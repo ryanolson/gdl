@@ -10,7 +10,7 @@ use aws_sdk_dynamodb::{
     error::{DisplayErrorContext, SdkError},
     operation::put_item::PutItemError,
     types::{
-        AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ReturnValue,
+        AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType, ReturnValue,
         ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TimeToLiveSpecification,
     },
 };
@@ -27,18 +27,19 @@ use crate::{
 ///
 /// The records table holds one item per cell: its record without the
 /// model list, or the tombstone of its withdrawal. The lists table holds
-/// each model list a record names, keyed by the record's `models_version`
-/// and a digest of the list, so a scan reads a few hundred bytes per cell
-/// and fetches a list only when a cell's list changes. A write is a
-/// conditional put that holds only if it is newer than the cell's item,
-/// so a late write is refused with [`DirectoryError::NotNewer`]. A list is
-/// written before the record that names it.
+/// each model list a record names, keyed by the record's `models_version`,
+/// a digest of the list, and the token of the put that made it, so a scan
+/// reads a few hundred bytes per cell and fetches a list only when a
+/// cell's list changes. A write is a conditional put that holds only if it
+/// is newer than the cell's item, so a late write is refused with
+/// [`DirectoryError::NotNewer`]. A list is written before the record that
+/// names it, and no put replaces another's list.
 ///
 /// Neither table expires a live item: a record stays until its cell
 /// withdraws it, and a reader applies the lease on its own clock
-/// ([`gdl_cells::CellView`]). The lists table's TTL removes only a list its
-/// cell has moved past: an hour after the cell's record is stored at a
-/// higher `models_version`, which a cell never lowers.
+/// ([`gdl_cells::CellView`]). The lists table's TTL removes only a list
+/// that no record of its cell names again: an hour after a write replaced
+/// the record that named it, at a higher `models_version`.
 ///
 /// A watch is polled: while a class has watches through this handle, one
 /// task queries the class's items every [`DynamoLimits::period`], and the
@@ -109,12 +110,11 @@ const SUPERSEDED: Duration = Duration::from_secs(3_600);
 /// active.
 const TABLE_ACTIVE: Duration = Duration::from_secs(300);
 
-/// The list a cell's last write through a handle named: its key, the
-/// token of its put, and the write's epoch.
+/// The list a cell's last write through a handle named, and the write's
+/// epoch.
 #[derive(Debug, Clone, Copy)]
 struct Written {
     key: ListKey,
-    put: u64,
     epoch: u64,
 }
 
@@ -236,23 +236,32 @@ impl DynamoDirectory {
     }
 
     /// Put `item`, a write of `cell` of `class` at `version`, if it is
-    /// newer than the cell's item: the list the item it replaced named,
-    /// if any.
+    /// newer than the cell's item, and, given `kept`, only while the cell's
+    /// item names that list: the list the item it replaced named, if any.
     async fn put(
         &self,
         class: &str,
         cell: &str,
         version: Version,
         item: Item,
-    ) -> Result<Option<(ListKey, u64)>, Refusal> {
-        let (names, values) = item::newer(version);
+        kept: Option<ListKey>,
+    ) -> Result<Option<ListKey>, Refusal> {
+        let (mut names, mut values) = item::newer(version);
+        let condition = match kept {
+            None => item::NEWER.to_owned(),
+            Some(kept) => {
+                names.insert("#names".into(), item::NAMES.into());
+                values.insert(":names".into(), AttributeValue::S(kept.sort_key()));
+                format!("({}) AND #names = :names", item::NEWER)
+            }
+        };
         let put = self
             .shared
             .client
             .put_item()
             .table_name(&self.shared.tables.records)
             .set_item(Some(item))
-            .condition_expression(item::NEWER)
+            .condition_expression(condition)
             .set_expression_attribute_names(Some(names))
             .set_expression_attribute_values(Some(values))
             .return_values(ReturnValue::AllOld)
@@ -271,13 +280,23 @@ impl DynamoDirectory {
                     PutItemError::ConditionalCheckFailedException(refused) => refused.item(),
                     _ => None,
                 };
-                let held = held.and_then(item::version).ok_or_else(|| {
+                let held = match held.and_then(item::version) {
+                    Some(held) if held >= version => held,
+                    // Older, or no item at all: only the list it names
+                    // refused a write that kept one.
+                    _ if kept.is_some() => {
+                        return Err(Refusal::Elsewhere(DirectoryError::Unavailable(format!(
+                            "cell `{cell}` of class `{class}`: a write at {version} found the cell's item naming another list"
+                        ))));
+                    }
                     // The table refused the write, so it holds a newer one;
                     // a table that does not say which is not DynamoDB.
-                    DirectoryError::Unavailable(format!(
-                        "cell `{cell}` of class `{class}`: a write at {version} was refused without the item that refused it"
-                    ))
-                })?;
+                    _ => {
+                        return Err(Refusal::Failed(DirectoryError::Unavailable(format!(
+                            "cell `{cell}` of class `{class}`: a write at {version} was refused without a newer item that refused it"
+                        ))));
+                    }
+                };
                 Err(Refusal::NotNewer {
                     error: DirectoryError::NotNewer {
                         class: class.to_owned(),
@@ -294,13 +313,13 @@ impl DynamoDirectory {
         }
     }
 
-    /// Mark `key`'s list of `cell` to expire, if it is still the list's put
-    /// `put`: its cell's record is stored at a higher `models_version`,
-    /// which no later write of the cell lowers, so no record of the cell
-    /// names the list again but one that put it again, such as a command
-    /// that copied an earlier record. Best effort: a list left in place
-    /// costs only its storage.
-    async fn supersede(&self, class: &str, cell: &str, key: ListKey, put: u64) {
+    /// Mark `key`'s list of `cell` to expire: a write replaced the record
+    /// that named it, at a higher `models_version`. Only the writer that put
+    /// the list names it, and only while the cell's item names it already,
+    /// so no record of the cell names it again
+    /// (`docs/src/development/cells-design.md`). Best effort: a list left in
+    /// place costs only its storage.
+    async fn supersede(&self, class: &str, cell: &str, key: ListKey) {
         let expires = SystemTime::now()
             .checked_add(SUPERSEDED)
             .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
@@ -311,14 +330,12 @@ impl DynamoDirectory {
             .update_item()
             .table_name(&self.shared.tables.lists)
             .set_key(Some(item::list_key(class, cell, key)))
-            // Only the put that the replaced record followed: a later put of
-            // the list, for a record that names it again, keeps it. And an
-            // update makes the item it names, which this keeps from doing.
-            .condition_expression("#put = :put")
+            // An update makes the item it names, and TTL may have removed
+            // this one already.
+            .condition_expression("attribute_exists(#list)")
             .update_expression("SET #expires = :expires")
-            .expression_attribute_names("#put", item::PUT)
+            .expression_attribute_names("#list", item::LIST_KEY)
             .expression_attribute_names("#expires", item::EXPIRES_AT)
-            .expression_attribute_values(":put", item::number(put))
             .expression_attribute_values(":expires", item::number(expires))
             .send()
             .await;
@@ -349,53 +366,9 @@ impl DynamoDirectory {
             })
     }
 
-    /// Put a list again after the record that names it, with the token
-    /// `put` of its first put: only while the list is still that put, or is
-    /// set to expire. So the put clears an expiry set in between, and never
-    /// replaces another writer's later put, whose token a later expiry may
-    /// name.
-    async fn put_list_again(
-        &self,
-        class: &str,
-        cell: &str,
-        put: u64,
-        list: Item,
-    ) -> Result<(), DirectoryError> {
-        let again = self
-            .shared
-            .client
-            .put_item()
-            .table_name(&self.shared.tables.lists)
-            .set_item(Some(list))
-            .condition_expression("#put = :put OR attribute_exists(#expires)")
-            .expression_attribute_names("#put", item::PUT)
-            .expression_attribute_names("#expires", item::EXPIRES_AT)
-            .expression_attribute_values(":put", item::number(put))
-            .send()
-            .await;
-        match again {
-            Ok(_) => Ok(()),
-            // Another writer's put, not set to expire: it is live as it is.
-            Err(SdkError::ServiceError(failed))
-                if matches!(
-                    failed.err(),
-                    PutItemError::ConditionalCheckFailedException(_)
-                ) =>
-            {
-                Ok(())
-            }
-            Err(error) => Err(unavailable(
-                &format!(
-                    "cell `{cell}` of class `{class}`: its record is stored, but its model list may expire until the cell's next write"
-                ),
-                error,
-            )),
-        }
-    }
-
-    /// Write a cell's item, and then mark the list of the item it replaced
-    /// to expire, if the new item is a record at a higher
-    /// `models_version`. A withdrawal expires nothing.
+    /// Write a cell's item, as [`Self::put`] does, and then mark the list
+    /// of the item it replaced to expire, if the new item is a record at a
+    /// higher `models_version`. A withdrawal expires nothing.
     async fn write(
         &self,
         class: &str,
@@ -403,19 +376,15 @@ impl DynamoDirectory {
         version: Version,
         item: Item,
         models_version: Option<u64>,
-    ) -> Result<(), DirectoryError> {
-        match self.put(class, cell, version, item).await {
-            Ok(before) => {
-                if let Some((before, put)) = before.filter(|(before, _)| {
-                    models_version.is_some_and(|now| now > before.models_version())
-                }) {
-                    self.supersede(class, cell, before, put).await;
-                }
-                Ok(())
-            }
-            Err(Refusal::NotNewer { error }) => Err(error),
-            Err(Refusal::Failed(error)) => Err(error),
+        kept: Option<ListKey>,
+    ) -> Result<(), Refusal> {
+        let before = self.put(class, cell, version, item, kept).await?;
+        if let Some(before) =
+            before.filter(|before| models_version.is_some_and(|now| now > before.models_version()))
+        {
+            self.supersede(class, cell, before).await;
         }
+        Ok(())
     }
 }
 
@@ -425,7 +394,20 @@ enum Refusal {
     NotNewer {
         error: DirectoryError,
     },
+    /// A write that kept its handle's list found the cell's item naming
+    /// another list, or no item: it puts a list of its own.
+    Elsewhere(DirectoryError),
     Failed(DirectoryError),
+}
+
+impl From<Refusal> for DirectoryError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::NotNewer { error } | Refusal::Elsewhere(error) | Refusal::Failed(error) => {
+                error
+            }
+        }
+    }
 }
 
 impl From<DirectoryError> for Refusal {
@@ -446,46 +428,49 @@ impl CellDirectory for DynamoDirectory {
         let io = self.shared.io(class);
         let _io = io.lock().await;
         let owner = (class.to_owned(), cell.to_owned());
-        let cached = self.written().get(&owner).copied();
-        // Only a write at the epoch of the handle's last write of the cell
-        // reuses its list. Another epoch is a command or a restarted hub,
-        // whose list another writer may have moved past and set to expire
-        // meanwhile: it puts the list before its record, so that a reader
-        // finds it, and again after, which clears an expiry set in between
-        // and leaves no later expiry of another put able to touch it.
-        let mut again = None;
-        if let Some((key, mut list)) = encoded.list.take() {
-            match cached.filter(|cached| cached.key == key && cached.epoch == record.epoch) {
-                Some(cached) => item::stamp(&mut list, &mut encoded.item, cached.put),
-                None => {
-                    let put = item::new_put();
-                    item::stamp(&mut list, &mut encoded.item, put);
-                    self.written().remove(&owner);
-                    self.put_list(cell, list.clone()).await?;
-                    let written = Written {
-                        key,
-                        put,
-                        epoch: record.epoch,
-                    };
-                    again = Some((written, list));
+        // A hint, not a promise: the table checks that the cell's item
+        // still names a kept list. Out while the write runs, so that a write
+        // dropped part way leaves the next one to put its list.
+        let cached = self.written().remove(&owner);
+        let version = record.version();
+        let models_version = Some(record.models_version);
+        let Some((key, list)) = encoded.list.take() else {
+            return Ok(self
+                .write(class, cell, version, encoded.item, models_version, None)
+                .await?);
+        };
+        // A write at the epoch of the handle's last write of the cell, with
+        // the same list, names that list again, but only while the cell's
+        // item still names it: once another item replaced it, a write of
+        // the list makes an item of its own. Another epoch is another
+        // writer, such as a command or a restarted hub, and always puts its
+        // own.
+        if let Some(cached) =
+            cached.filter(|cached| cached.epoch == record.epoch && cached.key.same_list(&key))
+        {
+            let mut kept = encoded.item.clone();
+            item::name(&mut kept, cached.key);
+            match self
+                .write(class, cell, version, kept, models_version, Some(cached.key))
+                .await
+            {
+                Err(Refusal::Elsewhere(_)) => {}
+                done => {
+                    self.written().insert(owner, cached);
+                    return Ok(done?);
                 }
             }
         }
-        self.write(
-            class,
-            cell,
-            record.version(),
-            encoded.item,
-            Some(record.models_version),
-        )
-        .await?;
-        if let Some((written, list)) = again {
-            let fresh = cached.is_some_and(|cached| cached.epoch == record.epoch);
-            if !fresh {
-                self.put_list_again(class, cell, written.put, list).await?;
-            }
-            self.written().insert(owner, written);
-        }
+        self.put_list(cell, list).await?;
+        self.write(class, cell, version, encoded.item, models_version, None)
+            .await?;
+        self.written().insert(
+            owner,
+            Written {
+                key,
+                epoch: record.epoch,
+            },
+        );
         Ok(())
     }
 
@@ -494,14 +479,16 @@ impl CellDirectory for DynamoDirectory {
         let item = item::withdrawal(&withdrawal, item::next_order());
         let io = self.shared.io(&withdrawal.class);
         let _io = io.lock().await;
-        self.write(
-            &withdrawal.class,
-            &withdrawal.cell,
-            withdrawal.version(),
-            item,
-            None,
-        )
-        .await
+        Ok(self
+            .write(
+                &withdrawal.class,
+                &withdrawal.cell,
+                withdrawal.version(),
+                item,
+                None,
+                None,
+            )
+            .await?)
     }
 
     /// The watch begins when it is first polled, which must be inside a

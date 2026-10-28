@@ -226,7 +226,7 @@ Ingress instances share which set each session went to through their cell's hub.
 
 ## The DynamoDB directory queries one class, and keeps lists apart
 
-The DynamoDB backend keys its records table by class, so a watch reads its class with one query, not a scan of every class. Model lists live in a second table, keyed by the record's `models_version` and a digest of the list. A query then reads a few hundred bytes per cell, and a list is read only when it changes. A list's key names its content, so two writers of one cell never overwrite each other's list. A reader joins a record only to the list whose digest the record names, so it never sees a part of another version (rule 4).
+The DynamoDB backend keys its records table by class, so a watch reads its class with one query, not a scan of every class. Model lists live in a second table, keyed by the record's `models_version`, a digest of the list, and a random token that one put mints for itself. A query then reads a few hundred bytes per cell, and a list is read only when it changes. A reader joins a record only to the list whose digest the record names, so it never sees a part of another version (rule 4).
 
 **Rejected: lists in the records table.** Every query would read every list: more than 3 MB per query of 50 cells with 1,000 models each, where apart it reads about 20 KB.
 
@@ -234,7 +234,18 @@ The DynamoDB backend keys its records table by class, so a watch reads its class
 
 **Rejected: TTL on records or tombstones.** TTL deletes the item and replicates the delete, so a silent cell would vanish from every region, and its models would answer 404.
 
-A list expires only when its cell's record is stored at a higher `models_version`, which only the cell's hub raises and never lowers. No later record of the cell can name that list, through any handle or region. **Rejected: expire every list a write moves past, guarded by checks that the record does not name it, and repaired by the writer.** A withdrawal, or a command, through another handle or region could still expire a list that a later record named, and each repair had a failure path of its own. The rule leaves a withdrawn cell's last list and the lists of refused writes in the table, which is bounded ([Limitations](../operations/limitations.md#a-dynamodb-model-list-can-outlive-the-record-that-named-it)).
+A list expires only when its cell's record is stored at a higher `models_version`. **Rejected: expire every list a write moves past, guarded by checks that the record does not name it, and repaired by the writer.** A withdrawal, or a command, through another handle or region could still expire a list that a later record named, and each repair had a failure path of its own. The rule leaves a withdrawn cell's last list, the lists of refused writes, and the list each command or same-version write replaced in the table, which is bounded ([Limitations](../operations/limitations.md#a-dynamodb-model-list-can-outlive-the-record-that-named-it)).
+
+Each put of a list makes an item that no other put can replace, and the property that a stored record names a list that is there and not set to expire follows from four facts, each from the construction alone:
+
+1. A list's token is minted by one publish call. Only that call puts the list. Only that call's record put, and later writes of the same list through the same handle at the same epoch, name it.
+2. No put replaces a list with other content. The only change to a list is its expiry.
+3. The records that name a list are stored in one unbroken run. The first is the record written after the list. Each later one keeps the list with the condition that the cell's item names it already. Once an item that does not name the list replaces the run's last record, no record names the list again: a write that keeps it fails its condition and puts a list of its own, and a late attempt of an earlier write of the run is refused as not newer.
+4. A list is set to expire only by a writer whose record put returned, as the item it replaced, a record naming that list. That ends the run, so however late the expiry lands, no record names the list after it. TTL removes a list only after its expiry.
+
+The rule on `models_version` only limits which ended runs lead to an expiry; the safety argument does not need it. The four facts hold in one region whose records item never goes back to a lower version, which the newer-than condition gives for the writes the region takes. Global tables settle two regions' writes of one item by the last writer, so a write from another region can put an older version back, and then a late attempt of an earlier write can pass the condition again and name a list set to expire ([Limitations](../operations/limitations.md#a-dynamodb-write-from-another-region-can-lose-to-the-cells-own)). `crates/gdl-cells-dynamodb/tests/local/interleave.rs` runs every order of the calls of a command, a hub's writes, their expiry, TTL, and a late attempt, and checks the property after each call.
+
+**Rejected: one list item per `models_version` and digest, shared by every writer.** Two writers of one cell that wrote the same list at the same version wrote the same item, and each put replaced the other's. Every guard on that overwrite (a token per put, a condition on the expiry, a second put after the record, a condition on that put) closed one interleaving and opened another: a writer's delayed expiry, or TTL, reached the item that another writer's record named.
 
 ## What stays fixed
 

@@ -625,7 +625,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### A DynamoDB write from another region can lose to the cell's own
 - **What:** MREC global tables check that a write is newer only in the region that takes it, and settle two writes of one item in two regions by the last writer. An operator's command for a cell, given through a handle in another region while the cell's hub writes in its own, can be lost, or an older write can replace a newer one. A reader never goes back to a version it has seen. A reader that starts later reads what the table kept.
-- **Model lists:** a command for a cell that copies its last record reads that record in its own region, and puts the record's list again. Given in another region while the cell's hub moves past that list, within the replication lag, the hub's expiry of the list can win over the command's put. The command's write is newer, so it stands, and once TTL removes the list an hour later, every new watch of the class waits 30 s and ends `Unavailable` until the cell's hub restarts and writes a new list.
+- **Model lists:** a command names a list of its own, so the hub's expiry of its own list never reaches the command's. But once an older write has replaced a newer one in a region, a late attempt of an earlier write of the hub can pass the newer-than check there again. For example: the hub's record put is answered too late and the hub moves on, a higher `models_version` sets its earlier list to expire, a command from another region replaces the hub's record by the last writer, and then the delayed attempt lands and names the expiring list. Once TTL removes that list an hour later, every new watch of the class waits 30 s and ends `Unavailable` until the cell's hub writes again.
 - **Workaround:** give a command for a cell through a handle in the cell's region. Each hub writes only its own cell's record, from its own region.
 - **Lifts:** nothing in gdl.
 
@@ -640,10 +640,10 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Workaround:** none needed for replication lag. Never delete a list that a record names. The writer sets a list to expire only once its cell's record is stored at a higher `models_version`.
 
 ### A DynamoDB model list can outlive the record that named it
-- **What:** the DynamoDB backend sets a list to expire only when its cell's record is stored at a higher `models_version`. Three kinds of list stay in the lists table for good:
+- **What:** the DynamoDB backend sets a list to expire only when its cell's record is stored at a higher `models_version`, and each put of a list makes an item of its own. Three kinds of list stay in the lists table for good:
   - A withdrawn cell's last list: one per withdrawn cell, about 65 KB for 1,000 models and at most 400 KB.
-  - The list of a write that was refused as not newer, or that failed after its list was written, when no later write of the cell names it: one per such write. So is a list that another writer put again after this handle wrote it, since the handle's expiry names its own put.
-  - The list replaced by a write at a lower `models_version`, such as a command that copied an older record: one per such write.
+  - The list of a write that was refused as not newer, or that failed after its list was written, when no later write of the cell names it: one per such write.
+  - The list replaced by a write at the same or a lower `models_version` that names a list of its own, such as a command that copied the record, a restarted hub whose models did not change, or a heartbeat after another writer's write: one per such write.
 - **Why:** a rule that expired more raced with writes of the same cell through other handles and other regions, and could expire the list that a live record names.
-- **Workaround:** none needed: each is bounded by the cell's withdrawals and refused writes, which are rare. No sweeper removes them.
+- **Workaround:** none needed: each is bounded by the cell's withdrawals, refused or failed writes, and writes at the same or a lower `models_version` that name a list of their own (commands, restarts that kept the models, heartbeats after another writer's write), which are rare. No sweeper removes them.
 - **Lifts:** a sweeper that deletes the lists that no record names.

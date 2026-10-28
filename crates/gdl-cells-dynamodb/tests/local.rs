@@ -31,6 +31,11 @@ use gdl_cells::{
 };
 use gdl_cells_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
 
+// In a directory of its own, so that cargo does not take it for a test
+// target.
+#[path = "local/interleave.rs"]
+mod interleave;
+
 const MODEL: &str = "model_x";
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -225,6 +230,54 @@ async fn lists(client: &Client, tables: &Tables, cell: &str) -> Vec<(String, Opt
         .collect()
 }
 
+/// The key of the list that `cell`'s stored record names, and that list's
+/// expiry. Fails when the record names no list or its list is missing: a
+/// stored record must name a list that is there.
+async fn named(client: &Client, tables: &Tables, cell: &str) -> (String, Option<u64>) {
+    named_list(client, tables, cell)
+        .await
+        .unwrap_or_else(|broken| panic!("{broken}"))
+}
+
+/// [`named`], or why the stored record names no list that is there.
+async fn named_list(
+    client: &Client,
+    tables: &Tables,
+    cell: &str,
+) -> Result<(String, Option<u64>), String> {
+    let stored = client
+        .get_item()
+        .table_name(&tables.records)
+        .key("class", AttributeValue::S(MODEL.into()))
+        .key("cell", AttributeValue::S(cell.into()))
+        .consistent_read(true)
+        .send()
+        .await
+        .expect("the stored record");
+    let key = match stored.item().and_then(|item| item.get("list")) {
+        Some(AttributeValue::S(key)) => key.clone(),
+        other => {
+            return Err(format!(
+                "the stored record of {cell} names no list: {other:?}"
+            ));
+        }
+    };
+    let lists = lists(client, tables, cell).await;
+    match lists.iter().find(|(list, _)| *list == key) {
+        Some(&(_, expires)) => Ok((key, expires)),
+        None => Err(format!(
+            "the stored record of {cell} names {key}, which is missing: {lists:?}"
+        )),
+    }
+}
+
+/// Whether no list of `lists` is set to expire. With [`named`], or a
+/// snapshot that joins the record to its list, the claim of a case whose
+/// cell's lists all stay: the list the record names is there and live.
+fn none_expire(lists: &[(String, Option<u64>)]) -> bool {
+    lists.iter().all(|(_, expiry)| expiry.is_none())
+}
+
 type Item = std::collections::HashMap<String, AttributeValue>;
 
 /// The items a publish of `record` writes, made in tables of their own: its
@@ -408,7 +461,7 @@ async fn a_superseded_list_expires_and_the_named_one_stays() {
         .expect("a heartbeat");
     let lists_now = lists(&client, &tables, "model-x-01").await;
     assert!(
-        matches!(lists_now.as_slice(), [(_, None)]),
+        none_expire(&lists_now),
         "one list, not expiring: {lists_now:?}"
     );
 
@@ -485,10 +538,7 @@ async fn a_cached_list_is_kept_when_published_after_another_handles_withdrawal()
         .await
         .expect("a withdrawal through another handle in the same region");
     assert!(
-        matches!(
-            lists(&client, &tables, &first.name).await.as_slice(),
-            [(_, None)]
-        ),
+        none_expire(&lists(&client, &tables, &first.name).await),
         "a withdrawal expires no list"
     );
 
@@ -506,7 +556,7 @@ async fn a_cached_list_is_kept_when_published_after_another_handles_withdrawal()
 
     let lists_now = lists(&client, &tables, &latest.name).await;
     assert!(
-        matches!(lists_now.as_slice(), [(_, None)]),
+        none_expire(&lists_now),
         "a live record's list must not retain its withdrawal's TTL: {lists_now:?}"
     );
 }
@@ -610,10 +660,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
         .await
         .expect("a newer record");
     assert!(
-        matches!(
-            lists(&client, &tables, &latest.name).await.as_slice(),
-            [(_, None)]
-        ),
+        none_expire(&lists(&client, &tables, &latest.name).await),
         "the newer publish leaves its list without TTL"
     );
     let latest = CellRecord { seq: 4, ..latest };
@@ -629,7 +676,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
     );
     let lists_now = lists(&client, &tables, &latest.name).await;
     assert!(
-        matches!(lists_now.as_slice(), [(_, None)]),
+        none_expire(&lists_now),
         "delayed cleanup must not expire the live record's list: {lists_now:?}"
     );
 }
@@ -733,10 +780,7 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
         .await
         .expect("the withdrawal completes before the newer record is stored");
     assert!(
-        matches!(
-            lists(&client, &tables, &latest.name).await.as_slice(),
-            [(_, None)]
-        ),
+        none_expire(&lists(&client, &tables, &latest.name).await),
         "a withdrawal expires no list, the prepared one included"
     );
     release.send(()).expect("release the record");
@@ -755,7 +799,7 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
     );
     let lists_now = lists(&client, &tables, &latest.name).await;
     assert!(
-        matches!(lists_now.as_slice(), [(_, None)]),
+        none_expire(&lists_now),
         "a successful publish must clear cleanup between its list and record writes: {lists_now:?}"
     );
 }
@@ -823,10 +867,7 @@ async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
         })
         .await
         .expect("the same-region withdrawal");
-    assert!(matches!(
-        lists(&client, &tables, &first.name).await.as_slice(),
-        [(_, None)]
-    ));
+    assert!(none_expire(&lists(&client, &tables, &first.name).await));
 
     // A scaled-to-zero cell sends no heartbeat that could repair the list.
     let latest = CellRecord {
@@ -851,12 +892,9 @@ async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
         .publish(CellRecord { seq: 4, ..latest })
         .await
         .expect("a later publish");
-    assert!(matches!(
-        lists(&client, &tables, "model-x-01").await.as_slice(),
-        [(_, None)]
-    ));
+    assert!(none_expire(&lists(&client, &tables, "model-x-01").await));
     assert!(
-        acknowledged.is_err() || matches!(stranded.as_slice(), [(_, None)]),
+        acknowledged.is_err() || none_expire(&stranded),
         "a successful publish must not leave its live list expiring: result={acknowledged:?}, lists={stranded:?}"
     );
 }
@@ -1018,17 +1056,42 @@ async fn a_stalled_write_does_not_hold_a_watch_past_first_sync() {
 async fn a_lost_record_response_leaves_its_list_unexpired() {
     use std::sync::{Arc, atomic::AtomicBool};
 
-    use aws_sdk_dynamodb::config::{
-        ConfigBag, Intercept, RuntimeComponents,
-        interceptors::BeforeDeserializationInterceptorContextRef, retry::RetryConfig,
+    use aws_sdk_dynamodb::{
+        config::{
+            ConfigBag, Intercept, RuntimeComponents,
+            interceptors::{
+                BeforeDeserializationInterceptorContextRef,
+                BeforeSerializationInterceptorContextRef,
+            },
+            retry::RetryConfig,
+        },
+        operation::put_item::PutItemInput,
     };
 
+    /// Loses the answer of the next records-table put that succeeds, once
+    /// armed.
     #[derive(Debug)]
-    struct LoseResponse(Arc<AtomicBool>);
+    struct LoseResponse {
+        armed: Arc<AtomicBool>,
+        record: AtomicBool,
+    }
 
     impl Intercept for LoseResponse {
         fn name(&self) -> &'static str {
             "LoseResponse"
+        }
+
+        fn read_before_execution(
+            &self,
+            context: &BeforeSerializationInterceptorContextRef<'_>,
+            _config: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let record = context
+                .input()
+                .downcast_ref::<PutItemInput>()
+                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell")));
+            self.record.store(record, Ordering::Relaxed);
+            Ok(())
         }
 
         fn read_after_transmit(
@@ -1037,7 +1100,10 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
             _runtime: &RuntimeComponents,
             _config: &mut ConfigBag,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            if context.response().status().is_success() && self.0.swap(false, Ordering::Relaxed) {
+            if context.response().status().is_success()
+                && self.record.load(Ordering::Relaxed)
+                && self.armed.swap(false, Ordering::Relaxed)
+            {
                 return Err(std::io::Error::other("injected loss of a successful response").into());
             }
             Ok(())
@@ -1049,7 +1115,10 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
     let lose = Arc::new(AtomicBool::new(false));
     let config = own_pool(&client)
         .retry_config(RetryConfig::disabled())
-        .interceptor(LoseResponse(Arc::clone(&lose)))
+        .interceptor(LoseResponse {
+            armed: Arc::clone(&lose),
+            record: AtomicBool::new(false),
+        })
         .build();
     let writer = DynamoDirectory::with_limits(Client::from_conf(config), tables.clone(), LIMITS);
     let operator = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
@@ -1067,12 +1136,11 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
         })
         .await
         .expect("the same-region withdrawal");
-    assert!(matches!(
-        lists(&client, &tables, &first.name).await.as_slice(),
-        [(_, None)]
-    ));
+    assert!(none_expire(&lists(&client, &tables, &first.name).await));
 
-    // The cached list skips its put, so the next response is the record's.
+    // The cached list's put is refused, since the cell's item is the
+    // withdrawal: the write puts a list of its own, then its record, whose
+    // answer is lost.
     lose.store(true, Ordering::Relaxed);
     let stored = CellRecord { seq: 3, ..first };
     let uncertain = writer.publish(stored.clone()).await;
@@ -1102,7 +1170,7 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
     );
     let now = lists(&client, &tables, &latest.name).await;
     assert!(
-        matches!(now.as_slice(), [(_, None)]),
+        none_expire(&now),
         "a successful publish after a lost record response must keep its live list from expiring: {now:?}"
     );
 }
@@ -1277,10 +1345,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
         })
         .await
         .expect("the withdrawal between the second list and record");
-    assert!(matches!(
-        lists(&client, &tables, &first.name).await.as_slice(),
-        [(_, None)]
-    ));
+    assert!(none_expire(&lists(&client, &tables, &first.name).await));
     second_release.send(()).expect("release the second record");
     let result = tokio::task::spawn_blocking(move || two.join().expect("the second thread"))
         .await
@@ -1304,7 +1369,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     assert_eq!(snapshot(&mut watch(&operator, None)).await.0, [latest]);
     let now = lists(&client, &tables, "model-x-01").await;
     assert!(
-        matches!(now.as_slice(), [(_, None)]),
+        none_expire(&now),
         "a successful publish after a failed keep must clear its list's TTL, including a cache entry restored by an overlapping publish: {now:?}"
     );
 }
@@ -1486,10 +1551,12 @@ async fn a_same_region_command_keeps_its_list_after_delayed_expiry() {
         snapshot(&mut watch(&reader, None)).await.0,
         [*command_record]
     );
-    let now = lists(&client, &tables, &last.name).await;
-    assert!(
-        now.iter().all(|(_, expiry)| expiry.is_none()),
-        "a delayed expiry must not mark the list named by the live same-region command: {now:?}"
+    let (list, expiry) = named(&client, &tables, &last.name).await;
+    assert_eq!(
+        expiry,
+        None,
+        "a delayed expiry must not mark the list named by the live same-region command: {list} in {:?}",
+        lists(&client, &tables, &last.name).await
     );
 }
 
@@ -1632,10 +1699,12 @@ async fn a_cached_command_handle_keeps_the_list_it_names_again() {
         [*command_record],
         "the command's record names the earlier list"
     );
-    let now = lists(&client, &tables, &first.name).await;
-    assert!(
-        now.iter().all(|(_, expiry)| expiry.is_none()),
-        "a successful same-region command must keep its named list without TTL, including through a cached handle: {now:?}"
+    let (list, expiry) = named(&client, &tables, &first.name).await;
+    assert_eq!(
+        expiry,
+        None,
+        "a successful same-region command must keep its named list without TTL, including through a cached handle: {list} in {:?}",
+        lists(&client, &tables, &first.name).await
     );
 }
 
@@ -1752,10 +1821,12 @@ async fn a_fresh_command_keeps_its_list_when_another_put_overtakes_it() {
         [*command_record],
         "the live command names the expiring list"
     );
-    let now = lists(&client, &tables, &first.name).await;
-    assert!(
-        now.iter().all(|(_, expiry)| expiry.is_none()),
-        "even a fresh same-region command must keep its named list when another put overtakes its list put: {now:?}"
+    let (list, expiry) = named(&client, &tables, &first.name).await;
+    assert_eq!(
+        expiry,
+        None,
+        "even a fresh same-region command must keep its named list when another put overtakes its list put: {list} in {:?}",
+        lists(&client, &tables, &first.name).await
     );
 }
 
@@ -1884,24 +1955,48 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
     use std::sync::{Mutex, mpsc};
 
     use aws_sdk_dynamodb::{
-        config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
+        config::{
+            ConfigBag, Intercept, RuntimeComponents,
+            interceptors::{
+                BeforeSerializationInterceptorContextRef, FinalizerInterceptorContextRef,
+            },
+        },
         operation::{put_item::PutItemInput, update_item::UpdateItemInput},
     };
     use gdl_cells::{CellCommand, CommandWrite};
     use tokio::sync::oneshot;
 
+    // The first writer pauses after its record is stored, before its
+    // publish returns: the last point at which a late call of it could
+    // land. A write puts no list after its record, so nothing it does
+    // there can touch the list a later command names.
     #[derive(Debug)]
     enum At {
-        SecondList,
+        AfterRecord,
         Expiry,
     }
 
     #[derive(Debug)]
     struct Pause {
         at: At,
-        lists: AtomicUsize,
+        // Whether the call under way is a records-table put: the input is
+        // gone by the time the call ends.
+        record: std::sync::atomic::AtomicBool,
         began: Mutex<Option<oneshot::Sender<()>>>,
         release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Pause {
+        fn hold(&self) {
+            if let Some(began) = self.began.lock().expect("the signal lock").take() {
+                began.send(()).expect("the test waits for the write");
+                self.release
+                    .lock()
+                    .expect("the release lock")
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the write");
+            }
+        }
     }
 
     impl Intercept for Pause {
@@ -1914,26 +2009,27 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
             context: &BeforeSerializationInterceptorContextRef<'_>,
             _config: &mut ConfigBag,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let pause = match self.at {
-                At::SecondList => {
-                    context
-                        .input()
-                        .downcast_ref::<PutItemInput>()
-                        .is_some_and(|put| {
-                            // A put to the lists table: its item has an owner.
-                            put.item().is_some_and(|item| item.contains_key("owner"))
-                                && self.lists.fetch_add(1, Ordering::Relaxed) == 1
-                        })
-                }
-                At::Expiry => context.input().downcast_ref::<UpdateItemInput>().is_some(),
-            };
-            if pause && let Some(began) = self.began.lock().expect("the signal lock").take() {
-                began.send(()).expect("the test waits for the write");
-                self.release
-                    .lock()
-                    .expect("the release lock")
-                    .recv_timeout(WAIT)
-                    .expect("the test releases the write");
+            let input = context.input();
+            self.record.store(
+                input
+                    .downcast_ref::<PutItemInput>()
+                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell"))),
+                Ordering::Relaxed,
+            );
+            if matches!(self.at, At::Expiry) && input.downcast_ref::<UpdateItemInput>().is_some() {
+                self.hold();
+            }
+            Ok(())
+        }
+
+        fn read_after_execution(
+            &self,
+            _context: &FinalizerInterceptorContextRef<'_>,
+            _runtime: &RuntimeComponents,
+            _config: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if matches!(self.at, At::AfterRecord) && self.record.load(Ordering::Relaxed) {
+                self.hold();
             }
             Ok(())
         }
@@ -1947,7 +2043,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         let config = own_pool(&client)
             .interceptor(Pause {
                 at,
-                lists: AtomicUsize::new(0),
+                record: std::sync::atomic::AtomicBool::new(false),
                 began: Mutex::new(Some(began)),
                 release: Mutex::new(released),
             })
@@ -1971,11 +2067,11 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
     };
 
     let first = record("model-x-01", 1, 1, &["qwen-32b"]);
-    let (initial, second_list_paused, second_list_release) = pausing(At::SecondList);
+    let (initial, second_list_paused, second_list_release) = pausing(At::AfterRecord);
     let initial_write = start(initial, first.clone());
     tokio::time::timeout(WAIT, second_list_paused)
         .await
-        .expect("the second list put begins within the bound")
+        .expect("the first writer reaches its pause within the bound")
         .expect("the first record is stored");
 
     let operator = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
@@ -2011,7 +2107,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         "the command has put its list without TTL"
     );
 
-    // The first writer can finish after the command, restoring its token.
+    // The first writer finishes after the command.
     second_list_release
         .send(())
         .expect("release the second put");
@@ -2021,7 +2117,8 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         .expect("the initial publish finishes within the bound")
         .expect("the initial publish succeeds");
 
-    // The expiry captured that token before the command put its list.
+    // The expiry names the list of the record it replaced, put before the
+    // command put its own.
     expiry_release.send(()).expect("release expiry");
     tokio::task::spawn_blocking(move || higher_write.join().expect("the hub thread"))
         .await
@@ -2035,9 +2132,315 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         [*command_record],
         "the command remains the cell's live record"
     );
-    let now = lists(&client, &tables, &first.name).await;
+    let (list, expiry) = named(&client, &tables, &first.name).await;
+    assert_eq!(
+        expiry,
+        None,
+        "a delayed second list put must not restore a token that lets delayed expiry delete the successful command's live list: {list} in {:?}",
+        lists(&client, &tables, &first.name).await
+    );
+}
+
+#[tokio::test]
+async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
+    use std::sync::{Mutex, mpsc};
+
+    use aws_sdk_dynamodb::{
+        config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
+        operation::{put_item::PutItemInput, update_item::UpdateItemInput},
+    };
+    use gdl_cells::{CellCommand, CommandWrite};
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    enum At {
+        Record,
+        Expiry,
+    }
+
+    #[derive(Debug)]
+    struct Pause {
+        at: At,
+        began: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Intercept for Pause {
+        fn name(&self) -> &'static str {
+            "Pause"
+        }
+
+        fn read_before_execution(
+            &self,
+            context: &BeforeSerializationInterceptorContextRef<'_>,
+            _config: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let pause = match self.at {
+                At::Record => context
+                    .input()
+                    .downcast_ref::<PutItemInput>()
+                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell"))),
+                At::Expiry => context.input().downcast_ref::<UpdateItemInput>().is_some(),
+            };
+            if pause && let Some(began) = self.began.lock().expect("the signal lock").take() {
+                began.send(()).expect("the test waits for the write");
+                self.release
+                    .lock()
+                    .expect("the release lock")
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the write");
+            }
+            Ok(())
+        }
+    }
+
+    let client = client();
+    let tables = tables(&client).await;
+    let pausing = |at| {
+        let (began, paused) = oneshot::channel();
+        let (release, released) = mpsc::channel();
+        let config = own_pool(&client)
+            .interceptor(Pause {
+                at,
+                began: Mutex::new(Some(began)),
+                release: Mutex::new(released),
+            })
+            .build();
+        (
+            DynamoDirectory::with_limits(Client::from_conf(config), tables.clone(), LIMITS),
+            paused,
+            release,
+        )
+    };
+    let start = |directory: DynamoDirectory, published: CellRecord| {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("the publisher runtime")
+                .block_on(
+                    async move { tokio::time::timeout(WAIT, directory.publish(published)).await },
+                )
+        })
+    };
+
+    let first = record("model-x-01", 1, 1, &["qwen-32b"]);
+    DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS)
+        .publish(first.clone())
+        .await
+        .expect("the first record");
+    let command = CellCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
+    let CommandWrite::Record(command_record) = command else {
+        panic!("a scale-to-zero record");
+    };
+    let (operator, record_paused, record_release) = pausing(At::Record);
+    let commanding = start(operator, (*command_record).clone());
+    tokio::time::timeout(WAIT, record_paused)
+        .await
+        .expect("the command begins within the bound")
+        .expect("the command has put its list");
+
+    let (hub, expiry_paused, expiry_release) = pausing(At::Expiry);
+    hub.publish(CellRecord {
+        epoch: 2,
+        seq: 1,
+        ..first.clone()
+    })
+    .await
+    .expect("a restarted hub puts the same list with its own token");
+    let advancing = start(
+        hub,
+        CellRecord {
+            epoch: 2,
+            seq: 2,
+            ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
+        },
+    );
+    tokio::time::timeout(WAIT, expiry_paused)
+        .await
+        .expect("expiry begins within the bound")
+        .expect("the higher model version is stored");
     assert!(
-        now.iter().all(|(_, expiry)| expiry.is_none()),
-        "a delayed second list put must not restore a token that lets delayed expiry delete the successful command's live list: {now:?}"
+        lists(&client, &tables, &first.name)
+            .await
+            .iter()
+            .all(|(_, expiry)| expiry.is_none()),
+        "expiry has not landed yet"
+    );
+
+    record_release.send(()).expect("release the command record");
+    tokio::task::spawn_blocking(move || commanding.join().expect("the command thread"))
+        .await
+        .expect("join the command")
+        .expect("the command finishes within the bound")
+        .expect("the command succeeds");
+    let reader = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
+    assert_eq!(
+        snapshot(&mut watch(&reader, None)).await.0,
+        [*command_record],
+        "the successful command names the earlier list"
+    );
+
+    expiry_release.send(()).expect("release the hub's expiry");
+    tokio::task::spawn_blocking(move || advancing.join().expect("the hub thread"))
+        .await
+        .expect("join the hub")
+        .expect("the hub finishes within the bound")
+        .expect("the hub write succeeds");
+    let (list, expiry) = named(&client, &tables, &first.name).await;
+    assert_eq!(
+        expiry,
+        None,
+        "a command must keep its live list {list} when another put overtakes its first put and that put's expiry lands after its second put: {:?}",
+        lists(&client, &tables, &first.name).await
+    );
+}
+
+#[tokio::test]
+async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
+    use std::sync::{Mutex, mpsc};
+
+    use aws_sdk_dynamodb::{
+        config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
+        operation::put_item::PutItemInput,
+    };
+    use gdl_cells::{CellCommand, CommandWrite};
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    struct PauseRecord {
+        began: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Intercept for PauseRecord {
+        fn name(&self) -> &'static str {
+            "PauseRecord"
+        }
+
+        fn read_before_execution(
+            &self,
+            context: &BeforeSerializationInterceptorContextRef<'_>,
+            _config: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let record = context
+                .input()
+                .downcast_ref::<PutItemInput>()
+                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell")));
+            if record && let Some(began) = self.began.lock().expect("the signal lock").take() {
+                began.send(()).expect("the test waits for the record");
+                self.release
+                    .lock()
+                    .expect("the release lock")
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the record");
+            }
+            Ok(())
+        }
+    }
+
+    let client = client();
+    let tables = tables(&client).await;
+    let first = record("model-x-01", 1, 1, &["qwen-32b"]);
+    DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS)
+        .publish(first.clone())
+        .await
+        .expect("the first record");
+    let command = CellCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
+    let CommandWrite::Record(command_record) = command.clone() else {
+        panic!("a scale-to-zero record");
+    };
+    let (began, paused) = oneshot::channel();
+    let (release, released) = mpsc::channel();
+    let config = own_pool(&client)
+        .interceptor(PauseRecord {
+            began: Mutex::new(Some(began)),
+            release: Mutex::new(released),
+        })
+        .build();
+    let operator = DynamoDirectory::with_limits(Client::from_conf(config), tables.clone(), LIMITS);
+    let publishing = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the command runtime")
+            .block_on(async move { tokio::time::timeout(WAIT, command.to(&operator)).await })
+    });
+    tokio::time::timeout(WAIT, paused)
+        .await
+        .expect("the command begins within the bound")
+        .expect("the command has put its list");
+
+    let hub = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
+    hub.publish(CellRecord {
+        epoch: 2,
+        seq: 1,
+        ..first.clone()
+    })
+    .await
+    .expect("a restarted hub puts the same list with its own token");
+    hub.publish(CellRecord {
+        epoch: 2,
+        seq: 2,
+        ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
+    })
+    .await
+    .expect("the hub stores a higher models_version and expires its prior list");
+    let expiring = lists(&client, &tables, &first.name)
+        .await
+        .into_iter()
+        .filter(|(_, expiry)| expiry.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(expiring.len(), 1, "only the superseded list can expire");
+    let (list, expiry) = &expiring[0];
+
+    // Model TTL deletion after the superseded list's one-hour retention.
+    client
+        .delete_item()
+        .table_name(&tables.lists)
+        .key(
+            "owner",
+            AttributeValue::S(format!("{MODEL}/{}", first.name)),
+        )
+        .key("list", AttributeValue::S(list.clone()))
+        .condition_expression("#expires = :expires")
+        .expression_attribute_names("#expires", "expires_at")
+        .expression_attribute_values(
+            ":expires",
+            AttributeValue::N(expiry.expect("TTL").to_string()),
+        )
+        .send()
+        .await
+        .expect("TTL removes only the list marked to expire");
+    assert_eq!(
+        named(&client, &tables, &first.name).await.1,
+        None,
+        "the higher model version's list stays"
+    );
+
+    release.send(()).expect("release the command record");
+    tokio::task::spawn_blocking(move || publishing.join().expect("the command thread"))
+        .await
+        .expect("join the command")
+        .expect("the command finishes within the bound")
+        .expect("the command succeeds");
+    let stored = client
+        .get_item()
+        .table_name(&tables.records)
+        .key("class", AttributeValue::S(MODEL.into()))
+        .key("cell", AttributeValue::S(first.name.clone()))
+        .consistent_read(true)
+        .send()
+        .await
+        .expect("the stored command");
+    let stored = stored.item().expect("the command's record exists");
+    assert_eq!(
+        stored["epoch"],
+        AttributeValue::N(command_record.epoch.to_string())
+    );
+    let (named, expiry) = named(&client, &tables, &first.name).await;
+    assert_eq!(
+        expiry, None,
+        "a successful command must name a list that is there and not set to expire, when TTL removed the put that overtook its first put ({list} was removed): {named}"
     );
 }

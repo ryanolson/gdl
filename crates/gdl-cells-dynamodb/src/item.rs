@@ -4,10 +4,11 @@
 //! The records table holds one item per cell, keyed by `class` and
 //! `cell`: the record without its model list, or a withdrawal's
 //! tombstone. The lists table holds each model list a record names, keyed
-//! by `owner` (`<class>/<cell>`) and `list`, the record's `models_version`
-//! and a digest of the list. A list's key names its content, so two
-//! writers of one cell never overwrite each other's list, and a reader
-//! that checks the digest never joins a record to another version's list.
+//! by `owner` (`<class>/<cell>`) and `list`: the record's `models_version`,
+//! a digest of the list, and the token of the put that made it. Each put
+//! makes an item of its own, so no put replaces another's and an expiry
+//! names one put's item; a reader that checks the digest never joins a
+//! record to another version's list.
 
 use std::{
     collections::HashMap,
@@ -38,12 +39,8 @@ const LIST: &str = "list";
 pub(crate) const OWNER: &str = "owner";
 /// The lists table's sort key.
 pub(crate) const LIST_KEY: &str = LIST;
-/// The token of one put of a list, in the list's item and in the record
-/// written after it: an expiry holds only while the list is still that
-/// put, so a later put of the same list, by any writer, keeps it.
-pub(crate) const PUT: &str = "put";
-/// The records table's attribute that holds [`PUT`] of the record's list.
-pub(crate) const LIST_PUT: &str = "list_put";
+/// The records table's attribute that holds the key of the record's list.
+pub(crate) const NAMES: &str = LIST;
 /// The lists table's TTL attribute: set only on a list its cell has moved
 /// past, never on one a record names.
 pub(crate) const EXPIRES_AT: &str = "expires_at";
@@ -73,11 +70,13 @@ pub(crate) fn newer(version: Version) -> (HashMap<String, String>, Item) {
 }
 
 /// The key of a model list in the lists table: the record's
-/// `models_version` and a digest of the list's stored body.
+/// `models_version`, a digest of the list's stored body, and the token of
+/// the put that made the item, which no other put shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ListKey {
     models_version: u64,
     digest: u64,
+    token: u64,
 }
 
 impl ListKey {
@@ -86,17 +85,28 @@ impl ListKey {
         self.models_version
     }
 
-    /// The sort key: zero-padded, so that a class's lists sort by version.
+    /// Whether `other` keys the same list, whatever put made it.
+    pub(crate) fn same_list(&self, other: &Self) -> bool {
+        self.models_version == other.models_version && self.digest == other.digest
+    }
+
+    /// The sort key: zero-padded, so that a class's lists sort by version,
+    /// and of one length for every token.
     pub(crate) fn sort_key(&self) -> String {
-        format!("{:020}.{:016x}", self.models_version, self.digest)
+        format!(
+            "{:020}.{:016x}.{:016x}",
+            self.models_version, self.digest, self.token
+        )
     }
 
     fn parse(key: &str) -> Option<Self> {
-        let (version, digest) = key.split_once('.')?;
-        Some(Self {
-            models_version: version.parse().ok()?,
-            digest: u64::from_str_radix(digest, 16).ok()?,
-        })
+        let mut parts = key.split('.');
+        let key = Self {
+            models_version: parts.next()?.parse().ok()?,
+            digest: u64::from_str_radix(parts.next()?, 16).ok()?,
+            token: u64::from_str_radix(parts.next()?, 16).ok()?,
+        };
+        parts.next().is_none().then_some(key)
     }
 }
 
@@ -116,12 +126,14 @@ pub(crate) struct Encoded {
     /// The records table's item.
     pub(crate) item: Item,
     /// The record's list, with its key and the lists table's item, when
-    /// the record has models or revocations.
+    /// the record has models or revocations. The key has a new token, and
+    /// [`Encoded::item`] names it.
     pub(crate) list: Option<(ListKey, Item)>,
 }
 
-/// The items of `record`, written at `order`. A record whose list or
-/// whose own item would pass DynamoDB's item limit is refused.
+/// The items of `record`, written at `order`, with a new token for its
+/// list. A record whose list or whose own item would pass DynamoDB's item
+/// limit is refused.
 pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, DirectoryError> {
     let list = (!record.models.is_empty() || !record.revoked.is_empty()).then(|| List {
         models: record.models.clone(),
@@ -134,6 +146,7 @@ pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, Directo
             let key = ListKey {
                 models_version: record.models_version,
                 digest: digest(body.as_bytes()),
+                token: new_token(),
             };
             let item = Item::from([
                 (
@@ -159,7 +172,7 @@ pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, Directo
         AttributeValue::S(serde_json::to_string(&bare).expect("a record serializes")),
     );
     if let Some((key, _)) = &list {
-        item.insert(LIST.into(), AttributeValue::S(key.sort_key()));
+        name(&mut item, *key);
     }
     fits(&item, &record.name, "record")?;
     Ok(Encoded { item, list })
@@ -271,26 +284,22 @@ pub(crate) fn version(item: &Item) -> Option<Version> {
     })
 }
 
-/// The key of the list a records-table item names, and the token of the
-/// list's put that the item followed, if it names one.
-pub(crate) fn names_list(item: &Item) -> Option<(ListKey, u64)> {
-    let key = match item.get(LIST)? {
-        AttributeValue::S(key) => ListKey::parse(key)?,
-        _ => return None,
-    };
-    Some((key, count(item, LIST_PUT)?))
+/// The key of the list a records-table item names, if it names one.
+pub(crate) fn names_list(item: &Item) -> Option<ListKey> {
+    match item.get(NAMES)? {
+        AttributeValue::S(key) => ListKey::parse(key),
+        _ => None,
+    }
 }
 
-/// Stamp a write's list item, and the record item that names it, with the
-/// token of the list's put.
-pub(crate) fn stamp(list: &mut Item, record: &mut Item, put: u64) {
-    list.insert(PUT.into(), number(put));
-    record.insert(LIST_PUT.into(), number(put));
+/// Make the records-table item `record` name the list `key`.
+pub(crate) fn name(record: &mut Item, key: ListKey) {
+    record.insert(NAMES.into(), AttributeValue::S(key.sort_key()));
 }
 
 /// A token for a new put of a list: random, so that two writers in any
 /// processes do not share one.
-pub(crate) fn new_put() -> u64 {
+fn new_token() -> u64 {
     use std::hash::{BuildHasher, RandomState};
     RandomState::new().hash_one(next_order())
 }

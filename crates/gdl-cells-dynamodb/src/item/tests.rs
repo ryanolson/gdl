@@ -172,7 +172,7 @@ fn list_keys_sort_by_models_version() {
 
 /// What a query reads per cell is the cost of a scan, and the book's
 /// numbers come from here: a record item, with a load summary and a model
-/// list, stays near 424 bytes, and only the list grows with the models.
+/// list, stays near 442 bytes, and only the list grows with the models.
 #[test]
 fn a_records_item_stays_small_whatever_its_models() {
     let size = |item: &super::Item| -> usize {
