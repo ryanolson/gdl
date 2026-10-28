@@ -47,6 +47,29 @@ fn the_committed_segments_are_current() {
     );
 }
 
+/// `generate` writes crates into the user's workspace, where Cargo reads
+/// a profile only from the workspace's root and warns about one in a
+/// member: the user's root profile applies, so the crates carry none.
+#[test]
+fn a_generated_segment_leaves_the_profile_to_its_workspace() {
+    let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
+    let files = gdl_gen::render(&spec, &example().join("segments"), &target("gdl-gen-tests"))
+        .expect("render");
+    let manifests: Vec<_> = files
+        .iter()
+        .filter(|(path, _)| path.ends_with("Cargo.toml"))
+        .collect();
+    assert_eq!(manifests.len(), 4, "{:?}", files.keys());
+    for (path, text) in manifests {
+        let manifest: toml::Table = text.parse().expect("a manifest");
+        assert!(
+            !manifest.contains_key("profile"),
+            "{}:\n{text}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn only_the_engine_segment_links_the_engine_dependency() {
     let manifest = example().join("Cargo.toml");

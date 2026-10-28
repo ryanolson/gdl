@@ -30,6 +30,17 @@ fn compose_starts_segments_only_after_hub_health() {
             "service_healthy"
         );
         assert!(files.contains_key(&Path::new(name).join("Dockerfile")));
+        // Each image builds its segment in release, from the segment's own
+        // workspace, so the profile there is the one that applies.
+        let manifest: toml::Table = files[&Path::new(name).join("Cargo.toml")]
+            .parse()
+            .expect("a manifest");
+        assert_eq!(
+            manifest["profile"],
+            toml::from_str::<toml::Value>("release = { codegen-units = 1, lto = \"fat\" }")
+                .expect("the profile"),
+            "{name}"
+        );
         let config = &files[&Path::new(name).join("config.toml")];
         assert!(config.contains("[hub]\nhost = \"hub\""));
         // The dynamo operator's port; the probe asks the binary itself, so

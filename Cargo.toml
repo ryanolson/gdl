@@ -44,6 +44,18 @@ uuid = "1"
 velo = { git = "https://github.com/ai-dynamo/velo", rev = "e892f87e398b017e3027e1ab0f56d9136099283b", default-features = false }
 velo-hub = { git = "https://github.com/ai-dynamo/velo", rev = "e892f87e398b017e3027e1ab0f56d9136099283b", default-features = false }
 
+# Release builds ship with one codegen unit and fat LTO. Benches and their
+# baselines use thin LTO, which builds faster. `bench` inherits from
+# `release`, so it sets `lto` itself. The measurements behind the choice are
+# in docs/src/operations/benchmarking.md, "Release profiles".
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
+[profile.bench]
+codegen-units = 1
+lto = "thin"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"

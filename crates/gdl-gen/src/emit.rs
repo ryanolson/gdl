@@ -69,6 +69,20 @@ impl Deps {
             }
         }
     }
+
+    /// The release profile of a segment manifest: none for one in the
+    /// user's workspace, where Cargo reads only the root's profile. A
+    /// segment built on its own, as export and compose build it for its
+    /// image, gets one codegen unit and fat LTO
+    /// (`docs/src/operations/benchmarking.md`, "Release profiles").
+    pub(crate) fn profile(self) -> &'static str {
+        match self {
+            Self::Relative => "",
+            Self::Exported | Self::Local => {
+                "\n# The profile its image is built with.\n[profile.release]\ncodegen-units = 1\nlto = \"fat\"\n"
+            }
+        }
+    }
 }
 
 /// Everything to write under the output directory for layout `laid`,
@@ -573,6 +587,7 @@ impl Unit<'_> {
             "tracing-subscriber = {{ version = \"0.3\", default-features = false, features = [\"env-filter\", \"fmt\"] }}"
         );
         text.push_str(self.deps.workspace());
+        text.push_str(self.deps.profile());
         text
     }
 

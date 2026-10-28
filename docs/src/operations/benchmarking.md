@@ -20,7 +20,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 - **Interleave.** Build base and change in the same checkout and the same target directory, one after the other, and copy each binary aside. Run them alternately for at least seven rounds. Two builds of identical sources in different directories differed by 7% in instructions, so a comparison across directories means nothing.
 - **Report the median and the range across rounds.** Call a difference real only when it exceeds the range of the base alone. Record the load average with each round.
 - **Wall time** comes from the criterion rows of `crates/gdl-runtime/benches/remote.rs`, base and change in turn, with `--warm-up-time 2 --measurement-time 5`.
-- **Build as shipped.** Use the release profile and the shipping features. The workspace sets no profile, so this is Cargo's default ([Release profiles](#release-profiles)). Time without a counting allocator. Count allocations in a separate bench (`footprint`) so that instrumentation is never timed.
+- **Build as the workspace sets.** `cargo bench` uses the workspace's bench profile, B, and a release build its release profile, E ([Release profiles](#release-profiles)). Use the shipping features. Time without a counting allocator. Count allocations in a separate bench (`footprint`) so that instrumentation is never timed.
 - **Check every request.** A bench request that fails or is truncated panics. It is never counted.
 
 ## Measurement traps
@@ -33,6 +33,8 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 - **A future that grows is a cost.** A larger future is moved whole on every request. `requests sizes 0` prints the size of the front's call future for one, two, and three segments. One pump change added 592 bytes to the future and about 650 bytes to every request. The footprint bench showed it as bytes allocated per request. The test `the_front_call_future_stays_under_its_ceiling` (`crates/gdl-runtime/tests/dist.rs`) fails when the future grows more than 256 bytes past its measured size.
 
 ## Gates
+
+The gates are relative: base and change are built under the same profile and compared. The baseline numbers that the guards in [Hot paths](hot-paths.md) and the gate tables in this book give are still under Cargo's defaults (A), until they are measured again under B.
 
 | Path | A change may cost |
 |---|---|
@@ -264,7 +266,7 @@ User instructions per request, the change minus the base. The medians of the thr
 
 ## Release profiles
 
-The workspace sets no `[profile.*]` and no target flags. So `cargo bench`, and every gdl bench in this book, uses Cargo's defaults: 16 codegen units per crate, no LTO across crates, and the generic CPU. velo, built as a dependency, gets the same. Five settings were measured on the guarded benches to see what a profile changes.
+The workspace's `Cargo.toml` sets two profiles and no target flags. `[profile.release]` is E, so a release build, `cargo test --release`, and every exported or composed segment ship with one codegen unit and fat LTO. `[profile.bench]` is B, so `cargo bench` and the baselines of the guards use thin LTO, which builds faster. `bench` inherits from `release`, so B sets `lto = "thin"` itself. velo, built as a dependency, gets the same. Benches taken before the workspace set them, at Cargo's defaults (A), say so in their setup. Five settings were measured on the guarded benches to choose them.
 
 | Config | Settings |
 |---|---|
@@ -281,7 +283,7 @@ The workspace sets no `[profile.*]` and no target flags. So `cargo bench`, and e
 - **Allocations stay close.** In every config the footprint bench counts within 1 allocation per request and 0.1 per item of the others.
 - **Builds take longer, and binaries are smaller.** A clean build of the benches takes 108 s with thin LTO and 141 s with fat LTO, against 39 s. A stripped segment binary is 28% to 32% smaller.
 
-**Apply a config** without editing a manifest. `cargo bench` uses the bench profile, which inherits from release, and `cargo test --release` uses release, so set both:
+**Apply another config** without editing a manifest. An environment variable overrides the manifest. `cargo bench` uses the bench profile and `cargo test --release` uses release, so set both. For A, set `CODEGEN_UNITS=16` and `LTO=false`:
 
 ```bash
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_BENCH_CODEGEN_UNITS=1
@@ -292,7 +294,7 @@ cargo bench -p gdl -p gdl-runtime --bench choose --bench followed --bench remote
 
 The profile reaches velo, a git dependency. In the build's `-v` output, velo's `rustc` line has `-C codegen-units=1 -C linker-plugin-lto` under B, against `-C embed-bitcode=no` under A, and each bench binary's line has `-C lto=thin`.
 
-**Setup.** The gb300 bench host (Neoverse-V2, 72 cores, Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
+**Setup.** The gb300 bench host (Neoverse-V2, 72 cores, Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, before the workspace set a profile, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -342,6 +344,15 @@ The instruction counts are `perf stat -e instructions:u` on cores 16 to 23 over 
 
 The builds use all 72 cores. The segment is built with `cargo build --release -p chat-front` in `examples/chat`, into its own fresh target directory.
 
+The same builds on a spark host (aarch64, 20 cores, shared with other builds, load 3.5 to 10.1), at gdl `a5e050a`, after the workspace set its profiles, each into a fresh target directory. B and E are the workspace's and the exported segment's own profiles. A is set through `CARGO_PROFILE_*` variables. The segment is `chat/front` from `cargo gdl export --spec examples/chat/gdl.toml`, built with `cargo build --release --manifest-path chat/front/Cargo.toml`. Its manifest carries E, and the archive has no lock file, so it resolved current crate versions.
+
+| Build | A | B | E |
+|---|---|---|---|
+| clean build of the six benches, s | 35.5 | 73.0 | |
+| clean build of the exported `chat-front` segment, s | 17.4 | | 62.8 |
+| `chat-front`, bytes | 13,849,304 | | 8,277,048 |
+| `chat-front` stripped, bytes | 9,448,568 | | 6,433,752 |
+
 - **The loopback request rows rank nothing.** `request/lean-2-segments` took 102.6 µs and 108.9 µs in A's two jobs, so they are left out of the table.
 - **Some single rows need a second build.** E's `followed/model` (+6.9 ns) and C's `own thresholds` (+7.4 ns) are each one build, and B's two jobs differed by 4.5 ns on `followed/model`.
 - **Allocations.** Per request, the footprint bench counted 60.0 for the local graph in every config, 198.9 to 199.9 for two segments, and 132.6 to 133.3 for the lean graph. Per item, the lean graph made 7.98 to 8.07 allocations at 16 B and 12.11 to 12.16 at 16 KiB.
@@ -388,7 +399,7 @@ Under A, the attribute saves 3 ns per pick and acceptance. Under D and E it make
 
 ### Where a profile applies
 
-Cargo reads `[profile.*]` only from the manifest at a workspace's root, and ignores it in a member with a warning. `cargo gdl export` and `compose` write each segment crate as its own workspace (its manifest ends with `[workspace]`), and the export `Dockerfile` builds it with `cargo build --release`. So a profile in a segment's own manifest would reach its image. `cargo gdl generate` writes crates into the user's workspace, as in `examples/chat`, so the profile there is the one at that workspace's root. A target CPU is not a profile setting, and a binary built for `neoverse-v2` does not run on an older Arm CPU. Node registration through `linkme` holds under LTO: `examples/http`'s service test, which finds its node in `Catalogue::linked()`, passes under B and under E.
+Cargo reads `[profile.*]` only from the manifest at a workspace's root, and ignores it in a member with a warning. `cargo gdl export` and `compose` write each segment crate as its own workspace (its manifest has an empty `[workspace]`), and its `Dockerfile` and `build-all.sh` build it with `cargo build --release`. So each segment's own manifest carries `[profile.release]` E, and that profile reaches its image. The generated contract carries none: it is only a dependency, built under the segment's profile. `cargo gdl generate` writes crates into the user's workspace, as in `examples/chat`, so it writes no profile: the one at that workspace's root applies, and Cargo's defaults when it sets none. The example workspaces set none. A target CPU is not a profile setting, and a binary built for `neoverse-v2` does not run on an older Arm CPU. Node registration through `linkme` holds under LTO: `examples/http`'s service test, which finds its node in `Catalogue::linked()`, passes under B and under E. In the suite, `a_binary_under_the_exported_profile_lists_its_nodes` (`crates/gdl-gen/tests/export.rs`) builds a binary under the profile an exported segment carries and checks that it lists the chat front segment's nodes.
 
 ## Runner
 

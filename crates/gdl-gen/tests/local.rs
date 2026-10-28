@@ -38,6 +38,15 @@ fn a_local_bundle_builds_from_a_context_that_holds_its_crates() {
         &root().join("target/gdl-local-golden"),
     )
     .expect("a bundle");
+    // The image builds the segment in release from its own workspace.
+    let manifest: toml::Table = files[Path::new("main/Cargo.toml")]
+        .parse()
+        .expect("a manifest");
+    assert_eq!(
+        manifest["profile"],
+        toml::from_str::<toml::Value>("release = { codegen-units = 1, lto = \"fat\" }")
+            .expect("the profile")
+    );
     let found: String = [
         "README.md",
         "compose.yaml",

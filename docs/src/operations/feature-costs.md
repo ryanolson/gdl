@@ -97,7 +97,7 @@ cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignor
 | accepted first offer over loopback, cells | 36.8 us, 37.1 us | 33.1 us, 36.8 us |
 | accepted first offer over loopback, roster | 30.3 us, 33.2 us | 37.9 us, 32.6 us |
 
-The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and the workspace builds without LTO. Under LTO the attribute makes no measurable difference ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)). A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
+The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and these runs built without LTO. Under LTO the attribute makes no measurable difference ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)). A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
 
 What a policy pays to read the head of a 100 KB request (100 messages of 1,000 characters, the hint after them), by the runtime's path, from `crates/gdl/benches/projection.rs`:
 

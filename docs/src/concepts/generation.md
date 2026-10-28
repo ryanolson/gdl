@@ -80,7 +80,8 @@ Every generated file starts with a do-not-edit marker and the command that regen
 
 - A dependency outside the archive is named as the spec gives it: a version or a git revision stays so, and a directory becomes an absolute path on the machine that wrote the archive. The archive then builds on that machine. A crate named by a version or a revision builds anywhere.
 - Entries are sorted, with zero times and owners, and the gzip header has no time. Two exports of one spec are the same bytes.
-- Each manifest ends with an empty `[workspace]`, so an archive expanded inside another workspace still builds. The archive holds no `Cargo.lock`.
+- Each manifest has an empty `[workspace]`, so an archive expanded inside another workspace still builds. The archive holds no `Cargo.lock`.
+- Each segment's manifest also sets `[profile.release]` to one codegen unit and fat LTO, the profile its image ships with, because Cargo reads a profile only at a workspace's root. `compose` writes the same. `generate` writes none: its crates are members of the user's workspace, whose root profile applies ([Where a profile applies](../operations/benchmarking.md#where-a-profile-applies)).
 - When every crate comes from crates.io or git, the archive also holds a `Dockerfile` for each segment and `build-images.sh`. Each Dockerfile is a multi-stage build from the archive's root: the Rust image builds the segment, and `debian:bookworm-slim` runs its binary. The script tags each image with the segment's package name after `GDL_IMAGE_PREFIX`. A segment whose image name Docker would refuse, such as a name that ends in `-`, is an export error that names the segment. Nothing is pushed.
 - The tests check the generated image text, and no test builds an image.
 

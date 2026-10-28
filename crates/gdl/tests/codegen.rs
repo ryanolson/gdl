@@ -44,29 +44,41 @@ fn home_first_keeps_its_thresholds_in_code() {
 /// about 25 s cold and 2 s warm.
 #[test]
 fn a_node_boundary_does_not_copy_an_item() {
-    let ir = release_ir("example", "copies");
-    // Half an item: smaller copies move a field, not the item.
-    const ITEM: u64 = 1024;
-    let copies = |name: &str| -> Vec<u64> {
-        let (_, body) = definitions(&ir)
-            .find(|(signature, _)| signature.contains(name) && signature.contains("9poll_next"))
-            .unwrap_or_else(|| panic!("{name}'s poll_next definition"));
-        copy_sizes(body).filter(|size| *size >= ITEM).collect()
-    };
+    check_item_boundaries(&release_ir("example", "copies"));
+}
+
+/// The guard reads every instantiation of a boundary: here the one that
+/// copies comes second, after one of a small item.
+#[test]
+fn the_item_copy_guard_checks_every_monomorphization() {
+    let ir = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+
+define void @"copies..Copying$u20$9poll_next"(ptr %dst, ptr %src) {
+    call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 2056, i1 false)
+    ret void
+}
+
+define void @"gdl..items..Fuse$LT$Big$GT$9poll_next"() {
+    ret void
+}
+
+define void @"gdl..items..Bounded$LT$u64$GT$9poll_next"() {
+    ret void
+}
+
+define void @"gdl..items..Bounded$LT$Big$GT$9poll_next"(ptr %dst, ptr %src) {
+    call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 2056, i1 false)
+    ret void
+}
+
+define void @"gdl..items..UntilError$LT$Big$GT$9poll_next"() {
+    ret void
+}
+"#;
     assert!(
-        !copies("copies..Copying$u20$").is_empty(),
-        "the Copying control must show a copy of the item"
-    );
-    assert_eq!(copies("gdl..items..Fuse$LT$"), Vec::<u64>::new(), "Fuse");
-    assert_eq!(
-        copies("gdl..items..Bounded$LT$"),
-        Vec::<u64>::new(),
-        "Bounded"
-    );
-    assert_eq!(
-        copies("gdl..items..UntilError$LT$"),
-        Vec::<u64>::new(),
-        "UntilError"
+        std::panic::catch_unwind(|| check_item_boundaries(ir)).is_err(),
+        "the guard accepted a 2056-byte copy in the second Bounded::poll_next"
     );
 }
 
@@ -139,6 +151,42 @@ fn example_ir_ignores_a_newer_artifact_from_another_build() {
     );
 }
 
+/// Fails if any `poll_next` of a boundary copies an item, while the
+/// `Copying` control does.
+fn check_item_boundaries(ir: &str) {
+    // Half an item: smaller copies move a field, not the item.
+    const ITEM: u64 = 1024;
+    // Every instantiation: the example's boundaries carry small items as
+    // well as large ones, and fat LTO can put either first.
+    let copies = |name: &str| -> Vec<u64> {
+        let bodies: Vec<&str> = definitions(ir)
+            .filter(|(signature, _)| signature.contains(name) && signature.contains("9poll_next"))
+            .map(|(_, body)| body)
+            .collect();
+        assert!(!bodies.is_empty(), "{name}'s poll_next definition");
+        bodies
+            .into_iter()
+            .flat_map(copy_sizes)
+            .filter(|size| *size >= ITEM)
+            .collect()
+    };
+    assert!(
+        !copies("copies..Copying$u20$").is_empty(),
+        "the Copying control must show a copy of the item"
+    );
+    assert_eq!(copies("gdl..items..Fuse$LT$"), Vec::<u64>::new(), "Fuse");
+    assert_eq!(
+        copies("gdl..items..Bounded$LT$"),
+        Vec::<u64>::new(),
+        "Bounded"
+    );
+    assert_eq!(
+        copies("gdl..items..UntilError$LT$"),
+        Vec::<u64>::new(),
+        "UntilError"
+    );
+}
+
 /// The release IR of one of gdl's targets: `kind` is `lib` or `example`.
 fn release_ir(kind: &str, name: &str) -> String {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -148,12 +196,11 @@ fn release_ir(kind: &str, name: &str) -> String {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
-    // An example builds as a release build does by default, in 16 units:
-    // whether a future is built in place can depend on it. Asked for IR,
-    // rustc would build in one unit.
-    let (selected, units) = match kind {
-        "lib" => (vec!["--lib"], vec![]),
-        _ => (vec!["--example", name], vec!["-C", "codegen-units=16"]),
+    // Under the workspace's release profile, the one a segment ships
+    // with: whether a future is built in place can depend on it.
+    let selected = match kind {
+        "lib" => vec!["--lib"],
+        _ => vec!["--example", name],
     };
     let built = Command::new(env!("CARGO"))
         .current_dir(workspace)
@@ -162,7 +209,6 @@ fn release_ir(kind: &str, name: &str) -> String {
         .args(["rustc", "-p", "gdl", "--release"])
         .args(selected)
         .args(["--message-format=json", "--", "--emit=llvm-ir"])
-        .args(units)
         .output()
         .expect("compile gdl's release IR");
     assert!(
@@ -211,32 +257,9 @@ fn release_ir(kind: &str, name: &str) -> String {
                 })
                 .find(|path| std::fs::read(path).is_ok_and(|bytes| bytes == built))
                 .expect("the hashed executable of this build");
-            // One file per unit, named after the hashed executable.
-            let prefix = format!(
-                "{}.",
-                hashed
-                    .file_name()
-                    .and_then(|file| file.to_str())
-                    .expect("a name")
-            );
-            let mut units: Vec<PathBuf> = std::fs::read_dir(hashed.parent().expect("a directory"))
-                .expect("the artifact's directory")
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|file| file.to_str())
-                        .is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".rcgu.ll"))
-                })
-                .collect();
-            units.sort();
-            // Fewer units than asked for could leave another build's files
-            // under the same names.
-            assert_eq!(units.len(), 16, "the example's units: {units:?}");
-            units
-                .iter()
-                .map(|unit| std::fs::read_to_string(unit).expect("the emitted IR"))
-                .collect()
+            // Fat LTO merges the program into one module, and the IR is
+            // that module's, named after the hashed executable.
+            std::fs::read_to_string(hashed.with_extension("ll")).expect("the emitted IR")
         }
     }
 }
