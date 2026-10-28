@@ -267,7 +267,7 @@ impl Fleet {
             pos: 1,
             cx: WireCx::of(&cx),
             reply: ReplyTo::test_value(7),
-            payload: key.as_bytes().to_vec(),
+            payload: key.as_bytes().to_vec().into(),
         };
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -312,7 +312,7 @@ fn answer(serves: Serves, message: &[u8]) -> Vec<u8> {
         Serves::None(decline) => declined(decline),
         Serves::Key(key) => {
             let forward: Forward = decode(message).expect("a forward hand-off");
-            if forward.payload == key.as_bytes() {
+            if forward.payload[..] == *key.as_bytes() {
                 accepted()
             } else {
                 declined(Decline::Instance)
@@ -320,7 +320,7 @@ fn answer(serves: Serves, message: &[u8]) -> Vec<u8> {
         }
         Serves::Not(model) => {
             let forward: Forward = decode(message).expect("a forward hand-off");
-            if forward.payload == model.as_bytes() {
+            if forward.payload[..] == *model.as_bytes() {
                 declined(Decline::Instance)
             } else {
                 accepted()

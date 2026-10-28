@@ -24,6 +24,11 @@
 //! once, so the difference between two counts is the cost of the items
 //! alone, with no share of a request's. `perf record` on one of these
 //! profiles the item path, both ends, in one process.
+//!
+//! `head-<size>` counts requests whose head is one blob of `<size>` bytes,
+//! through a two-segment graph that answers each with one item: the cost of
+//! crossing a request head of that size. `fields-<words>` sends a head of
+//! `<words>` words of 8 bytes instead: the cost per field.
 
 #![allow(missing_docs)]
 
@@ -48,7 +53,7 @@ async fn node() -> velo::Velo {
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -60,6 +65,22 @@ fn main() {
         // Only the setup measured: every velo node running in the process
         // does work of its own while the requests run, which a count per
         // request would take for theirs.
+        if let Some(size) = which.strip_prefix("head-") {
+            let size: usize = size.parse().expect(usage);
+            let heads = heads_front().await;
+            for _ in 0..count {
+                head(&heads, size).await;
+            }
+            std::process::exit(0);
+        }
+        if let Some(words) = which.strip_prefix("fields-") {
+            let words: usize = words.parse().expect(usage);
+            let heads = heads_front().await;
+            for _ in 0..count {
+                fields(&heads, words).await;
+            }
+            std::process::exit(0);
+        }
         if let Some((kind, size)) = which
             .split_once('-')
             .filter(|(kind, _)| matches!(*kind, "lean" | "direct"))

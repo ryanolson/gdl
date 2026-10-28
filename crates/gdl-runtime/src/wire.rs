@@ -11,7 +11,7 @@ use gdl::{Error, ErrorKind, Result};
 use gdl::{Items, items};
 use gdl_model::Encoding;
 
-use crate::dist::EncodedItem;
+use crate::dist::{EncodedItem, Head};
 
 /// How one edge's message type crosses a segment boundary.
 ///
@@ -27,6 +27,8 @@ use crate::dist::EncodedItem;
 /// JSON (`json`). Arrays must not conditionally omit fields.
 pub struct Codec<T> {
     encode: fn(&T, &mut Vec<u8>) -> Result<()>,
+    /// `encode`, into a buffer it sizes once: for a request's head.
+    encode_sized: fn(&T, &mut Vec<u8>) -> Result<()>,
     decode: fn(&[u8]) -> Result<T>,
     encoding: Encoding,
 }
@@ -48,6 +50,11 @@ impl<T> Codec<T> {
         Ok(item)
     }
 
+    /// Encode a request's head into the buffer its envelope is sent from.
+    pub(crate) fn encode_head(&self, value: &T) -> Result<Head> {
+        Head::encode(value, self.encode_sized)
+    }
+
     /// Decode one value.
     pub fn decode(&self, bytes: &[u8]) -> Result<T> {
         (self.decode)(bytes)
@@ -55,7 +62,7 @@ impl<T> Codec<T> {
 }
 
 impl<T> Codec<T> {
-    /// A codec from its two functions, so that a test can see what the
+    /// A codec from its functions, so that a test can see what the
     /// runtime hands them.
     #[cfg(test)]
     pub(crate) fn from_fns(
@@ -64,6 +71,7 @@ impl<T> Codec<T> {
     ) -> Self {
         Self {
             encode,
+            encode_sized: encode,
             decode,
             encoding: Encoding::default(),
         }
@@ -75,6 +83,7 @@ impl<T: Serialize + DeserializeOwned> Codec<T> {
     pub fn new(encoding: Encoding) -> Self {
         Self {
             encode: gdl::__runtime::encoder_into::<T>(encoding),
+            encode_sized: gdl::__runtime::encoder_sized::<T>(encoding),
             decode: gdl::__runtime::decoder::<T>(encoding),
             encoding,
         }
@@ -127,7 +136,7 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
 /// encoded items.
 #[doc(hidden)]
 pub struct Split {
-    pub head: Vec<u8>,
+    pub head: Head,
     pub input: Option<Items<EncodedItem>>,
 }
 
@@ -145,7 +154,7 @@ impl<T: Send + 'static> RequestCodec for Codec<T> {
 
     fn split(&self, value: T) -> Result<Split> {
         Ok(Split {
-            head: self.encode(&value)?,
+            head: self.encode_head(&value)?,
             input: None,
         })
     }
@@ -210,7 +219,7 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         let mut hint = SizeHint::default();
         let encoded = items(input.map(move |value| item.encode_item(&value?, &mut hint)));
         Ok(Split {
-            head: self.head.encode(&head)?,
+            head: self.head.encode_head(&head)?,
             input: Some(encoded),
         })
     }

@@ -17,17 +17,34 @@ struct Counting;
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     static COUNTED: Cell<u64> = const { Cell::new(0) };
+    static SIZES: Cell<Sizes> = const { Cell::new(Sizes { largest: 0, bytes: 0 }) };
 }
 
-fn count() {
+/// The sizes of the allocations a thread counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sizes {
+    /// The largest one, or the largest size a reallocation grew one to.
+    pub(crate) largest: usize,
+    /// All of them added up, each reallocation at its new size.
+    pub(crate) bytes: usize,
+}
+
+fn count(size: usize) {
     if COUNTING.with(Cell::get) {
         COUNTED.with(|counted| counted.set(counted.get() + 1));
+        SIZES.with(|sizes| {
+            let Sizes { largest, bytes } = sizes.get();
+            sizes.set(Sizes {
+                largest: largest.max(size),
+                bytes: bytes + size,
+            });
+        });
     }
 }
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count();
+        count(layout.size());
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
@@ -38,7 +55,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        count();
+        count(size);
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.realloc(ptr, layout, size) }
     }
@@ -50,6 +67,16 @@ static ALLOCATOR: Counting = Counting;
 /// The allocations this thread has counted so far.
 pub(crate) fn counted() -> u64 {
     COUNTED.with(Cell::get)
+}
+
+/// The sizes of the allocations this thread counted since the last call.
+pub(crate) fn take_sizes() -> Sizes {
+    SIZES.with(|sizes| {
+        sizes.replace(Sizes {
+            largest: 0,
+            bytes: 0,
+        })
+    })
 }
 
 /// Count this thread's allocations from now on, or stop.

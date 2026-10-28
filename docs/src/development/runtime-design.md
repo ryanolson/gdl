@@ -28,6 +28,12 @@ Every gdl anchor carries velo's byte items, and each edge's codec turns `T` into
 
 The edge codec writes each item straight into velo's frame, so a crossing adds no copy of the item. The receiver decodes it where it arrived. [Crossing performance](../operations/crossing-performance.md#codec-cost) has the measured cost and the command.
 
+A request's head is written behind room for the rest of its envelope, and the envelope is written into that room when it is offered ([What crosses the wire](../concepts/crossings.md#what-crosses-the-wire)). Before, the head went into a buffer of its own that grew by doubling, and the envelope's encode copied it into a second buffer. A 4 MiB image took an 8 MiB head buffer and a 4 MiB envelope. Three other forms were not taken:
+
+- **A size pass on every head.** It serializes every head twice. With the first buffer of 1 KiB, only a head larger than that is serialized to count it.
+- **The head first, and the other fields after it.** It needs no room, but it changes the envelope's layout, so every receiver would need a new envelope version.
+- **A size hint from earlier requests,** as a stream's items have. The requests of a hop come from many tasks, so a shared hint is a write to one cache line on each request. A head larger than the hint would still double its buffer.
+
 The first form wrapped the bytes in a `WireItem` enum that velo serialized inside its own frame: two encodes and four copies of the payload per item, against velo's one encode and two copies. It cost 97 ns more than velo per item at 16 B and 477 ns more at 16 KiB, and 3 more allocations per item end to end. A tag byte before each payload, instead of an empty item for Open and velo's sender error for Fail, was not taken: it costs a byte per item and a copy unless the codec writes it.
 
 The graph macro picks a streamed edge's codec from the syntax (`stream_codec!` for `Head + stream Item`, `wire_codec!` otherwise). The wire probe is autoref specialization with two levels. A third autoref level that recognized `Streamed` by type was not built, because the syntax already marks each streamed edge (`Head + stream Item`).

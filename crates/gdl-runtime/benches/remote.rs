@@ -20,6 +20,10 @@
 //!   figures recorded (`-metrics`), and 32 reference requests at once, each
 //!   a task of its own (`concurrent-32x1-reference`), where a figure every
 //!   thread touches would contend (see docs/src/operations/feature-costs.md).
+//! - **Heads:** a request whose head is one blob of 16 B, 64 KiB, or 4 MiB,
+//!   over two segments, answered with one item (`head-<size>B-2-segments`):
+//!   what a crossing costs per byte of request head. And one whose head is
+//!   1,000 words of 8 B (`fields-1000-2-segments`): what it costs per field.
 //! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,
 //!   one count back) over two segments, against the same exchange on velo
 //!   alone: the server mints the input anchor and answers with its ticket.
@@ -225,6 +229,16 @@ fn bench(c: &mut Criterion) {
     latency.bench_function("velo-direct-upload", |b| {
         b.to_async(&rt)
             .iter(|| setups.direct_upload(black_box(one)))
+    });
+    for size in HEAD_SIZES {
+        latency.bench_function(format!("head-{size}B-2-segments"), |b| {
+            b.to_async(&rt)
+                .iter(|| head(&setups.heads, black_box(size)))
+        });
+    }
+    latency.bench_function(format!("fields-{HEAD_WORDS}-2-segments"), |b| {
+        b.to_async(&rt)
+            .iter(|| fields(&setups.heads, black_box(HEAD_WORDS)))
     });
     latency.finish();
 

@@ -83,6 +83,10 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 | its refusal | the error, then, when an entry declines an offer from another cell as gone, the string `gone` as a second value, which a build without it does not read ([A cell that is gone](cell-routing.md#a-cell-that-is-gone)) |
 | `Open` | envelope version, deployment identity, hop, the position of the run's first stage, the context's wire part, and reply-to |
 
+A request's head crosses in the buffer it was encoded into. The edge codec writes the head behind 256 bytes of room, and the first offer writes the rest of the `Forward` envelope into that room. The envelope is then one byte string that holds the head where the codec wrote it, so the head is not copied. The bytes are the same as `rmp_serde` gives for the whole envelope, and a receiver reads them as before. With no metadata, the rest of the envelope takes about 100 bytes, which leaves about 150 bytes for metadata. An envelope whose metadata does not fit, and each offer after the first, as a failover makes, copies the head after its own header.
+
+The head's first buffer holds 1 KiB, with the room. A head that does not fit is serialized to count its bytes, and then into a buffer of exactly its size. So the buffer never grows past the head: a 4 MiB image takes one buffer of 4 MiB and the room, not one of 8 MiB.
+
 A receiver refuses an envelope of another version, and one whose identity differs from its own, with `Placement`. So an instance built from another contract or placement cannot misread a request. [Specs, segments, and layouts](placement.md) describes the identity hashes.
 
 Stream items cross on velo's byte path: each is one velo frame whose payload is a byte string. The edge codec writes each item straight into the frame (`ByteItemBuilder`), and the producer sends that frame with `StreamSender::send_frame`, so the item is not copied after it is encoded. The consumer reads with `StreamAnchor::poll_next_bytes`, which hands on the payload as a view of the frame it arrived in.
@@ -99,7 +103,7 @@ No encoding writes zero bytes for a value, so an empty item is only Open. A hand
 
 Every crossing edge needs a codec. So does every edge whose items travel through an anchor. When a hop's forward path leaves O's segment, the type that enters `anchor_k` needs a codec even if every backward stage is in O's segment. For example, in `{A,B,D,F,E,G} {C}` the forward path leaves at C and comes back for D, so D's output returns to B through an anchor. The placement check reports this as `NotWire` with reason `AnchorCarried`, and a crossing edge as `NotWire` with reason `Crossing`. The placement check and the generated segments' crossing assertions read one list of these edges, so they cannot disagree.
 
-Encoding happens only when a message leaves its segment. `crates/gdl-runtime/tests/crossings.rs` counts encodes: none in a local graph or inside one segment, and one per message per crossing.
+Encoding happens only when a message leaves its segment. `crates/gdl-runtime/tests/crossings.rs` counts encodes: none in a local graph or inside one segment, and one per message per crossing. A request head larger than its first buffer is serialized two more times: in part, until the buffer is full, and once to count its bytes ([What crosses the wire](#what-crosses-the-wire)).
 
 ## No correlation map
 

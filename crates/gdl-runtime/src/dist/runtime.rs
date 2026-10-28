@@ -902,7 +902,7 @@ impl Runtime {
                         .choose_cell(crossing, cx, &mut envelope, &[])
                         .await?
                         .map_err(|no| crossing.no_cell(no))?;
-                    let (offering, sent) = self.deliver(instance, &envelope, timed)?;
+                    let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
                     return match super::cells::answer(offering.await, crossing, cell, &mut held) {
                         Answer::Accepted(accepted) => Ok(Handed {
                             accepted,
@@ -936,7 +936,7 @@ impl Runtime {
                 let sent = timed.then(tokio::time::Instant::now);
                 Offer::entered(entering.await, sent)?
             } else {
-                let (offering, sent) = self.deliver(instance, &envelope, timed)?;
+                let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
                 Offer::delivered(offering.await, sent, envelope)?
             };
             match offer {
@@ -973,7 +973,7 @@ impl Runtime {
             .call(
                 instance,
                 &self.names.open,
-                super::envelope::encode(&open)?,
+                super::envelope::encode(&open)?.into(),
                 self.config.setup_timeout,
             )
             .await?;

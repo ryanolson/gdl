@@ -341,7 +341,7 @@ mod tests {
                     pos: 1,
                     cx: WireCx::of(&cx),
                     reply: ReplyTo::test_value(7),
-                    payload: vec![1, 2, 3],
+                    payload: vec![1, 2, 3].into(),
                 };
                 let send = Counted::new(rt.send_forward("d", router, &cx, envelope, false));
                 let (sent, made) = tokio::time::timeout(Duration::from_secs(5), send)
@@ -596,7 +596,8 @@ mod tests {
             payload: serde_json::to_vec(&Prompt {
                 text: "hello".into(),
             })
-            .expect("encoded"),
+            .expect("encoded")
+            .into(),
         };
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -721,7 +722,7 @@ mod tests {
                 pos: 1,
                 cx: WireCx::of(&cx),
                 reply: ReplyTo::test_value(7),
-                payload: vec![1, 2, 3],
+                payload: vec![1, 2, 3].into(),
             };
             tokio::time::timeout(
                 Duration::from_secs(5),
@@ -865,7 +866,7 @@ mod tests {
             pos: 1,
             cx: WireCx::of(&cx),
             reply: ReplyTo::test_value(7),
-            payload: vec![1, 2, 3],
+            payload: vec![1, 2, 3].into(),
         };
         let mut offer = Box::pin(rt.send_forward("d", &router, &cx, envelope, false));
         tokio::select! {
@@ -1035,7 +1036,7 @@ mod tests {
                 pos: 1,
                 cx: WireCx::of(&cx),
                 reply: ReplyTo::test_value(7),
-                payload,
+                payload: payload.into(),
             };
             let rt = &rt;
             let router = &router;
@@ -1587,7 +1588,7 @@ mod tests {
                         pos: 1,
                         cx: WireCx::of(&cx),
                         reply: ReplyTo::test_value(7),
-                        payload: vec![1, 2, 3],
+                        payload: vec![1, 2, 3].into(),
                     };
                     rt.send_forward("d", router, &cx, envelope, false)
                         .await

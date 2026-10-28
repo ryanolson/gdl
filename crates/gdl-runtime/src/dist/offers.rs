@@ -314,13 +314,13 @@ impl Runtime {
     pub(crate) fn deliver(
         &self,
         instance: InstanceId,
-        envelope: &Forward,
+        envelope: &mut Forward,
         timed: bool,
     ) -> Result<(
         impl Future<Output = Offered> + Send + '_,
         Option<tokio::time::Instant>,
     )> {
-        let bytes = envelope::encode(envelope)?;
+        let bytes = envelope.wire()?;
         let sent = timed.then(tokio::time::Instant::now);
         let offered = self.fabric.offer(
             instance,
@@ -337,7 +337,7 @@ impl Runtime {
     async fn offer(
         &self,
         instance: InstanceId,
-        envelope: Box<Forward>,
+        mut envelope: Box<Forward>,
         timed: bool,
     ) -> Result<Offer> {
         if instance == self.fabric.instance() {
@@ -345,7 +345,7 @@ impl Runtime {
             let sent = timed.then(tokio::time::Instant::now);
             return Offer::entered(entering.await, sent);
         }
-        let (offering, sent) = self.deliver(instance, &envelope, timed)?;
+        let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
         Offer::delivered(offering.await, sent, *envelope)
     }
 

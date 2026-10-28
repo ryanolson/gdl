@@ -506,6 +506,100 @@ pub async fn direct_upload(client: &velo::Velo, target: velo::InstanceId, ask: A
     assert_eq!(answered, Some(ask.items), "direct upload: item count");
 }
 
+// ----- a request with a head of a given size -----
+
+/// A request whose head is one msgpack binary of `pad`'s size, for what a
+/// crossing costs per byte of head, and `words`, for what it costs per
+/// field.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Padded {
+    pub pad: Blob,
+    pub words: Vec<String>,
+}
+
+pub mod heads {
+    use super::{Blob, Padded};
+
+    gdl_runtime::graph! {
+        name = "heads", schema = 1;
+        source S: Padded -> stream Blob;
+        sink   D: Padded -> stream Blob;
+        topology: S => D;
+    }
+}
+
+/// Answers each request with one blob of 16 B.
+pub struct Answer;
+
+impl gdl::Sink for Answer {
+    type Req = Padded;
+    type Item = Blob;
+
+    async fn generate(&self, _cx: Cx, _req: Padded) -> gdl::Result<Items<Blob>> {
+        Ok(gdl::items(futures::stream::iter([Ok(blob(16))])))
+    }
+}
+
+pub type HeadsCaller =
+    Box<dyn Fn(Cx, Padded) -> BoxFuture<'static, gdl::Result<Items<Blob>>> + Send + Sync>;
+
+pub async fn heads_front() -> HeadsCaller {
+    let nodes = [super::node().await, super::node().await];
+    let placement = Placement::new()
+        .segment("front", ["S"])
+        .segment("engine", ["D"]);
+    let manifest = heads::manifest();
+    let mut roster = Roster::new();
+    for (name, node) in ["front", "engine"].iter().zip(&nodes) {
+        roster.add(*name, node.peer_info());
+    }
+    let deployment = |index: usize, name: &str| {
+        Deployment::new(
+            nodes[index].clone(),
+            &manifest,
+            &placement,
+            name,
+            &roster,
+            RuntimeConfig::default(),
+        )
+        .expect("deployment")
+    };
+    let engine = deployment(1, "engine");
+    let root = heads::assemble(&engine, heads::Bindings::new().d(Answer)).expect("engine");
+    let engine = engine.start(root).expect("engine");
+    let front = deployment(0, "front");
+    let root = heads::assemble(&front, heads::Bindings::new()).expect("front");
+    let front = front.start(root).expect("front");
+    std::mem::forget(engine);
+    std::mem::forget(nodes);
+    let front = Arc::new(front);
+    Box::new(move |cx, req| {
+        let front = Arc::clone(&front);
+        Box::pin(async move { front.call(cx, req).await })
+    })
+}
+
+/// One request whose head carries `size` bytes, read to its one item.
+pub async fn head(source: &HeadsCaller, size: usize) {
+    let padded = Padded {
+        pad: blob(size),
+        words: Vec::new(),
+    };
+    let out = source(Cx::new(), padded).await.expect("call");
+    drain(out, 1, |_| {}).await;
+}
+
+/// One request whose head carries `count` words of 8 bytes, read to its
+/// one item.
+pub async fn fields(source: &HeadsCaller, count: usize) {
+    let padded = Padded {
+        pad: blob(0),
+        words: (0..count).map(|n| format!("word{n:04}")).collect(),
+    };
+    let out = source(Cx::new(), padded).await.expect("call");
+    drain(out, 1, |_| {}).await;
+}
+
 // ----- the reference graph -----
 
 pub type Caller =
@@ -588,6 +682,7 @@ pub struct Setups {
     pub direct: (velo::Velo, velo::InstanceId),
     pub upload: UploadCaller,
     pub direct_upload: (velo::Velo, velo::InstanceId),
+    pub heads: HeadsCaller,
 }
 
 pub async fn setups() -> Setups {
@@ -615,6 +710,7 @@ pub async fn setups() -> Setups {
         direct: direct_pair().await,
         upload: upload_front().await,
         direct_upload: direct_upload_pair().await,
+        heads: heads_front().await,
     }
 }
 
@@ -657,6 +753,13 @@ impl Setups {
         direct(&self.direct.0, self.direct.1, ask, false).await;
     }
 }
+
+/// The head sizes the request rows run at: a token-sized request, one of
+/// 64 KiB, and an image of 4 MiB.
+pub const HEAD_SIZES: [usize; 3] = [16, 64 * 1024, 4 * 1024 * 1024];
+
+/// The words of a head with many short fields: about 9 KiB.
+pub const HEAD_WORDS: usize = 1000;
 
 /// The item sizes every comparison runs at.
 pub const SIZES: [u32; 3] = [16, 1024, 16 * 1024];

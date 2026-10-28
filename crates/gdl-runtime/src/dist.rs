@@ -20,6 +20,8 @@ pub use cells::{Cells, FollowedCell};
 #[cfg(feature = "hub")]
 pub(crate) use cells::{check_policies as check_cell_policies, follow as follow_cells};
 #[doc(hidden)]
+pub use envelope::Head;
+#[doc(hidden)]
 pub use fabric::EncodedItem;
 #[cfg(feature = "hub")]
 pub use fabric::HubSession;

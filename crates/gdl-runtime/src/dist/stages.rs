@@ -13,7 +13,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 
-use super::EncodedItem;
+use super::{EncodedItem, Head};
 use crate::wire::{Codec, RequestCodec, SizeHint};
 use gdl::__runtime::{fuse, until_error};
 use gdl::Cx;
@@ -30,7 +30,7 @@ pub enum FwdExit<T> {
     /// head and, for a streamed request, its encoded items.
     Leave {
         at: usize,
-        head: Vec<u8>,
+        head: Head,
         input: Option<Items<EncodedItem>>,
     },
 }

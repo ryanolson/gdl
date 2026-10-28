@@ -12,7 +12,7 @@ use gdl::__runtime::Typed;
 use gdl::{Cx, Error, ErrorKind, Result};
 
 use crate::dist::counting::Counted;
-use crate::dist::envelope::{self, Accepted, Forward, VERSION, WireCx};
+use crate::dist::envelope::{self, Accepted, Forward, Head, VERSION, WireCx};
 use crate::dist::fabric::{Fabric, Refusing, ReplyTo, bind_node};
 use crate::dist::offers::Refused;
 use crate::dist::roster::{Policy, Roster};
@@ -203,7 +203,13 @@ fn hand_off(rt: &Runtime, cx: &Cx) -> Forward {
         pos: 1,
         cx: WireCx::of(cx),
         reply: ReplyTo::test_value(7),
-        payload: vec![1, 2, 3],
+        // Encoded as an edge codec encodes a head: behind room for the
+        // rest of the envelope.
+        payload: Head::encode(&[1, 2, 3][..], |head: &[u8], buffer| {
+            buffer.extend_from_slice(head);
+            Ok(())
+        })
+        .expect("a head"),
     }
 }
 
@@ -575,7 +581,7 @@ async fn a_hand_off_this_instance_declines_is_offered_again() {
     assert_eq!(here.refused.load(Ordering::SeqCst), 1);
     let seen = here.seen.lock().expect("lock");
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].payload, [1, 2, 3]);
+    assert_eq!(seen[0].payload[..], [1, 2, 3]);
     assert_eq!(seen[0].reply.handle_u128(), 7);
     let arrived = seen[0]
         .cx
@@ -660,7 +666,7 @@ where
 }
 
 /// A hand-off as it was before hand-offs were offers: the same choice,
-/// then an encoding, a velo call, and its answer's decoding.
+/// then the envelope's bytes, a velo call, and its answer's decoding.
 fn called<'a>(
     rt: &'a Runtime,
     router: &'a Router,
@@ -673,7 +679,7 @@ fn called<'a>(
             panic!("these hand-offs route in the roster");
         };
         let (instance, _held) = rt.choose("d", within, &cx, &mut envelope, &[]).await?;
-        let bytes = envelope::encode(&envelope)?;
+        let bytes = envelope.wire()?;
         let reply = rt
             .fabric
             .call(

@@ -263,14 +263,14 @@ impl Fabric {
         &self,
         instance: InstanceId,
         name: &str,
-        payload: Vec<u8>,
+        payload: Bytes,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         let send = self
             .velo
             .unary(name)
             .map_err(transport)?
-            .raw_payload(payload.into())
+            .raw_payload(payload)
             .instance(instance)
             .send();
         match tokio::time::timeout(timeout, send).await {
@@ -295,14 +295,14 @@ impl Fabric {
         &self,
         instance: InstanceId,
         name: &str,
-        payload: Vec<u8>,
+        payload: Bytes,
         timeout: Duration,
     ) -> Offered {
         let send = match self.velo.unary(name) {
             Ok(unary) => unary,
             Err(error) => return Offered::Unsent(transport(error)),
         };
-        let send = send.raw_payload(payload.into()).instance(instance).send();
+        let send = send.raw_payload(payload).instance(instance).send();
         // A send still waiting for its admission when the time runs out may
         // be admitted later: velo's send task outlives the wait for it.
         tokio::time::timeout(timeout, Offering(send))
@@ -768,15 +768,21 @@ mod tests {
         let fabric = fabric(&sender);
         let (peer, probe) = answering().await;
         let id = peer.instance_id();
-        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
+        let offered = fabric
+            .offer(id, &probe, Bytes::from_static(&[7]), WAIT)
+            .await;
         assert!(
             matches!(offered, Offered::Unsent(_)),
             "to a peer not registered"
         );
         fabric.register_peer(peer.peer_info()).expect("registered");
-        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
+        let offered = fabric
+            .offer(id, &probe, Bytes::from_static(&[7]), WAIT)
+            .await;
         assert!(matches!(offered, Offered::Answered(ref bytes) if bytes == &[7]));
-        let offered = fabric.offer(id, "absent", vec![7], WAIT).await;
+        let offered = fabric
+            .offer(id, "absent", Bytes::from_static(&[7]), WAIT)
+            .await;
         assert!(
             matches!(offered, Offered::Unsent(_)),
             "to a handler it has not"
@@ -794,12 +800,14 @@ mod tests {
         let (peer, probe) = answering().await;
         let id = peer.instance_id();
         fabric.register_peer(peer.peer_info()).expect("registered");
-        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
+        let offered = fabric
+            .offer(id, &probe, Bytes::from_static(&[7]), WAIT)
+            .await;
         assert!(matches!(offered, Offered::Answered(_)));
         shut_down(&peer, Duration::from_millis(100)).await;
         drop(peer);
         let offered = fabric
-            .offer(id, &probe, vec![7], Duration::from_secs(1))
+            .offer(id, &probe, Bytes::from_static(&[7]), Duration::from_secs(1))
             .await;
         assert!(matches!(offered, Offered::Unknown(_)), "a stopped peer");
     }
@@ -817,7 +825,9 @@ mod tests {
         let peer = gone.peer();
         let id = peer.instance_id();
         fabric.register_peer(peer).expect("registered");
-        let offered = fabric.offer(id, &probe(), vec![7], WAIT).await;
+        let offered = fabric
+            .offer(id, &probe(), Bytes::from_static(&[7]), WAIT)
+            .await;
         match offered {
             Offered::Unsent(_) => {}
             Offered::Unknown(error) => panic!("unknown: {error}"),
@@ -841,7 +851,10 @@ mod tests {
         fabric
             .register_peer(PeerInfo::new(id, taken))
             .expect("registered");
-        match fabric.offer(id, &probe(), vec![7], WAIT).await {
+        match fabric
+            .offer(id, &probe(), Bytes::from_static(&[7]), WAIT)
+            .await
+        {
             Offered::Unsent(_) => {}
             Offered::Unknown(error) => panic!("unknown: {error}"),
             Offered::Answered(_) => panic!("the neighbour answered"),
