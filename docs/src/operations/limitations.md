@@ -614,4 +614,36 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **What:** a watch of the `dir` backend (`gdl_cells::DirDirectory`) reads its class's directory every 50 ms. A change reaches a watcher up to a period late, and two writes of one cell between polls are seen as one. A resume token works only with the handle (and its clones) whose watch made it. Any other token yields `Resnapshot`. A cell file that is removed or unparsable while watched is not reported: a reader keeps the record until its lease ends. A file that cannot be read ends every watch of its class with `Unavailable` and fails its cell's writes. Files are never removed, so a withdrawn cell's tombstone and a dead writer's temporary file stay. Two processes that write one cell's file are not arbitrated beyond the check that a write is newer.
 - **Why:** the backend needs no service and no file-watching crate, and it keeps one file per cell rather than an ordered log.
 - **Workaround:** none needed for a reader. `CellView` keeps each cell's newest record, so a missed write loses no state. Use a fresh directory for each deployment.
-- **Lifts:** a backend with an ordered, shared log, such as DynamoDB. The `relay` backend is not polled, and needs no shared directory.
+- **Lifts:** a backend with an ordered, shared log. The `relay` backend is not polled, and needs no shared directory. The DynamoDB backend is polled too ([below](#the-dynamodb-cell-directory-is-polled-and-its-replication-lag-is-not-measured)).
+
+### The DynamoDB cell directory is polled, and its replication lag is not measured
+- **What:** a watch of the DynamoDB backend (`gdl_cells_dynamodb::DynamoDirectory`) queries its class once per period, 1 s by default. A change reaches a reader up to a period late, plus the time that global tables take to copy it to the reader's region. Two writes of one cell between two queries are seen as one. A resume token works only through the handle, and its clones, whose watch made it. An item deleted by hand while it is watched is not reported: a reader keeps the record until its lease ends.
+- **Not measured:** the replication lag of MREC global tables for each pair of regions. The tests run against DynamoDB Local in one process, which has no regions. To measure it, write a record in one region of a fleet on AWS, and time how long a watch in each other region takes to see it, at p50 and p99, for each pair.
+- **Why:** a query needs no reader of a change log. DynamoDB Streams keep 24 hours of changes for each region's table, in shards that split, so a watch built on them still needs a query for its snapshot.
+- **Workaround:** a shorter period (`DynamoLimits::period`), at the cost of more read units ([The DynamoDB backend](../concepts/cells.md#the-dynamodb-backend)).
+- **Lifts:** a watch built on DynamoDB Streams, if the lag proves too long.
+
+### A DynamoDB write from another region can lose to the cell's own
+- **What:** MREC global tables check that a write is newer only in the region that takes it, and settle two writes of one item in two regions by the last writer. An operator's command for a cell, given through a handle in another region while the cell's hub writes in its own, can be lost, or an older write can replace a newer one. A reader never goes back to a version it has seen. A reader that starts later reads what the table kept.
+- **Model lists:** a command for a cell that copies its last record reads that record in its own region, and puts the record's list again. Given in another region while the cell's hub moves past that list, within the replication lag, the hub's expiry of the list can win over the command's put. The command's write is newer, so it stands, and once TTL removes the list an hour later, every new watch of the class waits 30 s and ends `Unavailable` until the cell's hub restarts and writes a new list.
+- **Workaround:** give a command for a cell through a handle in the cell's region. Each hub writes only its own cell's record, from its own region.
+- **Lifts:** nothing in gdl.
+
+### A model list over DynamoDB's item limit is refused
+- **What:** the DynamoDB backend refuses a record whose model list, as JSON, passes 400 KB, with `DirectoryError::Refused`. That is about 6,000 models with names such as `qwen-32b-lora-1234`. The cell's hub logs the error at each write, and readers keep its last record until its lease ends.
+- **Why:** DynamoDB limits each item to 400 KB.
+- **Lifts:** a list split across several items.
+
+### A record whose list has not arrived holds a new watch's snapshot
+- **What:** a reader of the DynamoDB backend installs a record only with its model list. While the list has not reached the reader's region, the reader keeps the cell's earlier record, and a new watch's snapshot waits. After 30 s (`DynamoLimits::first_sync`) the watch ends with `Unavailable`, and the hub watches again after its backoff. A list deleted by hand holds every new snapshot of its class until the cell's models change or its hub restarts, since a hub writes each list once.
+- **Why:** a snapshot that completed without the cell would drop it, and its models would answer 404 rather than 503.
+- **Workaround:** none needed for replication lag. Never delete a list that a record names. The writer sets a list to expire only once its cell's record is stored at a higher `models_version`.
+
+### A DynamoDB model list can outlive the record that named it
+- **What:** the DynamoDB backend sets a list to expire only when its cell's record is stored at a higher `models_version`. Three kinds of list stay in the lists table for good:
+  - A withdrawn cell's last list: one per withdrawn cell, about 65 KB for 1,000 models and at most 400 KB.
+  - The list of a write that was refused as not newer, or that failed after its list was written, when no later write of the cell names it: one per such write. So is a list that another writer put again after this handle wrote it, since the handle's expiry names its own put.
+  - The list replaced by a write at a lower `models_version`, such as a command that copied an older record: one per such write.
+- **Why:** a rule that expired more raced with writes of the same cell through other handles and other regions, and could expire the list that a live record names.
+- **Workaround:** none needed: each is bounded by the cell's withdrawals and refused writes, which are rare. No sweeper removes them.
+- **Lifts:** a sweeper that deletes the lists that no record names.

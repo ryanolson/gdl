@@ -1,0 +1,521 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use aws_sdk_dynamodb::{
+    Client,
+    client::Waiters,
+    error::{DisplayErrorContext, SdkError},
+    operation::put_item::PutItemError,
+    types::{
+        AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ReturnValue,
+        ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TimeToLiveSpecification,
+    },
+};
+use gdl_cells::{CellDirectory, CellRecord, DirectoryError, Version, Withdrawal};
+
+use crate::{
+    item::{self, Item, ListKey},
+    watch::{self, DynamoWatch, State},
+};
+
+/// A cell directory in two DynamoDB tables, for hubs in several regions:
+/// global tables with multi-Region eventual consistency (MREC) replicate
+/// each write to every region, and each hub reads its own region's copy.
+///
+/// The records table holds one item per cell: its record without the
+/// model list, or the tombstone of its withdrawal. The lists table holds
+/// each model list a record names, keyed by the record's `models_version`
+/// and a digest of the list, so a scan reads a few hundred bytes per cell
+/// and fetches a list only when a cell's list changes. A write is a
+/// conditional put that holds only if it is newer than the cell's item,
+/// so a late write is refused with [`DirectoryError::NotNewer`]. A list is
+/// written before the record that names it.
+///
+/// Neither table expires a live item: a record stays until its cell
+/// withdraws it, and a reader applies the lease on its own clock
+/// ([`gdl_cells::CellView`]). The lists table's TTL removes only a list its
+/// cell has moved past: an hour after the cell's record is stored at a
+/// higher `models_version`, which a cell never lowers.
+///
+/// A watch is polled: while a class has watches through this handle, one
+/// task queries the class's items every [`DynamoLimits::period`], and the
+/// differences are the watch's changes. Each query is billed, so the
+/// period is the cost. A record whose list has not arrived (replication
+/// does not order the two tables) is not installed: the watch keeps the
+/// cell's earlier version, and queries again sooner, backing off to the
+/// period. A new watch's snapshot waits for every list it names, and a
+/// watch whose snapshot cannot complete within [`DynamoLimits::first_sync`]
+/// ends with [`DirectoryError::Unavailable`]. A failed query ends every
+/// watch of its class the same way: the reader watches again after its
+/// own backoff.
+///
+/// A resume token is a place in what this handle and its clones watched:
+/// a token of another handle, or from before a spell in which the class
+/// went unwatched and its items changed, yields
+/// [`gdl_cells::CellEvent::Resnapshot`].
+#[derive(Debug, Clone)]
+pub struct DynamoDirectory {
+    shared: Arc<Shared>,
+}
+
+/// The two tables a [`DynamoDirectory`] uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tables {
+    /// One item per cell, keyed by `class` (partition) and `cell` (sort).
+    pub records: String,
+    /// One item per model list, keyed by `owner` (partition) and `list`
+    /// (sort), with TTL on `expires_at`.
+    pub lists: String,
+}
+
+/// How a [`DynamoDirectory`] polls and buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamoLimits {
+    /// The changes a watcher may have unread before it is cut off with
+    /// [`gdl_cells::CellEvent::Resnapshot`].
+    pub buffer: usize,
+    /// The latest changes of each class kept for watches that resume.
+    pub history: usize,
+    /// The wait between two queries of a watched class: each wait is drawn
+    /// between half of it and all of it, so that hubs that started together
+    /// do not query together.
+    pub period: Duration,
+    /// How long a new watch's snapshot waits for the lists its records
+    /// name before the watch ends with [`DirectoryError::Unavailable`]. A
+    /// scan that takes longer fails, and ends every watch of its class.
+    pub first_sync: Duration,
+}
+
+impl Default for DynamoLimits {
+    fn default() -> Self {
+        Self {
+            buffer: 256,
+            history: 256,
+            period: Duration::from_secs(1),
+            first_sync: Duration::from_secs(30),
+        }
+    }
+}
+
+/// How long a list its cell has moved past stays before the lists table's
+/// TTL may remove it: far past the replication lag, so that a reader whose
+/// region still shows the earlier record can still join it.
+const SUPERSEDED: Duration = Duration::from_secs(3_600);
+
+/// How long [`DynamoDirectory::create_tables`] waits for a new table to be
+/// active.
+const TABLE_ACTIVE: Duration = Duration::from_secs(300);
+
+/// The list a cell's last write through a handle named: its key, the
+/// token of its put, and the write's epoch.
+#[derive(Debug, Clone, Copy)]
+struct Written {
+    key: ListKey,
+    put: u64,
+    epoch: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct Shared {
+    pub(crate) client: Client,
+    pub(crate) tables: Tables,
+    pub(crate) limits: DynamoLimits,
+    // The position before each class's first change through this handle.
+    pub(crate) base: u64,
+    pub(crate) state: Mutex<State>,
+    // The list each cell's last write through this handle named, so that
+    // a heartbeat does not write its list again.
+    written: Mutex<HashMap<(String, String), Written>>,
+}
+
+impl DynamoDirectory {
+    /// The directory in `tables`, through `client`, with the default
+    /// limits. Nothing is read or made until it is used.
+    pub fn new(client: Client, tables: Tables) -> Self {
+        Self::with_limits(client, tables, DynamoLimits::default())
+    }
+
+    /// The directory in `tables`, through `client`, with `limits`. A
+    /// buffer of 0 is taken as 1, and a period under 1 ms as 1 ms.
+    pub fn with_limits(client: Client, tables: Tables, limits: DynamoLimits) -> Self {
+        let limits = DynamoLimits {
+            period: limits.period.max(Duration::from_millis(1)),
+            ..limits
+        };
+        Self {
+            shared: Arc::new(Shared {
+                client,
+                tables,
+                limits,
+                base: watch::base(),
+                state: Mutex::default(),
+                written: Mutex::default(),
+            }),
+        }
+    }
+
+    /// Make the two tables, in this client's region alone, with on-demand
+    /// billing and TTL on the lists table. For DynamoDB Local and for
+    /// trials: a deployment makes its global tables with their replicas in
+    /// the tool that owns its infrastructure, with the same keys.
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryError::Unavailable`] when a table cannot be made, for
+    /// example because it exists.
+    pub async fn create_tables(client: &Client, tables: &Tables) -> Result<(), DirectoryError> {
+        let key = |name: &str, kind| {
+            KeySchemaElement::builder()
+                .attribute_name(name)
+                .key_type(kind)
+                .build()
+                .expect("a key has its name and type")
+        };
+        let text = |name: &str| {
+            AttributeDefinition::builder()
+                .attribute_name(name)
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .expect("an attribute has its name and type")
+        };
+        for (table, partition, sort) in [
+            (&tables.records, item::CLASS, item::CELL),
+            (&tables.lists, item::OWNER, item::LIST_KEY),
+        ] {
+            client
+                .create_table()
+                .table_name(table)
+                .billing_mode(BillingMode::PayPerRequest)
+                .key_schema(key(partition, KeyType::Hash))
+                .key_schema(key(sort, KeyType::Range))
+                .attribute_definitions(text(partition))
+                .attribute_definitions(text(sort))
+                .send()
+                .await
+                .map_err(|error| unavailable(&format!("making table {table}"), error))?;
+        }
+        // A new table takes TTL only once it is active.
+        client
+            .wait_until_table_exists()
+            .table_name(&tables.lists)
+            .wait(TABLE_ACTIVE)
+            .await
+            .map_err(|error| {
+                DirectoryError::Unavailable(format!(
+                    "waiting for table {} to be active: {}",
+                    tables.lists,
+                    DisplayErrorContext(error)
+                ))
+            })?;
+        let ttl = TimeToLiveSpecification::builder()
+            .attribute_name(item::EXPIRES_AT)
+            .enabled(true)
+            .build()
+            .expect("TTL has its attribute and switch");
+        client
+            .update_time_to_live()
+            .table_name(&tables.lists)
+            .time_to_live_specification(ttl)
+            .send()
+            .await
+            .map_err(|error| unavailable(&format!("turning on TTL of {}", tables.lists), error))?;
+        Ok(())
+    }
+
+    /// The tables, as given.
+    pub fn tables(&self) -> &Tables {
+        &self.shared.tables
+    }
+
+    /// How many watches of `class` this handle and its clones have open.
+    pub fn watchers(&self, class: &str) -> usize {
+        self.shared.watchers(class)
+    }
+
+    /// Put `item`, a write of `cell` of `class` at `version`, if it is
+    /// newer than the cell's item: the list the item it replaced named,
+    /// if any.
+    async fn put(
+        &self,
+        class: &str,
+        cell: &str,
+        version: Version,
+        item: Item,
+    ) -> Result<Option<(ListKey, u64)>, Refusal> {
+        let (names, values) = item::newer(version);
+        let put = self
+            .shared
+            .client
+            .put_item()
+            .table_name(&self.shared.tables.records)
+            .set_item(Some(item))
+            .condition_expression(item::NEWER)
+            .set_expression_attribute_names(Some(names))
+            .set_expression_attribute_values(Some(values))
+            .return_values(ReturnValue::AllOld)
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+            .send()
+            .await;
+        match put {
+            Ok(put) => Ok(put.attributes().and_then(item::names_list)),
+            Err(SdkError::ServiceError(failed))
+                if matches!(
+                    failed.err(),
+                    PutItemError::ConditionalCheckFailedException(_)
+                ) =>
+            {
+                let held = match failed.err() {
+                    PutItemError::ConditionalCheckFailedException(refused) => refused.item(),
+                    _ => None,
+                };
+                let held = held.and_then(item::version).ok_or_else(|| {
+                    // The table refused the write, so it holds a newer one;
+                    // a table that does not say which is not DynamoDB.
+                    DirectoryError::Unavailable(format!(
+                        "cell `{cell}` of class `{class}`: a write at {version} was refused without the item that refused it"
+                    ))
+                })?;
+                Err(Refusal::NotNewer {
+                    error: DirectoryError::NotNewer {
+                        class: class.to_owned(),
+                        cell: cell.to_owned(),
+                        held,
+                        offered: version,
+                    },
+                })
+            }
+            Err(error) => Err(Refusal::Failed(unavailable(
+                &format!("writing cell `{cell}` of class `{class}`"),
+                error,
+            ))),
+        }
+    }
+
+    /// Mark `key`'s list of `cell` to expire, if it is still the list's put
+    /// `put`: its cell's record is stored at a higher `models_version`,
+    /// which no later write of the cell lowers, so no record of the cell
+    /// names the list again but one that put it again, such as a command
+    /// that copied an earlier record. Best effort: a list left in place
+    /// costs only its storage.
+    async fn supersede(&self, class: &str, cell: &str, key: ListKey, put: u64) {
+        let expires = SystemTime::now()
+            .checked_add(SUPERSEDED)
+            .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map_or(u64::MAX, |at| at.as_secs());
+        let updated = self
+            .shared
+            .client
+            .update_item()
+            .table_name(&self.shared.tables.lists)
+            .set_key(Some(item::list_key(class, cell, key)))
+            // Only the put that the replaced record followed: a later put of
+            // the list, for a record that names it again, keeps it. And an
+            // update makes the item it names, which this keeps from doing.
+            .condition_expression("#put = :put")
+            .update_expression("SET #expires = :expires")
+            .expression_attribute_names("#put", item::PUT)
+            .expression_attribute_names("#expires", item::EXPIRES_AT)
+            .expression_attribute_values(":put", item::number(put))
+            .expression_attribute_values(":expires", item::number(expires))
+            .send()
+            .await;
+        if let Err(error) = updated {
+            tracing::debug!(class, cell, error = %DisplayErrorContext(error), "a superseded model list was not marked to expire");
+        }
+    }
+
+    fn written(&self) -> MutexGuard<'_, HashMap<(String, String), Written>> {
+        self.shared
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Put a model list.
+    async fn put_list(&self, cell: &str, list: Item) -> Result<(), DirectoryError> {
+        self.shared
+            .client
+            .put_item()
+            .table_name(&self.shared.tables.lists)
+            .set_item(Some(list))
+            .send()
+            .await
+            .map(drop)
+            .map_err(|error| {
+                unavailable(&format!("writing the model list of cell `{cell}`"), error)
+            })
+    }
+
+    /// Put a list again after the record that names it, with the token
+    /// `put` of its first put: only while the list is still that put, or is
+    /// set to expire. So the put clears an expiry set in between, and never
+    /// replaces another writer's later put, whose token a later expiry may
+    /// name.
+    async fn put_list_again(
+        &self,
+        class: &str,
+        cell: &str,
+        put: u64,
+        list: Item,
+    ) -> Result<(), DirectoryError> {
+        let again = self
+            .shared
+            .client
+            .put_item()
+            .table_name(&self.shared.tables.lists)
+            .set_item(Some(list))
+            .condition_expression("#put = :put OR attribute_exists(#expires)")
+            .expression_attribute_names("#put", item::PUT)
+            .expression_attribute_names("#expires", item::EXPIRES_AT)
+            .expression_attribute_values(":put", item::number(put))
+            .send()
+            .await;
+        match again {
+            Ok(_) => Ok(()),
+            // Another writer's put, not set to expire: it is live as it is.
+            Err(SdkError::ServiceError(failed))
+                if matches!(
+                    failed.err(),
+                    PutItemError::ConditionalCheckFailedException(_)
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(unavailable(
+                &format!(
+                    "cell `{cell}` of class `{class}`: its record is stored, but its model list may expire until the cell's next write"
+                ),
+                error,
+            )),
+        }
+    }
+
+    /// Write a cell's item, and then mark the list of the item it replaced
+    /// to expire, if the new item is a record at a higher
+    /// `models_version`. A withdrawal expires nothing.
+    async fn write(
+        &self,
+        class: &str,
+        cell: &str,
+        version: Version,
+        item: Item,
+        models_version: Option<u64>,
+    ) -> Result<(), DirectoryError> {
+        match self.put(class, cell, version, item).await {
+            Ok(before) => {
+                if let Some((before, put)) = before.filter(|(before, _)| {
+                    models_version.is_some_and(|now| now > before.models_version())
+                }) {
+                    self.supersede(class, cell, before, put).await;
+                }
+                Ok(())
+            }
+            Err(Refusal::NotNewer { error }) => Err(error),
+            Err(Refusal::Failed(error)) => Err(error),
+        }
+    }
+}
+
+/// Why a cell's write was not stored.
+enum Refusal {
+    /// The table holds a write at least as new.
+    NotNewer {
+        error: DirectoryError,
+    },
+    Failed(DirectoryError),
+}
+
+impl From<DirectoryError> for Refusal {
+    fn from(error: DirectoryError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl CellDirectory for DynamoDirectory {
+    type Watch = DynamoWatch;
+
+    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        record.check()?;
+        let mut encoded = item::record(&record, item::next_order())?;
+        let (class, cell) = (record.class.as_str(), record.name.as_str());
+        // One write of the class at a time through this handle, so that a
+        // scan never finds one of its writes without the writes before it.
+        let io = self.shared.io(class);
+        let _io = io.lock().await;
+        let owner = (class.to_owned(), cell.to_owned());
+        let cached = self.written().get(&owner).copied();
+        // Only a write at the epoch of the handle's last write of the cell
+        // reuses its list. Another epoch is a command or a restarted hub,
+        // whose list another writer may have moved past and set to expire
+        // meanwhile: it puts the list before its record, so that a reader
+        // finds it, and again after, which clears an expiry set in between
+        // and leaves no later expiry of another put able to touch it.
+        let mut again = None;
+        if let Some((key, mut list)) = encoded.list.take() {
+            match cached.filter(|cached| cached.key == key && cached.epoch == record.epoch) {
+                Some(cached) => item::stamp(&mut list, &mut encoded.item, cached.put),
+                None => {
+                    let put = item::new_put();
+                    item::stamp(&mut list, &mut encoded.item, put);
+                    self.written().remove(&owner);
+                    self.put_list(cell, list.clone()).await?;
+                    let written = Written {
+                        key,
+                        put,
+                        epoch: record.epoch,
+                    };
+                    again = Some((written, list));
+                }
+            }
+        }
+        self.write(
+            class,
+            cell,
+            record.version(),
+            encoded.item,
+            Some(record.models_version),
+        )
+        .await?;
+        if let Some((written, list)) = again {
+            let fresh = cached.is_some_and(|cached| cached.epoch == record.epoch);
+            if !fresh {
+                self.put_list_again(class, cell, written.put, list).await?;
+            }
+            self.written().insert(owner, written);
+        }
+        Ok(())
+    }
+
+    async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+        withdrawal.check()?;
+        let item = item::withdrawal(&withdrawal, item::next_order());
+        let io = self.shared.io(&withdrawal.class);
+        let _io = io.lock().await;
+        self.write(
+            &withdrawal.class,
+            &withdrawal.cell,
+            withdrawal.version(),
+            item,
+            None,
+        )
+        .await
+    }
+
+    /// The watch begins when it is first polled, which must be inside a
+    /// tokio runtime.
+    fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> DynamoWatch {
+        DynamoWatch::new(Arc::clone(&self.shared), class, from)
+    }
+}
+
+/// A call to DynamoDB that failed, as the directory reports it.
+pub(crate) fn unavailable<E, R>(what: &str, error: SdkError<E, R>) -> DirectoryError
+where
+    E: std::error::Error + 'static,
+    R: std::fmt::Debug,
+{
+    DirectoryError::Unavailable(format!("{what}: {}", DisplayErrorContext(error)))
+}

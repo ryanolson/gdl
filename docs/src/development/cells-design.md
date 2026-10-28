@@ -224,6 +224,18 @@ Ingress instances share which set each session went to through their cell's hub.
 
 **Rejected: leases with change messages to the holders of a record.** The hub would track who holds each record, for changes that are rare.
 
+## The DynamoDB directory queries one class, and keeps lists apart
+
+The DynamoDB backend keys its records table by class, so a watch reads its class with one query, not a scan of every class. Model lists live in a second table, keyed by the record's `models_version` and a digest of the list. A query then reads a few hundred bytes per cell, and a list is read only when it changes. A list's key names its content, so two writers of one cell never overwrite each other's list. A reader joins a record only to the list whose digest the record names, so it never sees a part of another version (rule 4).
+
+**Rejected: lists in the records table.** Every query would read every list: more than 3 MB per query of 50 cells with 1,000 models each, where apart it reads about 20 KB.
+
+**Rejected: a watch built on DynamoDB Streams.** Each region's table has its own stream, which keeps 24 hours of changes in shards that split. A watch would still query for its snapshot, and would have to follow the shards. A query once per period is one call, and its cost is set by the period.
+
+**Rejected: TTL on records or tombstones.** TTL deletes the item and replicates the delete, so a silent cell would vanish from every region, and its models would answer 404.
+
+A list expires only when its cell's record is stored at a higher `models_version`, which only the cell's hub raises and never lowers. No later record of the cell can name that list, through any handle or region. **Rejected: expire every list a write moves past, guarded by checks that the record does not name it, and repaired by the writer.** A withdrawal, or a command, through another handle or region could still expire a list that a later record named, and each repair had a failure path of its own. The rule leaves a withdrawn cell's last list and the lists of refused writes in the table, which is bounded ([Limitations](../operations/limitations.md#a-dynamodb-model-list-can-outlive-the-record-that-named-it)).
+
 ## What stays fixed
 
 A change of graph or placement changes the hashes, so the new version's cells and the old version's cells do not see each other. Such a change is a lockstep rollout of new cells of every class, region by region, blue and green. A new class changes the placement, so it is a rollout too. Builds of the same contract and placement roll per cell.

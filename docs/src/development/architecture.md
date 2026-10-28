@@ -1,6 +1,6 @@
 # Workspace crates
 
-The root workspace has twelve crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
+The root workspace has thirteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
 
 | Crate | Depends on | Contents |
 |---|---|---|
@@ -14,6 +14,7 @@ The root workspace has twelve crates. Each example is its own workspace, outside
 | `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
 | `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a cell whose hub is gone (`CellCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
+| `gdl-cells-dynamodb` | `gdl-cells`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` cell directory backend, in DynamoDB global tables. The only crate that links the AWS SDK, and nothing in the workspace depends on it. Its tests against DynamoDB Local run outside the default suite (`scripts/dynamodb-local.sh`) |
 | `gdl-watch` | `gdl-cells`, `gdl-model`, velo's peer types | The watches a cell's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
 | `gdl-hub` | `gdl-cells`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a cell's hub the `gdl-cell` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. See [Discovery](../concepts/hub.md) and [Classes and cells](../concepts/cells.md) |
 

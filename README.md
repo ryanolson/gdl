@@ -36,6 +36,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state, load summary, presence, and models, the `CellDirectory` backends, and an operator's commands for a cell whose hub is gone. No velo |
+| `gdl-cells-dynamodb` | Deployments across regions | A cell directory in DynamoDB global tables, for a hub built with `gdl_hub::hub_builder_with` |
 | `gdl-watch` | Hub and runtime | The watches a cell's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a cell's quorum, health, record, follows, and keyed records |
 
@@ -103,6 +104,7 @@ timeout 300 cargo nextest run --workspace
 timeout 60 cargo test --workspace --doc             # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
 bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, python3
+bash scripts/dynamodb-local.sh                      # the DynamoDB directory against DynamoDB Local; needs Docker
 ```
 
 The tests start velo nodes in one process on ports that the OS assigns. The example workspaces are outside the root workspace, so run their tests from their directories. See [Testing](docs/src/development/testing.md).
