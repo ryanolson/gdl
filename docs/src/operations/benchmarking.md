@@ -287,7 +287,7 @@ for run in 1 2 3; do
 done
 ```
 
-The guard rows, three runs each:
+These rows are unconfirmed. brev-x86-cpu is a shared VM whose wall times have not been shown to hold still, so no decision rests on them until a host that can time is in place. They are recorded here so that host has something to compare with. Three runs each:
 
 | Row | 16 B | 1 KiB |
 |---|---|---|
