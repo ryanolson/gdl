@@ -54,7 +54,7 @@ gdl uses it in `Outbound::finish`. The pump awaits `retired()` in the work it al
 | Consumer acknowledgement instead (`ack`) | 29.8e9 to 30.1e9 instructions per run against 22.6e9 to 23.2e9 for `plain`: **about 30% more** |
 | Time a stream is held, median | `retired` 114 to 149 us, `ack` 504 to 636 us, over five runs |
 
-On gb300 the unused `retired()` is not free: against the commit before velo `e512ba0`, a stream on the mux costs 589 more user instructions, 0.6%, beyond the spread. That figure covers all of `e512ba0`, the teardown and the size check included. Awaiting `retired()` adds about 1,500 more ([Claims checked on gb300](../operations/benchmarking.md#velos-retirement-signal)).
+On gb300 (history), the unused `retired()` is not free: against the commit before velo `e512ba0`, a stream on the mux costs 589 more user instructions, 0.6%, beyond the spread. That figure covers all of `e512ba0`, the teardown and the size check included. Awaiting `retired()` adds about 1,500 more ([Claims checked on gb300](../operations/benchmarking.md#velos-retirement-signal)).
 
 **The rejected alternative** is a consumer acknowledgement in gdl's own protocol. It costs about 30% more instructions per short stream, and a stream is held 4 to 5 times longer at the median (114 to 149 µs against 504 to 636 µs). It also needs a per-stream table on the producer to match acknowledgements to streams. gdl's rule is that responses are never correlated through a map or a request id.
 

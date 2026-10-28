@@ -69,7 +69,7 @@ cargo bench -p gdl-runtime --bench hop --bench remote -- --warm-up-time 2 --meas
 | `request/reference-3-segments` | 117.1 us | 117.1 us |
 | `request/velo-direct` (control) | 40.2 us | 40.3 us |
 
-The cost per request is below the noise of a 57 us crossing. The renewal task did not appear in any request's time. gb300 confirms it with the commits of renewal alone, `ad11b37` against `8b282c4`: every row is within the spread ([Claims checked on gb300](benchmarking.md#reply-renewal)).
+The cost per request is below the noise of a 57 us crossing. The renewal task did not appear in any request's time. gb300 (history) confirmed it with the commits of renewal alone, `ad11b37` against `8b282c4`: every row is within the spread ([Claims checked on gb300](benchmarking.md#reply-renewal)).
 
 ## Velo deadline sweeps
 
@@ -81,7 +81,7 @@ Velo moved anchors' unattached deadlines and senders' heartbeats from one timer 
 | two segments, `round_robin` | 629,125 | 612,719 | -16,406 (-2.6%) |
 | three segments, `round_robin` | 1,212,451 | 1,181,941 | -30,510 (-2.5%) |
 
-The saving is about 16k instructions per anchor (per stream) and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block. On gb300 the per-item row is within the spread and not bimodal, so sweeps cost nothing per item, and the saving is about 8,000 user instructions per anchor ([Claims checked on gb300](benchmarking.md#velo-deadline-sweeps)).
+The saving is about 16k instructions per anchor (per stream) and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block. On gb300 (history) the per-item row is within the spread and not bimodal, so sweeps cost nothing per item, and the saving is about 8,000 user instructions per anchor ([Claims checked on gb300](benchmarking.md#velo-deadline-sweeps)).
 
 ## The single-stream limit
 
@@ -91,7 +91,7 @@ Two velo 0.19 nodes in one process over loopback TCP, default settings, move one
 
 What one item costs to cross, in instructions, with the request's cost taken out. This is the per-item claim that wall time and items per second cannot settle, because velo's single-stream limit hides it.
 
-**Setup.** The gb300 bench host: 72 Neoverse-V2 cores, quiet, Linux 6.17.0 (64 KiB pages), rustc 1.93.1, perf 6.17.13. Each run is pinned to cores 16 to 23. Load average 5.3, falling to 1.4 over the run. One process runs both ends, with 4 tokio workers and two velo nodes over loopback TCP. `requests lean-<size> <count>` sends one stream of `<count>` items through the lean graph `S => D` over two segments. `requests direct-<size> <count>` sends the same stream on velo alone, opened by ticket as gdl opens it. Each run is counted at 10,000 and at 20,000 items, and the difference divided by 10,000 is the cost of one item. `perf stat` counts user and kernel instructions apart, across all threads and both ends. Seven rounds alternate the builds, the shapes, and the order of the two counts. The table gives the median and the range across rounds.
+**Setup (gb300 history).** The gb300 bench host: 72 Neoverse-V2 cores, quiet, Linux 6.17.0 (64 KiB pages), rustc 1.93.1, perf 6.17.13. Each run is pinned to cores 16 to 23. Load average 5.3, falling to 1.4 over the run. One process runs both ends, with 4 tokio workers and two velo nodes over loopback TCP. `requests lean-<size> <count>` sends one stream of `<count>` items through the lean graph `S => D` over two segments. `requests direct-<size> <count>` sends the same stream on velo alone, opened by ticket as gdl opens it. Each run is counted at 10,000 and at 20,000 items, and the difference divided by 10,000 is the cost of one item. `perf stat` counts user and kernel instructions apart, across all threads and both ends. Seven rounds alternate the builds, the shapes, and the order of the two counts. The table gives the median and the range across rounds.
 
 The two builds are the `WireItem` frame at `523afc0` and the byte path at `cadd2f3`, whose runtime merged unchanged as `d1fa15a`. Each has the item shapes of `requests` added and nothing else. Both were built in turn in one checkout and one target directory.
 
@@ -154,7 +154,7 @@ Each ref must contain the item shapes of `crates/gdl-runtime/benches/requests.rs
 
 A sampling profile of the same streams shows where the cycles of an item go, at both ends. One process runs both ends, so one profile covers the producer's send and the consumer's receive.
 
-**Setup.** The gb300 bench host as above, load average 2.0. `scripts/bench/items.py profile` builds `requests` with line tables and runs one stream of 100,000 items of 16 B. `perf record -e cycles -c 250000 --call-graph dwarf,8192 --no-buildid` samples every 250,000 cycles on any thread, in user space or in the kernel. The script expands each frame's inlined functions with `addr2line`, because async functions are inlined into tokio's task poll. Then it names each sample by the first step that a frame matches, from the sampled frame out to the thread's root. A step's callees count as the step's, so an allocation or a copy that a step makes is that step's cost. Every sampled address was expanded. All three profiles ran with the same `items.py`.
+**Setup (gb300 history).** The gb300 bench host as above, load average 2.0. `scripts/bench/items.py profile` builds `requests` with line tables and runs one stream of 100,000 items of 16 B. `perf record -e cycles -c 250000 --call-graph dwarf,8192 --no-buildid` samples every 250,000 cycles on any thread, in user space or in the kernel. The script expands each frame's inlined functions with `addr2line`, because async functions are inlined into tokio's task poll. Then it names each sample by the first step that a frame matches, from the sampled frame out to the thread's root. A step's callees count as the step's, so an allocation or a copy that a step makes is that step's cost. Every sampled address was expanded. All three profiles ran with the same `items.py`.
 
 | Share of all cycles | Lean, `WireItem` frame | Lean, byte path | Lean, main | Lean, in place | velo direct |
 |---|---|---|---|---|---|
@@ -191,7 +191,7 @@ The script prints the step table, the leaf functions, and the project functions 
 
 ## Codec cost
 
-Application messages cross as named-field MessagePack (`msgpack`) by default. A fixed layout can choose positional MessagePack (`msgpack_array`), and a message can choose JSON. Named MessagePack keeps omitted fields, including nested ones. JSON has [value restrictions](limitations.md#json-cannot-preserve-every-serde-value). Choosing the encoding per message costs a two-segment request of the reference graph +1.26% in user instructions on gb300, after the allocation work below ([Claims checked on gb300](benchmarking.md#cells)). The owner accepts that cost.
+Application messages cross as named-field MessagePack (`msgpack`) by default. A fixed layout can choose positional MessagePack (`msgpack_array`), and a message can choose JSON. Named MessagePack keeps omitted fields, including nested ones. JSON has [value restrictions](limitations.md#json-cannot-preserve-every-serde-value). Choosing the encoding per message costs a two-segment request of the reference graph +1.26% in user instructions on gb300 (history), after the allocation work below ([Claims checked on gb300](benchmarking.md#cells)). The owner accepts that cost.
 
 **Crossing overhead, in process.** Encode and decode of one item as velo carries it directly, against gdl's crossing. The crossing's edge codec writes the item straight into velo's frame, as one velo byte item, and the receiver decodes it in the buffer it arrived in ([Crossings](../concepts/crossings.md#what-crosses-the-wire)). The item is a 16 B, 1 KiB, or 16 KiB blob. Two earlier frames are shown for comparison: the `WireItem` frame wrapped the bytes in an enum inside velo's frame, and the byte path with a copy encoded the item into its own buffer, which `send_bytes` copied into the frame.
 
@@ -217,7 +217,7 @@ The byte path with a copy spent 13.5, 67.1, and 228.2 ns copying the item into t
 - **The frame size hint.** Each stream reserves the smaller of its last two items' sizes for the next frame. A third workload in the same test sends 16 KiB and 16 B items in turn, and fails if the crossing allocates more than velo plus 2% plus 128 B per small item. The crossing allocates 61,163 B per item there, against velo's 61,127 B. A hint of the last item's size fails it at 69,348 B, because each small item reserves 16 KiB. A hint of the last size capped at 1 KiB fails the 1 KiB rows at 7,870 B against 5,799 B, because a 1 KiB blob encodes to 1,027 bytes and its frame grows once.
 - **CPU per item, end to end**, 32 streams of 1,000 16 B items at once (the bench's first lines): 1.45 µs for the lean graph against 1.19 µs for velo direct with the `WireItem` frame, and 1.36 µs against 1.23 µs with the byte path. One run each, so this is not a claim.
 
-**Setup.** gb300 bench host (Neoverse-V2, pinned to CPU 9, load average 3.6 to 3.9), rustc 1.93.1. The `WireItem` frame at `523afc0` (velo `cee2834`). The byte path with a copy at `ddc0d4a` (velo `cee2834`), and in place at `d8ac735` (velo `e892f87`). Each row is criterion's median with 1 s warm-up and 3 s measurement. Velo direct is the same function in every run: 68.4 and 69.1 ns at 16 B, 144.1 and 133.2 ns at 1 KiB, 484.6 and 486.7 ns at 16 KiB. The table gives the in-place run's.
+**Setup (gb300 history).** gb300 bench host (Neoverse-V2, pinned to CPU 9, load average 3.6 to 3.9), rustc 1.93.1. The `WireItem` frame at `523afc0` (velo `cee2834`). The byte path with a copy at `ddc0d4a` (velo `cee2834`), and in place at `d8ac735` (velo `e892f87`). Each row is criterion's median with 1 s warm-up and 3 s measurement. Velo direct is the same function in every run: 68.4 and 69.1 ns at 16 B, 144.1 and 133.2 ns at 1 KiB, 484.6 and 486.7 ns at 16 KiB. The table gives the in-place run's.
 
 ```bash
 cargo bench -p gdl-runtime --bench remote -- 'codec-' --warm-up-time 1 --measurement-time 3

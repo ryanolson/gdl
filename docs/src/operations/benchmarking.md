@@ -1,8 +1,10 @@
 # Benchmarking
 
-This chapter says what a performance number in this book may claim, how to take one, and what the gb300 host found when it checked the claims a laptop measured. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
+This chapter says what a performance number in this book may claim and how to take one. It records what the gb300 host found, now history, and the baselines on brev-x86-cpu, which replaced it. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
 
-Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. The newer tables come from the gb300 bench host: a 72-core Neoverse-V2 server that runs one bench job at a time, where `perf` can count and sample. The owner counts it as the dedicated machine for the claims in [Claims checked on gb300](#claims-checked-on-gb300). It is not isolated: other processes can run on it, so each of its tables records the load average.
+Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. Many tables came from the gb300 bench host: a 72-core Neoverse-V2 server that ran one bench job at a time, where `perf` could count and sample. The owner counted it as the dedicated machine for the claims in [Claims checked on gb300](#claims-checked-on-gb300). gb300 is no longer available. Every number from it is marked **gb300 history**. It compares only with other gb300 numbers.
+
+The current bench host is brev-x86-cpu, an 8-core x86 virtual machine ([Baselines on brev-x86-cpu](#baselines-on-brev-x86-cpu)). No table mixes the two hosts, and no brev number is compared with a gb300 number.
 
 ## What a shared machine may claim
 
@@ -25,7 +27,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Measurement traps
 
-- **Kernel instructions are noise on gb300.** About half of a crossing request's instructions run in the kernel: futex waits, epoll, and socket calls. That half varies by up to 15% between rounds of the same build, because it follows how the threads are scheduled. The user half varies by under 1%. Counted together, two segments ranged over ±7% and settled nothing at 1%. The user count leaves out the system calls a change adds, so a change that adds them needs its own check.
+- **Kernel instructions were noise on gb300 (history).** About half of a crossing request's instructions run in the kernel: futex waits, epoll, and socket calls. That half varies by up to 15% between rounds of the same build, because it follows how the threads are scheduled. The user half varies by under 1%. Counted together, two segments ranged over ±7% and settled nothing at 1%. The user count leaves out the system calls a change adds, so a change that adds them needs its own check.
 - **A run under compile load is not a number.** One full run showed `request/gdl` at +22% and several `velo-direct` controls at +8% to +14% while the workspace suite compiled. None of it reproduced when the run was repeated alone.
 - **Resident memory is wrong for held memory.** The system allocator keeps freed pages resident, so resident memory grows only for whichever path runs first. Use live heap bytes from a counting allocator.
 - **A bench can allocate for itself.** Extra velo nodes that a bench starts allocate in the background while it counts. A rise of 1.5 allocations per request came from the bench, not from gdl.
@@ -34,7 +36,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Gates
 
-The gates are relative: base and change are built under the same profile and compared. The baseline numbers that the guards in [Hot paths](hot-paths.md) and the gate tables in this book give are still under Cargo's defaults (A), until they are measured again under B.
+The gates are relative: base and change are built under the same profile and compared. The gb300 history numbers in [Hot paths](hot-paths.md) and in the gate tables of this book are under Cargo's defaults (A). The brev-x86-cpu baselines are under B.
 
 | Path | A change may cost |
 |---|---|
@@ -45,7 +47,7 @@ The gates are relative: base and change are built under the same profile and com
 
 ## Dedicated machines
 
-The claims a laptop measured wait for a machine where the spread is small. The gb300 host stands in for machine 1, on Arm. Machine 2 does not exist yet.
+The claims a laptop measured wait for a machine where the spread is small. The gb300 host stood in for machine 1, on Arm, until it was lost. brev-x86-cpu runs the benches now. It has no hardware counters, so it counts instructions with callgrind, which compares a base and a change within one job. Machine 2 does not exist yet.
 
 | # | Setup | Settles |
 |---|---|---|
@@ -58,6 +60,8 @@ Set the performance governor, fix SMT, pin the bench with `taskset` to isolated 
 Still to measure on machine 2: time to first item and inter-item p50 and p99 for a three-segment graph, requests per second at saturation, how long a deployment-wide stop takes to drain under load, and the bring-up time to `ready`.
 
 ## Claims checked on gb300
+
+**gb300 history.** These results stand as measured and compare only with each other. The guards that are measured again run on brev-x86-cpu ([Baselines on brev-x86-cpu](#baselines-on-brev-x86-cpu)).
 
 | Claim | Laptop result | gb300, user instructions | Holds? |
 |---|---|---|---|
@@ -264,6 +268,102 @@ User instructions per request, the change minus the base. The medians of the thr
 
 - **Wall time** (`remote` and `hop`, three runs, load average 1.8 to 5.6): these change medians are outside the base range, given against the base median: `request/gdl` in the cells series (+1.2%) and in the offers (−0.4%), `request/reference-1-segment` in the cells series (−2.4%) and in the offers (+0.7%), and `reference-items/2-segments` in the watch and roster series (+0.4%). The other rows are inside it.
 
+## Baselines on brev-x86-cpu
+
+brev-x86-cpu is an 8-core x86 virtual machine (AMD EPYC 7B13), measured from 2026-10-27, rustc 1.93.1, bench profile B (thin LTO, one codegen unit). It has no performance-monitoring unit: `perf` reports `instructions:u` as not supported, even as root. Instruction rows are therefore counted in software, with valgrind's callgrind, as **callgrind Ir**. Callgrind Ir is a series of its own. It counts user instructions of every thread under an emulator that runs the threads one at a time. Never compare it with a gb300 `perf` count, and compare a base and a change only inside one job.
+
+### Wall time
+
+Main at `8b182e3`, one build, three runs. The codec rows are pinned to core 7 and the others to cores 4 to 7, with `--warm-up-time 1 --measurement-time 3`. The load average was 3.2, 1.6, and 0.9 at the start of the runs.
+
+```bash
+export CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1   # profile B, for commits before the workspace set it
+cargo bench --locked -p gdl-runtime --bench remote --bench hop --no-run
+for run in 1 2 3; do
+  taskset -c 7 cargo bench --locked -p gdl-runtime --bench remote -- --warm-up-time 1 --measurement-time 3 --output-format bencher 'codec-'
+  taskset -c 4-7 cargo bench --locked -p gdl-runtime --bench remote -- --warm-up-time 1 --measurement-time 3 --output-format bencher \
+    '^(request/reference-[123]-segments?(-metrics)?|concurrent-32x1-reference/.*|reference-items/2-segments(-metrics)?)$'
+  taskset -c 4-7 cargo bench --locked -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3 --output-format bencher 'chunks/'
+done
+```
+
+The guard rows, three runs each:
+
+| Row | 16 B | 1 KiB |
+|---|---|---|
+| `codec-<size>/velo-direct` | 80, 82, 83 ns | 167, 164, 157 ns |
+| `codec-<size>/gdl-crossing` | 60, 60, 61 ns | 111, 116, 112 ns |
+| `codec-<size>/gdl-crossing/1-encode-in-place` | 23, 23, 23 ns | 66, 69, 69 ns |
+| `codec-<size>/gdl-crossing/2-frame-decode` | 4, 3, 3 ns | 6, 6, 6 ns |
+| `codec-<size>/gdl-crossing/3-edge-decode` | 29, 30, 31 ns | 50, 43, 45 ns |
+
+| Row | Three runs |
+|---|---|
+| `chunks/request` (`hop`) | 1,350, 1,304, 1,315 ns |
+| `chunks/stream` (`hop`, 256 items) | 28.5, 24.8, 24.7 us |
+
+**Not a guard on this host:** the 16 KiB codec rows are bimodal. `velo-direct` measured 11,965, 11,599, and 6,163 ns, `gdl-crossing` 11,861, 11,251, and 5,870 ns, and the encode in place 291, 710, and 288 ns. The two modes differ by a factor of two in the same build, so these rows cannot show a change of a few percent.
+
+**Not a gate on this host:** several per-request rows swing between runs of the same build. From the lowest run to the highest, 32 requests at once moved 45% with metrics off (114.6 to 166.8 us) and 39% with metrics on. One segment with metrics moved 35%, and two segments with metrics 23%. The other rows move 1% to 7%. A row that can swing that far cannot carry a 1% gate. Callgrind Ir carries the per-request gates here. The rows as measured:
+
+| Row | Metrics off | Metrics on |
+|---|---|---|
+| `request/reference-1-segment` | 28.8, 30.7, 30.3 us | 23.4, 31.5, 28.5 us |
+| `request/reference-2-segments` | 210.3, 212.5, 211.9 us | 217.3, 178.1, 176.2 us |
+| `request/reference-3-segments` | 456.4, 474.0, 455.6 us | 460.5, 458.3, 471.0 us |
+| `concurrent-32x1-reference/1-segment` | 114.6, 150.6, 166.8 us | 148.4, 118.2, 163.8 us |
+| `reference-items/2-segments` (1,000 items) | 80.4, 80.9, 79.2 ms | 79.6, 81.8, 79.4 ms |
+
+### Callgrind Ir
+
+Each run is `valgrind --tool=callgrind` over the `requests` bench, at two counts. The figure is the difference of the two "Collected" totals, divided by the difference in counts. Callgrind binaries are built with `RUSTFLAGS="--cfg rustix_use_libc"`: under valgrind, rustix's own startup code crashes the bench, which still prints a total. Every run's exit status is checked, and a run that fails stops the job. The wall-time binaries are built without the flag.
+
+```bash
+export RUSTFLAGS="--cfg rustix_use_libc" CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1
+cargo bench --locked -p gdl-runtime --bench requests --no-run     # -p gdl at commits before the crates split (1ca7eba, 83e9588); copy each binary aside
+taskset -c 4-7 valgrind --tool=callgrind --callgrind-out-file=/dev/null <requests binary> <setup> <count>
+# per request: (Ir at 400 - Ir at 200) / 200; per item: (Ir at 2000 - Ir at 1000) / 1000
+```
+
+Main at `54abbba`, one build, seven rounds on cores 4 to 7, load average 3.0 falling to 1.0.
+
+Per request, 200 and 400 requests:
+
+| Setup | Metrics off | Metrics on | On − off, per visit |
+|---|---|---|---|
+| one segment | 88,066 (87,627 to 88,320) | 88,822 (87,760 to 90,212) | 756 |
+| two segments | 272,891 (271,237 to 276,027) | 274,334 (273,058 to 275,967) | 722 |
+| three segments | 476,806 (465,913 to 490,129) | 473,906 (470,017 to 484,930) | within the spread |
+
+- **Metrics cost about 750 Ir per visit** on one and two segments. Within one round, on − off per visit ranges from −483 to 2,214 on one segment and from −241 to 1,853 on two. Three segments spread over ±3%, which hides a cost of this size.
+- **Callgrind Ir is not the gb300 count.** It is another machine and another counter, so the 750 here and the 2,100 on gb300 are not a change. The budget of 2,000 per visit was set on hardware counters.
+
+Per item, 1,000 and 2,000 items on one stream (the guard of `crossing-item-send`):
+
+| Size | `lean` (gdl, two segments) | `direct` (velo alone) | gdl − velo |
+|---|---|---|---|
+| 16 B | 6,603 (6,568 to 6,703) | 6,139 (6,129 to 6,169) | +464 |
+| 1 KiB | 8,780 (8,522 to 9,050) | 8,634 (8,478 to 8,974) | +146 |
+| 16 KiB | 127,897 (125,812 to 128,888) | 126,232 (123,460 to 128,564) | +1,665 |
+
+At 16 B the gdl crossing costs 464 Ir per item more than velo alone, beyond both ranges. At 1 KiB and 16 KiB the ranges overlap.
+
+### Live rosters in callgrind Ir
+
+`1ca7eba`, the commit before live rosters, `83e9588`, the commit that added them, and main at `8b182e3`, built in one target directory. Seven rounds, the builds in turn, at 200 and 400 requests. The load average was 1.0 at the start and 1.1 in the last round.
+
+| Setup | `1ca7eba` | `83e9588` | main `8b182e3` |
+|---|---|---|---|
+| one segment | 93,654 (92,552 to 94,353) | 92,413 (91,766 to 93,408) | 87,554 (87,060 to 88,851) |
+| two segments | 277,027 (275,519 to 278,786) | 278,964 (277,867 to 279,854) | 274,344 (273,460 to 276,503) |
+| three segments | 491,043 (468,303 to 496,113) | 484,560 (478,228 to 496,365) | 478,836 (465,894 to 483,167) |
+
+- **Two segments: live rosters add 1,937 Ir (+0.70%)**, with the change median above the base range.
+- **Three segments: inside the spread.** Its rounds spread over ±3% under callgrind, wider than any other setup here, so this row cannot show the 2% that gb300 measured. A guard on this host reads the two-segment row first.
+- **One segment, the control: −1,240 (−1.3%)**, below the base range.
+
+Wall time for the same three commits (`request/reference-<n>-segments`, five runs each on cores 4 to 7, load average 1.7 to 2.8) is not a gate on this host. Base to rosters moved +1.0% on two segments and +4.6% on three, inside base ranges of 221 to 243 us and 488 to 522 us. The rosters runs on three segments alone ranged from 404 to 538 us.
+
 ## Release profiles
 
 The workspace's `Cargo.toml` sets two profiles and no target flags. `[profile.release]` is E, so a release build, `cargo test --release`, and every exported or composed segment ship with one codegen unit and fat LTO. `[profile.bench]` is B, so `cargo bench` and the baselines of the guards use thin LTO, which builds faster. `bench` inherits from `release`, so B sets `lto = "thin"` itself. velo, built as a dependency, gets the same. Benches taken before the workspace set them, at Cargo's defaults (A), say so in their setup. Five settings were measured on the guarded benches to choose them.
@@ -294,7 +394,7 @@ cargo bench -p gdl -p gdl-runtime --bench choose --bench followed --bench remote
 
 The profile reaches velo, a git dependency. In the build's `-v` output, velo's `rustc` line has `-C codegen-units=1 -C linker-plugin-lto` under B, against `-C embed-bitcode=no` under A, and each bench binary's line has `-C lto=thin`.
 
-**Setup.** The gb300 bench host (Neoverse-V2, 72 cores, Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, before the workspace set a profile, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
+**Setup (gb300 history).** The gb300 bench host (Neoverse-V2, 72 cores, Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, before the workspace set a profile, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -372,7 +472,7 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 - **Fat LTO nearly makes the change to `home_first` and `round_robin` over every cell.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
 - **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one model then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
 
-Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
+**gb300 history.** Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
 
 | User cycles per pick, before and after | A | B | E |
 |---|---|---|---|

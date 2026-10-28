@@ -31,7 +31,7 @@ Base is `25fa36d`, a build that recorded per node. Off and on are `6b43a49` with
 - **Off is free.** With metrics off the change is within the spread of the base in every row (-0.2%, +0.5%, +0.2%).
 - **Per item: nothing.** `reference-items/2-segments` does not move with metrics on. The per-item work is one branch that tests whether the first item has passed.
 - **32 requests at once:** recording costs 4.6% to 5.0%, against 5.7% to 6.3% for the per-node build in the same runs. That is about 100 ns of 2.2 us per request.
-- **Where the cost goes** is read from the code, not profiled: one `Arc` per visit, four or five clock reads, about six compare-exchanges, the sharded counters, and a count that each `Cx::clone` and `Cx::child` moves while it lives. On gb300 the cost is about 2,100 instructions per visit, at the budget, and the owner accepts it ([Claims checked on gb300](benchmarking.md#runtime-metrics)).
+- **Where the cost goes** is read from the code, not profiled: one `Arc` per visit, four or five clock reads, about six compare-exchanges, the sharded counters, and a count that each `Cx::clone` and `Cx::child` moves while it lives. On gb300 (history) the cost is about 2,100 instructions per visit, at the budget, and the owner accepts it ([Claims checked on gb300](benchmarking.md#runtime-metrics)).
 
 One in-flight gauge for requests and responses, instead of two, was measured on one segment only: base `e55e692`, change `751af01`, load average 5.7 falling to 5.5. On minus off was +1,744 and +1,757. The change costs the same as the base with metrics on.
 
@@ -53,7 +53,7 @@ A segment waits for `retired()` at the end of each stream it sends ([Development
 | three segments (two streams sent) | 1,199,499 | 1,217,378 | +17,879 (+1.5%) |
 
 - **About 6k instructions per stream sent.** Read from the code, not profiled: velo has not retired a stream when the pump finishes, so the wait registers a waker (a lock and a push), the pump's task is woken once more, and the future's drop takes the lock again. Under the messenger mux a stream retires when the batch that carries its end is admitted, after the pump has finished, so the wait is pending on almost every stream.
-- **The three-segment median is over the 1% per-request gate** and inside the spread of its runs (base 1,185k to 1,214k, change 1,204k to 1,264k). It is accepted for now. On gb300, in user instructions, three segments cost +2.18% and two +1.10%, each beyond the spread ([Claims checked on gb300](benchmarking.md#live-rosters)). The owner accepts +2.18% for now, and [Hot paths](hot-paths.md#roster-stream-retirement) guards the row.
+- **The three-segment median is over the 1% per-request gate** and inside the spread of its runs (base 1,185k to 1,214k, change 1,204k to 1,264k). It is accepted for now. On gb300 (history), in user instructions, three segments cost +2.18% and two +1.10%, each beyond the spread ([Claims checked on gb300](benchmarking.md#live-rosters)). The owner accepts +2.18% for now, and [Hot paths](hot-paths.md#roster-stream-retirement) guards the row.
 - **Wall time:** every row is within the spread of its base runs. The 32 concurrent streams of 1,000 items, where a wait per stream could contend, have medians of 133.6 ms (base) and 134.8 ms (change) over six runs each.
 
 ## Selectors
@@ -67,7 +67,7 @@ The built-in policies `round_robin` and `random` gained a match on the crossing'
 | three segments, `round_robin` | 1,209,668 | 1,206,951 | -2,717 (-0.2%) |
 | two segments, `random` | 631,140 | 627,335 | -3,805 (-0.6%) |
 
-Every row is inside the range of its base runs. The lower crossing rows are likely the removed map lookup, read from the code and not profiled. Wall time per request and per item is within the spread. gb300 confirms it in user instructions: every row is within the spread ([Claims checked on gb300](benchmarking.md#selectors)).
+Every row is inside the range of its base runs. The lower crossing rows are likely the removed map lookup, read from the code and not profiled. Wall time per request and per item is within the spread. gb300 (history) confirms it in user instructions: every row is within the spread ([Claims checked on gb300](benchmarking.md#selectors)).
 
 A named selector costs what it costs. The change build only, five rounds, two segments:
 
@@ -145,7 +145,7 @@ A policy's `choose` returns a `CellChoice`, which may carry a lease that learns 
 | boundary pick and acceptance | 125 to 126 ns | 128 to 132 ns | 124 ns |
 | accepted first offer over loopback, cells | 19.4 to 19.7 us | 19.4 to 19.7 us | 19.6 to 19.9 us |
 
-The same comparison on a quiet host (gb300, aarch64 Neoverse-V2, 72 cores, load average under 5, rustc 1.93.1), pinned to core 8, three runs each, with a spread under 0.3 ns per row. Base `5d8c312`, the change before this one `657c639`, this change `dd2ced4`, and the same change with a fat pointer:
+**gb300 history.** The same comparison on a quiet host (gb300, aarch64 Neoverse-V2, 72 cores, load average under 5, rustc 1.93.1), pinned to core 8, three runs each, with a spread under 0.3 ns per row. Base `5d8c312`, the change before this one `657c639`, this change `dd2ced4`, and the same change with a fat pointer:
 
 | Measure | Base | Change before | Fat lease pointer | Change |
 |---|---|---|---|---|
@@ -160,7 +160,7 @@ With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were 
 
 A policy's `choose` returns `Result<CellChoice, NoCell>`. A `NoCell` holds an optional reason as a `Cow<'static, str>`, so the return is 24 bytes, as `Option<CellChoice>` was (`no_cell_carries_its_reason_at_no_cost_to_a_choice`). `send_forward`'s future stays at 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). A pick allocates nothing, also under a registered policy that builds a reason when it refuses (`a_pick_allocates_nothing_under_either_policy`).
 
-On a quiet host (gb300, aarch64 Neoverse-V2, rustc 1.93.1), pinned to core 8, load average under 4, three runs each, with a spread of 0.1 ns or less per row. Base `56bcf77`, change `b9e783b`. The control is the change without its new tests in the library's test binary, so that it differs from the change only by where the code is placed:
+**gb300 history.** On a quiet host (gb300, aarch64 Neoverse-V2, rustc 1.93.1), pinned to core 8, load average under 4, three runs each, with a spread of 0.1 ns or less per row. Base `56bcf77`, change `b9e783b`. The control is the change without its new tests in the library's test binary, so that it differs from the change only by where the code is placed:
 
 | Measure | Base | Control | Change |
 |---|---|---|---|
@@ -191,7 +191,7 @@ The error message is built in every case. A reason adds its bytes to the message
 
 A cell that refuses as gone is marked in the chooser's damped list ([A cell that is gone](../concepts/cell-routing.md#a-cell-that-is-gone)). Each policy's pass checks each cell for the mark, which is one branch while no cell is gone, and each `gdl::Cell` view holds its follow's generation and count of changes. An offer still reads one atomic at the entry. A pick allocates nothing with a gone cell in the table (`a_pick_allocates_nothing_under_either_policy`).
 
-On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average about 3.9, three runs each. Base `c06ba698`, change `2ec9d213`:
+**gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average about 3.9, three runs each. Base `c06ba698`, change `2ec9d213`:
 
 ```bash
 cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
@@ -210,7 +210,7 @@ A pick costs 1.6 ns more under `round_robin` and 1.0 ns more under `home_first`,
 
 A chooser that records metrics counts each offer under its cell and outcome ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)): one relaxed add to the calling thread's shard of the cell's counts, which the offer's lease on the cell's follow reaches. The pick does not change. An accepted first offer allocates what a roster hand-off does with the counts on (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`), and `send_forward`'s future stays at its size (`a_first_offer_is_no_larger_than_a_hand_off_was`).
 
-On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.8 to 4.0, three runs each. Base `42afd4a2`, change `0ae9346b`, whose offers over loopback count their outcomes:
+**gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.8 to 4.0, three runs each. Base `42afd4a2`, change `0ae9346b`, whose offers over loopback count their outcomes:
 
 ```bash
 cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
@@ -230,7 +230,7 @@ Counting an outcome costs 4.6 ns, in every run, with one thread. The picks run n
 
 An entry instance that declines as its own leaves the request in its cell, and the chooser offers it to the cell's other entry instances ([An instance that cannot serve the request](../concepts/cell-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
 
-On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
+**gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
 
 ```bash
 cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
@@ -259,7 +259,7 @@ The pass calls the filter before the tier step, so a cell the filter drops costs
 
 A cell that is gone is checked in each policy's pass by `Damped::is_gone` ([A cell that is gone](#a-cell-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any cell is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each cell.
 
-Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
+Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (history; aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -363,7 +363,7 @@ A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([
 cargo bench -p gdl --bench followed -- 'followed/' --warm-up-time 1 --measurement-time 3
 ```
 
-On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 1.8 to 2.0, rustc 1.93.1, two runs each. The base is `6d0a850`, before the read loaded the damping. The change is `eb18b65`:
+**gb300 history.** On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 1.8 to 2.0, rustc 1.93.1, two runs each. The base is `6d0a850`, before the read loaded the damping. The change is `eb18b65`:
 
 | Read | Base | Change |
 |---|---|---|
@@ -375,7 +375,7 @@ The load of the damping costs about 21 ns per read. It is what lets a gone mark 
 
 At `d133902`, on the same host at load average 3.7, `followed/read` took 48.4 ns and 47.7 ns.
 
-With the model index ([The model index](../concepts/cell-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two cells, and its first cell checked. On gb300, core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
+With the model index ([The model index](../concepts/cell-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two cells, and its first cell checked. On gb300 (history), core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
 
 | Read | Base | Change |
 |---|---|---|
@@ -401,7 +401,7 @@ Nothing reads the handle unless a node does, so a request that no such node hand
 
 An instance of a class that a hop enters counts the requests it holds that may still send work onward ([Each segment leaves when its own part is done](../concepts/cell-routing.md#each-segment-leaves-when-its-own-part-is-done)). A forward hand-off adds one sequentially consistent add and one subtract on its root's shard of the admission ledger. So does each `next` an operator is given, and each clone of it. An instance of any other class counts nothing: a hand-off reads one flag, and the `next` handle carries one word more.
 
-On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.6, three runs, at `66d4119`:
+**gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.6, three runs, at `66d4119`:
 
 ```bash
 cargo test --release -p gdl-runtime --lib dist::admission::tests::cost_of_counting_a_sender -- --ignored --nocapture --exact
@@ -433,7 +433,7 @@ The change is within the spread between runs. No bench runs a request through a 
 cargo bench -p gdl --bench mint -- 'request_id/' --warm-up-time 1 --measurement-time 3
 ```
 
-On the quiet host gb300 (Neoverse-V2), pinned to core 9, load average 2 to 3.4, rustc 1.93.1, base `8ba0a29`, change `e01f0d5`, three runs each:
+**gb300 history.** On the quiet host gb300 (Neoverse-V2), pinned to core 9, load average 2 to 3.4, rustc 1.93.1, base `8ba0a29`, change `e01f0d5`, three runs each:
 
 | Measure | Base | Change |
 |---|---|---|
@@ -453,7 +453,7 @@ On the same host, the precise wall clock (`SystemTime::now`) costs 23 to 30 ns a
 
 What one local hop costs a request, over the stages it runs, from dynamo-http-endpoints' pipeline bench at its commit `c4d9021`, built against each gdl commit by path. A chat request with one message goes through `Translate` and `Build` to an engine that answers at once. `Build direct` calls `Build` from `Translate` with no inner hop; `empty hop` puts the same call inside an inner hop with no stages; `Build as a stage` runs `Build` as the inner hop's forward stage. The time is the middle of three runs, which agreed within 2%. The bench's requests have no deadline.
 
-On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 2 to 4, rustc 1.93.1. Base `7010e3e`:
+**gb300 history.** On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 2 to 4, rustc 1.93.1. Base `7010e3e`:
 
 ```bash
 cargo bench -p dynamo-protocol-adapters --bench pipeline -- 'hop'
@@ -498,7 +498,7 @@ No row got slower beyond its spread. `items/direct` runs no gdl code, and it mov
 
 A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.
 
-On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.6 to 4.0, three runs each. Base `6f49729a`, change `979d0916`:
+**gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.6 to 4.0, three runs each. Base `6f49729a`, change `979d0916`:
 
 ```bash
 cargo bench -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3
@@ -521,7 +521,7 @@ cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/re
 - **`u64` items gain too.** `items/gdl` takes 16% less, although a `u64` was moved in a register before. This measurement does not show why.
 - **The runtime's segment rows do not change** beyond their spread. `requests sizes 0` prints 11,504 B for the front's call future at both commits: a segment's call does not go through `Source::call`.
 
-**In an endpoint.** dynamo-http-endpoints' loopback harness, `crates/http-endpoints/examples/loopback_profile.sh chat-1 chat-stream`, on gb300 (cores 8 to 15, load 1.8 to 3.6), with gdl at `523afc0` and at `bcde42c`, which applies this change to it. Shares are of the server threads' samples. Server CPU is three runs of 100,000 requests without perf.
+**In an endpoint.** dynamo-http-endpoints' loopback harness, `crates/http-endpoints/examples/loopback_profile.sh chat-1 chat-stream`, on gb300 (history; cores 8 to 15, load 1.8 to 3.6), with gdl at `523afc0` and at `bcde42c`, which applies this change to it. Shares are of the server threads' samples. Server CPU is three runs of 100,000 requests without perf.
 
 | Measure | `523afc0` | With the change |
 |---|---|---|
@@ -539,7 +539,7 @@ The copies gdl made were part of the endpoint's `memcpy`, not most of it. On the
 
 A request is copied whole each time a future takes it by value or returns it. In an endpoint's shape, a gdb trace of every `memcpy` counted the copies that gdl itself made, per request with three chunks: 21,240 B before this change and 8,368 B after it. Of those 21,240 B, 4,640 B was the operator's future copied into its box, and most of the rest was the 768 B request moving through the hop, the forward chain, and the inner ends ([Node contexts](../development/runtime-design.md#node-contexts)). All `memcpy` bytes per request fell from 50,933 to 38,189. The rest are the probe's own: its chunks, its reply converter, and its nodes' `async fn` arguments.
 
-The same `hop` bench on the gb300 runner, core 9, load average 2.5 to 3.8, three runs each. Base `0fa33eb8`, change `4931dcaf`:
+**gb300 history.** The same `hop` bench on the gb300 runner, core 9, load average 2.5 to 3.8, three runs each. Base `0fa33eb8`, change `4931dcaf`:
 
 ```bash
 cargo bench -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3
