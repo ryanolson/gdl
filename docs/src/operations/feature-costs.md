@@ -255,9 +255,11 @@ The step that finds a cell's tier is a function out of line, as it was before th
 - **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 cells.
 - **The tier step inlined into the pass.** It cut those instructions in a pick over every cell. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
 
+The pass calls the filter before the tier step, so a cell the filter drops costs no call to it. With the tier step first, a pick of one model under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one model back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every cell then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every cell, eligible or not, so a costly filter over many cells that are not eligible runs more often than before. The choice does not change, since a filter answers for a cell from that cell alone.
+
 A cell that is gone is checked in each policy's pass by `Damped::is_gone` ([A cell that is gone](#a-cell-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any cell is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each cell.
 
-Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
+Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -303,7 +305,7 @@ On `fb363e8c`, whose `CellRequest` holds one more field, the committed program c
 
 The pick of one model took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
 
-These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before runs fewer instructions per pick of one model ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
+These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before ran fewer instructions per pick of one model until the filter went first ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
 
 A chooser's own pick, through the runtime, over four idle cells, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
 
@@ -315,6 +317,43 @@ cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_c
 |---|---|---|---|
 | pick, `round_robin`, four idle cells | 122.7 ns | 120.3 ns | 120.6 to 120.7 ns |
 | pick, `home_first`, four idle cells | 163.4 to 163.5 ns | 159.0 to 159.2 ns | 159.1 to 159.2 ns |
+
+#### The filter before the tier step
+
+The one-model pick, with the filter first, on the brev bench host: x86_64, 8 cores, a VM with no hardware counters, so no cycle counts. rustc 1.93.1, valgrind 3.18.1, core 7, load average 0.6 to 2.3. One job built each commit under B and E and ran them in alternating order. `cf2b60d` is the commit before the thresholds became constants, with the program and the bench added. "Tier step inlined" is main with `#[inline]` for `#[inline(never)]` on the tier step.
+
+Instructions are callgrind Ir per pick: the difference between 1,000 and 2,000 picks, divided by 1,000, in two rounds that repeat exactly. These are their own series, not comparable with `perf stat` counts. Each binary is built in the release profile, set to B or E through the environment. rustix uses its libc backend, because its vDSO setup crashes under valgrind:
+
+```bash
+export CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1   # fat for E
+RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example picks
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/picks <policy> 1000   # and 2000
+```
+
+| Callgrind Ir per pick, B / E | `home_first`, every cell | `home_first`, one model | `round_robin`, every cell |
+|---|---|---|---|
+| `cf2b60d` | 2,109.8 / 1,848.2 | 1,214.0 / 1,235.0 | 846.5 / 360.5 |
+| `8c651a3`, and main | 2,045.8 / 1,892.6 | 2,102.0 / 2,124.0 | 649.5 / 362.5 |
+| tier step inlined | 2,178.8 / 1,891.2 | 1,305.0 / 1,238.0 | 649.5 / 358.5 |
+| filter first | 2,046.8 / 1,890.2 | 941.0 / 958.0 | 650.5 / 359.5 |
+
+Time is the `choose` bench in the bench profile, set to B or E, three rounds. Each cell gives the range of the three medians:
+
+```bash
+export CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1   # fat for E
+taskset -c 7 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
+```
+
+| Time, ns, B / E | `home_first`, every cell | `home_first`, one model | `round_robin`, every cell |
+|---|---|---|---|
+| `cf2b60d` | 185.5 to 187.0 / 172.4 to 174.7 | 79.8 to 81.4 / 75.2 to 75.5 | 73.1 to 74.1 / 24.3 to 25.2 |
+| `8c651a3` | 183.9 to 186.0 / 172.3 to 172.5 | 146.2 to 146.6 / 157.9 to 158.7 | 46.5 to 46.8 / 24.7 to 25.3 |
+| main | 184.6 to 186.7 / 172.1 to 172.4 | 146.3 to 148.0 / 156.9 to 161.1 | 46.4 to 46.6 / 24.7 to 26.4 |
+| filter first | 181.6 to 184.7 / 173.3 to 175.4 | 76.8 to 78.2 / 77.5 to 78.4 | 49.1 / 24.7 to 24.9 |
+
+- **The tier step out of line is the cost.** Inlined again, it brings a pick of one model to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every cell then runs 133 more.
+- **With the filter first, a pick of one model runs 273 to 277 fewer instructions than at `cf2b60d`, and about 1,160 fewer than at main.** It takes 76.8 to 78.4 ns, against 146.3 to 161.1 ns at main. Against `cf2b60d`, it is 1.6 to 4.6 ns faster under B and 2.0 to 3.2 ns slower under E.
+- **The picks over every cell run within 3 instructions of main.** In time, `round_robin` under B takes 2.5 to 2.8 ns more, and `home_first` under E 0.9 to 3.3 ns more. With the same instructions, a change of that size is within what code placement alone moves a pick ([Release profiles](benchmarking.md#release-profiles)).
 
 ## Reading the followed cells
 

@@ -45,8 +45,9 @@ impl RoundRobin {
     /// over the rest with this, and allocates nothing. It reads no head,
     /// so it takes a request of any head.
     ///
-    /// `keep` is called again for a cell within one choice, and must
-    /// answer alike each time.
+    /// `keep` must answer for a cell from that cell alone: alike each
+    /// time, whatever other cells it was called for, and in any order. It
+    /// is called again for a cell within one choice.
     ///
     /// Two passes over the table and no allocation while no cell's damping
     /// window lasts: one counts the choosable cells of each rank, the other

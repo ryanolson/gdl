@@ -361,7 +361,7 @@ The same builds on a spark host (aarch64, 20 cores, shared with other builds, lo
 
 Two recent changes cut a cost by changing inlining or code layout. Each was measured at the commit before it and at its own commit, in every config. A config "makes" a hand change when the two commits run alike under it.
 
-**Constant thresholds in a pick, `8c651a3`.** Base `cf2b60d`, the commit before it. [Thresholds as constants in a pick](feature-costs.md#thresholds-as-constants-in-a-pick) says what it changed. Both commits ran the same `crates/gdl/examples/picks.rs`, built in turn in one worktree and one target directory, and counted with `perf stat -e instructions:u` at 10 and 20 million picks, in 7 rounds on core 5. Across the rounds, each count repeats to within 0.001 instructions per pick.
+**Constant thresholds in a pick, `8c651a3`.** Base `cf2b60d`, the commit before it. [Thresholds as constants in a pick](feature-costs.md#thresholds-as-constants-in-a-pick) says what it changed. Both commits ran the same `crates/gdl/examples/picks.rs`, built in turn in one worktree and one target directory, and counted with `perf stat -e instructions:u` at 10 and 20 million picks, in 7 rounds on core 5 of the gb300 bench host. Its rows here are gb300 history. Across the rounds, each count repeats to within 0.001 instructions per pick.
 
 | User instructions per pick, before and after | A | B | C | D | E |
 |---|---|---|---|---|---|
@@ -370,7 +370,7 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 | `round_robin`, every cell | 803 / 628 | 809 / 638 | 889 / 703 | 842 / 660 | 365 / 368 |
 
 - **Fat LTO nearly makes the change to `home_first` and `round_robin` over every cell.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
-- **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. Which part of the change costs the instructions under LTO is not measured.
+- **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one model then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
 
 Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
 

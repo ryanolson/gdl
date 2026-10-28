@@ -101,7 +101,7 @@ impl CellPolicy for ByModel {
 ```
 
 - The choice is the one the policy would make over a copy of the kept cells. The tiers, the turns, and the damping cap count only the kept cells, so a lone kept cell is never damped out.
-- The filter is called more than once for a cell within one choice. It must answer the same each time.
+- The filter must answer for a cell from that cell alone: the same each time, whatever other cells it was called for, and in any order. It is called more than once for a cell within one choice, and `home_first` calls it for every cell, eligible or not.
 - A policy that chooses as `home_first` does should also override `eligible` as above. The default does not check that a cell's summary is fresh.
 - Both take a request of any `Head`, since neither reads the head.
 - `HomeFirst` chooses at the default thresholds, not at the chooser's `[runtime] home_first_*` settings. `HomeFirstAt { saturated_percent, spill_percent }` chooses alike at thresholds of its own. Whether a summary is fresh (`Load::is_fresh`) follows the chooser's `cell_fresh_periods` either way.

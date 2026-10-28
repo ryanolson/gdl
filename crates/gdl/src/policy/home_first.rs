@@ -130,9 +130,12 @@ impl HomeFirstAt {
     /// `home_first` over the rest with this, and allocates nothing. It
     /// reads no head, so it takes a request of any head.
     ///
-    /// `keep` is called again for a cell within one choice, and must
-    /// answer alike each time. A policy that chooses by it should also
-    /// check a cell as [`eligible`](CellPolicy::eligible) does here.
+    /// `keep` must answer for a cell from that cell alone: alike each
+    /// time, whatever other cells it was called for, and in any order. It
+    /// is called for every cell, eligible or not, before the cell's tier
+    /// is found, and again for a cell within one choice. A policy that
+    /// chooses by it should also check a cell as
+    /// [`eligible`](CellPolicy::eligible) does here.
     ///
     /// One pass and no allocation while no cell's damping window lasts:
     /// the best tier of the eligible cells, with two of them drawn as it
@@ -196,8 +199,9 @@ trait Thresholds: Copy {
     /// `cell`'s tier, lower first, with its summary, or `None` when it is
     /// not eligible. Out of line: inlined into a pass whose `keep` is a
     /// call, it keeps more values live across that call, and a pick that
-    /// filters by model took 8 ns more
-    /// (`docs/src/operations/feature-costs.md`).
+    /// filters by model took 8 ns more. The pass calls it only for the
+    /// cells `keep` keeps, so a pick that filters by model pays the call
+    /// for those alone (`docs/src/operations/feature-costs.md`).
     #[inline(never)]
     fn tier<'c>(
         self,
@@ -244,7 +248,7 @@ trait Thresholds: Copy {
         let lasts = damped.lasts(now);
         let cut = if lasts {
             let eligible = |cell: &Cell| {
-                self.tier(cell, region, excluded, damped, now).is_some() && keep(cell)
+                keep(cell) && self.tier(cell, region, excluded, damped, now).is_some()
             };
             cut(cells, eligible, damped, now)
         } else {
@@ -255,10 +259,14 @@ trait Thresholds: Copy {
         let mut count = 0u64;
         let mut drawn: [Option<(usize, &LoadSummary)>; 2] = [None, None];
         for (at, cell) in cells.iter().enumerate() {
+            // The filter first: a cell it drops costs no call to `tier`.
+            if !keep(cell) {
+                continue;
+            }
             let Some((tier, load)) = self.tier(cell, region, excluded, damped, now) else {
                 continue;
             };
-            if !keep(cell) || lasts && damped.left(cell.id, now) > cut {
+            if lasts && damped.left(cell.id, now) > cut {
                 continue;
             }
             match best {
