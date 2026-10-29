@@ -127,7 +127,14 @@ pub(super) fn bundle(
         let mut built = BTreeSet::new();
         for pool in ours {
             let parent = parent(layout, pool);
-            let variables = variables(pool, parent)?;
+            let variables = variables(
+                pool,
+                format!("{}:{HUB_PUBLIC_PORT}", pool.name),
+                pool.home
+                    .as_ref()
+                    .map(|home| format!("{home}:{HUB_PUBLIC_PORT}")),
+                parent,
+            )?;
             let mut service = json!({
                 "image": hub.name,
                 // Compose refuses to scale a service whose container is
@@ -228,11 +235,11 @@ impl Image {
 
 /// Where a parent pool's hub keeps its children's records in its
 /// container: its own volume's mount.
-const STATE_DIR: &str = "/var/lib/gdl-hub";
+pub(super) const STATE_DIR: &str = "/var/lib/gdl-hub";
 
 /// Whether `pool` is a parent in `layout`: its class sends to another, so
 /// its hub holds the records of its children.
-fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
+pub(super) fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
     layout
         .boundaries()
         .iter()
@@ -240,21 +247,24 @@ fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
 }
 
 /// The `GDL_POOL__*` variables of `pool`'s hub and segments: its settings
-/// as its fleet gives them, with its hub where other pools' hubs reach it,
-/// at the service named for the pool, and under the `relay` backend, a
-/// child's parent hub, at the service named for its parent, and for a
-/// `parent`, the state directory its hub keeps its children's records in.
-/// So no two hubs share a volume, and the pools may run on several hosts.
-fn variables(pool: &PoolSettings, parent: bool) -> Result<Map<String, Value>, Error> {
+/// as its fleet gives them, under the `relay` backend, with `hub`, where
+/// other pools' hubs reach its hub, `parent_hub`, where a child's hub
+/// reports to its parent's, and, for a `parent`, the state directory its
+/// hub keeps its children's records in. Compose and Kubernetes both write
+/// a pool's variables here, so the two differ only in the addresses each
+/// network spells.
+pub(super) fn variables(
+    pool: &PoolSettings,
+    hub: String,
+    parent_hub: Option<String>,
+    parent: bool,
+) -> Result<Map<String, Value>, Error> {
     let mut pool = pool.clone();
     pool.directory = DirectoryBackend::Relay {
-        parent_hub: pool
-            .home
-            .as_ref()
-            .map(|home| format!("{home}:{HUB_PUBLIC_PORT}")),
+        parent_hub,
         state_dir: parent.then(|| STATE_DIR.into()),
     };
-    pool.hub = Some(format!("{}:{HUB_PUBLIC_PORT}", pool.name));
+    pool.hub = Some(hub);
     let toml::Value::Table(table) = toml::Value::try_from(&pool).map_err(io)? else {
         return Err(Error::new("a pool's settings are a table"));
     };
@@ -298,7 +308,13 @@ mod tests {
         )
         .expect("a fleet");
         let pool = fleet.pool("model-x-01").expect("a pool");
-        let variables = variables(&pool, false).expect("variables");
+        let variables = variables(
+            &pool,
+            "model-x-01:1337".into(),
+            Some("global-us:1337".into()),
+            false,
+        )
+        .expect("variables");
         let expected = [
             ("GDL_POOL__CLASS", "model_x"),
             ("GDL_POOL__DIRECTORY", "relay"),
@@ -322,7 +338,8 @@ mod tests {
                 .expect("a fleet")
                 .pool("global-us")
                 .expect("a pool");
-        let kept = super::variables(&parent, true).expect("variables");
+        let kept =
+            super::variables(&parent, "global-us:1337".into(), None, true).expect("variables");
         assert_eq!(kept["GDL_POOL__STATE_DIR"], STATE_DIR);
         assert!(kept.get("GDL_POOL__PARENT_HUB").is_none(), "{kept:?}");
     }

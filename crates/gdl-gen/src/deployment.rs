@@ -492,8 +492,23 @@ impl Bundle {
                 .and_then(|s| s.base_image.as_ref())
                 .unwrap_or(&settings.base_image),
         );
+        self.files.insert(crate_dir.join("Dockerfile"), text);
+        self.segment_config(&path, segment, hub, unawaited)
+    }
+
+    /// Segment `segment`'s settings, at `path`, a path in the bundle, with
+    /// `[hub] host` when `hub` names it, and no wait for the instances of
+    /// segment `unawaited` when it names one. Returns how long a container
+    /// of it must be let stop, in seconds: its drain bound and a margin.
+    fn segment_config(
+        &mut self,
+        path: &Path,
+        segment: &str,
+        hub: Option<&str>,
+        unawaited: Option<&str>,
+    ) -> Result<u64, Error> {
+        let settings = &self.settings;
         let files = &mut self.files;
-        files.insert(crate_dir.join("Dockerfile"), text);
         let hub = hub.map_or(String::new(), |host| {
             format!("[hub]\nhost = \"{host}\"\n\n")
         });
@@ -504,14 +519,14 @@ impl Bundle {
             format!("\n[min_replicas]\n{source} = 0\n")
         });
         files.insert(
-            path.clone(),
+            path.to_path_buf(),
             format!(
                 "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = 9090\n{unawaited}",
                 emit::MARKER
             ),
         );
         if let Some(image) = settings.segment.get(segment) {
-            let mut config: toml::Table = toml::from_str(&files[&path]).map_err(io)?;
+            let mut config: toml::Table = toml::from_str(&files[path]).map_err(io)?;
             for (key, value) in &image.config {
                 // Where a segment finds its peers is the bundle's, and its
                 // pool the fleet's.
@@ -520,12 +535,15 @@ impl Bundle {
                 }
                 config.insert(key.clone(), value.clone());
             }
-            files.insert(path.clone(), toml::to_string_pretty(&config).map_err(io)?);
+            files.insert(
+                path.to_path_buf(),
+                toml::to_string_pretty(&config).map_err(io)?,
+            );
         }
         // Docker kills a container 10 s after it stops it unless told otherwise; a segment may
         // drain for its bound, read here from its settings as generated (an environment
         // override at run time is not seen).
-        let config: toml::Table = toml::from_str(&files[&path]).map_err(io)?;
+        let config: toml::Table = toml::from_str(&files[path]).map_err(io)?;
         Ok(drain_bound(&config).as_secs() + 30)
     }
 
