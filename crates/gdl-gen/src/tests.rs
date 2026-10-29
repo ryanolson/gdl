@@ -1328,3 +1328,53 @@ fn every_bad_policy_table_is_found() {
         "{error}"
     );
 }
+
+/// A spec that binds no selector generates the crates it generated before
+/// selectors could be bound, byte for byte: the shapes below, which route
+/// by gdl's policies, by gdl's own selector, by a selector that a program
+/// registers itself, and choose pools by a bound policy, are compared with
+/// the files in `tests/fixtures/golden`. `GDL_BLESS=1` rewrites those files;
+/// a change to what the generator writes for any spec rewrites them in the
+/// same commit, and the diff shows it.
+#[test]
+fn a_spec_without_selectors_generates_the_golden_crates() {
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden");
+    let routed =
+        |selector: &str| split().route("D", gdl_model::RequestRouter::Selector(selector.into()));
+    let mut policy = spec(classed("by_model"), &[("D", "tiny_nodes::Engine")]);
+    policy
+        .pool_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    let shapes = [
+        ("split", spec(split(), &[("D", "tiny_nodes::Engine")])),
+        (
+            "gdl-selector",
+            spec(routed("least_loaded"), &[("D", "tiny_nodes::Engine")]),
+        ),
+        (
+            "program-selector",
+            spec(routed("by_length"), &[("D", "tiny_nodes::Engine")]),
+        ),
+        ("pool-policy", policy),
+    ];
+    let bless = std::env::var_os("GDL_BLESS").is_some_and(|v| v == "1");
+    for (shape, spec) in shapes {
+        let files = rendered(&spec, &manifest(), Path::new("/out")).expect("rendered");
+        let mut text = String::new();
+        for (path, content) in &files {
+            text.push_str(&format!("==> {} <==\n{content}", path.display()));
+        }
+        let file = golden.join(format!("{shape}.txt"));
+        if bless {
+            std::fs::create_dir_all(&golden).expect("golden directory");
+            std::fs::write(&file, &text).expect("golden file");
+            continue;
+        }
+        let expected = std::fs::read_to_string(&file).expect("golden file");
+        assert!(
+            text == expected,
+            "{shape}: the generated crates differ from {}; rerun with GDL_BLESS=1 and read the diff\n{text}",
+            file.display()
+        );
+    }
+}
