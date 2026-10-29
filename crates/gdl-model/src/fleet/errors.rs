@@ -105,7 +105,7 @@ pub enum FleetError {
         /// Why the name is refused.
         reason: String,
     },
-    /// A cluster's namespace is not a DNS label.
+    /// A cluster's namespace is not a Kubernetes namespace's name.
     InvalidNamespace {
         /// The cluster.
         cluster: String,

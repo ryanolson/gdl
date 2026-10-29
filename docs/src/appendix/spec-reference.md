@@ -119,7 +119,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 
 - A pool's quorum for a segment is its own `ready`, else its class's, else 1.
 - An explicit `requires` replaces the default whole. It can raise a count or name a subset of the classes sent to. A count of 0, and a class that the class does not send to, are refused.
-- A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. So are the fleet's name, a cluster's name, and its namespace.
+- A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. So are the fleet's name and a cluster's name. A cluster's `namespace` is a Kubernetes namespace, an RFC 1123 label: lowercase letters, digits, and `-`, starting and ending with a letter or digit, at most 63 characters.
 - A pool's `cluster` names a `[cluster.<name>]` table, and the pool takes the cluster's region. A pool may still write `region`, and then it must be the cluster's. A pool without a cluster writes its `region`.
 - No two clusters have the same `context` and `namespace`.
 - The fleet file holds no secret value and no credential. A cluster's `secrets` holds only Kubernetes Secret names: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters. Its keys are not checked against the spec's `[deployment.secrets]` tables. A kube context's credentials stay in the kubeconfig. Do not put a secret value in `env`. An `env` key is letters, digits, and `_`, not starting with a digit.

@@ -102,10 +102,13 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
                 reason,
             });
         }
-        if let Err(reason) = check_label("namespace", &cluster.namespace) {
+        if !namespace_name(&cluster.namespace) {
             errors.push(FleetError::InvalidNamespace {
                 cluster: name.clone(),
-                reason,
+                reason: format!(
+                    "`{}` is not a Kubernetes namespace: lowercase letters, digits, and `-`, starting and ending with a letter or digit, at most {NAMESPACE_LIMIT} characters",
+                    cluster.namespace
+                ),
             });
         }
         for (secret, holder) in &cluster.secrets {
@@ -138,20 +141,31 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
     }
 }
 
+/// The longest name of a Kubernetes namespace: an RFC 1123 label's.
+const NAMESPACE_LIMIT: usize = 63;
+
 /// The longest name of a Kubernetes Secret: a DNS subdomain's.
 const SUBDOMAIN_LIMIT: usize = 253;
 
-/// Whether `name` can name a Kubernetes Secret: a DNS subdomain, labels of
-/// lowercase letters, digits, and `-` joined by `.`, each starting and
-/// ending with a letter or digit.
+/// Whether `name` can name a Kubernetes namespace: an RFC 1123 label. It
+/// may start with a digit, which a pool's or a cluster's name may not.
+fn namespace_name(name: &str) -> bool {
+    name.len() <= NAMESPACE_LIMIT && rfc_label(name)
+}
+
+/// Whether `name` can name a Kubernetes Secret: a DNS subdomain, RFC 1123
+/// labels joined by `.`.
 fn secret_name(name: &str) -> bool {
+    name.len() <= SUBDOMAIN_LIMIT && name.split('.').all(rfc_label)
+}
+
+/// Whether `label` is lowercase letters, digits, and `-`, starting and
+/// ending with a letter or digit: an RFC 1123 label, without its length.
+fn rfc_label(label: &str) -> bool {
     let alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    name.len() <= SUBDOMAIN_LIMIT
-        && name.split('.').all(|label| {
-            label.starts_with(alnum)
-                && label.ends_with(alnum)
-                && label.chars().all(|c| alnum(c) || c == '-')
-        })
+    label.starts_with(alnum)
+        && label.ends_with(alnum)
+        && label.chars().all(|c| alnum(c) || c == '-')
 }
 
 /// Whether `name` can name an environment variable in a container.

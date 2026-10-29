@@ -649,8 +649,8 @@ const LABEL_LIMIT: usize = 63;
 /// Whether `name` can name a pool or a region: a DNS label. A pool's name
 /// becomes a host name, a URL path segment, part of a hub's service names,
 /// and part of a certificate's identity, and a region's is used beside it.
-/// A fleet's clusters, their namespaces, and the fleet's own name label
-/// Kubernetes objects, and take the same rule. `kind` names what the name
+/// A fleet's clusters and the fleet's own name label Kubernetes objects,
+/// and take the same rule. `kind` names what the name
 /// is for in the refusal.
 pub(crate) fn check_label(kind: &str, name: &str) -> Result<(), String> {
     let shaped = name.starts_with(|c: char| c.is_ascii_lowercase())

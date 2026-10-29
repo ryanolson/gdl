@@ -197,7 +197,7 @@ fn each_cluster_refusal_names_its_pool_or_cluster() {
         ),
         (
             format!("{TWO}{G_IN_A}").replace("namespace = 'gdl'\nregion = 'r'\n[cluster.b]", "namespace = 'Gdl'\nregion = 'r'\n[cluster.b]"),
-            format!("[cluster.a] namespace: namespace name `Gdl` {rule}"),
+            format!("[cluster.a] namespace: `Gdl` {NAMESPACE_RULE}"),
         ),
         (
             format!("[fleet]\nname = 'Proof'\n{TWO}{G_IN_A}"),
@@ -220,6 +220,43 @@ fn each_cluster_refusal_names_its_pool_or_cluster() {
         };
         let errors: Vec<String> = errors.0.iter().map(ToString::to_string).collect();
         assert_eq!(errors, [expected], "{text}");
+    }
+}
+
+/// How a refused namespace is described.
+const NAMESPACE_RULE: &str = "is not a Kubernetes namespace: lowercase letters, digits, and `-`, starting and ending with a letter or digit, at most 63 characters";
+
+/// A namespace is a Kubernetes namespace's name, an RFC 1123 label, which
+/// may start with a digit, unlike a pool's or a cluster's name.
+#[test]
+fn a_namespace_is_an_rfc_1123_label() {
+    let longest = format!("0{}", "-0".repeat(31));
+    assert_eq!(longest.len(), 63);
+    let with = |namespace: &str| {
+        format!("{TWO}{G_IN_A}").replacen(
+            "namespace = 'gdl'",
+            &format!("namespace = '{namespace}'"),
+            1,
+        )
+    };
+    for good in ["123-gdl", "0", "gdl", "a1", longest.as_str()] {
+        fleet(&with(good)).check(Some(&laid())).expect(good);
+    }
+    let too_long = format!("{longest}0");
+    for bad in [
+        "Gdl",
+        "-gdl",
+        "gdl-",
+        "gdl.x",
+        "gdl_x",
+        "",
+        too_long.as_str(),
+    ] {
+        assert_eq!(
+            problems(&with(bad)),
+            [format!("[cluster.a] namespace: `{bad}` {NAMESPACE_RULE}")],
+            "{bad}"
+        );
     }
 }
 
