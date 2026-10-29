@@ -220,7 +220,8 @@ impl InstanceProperties {
     /// the head type against the crossing's edge when the segment starts,
     /// and reads the head of each offer of a hop whose edge is that type,
     /// once per want. Refused when the kind's name has not a settings
-    /// key's shape.
+    /// key's shape, and when `H` is a projection with a field that crosses
+    /// under no name the edge type reads, as for a selector.
     pub fn wants<H, T>(
         &self,
         kind: &PropertyKind<T>,
@@ -232,6 +233,12 @@ impl InstanceProperties {
     {
         gdl_model::check_property_kind(kind.name())
             .map_err(|why| Error::new(ErrorKind::Node, why))?;
+        <H as crate::select::sealed::Sealed>::names().map_err(|why| {
+            Error::new(
+                ErrorKind::Placement,
+                format!("the want of property kind `{}` {why}", kind.name()),
+            )
+        })?;
         let want: Arc<dyn Want> = Arc::new(wanted::Typed {
             kind: kind.name(),
             key,

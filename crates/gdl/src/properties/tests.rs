@@ -335,3 +335,39 @@ async fn a_node_registers_a_want_in_its_build() {
     assert_eq!(refused.kind(), crate::ErrorKind::Node, "{refused}");
     assert_eq!(properties.wanted().len(), 1, "nothing changed");
 }
+
+/// A projection of [`Asked`] that reads its field under a name `Asked`
+/// does not cross it under: every offer would fail to read.
+#[derive(Deserialize, crate::Projection)]
+#[gdl(of = Asked)]
+struct Misnamed {
+    #[serde(rename = "model")]
+    name: String,
+}
+
+/// A want that reads a projection is refused when one of its fields
+/// crosses under no name the edge type reads, as a selector or a pool
+/// policy is, naming the kind, and nothing is registered. The projection
+/// whose names match, the control, is taken.
+#[test]
+fn a_want_of_a_misnamed_projection_is_refused() {
+    #[derive(Deserialize, crate::Projection)]
+    #[gdl(of = Asked)]
+    struct Named {
+        name: String,
+    }
+
+    let properties = InstanceProperties::new();
+    let refused = properties
+        .wants(&TEST, |asked: &crate::Projected<Misnamed>| key(&asked.name))
+        .expect_err("a field under another name");
+    assert_eq!(refused.kind(), crate::ErrorKind::Placement, "{refused}");
+    assert!(
+        refused.message().contains("`test`") && refused.message().contains("`model`"),
+        "{refused}"
+    );
+    assert!(properties.wanted().is_empty(), "registered anyway");
+    properties
+        .wants(&TEST, |asked: &crate::Projected<Named>| key(&asked.name))
+        .expect("the control");
+}

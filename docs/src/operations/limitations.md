@@ -32,7 +32,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a generated segment binary knows only gdl's own selectors (`affinity`, `least_loaded`), and a placement that names another one fails that segment's start. Register it with `builder.selector::<S>("<name>")` in a hand-written `SegmentBinary`, or in `RuntimeConfig::selectors` in process. See [Write a selector](../guides/write-a-selector.md). The generator binding selector crates would lift this.
 
 ### A projection is not checked against what its edge type writes
-- **What:** `derive(gdl::Projection)` checks each field's Rust name and type against the edge type when it builds. Registering the router compares the field names that each type's `Deserialize` reads, from the list serde's derive gives `deserialize_struct`. Four edge types pass these checks, and the projection still cannot read what they write:
+- **What:** `derive(gdl::Projection)` checks each field's Rust name and type against the edge type when it builds. Registering the router, or an entry's want (`InstanceProperties::wants`), compares the field names that each type's `Deserialize` reads, from the list serde's derive gives `deserialize_struct`. Four edge types pass these checks, and the projection still cannot read what they write:
   - one that writes a field under a name it does not read, with `rename(serialize = ...)`, or that reads a name only as an `alias`;
   - one whose serde renames give a field the name of another field: the projection reads that other field, and when the two have the same type it routes by the wrong value with no error;
   - one, or a projection, that reads no plain struct (a `#[serde(flatten)]` field, or a hand-written `Deserialize`), which gives no list of names;
