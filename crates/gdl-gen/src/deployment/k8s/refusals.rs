@@ -13,6 +13,17 @@ use crate::deployment::Settings;
 const SET: &[&str] = &[objects::POD_IP];
 const SET_PREFIXES: &[&str] = &["GDL_POOL__", "GDL_HUB__"];
 
+/// Variables that hold a static cloud credential, which the objects would
+/// write in plain text: a fleet reaches AWS through its service account's
+/// role, never a key. Matched without regard to case.
+const CREDENTIALS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+];
+
 /// Every problem that keeps `fleet` off Kubernetes with the spec's
 /// deployment `settings`, each at its table.
 pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
@@ -57,6 +68,16 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
         }
         for variable in cluster.env.keys() {
             let upper = variable.to_ascii_uppercase();
+            if CREDENTIALS.contains(&upper.as_str()) {
+                problems.push(Problem::at(
+                    table(),
+                    Some("env".into()),
+                    format!(
+                        "`{variable}` holds a static credential, which the objects would write in plain text: use the service account's role, or a Secret"
+                    ),
+                ));
+                continue;
+            }
             if SET.contains(&upper.as_str()) || SET_PREFIXES.iter().any(|p| upper.starts_with(p)) {
                 problems.push(Problem::at(
                     table(),
