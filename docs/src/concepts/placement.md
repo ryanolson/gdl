@@ -48,7 +48,7 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | Classes: each segment in exactly one, the boundary rule, no cycle, a pool policy only for a class a boundary enters | `check`, `generate`, and segment start |
 | A property kind is declared once, with a wire type; a node provides and needs only declared kinds | `check`, `generate`, and `graph!` |
 | A property's key type implements `Serialize`, `DeserializeOwned`, `Ord`, `Send`, and `Sync` | the contract's build, at the declaration |
-| Each kind a node, an entry adapter, or a pool policy needs from a class is declared, the class is in the layout and chosen where the reader runs, and an entry segment of it provides the kind, or `[pools.<class>] provides` names it | `check`, `generate`, `build` |
+| Each kind a node, an entry adapter, or a pool policy needs from a class is declared, the class is in the layout and chosen where the reader runs, and an entry segment of it provides the kind, or `[pools.<class>] provides` names it | `check`, `generate`, `build`, and a pool instance's launch |
 | A node sets only a kind its segment's nodes provide, reads only a kind its segment's nodes or entry adapters need, and sets and reads each kind with its declared type | the node's build, at segment start, and `assemble` |
 | A pool policy registers only the kinds its `NEEDS` names, and the class it chooses for supplies each, also for a policy registered in code | segment start, before the chooser registers |
 | A pool serves from its settings only the kinds `[pools.<class>] provides` names | the pool's hub start |

@@ -526,10 +526,10 @@ pub(crate) fn check_policies(
     segment: &str,
     policies: &gdl::PoolPolicies,
 ) -> gdl::Result<()> {
-    // Whether each name resolves, and whether the class supplies what the
-    // policy needs, as `cargo gdl check` holds a bound policy to it: one
-    // registered in code is checked only here. The thresholds play no
-    // part.
+    // Whether each name resolves, and whether the layout supplies what the
+    // graph's nodes and each policy need, as `cargo gdl check` holds them:
+    // a policy registered in code, and a graph launched by a program of
+    // its own, are checked only here. The thresholds play no part.
     let mut consumers = Vec::new();
     for class in entries(layout, segment).keys() {
         let (name, policy) = policy::of(layout, class, policies, gdl::HomeFirstAt::DEFAULT)?;
@@ -545,11 +545,7 @@ pub(crate) fn check_policies(
                 }),
         );
     }
-    // The graph's own needs are checked where they are written.
-    let unmet: Vec<String> = gdl_model::property_supply(manifest, layout, &consumers)
-        .into_iter()
-        .filter(|problem| consumers.iter().any(|c| problem.starts_with(&c.consumer)))
-        .collect();
+    let unmet = gdl_model::property_supply(manifest, layout, &consumers);
     if unmet.is_empty() {
         Ok(())
     } else {

@@ -32,6 +32,78 @@ const LLAMA: &str = "llama-01-us-east-1";
 const QWEN: &str = "qwen-01-us-east-1";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_graph_reader_requires_its_property_supply_at_launch() {
+    mod contract {
+        gdl_runtime::graph! {
+            name = "graph_reader", schema = 1;
+            property shard: u32;
+            source S: u32 -> stream u32 needs shard from model;
+            sink D: u32 -> stream u32;
+            topology: S => D;
+        }
+    }
+
+    let spec = DeploymentSpec::new(contract::manifest(), spec("round_robin").placement)
+        .expect("deployment");
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("layout");
+    let problems = gdl_model::property_supply(&spec.graph, &layout, &[]);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("no entry segment"), "{problems:?}");
+
+    let directory = Resolving::new();
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let config = chooser_settings(&global, PoolPolicies::new());
+    gdl_runtime::declare_properties(
+        &spec.graph,
+        &spec.placement,
+        "a",
+        &contract::property_types(),
+        &[],
+        &config.runtime.properties,
+        &config.runtime.followed,
+    )
+    .expect("declared types");
+    config
+        .runtime
+        .followed
+        .register(&gdl::PropertyKind::<u32>::new("shard"))
+        .expect("the graph declares this reader's need");
+    let process = gdl_runtime::Process::start(&config).await.expect("process");
+    let launched = tokio::time::timeout(
+        WAIT,
+        config.launch(&process, "a", SEGMENTS, &spec, async { Ok(()) }),
+    )
+    .await
+    .expect("launch returns within the bound");
+    if let Ok(launch) = &launched {
+        let deployment = Deployment::new(
+            launch.node(),
+            &spec.graph,
+            &spec.placement,
+            "a",
+            launch.roster(),
+            config.runtime.clone(),
+        )
+        .expect("deployment");
+        contract::assemble(&deployment, contract::Bindings::new())
+            .expect("graph assembly enforces its declarations");
+    }
+    let accepted = launched.is_ok();
+    let refused = launched.as_ref().err().map(ToString::to_string);
+    drop(launched);
+    global.shutdown().await.expect("hub shuts down");
+    assert!(
+        !accepted,
+        "launch accepts node S's shard reader although model has neither a provider nor pools.model.provides"
+    );
+    let refused = refused.unwrap_or_default();
+    assert!(
+        refused.contains("node `S` needs property `shard` from class `model`"),
+        "{refused}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_policy_registered_in_code_requires_its_property_supply() {
     struct NeedsShard;
 
