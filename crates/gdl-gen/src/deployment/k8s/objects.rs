@@ -155,24 +155,52 @@ pub(super) struct Pod<'a> {
 impl Pod<'_> {
     /// The labels of the pool's objects of `segment`, `hub` for its hub's.
     fn labels(&self, segment: Option<&str>) -> Value {
-        let mut labels = json!({
-            "gdl.dev/fleet": self.fleet,
-            "gdl.dev/pool": self.pool.name,
-            "gdl.dev/class": self.pool.class,
+        self.named(segment)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), label_value(value).into()))
+            .collect::<Map<_, _>>()
+            .into()
+    }
+
+    /// Each label's key and its whole value, a label's value or not.
+    fn named<'s>(&'s self, segment: Option<&'s str>) -> Vec<(&'static str, &'s str)> {
+        let mut named = vec![
+            ("gdl.dev/fleet", self.fleet),
+            ("gdl.dev/pool", self.pool.name.as_str()),
+            ("gdl.dev/class", self.pool.class.as_str()),
+        ];
+        named.extend(segment.map(|segment| ("gdl.dev/segment", segment)));
+        named
+    }
+
+    /// The annotations that hold each label's whole value where the label
+    /// holds a shortened one ([`label_value`]), under the label's key.
+    fn whole(&self, segment: Option<&str>) -> Map<String, Value> {
+        self.named(segment)
+            .into_iter()
+            .filter(|(_, value)| value.len() > LABEL_LIMIT)
+            .map(|(key, value)| (key.to_string(), value.into()))
+            .collect()
+    }
+
+    /// The metadata of the pool's object `name` of `segment`, if it has
+    /// one.
+    fn meta(&self, name: &str, segment: Option<&str>) -> Value {
+        let mut metadata = json!({
+            "name": name,
+            "namespace": self.cluster.namespace,
+            "labels": self.labels(segment),
         });
-        if let Some(segment) = segment {
-            labels["gdl.dev/segment"] = segment.into();
+        let whole = self.whole(segment);
+        if !whole.is_empty() {
+            metadata["annotations"] = whole.into();
         }
-        labels
+        metadata
     }
 
     /// The metadata of the pool's object `name` of `segment`.
     pub(super) fn metadata(&self, name: &str, segment: &str) -> Value {
-        json!({
-            "name": name,
-            "namespace": self.cluster.namespace,
-            "labels": self.labels(Some(segment)),
-        })
+        self.meta(name, Some(segment))
     }
 
     /// The pool's ConfigMap, named for the pool: its layout's deployment,
@@ -189,11 +217,7 @@ impl Pod<'_> {
         json!({
             "apiVersion": "v1",
             "kind": "ConfigMap",
-            "metadata": {
-                "name": self.pool.name,
-                "namespace": self.cluster.namespace,
-                "labels": self.labels(None),
-            },
+            "metadata": self.meta(&self.pool.name, None),
             "data": data,
         })
     }
@@ -362,11 +386,13 @@ impl Pod<'_> {
         pod: Value,
     ) -> Value {
         let labels = self.labels(Some(segment));
+        let mut annotations = self.whole(Some(segment));
+        annotations.insert("gdl.dev/config".into(), checksum.into());
         let mut spec = json!({
             "replicas": replicas,
             "selector": {"matchLabels": labels},
             "template": {
-                "metadata": {"labels": labels, "annotations": {"gdl.dev/config": checksum}},
+                "metadata": {"labels": labels, "annotations": annotations},
                 "spec": pod,
             },
         });
@@ -496,12 +522,32 @@ pub(super) fn stream(objects: &[Value]) -> serde_json::Result<String> {
 
 /// A checksum of a ConfigMap's data, FNV-1a over its JSON text, as hex.
 pub(super) fn checksum(config: &Value) -> String {
+    format!("{:016x}", fnv(&config["data"].to_string()))
+}
+
+/// FNV-1a of `text`.
+fn fnv(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in config["data"].to_string().bytes() {
+    for byte in text.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
+}
+
+/// The characters of a long value that its label keeps.
+const LABEL_PREFIX: usize = 52;
+
+/// `value` as a label's value, which is at most 63 characters: itself when
+/// it fits, else its first 52 characters, `-`, and 10 hex digits of its
+/// hash, so that two long values that share their start still differ. The
+/// whole value is then in the annotation of the label's key.
+fn label_value(value: &str) -> String {
+    if value.len() <= LABEL_LIMIT {
+        return value.to_string();
+    }
+    let hash = format!("{:016x}", fnv(value));
+    format!("{}-{}", &value[..LABEL_PREFIX], &hash[..10])
 }
 
 /// Refuse a segment whose name a Kubernetes object cannot hold: its
@@ -650,6 +696,22 @@ mod tests {
         for port in ["8080-8081", "80-90:80-90", "0", "8080/http", "x"] {
             assert!(Port::parse(port).is_err(), "{port}");
         }
+    }
+
+    /// A value of up to 63 characters is its own label; a longer one is its
+    /// first 52 characters, `-`, and 10 hex digits of its hash, and two
+    /// that share those 52 characters still differ.
+    #[test]
+    fn a_long_value_is_labelled_by_its_start_and_hash() {
+        let fits = "m".repeat(63);
+        assert_eq!(label_value(&fits), fits);
+        let long = "m".repeat(64);
+        let label = label_value(&long);
+        assert_eq!(label.len(), 63, "{label}");
+        let (start, hash) = label.split_at(LABEL_PREFIX);
+        assert_eq!(start, &long[..LABEL_PREFIX]);
+        assert!(hash.starts_with('-') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(label_value(&"m".repeat(65)), label);
     }
 
     /// A platform is `<os>/<arch>`, with an optional variant; a tag is what
