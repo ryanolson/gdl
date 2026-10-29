@@ -120,6 +120,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[directory] backend` | where every pool's hub publishes its record: `dynamodb`, the one value. Without the table, each child's hub reports to its parent's (`relay`) | no table |
 | `[directory] records_table`, `lists_table` | the DynamoDB tables' names: 3 to 255 letters, digits, `_`, `-`, and `.` | required |
 | `[directory] local` | the deployment runs one DynamoDB Local for the tables, which every hub uses. Compose requires it | `false` |
+| `[directory] cluster` | the cluster that runs the DynamoDB Local, which every cluster reaches. Required with `local = true` when the fleet names clusters; refused without `local = true`, and when it names no cluster of the fleet. Compose does not read it | none |
 
 - A pool's quorum for a segment is its own `ready`, else its class's, else 1.
 - An explicit `requires` replaces the default whole. It can raise a count or name a subset of the classes sent to. A count of 0, and a class that the class does not send to, are refused.

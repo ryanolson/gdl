@@ -117,7 +117,10 @@ backend = "dynamodb"
 records_table = "gdl-pools"
 lists_table = "gdl-pool-lists"
 local = true                      # one DynamoDB Local in the bundle; Compose requires it
+# cluster = "use1"                # with clusters: the one cluster that runs the Local
 ```
+
+A fleet that names clusters also names, in `cluster`, the one cluster that runs the Local, at an address every cluster reaches. A Local in each cluster would give each region a directory of its own. `check` requires `cluster` with `local = true` when the fleet has clusters, and refuses one that is not a cluster of the fleet. Compose runs on one host, so it ignores `cluster`.
 
 `compose` then adds two services:
 

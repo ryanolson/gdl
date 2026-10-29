@@ -49,6 +49,7 @@ use cluster::{Header, check_clusters};
 /// records_table = "gdl-pools"
 /// lists_table = "gdl-pool-lists"
 /// local = true                       # optional: the bundle runs one DynamoDB Local for them
+/// cluster = "use1"                   # with local, when the fleet names clusters: the one that runs it
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +86,13 @@ pub struct FleetDirectory {
     /// every hub uses with fixed test credentials, instead of AWS.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local: bool,
+    /// The cluster that runs the DynamoDB Local, at an address every
+    /// cluster reaches: one Local for the fleet, since a Local in each
+    /// cluster would give each region a directory of its own. Required
+    /// with `local` when the fleet names clusters, and refused without
+    /// `local`. Compose, which runs on one host, does not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
 }
 
 /// The backends a fleet's `[directory]` can name.
@@ -243,6 +251,24 @@ impl Fleet {
                         reason,
                     });
                 }
+            }
+            let reason = match (&directory.cluster, directory.local) {
+                (Some(cluster), false) => Some(format!(
+                    "{cluster:?} names the cluster that runs DynamoDB Local, so it needs local = true"
+                )),
+                (Some(cluster), true) if !self.clusters.contains_key(cluster) => {
+                    Some(format!("the fleet has no cluster `{cluster}`"))
+                }
+                (None, true) if !self.clusters.is_empty() => Some(
+                    "missing; the fleet names clusters, so a directory in DynamoDB Local names the one cluster that runs it, for every cluster to reach".into(),
+                ),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                errors.push(FleetError::InvalidDirectory {
+                    key: "cluster".into(),
+                    reason,
+                });
             }
         }
         for (class, defaults) in &self.classes {

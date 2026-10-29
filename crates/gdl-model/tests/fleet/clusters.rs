@@ -387,3 +387,58 @@ fn unknown_keys_are_refused_in_the_new_tables() {
         assert!(Fleet::from_toml(bad).is_err(), "accepted:\n{bad}");
     }
 }
+
+/// A DynamoDB directory's tables, without `local` or `cluster`.
+const DIRECTORY: &str = "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\n";
+
+/// A directory in DynamoDB Local runs in one cluster, which `[directory]
+/// cluster` names: required when the fleet names clusters, so that every
+/// region uses one directory rather than one Local each, and a cluster of
+/// the fleet. It is read back as written.
+#[test]
+fn a_local_directory_names_the_cluster_that_runs_it() {
+    let text = format!("{CLUSTERED}{DIRECTORY}local = true\ncluster = \"use1\"\n");
+    let named = fleet(&text);
+    named.check(Some(&laid())).expect("a sound fleet");
+    assert_eq!(
+        named.directory().expect("a directory").cluster.as_deref(),
+        Some("use1")
+    );
+    let written = toml::to_string(&named).expect("toml");
+    assert_eq!(Fleet::from_toml(&written).expect("read back"), named);
+
+    assert_eq!(
+        problems(&format!("{CLUSTERED}{DIRECTORY}local = true\n")),
+        [
+            "[directory] cluster: missing; the fleet names clusters, so a directory in DynamoDB Local names the one cluster that runs it, for every cluster to reach"
+        ]
+    );
+    assert_eq!(
+        problems(&format!(
+            "{CLUSTERED}{DIRECTORY}local = true\ncluster = \"apse1\"\n"
+        )),
+        ["[directory] cluster: the fleet has no cluster `apse1`"]
+    );
+}
+
+/// `cluster` names where DynamoDB Local runs, so it is refused without
+/// `local = true`, and in a fleet without clusters, where it names none.
+/// A fleet without clusters needs no `cluster` for its Local.
+#[test]
+fn a_directory_cluster_is_refused_where_it_names_nothing() {
+    assert_eq!(
+        problems(&format!("{CLUSTERED}{DIRECTORY}cluster = \"use1\"\n")),
+        [
+            "[directory] cluster: \"use1\" names the cluster that runs DynamoDB Local, so it needs local = true"
+        ]
+    );
+    assert_eq!(
+        problems(&format!(
+            "{FLEET}{DIRECTORY}local = true\ncluster = \"use1\"\n"
+        )),
+        ["[directory] cluster: the fleet has no cluster `use1`"]
+    );
+    fleet(&format!("{FLEET}{DIRECTORY}local = true\n"))
+        .check(Some(&laid()))
+        .expect("a Local without clusters");
+}

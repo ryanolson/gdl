@@ -193,3 +193,25 @@ fn a_pool_named_for_a_directory_service_is_refused() {
     };
     assert!(error.to_string().contains("`dynamodb-tables`"), "{error}");
 }
+
+/// Compose runs on one host, so it ignores `[directory] cluster`: the same
+/// DynamoDB fleet with its pools in a cluster, which runs the Local,
+/// writes the same bundle.
+#[test]
+fn compose_ignores_the_directorys_cluster() {
+    let mirror = Mirror::new();
+    let spec = placed(&mirror, SPLIT);
+    let plain = gdl_model::Fleet::from_toml(&format!("{ONE_FLEET}{DIRECTORY}")).expect("a fleet");
+    let clustered = gdl_model::Fleet::from_toml(&format!(
+        "[cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\n{}{DIRECTORY}cluster = \"use1\"\n",
+        ONE_FLEET.replace("region = \"us-east-1\"", "cluster = \"use1\"")
+    ))
+    .expect("a fleet");
+    assert_eq!(
+        clustered.directory().and_then(|d| d.cluster.as_deref()),
+        Some("use1")
+    );
+    let (plain, _) = fleet_bundle(&mirror, &spec, &plain);
+    let (clustered, _) = fleet_bundle(&mirror, &spec, &clustered);
+    assert_eq!(plain, clustered);
+}
