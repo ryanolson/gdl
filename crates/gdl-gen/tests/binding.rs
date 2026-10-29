@@ -147,3 +147,163 @@ impl gdl::PoolPolicy for ByText {
         "both renamed root re-exports build and are intentionally refused, but the limitations chapter does not explain this type-name restriction for pool policies and selectors"
     );
 }
+
+#[test]
+#[ignore = "F3: catalogue checks accept a selector-only crate under the wrong library"]
+fn a_catalogue_selector_must_have_the_bound_library() {
+    let router = router(
+        r#"
+pub struct ByText;
+
+impl gdl::Build for ByText {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+
+
+impl gdl::Selector for ByText {
+    type Head = gdl::Encoded;
+    async fn select<'a>(&'a self, _: gdl::Request<'a, Self::Head>, instances: gdl::Instances<'a>) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+"#,
+        "router_library",
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(router.path())
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "Cargo.toml", "Cargo.lock", "src"]);
+    git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=gdl-test",
+        "-c",
+        "user.email=gdl@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+    ]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", router.path().display());
+    let fetched = gdl_extract::Workspace::fetch_git(
+        "selector-router",
+        &url,
+        &rev,
+        &target("gdl-gen-tests"),
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("Git selector workspace");
+    let selector = fetched.extract("selector-router").expect("selector").offer;
+    assert!(
+        selector.messages.is_empty() && selector.exports.is_empty() && selector.nodes.is_empty()
+    );
+    assert_eq!(selector.selectors[0].ty, "router_library::ByText");
+    let workspace = gdl_extract::Workspace::load(
+        &fixture().join("Cargo.toml"),
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("fixture workspace");
+    let messages = workspace
+        .extract("selector-messages")
+        .expect("messages")
+        .offer;
+    let nodes = workspace.extract("selector-nodes").expect("nodes").offer;
+    let offers = [&messages, &nodes, &selector];
+    let text = fixture_text("gdl.toml")
+        .replace(
+            "path = \"router\"",
+            &format!("git = {url:?}\nrev = {rev:?}\nlib = \"router_library\""),
+        )
+        .replace("selector_router::ByText", "router_library::ByText");
+    let checked = |text: &str, from| {
+        let spec = gdl_gen::Spec::from_text(text, &fixture_text("selector.gdl"), &fixture())
+            .expect("spec");
+        gdl_gen::check(&spec, &target("gdl-gen-tests"), from)
+    };
+    checked(&text, gdl_gen::Offers::Read).expect("the real library matches");
+    checked(&text, gdl_gen::Offers::Given(&offers)).expect("the catalogue library matches");
+    let wrong = text
+        .replace("lib = \"router_library\"", "lib = \"selector_router\"")
+        .replace("router_library::ByText", "selector_router::ByText");
+    let error = checked(&wrong, gdl_gen::Offers::Read)
+        .expect_err("source reader refuses the wrong library");
+    assert!(
+        error.to_string().contains("library does not match"),
+        "{error}"
+    );
+    if checked(&wrong, gdl_gen::Offers::Given(&offers)).is_ok() {
+        for (text, matches) in [(&text, true), (&wrong, false)] {
+            let out = router
+                .path()
+                .join(if matches { "matching" } else { "mismatched" });
+            let spec = gdl_gen::Spec::from_text(text, &fixture_text("selector.gdl"), &fixture())
+                .expect("spec");
+            let archive = gdl_gen::export(
+                &spec,
+                &target("gdl-gen-tests"),
+                gdl_gen::Offers::Given(&offers),
+            )
+            .expect("the accepted spec exports");
+            tar::Archive::new(flate2::read::GzDecoder::new(archive.as_slice()))
+                .unpack(&out)
+                .expect("exported files");
+            let manifest = out.join("selector/front/Cargo.toml");
+            let patch = format!(
+                "\n[patch.{url:?}]\ngdl = {{ path = {} }}\n",
+                toml::Value::String(root().join("crates/gdl").display().to_string())
+            );
+            std::fs::write(
+                &manifest,
+                format!(
+                    "{}{patch}",
+                    std::fs::read_to_string(&manifest).expect("manifest")
+                ),
+            )
+            .expect("use the runtime's copy of gdl");
+            std::fs::copy(
+                root().join("Cargo.lock"),
+                out.join("selector/front/Cargo.lock"),
+            )
+            .expect("segment lockfile");
+            let built = cargo_check(&manifest);
+            let stderr = String::from_utf8_lossy(&built.stderr);
+            if matches {
+                assert!(
+                    built.status.success(),
+                    "the matching library must build: {stderr}"
+                );
+            } else {
+                assert!(
+                    !built.status.success()
+                        && stderr.contains("error[E0433]")
+                        && stderr.contains("selector_router"),
+                    "the generated crate must expose the wrong library: {stderr}"
+                );
+                panic!(
+                    "catalogue check accepted selector_router::ByText, but its sender cannot build:\n{stderr}"
+                );
+            }
+        }
+    }
+}
