@@ -311,7 +311,7 @@ pub(crate) fn validate(
                     );
                 }
             }
-            for (_, bind) in &policies {
+            for (_, bind) in policies.iter().chain(&selectors) {
                 see(
                     &bind.lib,
                     format!("package `{}`", bind.package),

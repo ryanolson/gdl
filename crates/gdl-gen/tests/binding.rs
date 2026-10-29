@@ -67,7 +67,6 @@ fn spec(router: &Path, ty: &str) -> gdl_gen::Spec {
 }
 
 #[test]
-#[ignore = "F1: selector library names bypass the generated segment's crate-name checks"]
 fn check_refuses_a_selector_library_that_shadows_the_runtime() {
     let router = router(&fixture_text("router/src/lib.rs"), "gdl_runtime");
     let spec = spec(router.path(), "gdl_runtime::ByText");
