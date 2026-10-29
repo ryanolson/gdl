@@ -719,6 +719,8 @@ fn a_source_that_reads_stdin_is_refused() {
 
 #[path = "k8s/credentials.rs"]
 mod credentials;
+#[path = "k8s/images.rs"]
+mod images;
 #[path = "k8s/labels.rs"]
 mod labels;
 #[path = "k8s/probes.rs"]

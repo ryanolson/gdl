@@ -37,12 +37,17 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
     let declared: Vec<&str> = settings.secret_names().collect();
     for (name, cluster) in fleet.clusters() {
         let table = || Some(format!("cluster.{name}"));
-        if cluster.registry.is_none() {
-            problems.push(Problem::at(
+        match &cluster.registry {
+            None => problems.push(Problem::at(
                 table(),
                 None,
                 "has no `registry`: the cluster pulls its pools' images from it",
-            ));
+            )),
+            Some(registry) => {
+                if let Err(message) = objects::check_registry(registry) {
+                    problems.push(Problem::at(table(), Some("registry".into()), message));
+                }
+            }
         }
         match &cluster.platform {
             None => problems.push(Problem::at(

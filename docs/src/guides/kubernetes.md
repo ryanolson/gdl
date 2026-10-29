@@ -62,7 +62,7 @@ cargo gdl k8s --spec gdl.toml --fleet fleet.toml --out target/k8s
 `k8s` runs the same check as `cargo gdl check --fleet` first, and then refuses a fleet that cannot run on Kubernetes. It names each problem at its table:
 
 - The fleet has no `[fleet] name`.
-- A cluster has no `registry` or no `platform`, or a platform that is not `<os>/<arch>`.
+- A cluster has no `registry` or no `platform`, a registry that is not `host[:port][/path]` (no scheme, tag, or digest), or a platform that is not `<os>/<arch>`.
 - A pool has no `cluster`.
 - A key of a cluster's `secrets` is not a secret of the spec's `[deployment.secrets]`.
 - A segment that a pool runs mounts a secret that the pool's cluster does not map.

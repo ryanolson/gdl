@@ -590,6 +590,49 @@ pub(super) fn check_platform(platform: &str) -> Result<(), String> {
     ))
 }
 
+/// Refuse a registry that cannot start an image reference: a host, with a
+/// port if it has one, and then path components, or path components alone,
+/// which name a Docker Hub namespace. A scheme, a tag, or a digest would
+/// make every image name one that Docker refuses.
+pub(super) fn check_registry(registry: &str) -> Result<(), String> {
+    let mut parts = registry.trim_end_matches('/').split('/').peekable();
+    let first = parts.peek().copied().unwrap_or_default();
+    let host = first.contains(['.', ':']) || first == "localhost";
+    if host {
+        parts.next();
+    }
+    let host_ok = !host || {
+        let (name, port) = first.split_once(':').unwrap_or((first, "1"));
+        let label = |label: &str| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        };
+        name.split('.').all(label) && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+    };
+    // A path component: lowercase letters and digits, joined by `.`, `_`,
+    // `__`, or runs of `-`.
+    let component = |part: &str| {
+        let alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+        let separator =
+            |run: &str| matches!(run, "." | "_" | "__") || run.chars().all(|c| c == '-');
+        !part.is_empty()
+            && part.starts_with(alnum)
+            && part.ends_with(alnum)
+            && part
+                .split(alnum)
+                .filter(|run| !run.is_empty())
+                .all(separator)
+    };
+    if host_ok && parts.all(component) && !registry.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`{registry}` is not a registry that an image reference can start with: write `host[:port][/path]`, with no scheme, tag, or digest, such as `registry.example:5000/gdl`"
+    ))
+}
+
 /// Refuse a tag that an image reference cannot hold.
 pub(super) fn check_tag(tag: &str) -> Result<(), Error> {
     let shaped = tag.len() <= 128
@@ -712,6 +755,37 @@ mod tests {
         assert_eq!(start, &long[..LABEL_PREFIX]);
         assert!(hash.starts_with('-') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(label_value(&"m".repeat(65)), label);
+    }
+
+    /// A registry is a host and a path, or a path alone; a scheme, a tag,
+    /// or a digest is refused.
+    #[test]
+    fn a_registry_starts_an_image_reference() {
+        for registry in [
+            "registry.example/gdl",
+            "registry.example:5000/gdl/team",
+            "localhost:5000",
+            "localhost",
+            "000000000000.dkr.ecr.us-east-1.amazonaws.com/gdl",
+            "myorg",
+            "my-org/my__sub.part",
+            "registry.example/gdl/",
+        ] {
+            assert!(check_registry(registry).is_ok(), "{registry}");
+        }
+        for registry in [
+            "",
+            "https://registry.example/gdl",
+            "registry.example/gdl:tag",
+            "registry.example/gdl@sha256:00",
+            "registry.example/GDL",
+            "registry.example:/gdl",
+            "registry.example//gdl",
+            "-bad.example/gdl",
+            "registry.example/gdl-",
+        ] {
+            assert!(check_registry(registry).is_err(), "{registry}");
+        }
     }
 
     /// A platform is `<os>/<arch>`, with an optional variant; a tag is what

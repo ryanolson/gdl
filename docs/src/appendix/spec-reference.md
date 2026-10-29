@@ -102,7 +102,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[cluster.<name>] context` | the kube context that reaches the cluster, not empty | required |
 | `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
 | `[cluster.<name>] region` | the region of every pool in the cluster | required |
-| `[cluster.<name>] registry` | the registry the cluster pulls images from; `cargo gdl k8s` requires it | none |
+| `[cluster.<name>] registry` | the registry the cluster pulls images from, as `host[:port][/path]` with no scheme, tag, or digest; `cargo gdl k8s` requires it | none |
 | `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64`; `cargo gdl k8s` requires it | none |
 | `[cluster.<name>] service_account_annotations` | annotations of the pools' service account, such as a cloud role | none |
 | `[cluster.<name>] secrets` | spec secret name to the name of an existing Kubernetes Secret that holds it in this cluster, under a key of the spec secret's name | none |
