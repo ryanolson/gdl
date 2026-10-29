@@ -463,7 +463,8 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
                 property: gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": "llama-70b" }),
-                ),
+                )
+                .expect("a key"),
                 state: gdl_pools::PropertyState::Ready,
                 since: 2,
             },
@@ -471,7 +472,8 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
                 property: gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": "qwen-32b" }),
-                ),
+                )
+                .expect("a key"),
                 state: gdl_pools::PropertyState::Drained,
                 since: 3,
             },
@@ -1152,7 +1154,8 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+                    .expect("a key"),
                 gdl_model::EntryState::Ready,
             )],
         )]),
@@ -1216,7 +1219,8 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
         Duration::from_secs(30),
     );
     held.properties = vec![gdl_pools::PoolProperty {
-        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+            .expect("a key"),
         state: gdl_pools::PropertyState::Ready,
         since: 3,
     }];
@@ -1309,7 +1313,7 @@ async fn a_parent_lists_its_childrens_properties_and_no_other_pools() {
     )
     .await;
     let declared = |property: &str| {
-        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property }))
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property })).expect("a key")
     };
     let _child = relay_pool(
         &spec,

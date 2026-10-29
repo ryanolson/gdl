@@ -75,7 +75,8 @@ fn a_malformed_list_is_refused_whole() {
     );
     let twice = [r#"{"partition":null,"name":"m"}"#, r#"{"name":"m"}"#].map(|key| {
         PropertyEntry::new(
-            gdl_model::PropertyKey::new("test", serde_json::from_str(key).expect("json")),
+            gdl_model::PropertyKey::new("test", serde_json::from_str(key).expect("json"))
+                .expect("a key"),
             EntryState::Ready,
         )
     });

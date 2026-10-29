@@ -62,7 +62,8 @@ fn listing(
                     property: gdl_model::PropertyKey::new(
                         "test",
                         serde_json::json!({ "name": *property }),
-                    ),
+                    )
+                    .expect("a key"),
                     state: *state,
                     since: version,
                 })

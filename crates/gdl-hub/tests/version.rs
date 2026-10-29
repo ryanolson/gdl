@@ -36,7 +36,8 @@ async fn a_recovered_writer_epoch_raises_the_properties_version() {
         load: None,
         presence: Presence::Serving,
         properties: vec![PoolProperty {
-            property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+            property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+                .expect("a key"),
             state: PropertyState::Ready,
             since: epoch * (1 << 20) + 1,
         }],
@@ -175,7 +176,8 @@ async fn a_repeated_writer_epoch_keeps_property_versions_increasing() {
                                 property: gdl_model::PropertyKey::new(
                                     "test",
                                     serde_json::json!({ "name": "m" }),
-                                ),
+                                )
+                                .expect("a key"),
                                 state: PropertyState::Ready,
                                 since: version,
                             }],

@@ -232,10 +232,13 @@ async fn a_restarted_hub_keeps_its_properties_history() {
 async fn a_pool_publishes_the_properties_its_settings_declare() {
     let directory = MemoryDirectory::new();
     let settings = PoolSettings {
-        properties: vec![gdl_model::PropertyKey::new(
-            "test",
-            serde_json::json!({ "name": "llama-70b", "partition": "a" }),
-        )],
+        properties: vec![
+            gdl_model::PropertyKey::new(
+                "test",
+                serde_json::json!({ "name": "llama-70b", "partition": "a" }),
+            )
+            .expect("a key"),
+        ],
         ..pool()
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
@@ -247,7 +250,8 @@ async fn a_pool_publishes_the_properties_its_settings_declare() {
             property: gdl_model::PropertyKey::new(
                 "test",
                 serde_json::json!({ "name": "llama-70b", "partition": "a" })
-            ),
+            )
+            .expect("a key"),
             state: PropertyState::Starting,
             since: first.properties_version,
         }]
@@ -563,7 +567,7 @@ async fn revoke_written(hub: &Hub, body: &str, revoked: bool) -> u16 {
 
 /// The key of the test property `{ name }`.
 fn key(name: &str) -> PropertyKey {
-    gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }))
+    gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })).expect("a key")
 }
 
 /// A set serving llama-70b and acme-legal: revoking acme-legal takes it
@@ -741,7 +745,10 @@ async fn two_encodings_of_a_key_name_one_property() {
     let [a, b] = entries(&hub, &readiness).await;
     let written = |text: &str| {
         let key = serde_json::from_str(text).expect("json");
-        PropertyEntry::new(PropertyKey::new("test", key), EntryState::Ready)
+        PropertyEntry::new(
+            PropertyKey::new("test", key).expect("a key"),
+            EntryState::Ready,
+        )
     };
     send(
         &a,
@@ -982,7 +989,7 @@ async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
 
     directory.close();
     let revoking = readiness.revoke(
-        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })).expect("a key"),
         true,
     );
     tokio::pin!(revoking);

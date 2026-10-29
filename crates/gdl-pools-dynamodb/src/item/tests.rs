@@ -30,7 +30,8 @@ fn pool(properties: usize, properties_version: u64) -> PoolRecord {
                 property: gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": format!("shard-{n}") }),
-                ),
+                )
+                .expect("a key"),
                 state: PropertyState::Ready,
                 since: properties_version,
             })
@@ -92,10 +93,10 @@ fn a_record_without_properties_or_revocations_has_no_list() {
     assert_eq!(read_back(&published), published);
 
     let revoked = PoolRecord {
-        revoked: vec![gdl_model::PropertyKey::new(
-            "test",
-            serde_json::json!({ "name": "qwen-32b" }),
-        )],
+        revoked: vec![
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "qwen-32b" }))
+                .expect("a key"),
+        ],
         ..pool(0, 5)
     };
     assert!(record(&revoked, 1).expect("encodes").list.is_some());

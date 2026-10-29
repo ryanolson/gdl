@@ -7,7 +7,7 @@ use super::{Offer, Properties, PropertyList, floor};
 
 /// The key of the test property `{ name }`.
 fn key(name: &str) -> PropertyKey {
-    PropertyKey::new("test", json!({ "name": name }))
+    PropertyKey::new("test", json!({ "name": name })).expect("a key")
 }
 
 fn says(name: &str, state: EntryState) -> PropertyEntry {
@@ -449,7 +449,8 @@ fn two_encodings_of_a_key_make_one_entry_in_the_form_first_reported() {
         marker: (),
     }
     let said = |text: &str| {
-        let key = PropertyKey::new("test", serde_json::from_str(text).expect("json"));
+        let key =
+            PropertyKey::new("test", serde_json::from_str(text).expect("json")).expect("a key");
         [PropertyEntry::new(key, SaysReady)]
     };
     for (first, second) in [
@@ -487,7 +488,7 @@ fn two_encodings_of_a_key_make_one_entry_in_the_form_first_reported() {
 /// the instance says nothing of, not only for an instance silent on all.
 #[test]
 fn declared_properties_of_a_kind_an_instance_lists_none_of_are_served() {
-    let shard = PropertyKey::new("shard", json!({ "name": "s" }));
+    let shard = PropertyKey::new("shard", json!({ "name": "s" })).expect("a key");
     let mut properties = Properties::new(vec![key("x"), shard.clone()]);
     properties.restore(None, 10);
     let own = [says("z", SaysReady)];

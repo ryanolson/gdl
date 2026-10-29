@@ -83,14 +83,10 @@ impl<T> fmt::Debug for PropertyKind<T> {
 impl<T: Serialize + DeserializeOwned + Ord + Send + Sync + 'static> PropertyKind<T> {
     /// The encoded property of this kind whose key is `key`, or why it
     /// cannot be one: a kind name of the wrong shape, or a key that does
-    /// not encode as an object.
+    /// not encode as an object of integers and other values
+    /// ([`PropertyKey::new`]).
     pub fn encode(&self, key: &T) -> Result<PropertyKey> {
-        let property =
-            PropertyKey::encode(self.name, key).map_err(|why| Error::new(ErrorKind::Node, why))?;
-        property
-            .check()
-            .map_err(|why| Error::new(ErrorKind::Node, why))?;
-        Ok(property)
+        PropertyKey::encode(self.name, key).map_err(|why| Error::new(ErrorKind::Node, why))
     }
 }
 
@@ -203,8 +199,6 @@ impl InstanceProperties {
                     ),
                 ));
             }
-            key.check()
-                .map_err(|why| Error::new(ErrorKind::Node, why))?;
             if !keys.insert(key.clone()) {
                 return Err(Error::new(
                     ErrorKind::Node,

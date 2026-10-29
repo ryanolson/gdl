@@ -416,13 +416,10 @@ impl Feed {
                 "instance {owner}'s registration is not the one the report's credential is of"
             )),
             Some(entry) if entry.usable() => {
-                let mut lists = std::mem::take(&mut load.properties);
+                let lists = std::mem::take(&mut load.properties);
                 let said = if lists.is_empty() {
                     Said::Silent(lease.epoch)
                 } else {
-                    for entries in lists.values_mut() {
-                        entries.retain(|entry| entry.property().check().is_ok());
-                    }
                     Said::Listed(lists, lease.epoch)
                 };
                 let draining: Vec<PropertyKey> = match &said {

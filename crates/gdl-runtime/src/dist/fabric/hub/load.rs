@@ -245,7 +245,8 @@ mod properties {
     const PERIOD: Duration = Duration::from_secs(10);
 
     fn ready(name: &str) -> PropertyEntry {
-        let key = gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }));
+        let key = gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }))
+            .expect("a key");
         PropertyEntry::new(key, EntryState::Ready)
     }
 

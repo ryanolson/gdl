@@ -192,7 +192,7 @@ fn a_key_that_does_not_decode_is_left_out_and_counted() {
     kinds.register(&EMPTY).expect("registered");
     let listed = |kind: &str, key: serde_json::Value, name: &str| {
         (
-            PropertyKey::new(kind, key),
+            PropertyKey::new(kind, key).expect("a key"),
             pool(name, PropertyState::Ready),
         )
     };
@@ -250,11 +250,11 @@ fn two_keys_that_decode_alike_are_one_entry_the_first() {
         true,
         &[
             (
-                PropertyKey::new("test", json!({"name": "qwen"})),
+                PropertyKey::new("test", json!({"name": "qwen"})).expect("a key"),
                 pool("model-x-01", PropertyState::Draining),
             ),
             (
-                PropertyKey::new("test", json!({"name": "qwen", "weight": 2})),
+                PropertyKey::new("test", json!({"name": "qwen", "weight": 2})).expect("a key"),
                 pool("model-x-01", PropertyState::Ready),
             ),
         ],

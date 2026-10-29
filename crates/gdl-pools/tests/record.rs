@@ -17,8 +17,9 @@ fn key(name: &str, partition: Option<&str>) -> PropertyKey {
     match partition {
         Some(partition) => {
             PropertyKey::new("test", json!({ "name": name, "partition": partition }))
+                .expect("a key")
         }
-        None => PropertyKey::new("test", json!({ "name": name })),
+        None => PropertyKey::new("test", json!({ "name": name })).expect("a key"),
     }
 }
 
@@ -441,18 +442,13 @@ fn only_a_serving_record_has_a_lease() {
     );
 }
 
-/// The properties are not checked with the record: a parent that refused
-/// a record for one malformed property would drop the whole pool.
+/// A property is checked when it is read, as when it is made, so a record
+/// whose stored property does not check, a float in its key, does not
+/// read: no record holds a property that could not be published.
 #[test]
-fn a_record_is_not_refused_for_its_properties() {
-    PoolRecord {
-        properties: vec![PoolProperty {
-            property: PropertyKey::new("", json!("not an object")),
-            state: PropertyState::Ready,
-            since: 1,
-        }],
-        ..record()
-    }
-    .check()
-    .expect("a record with a malformed property");
+fn a_record_with_a_malformed_property_does_not_read() {
+    let mut value = serde_json::to_value(record()).expect("json");
+    value["properties"][0]["key"]["ratio"] = json!(0.5);
+    let refused = serde_json::from_value::<PoolRecord>(value).expect_err("a float in a key");
+    assert!(refused.to_string().contains("not an integer"), "{refused}");
 }

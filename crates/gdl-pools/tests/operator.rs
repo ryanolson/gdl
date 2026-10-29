@@ -35,7 +35,8 @@ fn last(epoch: u64, seq: u64) -> PoolRecord {
         presence: Presence::Serving,
         properties: ["a", "b"]
             .map(|name| PoolProperty {
-                property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })),
+                property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }))
+                    .expect("a key"),
                 state: PropertyState::Ready,
                 since: 7,
             })

@@ -58,7 +58,8 @@ fn record(
                 property: gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": *property }),
-                ),
+                )
+                .expect("a key"),
                 state: *state,
                 since: 7,
             })
@@ -309,7 +310,8 @@ fn says(property: &str, state: EntryState) -> LoadReport {
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property }))
+                    .expect("a key"),
                 state,
             )],
         )]),
@@ -570,8 +572,10 @@ async fn a_revoked_property_leaves_the_pools_listing() {
     let directory = Resolving::new();
     let settings = gdl_model::PoolSettings {
         properties: vec![
-            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "acme-legal" })),
-            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "llama-70b" })),
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "acme-legal" }))
+                .expect("a key"),
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "llama-70b" }))
+                .expect("a key"),
         ],
         ..model(POOL, "us-east-1", "model-x-01-hub:1337")
     };
@@ -605,10 +609,10 @@ async fn a_revoked_property_leaves_the_pools_listing() {
         control(
             &model_hub,
             gdl_watch::REVOKE_ROUTE,
-            Some(gdl_model::PropertyKey::new(
-                "test",
-                serde_json::json!({ "name": "acme-legal" })
-            ))
+            Some(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "acme-legal" }))
+                    .expect("a key")
+            )
         )
         .await,
         204
@@ -619,10 +623,10 @@ async fn a_revoked_property_leaves_the_pools_listing() {
     .await;
     assert_eq!(
         revoked.properties.revoked,
-        [gdl_model::PropertyKey::new(
-            "test",
-            serde_json::json!({ "name": "acme-legal" })
-        )]
+        [
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "acme-legal" }))
+                .expect("a key")
+        ]
     );
     let (events, _) = snapshot(&mut global.follows()).await;
     let shown = listings(&events);

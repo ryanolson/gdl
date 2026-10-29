@@ -24,7 +24,7 @@ fn report() -> LoadReport {
         properties: PropertyLists::from([(
             "test".to_string(),
             vec![PropertyEntry::new(
-                PropertyKey::new("test", json!({ "name": "x", "partition": "a" })),
+                PropertyKey::new("test", json!({ "name": "x", "partition": "a" })).expect("a key"),
                 EntryState::Ready,
             )],
         )]),

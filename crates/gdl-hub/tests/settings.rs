@@ -641,11 +641,13 @@ fn a_pools_declared_properties_are_read_from_the_environment() {
         assert_eq!(
             pool.map(|pool| pool.properties),
             Some(vec![
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "a" })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "a" }))
+                    .expect("a key"),
                 gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": "b", "partition": "p" })
-                ),
+                )
+                .expect("a key"),
             ])
         );
         jail.set_env("GDL_POOL__PROPERTIES__TEST", r#"["a"]"#);

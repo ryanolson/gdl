@@ -485,7 +485,8 @@ fn a_property_drain_waits_for_a_report_from_a_renewed_registration() {
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+                    .expect("a key"),
                 EntryState::Draining,
             )],
         )]),
@@ -520,7 +521,8 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
     use gdl_pools::{PoolProperty, PropertyState};
 
     let snapshot = [PoolProperty {
-        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+            .expect("a key"),
         state: PropertyState::Ready,
         since: 7,
     }];
@@ -537,7 +539,8 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+                    .expect("a key"),
                 EntryState::Draining,
             )],
         )]),

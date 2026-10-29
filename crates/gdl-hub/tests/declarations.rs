@@ -1,3 +1,7 @@
+//! A pool's declared properties built in code, not read from its
+//! settings: they hold only keys that check, since a key that does not
+//! cannot be made or read.
+
 mod common;
 
 use gdl_hub::PoolReadiness;
@@ -5,8 +9,10 @@ use gdl_model::{PoolSettings, PropertyKey};
 use gdl_pools::MemoryDirectory;
 use serde_json::json;
 
+/// A pool built in code takes a key of integers. A key with a float, which
+/// JSON does not read back exactly, cannot be made, nor read from JSON, so
+/// no path declares it to a pool.
 #[test]
-#[ignore = "F3: programmatic pool declarations bypass the property key's float check"]
 fn a_programmatic_pool_refuses_a_float_property() {
     let declare = |key| {
         PoolReadiness::new(
@@ -19,18 +25,13 @@ fn a_programmatic_pool_refuses_a_float_property() {
             common::timing(),
         )
     };
-    assert!(declare(PropertyKey::new("test", json!({"count": 1}))).is_ok());
+    let key = PropertyKey::new("test", json!({"count": 1})).expect("a key");
+    assert!(declare(key).is_ok());
 
-    let key = PropertyKey::new("test", json!({"ratio": 1.5801779765215413}));
-    assert!(
-        key.check().is_err(),
-        "the key is outside the supported domain"
-    );
-    let written = serde_json::to_string(&key).expect("a key serializes");
-    let read: PropertyKey = serde_json::from_str(&written).expect("a key reads");
-    assert_ne!(read, key, "this float changes identity across JSON");
-    assert!(
-        declare(key).is_err(),
-        "PoolReadiness::new accepts an unsupported property through PoolSettings.properties"
-    );
+    let float = json!({"ratio": 1.5801779765215413});
+    let refused = PropertyKey::new("test", float.clone()).expect_err("a float");
+    assert!(refused.contains("not an integer"), "{refused}");
+    let written = json!({"kind": "test", "key": float}).to_string();
+    let read = serde_json::from_str::<PropertyKey>(&written).expect_err("a float read");
+    assert!(read.to_string().contains("not an integer"), "{read}");
 }

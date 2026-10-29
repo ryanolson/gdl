@@ -37,10 +37,10 @@ fn child(parent_hub: Option<&str>) -> PoolSettings {
     ))
     .expect("valid test fixture");
     PoolSettings {
-        properties: vec![gdl_model::PropertyKey::new(
-            "test",
-            serde_json::json!({ "name": "llama-70b" }),
-        )],
+        properties: vec![
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "llama-70b" }))
+                .expect("a key"),
+        ],
         ..settings
     }
 }

@@ -142,7 +142,8 @@ fn record(pool: &str, epoch: u64, seq: u64, properties: &[&str]) -> PoolRecord {
                 property: gdl_model::PropertyKey::new(
                     "test",
                     serde_json::json!({ "name": *property }),
-                ),
+                )
+                .expect("a key"),
                 state: PropertyState::Ready,
                 since: epoch << 32,
             })

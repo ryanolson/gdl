@@ -841,8 +841,8 @@ impl TryFrom<Table> for PoolSettings {
         let mut declared = BTreeSet::new();
         for (kind, keys) in table.properties {
             for key in keys {
-                let property = PropertyKey::new(kind.clone(), key);
-                property.check().map_err(|why| at("properties", why))?;
+                let property =
+                    PropertyKey::new(kind.clone(), key).map_err(|why| at("properties", why))?;
                 if !declared.insert(property.clone()) {
                     return Err(at(
                         "properties",

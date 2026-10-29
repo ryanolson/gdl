@@ -56,9 +56,10 @@ pub struct PoolRecord {
     /// The properties the pool serves, each with its state, sorted by
     /// kind, then key. An entry stays until the pool withdraws, unless it
     /// is `drained`: at most [`PoolRecord::MAX_DRAINED`] of those are kept,
-    /// the oldest dropped first. Not checked with the record, so that one
-    /// malformed property never costs the pool its record. A directory
-    /// stores the keys as they are, and never reads a kind.
+    /// the oldest dropped first. Each key is checked when it is made or
+    /// read ([`gdl_model::PropertyKey::new`]), so a record that reads holds
+    /// no malformed property. A directory stores the keys as they are, and
+    /// never reads a kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<PoolProperty>,
     /// Raised on every change of `properties`, and never lowered, also
@@ -171,7 +172,7 @@ pub enum PoolCondition {
 /// One property a pool serves, in its record: the property, and what the
 /// pool can do with it, with its history.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(from = "PropertyWire", into = "PropertyWire")]
+#[serde(try_from = "PropertyWire", into = "PropertyWire")]
 pub struct PoolProperty {
     /// The property: its kind and its key, as the pool's instances or its
     /// settings named it.
@@ -192,13 +193,15 @@ struct PropertyWire {
     since: u64,
 }
 
-impl From<PropertyWire> for PoolProperty {
-    fn from(wire: PropertyWire) -> Self {
-        Self {
-            property: gdl_model::PropertyKey::new(wire.kind, wire.key),
+impl TryFrom<PropertyWire> for PoolProperty {
+    type Error = String;
+
+    fn try_from(wire: PropertyWire) -> Result<Self, String> {
+        Ok(Self {
+            property: gdl_model::PropertyKey::new(wire.kind, wire.key)?,
             state: wire.state,
             since: wire.since,
-        }
+        })
     }
 }
 

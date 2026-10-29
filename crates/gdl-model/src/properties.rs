@@ -11,14 +11,15 @@ use serde_json::{Map, Number, Value};
 /// decodes a key only where a node or a pool policy registered the kind
 /// (`gdl::PropertyKind`).
 ///
+/// A key is checked when it is made and when it is read
+/// ([`PropertyKey::new`]), so every key that exists can be published.
+///
 /// Two keys are compared, ordered, and hashed in a canonical form, so that
-/// two builds that encode one value differently name one property: an
-/// object's fields are sorted by name, and a field whose value is `null`
-/// is left out, as a missing optional field is. The key itself is kept,
-/// and written, as it was made or read: a field that the type requires
-/// and that encodes as `null` stays, so the key still decodes.
+/// two builds that write one value's fields in another order name one
+/// property: an object's fields are sorted by name. The key itself is
+/// kept, and written, as it was made or read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "KeyWire", into = "KeyWire")]
+#[serde(try_from = "KeyWire", into = "KeyWire")]
 pub struct PropertyKey {
     kind: String,
     key: Value,
@@ -28,22 +29,40 @@ pub struct PropertyKey {
 }
 
 impl PropertyKey {
-    /// The property of `kind` whose key is `key`, kept as it is.
-    pub fn new(kind: impl Into<String>, key: Value) -> Self {
-        Self {
-            kind: kind.into(),
+    /// The property of `kind` whose key is `key`, kept as it is, or why it
+    /// cannot be one: a kind name not of a settings key's shape
+    /// ([`check_property_kind`]), a key that is not an object, as the
+    /// encoding of a message type is, or a key that holds a number that is
+    /// not an integer. JSON reads a float back as a near value, not always
+    /// the same one, so a key with a float would not name its property
+    /// after a report or a stored record.
+    pub fn new(kind: impl Into<String>, key: Value) -> Result<Self, String> {
+        let kind = kind.into();
+        check_property_kind(&kind)?;
+        if !key.is_object() {
+            return Err(format!(
+                "a key of property kind `{kind}` must be an object, not `{key}`"
+            ));
+        }
+        if let Some(number) = fraction(&key) {
+            return Err(format!(
+                "a key of property kind `{kind}` holds `{number}`, a number that is not an integer: a property's numbers must be integers"
+            ));
+        }
+        Ok(Self {
+            kind,
             canonical: canonical(key.clone()),
             key,
-        }
+        })
     }
 
     /// The property of `kind` whose key is `key` encoded, or why it cannot
-    /// be encoded.
+    /// be one: as [`PropertyKey::new`], or a key that does not encode.
     pub fn encode<T: Serialize + ?Sized>(kind: impl Into<String>, key: &T) -> Result<Self, String> {
         let kind = kind.into();
-        serde_json::to_value(key)
-            .map(|key| Self::new(kind.clone(), key))
-            .map_err(|e| format!("a key of property kind `{kind}` cannot be encoded: {e}"))
+        let key = serde_json::to_value(key)
+            .map_err(|e| format!("a key of property kind `{kind}` cannot be encoded: {e}"))?;
+        Self::new(kind, key)
     }
 
     /// The property's kind.
@@ -56,29 +75,6 @@ impl PropertyKey {
     #[inline]
     pub fn key(&self) -> &Value {
         &self.key
-    }
-
-    /// Whether the property can be published: a kind name of its shape
-    /// ([`check_property_kind`]), and a key that is an object, as the
-    /// encoding of a message type is, and holds no number that is not an
-    /// integer. JSON reads a float back as a near value, not always the
-    /// same one, so a key with a float would not name its property after
-    /// a report or a stored record.
-    pub fn check(&self) -> Result<(), String> {
-        check_property_kind(&self.kind)?;
-        if !self.key.is_object() {
-            return Err(format!(
-                "a key of property kind `{}` must be an object, not `{}`",
-                self.kind, self.key
-            ));
-        }
-        if let Some(number) = fraction(&self.key) {
-            return Err(format!(
-                "a key of property kind `{}` holds `{number}`, a number that is not an integer: a property's numbers must be integers",
-                self.kind
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -118,7 +114,7 @@ impl Ord for PropertyKey {
 /// property, and whether the instance can serve it now. A field a later
 /// build adds is ignored, so builds roll one instance at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(from = "EntryWire", into = "EntryWire")]
+#[serde(try_from = "EntryWire", into = "EntryWire")]
 pub struct PropertyEntry {
     property: PropertyKey,
     state: EntryState,
@@ -199,8 +195,7 @@ fn fraction(value: &Value) -> Option<&Number> {
 
 /// `value` in its canonical form: each object's fields sorted by name,
 /// with every `null` field left out, at any depth. An array keeps its
-/// order and its `null`s, which are its own. A negative zero is zero, so
-/// that equal keys order equal.
+/// order and its `null`s, which are its own.
 fn canonical(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -213,9 +208,6 @@ fn canonical(value: Value) -> Value {
             Value::Object(fields.into_iter().collect::<Map<String, Value>>())
         }
         Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
-        Value::Number(number) if number.as_f64() == Some(0.0) && number.is_f64() => {
-            Value::Number(Number::from_f64(0.0).unwrap_or(number))
-        }
         value => value,
     }
 }
@@ -255,22 +247,14 @@ fn compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-/// Integers by value, floats by value, and an integer before a float of
-/// the same value, which `serde_json` holds unequal.
+/// Integers by value: a key holds no other number.
 fn numbers(a: &Number, b: &Number) -> Ordering {
     let integer = |n: &Number| {
         n.as_i64()
             .map(i128::from)
             .or_else(|| n.as_u64().map(i128::from))
     };
-    match (integer(a), integer(b)) {
-        (Some(a), Some(b)) => a.cmp(&b),
-        _ => {
-            let (x, y) = (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(0.0));
-            x.total_cmp(&y)
-                .then_with(|| integer(b).is_some().cmp(&integer(a).is_some()))
-        }
-    }
+    integer(a).cmp(&integer(b))
 }
 
 /// A key as it is written.
@@ -280,8 +264,10 @@ struct KeyWire {
     key: Value,
 }
 
-impl From<KeyWire> for PropertyKey {
-    fn from(wire: KeyWire) -> Self {
+impl TryFrom<KeyWire> for PropertyKey {
+    type Error = String;
+
+    fn try_from(wire: KeyWire) -> Result<Self, String> {
         Self::new(wire.kind, wire.key)
     }
 }
@@ -303,12 +289,14 @@ struct EntryWire {
     state: EntryState,
 }
 
-impl From<EntryWire> for PropertyEntry {
-    fn from(wire: EntryWire) -> Self {
-        Self {
-            property: PropertyKey::new(wire.kind, wire.key),
+impl TryFrom<EntryWire> for PropertyEntry {
+    type Error = String;
+
+    fn try_from(wire: EntryWire) -> Result<Self, String> {
+        Ok(Self {
+            property: PropertyKey::new(wire.kind, wire.key)?,
             state: wire.state,
-        }
+        })
     }
 }
 

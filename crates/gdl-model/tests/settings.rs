@@ -768,9 +768,10 @@ fn a_pool_declares_the_properties_it_serves() {
     assert_eq!(
         declared.properties,
         [
-            PropertyKey::new("other", serde_json::json!({ "name": "a" })),
-            PropertyKey::new("test", serde_json::json!({ "name": "b" })),
-            PropertyKey::new("test", serde_json::json!({ "name": "c", "partition": "a" })),
+            PropertyKey::new("other", serde_json::json!({ "name": "a" })).expect("a key"),
+            PropertyKey::new("test", serde_json::json!({ "name": "b" })).expect("a key"),
+            PropertyKey::new("test", serde_json::json!({ "name": "c", "partition": "a" }))
+                .expect("a key"),
         ]
     );
     let text = toml::to_string(&declared).expect("toml");

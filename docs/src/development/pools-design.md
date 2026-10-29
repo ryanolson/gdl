@@ -158,7 +158,9 @@ Every field of a key is part of its identity. Each layer compares, orders, and h
 
 **Rejected: storing the canonical form.** A type whose field is required and encodes as `null`, such as `()`, no longer decodes once the field is left out, and its entry would be counted as undecodable.
 
-A key's numbers must be integers. JSON reads a float back as a near value, not always the same one, so a key with a float would name another property after a report or a stored record.
+A key's numbers must be integers. JSON reads a float back as a near value, not always the same one, so a key with a float would name another property after a report or a stored record. `PropertyKey` checks a key when it is made and when it is read, and has no other constructor, so a key that exists can be published.
+
+**Rejected: a check at each place a key enters.** Settings built in code, not read, skipped it, and a hub took a float key from them.
 
 **Rejected: reading floats exactly (`serde_json`'s `float_roundtrip`).** The feature unifies into every `serde_json` of the process, the JSON edge codec on the request path included.
 

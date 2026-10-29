@@ -601,16 +601,14 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// properties at once, whatever the instances say, until it is lifted; the
     /// record keeps the revocation, so a restarted hub keeps it too. A
     /// lifted property is listed again as the instances say, starting afresh.
-    /// Refused for a malformed property, and when the directory has not stored
-    /// such a record within 5 s, or a later request replaced it, or the hub
-    /// has stopped: the revocation holds all the same, and the next write
-    /// carries it.
+    /// Refused when the directory has not stored such a record within 5
+    /// s, or a later request replaced it, or the hub has stopped: the
+    /// revocation holds all the same, and the next write carries it.
     pub async fn revoke(
         &self,
         key: gdl_model::PropertyKey,
         revoked: bool,
     ) -> Result<(), PoolError> {
-        key.check().map_err(PoolError::new)?;
         let mut stored = self.stored.subscribe();
         // Taken at once: before the pool's last record is read, the table
         // keeps it to apply over the record's own revocations.
@@ -1156,14 +1154,14 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
             )
             .route(
                 gdl_watch::REVOKE_ROUTE,
-                post(move |Json(key): Json<gdl_model::PropertyKey>| async move {
-                    revoke(&revoking, key, true).await
+                post(move |body: velo_hub::axum::body::Bytes| async move {
+                    revoke(&revoking, &body, true).await
                 }),
             )
             .route(
                 gdl_watch::LIFT_ROUTE,
-                post(move |Json(key): Json<gdl_model::PropertyKey>| async move {
-                    revoke(&lifting, key, false).await
+                post(move |body: velo_hub::axum::body::Bytes| async move {
+                    revoke(&lifting, &body, false).await
                 }),
             )
             .route(
@@ -1292,17 +1290,15 @@ async fn command_child<D: PoolDirectory>(
     }
 }
 
-/// Revoke `key` on `pool`, or lift its revocation, and answer: a
-/// malformed property is the caller's (400), and anything else is the
-/// directory's (503).
-async fn revoke<D: PoolDirectory>(
-    pool: &PoolReadiness<D>,
-    key: gdl_model::PropertyKey,
-    revoked: bool,
-) -> Response {
-    if let Err(why) = key.check() {
-        return (StatusCode::BAD_REQUEST, why).into_response();
-    }
+/// Revoke the property `body` names on `pool`, or lift its revocation,
+/// and answer: a malformed property is the caller's (400), and anything
+/// else is the directory's (503). The body is read here, not by `Json`,
+/// so that a key that does not check is a 400 as a malformed body is.
+async fn revoke<D: PoolDirectory>(pool: &PoolReadiness<D>, body: &[u8], revoked: bool) -> Response {
+    let key = match serde_json::from_slice::<gdl_model::PropertyKey>(body) {
+        Ok(key) => key,
+        Err(why) => return (StatusCode::BAD_REQUEST, why.to_string()).into_response(),
+    };
     match pool.revoke(key, revoked).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),

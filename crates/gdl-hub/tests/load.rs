@@ -308,7 +308,8 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+                    .expect("a key"),
                 EntryState::Draining,
             )],
         )]),
@@ -375,7 +376,8 @@ async fn a_stored_drain_keeps_reporting_load_while_another_properties_record_cha
         properties: gdl_model::PropertyLists::from([(
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(
-                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })),
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }))
+                    .expect("a key"),
                 state,
             )],
         )]),

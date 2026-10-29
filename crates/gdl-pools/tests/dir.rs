@@ -668,7 +668,8 @@ async fn a_record_keeps_its_presence_and_properties_in_its_file() {
             property: gdl_model::PropertyKey::new(
                 "test",
                 serde_json::json!({ "name": "x", "partition": "a" }),
-            ),
+            )
+            .expect("a key"),
             state: gdl_pools::PropertyState::Unavailable,
             since: 4,
         }],
