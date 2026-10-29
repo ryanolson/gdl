@@ -849,6 +849,8 @@ mod tests {
             policies: Vec::new(),
             skipped: Vec::new(),
             skipped_policies: Vec::new(),
+            selectors: Vec::new(),
+            skipped_selectors: Vec::new(),
         }
     }
 

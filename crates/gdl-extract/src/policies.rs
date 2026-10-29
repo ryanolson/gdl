@@ -1,5 +1,6 @@
-//! The pool policies a crate implements: each impl of `PoolPolicy` for a
-//! type that a generated segment can name, with the head it reads.
+//! The pool policies and selectors a crate implements: each impl of
+//! `PoolPolicy` or `Selector` for a type that a generated segment can
+//! name, with the head it reads.
 
 use crate::canon::{Env, Ty, canonical};
 
@@ -9,20 +10,44 @@ use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
 use crate::{PolicyEntry, PolicyHead, Skipped};
 
-/// The pool policies of crate `krate`, and those it leaves out with why:
-/// the impls whose trait the resolver follows to gdl's `PoolPolicy`. Only
-/// a package that depends on gdl, itself or through others, can implement
-/// it, so a crate that does not has none, and the paths of one that does
-/// enter only such packages: a crate holds many impls of other traits, and
-/// their crates are not read for them (`tests/cost.rs` guards it).
-pub(crate) fn policies(
-    resolver: &mut Resolver<'_>,
-    krate: usize,
-) -> (Vec<PolicyEntry>, Vec<Skipped>) {
-    let (mut found, mut skipped) = (Vec::new(), Vec::new());
+/// What a crate offers to route by, and what it leaves out with why.
+#[derive(Default)]
+pub(crate) struct Routers {
+    pub(crate) policies: Vec<PolicyEntry>,
+    pub(crate) skipped_policies: Vec<Skipped>,
+    pub(crate) selectors: Vec<PolicyEntry>,
+    pub(crate) skipped_selectors: Vec<Skipped>,
+}
+
+/// Which of gdl's routing traits an impl is of.
+#[derive(Clone, Copy)]
+enum Kind {
+    PoolPolicy,
+    Selector,
+}
+
+impl Kind {
+    /// How a problem names an impl of it.
+    fn noun(self) -> &'static str {
+        match self {
+            Kind::PoolPolicy => "pool policy",
+            Kind::Selector => "selector",
+        }
+    }
+}
+
+/// The pool policies and selectors of crate `krate`, and those it leaves
+/// out with why: the impls whose trait the resolver follows to gdl's
+/// `PoolPolicy` or `Selector`. Only a package that depends on gdl, itself
+/// or through others, can implement them, so a crate that does not has
+/// none, and the paths of one that does enter only such packages: a crate
+/// holds many impls of other traits, and their crates are not read for
+/// them (`tests/cost.rs` guards it). Each impl's trait is resolved once.
+pub(crate) fn routers(resolver: &mut Resolver<'_>, krate: usize) -> Routers {
+    let mut found = Routers::default();
     let reaches = reaching_gdl(resolver.graph);
     if !reaches[resolver.crates[krate].package] {
-        return (found, skipped);
+        return found;
     }
     // Set only while an impl's trait is resolved: the policy's own types
     // and head may be in crates that do not depend on gdl.
@@ -36,19 +61,24 @@ pub(crate) fn policies(
             .collect();
         for (index, path) in paths {
             resolver.admit = gate.take();
-            let is_policy = is_pool_policy(resolver, krate, module, &path);
+            let kind = kind(resolver, krate, module, &path);
             gate = resolver.admit.take();
-            if !is_policy {
+            let Some(kind) = kind else {
                 continue;
-            }
-            match policy(resolver, krate, module, index) {
-                Ok(entry) => found.push(entry),
+            };
+            let (entries, skipped) = match kind {
+                Kind::PoolPolicy => (&mut found.policies, &mut found.skipped_policies),
+                Kind::Selector => (&mut found.selectors, &mut found.skipped_selectors),
+            };
+            match entry(resolver, krate, module, index, kind) {
+                Ok(entry) => entries.push(entry),
                 Err(left_out) => skipped.push(left_out),
             }
         }
     }
-    found.sort_by(|a: &PolicyEntry, b| a.name.cmp(&b.name));
-    (found, skipped)
+    found.policies.sort_by(|a, b| a.name.cmp(&b.name));
+    found.selectors.sort_by(|a, b| a.name.cmp(&b.name));
+    found
 }
 
 /// Which packages of `graph` are gdl or depend on it, by index.
@@ -76,31 +106,38 @@ fn reaching_gdl(graph: &Graph) -> Vec<bool> {
         .collect()
 }
 
-/// Whether `path`, an impl's trait written in module `module` of crate
-/// `krate`, is gdl's `PoolPolicy`, by where the resolver finds it defined.
-/// A trait of that name that the crate declares, or one that a local
-/// module named `gdl` holds, is not gdl's, and its impls would not
-/// register.
-fn is_pool_policy(
+/// Which of gdl's `PoolPolicy` and `Selector` `path`, an impl's trait
+/// written in module `module` of crate `krate`, is, by where the resolver
+/// finds it defined. A trait of either name that the crate declares, or
+/// one that a local module named `gdl` holds, is not gdl's, and its impls
+/// would not register.
+fn kind(
     resolver: &mut Resolver<'_>,
     krate: usize,
     module: usize,
     path: &syn::Path,
-) -> bool {
+) -> Option<Kind> {
     let (names, absolute) = segments(path);
     let Some(def @ Def::Trait(..)) = resolver.resolve(krate, module, &names, absolute) else {
-        return false;
+        return None;
     };
-    gdls(resolver, def, Item::PoolPolicy)
+    if gdls(resolver, def, Item::PoolPolicy) {
+        Some(Kind::PoolPolicy)
+    } else if gdls(resolver, def, Item::Selector) {
+        Some(Kind::Selector)
+    } else {
+        None
+    }
 }
 
-/// The policy impl `index` of module `module` is for, or why no segment
-/// could name it.
-fn policy(
+/// The type impl `index` of module `module` is for, as a `kind`, or why
+/// no segment could name it.
+fn entry(
     resolver: &mut Resolver<'_>,
     krate: usize,
     module: usize,
     index: usize,
+    kind: Kind,
 ) -> Result<PolicyEntry, Skipped> {
     let i = &resolver.crates[krate].modules[module].impls[index];
     let (self_ty, params) = (i.self_ty.clone(), i.params());
@@ -121,12 +158,16 @@ fn policy(
     let skip = |why: String| Skipped {
         name: written.clone(),
         path: None,
-        problem: format!("{at}pool policy `{written}` {why}"),
+        problem: format!("{at}{} `{written}` {why}", kind.noun()),
     };
     if !params.is_empty() {
-        return Err(skip(
-            "is generic: a segment names one type, so implement the policy for one".into(),
-        ));
+        return Err(skip(format!(
+            "is generic: a segment names one type, so implement the {} for one",
+            match kind {
+                Kind::PoolPolicy => "policy",
+                Kind::Selector => "selector",
+            }
+        )));
     }
     let Ok(Ty::Def(def @ Def::Type(c, m, t), args)) =
         canonical(resolver, krate, module, &self_ty, &Env::new())

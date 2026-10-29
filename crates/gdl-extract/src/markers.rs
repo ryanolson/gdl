@@ -36,8 +36,10 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         exports: Vec::new(),
         nodes: Vec::new(),
         policies: Vec::new(),
+        selectors: Vec::new(),
         skipped: Vec::new(),
         skipped_policies: Vec::new(),
+        skipped_selectors: Vec::new(),
     };
     let mut problems = Vec::new();
     let mut impls = Impls::default();
@@ -181,9 +183,11 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             }
         }
     }
-    let (policies, left_out) = crate::policies::policies(&mut resolver, krate);
-    offer.policies = policies;
-    offer.skipped_policies = left_out;
+    let routers = crate::policies::routers(&mut resolver, krate);
+    offer.policies = routers.policies;
+    offer.skipped_policies = routers.skipped_policies;
+    offer.selectors = routers.selectors;
+    offer.skipped_selectors = routers.skipped_selectors;
     offer.messages.sort_by(|a, b| a.name.cmp(&b.name));
     offer.exports.sort_by(|a, b| a.name.cmp(&b.name));
     offer.nodes.sort_by(|a, b| a.name.cmp(&b.name));

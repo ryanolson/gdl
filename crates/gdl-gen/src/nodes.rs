@@ -377,6 +377,8 @@ mod tests {
             policies: Vec::new(),
             skipped: Vec::new(),
             skipped_policies: Vec::new(),
+            selectors: Vec::new(),
+            skipped_selectors: Vec::new(),
         }
     }
 
@@ -693,6 +695,8 @@ mod frontend_tests {
             policies: Vec::new(),
             skipped: Vec::new(),
             skipped_policies: Vec::new(),
+            selectors: Vec::new(),
+            skipped_selectors: Vec::new(),
         };
         let (bindings, problems) = bind(
             &graph,

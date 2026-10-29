@@ -214,3 +214,95 @@ pub mod globbed_facade {
 }
 
 pub use globbed_facade::Faked;
+
+pub mod selectors {
+    //! Selectors of each kind of head, a type that is both a pool policy
+    //! and a selector, and impls the reader leaves out.
+
+    use gdl::{Choice, Encoded, Instances, Projected, Request, Selector};
+    use read_protocols::Words;
+
+    use super::Part;
+
+    /// Reads the head whole.
+    pub struct ByWords;
+
+    impl Selector for ByWords {
+        type Head = Words;
+
+        async fn select<'a>(&'a self, _: Request<'a, Words>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
+    /// Reads the head's bytes, and chooses pools too.
+    pub struct Both;
+
+    impl Selector for Both {
+        type Head = Encoded;
+
+        async fn select<'a>(&'a self, _: Request<'a, Encoded>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
+    impl gdl::PoolPolicy for Both {
+        type Head = Encoded;
+
+        fn choose(&self, _: gdl::PoolRequest<'_, Encoded>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
+        }
+    }
+
+    /// Reads a part of the head.
+    pub struct ByPart;
+
+    impl Selector for ByPart {
+        type Head = Projected<Part>;
+
+        async fn select<'a>(&'a self, _: Request<'a, Projected<Part>>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
+    /// Generic: no one type to name.
+    pub struct AnySelector<T>(T);
+
+    impl<T: Send + Sync + 'static> Selector for AnySelector<T> {
+        type Head = Encoded;
+
+        async fn select<'a>(&'a self, _: Request<'a, Encoded>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
+    mod hidden {
+        /// Not reached from the crate root.
+        pub struct Unreached;
+
+        impl gdl::Selector for Unreached {
+            type Head = gdl::Encoded;
+
+            async fn select<'a>(&'a self, _: gdl::Request<'a, gdl::Encoded>, i: gdl::Instances<'a>) -> gdl::Result<gdl::Choice<'a>> {
+                Ok(gdl::Choice::new(i.get(0).expect("never empty")))
+            }
+        }
+    }
+
+    pub mod local {
+        /// A trait of gdl's name that is not gdl's.
+        pub trait Selector {
+            type Head;
+        }
+
+        /// Implements only the local trait.
+        pub struct Pretender;
+
+        impl Selector for Pretender {
+            type Head = gdl::Encoded;
+        }
+    }
+}
+
+pub use selectors::local::Pretender;
+pub use selectors::{AnySelector, Both, ByPart, ByWords};

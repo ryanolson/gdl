@@ -1454,6 +1454,7 @@ fn a_crate_offers_its_pool_policies_with_their_heads() {
     assert_eq!(
         policies,
         [
+            ("Both", "read_policies::Both", "encoded".to_string()),
             ("Bytes", "read_policies::Bytes", "encoded".to_string()),
             (
                 "FromParent",
@@ -1491,6 +1492,77 @@ fn a_crate_offers_its_pool_policies_with_their_heads() {
     // A catalogue entry keeps them.
     let read = gdl_extract::Offer::from_toml(&offer.to_toml()).expect("an entry");
     assert_eq!(&read, offer);
+}
+
+/// A crate's selectors, read as its pool policies are: each with what it
+/// reads of the request's head. A type that is both is offered as both. A
+/// selector no segment could name, one not reached from the crate root or
+/// a generic one, is left out, and an impl of a local trait of gdl's
+/// trait's name is no selector at all.
+#[test]
+fn a_crate_offers_its_selectors_with_their_heads() {
+    use gdl_extract::PolicyHead;
+
+    let extraction = workspace().extract("read-policies").expect("package");
+    clean(&extraction);
+    let offer = &extraction.offer;
+    let words = "read-protocols 0.0.0 read_protocols::Words".to_string();
+    let selectors: Vec<(&str, &str, String)> = offer
+        .selectors
+        .iter()
+        .map(|s| {
+            let head = match &s.head {
+                PolicyHead::Message(of) => format!("message {}", origin(of)),
+                PolicyHead::Unit => "unit".to_string(),
+                PolicyHead::Encoded => "encoded".to_string(),
+                PolicyHead::Projected { projection, of } => {
+                    format!("projected {projection} of {}", origin(of))
+                }
+            };
+            (s.name.as_str(), s.ty.as_str(), head)
+        })
+        .collect();
+    assert_eq!(
+        selectors,
+        [
+            ("Both", "read_policies::Both", "encoded".to_string()),
+            (
+                "ByPart",
+                "read_policies::ByPart",
+                format!("projected read_policies::Part of {words}")
+            ),
+            (
+                "ByWords",
+                "read_policies::ByWords",
+                format!("message {words}")
+            ),
+        ]
+    );
+    assert!(
+        offer.policies.iter().any(|p| p.name == "Both"),
+        "{:?}",
+        offer.policies
+    );
+    let skipped: Vec<(&str, &str)> = offer
+        .skipped_selectors
+        .iter()
+        .map(|s| (s.name.as_str(), s.problem.as_str()))
+        .collect();
+    assert_eq!(
+        skipped.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        ["AnySelector", "Unreached"],
+        "{skipped:?}"
+    );
+    assert!(
+        skipped[0].1.contains("selector `AnySelector` is generic"),
+        "{skipped:?}"
+    );
+    // A catalogue entry keeps them, and one without selectors is written as
+    // it was before selectors were read.
+    let read = gdl_extract::Offer::from_toml(&offer.to_toml()).expect("an entry");
+    assert_eq!(&read, offer);
+    let protocols = workspace().extract("read-protocols").expect("package");
+    assert!(!protocols.offer.to_toml().contains("selectors"));
 }
 
 /// How the reader tells an item of a crate it does not read by the way a

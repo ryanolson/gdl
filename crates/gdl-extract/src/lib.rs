@@ -437,6 +437,10 @@ pub struct Offer {
     /// writes the same.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<PolicyEntry>,
+    /// The selectors it implements, by name; left out when it has none,
+    /// as `policies` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selectors: Vec<PolicyEntry>,
     /// The exported aliases it leaves out: their instantiations name an
     /// argument the reader cannot, such as `Arc<T>`. One is no problem of
     /// the crate's, whose other offers stand; a graph that names it is
@@ -448,6 +452,9 @@ pub struct Offer {
     /// alias, a spec that names one is told why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_policies: Vec<Skipped>,
+    /// The selectors it leaves out, for the reasons a pool policy is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_selectors: Vec<Skipped>,
 }
 
 /// An exported alias or a pool policy an offer leaves out, and why.
