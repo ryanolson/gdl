@@ -17,6 +17,10 @@ use crate::Error;
 /// only the pod knows it, from the downward API.
 pub(super) const POD_IP: &str = "GDL_POD_IP";
 
+/// The address every segment's system listener binds in a pod: every
+/// interface, so that the kubelet's probes reach it at the pod's IP.
+pub(super) const SYSTEM_HOST: &str = "0.0.0.0";
+
 /// Where a pod mounts its pool's ConfigMap.
 const CONFIG_DIR: &str = "/etc/gdl/fleet";
 

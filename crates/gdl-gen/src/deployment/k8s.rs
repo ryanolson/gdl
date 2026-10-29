@@ -230,8 +230,16 @@ impl Render<'_> {
         }
         let path = laid.dir().join(segment).join("config.toml");
         let grace = self.bundle.segment_config(&path, segment, None, None)?;
-        let config = self.bundle.files[&path].clone();
-        let table: toml::Table = toml::from_str(&config).map_err(io)?;
+        let mut table: toml::Table = toml::from_str(&self.bundle.files[&path]).map_err(io)?;
+        // The probes ask the pod's IP, so a listener on loopback alone
+        // would never answer them.
+        if let toml::Value::Table(system) = table
+            .entry("system")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        {
+            system.insert("host".into(), objects::SYSTEM_HOST.into());
+        }
+        let config = toml::to_string_pretty(&table).map_err(io)?;
         let probes = match objects::Probes::of(&table) {
             Ok(probes) => probes,
             Err(message) => {
