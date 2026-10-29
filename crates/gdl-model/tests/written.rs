@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use gdl_model::{DirectoryBackend, Fleet, Placement, PoolSettings};
+use gdl_model::{DirectoryBackend, Fleet, Parent, Placement, PoolSettings};
 
 const PLACEMENT: &str = "[segment.a]\nnodes = ['S', 'F']\n[segment.d]\nnodes = ['D']\n\
     [class.global]\nsegments = ['a']\n[class.model_x]\nsegments = ['d']\n\
@@ -75,7 +75,7 @@ fn a_pools_settings_read_back_what_they_write() {
         layout: Some("regional".into()),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some("global-us-east-1".into()),
+        parent: Some(Parent::Pool("global-us-east-1".into())),
         directory: DirectoryBackend::Dir {
             path: "/srv/pools".into(),
         },
@@ -90,7 +90,7 @@ fn a_pools_settings_read_back_what_they_write() {
     assert_eq!(PoolSettings::read(value).expect("reads"), every, "{text}");
     let least = PoolSettings {
         layout: None,
-        home: None,
+        parent: None,
         directory: DirectoryBackend::default(),
         ready: BTreeMap::new(),
         requires: BTreeMap::new(),

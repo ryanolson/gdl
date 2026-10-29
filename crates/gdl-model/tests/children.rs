@@ -98,7 +98,7 @@ fn pool(name: &str, class: &str, home: &str, layout: &str) -> String {
 /// `class`.
 fn childless(pool: &str, layout: &str, class: &str) -> String {
     format!(
-        "[pool.{pool}]: no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one"
+        "[pool.{pool}]: no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one or whose `parents` is its class"
     )
 }
 

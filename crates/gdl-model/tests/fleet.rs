@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use gdl_model::{
-    DirectoryBackend, Fleet, HopInfo, Layout, Manifest, NodeInfo, Placement, Placements,
+    DirectoryBackend, Fleet, HopInfo, Layout, Manifest, NodeInfo, Parent, Placement, Placements,
     PoolSettings, Role, TypeInfo, layout,
 };
 
@@ -178,7 +178,7 @@ fn a_pools_settings_have_its_quorum_resolved() {
             layout: None,
             class: "model_x".into(),
             region: "us-east-1".into(),
-            home: Some("global-us-east-1".into()),
+            parent: Some(Parent::Pool("global-us-east-1".into())),
             directory: DirectoryBackend::DEFAULT,
             // The pool's own `e`; the class's `d` and `f`.
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
@@ -190,7 +190,7 @@ fn a_pools_settings_have_its_quorum_resolved() {
     );
     assert!(larger.requires.is_empty(), "model_x requires nothing");
     let global = fleet.pool("global-eu-west-1").expect("a pool");
-    assert_eq!(global.home, None);
+    assert_eq!(global.parent, None);
     assert_eq!(
         global.requires,
         BTreeMap::from([("model_x".into(), 1)]),
@@ -448,7 +448,7 @@ fn home_is_the_pools_parent() {
     let cases = [
         (
             format!("{G}[pool.m]\nclass = 'model_x'\nregion = 'r'\n"),
-            "[pool.m] home: missing; a pool of class `model_x` names its parent, a pool of a class that sends to it: `global`",
+            "[pool.m] home: missing; a pool of class `model_x` names its parent, a pool of a class that sends to it, or `parents`, one such class, whose every pool follows it: `global`",
         ),
         (
             format!("{G}[pool.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'nope'\n"),
@@ -715,4 +715,81 @@ fn a_fleet_lists_its_pools_in_name_order() {
         assert_eq!(Some(pool), fleet.pool(&pool.name).as_ref());
     }
     assert_eq!(Fleet::default().pools().count(), 0);
+}
+
+/// Three global pools in three regions, and one model pool shared by them
+/// all: it names their class, `parents = "global"`, in place of one home.
+const SHARED: &str = r#"
+[pool.global-us-east-1]
+class = "global"
+region = "us-east-1"
+
+[pool.global-eu-west-1]
+class = "global"
+region = "eu-west-1"
+
+[pool.global-ap-south-1]
+class = "global"
+region = "ap-south-1"
+
+[pool.model-x-shared]
+class = "model_x"
+region = "eu-west-1"
+parents = "global"
+"#;
+
+/// A shared pool is a child of every pool of its parents' class, so each
+/// global has its child of `model_x`, and the pool needs no home. A fleet's
+/// pools publish through `relay`, where a pool reports to one parent's hub,
+/// so the check refuses the shared pool, and names it: that alone.
+#[test]
+fn a_shared_pool_is_every_parents_child_and_refused_under_relay() {
+    assert_eq!(
+        problems(SHARED),
+        [
+            "[pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`"
+        ]
+    );
+    let pool = fleet(SHARED).pool("model-x-shared").expect("a pool");
+    assert_eq!(pool.parent, Some(Parent::Class("global".into())));
+    let text = toml::to_string(&fleet(SHARED)).expect("toml");
+    assert!(text.contains("parents = \"global\""), "{text}");
+    assert_eq!(Fleet::from_toml(&text).expect("reads"), fleet(SHARED));
+}
+
+/// `parents` is judged as `home` is: it is a class that sends to the
+/// pool's, never given with `home`, and refused for a class nothing sends
+/// to. Each case is reported beside the refusal under `relay`.
+#[test]
+fn a_pools_parents_name_a_class_that_sends_to_it() {
+    const RELAY: &str = "[pool.m] parents: every pool of class";
+    let cases = [
+        (
+            format!("{SHARED}[pool.m]\nclass = 'model_x'\nregion = 'r'\nparents = 'model_x'\n"),
+            "[pool.m] parents: class `model_x` does not send to class `model_x`; `parents` is a class that sends to the pool's",
+        ),
+        (
+            format!(
+                "{SHARED}[pool.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'global-us-east-1'\nparents = 'global'\n"
+            ),
+            "[pool.m] parents: `global` is given with `home = \"global-us-east-1\"`; a pool names one pool as its parent, `home`, or every pool of a class, `parents`, not both",
+        ),
+        (
+            format!("{SHARED}[pool.m]\nclass = 'global'\nregion = 'r'\nparents = 'global'\n"),
+            "[pool.m] parents: no class sends to `global`, so its pools have no parent",
+        ),
+    ];
+    for (text, expected) in cases {
+        let found = problems(&text);
+        let judged: Vec<&String> = found
+            .iter()
+            .filter(|problem| !problem.starts_with("[pool.model-x-shared]"))
+            .filter(|problem| !problem.starts_with(RELAY))
+            .collect();
+        assert_eq!(judged, [expected], "{text}");
+        assert!(
+            found.iter().any(|problem| problem.starts_with(RELAY)),
+            "{found:?}"
+        );
+    }
 }

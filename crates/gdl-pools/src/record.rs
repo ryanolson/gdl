@@ -19,12 +19,15 @@ pub struct PoolRecord {
     pub class: String,
     /// The region the pool runs in, a DNS label.
     pub region: String,
-    /// The parent pool: the pool of the class that sends to this one whose
-    /// hub follows it, and whose choosers alone offer it work. `None` for a
-    /// pool of a class that nothing sends to. Optional on the wire, so that
-    /// a reader of an earlier build ignores it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<String>,
+    /// The pool's parents: the pools of the class that sends to this one
+    /// whose hubs follow it, and whose choosers alone offer it work. One
+    /// pool, written `home`, or every pool of a class, written `parents`.
+    /// `None` for a pool of a class that nothing sends to. Optional on the
+    /// wire. A reader of a build before `parents` ignores the key, and so
+    /// never follows a shared pool; a record with both keys has no parent,
+    /// so no hub follows it.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<gdl_model::Parent>,
     /// The contract hash of the graph the pool serves. A reader follows
     /// only a pool whose hashes equal its own.
     pub contract: u64,
@@ -93,6 +96,8 @@ struct RecordWire {
     region: String,
     #[serde(default)]
     home: Option<String>,
+    #[serde(default)]
+    parents: Option<String>,
     contract: u64,
     placement: u64,
     state: PoolState,
@@ -122,7 +127,9 @@ impl From<RecordWire> for PoolRecord {
             name: wire.name,
             class: wire.class,
             region: wire.region,
-            home: wire.home,
+            parent: gdl_model::Parent::from_keys(wire.home, wire.parents)
+                .ok()
+                .flatten(),
             contract: wire.contract,
             placement: wire.placement,
             state: wire.state,
@@ -170,8 +177,14 @@ impl PoolRecord {
     /// reported.
     pub fn check(&self) -> Result<(), DirectoryError> {
         let mut problems = names(&self.class, &self.name);
-        if let Some(Err(problem)) = self.home.as_deref().map(gdl_model::check_pool_name) {
-            problems.push(problem);
+        match &self.parent {
+            Some(gdl_model::Parent::Pool(home)) => {
+                problems.extend(gdl_model::check_pool_name(home).err())
+            }
+            Some(gdl_model::Parent::Class(parents)) => {
+                problems.extend(gdl_model::check_class_name(parents).err());
+            }
+            None => {}
         }
         if let Err(problem) = gdl_model::check_region_name(&self.region) {
             problems.push(problem);

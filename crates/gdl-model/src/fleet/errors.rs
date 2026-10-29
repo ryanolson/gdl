@@ -195,8 +195,9 @@ pub enum FleetError {
         /// Its home.
         home: String,
     },
-    /// A pool of a class that another class sends to has no home.
-    MissingHome {
+    /// A pool of a class that another class sends to names no parent:
+    /// neither `home` nor `parents`.
+    MissingParent {
         /// The pool.
         pool: String,
         /// Its class.
@@ -204,12 +205,42 @@ pub enum FleetError {
         /// The classes that send to it.
         parents: Vec<String>,
     },
-    /// A pool of a class that nothing sends to has a home.
-    HomeOfTopClass {
+    /// A pool of a class that nothing sends to names a parent.
+    ParentOfTopClass {
         /// The pool.
         pool: String,
         /// Its class.
         class: String,
+        /// The key that names it: `home` or `parents`.
+        key: &'static str,
+    },
+    /// A pool names both a `home` and `parents`.
+    HomeAndParents {
+        /// The pool.
+        pool: String,
+        /// Its home.
+        home: String,
+        /// Its parents' class.
+        parents: String,
+    },
+    /// A pool's `parents` is not a class that sends to the pool's class.
+    ParentsNotSender {
+        /// The pool.
+        pool: String,
+        /// Its parents' class.
+        parents: String,
+        /// The pool's class.
+        class: String,
+        /// The pool's layout, when the spec has several.
+        layout: Option<String>,
+    },
+    /// A pool names `parents`, which the fleet's directory cannot serve:
+    /// under `relay` a pool reports its record to one parent's hub.
+    SharedUnderRelay {
+        /// The pool.
+        pool: String,
+        /// Its parents' class.
+        parents: String,
     },
     /// A pool's home is of a class that does not send to the pool's class.
     HomeNotParent {
@@ -222,8 +253,8 @@ pub enum FleetError {
         /// The pool's class.
         class: String,
     },
-    /// A parent pool has no child, a pool whose home it is, of a class its
-    /// class sends to.
+    /// A parent pool has no child, a pool whose home it is or whose
+    /// parents are its class, of a class its class sends to.
     MissingChild {
         /// The parent pool.
         pool: String,
@@ -460,25 +491,60 @@ impl FleetError {
                 key("home"),
                 format!("the fleet has no pool `{home}`"),
             ),
-            Self::MissingHome {
+            Self::MissingParent {
                 pool: name,
                 class,
                 parents,
-            } => {
-                let parents: Vec<String> = parents.iter().map(|p| format!("`{p}`")).collect();
-                (
-                    pool(name),
-                    key("home"),
-                    format!(
-                        "missing; a pool of class `{class}` names its parent, a pool of a class that sends to it: {}",
-                        parents.join(", ")
-                    ),
-                )
-            }
-            Self::HomeOfTopClass { pool: name, class } => (
+            } => (
                 pool(name),
                 key("home"),
+                format!(
+                    "missing; a pool of class `{class}` names its parent, a pool of a class that sends to it, or `parents`, one such class, whose every pool follows it: {}",
+                    quoted(parents)
+                ),
+            ),
+            Self::ParentOfTopClass {
+                pool: name,
+                class,
+                key: written,
+            } => (
+                pool(name),
+                key(written),
                 format!("no class sends to `{class}`, so its pools have no parent"),
+            ),
+            Self::HomeAndParents {
+                pool: name,
+                home,
+                parents,
+            } => (
+                pool(name),
+                key("parents"),
+                format!(
+                    "`{parents}` is given with `home = \"{home}\"`; a pool names one pool as its parent, `home`, or every pool of a class, `parents`, not both"
+                ),
+            ),
+            Self::ParentsNotSender {
+                pool: name,
+                parents,
+                class,
+                layout,
+            } => (
+                pool(name),
+                key("parents"),
+                format!(
+                    "class `{parents}` does not send to class `{class}`{}; `parents` is a class that sends to the pool's",
+                    within(layout)
+                ),
+            ),
+            Self::SharedUnderRelay {
+                pool: name,
+                parents,
+            } => (
+                pool(name),
+                key("parents"),
+                format!(
+                    "every pool of class `{parents}` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`"
+                ),
             ),
             Self::HomeNotParent {
                 pool: name,
@@ -500,7 +566,7 @@ impl FleetError {
                 pool(name),
                 None,
                 format!(
-                    "no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one"
+                    "no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one or whose `parents` is its class"
                 ),
             ),
         };

@@ -162,7 +162,9 @@ pub struct VerifiedReport(Report);
 /// and writes what it verified into the records it holds for them.
 pub(crate) struct Reports {
     children: RelayDirectory,
-    /// The parent's own pool, which a child's record names as its `home`.
+    /// The parent's own pool, which a child's record names as its `home`:
+    /// a child here reports to one parent's hub, so a shared pool, which
+    /// names its parents' class, is refused.
     pool: String,
     contract: u64,
     placement: u64,
@@ -241,13 +243,19 @@ impl Reports {
                         "a child's record holds properties that do not check: they are left out"
                     );
                 }
-                if record.home.as_deref() != Some(self.pool.as_str()) {
+                let named = match &record.parent {
+                    Some(gdl_model::Parent::Pool(home)) if *home == self.pool => None,
+                    Some(gdl_model::Parent::Pool(home)) => Some(format!("`{home}`")),
+                    Some(gdl_model::Parent::Class(parents)) => {
+                        return Err(DirectoryError::Refused(format!(
+                            "pool `{pool}` is shared by every pool of class `{parents}`, and under the `relay` directory a pool reports to one parent's hub: a shared pool needs a directory each of its parents' hubs reads"
+                        )));
+                    }
+                    None => Some("no pool".to_string()),
+                };
+                if let Some(named) = named {
                     return Err(DirectoryError::Refused(format!(
-                        "pool `{pool}` names {} as its parent, not this pool, `{}`",
-                        record
-                            .home
-                            .as_deref()
-                            .map_or("no pool".to_string(), |home| format!("`{home}`")),
+                        "pool `{pool}` names {named} as its parent, not this pool, `{}`",
                         self.pool
                     )));
                 }

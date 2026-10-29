@@ -1331,7 +1331,10 @@ fn assert_each_hub_reads_its_pool(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: 
             .any(|boundary| boundary.from == pool.class);
         let mut expected = pool.clone();
         expected.directory = gdl_model::DirectoryBackend::Relay {
-            parent_hub: pool.home.as_ref().map(|home| format!("{home}:1337")),
+            parent_hub: match &pool.parent {
+                Some(gdl_model::Parent::Pool(home)) => Some(format!("{home}:1337")),
+                _ => None,
+            },
             state_dir: parent.then(|| "/var/lib/gdl-hub".into()),
         };
         expected.hub = Some(format!("{}:1337", pool.name));

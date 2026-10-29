@@ -6,7 +6,7 @@
 //! so these are the only answers; a directory that every cluster reads
 //! would answer all three here, and need no claim.
 
-use gdl_model::{Fleet, HUB_PUBLIC_PORT, PoolSettings, Problem};
+use gdl_model::{Fleet, HUB_PUBLIC_PORT, Parent, PoolSettings, Problem};
 use serde_json::{Value, json};
 
 use super::objects::Pod;
@@ -31,10 +31,12 @@ impl<'p> Relay<'p> {
     /// Where the pool's hub reports its record: its parent's hub, at the
     /// Service named for the parent, which resolves in its own cluster.
     pub(super) fn parent_hub(&self) -> Option<String> {
-        self.pool
-            .home
-            .as_ref()
-            .map(|home| format!("{home}:{HUB_PUBLIC_PORT}"))
+        // A fleet refuses a shared pool under `relay`, so only a home has a
+        // parent's hub.
+        match &self.pool.parent {
+            Some(Parent::Pool(home)) => Some(format!("{home}:{HUB_PUBLIC_PORT}")),
+            _ => None,
+        }
     }
 
     /// Where a parent's hub keeps its children's records: its claim's
@@ -71,7 +73,9 @@ pub(super) fn state_claim(pool: &str) -> String {
 pub(super) fn refusals(fleet: &Fleet) -> Vec<Problem> {
     let mut problems = Vec::new();
     for pool in fleet.pools() {
-        let Some(home) = &pool.home else { continue };
+        let Some(Parent::Pool(home)) = &pool.parent else {
+            continue;
+        };
         let (Some((ours, _)), Some((theirs, _))) =
             (fleet.cluster_of(&pool.name), fleet.cluster_of(home))
         else {

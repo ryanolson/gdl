@@ -114,7 +114,8 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[pool.<name>] cluster` | the cluster that runs the pool | none |
 | `[pool.<name>] region` | the pool's region | its cluster's, and required without a cluster |
 | `[pool.<name>] layout` | the spec layout the pool runs | the only layout, when there is one; required otherwise |
-| `[pool.<name>] home` | the parent pool | required for a class that another class sends to; refused otherwise |
+| `[pool.<name>] home` | the parent pool | this or `parents` is required for a class that another class sends to; refused otherwise |
+| `[pool.<name>] parents` | in place of `home`, the parent class: every pool of it follows this pool | none; refused while the fleet's pools publish through `relay` |
 | `[pool.<name>] ready` | overrides the class's quorum for a segment | the class's, else 1 |
 
 - A pool's quorum for a segment is its own `ready`, else its class's, else 1.
@@ -126,7 +127,8 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 - A `service_account_annotations` key is a Kubernetes annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit.
 - `cargo gdl k8s` requires `[fleet] name`, a `cluster` for every pool, and a `registry` and `platform` for every cluster. It refuses an `env` key that names a static AWS credential (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CONTAINER_AUTHORIZATION_TOKEN`), an `env` key that is `GDL_POD_IP`, `GDL_POOL`, or `GDL_HUB`, or starts with `GDL_POOL__` or `GDL_HUB__`, in any case, and a child in another cluster than its parent. See [Deploy a fleet on Kubernetes](../guides/kubernetes.md).
 - `cargo gdl compose` reads only a cluster's region. A fleet whose pools take their regions from clusters writes the same bundle as one whose pools write the same regions.
-- A `home` names a pool of a parent class that runs the same layout. Every pool whose class sends to another class needs a child of each class it sends to, in its layout.
+- A `home` names a pool of a parent class that runs the same layout. A `parents` names a class that sends to the pool's class in its layout. A pool names one of the two. Every pool whose class sends to another class needs a child of each class it sends to, in its layout: a pool whose `home` it is, or whose `parents` is its class.
+- A fleet's pools publish through `relay`, so `check` refuses a pool with `parents`.
 - A `ready` key must be a segment of the class, and a count is at least 1.
 - A `[class.<name>]` table applies to the class's pools in every layout with the class, and is checked against each.
 
@@ -139,6 +141,7 @@ The fleet file fills in each pool's `[pool]` table in its segments' settings. Th
 | `name`, `class`, `region` | the pool's name, class, and region | required |
 | `layout` | the layout the pool runs. Read and checked for its shape. Nothing else in an instance or hub reads it. | none |
 | `home` | the parent pool | none |
+| `parents` | in place of `home`, the parent class: every pool of it follows this pool. Refused with `home`. A hub that publishes through `relay` refuses it. | none |
 | `directory` | where pool records are published: `relay`, `memory` (one directory per process, for tests), or `dir` | `relay` |
 | `parent_hub` | the parent pool's hub, `host:port`, where the pool's hub reports its record. With `relay`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with the other backends. A fleet bundle sets it to `<home>:1337`. | none |
 | `state_dir` | where the pool's hub keeps the records its children report, across its restart. With `relay`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with the other backends. Only the hub reads it. A fleet bundle sets it to `/var/lib/gdl-hub`, on a volume of the hub's own. | none |

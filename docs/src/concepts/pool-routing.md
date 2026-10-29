@@ -4,7 +4,9 @@ A parent pool sends work to its child pools. This chapter covers how the parent'
 
 ## Who follows whom
 
-A hub follows only its children. A child is a pool whose record names the hub's own pool as its `home`, has the same contract and placement hashes, is `ready` or `degraded`, and is `serving`, not scaled to 0 ([Presence](pools.md#presence)). A record that says a followed pool is scaled to 0 ends its follow. Region plays no part in following. A child in another region is followed. A pool in the hub's region whose parent is another pool is not followed.
+A hub follows only its children. A child is a pool whose record names the hub's own pool as its `home`, or the hub's class as its `parents`, has the same contract and placement hashes, is `ready` or `degraded`, and is `serving`, not scaled to 0 ([Presence](pools.md#presence)). A record that says a followed pool is scaled to 0 ends its follow. Region plays no part in following. A child in another region is followed. A pool in the hub's region whose parent is another pool is not followed.
+
+A pool that names a class with `parents` is shared: the hub of every pool of that class follows it, each over a link of its own. Each parent's hub offers it, releases it, and avoids its retired instances on its own. The shared pool waits for every parent ([Entry retirement across pools](#entry-retirement-across-pools), [Draining a pool](#draining-a-pool)). A parent whose hub stops changes nothing for the others. Its watch is lost, so a later drain or retirement waits for its bound, as it would with one parent. A shared pool needs a directory that every parent's hub reads, not `relay` ([The relay backend](pools.md#the-relay-backend)).
 
 Pools of layouts that place nodes differently have different placement hashes, so they never follow or offer to each other. A pool with other hashes is ignored, not an error. A hub follows children only for the classes its own class sends to. A pool of a class that sends to no class follows nothing.
 
@@ -28,7 +30,7 @@ sequenceDiagram
     participant GI as parent choosers
     MI->>MH: register, loaded, ready
     MH->>MH: quorum holds for 2 s
-    MH->>D: publish record (ready, home = parent)
+    MH->>D: publish record (ready, home = parent, or parents = its class)
     D-->>GH: watch of the child's class
     GH->>MH: GET /watch?class&pool&run&generation
     MH-->>GH: pool, retired, ready, synced, then changes
@@ -403,7 +405,7 @@ An entry instance is an instance of a segment that a hop from another class ente
 1. The child's hub sends `retired` on its pool's watch. Each parent hub applies it to its relay.
 2. The parent hub waits for each chooser whose hops enter the instance's segment. Each chooser says that it avoids the instance once its tables hold it retired (`POST /instances/{id}/avoids`). It resends one its hub did not take every 500 ms. A chooser that leaves counts as one that avoids it.
 3. The parent hub then tells the child's hub once, for its whole pool (`POST /avoided`). A follow that closes first is released instead, which counts the same.
-4. Once every pool that followed the child when the instance retired has done so, the child's hub sends `retired` again with `acknowledged: true`.
+4. Once every pool that followed the child when the instance retired has done so, the child's hub sends `retired` again with `acknowledged: true`. A shared pool waits for each of its parents.
 
 The retiree waits for that, or for at most the setup timeout plus twice `summary_ms` after it retired. Then it waits the setup timeout, as any retiring instance does (see [Segment lifecycle](lifecycle.md)). With no pool following its pool, the first `retired` already says `acknowledged`. A watch lost without a release never counts, so the retiree then waits out its bound. A follow opened after the retirement is not waited for, since its snapshot shows the instance retired.
 
@@ -425,7 +427,7 @@ A peer avoids a retired instance only while the segment has another instance. So
 
 1. The pool is `draining` on its health endpoint, record, and watch. Each parent hub marks its follow not offered at the next revision.
 2. Each entry instance learns of the drain from its own pool's watch. It keeps taking new work, stays ready, and keeps reporting its load for a bound: the setup timeout plus twice `summary_ms`. This lets an offer from a chooser with a stale view land.
-3. The bound ends early when the pool's hub says that no other pool follows it: the pool's watch sends `state` again with `unfollowed: true`. A parent's hub releases the pool only once its follow has closed, so no offer from another pool is still on its way. A chooser that lost its watch of its own hub's relay holds the follow open for at most `lost_chooser_ms` ([Closing a follow](#closing-a-follow)). A response it still holds is finished in step 4.
+3. The bound ends early when the pool's hub says that no other pool follows it: the pool's watch sends `state` again with `unfollowed: true`. A parent's hub releases the pool only once its follow has closed, so no offer from another pool is still on its way. A shared pool says so only once every parent has released it. A chooser that lost its watch of its own hub's relay holds the follow open for at most `lost_chooser_ms` ([Closing a follow](#closing-a-follow)). A response it still holds is finished in step 4.
 4. Then the entry instance declines offers from other pools as gone. A chooser whose view is stale offers the request to another pool, and offers this pool no more work until the relay changes its follow ([A pool that is gone](#a-pool-that-is-gone)). Once no request it holds can send work into the pool, it announces that it has detached (below). It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the pool until every entry instance has drained or left. Then it closes and leaves. It does not retire: the pool's state already keeps choosers away.
 5. An interior instance serves until no more work can reach it: every entry instance, and every instance of the segments of its class that send to it, has detached or left. An entry instance's `drained` counts as detached. Then it drains as after a stop: it closes, announces that it has detached once no request it holds can send work onward, waits until it holds no request, and leaves. Its drain's bound (`drain_ms`) counts from when every entry instance has drained or left, as before, so a response is not cut sooner than it was. As before an instance could detach, it also drains once every entry instance of the pool has drained or left. While its pool drains, those are its drain sources, whatever stopped it. The sources outside the pool are not members of its hub, so it cannot see them.
 6. Once no instance of the pool's class is a member, the hub writes a last draining record, withdraws it, and ends the pool's watches. From then it refuses every registration with 409. To serve the pool again, start its hub again.

@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gdl_model::{DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Layout, Manifest, PoolSettings};
+use gdl_model::{DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Layout, Manifest, Parent, PoolSettings};
 use serde_json::{Map, Value, json};
 
 use super::variables::{pool_variables, string};
@@ -130,9 +130,12 @@ pub(super) fn bundle(
             let variables = variables(
                 pool,
                 format!("{}:{HUB_PUBLIC_PORT}", pool.name),
-                pool.home
-                    .as_ref()
-                    .map(|home| format!("{home}:{HUB_PUBLIC_PORT}")),
+                // A fleet refuses a shared pool under `relay`, so only a home
+                // has a parent's hub.
+                match &pool.parent {
+                    Some(Parent::Pool(home)) => Some(format!("{home}:{HUB_PUBLIC_PORT}")),
+                    _ => None,
+                },
                 parent,
             )?;
             let mut service = json!({

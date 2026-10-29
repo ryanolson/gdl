@@ -16,8 +16,8 @@
 //! asked (`POST /v1/ext/gdl-pool/drain` on the control listener): the pool
 //! is then `draining` whatever its quorum. The hub of a pool whose
 //! class sends to other classes is such a follower: it finds its children,
-//! the pools of those classes whose record names its pool as their parent,
-//! in the directory, follows each over its watch, and relays what it
+//! the pools of those classes whose record names its pool, or its class,
+//! as their parent, in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-pool/follows`, as
 //! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::PoolWatcher`] reads
 //! too), and a watch of one follow of it alone, ordered as the relay is

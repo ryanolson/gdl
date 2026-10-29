@@ -62,7 +62,17 @@ Expiry governs discovery only. A follow over a live link keeps its pool whatever
 
 ## Following children only
 
-A hub follows only the pools that name its own pool as their parent. Region plays no part in following. A parent's hub needs no other parent's view, and a child reports to one parent's hub. A deployment must be complete per parent, so every parent has somewhere to send.
+A hub follows only its children: the pools that name its own pool as their parent (`home`), or its class (`parents`). A pool that names a class is shared: the hub of every pool of that class follows it. Region plays no part in following. A parent's hub needs no other parent's view. A deployment must be complete per parent, so every parent has somewhere to send.
+
+`home` and `parents` are two forms of one rule, `gdl_model::Parent`, in the settings, the fleet file, and the record. A pool names one of them. So a pool that one parent follows is a shared pool with one parent, and every lifecycle rule counts parents the same way for both.
+
+A shared pool needs a directory that every parent's hub reads, such as `dir` or DynamoDB. Under `relay` a pool reports its record to one parent's hub, so the other parents never see it. A hub that publishes through `relay` refuses a shared pool, and a relay parent refuses a shared pool's report.
+
+**The child counts each parent on its own.** It counts its followers by their watches, keyed by the follower's pool, run, and follow ([Closing a follow by acknowledgement](#closing-a-follow-by-acknowledgement)). So a drain says that no pool follows it only once every parent has released its follow, and a retirement is acknowledged only once every parent counted at the retirement has avoided the retiree or released its follow. A parent whose hub stops changes nothing for the other parents: they keep following, offering, and acknowledging. Its watch closed without a release, so the child counts it as lost. A later drain then waits for its entry instances' bound, and a later retirement for the retiree's bound (the setup timeout plus twice `summary_ms`), as with one parent. `crates/gdl-hub/tests/shared.rs` holds these cases with three parents in three regions.
+
+**Rejected: one parent per pool.** A pool in one region then takes work only from the one parent that names it. A parent places a request by region and load in any region, so each parent needs every child pool. With one parent per pool, a fleet must run a copy of each child pool for each parent, and a child's capacity is split between the parents and cannot move between them.
+
+**Rejected: a parent's hub that stops releases its follows.** It would end a later drain or retirement sooner after a clean stop. But a stopped hub's choosers can still hold offers to the child: they lose their hub lease, but a request in flight can outlive the hub. A crash would still wait for the bound. The rule for one parent is kept.
 
 ## Failover only before acceptance
 

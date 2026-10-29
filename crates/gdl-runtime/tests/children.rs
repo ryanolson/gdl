@@ -280,7 +280,7 @@ async fn only_children_are_followed_and_chosen() {
         &directory,
         ready("model-x-04-us-east-1", "m4-hub:1337"),
         &|hub| gdl_model::PoolSettings {
-            home: Some("global-02-us-east-1".into()),
+            parent: Some(gdl_model::Parent::Pool("global-02-us-east-1".into())),
             ..hub
         },
         &events,
@@ -290,7 +290,10 @@ async fn only_children_are_followed_and_chosen() {
         &spec,
         &directory,
         ready("model-x-05-us-east-1", "m5-hub:1337"),
-        &|hub| gdl_model::PoolSettings { home: None, ..hub },
+        &|hub| gdl_model::PoolSettings {
+            parent: None,
+            ..hub
+        },
         &events,
     )
     .await;

@@ -154,7 +154,7 @@ fn record(pool: &str, epoch: u64, seq: u64, properties: &[&str]) -> PoolRecord {
         name: pool.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
-        home: Some("global-us".into()),
+        parent: Some(gdl_model::Parent::Pool("global-us".into())),
         contract: 1,
         placement: 2,
         state: PoolState::Ready,

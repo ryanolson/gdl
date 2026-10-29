@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pool::{check_pool_name, check_region_name};
 use crate::{
-    DirectoryBackend, Layout, PoolSettings, Problem, Problems, check_layout_name, read_toml,
+    DirectoryBackend, Layout, Parent, PoolSettings, Problem, Problems, check_layout_name, read_toml,
 };
 
 mod cluster;
@@ -18,7 +18,7 @@ use cluster::{Header, check_clusters};
 /// A deployment's pools: `fleet.toml`. Not part of the placement's
 /// identity: pools are runtime topology, like replicas. It says what each
 /// class's pools need by default, which pools there are, with their
-/// layout, class, region, home, and quorum overrides, and the clusters
+/// layout, class, region, parent, and quorum overrides, and the clusters
 /// that run them; a bundle generator writes each pool's own settings from
 /// it ([`Fleet::pool`]).
 ///
@@ -41,6 +41,7 @@ use cluster::{Header, check_clusters};
 /// cluster = "use1"                   # the cluster that runs it, whose region it takes
 /// region = "us-east-1"               # required without a cluster; with one, its region if given
 /// home = "global-us-east-1"          # the parent pool, required when another class sends to this one: whose hub follows it
+/// # parents = "global"               # or, in place of `home`, the parent class: every pool of it follows this one
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,11 +87,15 @@ struct PoolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     region: Option<String>,
     /// The parent pool: the pool of a class that sends to this one that
-    /// follows this pool and offers it work. Required for a pool of a
-    /// class that another class sends to, and refused for one of a class
-    /// that nothing sends to.
+    /// follows this pool and offers it work. This or `parents` is required
+    /// for a pool of a class that another class sends to, and both are
+    /// refused for one of a class that nothing sends to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     home: Option<String>,
+    /// In place of `home`, the parent class: every pool of it in the
+    /// pool's layout follows this pool and offers it work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parents: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
 }
@@ -152,12 +157,16 @@ impl Fleet {
     ///
     /// Each pool runs the layout its `layout` names, which must be one of
     /// the spec's; a pool of a spec of one layout may leave it unsaid. Its
-    /// class, its quorum, and its home are judged against that layout: a
+    /// class, its quorum, and its parent are judged against that layout: a
     /// home is a pool of the same layout, whose class sends to the pool's
-    /// there. Every pool whose class sends to another class is a parent,
-    /// and has at least one child of each class its class sends to: a pool
-    /// of that class and of its layout whose home it is; each class it
-    /// lacks is a problem at the parent's table. A class's defaults apply
+    /// there, and `parents` is a class that sends to the pool's there; a
+    /// pool names one of the two. A pool that names `parents` is refused
+    /// while the fleet's pools publish through `relay`, where a pool reports
+    /// its record to one parent's hub. Every pool whose class sends to
+    /// another class is a parent, and has at least one child of each class
+    /// its class sends to: a pool of that class and of its layout whose
+    /// home it is, or whose parents are its class; each class it lacks is a
+    /// problem at the parent's table. A class's defaults apply
     /// to its pools in every layout with the class, and are judged against
     /// each. A pool whose layout or class is unknown is reported once: its
     /// quorum, its home, and its children are not judged against them.
@@ -194,16 +203,21 @@ impl Fleet {
         }
         self.header.check(&mut errors);
         check_clusters(&self.clusters, &mut errors);
-        // Each child by its home, its layout, and its class: a parent's
-        // children are the pools that name it in its own layout.
-        let children: BTreeSet<(&str, &str, &str)> = self
-            .pools
-            .iter()
-            .filter_map(|(name, pool)| {
-                let runs = self.layout_of(name, pool, laid.as_ref()).ok()??;
-                Some((pool.home.as_deref()?, runs, pool.class.as_str()))
-            })
-            .collect();
+        // Each child by its home, its layout, and its class, and each
+        // shared pool by its parents' class: a parent's children are the
+        // pools that name it, or its class, in its own layout.
+        let (mut homed, mut shared) = (BTreeSet::new(), BTreeSet::new());
+        for (name, pool) in &self.pools {
+            let Some(runs) = self.layout_of(name, pool, laid.as_ref()).ok().flatten() else {
+                continue;
+            };
+            if let Some(home) = &pool.home {
+                homed.insert((home.as_str(), runs, pool.class.as_str()));
+            }
+            if let Some(parents) = &pool.parents {
+                shared.insert((parents.as_str(), runs, pool.class.as_str()));
+            }
+        }
         for (name, pool) in &self.pools {
             let table = || FleetTable::Pool(name.clone());
             if let Err(reason) = check_pool_name(name) {
@@ -233,7 +247,9 @@ impl Fleet {
                             &mut errors,
                         );
                         for &into in classes.sends.get(pool.class.as_str()).into_iter().flatten() {
-                            if !children.contains(&(name.as_str(), runs, into)) {
+                            if !homed.contains(&(name.as_str(), runs, into))
+                                && !shared.contains(&(pool.class.as_str(), runs, into))
+                            {
                                 errors.push(FleetError::MissingChild {
                                     pool: name.clone(),
                                     layout: runs.to_string(),
@@ -250,6 +266,14 @@ impl Fleet {
                 },
             }
             errors.extend(self.home_problem(name, pool, laid.as_ref()));
+            if let Some(parents) = &pool.parents
+                && matches!(self.directory(), DirectoryBackend::Relay { .. })
+            {
+                errors.push(FleetError::SharedUnderRelay {
+                    pool: name.clone(),
+                    parents: parents.clone(),
+                });
+            }
         }
         // A class's table is judged in each layout with the class, and
         // what is wrong in all of them alike is one problem.
@@ -417,18 +441,26 @@ impl Fleet {
         }
     }
 
-    /// What is wrong with `pool`'s home, if anything. Whether it names a
-    /// pool of the fleet needs no layout, and whether that pool runs the
-    /// same layout needs only the layouts' names; whether a pool needs a
-    /// home, and whether it names a parent, need the classes, and a pool of
-    /// a layout or a class the spec does not have is reported as that
-    /// pool's problem.
+    /// What is wrong with `pool`'s parent, its `home` or its `parents`, if
+    /// anything. That it names at most one needs nothing; whether a home
+    /// names a pool of the fleet needs no layout, and whether that pool runs
+    /// the same layout needs only the layouts' names; whether a pool needs a
+    /// parent, and whether it names one, need the classes, and a pool of a
+    /// layout or a class the spec does not have is reported as that pool's
+    /// problem.
     fn home_problem(
         &self,
         name: &str,
         pool: &PoolSpec,
         laid: Option<&Laid<'_>>,
     ) -> Option<FleetError> {
+        if let (Some(home), Some(parents)) = (&pool.home, &pool.parents) {
+            return Some(FleetError::HomeAndParents {
+                pool: name.into(),
+                home: home.clone(),
+                parents: parents.clone(),
+            });
+        }
         if let Some(home) = &pool.home
             && !self.pools.contains_key(home)
         {
@@ -453,7 +485,9 @@ impl Fleet {
             }
         }
         let Classes {
-            segments, sends, ..
+            named,
+            segments,
+            sends,
         } = laid?.get(runs?)?.as_ref()?;
         if !segments.contains_key(pool.class.as_str()) {
             return None;
@@ -463,16 +497,32 @@ impl Fleet {
             .filter(|(_, into)| into.contains(pool.class.as_str()))
             .map(|(from, _)| from.to_string())
             .collect();
+        if let Some(shared) = &pool.parents {
+            return match parents.is_empty() {
+                true => Some(FleetError::ParentOfTopClass {
+                    pool: name.into(),
+                    class: pool.class.clone(),
+                    key: "parents",
+                }),
+                false => (!parents.contains(shared)).then(|| FleetError::ParentsNotSender {
+                    pool: name.into(),
+                    parents: shared.clone(),
+                    class: pool.class.clone(),
+                    layout: named.map(str::to_string),
+                }),
+            };
+        }
         match &pool.home {
             None if parents.is_empty() => None,
-            None => Some(FleetError::MissingHome {
+            None => Some(FleetError::MissingParent {
                 pool: name.into(),
                 class: pool.class.clone(),
                 parents,
             }),
-            Some(_) if parents.is_empty() => Some(FleetError::HomeOfTopClass {
+            Some(_) if parents.is_empty() => Some(FleetError::ParentOfTopClass {
                 pool: name.into(),
                 class: pool.class.clone(),
+                key: "home",
             }),
             Some(home) => {
                 let parent = &self.pools[home];
@@ -559,8 +609,11 @@ impl Fleet {
                 .map(|(_, cluster)| cluster.region.clone())
                 .or_else(|| pool.region.clone())
                 .unwrap_or_default(),
-            home: pool.home.clone(),
-            directory: DirectoryBackend::default(),
+            // A fleet that `check` accepted names at most one.
+            parent: Parent::from_keys(pool.home.clone(), pool.parents.clone())
+                .ok()
+                .flatten(),
+            directory: self.directory(),
             ready,
             requires: defaults
                 .map(|class| class.requires.clone())
@@ -569,6 +622,13 @@ impl Fleet {
             summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
         })
+    }
+
+    /// The directory the fleet's pools publish their records through:
+    /// `relay`, the default, whose parent's hub a bundle generator fills in
+    /// for each pool. So a fleet refuses a shared pool ([`Fleet::check`]).
+    fn directory(&self) -> DirectoryBackend {
+        DirectoryBackend::default()
     }
 
     /// Every pool's settings, as [`Fleet::pool`] gives them, in name order:

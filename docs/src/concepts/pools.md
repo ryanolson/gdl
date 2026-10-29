@@ -65,8 +65,8 @@ The placement hash covers each entered class's effective policy, the default inc
 
 A pool has a name, a class, a region, and a layout. A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter and ending with a letter or digit, at most 63 characters.
 
-- **Parent (`home`).** A pool's parent is the pool of the class that sends to it. Only the parent's hub follows it, and only the parent's choosers offer it work. `home` is required for every pool of a class that another class sends to. It is refused for a pool of a class that nothing sends to, such as a global pool.
-- **Complete per parent.** Every pool whose class sends to another class needs at least one child of each class its class sends to, in its own layout. With three classes in a chain, this holds at every level: a middle pool is a child of a top pool and a parent of a bottom pool.
+- **Parent (`home` or `parents`).** A pool's parents are the pools of the class that sends to it whose hubs follow it. Only their choosers offer it work. `home` names one pool. `parents` names a class that sends to the pool's class, and every pool of that class is a parent: the pool is shared. A pool of a class that another class sends to names one of the two. Both are refused for a pool of a class that nothing sends to, such as a global pool. A shared pool needs a directory that every parent's hub reads, not `relay`.
+- **Complete per parent.** Every pool whose class sends to another class needs at least one child of each class its class sends to, in its own layout. A shared pool is a child of every pool of its parents' class. With three classes in a chain, this holds at every level: a middle pool is a child of a top pool and a parent of a bottom pool.
 - **Layouts.** A spec can hold several layouts of one graph, each with its own placement hash. Each layout must be a complete graph on its own. A pool runs one layout. Pools of layouts that place nodes differently never follow or offer to each other, because a hub follows only pools whose hashes equal its own. The hash does not include the layout's name.
 - **Quorum (`ready`).** The usable instances each segment of the class needs for the pool to be `ready`: 1 by default, a class default in the fleet file, or the pool's own override.
 - **Requires.** How many `ready` children of each class it sends to the pool's health needs: 1 of each by default.
@@ -194,7 +194,7 @@ A pool whose hub is gone cannot drain or say that it was scaled to 0, and silenc
 
 Each write has an epoch past the child's last record: the time in milliseconds, or the epoch after the record's when that is later (`gdl_pools::PoolCommand`). So a late write of the old epoch, such as a heartbeat that was on its way or a hub that was cut off and comes back, is refused as not newer, and cannot undo the command. A hub of the pool that starts again takes an epoch past the command's, as it does past any record it finds, and serves the pool again. So does a hub that still runs but none of whose writes was answered: it cannot tell the command from a record that was there before it started ([Limitations](../operations/limitations.md#an-operators-command-fences-a-hub-that-still-answers)).
 
-- The hub answers 204 once the directory has stored the write. It answers 404 when it holds no record of a child of that name and class: a pool of a class it does not send to, or whose record names another pool as its parent or has other hashes. It answers 409 when the directory refuses the write, and 503 when the directory cannot be read or written.
+- The hub answers 204 once the directory has stored the write. It answers 404 when it holds no record of a child of that name and class: a pool of a class it does not send to, or whose record names another pool as its parent or has other hashes. A shared pool is a child of every pool of its parents' class, so the hub of any of them takes the command. It answers 409 when the directory refuses the write, and 503 when the directory cannot be read or written.
 - Under the `relay` backend, the parent's hub holds its children's records itself, and writes the command into its children's records as it writes a report. Under `dir`, or a backend given to `hub_builder_with`, it reads and writes the directory it watches. A top pool has no parent: a tool of the deployment gives the command through the backend with `PoolCommand::give`.
 - The commands are for a pool whose hub is gone. A command for a pool whose hub still answers fences that hub's writes until it restarts ([Limitations](../operations/limitations.md#an-operators-command-fences-a-hub-that-still-answers)). For such a pool, use its own `/drain` or `/presence`.
 
@@ -306,7 +306,7 @@ Under the `relay` backend, the pool's hub also reports its record to its parent'
 
 ### The relay backend
 
-Under `relay`, the default, a child pool's hub reports its record to its parent pool's hub, at `[pool] parent_hub` (`GDL_POOL__PARENT_HUB`). A hub of a class that another class sends to needs `parent_hub`. A hub of a class that nothing sends to refuses it, and reports nowhere. The report is `POST /v1/ext/gdl-pool/report` on the parent's public listener. It carries the record, on each change of state and each heartbeat, or the withdrawal once the pool's drain has ended.
+Under `relay`, the default, a child pool's hub reports its record to its parent pool's hub, at `[pool] parent_hub` (`GDL_POOL__PARENT_HUB`). So the relay serves only a pool with one parent: a hub that publishes through `relay` refuses a pool that names `parents`. A hub of a class that another class sends to needs `parent_hub`. A hub of a class that nothing sends to refuses it, and reports nowhere. The report is `POST /v1/ext/gdl-pool/report` on the parent's public listener. It carries the record, on each change of state and each heartbeat, or the withdrawal once the pool's drain has ended.
 
 The parent's hub holds its children's records in a directory in its own memory, and its follow watches that directory as it watches any other. `GET /v1/ext/gdl-pool/report/{class}/{pool}` answers the record it holds for a child, expired or not, or 404. A child's hub that restarts reads its last record there, since its own directory holds its children's records, not its own. Only a 404 means that the parent holds no record. Until a read succeeds, the child reads again every 1 s and reports nothing, since a report could not land either. A pool in the middle of a chain of classes does both: it reports to its parent, and holds its own children's records. A record goes one hop, to the parent, and no further.
 
@@ -315,7 +315,7 @@ The parent's hub also keeps each record and withdrawal in its state directory, `
 The parent writes a report only once it has checked it (`gdl_hub::VerifiedReport`, which nothing else can make):
 
 - the record is well formed;
-- its `home` is the parent's pool;
+- its `home` is the parent's pool, so the record of a shared pool, which names `parents`, is refused;
 - its contract and placement hashes are the parent's own, since a parent and its children share one layout;
 - its `(epoch, seq)` is newer than what the parent holds for the pool.
 

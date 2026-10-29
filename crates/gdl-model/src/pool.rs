@@ -19,6 +19,7 @@ use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 /// class = "model_x"
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent pool, for a class that another sends to: whose hub follows this one
+/// # parents = "global"         # or, in place of `home`, the parent class: every pool of it follows this one (not with "relay")
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// parent_hub = "global-hub:1337" # with "relay", for a class that another sends to: the parent's hub
 /// # dir = "/var/lib/gdl/pools" # with "dir", and only with it: the shared directory
@@ -63,15 +64,14 @@ pub struct PoolSettings {
     pub class: String,
     /// The region the pool runs in.
     pub region: String,
-    /// The parent pool: the pool of a class that sends to this one whose
-    /// hub follows this pool, and whose choosers alone offer it work. The
-    /// pool's record names it. The fleet file requires it for a pool of a
-    /// class that another class sends to, and refuses it for one of a class
-    /// that nothing sends to; a pool given settings without a fleet file
-    /// that names none, or names another pool, is not followed by that
-    /// parent's hub.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<String>,
+    /// The pool's parents: the pools of a class that sends to this one
+    /// whose hubs follow this pool, and whose choosers alone offer it work
+    /// (`home` or `parents`). The pool's record names them. The fleet file
+    /// requires it for a pool of a class that another class sends to, and
+    /// refuses it for one of a class that nothing sends to; a pool given
+    /// settings without a fleet file that names none is followed by no
+    /// pool.
+    pub parent: Option<Parent>,
     /// Where the pool's record is published and the other pools are found:
     /// the `directory` key, with the `parent_hub` and `state_dir` keys for
     /// [`DirectoryBackend::Relay`] and the `dir` key for
@@ -306,6 +306,74 @@ impl Default for DirectoryBackend {
     }
 }
 
+/// Which pools follow a pool of a class that another class sends to, and
+/// alone offer it work: one pool, or every pool of a class. Both forms are
+/// one rule, a parent whose hub follows the pool, and differ only in how
+/// many parents there are. Written as `home` or `parents` in `[pool]`,
+/// the fleet file, and the pool's record.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Parent {
+    /// One pool, by its name (`home`): only that pool's hub follows this
+    /// one. Any directory serves it.
+    #[serde(rename = "home")]
+    Pool(String),
+    /// Every pool of a class, by its name (`parents`): each of their hubs
+    /// follows this one, so it is shared. It needs a directory that every
+    /// parent's hub reads, never `relay`, where a pool reports its record
+    /// to one parent's hub.
+    #[serde(rename = "parents")]
+    Class(String),
+}
+
+impl Parent {
+    /// Whether the pool `pool` of class `class` is one of these parents.
+    pub fn includes(&self, pool: &str, class: &str) -> bool {
+        match self {
+            Self::Pool(name) => name == pool,
+            Self::Class(name) => name == class,
+        }
+    }
+
+    /// The key that writes this form: `home` or `parents`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Pool(_) => "home",
+            Self::Class(_) => "parents",
+        }
+    }
+
+    /// The parent from the keys `home` and `parents` as written: at most
+    /// one of them, or the key of the second and why it is refused.
+    pub fn from_keys(
+        home: Option<String>,
+        parents: Option<String>,
+    ) -> Result<Option<Self>, (&'static str, String)> {
+        match (home, parents) {
+            (Some(home), Some(parents)) => Err((
+                "parents",
+                format!(
+                    "`{parents}` is given with `home = \"{home}\"`; a pool names one pool as its parent, `home`, or every pool of a class, `parents`, not both"
+                ),
+            )),
+            (Some(home), None) => Ok(Some(Self::Pool(home))),
+            (None, Some(parents)) => {
+                crate::check_class_name(&parents).map_err(|why| ("parents", why))?;
+                Ok(Some(Self::Class(parents)))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The keys `home` and `parents` that write `parent`.
+    pub fn into_keys(parent: Option<Self>) -> (Option<String>, Option<String>) {
+        match parent {
+            Some(Self::Pool(home)) => (Some(home), None),
+            Some(Self::Class(parents)) => (None, Some(parents)),
+            None => (None, None),
+        }
+    }
+}
+
 impl PoolSettings {
     /// The load summary's period when `summary_ms` is not set: 10 s.
     pub const DEFAULT_SUMMARY: Duration = Duration::from_secs(10);
@@ -370,7 +438,8 @@ impl PoolSettings {
     /// class sends to its pool's class, since it reports there
     /// ([`missing_parent_hub`]), and `state_dir` when its pool's class
     /// sends to another class, since it keeps its children's records there
-    /// ([`missing_state_dir`]).
+    /// ([`missing_state_dir`]). A shared pool is refused with the `relay`
+    /// backend ([`shared_under_relay`]).
     pub fn check_hub(&self, layout: &Layout) -> Result<(), Problems> {
         let mut problems = self.problems(layout, None);
         if let DirectoryBackend::Relay {
@@ -378,6 +447,9 @@ impl PoolSettings {
             state_dir,
         } = &self.directory
         {
+            if let Some(Parent::Class(parents)) = &self.parent {
+                problems.push(shared_under_relay(parents));
+            }
             if let (None, Some(parent)) = (parent_hub, sent_to(layout, &self.class)) {
                 problems.push(missing_parent_hub(parent, &self.class));
             }
@@ -490,6 +562,22 @@ impl PoolSettings {
                 ),
                 _ => (None, None),
             };
+            let parents = match &self.parent {
+                Some(Parent::Class(parents))
+                    if !layout
+                        .boundaries()
+                        .iter()
+                        .any(|boundary| boundary.from == *parents && boundary.into == class) =>
+                {
+                    Some(at(
+                        "parents".into(),
+                        format!(
+                            "class `{parents}` does not send to class `{class}`; `parents` is a class that sends to the pool's"
+                        ),
+                    ))
+                }
+                _ => None,
+            };
             let properties = (!self.properties.is_empty() && sent_to(layout, class).is_none())
                 .then(|| {
                     at(
@@ -504,6 +592,7 @@ impl PoolSettings {
                 .chain(requires)
                 .chain(reports)
                 .chain(keeps)
+                .chain(parents)
                 .chain(properties)
                 .collect()
         }
@@ -519,6 +608,19 @@ pub fn missing_parent_hub(parent: &str, class: &str) -> Problem {
         Some("parent_hub".into()),
         format!(
             "missing: class `{parent}` sends to class `{class}`, so with directory = \"relay\" the pool's hub reports its record to its parent's hub, at this address"
+        ),
+    )
+}
+
+/// The problem of a shared pool, whose parents are every pool of class
+/// `parents`, under the `relay` backend: a pool reports its record there
+/// to one parent's hub, so the others would never find it.
+pub fn shared_under_relay(parents: &str) -> Problem {
+    Problem::at(
+        Some("pool".into()),
+        Some("parents".into()),
+        format!(
+            "every pool of class `{parents}` follows a shared pool, so it needs a directory each of their hubs reads; with directory = \"relay\" a pool reports its record to one parent's hub: name the pool's parent with `home`, or use another directory"
         ),
     )
 }
@@ -680,6 +782,8 @@ struct Table {
     region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parents: Option<String>,
     #[serde(default)]
     directory: Backend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -803,6 +907,8 @@ impl TryFrom<Table> for PoolSettings {
             }
         }
         let timing = hub_timing(&table)?;
+        let parent =
+            Parent::from_keys(table.home, table.parents).map_err(|(key, why)| at(key, why))?;
         let directory = match (table.directory, table.dir) {
             (Backend::Relay, None) => DirectoryBackend::Relay {
                 parent_hub: table.parent_hub,
@@ -862,7 +968,7 @@ impl TryFrom<Table> for PoolSettings {
             layout: table.layout,
             class: table.class,
             region: table.region,
-            home: table.home,
+            parent,
             directory,
             ready: table.ready,
             requires: table.requires,
@@ -996,12 +1102,14 @@ impl From<PoolSettings> for Table {
             DirectoryBackend::Memory => (Backend::Memory, None, None, None),
             DirectoryBackend::Dir { path } => (Backend::Dir, None, None, Some(path)),
         };
+        let (home, parents) = Parent::into_keys(settings.parent);
         Self {
             name: settings.name,
             layout: settings.layout,
             class: settings.class,
             region: settings.region,
-            home: settings.home,
+            home,
+            parents,
             directory,
             parent_hub,
             state_dir,

@@ -99,7 +99,7 @@ async fn the_pool_publishes_its_record_and_each_change_of_state() {
             name: POOL.into(),
             class: "model_x".into(),
             region: "us-east-1".into(),
-            home: Some(GLOBAL.into()),
+            parent: Some(gdl_model::Parent::Pool(GLOBAL.into())),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
             state: PoolState::Unavailable,
@@ -123,8 +123,8 @@ async fn the_pool_publishes_its_record_and_each_change_of_state() {
     );
     assert_eq!(ready.epoch, first.epoch, "one epoch for the hub's life");
     assert_eq!(
-        ready.home.as_deref(),
-        Some(GLOBAL),
+        ready.parent,
+        Some(gdl_model::Parent::Pool(GLOBAL.into())),
         "every write names the parent"
     );
     assert!(ready.seq > held.seq && held.seq > first.seq);
@@ -168,13 +168,13 @@ async fn a_pool_of_a_class_nothing_sends_to_names_no_parent() {
     let directory = MemoryDirectory::new();
     let mut records = Records::of(&directory, "global", GLOBAL);
     let settings = PoolSettings {
-        home: Some("global-02-us-east-1".into()),
+        parent: Some(gdl_model::Parent::Pool("global-02-us-east-1".into())),
         ..global_default()
     };
     let (hub, _pool) = hub_of(settings, directory.clone(), timing()).await;
     let record = records.next().await;
     assert_eq!(record.class, "global");
-    assert_eq!(record.home, None, "{record:?}");
+    assert_eq!(record.parent, None, "{record:?}");
     hub.shutdown().await.expect("the hub stops");
 }
 

@@ -13,7 +13,7 @@ fn record(seq: u64, presence: Presence) -> PoolRecord {
         name: POOL.into(),
         class: CLASS.into(),
         region: "eu-west-1".into(),
-        home: None,
+        parent: None,
         contract: 1,
         placement: 1,
         state: PoolState::Ready,

@@ -47,6 +47,8 @@ home = "global-us"
 ready = { engine = 2 }            # overrides the class default
 ```
 
+`home` names one parent pool. A pool can instead write `parents = "global"`: then every pool of class `global` follows it and offers it work. A fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so `check` refuses `parents` ([Limitations](../operations/limitations.md#a-fleet-cannot-deploy-a-shared-pool)).
+
 `requires = { model_x = 1 }` in `[class.global]` sets how many `ready` children the global pool's health needs (1 of each class by default). A pool needs `layout = "<name>"` when the spec has several layouts. Every key is in [Spec and fleet reference](../appendix/spec-reference.md).
 
 A fleet can also name the Kubernetes clusters that run its pools. A pool that names a cluster takes the cluster's region:
@@ -74,7 +76,7 @@ cargo gdl check --spec gdl.toml --fleet fleet.toml
 cargo gdl compose --spec gdl.toml --fleet fleet.toml --out /tmp/fleet
 ```
 
-`check` prints `cargo gdl: no problems`, or every problem: a missing or wrong `home`, a parent without a child of each class its class sends to, a `ready` key that is not a segment of the class, a count of 0, an unknown key, and more. `compose` runs the same check, and writes nothing if there is a problem.
+`check` prints `cargo gdl: no problems`, or every problem: a missing or wrong `home` or `parents`, a parent without a child of each class its class sends to, a `ready` key that is not a segment of the class, a count of 0, an unknown key, and more. `compose` runs the same check, and writes nothing if there is a problem.
 
 For every pool, the bundle has one hub, the service named for the pool, and one service for each segment of the pool's class, named `<pool>_<segment>`. Here that is `global-us`, `global-us_front`, `model-x-01`, `model-x-01_engine`, `model-x-02`, and `model-x-02_engine`. The images are `api-hub`, `api-front`, and `api-engine`.
 

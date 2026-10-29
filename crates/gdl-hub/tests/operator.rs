@@ -168,7 +168,7 @@ async fn a_parent_commands_only_its_own_children() {
     let last = gone_child(&directory).await;
     let other = PoolRecord {
         name: "model-x-09-us-east-1".into(),
-        home: Some("global-02-us-west-2".into()),
+        parent: Some(gdl_model::Parent::Pool("global-02-us-west-2".into())),
         ..last
     };
     directory

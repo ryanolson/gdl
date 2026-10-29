@@ -91,7 +91,7 @@ fn a_pools_settings_are_read_from_the_environment() {
                 layout: None,
                 class: "model_x".into(),
                 region: "us-east-1".into(),
-                home: None,
+                parent: None,
                 directory: DirectoryBackend::Dir {
                     path: "/srv/pools".into()
                 },
@@ -411,7 +411,7 @@ fn settings(directory: DirectoryBackend) -> PoolSettings {
         layout: None,
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: None,
+        parent: None,
         directory,
         ready: BTreeMap::new(),
         requires: BTreeMap::new(),
@@ -532,6 +532,73 @@ async fn a_pool_with_the_dir_backend_publishes_into_its_directory() {
         .expect("the record is published in time");
     assert_eq!(record.name, "model-x-01-us-east-1");
     assert_eq!(record.state, PoolState::Unavailable);
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// Under `relay` a pool's hub reports its record to one parent's hub, so a
+/// shared pool, which every pool of its parents' class follows, is refused
+/// there, read from the environment and made in code alike. Under `dir`,
+/// whose files every hub on the host reads, its record names the class.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_pool_is_refused_under_relay_and_published_under_dir() {
+    let shared = [
+        ("GDL_POOL__NAME", "model-x-01-us-east-1"),
+        ("GDL_POOL__CLASS", "model_x"),
+        ("GDL_POOL__REGION", "us-east-1"),
+        ("GDL_POOL__HUB", "model-x-01-hub:1337"),
+        ("GDL_POOL__PARENTS", "global"),
+        ("GDL_POOL__PARENT_HUB", "global-hub:1337"),
+    ];
+    let refused = pool_from_vars(&spec(), shared.map(|(n, v)| (n.into(), v.into())))
+        .expect_err("a shared pool under relay");
+    assert!(
+        refused.to_string().contains("GDL_POOL__PARENTS"),
+        "{refused}"
+    );
+    let parent = Some(gdl_model::Parent::Class("global".into()));
+    let relay = PoolSettings {
+        parent: parent.clone(),
+        ..settings(DirectoryBackend::Relay {
+            parent_hub: Some("global-hub:1337".into()),
+            state_dir: None,
+        })
+    };
+    let Err(error) = hub_builder(config(), spec(), Some(relay)) else {
+        panic!("hub_builder accepted a shared pool under relay");
+    };
+    assert!(error.to_string().contains("[pool] parents"), "{error}");
+
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-shared-")
+        .tempdir()
+        .expect("a directory");
+    let pool = PoolSettings {
+        parent: parent.clone(),
+        ..settings(DirectoryBackend::Dir {
+            path: dir.path().to_path_buf(),
+        })
+    };
+    let hub = hub_builder(config(), spec(), Some(pool))
+        .expect("a shared pool under dir")
+        .serve()
+        .await
+        .expect("the hub serves");
+    let mut watch = DirDirectory::new(dir.path()).watch("model_x", None);
+    let published = async {
+        loop {
+            match watch.next().await {
+                Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. })) => {
+                    return record;
+                }
+                Some(Ok(_)) => {}
+                other => panic!("the watch ended: {other:?}"),
+            }
+        }
+    };
+    let record = tokio::time::timeout(Duration::from_secs(5), published)
+        .await
+        .expect("the record is published in time");
+    assert_eq!(record.parent, parent);
     hub.shutdown().await.expect("the hub stops");
 }
 

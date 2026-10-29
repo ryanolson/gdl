@@ -66,8 +66,8 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// instances.
 ///
 /// The state follows [`Quorum`], and the pool's record carries it, with
-/// the pool's parent (`[pool] home`) unless no class sends to the pool's
-/// class. Its routes, under `/v1/ext/gdl-pool/` on
+/// the pool's parent (`[pool] home`, or `parents` for a shared pool)
+/// unless no class sends to the pool's class. Its routes, under `/v1/ext/gdl-pool/` on
 /// the public listener: `GET health`, the pool health endpoint, which
 /// answers 200 when the pool is `ready` and, for each class its settings
 /// require pools of, at least that many followed pools of the class have
@@ -98,7 +98,8 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// A pool whose class sends to other classes follows their pools: for
 /// each class it sends to, it watches `directory`, and follows each child
 /// of its pool in the class (a pool whose record names this pool as its
-/// parent, `home`, has this deployment's contract and placement hashes,
+/// parent, `home`, or this pool's class, `parents`, has this deployment's
+/// contract and placement hashes,
 /// is `ready` or `degraded`, and is not scaled to 0, whatever its region)
 /// over the pool's
 /// watch, one link per pool. It
@@ -344,7 +345,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
             name: pool.name.clone(),
             class: pool.class.clone(),
             region: pool.region.clone(),
-            home: pool.home.clone().filter(|_| entered),
+            parent: pool.parent.clone().filter(|_| entered),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
             state: PoolState::Unavailable,
@@ -652,7 +653,9 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// do: read the child's last record, and write the command at an epoch
     /// past it ([`gdl_pools::PoolCommand`]). The version written, or
     /// `None` when the hub's directory holds no record of a child of this
-    /// pool by that name, of a class this pool sends to.
+    /// pool by that name, of a class this pool sends to. A shared pool is
+    /// a child of every pool of its parents' class, so the hub of any of
+    /// them takes the command.
     ///
     /// Under the `relay` backend the hub holds its children's records
     /// itself, and writes the command into them as
@@ -682,7 +685,9 @@ impl<D: PoolDirectory> PoolReadiness<D> {
             }
         };
         let child = |last: &PoolRecord| {
-            last.home.as_deref() == Some(self.record.name.as_str())
+            last.parent
+                .as_ref()
+                .is_some_and(|parent| parent.includes(&self.record.name, &self.record.class))
                 && (last.contract, last.placement) == (self.record.contract, self.record.placement)
         };
         let Some(last) = last.filter(child) else {

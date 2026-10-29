@@ -93,7 +93,7 @@ fn record(pool: &str, seq: u64, lease: Duration) -> PoolRecord {
         name: pool.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some("global-us-east-1".into()),
+        parent: Some(gdl_model::Parent::Pool("global-us-east-1".into())),
         contract: 1,
         placement: 2,
         state: PoolState::Ready,

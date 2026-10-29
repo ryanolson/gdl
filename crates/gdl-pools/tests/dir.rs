@@ -98,7 +98,7 @@ fn record(pool: &str, epoch: u64, seq: u64) -> PoolRecord {
         name: pool.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
-        home: None,
+        parent: None,
         contract: 1,
         placement: 2,
         state: PoolState::Ready,

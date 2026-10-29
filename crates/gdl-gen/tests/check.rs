@@ -590,3 +590,28 @@ fn check_refuses_a_positional_message_that_omits_a_field() {
         assert!(output.status.success(), "{codec}: {output:?}");
     }
 }
+
+/// A fleet's pools publish through `relay`, where a pool reports its record
+/// to one parent's hub, so a shared pool, whose parents are every global
+/// pool, is refused: `check` names the pool and its `parents` key, and
+/// counts it as every global's child, and `compose` refuses the same fleet.
+#[test]
+fn check_names_a_shared_pool_that_relay_refuses() {
+    let fleet = "[class.global]\nready = { front = 2 }\n[class.model_x]\nready = { engine = 1 }\n\
+        [pool.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+        [pool.global-eu-west-1]\nclass = \"global\"\nregion = \"eu-west-1\"\n\
+        [pool.global-ap-south-1]\nclass = \"global\"\nregion = \"ap-south-1\"\n\
+        [pool.model-x-shared]\nclass = \"model_x\"\nregion = \"eu-west-1\"\nparents = \"global\"\n";
+    let files = Files::new(&spec(""), fleet);
+    let f = files.fleet().display().to_string();
+    let expected = [format!(
+        "{f}: [pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`"
+    )];
+    let check = files.check();
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert_problems(&problems(&check), &expected);
+    let out = files.dir.path().join("deployment");
+    let compose = files.run("compose", &["--out".as_ref(), out.as_os_str()]);
+    assert_problems(&problems(&compose), &expected);
+    assert!(!out.exists(), "compose wrote a bundle");
+}

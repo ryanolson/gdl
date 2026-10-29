@@ -293,7 +293,10 @@ async fn the_middle_of_a_chain_reports_up_and_holds_its_childrens_records() {
     let at_middle = held(&middle.directory, "model_y").await;
     assert_eq!(at_middle.keys().collect::<Vec<_>>(), [BOTTOM]);
     assert_eq!(at_middle[BOTTOM].hub, address(&bottom.hub));
-    assert_eq!(at_middle[BOTTOM].home.as_deref(), Some(MIDDLE));
+    assert_eq!(
+        at_middle[BOTTOM].parent,
+        Some(gdl_model::Parent::Pool(MIDDLE.into()))
+    );
     let at_top = held(&top.directory, "model_x").await;
     assert_eq!(at_top.keys().collect::<Vec<_>>(), [MIDDLE]);
     assert_eq!(at_top[MIDDLE].hub, address(&middle.hub));
@@ -318,7 +321,7 @@ fn child_record(pool: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration
         name: pool.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some(GLOBAL.into()),
+        parent: Some(gdl_model::Parent::Pool(GLOBAL.into())),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
         state: PoolState::Ready,
@@ -802,12 +805,12 @@ async fn the_parent_refuses_what_it_cannot_verify() {
 
     let refused = [
         PoolRecord {
-            home: Some("global-02-us-east-1".into()),
+            parent: Some(gdl_model::Parent::Pool("global-02-us-east-1".into())),
             seq: 3,
             ..good.clone()
         },
         PoolRecord {
-            home: None,
+            parent: None,
             seq: 3,
             ..good.clone()
         },
@@ -1330,7 +1333,7 @@ async fn a_parent_lists_its_childrens_properties_and_no_other_pools() {
         &spec,
         PoolSettings {
             properties: vec![declared("mistral-24b")],
-            home: Some("global-02".into()),
+            parent: Some(gdl_model::Parent::Pool("global-02".into())),
             ..model("model-x-02", &address(&elsewhere.hub))
         },
         quiet_timing(),

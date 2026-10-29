@@ -10,10 +10,11 @@
 //! makes its follow not offered at once, whatever the directory says. A
 //! newer epoch in the directory ends a follow too, since the hub it was
 //! following is gone. The follow set is the follower's children, the pools
-//! whose record names its pool as their parent (`home`), so a pool leaves
-//! it only so: a pool that stops taking work stays followed, not offered,
-//! until the relay closes its follow. Region plays no part: a parent
-//! follows its children wherever they run, and no other pool.
+//! whose record names its pool as their parent (`home`), or its class
+//! (`parents`: a shared pool, which every pool of the class follows), so a
+//! pool leaves it only so: a pool that stops taking work stays followed,
+//! not offered, until the relay closes its follow. Region plays no part: a
+//! parent follows its children wherever they run, and no other pool.
 //!
 //! A follow the relay closed, once every chooser acknowledged that it is
 //! not offered, is followed again only once the directory shows a later
@@ -145,13 +146,17 @@ impl<D: PoolDirectory> Follower<D> {
         }
     }
 
-    /// Whether `record` is a child that takes work: it names this pool as
-    /// its parent, is of this deployment, is `ready` or `degraded`, and is
+    /// Whether `record` is a child that takes work: it names this pool, or
+    /// this pool's class, as its parent, is of this deployment, is `ready`
+    /// or `degraded`, and is
     /// serving. A pool scaled to 0 takes no work, and its record never
     /// lapses though its hub may be gone, so following it would dial that
     /// hub without end.
     fn child(&self, record: &PoolRecord) -> bool {
-        record.home.as_deref() == Some(self.me.pool.as_str())
+        record
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.includes(&self.me.pool, &self.me.class))
             && record.contract == self.contract
             && record.placement == self.placement
             && matches!(record.state, PoolState::Ready | PoolState::Degraded)

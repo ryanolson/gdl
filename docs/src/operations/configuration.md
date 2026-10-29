@@ -87,6 +87,7 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `region` | required | a DNS label |
 | `layout` | none | the spec's layout that the pool runs. Read and checked for shape only |
 | `home` | none | the parent pool |
+| `parents` | none | in place of `home`, the parent class: every pool of it follows this pool. Refused with `home`, and by a hub that publishes through `relay`. An instance takes it with any backend |
 | `directory` | `relay` | `relay`, `memory`, or `dir`. A hub process runs `relay` or `dir` |
 | `parent_hub` | none | the parent pool's hub, `host:port`, where the pool's hub reports its record. With `directory = "relay"`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with another backend |
 | `state_dir` | none | where the pool's hub keeps the records its children report, so that it still holds them after it restarts. With `directory = "relay"`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with another backend. An instance ignores it |

@@ -208,7 +208,7 @@ fn record(class: &str, pool: &str, epoch: u64, seq: u64) -> PoolRecord {
         name: pool.into(),
         class: class.into(),
         region: "us-east-1".into(),
-        home: None,
+        parent: None,
         contract: 1,
         placement: 2,
         state: PoolState::Ready,
@@ -718,7 +718,7 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
     // Fields away from their defaults, so that a backend that keeps only
     // some of them fails.
     let m1 = PoolRecord {
-        home: Some("global-us".into()),
+        parent: Some(gdl_model::Parent::Pool("global-us".into())),
         contract: 7,
         placement: 8,
         state: PoolState::Degraded,
@@ -788,19 +788,19 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
 
 /// Rule [`Rule::EveryRecord`]: every watch of a class, through any
 /// handle, sees every record of the class, in every region, of every
-/// parent, and of any hashes: which pools to follow is the reader's
-/// choice.
+/// parent, shared or not, and of any hashes: which pools to follow is the
+/// reader's choice.
 async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
     let directories: [B::Directory; 3] = within("a fresh directory", backend.fresh()).await;
     let records = [
         record(MODEL, "m1", 1, 1),
         PoolRecord {
             region: "eu-west-1".into(),
-            home: Some("global-eu".into()),
+            parent: Some(gdl_model::Parent::Pool("global-eu".into())),
             ..record(MODEL, "m2", 1, 1)
         },
         PoolRecord {
-            home: Some("global-us".into()),
+            parent: Some(gdl_model::Parent::Pool("global-us".into())),
             contract: 9,
             placement: 8,
             ..record(MODEL, "m3", 1, 1)
@@ -825,9 +825,10 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
         watches.push(watch);
     }
 
+    // A shared pool: every hub of its parents' class reads it.
     let m4 = PoolRecord {
         region: "ap-south-1".into(),
-        home: Some("global-ap".into()),
+        parent: Some(gdl_model::Parent::Class("global".into())),
         ..record(MODEL, "m4", 1, 1)
     };
     publish(&directories[2], m4.clone())
@@ -866,7 +867,12 @@ fn whole(seq: u64) -> PoolRecord {
         name: "m1".into(),
         class: MODEL.into(),
         region: format!("region-{seq}"),
-        home: Some(format!("global-{seq}")),
+        // A home at one seq, and a parents' class at the next.
+        parent: Some(if seq.is_multiple_of(2) {
+            gdl_model::Parent::Class(format!("global{seq}"))
+        } else {
+            gdl_model::Parent::Pool(format!("global-{seq}"))
+        }),
         contract: 100 + seq,
         placement: 200 + seq,
         state: if seq.is_multiple_of(2) {

@@ -335,17 +335,20 @@ async fn a_global_follows_its_children_that_take_work() {
     .await;
     let published = records.next().await;
     assert_eq!(published.state, PoolState::Unavailable);
-    assert_eq!(published.home.as_deref(), Some(GLOBAL));
+    assert_eq!(
+        published.parent,
+        Some(gdl_model::Parent::Pool(GLOBAL.into()))
+    );
     let elsewhere = PoolRecord {
         region: "us-west-2".into(),
         ..written(&published, "model-x-01-us-west-2", &nowhere())
     };
     let cousin = PoolRecord {
-        home: Some("global-02-us-east-1".into()),
+        parent: Some(gdl_model::Parent::Pool("global-02-us-east-1".into())),
         ..written(&published, "model-x-03-us-east-1", &nowhere())
     };
     let orphan = PoolRecord {
-        home: None,
+        parent: None,
         ..written(&published, "model-x-04-us-east-1", &nowhere())
     };
     let foreign = PoolRecord {

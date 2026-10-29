@@ -17,7 +17,7 @@ fn pool(properties: usize, properties_version: u64) -> PoolRecord {
         name: "model-x-01".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some("global-us".into()),
+        parent: Some(gdl_model::Parent::Pool("global-us".into())),
         contract: 7,
         placement: 8,
         state: PoolState::Ready,

@@ -337,7 +337,7 @@ fn a_pool_table_is_read_from_a_file() {
             layout: None,
             class: "global".into(),
             region: "us-east-1".into(),
-            home: Some("g".into()),
+            parent: Some(gdl_model::Parent::Pool("g".into())),
             directory: DirectoryBackend::DEFAULT,
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
@@ -374,7 +374,7 @@ fn a_pool_table_is_read_from_the_environment() {
                 layout: Some("regional".into()),
                 class: "global".into(),
                 region: "us-west-2".into(),
-                home: None,
+                parent: None,
                 directory: DirectoryBackend::Memory,
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
                 requires: BTreeMap::new(),
@@ -410,9 +410,28 @@ fn a_pool_table_is_read_from_the_environment() {
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         let pool = config.pool().expect("a pool");
         assert_eq!(pool.name, "model-x-01-us-east-1");
-        assert_eq!(pool.home.as_deref(), Some("global-us-east-1"));
+        assert_eq!(
+            pool.parent,
+            Some(gdl_model::Parent::Pool("global-us-east-1".into()))
+        );
         assert_eq!(pool.directory, DirectoryBackend::DEFAULT);
         assert_eq!(pool.quorum("back"), 2);
+        Ok(())
+    });
+    // A shared pool, whose parents are every pool of a class.
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_POOL__NAME", "model-x-01-us-east-1");
+        jail.set_env("GDL_POOL__CLASS", "model_x");
+        jail.set_env("GDL_POOL__REGION", "us-east-1");
+        jail.set_env("GDL_POOL__PARENTS", "global");
+        jail.set_env("GDL_POOL__DIRECTORY", "dir");
+        jail.set_env("GDL_POOL__DIR", "/srv/pools");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        assert_eq!(
+            config.pool().map(|pool| &pool.parent),
+            Some(&Some(gdl_model::Parent::Class("global".into())))
+        );
         Ok(())
     });
 }
@@ -455,7 +474,7 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_pool() {
                 layout: None,
                 class: "model_x".into(),
                 region: "us-east-1".into(),
-                home: Some("global-us-east-1".into()),
+                parent: Some(gdl_model::Parent::Pool("global-us-east-1".into())),
                 directory: DirectoryBackend::Dir {
                     path: "/var/lib/gdl/pools".into()
                 },

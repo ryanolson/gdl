@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gdl_model::{
-    DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, NodeInfo, Placement, PoolSettings,
-    PropertyKey, Role, TypeInfo, WatchCaps, layout,
+    DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, NodeInfo, Parent, Placement,
+    PoolSettings, PropertyKey, Role, TypeInfo, WatchCaps, layout,
 };
 
 /// `S => F { D }`: F's own hop crosses from `global` into `model_x`.
@@ -78,7 +78,7 @@ fn a_pools_settings_are_read_whole() {
             layout: None,
             class: "model_x".into(),
             region: "us-east-1".into(),
-            home: Some("global-us-east-1".into()),
+            parent: Some(Parent::Pool("global-us-east-1".into())),
             directory: DirectoryBackend::Memory,
             ready: BTreeMap::from([("d".into(), 4)]),
             requires: BTreeMap::new(),
@@ -95,7 +95,7 @@ fn a_pools_settings_are_read_whole() {
 #[test]
 fn only_name_class_and_region_are_required() {
     let least = settings("name = 'g'\nclass = 'global'\nregion = 'r'\n");
-    assert_eq!(least.home, None);
+    assert_eq!(least.parent, None);
     assert_eq!(least.directory, DirectoryBackend::DEFAULT);
     assert!(least.ready.is_empty());
     assert_eq!(least.hub, None);
@@ -807,4 +807,66 @@ fn a_pool_declares_the_properties_it_serves() {
         assert!(refused.contains(named), "{text}: {refused}");
         assert!(refused.contains(why), "{text}: {refused}");
     }
+}
+
+/// A shared pool names its parents' class with `parents`, in place of one
+/// pool with `home`; the two are one setting, so naming both is refused.
+#[test]
+fn a_shared_pools_settings_name_its_parents_class() {
+    const SHARED: &str = "name = 'm'\nclass = 'model_x'\nregion = 'r'\nparents = 'global'\n\
+                          directory = 'dir'\ndir = '/srv/pools'\nhub = 'm-hub:1337'\n";
+    let pool = settings(SHARED);
+    assert_eq!(pool.parent, Some(Parent::Class("global".into())));
+    let text = toml::to_string(&pool).expect("toml");
+    assert!(text.contains("parents = \"global\""), "{text}");
+    assert!(!text.contains("home"), "{text}");
+    assert_eq!(settings(&text), pool, "{text}");
+    pool.check_hub(&classed())
+        .expect("a shared pool under `dir`");
+    pool.check(&classed(), "d").expect("an instance of it");
+
+    let both = format!("{SHARED}home = 'g'\n");
+    let Err(error) = toml::from_str::<PoolSettings>(&both) else {
+        panic!("accepted {both}");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("a pool names one pool as its parent, `home`, or every pool of a class, `parents`, not both"),
+        "{error}"
+    );
+    let unsent = PoolSettings {
+        parent: Some(Parent::Class("model_x".into())),
+        ..pool
+    };
+    let Err(error) = unsent.check_hub(&classed()) else {
+        panic!("accepted parents that do not send to the pool");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[pool] parents: class `model_x` does not send to class `model_x`; `parents` is a class that sends to the pool's"
+    );
+}
+
+/// Under `relay` a pool reports its record to one parent's hub, so the
+/// other parents would never find a shared pool: a hub that publishes
+/// through `relay` refuses it. An instance of the pool, which publishes
+/// nothing, and a hub whose program gives it its directory, read the same
+/// settings and take them.
+#[test]
+fn a_shared_pools_hub_refuses_relay() {
+    let pool = settings(
+        "name = 'm'\nclass = 'model_x'\nregion = 'r'\nparents = 'global'\nparent_hub = 'g-hub:1337'\n",
+    );
+    let Err(error) = pool.check_hub(&classed()) else {
+        panic!("a shared pool's hub under `relay`");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[pool] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; with directory = \"relay\" a pool reports its record to one parent's hub: name the pool's parent with `home`, or use another directory"
+    );
+    pool.check(&classed(), "d")
+        .expect("an instance publishes nothing");
+    pool.check_hub_given_directory(&classed())
+        .expect("a hub given its directory");
 }

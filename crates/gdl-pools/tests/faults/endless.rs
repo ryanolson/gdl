@@ -38,7 +38,7 @@ impl PoolDirectory for Endless {
             name: "m1".into(),
             class: class.into(),
             region: "us-east-1".into(),
-            home: None,
+            parent: None,
             contract: 1,
             placement: 2,
             state: PoolState::Ready,

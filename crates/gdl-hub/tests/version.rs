@@ -26,7 +26,7 @@ async fn a_recovered_writer_epoch_raises_the_properties_version() {
         name: common::POOL.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some(common::GLOBAL.into()),
+        parent: Some(gdl_model::Parent::Pool(common::GLOBAL.into())),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
         state: gdl_pools::PoolState::Unavailable,

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use gdl_model::PropertyKey;
+use gdl_model::{Parent, PropertyKey};
 use gdl_pools::{
     DirectoryError, LoadSummary, PoolProperty, PoolRecord, PoolState, Presence, PropertyState,
     Version, Withdrawal,
@@ -29,7 +29,7 @@ fn record() -> PoolRecord {
         name: "model-x-01-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: Some("global-01-us-east-1".into()),
+        parent: Some(gdl_model::Parent::Pool("global-01-us-east-1".into())),
         contract: 0xdead_beef_0000_0001,
         placement: u64::MAX,
         state: PoolState::Degraded,
@@ -78,7 +78,7 @@ fn a_record_round_trips_through_json() {
 
     let bare = PoolRecord {
         load: None,
-        home: None,
+        parent: None,
         state: PoolState::Draining,
         ..record()
     };
@@ -98,14 +98,47 @@ fn a_record_without_a_home_reads_as_having_none() {
     let mut value = serde_json::to_value(record()).expect("json");
     value.as_object_mut().expect("an object").remove("home");
     let read: PoolRecord = serde_json::from_value(value).expect("a record");
-    assert_eq!(read.home, None);
+    assert_eq!(read.parent, None);
     assert_eq!(
         read,
         PoolRecord {
-            home: None,
+            parent: None,
             ..record()
         }
     );
+}
+
+/// A shared pool's record names its parents' class under `parents`, in
+/// place of `home`, and reads back so. A reader of a build before
+/// `parents` ignores the key: it reads the record with no parent, so its
+/// hub never follows the pool. A record with both keys names no parent,
+/// so no hub follows it, and one with a `parents` that is not a class's
+/// name names none either.
+#[test]
+fn a_shared_record_names_its_parents_class() {
+    let shared = PoolRecord {
+        parent: Some(Parent::Class("global".into())),
+        ..record()
+    };
+    shared.check().expect("a well-formed shared record");
+    let value = serde_json::to_value(&shared).expect("json");
+    assert_eq!(value["parents"], "global", "{value}");
+    assert!(value.get("home").is_none(), "{value}");
+    assert_eq!(
+        serde_json::from_value::<PoolRecord>(value.clone()).expect("a record"),
+        shared
+    );
+    let earlier: EarlierRecord = serde_json::from_value(value.clone()).expect("an earlier record");
+    assert_eq!(earlier.home, None);
+
+    let mut both = value.clone();
+    both["home"] = json!("global-01-us-east-1");
+    let read: PoolRecord = serde_json::from_value(both).expect("a record");
+    assert_eq!(read.parent, None);
+    let mut malformed = value;
+    malformed["parents"] = json!("Global");
+    let read: PoolRecord = serde_json::from_value(malformed).expect("a record");
+    assert_eq!(read.parent, None);
 }
 
 /// A record without a lease gets the default, and a field a newer build
@@ -167,10 +200,17 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
         ),
         (
             PoolRecord {
-                home: Some("Global".into()),
+                parent: Some(gdl_model::Parent::Pool("Global".into())),
                 ..record()
             },
             "pool name `Global`",
+        ),
+        (
+            PoolRecord {
+                parent: Some(Parent::Class("Global".into())),
+                ..record()
+            },
+            "class name `Global`",
         ),
         (
             PoolRecord {
@@ -415,7 +455,7 @@ fn an_earlier_reader_reads_a_record_with_presence_and_properties() {
         name,
         class,
         region,
-        home,
+        parent: home.map(Parent::Pool),
         contract,
         placement,
         state,

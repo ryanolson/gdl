@@ -34,7 +34,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 name: "global-us".into(),
                 class: "global".into(),
                 region: "us-east-1".into(),
-                home: None,
+                parent: None,
                 contract: 1,
                 placement: 2,
                 state: PoolState::Ready,
@@ -51,7 +51,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
             let record = PoolRecord {
                 name: "model-x-01".into(),
                 class: "model_x".into(),
-                home: Some(parent.name.clone()),
+                parent: Some(gdl_model::Parent::Pool(parent.name.clone())),
                 hub: "model-x-01:1337".into(),
                 ..parent.clone()
             };
@@ -126,4 +126,58 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
             assert!(!reopened.holds_record(&record.class, &record.name));
         }
     });
+}
+
+/// A relay parent's hub holds its children's records, which only its own
+/// pool's choosers read, so it refuses the record of a shared pool, which
+/// every pool of its class must find, and stores nothing for it. A child
+/// that names this pool as its home is taken.
+#[test]
+fn a_relay_parent_refuses_a_shared_pools_record() {
+    let children = RelayDirectory::new();
+    let parent = PoolRecord {
+        dropped: Vec::new(),
+        name: "global-us".into(),
+        class: "global".into(),
+        region: "us-east-1".into(),
+        parent: None,
+        contract: 1,
+        placement: 2,
+        state: PoolState::Ready,
+        epoch: 1,
+        seq: 1,
+        hub: "global-us:1337".into(),
+        lease: Duration::from_secs(30),
+        load: None,
+        presence: Default::default(),
+        properties: Vec::new(),
+        properties_version: 0,
+        revoked: Vec::new(),
+    };
+    let reports = Reports::new(children.clone(), &parent, Duration::from_secs(1));
+    let shared = PoolRecord {
+        name: "model-x-shared".into(),
+        class: "model_x".into(),
+        parent: Some(gdl_model::Parent::Class("global".into())),
+        hub: "model-x-shared:1337".into(),
+        ..parent.clone()
+    };
+    let Err(gdl_pools::DirectoryError::Refused(why)) =
+        reports.verify(Report::Record(shared.clone()))
+    else {
+        panic!("a relay parent took a shared pool's record");
+    };
+    assert!(
+        why.contains("shared by every pool of class `global`"),
+        "{why}"
+    );
+    assert!(why.contains("`relay`"), "{why}");
+    assert!(!children.holds_record(&shared.class, &shared.name));
+    let homed = PoolRecord {
+        parent: Some(gdl_model::Parent::Pool(parent.name.clone())),
+        ..shared
+    };
+    reports
+        .verify(Report::Record(homed))
+        .expect("a child whose home is this pool");
 }

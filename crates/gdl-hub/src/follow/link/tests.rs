@@ -69,7 +69,7 @@ fn record(hub: String) -> PoolRecord {
         name: "m".into(),
         class: "model_x".into(),
         region: "r".into(),
-        home: Some("g".into()),
+        parent: Some(gdl_model::Parent::Pool("g".into())),
         contract: 1,
         placement: 1,
         state: PoolState::Ready,

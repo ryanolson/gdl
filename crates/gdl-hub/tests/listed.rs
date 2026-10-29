@@ -43,7 +43,7 @@ fn record(
         name: pool.into(),
         class: "model_x".into(),
         region: "eu-west-1".into(),
-        home: Some(home.into()),
+        parent: Some(gdl_model::Parent::Pool(home.into())),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
         state: PoolState::Ready,

@@ -24,7 +24,7 @@ fn last(epoch: u64, seq: u64) -> PoolRecord {
         name: POOL.into(),
         class: CLASS.into(),
         region: "us-east-1".into(),
-        home: Some("global-01-us-east-1".into()),
+        parent: Some(gdl_model::Parent::Pool("global-01-us-east-1".into())),
         contract: 1,
         placement: 2,
         state: PoolState::Ready,

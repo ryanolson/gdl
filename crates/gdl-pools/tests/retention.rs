@@ -127,7 +127,7 @@ fn record(seq: u64) -> PoolRecord {
         name: "m2".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: None,
+        parent: None,
         contract: 1,
         placement: 2,
         state: PoolState::Ready,
