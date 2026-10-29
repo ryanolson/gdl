@@ -147,10 +147,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the field is left out when it is empty, so an entry without it reads as a policy that needs nothing. An entry carries no version of the reader that wrote it.
 - **Recovery:** extract the policy's crate again with `cargo gdl extract`, or import it again in the composer.
 
-### Only a generated segment is held to its graph's declarations
-- **What:** a program that deploys a segment with `Deployment::new` itself, as the runtime's tests do, sets and reads any property kind with any type.
-- **Why:** the generated binary and the generated `start` call `declare_properties` with the contract's `property_types()`. `Deployment::new` takes no types.
-- **Workaround:** call `gdl_runtime::declare_properties` with the contract's `property_types()` before the build.
+### A graph assembled hop by hop is not held to its declarations
+- **What:** a program that builds a segment's hops with `Deployment::hop` itself, not through the contract's `assemble`, as some of the runtime's tests do, sets and reads any property kind with any type.
+- **Why:** the contract's `assemble` holds the deployment to its `property_types()`. `Deployment::new` and `Deployment::hop` have no types to hold it to.
+- **Workaround:** call `Deployment::declare_properties` with the contract's `manifest()` and `property_types()` before the hops are built.
 
 ### A graph that needs a property from a class cannot run in a layout without that class
 - **What:** `needs <kind> from <class>` names a class of the placement. `cargo gdl check` refuses each layout that lacks the class, a compact layout of one segment included.

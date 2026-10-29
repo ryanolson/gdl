@@ -77,6 +77,30 @@ impl Deployment {
         ))
     }
 
+    /// Hold the handles of the deployment's runtime, its instance's
+    /// properties and the pools its nodes read, to the property
+    /// declarations of `manifest`, each kind with its type in `types`, the
+    /// contract's `property_types()`, as
+    /// [`declare_properties`](crate::declare_properties) does. A generated
+    /// `assemble` calls it, so a deployment made by hand is held to them
+    /// too.
+    pub fn declare_properties(
+        &self,
+        manifest: &Manifest,
+        types: &[gdl::PropertyType],
+    ) -> Result<()> {
+        let layout = &self.rt.layout;
+        let hosts = |node: &str| layout.segment_of(node) == Some(self.rt.segment.as_str());
+        crate::declared::declare(
+            manifest,
+            &hosts,
+            types,
+            &[],
+            &self.rt.config.properties,
+            &self.rt.config.followed,
+        )
+    }
+
     /// Assemble hop `index` from its stages. Slots of nodes this segment does
     /// not host are `Absent`.
     pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>>

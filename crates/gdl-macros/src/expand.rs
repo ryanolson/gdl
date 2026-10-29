@@ -622,6 +622,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
             #(#bounds,)*
         {
             __gdl_deployment.check_contract(manifest().contract_hash())?;
+            __gdl_deployment.declare_properties(&manifest(), &property_types())?;
             #unpack
             #(#hops)*
             ::core::result::Result::Ok(#result_value)

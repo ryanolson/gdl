@@ -13,12 +13,32 @@ use gdl_model::{Manifest, Placement};
 /// graph's kinds, each with its declared type, and for a node only those
 /// that a node of the segment or one of `entry_needs`, what its entry
 /// adapters need, says it needs. What either took before is held to them
-/// too. A segment binary calls it before it builds its nodes, and a
-/// generated `start` before it deploys.
+/// too. A segment binary calls it before it builds its nodes, a generated
+/// `start` before it deploys, and a generated `assemble` again
+/// ([`Deployment::declare_properties`](crate::Deployment::declare_properties)),
+/// so a deployment made by hand is held to the contract as well.
 pub fn declare_properties(
     manifest: &Manifest,
     placement: &Placement,
     segment: &str,
+    types: &[PropertyType],
+    entry_needs: &[&str],
+    properties: &InstanceProperties,
+    followed: &FollowedPools,
+) -> Result<()> {
+    let hosted: Vec<&String> = placement
+        .segments()
+        .filter(|(name, _)| *name == segment)
+        .flat_map(|(_, nodes)| nodes)
+        .collect();
+    let hosts = |node: &str| hosted.iter().any(|hosted| *hosted == node);
+    declare(manifest, &hosts, types, entry_needs, properties, followed)
+}
+
+/// [`declare_properties`] for the segment whose nodes `hosts` tells.
+pub(crate) fn declare(
+    manifest: &Manifest,
+    hosts: &dyn Fn(&str) -> bool,
     types: &[PropertyType],
     entry_needs: &[&str],
     properties: &InstanceProperties,
@@ -36,24 +56,15 @@ pub fn declare_properties(
                 )
             })
     };
-    let hosted: Vec<&String> = placement
-        .segments()
-        .filter(|(name, _)| *name == segment)
-        .flat_map(|(_, nodes)| nodes)
-        .collect();
     let mut provided = Vec::new();
     let mut needed: Vec<&str> = entry_needs.to_vec();
     let mut declared = Vec::with_capacity(manifest.properties.len());
     for property in &manifest.properties {
         let ty = typed(&property.kind)?;
-        if property.providers.iter().any(|node| hosted.contains(&node)) {
+        if property.providers.iter().any(|node| hosts(node)) {
             provided.push(ty);
         }
-        if property
-            .needs
-            .iter()
-            .any(|need| hosted.contains(&&need.node))
-        {
+        if property.needs.iter().any(|need| hosts(&need.node)) {
             needed.push(&property.kind);
         }
         declared.push(ty);

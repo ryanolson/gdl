@@ -21,7 +21,7 @@ A contract holds the graph's message types and one `gdl_runtime::graph!` invocat
 - `nodes`: one marker type per node, with the node's port types.
 - `Bindings`: one typestate slot per node that needs an implementation, filled with `Bindings::new().engine(...)`. A node's setter is its name in snake case. The macro refuses a name that cannot name a method, one that `Bindings` already uses, and two nodes with one binding name.
 - `local(bindings)`: the whole graph as nested calls in one process.
-- `assemble(&deployment, bindings)`: the part one segment runs. It fails if the deployment was made for another contract, or if a hosted node has no binding.
+- `assemble(&deployment, bindings)`: the part one segment runs. It fails if the deployment was made for another contract, or if a hosted node has no binding. It holds the deployment's handles to the contract's property declarations, so a node that set or read a kind with another type, or a kind its segment neither provides nor needs, fails it.
 - `manifest()`: the graph as data, with each edge's message, wire capability, and encoding. `manifest().contract_hash()` is the contract hash. There is no hash constant.
 - `SourceReq` and `SourceItem`: the source's request and item types. A graph with several roots has no one source, so it has neither.
 - `property_types()`: each declared property kind with its key's Rust type. A segment's binary, and its library's `start`, pass it to the runtime, which holds every node that sets or reads a kind to the declared type. A type that cannot be a property's key fails to build at its declaration.
