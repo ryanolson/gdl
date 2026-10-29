@@ -467,12 +467,13 @@ fn processes_that_start_together_share_one_mirror() {
 }
 
 /// The paths of the pinned commit that the mirror holds.
-const MIRRORED: [&str; 8] = [
+const MIRRORED: [&str; 9] = [
     "Cargo.toml",
     "crates/gdl",
     "crates/gdl-macros",
     "crates/gdl-message",
     "crates/gdl-model",
+    "crates/gdl-pools",
     "crates/gdl-syntax",
     "examples/api",
     "examples/chat",
