@@ -733,10 +733,9 @@ async fn a_malformed_property_is_not_revoked() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// Two builds that write a key's fields in another order, or a missing
-/// optional field as `null`, name one property: two instances that report
-/// it so make one entry, and an operator who writes it a third way
-/// revokes that entry.
+/// Two builds that write a key's fields in another order name one
+/// property: two instances that report it so make one entry, and an
+/// operator who writes it in a third order revokes that entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_encodings_of_a_key_name_one_property() {
     let directory = MemoryDirectory::new();
@@ -757,9 +756,7 @@ async fn two_encodings_of_a_key_name_one_property() {
     .await;
     send(
         &b,
-        report(Some(vec![written(
-            r#"{"version":null,"partition":"p","name":"m"}"#,
-        )])),
+        report(Some(vec![written(r#"{"partition":"p","name":"m"}"#)])),
     )
     .await;
     let listed = until(&mut records, &[("m", PropertyState::Ready)]).await;
@@ -771,7 +768,7 @@ async fn two_encodings_of_a_key_name_one_property() {
     assert_eq!(
         revoke_written(
             &hub,
-            r#"{"key":{"partition":"p","version":null,"name":"m"},"kind":"test"}"#,
+            r#"{"key":{"partition":"p","name":"m"},"kind":"test"}"#,
             true
         )
         .await,

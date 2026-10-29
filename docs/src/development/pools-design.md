@@ -154,7 +154,9 @@ An entry stopped outside the drain, which then learns of it, says `drained` whil
 
 A pool's record lists the properties the pool serves. A property is a key of a type the application defines, under a kind name. The node that provides a kind encodes its keys, and the hub, the relay, `gdl-watch` and every directory backend carry them as JSON objects. Only a node or a pool policy that registered the kind decodes the keys, when the chooser builds the class's property index, off the request path. So gdl knows nothing of what a pool serves, and a new kind needs no change to the hub or to a backend.
 
-Every field of a key is part of its identity. Each layer compares, orders, and hashes keys in a canonical form: fields sorted by name, and a `null` field left out, as a missing optional field is. So two builds that write a key's fields in another order name one entry, and a revocation names it whatever order the operator writes. The hub keeps each entry's key as it was first reported, and sends that form.
+Every field of a key is part of its identity. Each layer compares, orders, and hashes keys in a canonical form, with fields sorted by name. So two builds that write a key's fields in another order name one entry, and a revocation names it whatever order the operator writes. The hub keeps each entry's key as it was first reported, and sends that form.
+
+**Rejected: a `null` field equal to a missing one.** It let two builds that encode an optional field differently name one property. But it also merged distinct values: a map with one `()` value and an empty map became one key, and a node's list of both was refused as naming one twice. Builds that encode a type differently are kept apart instead: a property type encodes alike in every build of a fleet, as an edge type does ([Limitations](../operations/limitations.md#a-property-type-that-encodes-differently-in-two-builds-names-two-properties)).
 
 **Rejected: storing the canonical form.** A type whose field is required and encodes as `null`, such as `()`, no longer decodes once the field is left out, and its entry would be counted as undecodable.
 

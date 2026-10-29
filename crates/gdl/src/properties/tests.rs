@@ -55,9 +55,10 @@ async fn a_node_sets_the_list_of_the_segment_it_is_built_in() {
     assert_eq!(read.borrow()["test"].len(), 1);
 }
 
-/// A list with a key named twice, also in another encoding, a kind name
-/// that is not a settings key, a key that is not an object, or a key that
-/// holds a float, is refused whole, and the list set before stands.
+/// A list with a key named twice, also with its fields in another order,
+/// a kind name that is not a settings key, a key that is not an object,
+/// or a key that holds a float, is refused whole, and the list set before
+/// stands.
 #[test]
 fn a_malformed_list_is_refused_whole() {
     let properties = InstanceProperties::new();
@@ -73,7 +74,11 @@ fn a_malformed_list_is_refused_whole() {
             )
             .is_err()
     );
-    let twice = [r#"{"partition":null,"name":"m"}"#, r#"{"name":"m"}"#].map(|key| {
+    let twice = [
+        r#"{"partition":"p","name":"m"}"#,
+        r#"{"name":"m","partition":"p"}"#,
+    ]
+    .map(|key| {
         PropertyEntry::new(
             gdl_model::PropertyKey::new("test", serde_json::from_str(key).expect("json"))
                 .expect("a key"),

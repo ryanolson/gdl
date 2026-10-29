@@ -14,7 +14,6 @@ struct Tagged {
 const TAGGED: PropertyKind<Tagged> = PropertyKind::new("tagged");
 
 #[test]
-#[ignore = "F4: canonical comparison drops null-valued map entries and conflates distinct keys"]
 fn null_map_values_are_part_of_a_typed_propertys_identity() {
     let empty = Tagged {
         name: "a".into(),

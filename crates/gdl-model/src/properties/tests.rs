@@ -6,9 +6,10 @@ fn read(text: &str) -> PropertyKey {
     serde_json::from_str(text).expect("a key")
 }
 
-/// Two builds that write a key's fields in another order, or write a
-/// missing optional field as `null`, name one property: equal, ordered
-/// equal, and hashed alike. Each key is written back as it was read.
+/// Two builds that write a key's fields in another order name one
+/// property: equal, ordered equal, and hashed alike. A field written as
+/// `null` and a missing one are two values, so they name two properties.
+/// Each key is written back as it was read.
 #[test]
 fn two_encodings_of_one_key_name_one_property() {
     use std::hash::{BuildHasher, RandomState};
@@ -16,11 +17,11 @@ fn two_encodings_of_one_key_name_one_property() {
     let b = read(r#"{"kind":"test","key":{"version":null,"partition":"p","name":"a"}}"#);
     let c = read(r#"{"kind":"test","key":{"partition":"p","name":"a"}}"#);
     let hasher = RandomState::new();
-    for other in [&b, &c] {
-        assert_eq!(&a, other);
-        assert_eq!(a.cmp(other), Ordering::Equal);
-        assert_eq!(hasher.hash_one(&a), hasher.hash_one(other));
-    }
+    assert_eq!(a, b);
+    assert_eq!(a.cmp(&b), Ordering::Equal);
+    assert_eq!(hasher.hash_one(&a), hasher.hash_one(&b));
+    assert_ne!(a, c, "a null field is not a missing one");
+    assert_ne!(a.cmp(&c), Ordering::Equal);
     assert_eq!(a.key()["version"], Value::Null, "kept as read");
     assert_eq!(
         serde_json::to_value(&c).expect("json"),
@@ -48,7 +49,8 @@ fn two_encodings_of_one_key_name_one_property() {
 }
 
 /// A canonical object iterates its fields by name whatever order they
-/// were written in, which the order of keys relies on. With
+/// were written in, which the order of keys relies on, and keeps every
+/// `null`. With
 /// `serde_json/preserve_order` the map keeps the written order; the key
 /// is rebuilt sorted, so this holds in both builds.
 #[test]
@@ -68,7 +70,7 @@ fn a_canonical_object_iterates_its_fields_by_name() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(inner, ["b", "c"], "null left out at any depth");
+    assert_eq!(inner, ["b", "c", "y"], "a null kept at any depth");
 }
 
 /// Keys differ in any field, a `null` in an array is its own, and keys
@@ -125,27 +127,48 @@ fn a_key_is_checked_for_its_kind_and_its_shape() {
     }
 }
 
-/// A key is encoded from its type, in the canonical form.
+/// A key is encoded from its type as the type writes it: a type that
+/// skips a missing optional field and one that writes it as `null` name
+/// two properties, so a property type must encode alike in every build.
 #[test]
 fn a_key_is_encoded_from_its_type() {
     #[derive(Serialize)]
-    struct Test {
+    struct Skipping {
+        name: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partition: Option<&'static str>,
+    }
+    #[derive(Serialize)]
+    struct Writing {
         name: &'static str,
         partition: Option<&'static str>,
     }
-    let key = PropertyKey::encode(
+    let skipping = PropertyKey::encode(
         "test",
-        &Test {
+        &Skipping {
             name: "a",
             partition: None,
         },
     )
     .expect("encoded");
     assert_eq!(
-        key,
+        skipping,
         PropertyKey::new("test", json!({"name": "a"})).expect("a key")
     );
-    assert_eq!(key.kind(), "test");
+    assert_eq!(skipping.kind(), "test");
+    let writing = PropertyKey::encode(
+        "test",
+        &Writing {
+            name: "a",
+            partition: None,
+        },
+    )
+    .expect("encoded");
+    assert_eq!(
+        writing,
+        PropertyKey::new("test", json!({"name": "a", "partition": null})).expect("a key")
+    );
+    assert_ne!(skipping, writing, "two encodings, two properties");
 }
 
 /// JSON reads a float back as a near value, not always the same one, so

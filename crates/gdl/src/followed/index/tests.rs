@@ -181,7 +181,8 @@ fn a_request_with_no_partition_never_reaches_a_partitioned_key() {
 
 /// The chooser decodes each registered kind's keys into its type: a key
 /// that does not decode is left out and counted, another kind's keys are
-/// not read, and two encodings of one key are one key. A kind no pool
+/// not read, and two keys that decode to one value find it together. A
+/// kind no pool
 /// lists has an empty index, synced as the table is; a kind not
 /// registered has none, nor does another type under a registered name.
 #[test]

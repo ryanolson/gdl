@@ -193,15 +193,15 @@ fn fraction(value: &Value) -> Option<&Number> {
     }
 }
 
-/// `value` in its canonical form: each object's fields sorted by name,
-/// with every `null` field left out, at any depth. An array keeps its
-/// order and its `null`s, which are its own.
+/// `value` in its canonical form: each object's fields sorted by name, at
+/// any depth. A `null` is kept wherever it is: a field whose value is
+/// `null` and a missing field are two values, as an empty map and a map
+/// with one `()` value are.
 fn canonical(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut fields: Vec<(String, Value)> = map
                 .into_iter()
-                .filter(|(_, value)| !value.is_null())
                 .map(|(name, value)| (name, canonical(value)))
                 .collect();
             fields.sort_by(|(a, _), (b, _)| a.cmp(b));

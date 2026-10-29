@@ -133,6 +133,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Large items:** an item larger than velo's eager budget (256 KiB by default) leaves the node as a handle, and its bytes stay staged until the consumer pulls them. velo reports such a stream `Sent` before the pull, so a drain can end, and the shutdown cut the item, while it is still staged.
 - **Lifts:** velo waiting for staged payloads at shutdown. See [velo](../development/velo.md).
 
+### A property type that encodes differently in two builds names two properties
+- **What:** two builds whose property type encodes one value differently, for example one that skips a missing optional field and one that writes it as `null`, report two keys for it. The pool's record lists both, and a reader that asks for one does not find the other.
+- **Why:** a `null` field and a missing field are two values ([Pools design](../development/pools-design.md#a-property-is-a-typed-key-that-the-middle-carries-as-json)), and nothing checks yet that every build of a fleet encodes a property type alike.
+- **Workaround:** change a property type's encoding only as a change of the graph's contract: move every pool to the new build in one step.
+- **Lifts:** property types in the contract hash, as edge types are.
+
 ### A fleet does not mix builds from before and after the pool rename
 - **What:** a hub of a build from before pools were named pools serves its routes under `/v1/ext/gdl-cell/...`. A hub of this build serves `/v1/ext/gdl-pool/...` and refuses the old path. The two builds cannot follow, watch, or drain each other, and an instance of one cannot join a hub of the other.
 - **When:** a fleet runs both builds at once, for example while one pool upgrades first.
