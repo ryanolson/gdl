@@ -104,7 +104,6 @@ fn check_refuses_a_selector_library_that_shadows_the_runtime() {
 }
 
 #[test]
-#[ignore = "F2: the limitations chapter omits the root-name restriction for policies and selectors"]
 fn the_book_explains_which_router_reexports_can_be_bound() {
     let policy = r#"
 impl gdl::PoolPolicy for ByText {
