@@ -306,3 +306,94 @@ impl gdl::Selector for ByText {
         }
     }
 }
+
+#[test]
+#[ignore = "F4: catalogue matching expects the abbreviated revision to equal the full commit hash"]
+fn catalogue_accepts_a_selector_at_an_abbreviated_revision() {
+    let router = router(
+        r#"
+pub struct ByText;
+impl gdl::Build for ByText {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> { Ok(Self) }
+}
+impl gdl::Selector for ByText {
+    type Head = gdl::Encoded;
+    async fn select<'a>(&'a self, _: gdl::Request<'a, Self::Head>, instances: gdl::Instances<'a>) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+"#,
+        "selector_router",
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(router.path())
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=gdl-test",
+                "-c",
+                "user.email=gdl@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "Cargo.toml", "Cargo.lock", "src"]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let rev = &commit[..12];
+    let url = format!("file://{}", router.path().display());
+    let workspace = gdl_extract::Workspace::fetch_git(
+        "selector-router",
+        &url,
+        rev,
+        &target("gdl-gen-tests"),
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("Git selector workspace");
+    let selector = workspace
+        .extract("selector-router")
+        .expect("selector")
+        .offer;
+    assert_eq!(selector.source, format!("git+{url}?rev={rev}#{commit}"));
+    let workspace = gdl_extract::Workspace::load(
+        &fixture().join("Cargo.toml"),
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("fixture workspace");
+    let messages = workspace
+        .extract("selector-messages")
+        .expect("messages")
+        .offer;
+    let nodes = workspace.extract("selector-nodes").expect("nodes").offer;
+    let text = fixture_text("gdl.toml").replace(
+        "path = \"router\"",
+        &format!("git = {url:?}\nrev = {rev:?}"),
+    );
+    let spec =
+        gdl_gen::Spec::from_text(&text, &fixture_text("selector.gdl"), &fixture()).expect("spec");
+    gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+        .expect("source reader accepts the short revision");
+    let offers = [&messages, &nodes, &selector];
+    gdl_gen::check(
+        &spec,
+        &target("gdl-gen-tests"),
+        gdl_gen::Offers::Given(&offers),
+    )
+    .expect("catalogue accepts the same extracted short revision");
+}
