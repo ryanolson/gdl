@@ -992,3 +992,37 @@ test('clear catalog requires confirmation and invalidates deployment snapshots',
   assert.equal(run('deployOpen'),false);
   assert.equal(run('editHistory.length'),0);
 });
+
+test('a node says what it provides and needs as lists the page reads', () => {
+  const run = editor();
+  assert.equal(run("JSON.stringify(parseKinds(' model, region ,'))"), '["model","region"]');
+  assert.equal(run("JSON.stringify(parseNeeds('model from sets, region from edge'))"), '[{"kind":"model","class":"sets"},{"kind":"region","class":"edge"}]');
+  assert.equal(run("JSON.stringify(parseNeeds(''))"), '[]');
+  assert.equal(run("parseNeeds('model sets')"), null);
+  assert.equal(run("parseNeeds('model from')"), null);
+  assert.equal(run("propertyClauses({provides:['model'],needs:[{kind:'region',class:'edge'}]})"), 'provides model · needs region from edge');
+  assert.equal(run("propertyClauses({node:{}})"), '');
+});
+
+test('the draft carries the declared kinds and what each node provides and needs', () => {
+  const run = editor();
+  run(`state.entries = [{package:'p', version:'1', source:'local', messages:[{name:'Shard', path:'p::Shard', public:true}], nodes:[]}];
+    $('source-name').value='Source';state.frontend={entry:'p@1',node:{name:'Api',entries:[{}]}};
+    const sink={entry:'p@1',node:{name:'Echo',role:'sink',ports:[]},provides:['shard'],needs:[{kind:'shard',class:'sets'}]};
+    state.pipelines=[{id:1,name:'p1',request:{head:null,item:null},response:{path:'Reply'},hop:{...newHop(),inner:sink}}];
+    state.frontend.node.config=[{name:'e1',default:true}];state.frontend.node.entries=[{name:'e1',enabled:'e1',request:{head:null,item:null},response:{head:{path:'Reply'}}}];state.frontend.arms={e1:{...newHop(),target:1}};
+    state.properties=[{kind:'shard',message:'p@1 p::Shard'},{kind:'',message:'p@1 p::Shard'},{kind:'region',message:''}];
+    const output=draft();`);
+  assert.equal(run('JSON.stringify(output.properties.map(p=>[p.kind,p.message.path]))'), '[["shard","p::Shard"]]', 'only finished declarations');
+  assert.equal(run('JSON.stringify(output.nodes.find(n=>n.node==="Echo").provides)'), '["shard"]');
+  assert.equal(run('JSON.stringify(output.nodes.find(n=>n.node==="Echo").needs)'), '[{"kind":"shard","class":"sets"}]');
+  assert.equal(run('output.nodes.find(n=>n.node==="Api").provides'), undefined, 'the frontend provides nothing');
+});
+
+test('a node box shows what the node provides and needs', () => {
+  const run = editor();
+  run(`document.createElement = () => ({dataset:{}, children:[], append(...children) {this.children.push(...children);}, setAttribute() {}});
+    const instance={entry:'p@1',node:{name:'Echo',role:'sink',ports:[]},provides:['shard']};
+    const shown=box('Echo', null, instance);`);
+  assert.equal(run("shown.children.find(c=>c.className==='property-badge').textContent"), 'provides shard');
+});

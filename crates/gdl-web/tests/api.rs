@@ -195,6 +195,41 @@ async fn a_draft_checks_as_its_spec_would_generate() {
     );
 }
 
+/// A draft declares property kinds and says which nodes provide and need
+/// them: the graph file writes them, the check holds them to the
+/// generator's rules, and the diagram draws them. A need of a class the
+/// draft's placement does not have is refused, naming it.
+#[tokio::test]
+async fn a_drafts_property_declarations_are_written_checked_and_drawn() {
+    let temp = scratch("properties");
+    let router = router(temp.path(), fixture_catalog());
+    let mut declared = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "all": ["A", "Engine"] }),
+    );
+    declared["properties"] = json!([{ "kind": "shard", "message": origin("regproto::Token") }]);
+    declared["nodes"][0]["provides"] = json!(["shard"]);
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(declared.clone())).await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    assert_eq!(
+        body["graph"],
+        "name = \"composed\", schema = 1;\nproperty shard: Token;\nsource A: Words -> stream Token;\nsink Engine: Words -> stream Token provides shard;\ntopology: A => Engine;\n"
+    );
+    let mermaid = body["mermaid"].as_str().expect("a diagram");
+    assert!(mermaid.contains("property shard: Token"), "{mermaid}");
+    assert!(mermaid.contains("<br/>provides shard"), "{mermaid}");
+
+    declared["nodes"][0]["needs"] = json!([{ "kind": "shard", "class": "sets" }]);
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(declared)).await;
+    assert_eq!(body["ok"], false, "{body:#}");
+    assert!(
+        body.to_string()
+            .contains("node `Engine` needs property `shard` from class `sets`, but the placement has no class `sets`"),
+        "{body:#}"
+    );
+}
+
 /// What generation refuses, a check refuses, with the reason: a cut on an
 /// edge of a type without a codec, ports of two messages, and a node the
 /// catalogue does not hold.

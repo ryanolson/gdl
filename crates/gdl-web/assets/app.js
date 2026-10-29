@@ -25,6 +25,8 @@ const state = {
   routing: Object.create(null),
   // Keyed by names the user chooses: no prototype, so `constructor` is a name.
   segmentNames: Object.create(null),
+  // The graph's property kinds: each a kind name and its key's message.
+  properties: [],
 };
 
 function newHop() {
@@ -131,6 +133,88 @@ function configControls(instance) {
     container.append(label);
   }
   return container;
+}
+
+// What a node provides and needs, as the user writes them: `a, b` and
+// `a from x, b from y`. The server writes them into the graph file, where
+// the generator checks them.
+function parseKinds(text) {
+  return text.split(",").map((kind) => kind.trim()).filter(Boolean);
+}
+
+// `null` for text that is not a list of `kind from class`.
+function parseNeeds(text) {
+  const needs = [];
+  for (const part of text.split(",").map((need) => need.trim()).filter(Boolean)) {
+    const found = /^(\S+)\s+from\s+(\S+)$/.exec(part);
+    if (!found) return null;
+    needs.push({kind: found[1], class: found[2]});
+  }
+  return needs;
+}
+
+function propertyClauses(instance) {
+  const clauses = [];
+  if (instance?.provides?.length) clauses.push(`provides ${instance.provides.join(", ")}`);
+  if (instance?.needs?.length) clauses.push(`needs ${instance.needs.map((need) => `${need.kind} from ${need.class}`).join(", ")}`);
+  return clauses.join(" · ");
+}
+
+function propertyControls(instance) {
+  const container = document.createElement("div");
+  container.className = "node-config";
+  const field = (labelText, value, parse, set) => {
+    const label = textElement("label", "", "setting-field");
+    label.append(textElement("span", labelText, "setting-copy"));
+    const input = document.createElement("input");
+    input.setAttribute("aria-label", labelText);
+    input.value = value;
+    input.disabled = state.mode === "segments";
+    input.onchange = () => {
+      const parsed = parse(input.value);
+      if (parsed === null) {input.setCustomValidity("Write each as `kind from class`, separated by commas"); input.reportValidity(); return;}
+      input.setCustomValidity("");
+      set(parsed);
+      render();
+    };
+    label.append(input);
+    container.append(label);
+  };
+  field("Provides", (instance.provides || []).join(", "), parseKinds, (kinds) => { instance.provides = kinds; });
+  field("Needs", (instance.needs || []).map((need) => `${need.kind} from ${need.class}`).join(", "), parseNeeds, (needs) => { instance.needs = needs; });
+  return container;
+}
+
+// The declared kinds whose message is chosen, as the draft carries them.
+function propertyDraft() {
+  return state.properties
+    .map((property) => ({kind: property.kind.trim(), message: messages().find((m) => key(m.origin) === property.message)?.origin}))
+    .filter((property) => property.kind && property.message);
+}
+
+function renderProperties() {
+  const rows = state.properties.map((property, index) => {
+    const row = document.createElement("div");
+    row.className = "property-kind";
+    const kind = document.createElement("input");
+    kind.setAttribute("aria-label", "Property kind");
+    kind.placeholder = "kind";
+    kind.value = property.kind;
+    kind.oninput = () => { property.kind = kind.value; scheduleValidation(); };
+    const message = document.createElement("select");
+    message.setAttribute("aria-label", `Message of property kind ${property.kind || index + 1}`);
+    if (message.add) {
+      fillMessages(message, "Choose a message");
+      message.value = property.message;
+    }
+    message.onchange = () => { property.message = message.value; scheduleValidation(); };
+    const remove = textElement("button", "✕", "remove");
+    remove.setAttribute("aria-label", `Remove property kind ${property.kind}`);
+    remove.onclick = () => { state.properties.splice(index, 1); render(); };
+    row.append(kind, message, remove);
+    return row;
+  });
+  $("properties").replaceChildren(...rows);
 }
 
 function selectFrontend(frontend) {
@@ -867,6 +951,8 @@ function box(text, remove, instance) {
   div.className = "box";
   div.textContent = text;
   if (instance) {
+    const clauses = propertyClauses(instance);
+    if (clauses) div.append(textElement("small", clauses, "property-badge"));
     div.append(settingsButton(instance));
     if(state.mode==='segments') {
       const name=instances().get(instance) || $('source-name').value;
@@ -1132,6 +1218,7 @@ function placementControls(names) {
 
 function render(validate = true) {
   $("source-config").replaceChildren(configControls(state.frontend));
+  renderProperties();
   $("source-ports").hidden=!!state.frontend?.node.entries?.length;
   $("source-title").textContent = $("source-name").value;
   $("source-subtitle").textContent = state.frontend?.node.name || "Choose a frontend";
@@ -1207,8 +1294,9 @@ function draft() {
     },
     nodes: [
       ...(state.frontend ? [{name:$("source-name").value,entry:state.frontend.entry,node:state.frontend.node.name,config:graphConfig(state.frontend)}] : []),
-      ...[...names.entries()].filter(([n])=>!n.node.identity).map(([n, name]) => ({ name, entry: n.entry, node: n.node.name, config:graphConfig(n) })),
+      ...[...names.entries()].filter(([n])=>!n.node.identity).map(([n, name]) => ({ name, entry: n.entry, node: n.node.name, config:graphConfig(n), provides:n.provides||[], needs:n.needs||[] })),
     ],
+    properties: propertyDraft(),
     hop: toHop(first?.hop || newHop()),
     pipeline_names: Object.fromEntries(roots.map(p=>[p.root,p.name])),
     identities: Object.fromEntries([...names].filter(([n])=>n.node.identity).map(([n,name])=>[name,identitySpec(n)])),
@@ -1315,6 +1403,7 @@ async function validateGraph() {
 }
 
 $("check").onclick = validateGraph;
+$("add-property").onclick = () => { state.properties.push({kind: "", message: ""}); render(); };
 $("graph-tab").onclick = () => { deployOpen=false; state.mode = "graph"; setWorkspaceZoom(workspaceZooms.graph,true); render(); };
 $("segments-tab").onclick = () => {
   deployOpen=false;
@@ -1515,6 +1604,7 @@ function settingsButton(instance) {
     $("settings-title").textContent=instance.node.name;
     $("settings-fields").replaceChildren(configControls(instance));
     if(!instance.node.config?.length) $("settings-fields").append(textElement("p","No graph settings exposed by this node.","muted"));
+    $("settings-fields").append(textElement("h3","Properties"),propertyControls(instance));
     for(const p of instance.node.ports || []) $("settings-fields").append(textElement("p",`${p.port}: ${carried(p)}`,"port-detail"));
     $("settings-dialog").showModal();
   };

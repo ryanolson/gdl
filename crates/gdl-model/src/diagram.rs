@@ -3,7 +3,10 @@
 //! Request edges are solid and response edges dashed, each labeled with its
 //! message type. With a layout, each segment is a cluster and every edge
 //! that crosses segments is drawn thick and red. An edge whose type has no
-//! codec says so in its label: no placement can cut it.
+//! codec says so in its label: no placement can cut it. A node's label says
+//! which property kinds it provides and needs, with the class of each
+//! need, and the title says each declared kind's type: a property is on no
+//! edge.
 //!
 //! Node and segment names go into labels only. Identifiers are generated
 //! (`n0`, `s0`), because a node may be named like a keyword of either
@@ -29,9 +32,20 @@ impl Manifest {
         let mut out = String::new();
         let _ = writeln!(out, "digraph {} {{", dot_string(&self.name));
         let _ = writeln!(out, "    rankdir=LR;");
+        if !self.properties.is_empty() {
+            let _ = writeln!(
+                out,
+                "    label={}; labelloc=t;",
+                dot_string(&self.declarations().join("\n"))
+            );
+        }
         let node = |out: &mut String, indent: &str, index: usize| {
             let info = &self.nodes[index];
-            let label = format!("{}\n{}", info.name, info.role.name());
+            let mut label = format!("{}\n{}", info.name, info.role.name());
+            for clause in self.clauses(&info.name) {
+                label.push('\n');
+                label.push_str(&clause);
+            }
             let _ = writeln!(
                 out,
                 "{indent}n{index} [label={}, {}];",
@@ -92,12 +106,22 @@ impl Manifest {
         let _ = writeln!(out, "---");
         // Front matter is YAML, where `: ` and ` #` mean something:
         // quoted as a YAML string, not escaped as a label.
-        let _ = writeln!(out, "title: {}", yaml_string(&self.name));
+        let mut title = self.name.clone();
+        for declaration in self.declarations() {
+            title.push_str("; ");
+            title.push_str(&declaration);
+        }
+        let _ = writeln!(out, "title: {}", yaml_string(&title));
         let _ = writeln!(out, "---");
         let _ = writeln!(out, "flowchart LR");
         let node = |out: &mut String, indent: &str, index: usize| {
             let info = &self.nodes[index];
-            let label = format!("\"{}<br/>{}\"", mermaid_text(&info.name), info.role.name());
+            let mut label = format!("\"{}<br/>{}", mermaid_text(&info.name), info.role.name());
+            for clause in self.clauses(&info.name) {
+                label.push_str("<br/>");
+                label.push_str(&mermaid_text(&clause));
+            }
+            label.push('"');
             let (open, close) = mermaid_shape(info.role);
             let _ = writeln!(out, "{indent}n{index}{open}{label}{close}");
         };
@@ -141,6 +165,44 @@ impl Manifest {
             );
         }
         Ok(out)
+    }
+
+    /// Each declared kind as the graph writes it: `property model: Model`.
+    fn declarations(&self) -> Vec<String> {
+        self.properties
+            .iter()
+            .map(|property| format!("property {}: {}", property.kind, short(&property.ty.name)))
+            .collect()
+    }
+
+    /// What node `name` provides and needs, as the graph writes it after
+    /// its signature: `provides model`, `needs model from sets`.
+    fn clauses(&self, name: &str) -> Vec<String> {
+        let provides: Vec<&str> = self
+            .properties
+            .iter()
+            .filter(|property| property.providers.iter().any(|node| node == name))
+            .map(|property| property.kind.as_str())
+            .collect();
+        let needs: Vec<String> = self
+            .properties
+            .iter()
+            .flat_map(|property| {
+                property
+                    .needs
+                    .iter()
+                    .filter(|need| need.node == name)
+                    .map(|need| format!("{} from {}", property.kind, need.class))
+            })
+            .collect();
+        let mut clauses = Vec::new();
+        if !provides.is_empty() {
+            clauses.push(format!("provides {}", provides.join(", ")));
+        }
+        if !needs.is_empty() {
+            clauses.push(format!("needs {}", needs.join(", ")));
+        }
+        clauses
     }
 
     /// The manifest is checked as `layout` checks it: a manifest is plain

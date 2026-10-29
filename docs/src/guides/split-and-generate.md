@@ -125,7 +125,7 @@ cargo gdl diagram --spec examples/chat/gdl.toml --format mermaid
 cargo gdl diagram --spec examples/chat/gdl.toml --format dot | dot -Tsvg -o chat.svg
 ```
 
-The command writes the placed graph to stdout and no file. Request edges are solid and response edges are dashed. Each edge carries its message type's name, or `(no codec)` when the type has none, because no placement can cut that edge. Each segment is a cluster, and an edge that crosses segments is thick and red. In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`, with `None` for no segments or a `Layout` for a placed graph.
+The command writes the placed graph to stdout and no file. Request edges are solid and response edges are dashed. Each edge carries its message type's name, or `(no codec)` when the type has none, because no placement can cut that edge. Each segment is a cluster, and an edge that crosses segments is thick and red. A node's label also says which property kinds it provides and needs, and the title names each declared kind with its type. In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`, with `None` for no segments or a `Layout` for a placed graph.
 
 ## Export
 

@@ -119,6 +119,8 @@ fn a_keyword_message_is_written_raw() {
             name: "Engine".into(),
             entry: "nodes@0.1.0".into(),
             node: "Engine".into(),
+            provides: Vec::new(),
+            needs: Default::default(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -130,6 +132,7 @@ fn a_keyword_message_is_written_raw() {
             "all".to_string(),
             vec!["A".to_string(), "Engine".to_string()],
         )]),
+        properties: Vec::new(),
     };
     let rendered = draft
         .render(&catalog, &Gdl::Path("/gdl".into()))
@@ -238,6 +241,7 @@ fn two_messages_of_one_name_are_named_apart_and_pinned() {
             backward: Vec::new(),
         },
         segments: BTreeMap::new(),
+        properties: Vec::new(),
     };
     let rendered = draft
         .render(&catalog, &Gdl::Path("/gdl".into()))
@@ -328,12 +332,16 @@ fn a_node_two_crates_offer_is_pinned() {
                 name: "Engine".into(),
                 entry: "nodes@0.1.0".into(),
                 node: "Engine".into(),
+                provides: Vec::new(),
+                needs: Default::default(),
             },
             Instance {
                 config: Default::default(),
                 name: "Engine2".into(),
                 entry: "cuda@0.1.0".into(),
                 node: "Engine".into(),
+                provides: Vec::new(),
+                needs: Default::default(),
             },
         ],
         hop: Hop {
@@ -343,6 +351,7 @@ fn a_node_two_crates_offer_is_pinned() {
             backward: Vec::new(),
         },
         segments: BTreeMap::new(),
+        properties: Vec::new(),
     };
     let rendered = draft
         .render(&catalog, &Gdl::Path("/gdl".into()))
@@ -471,6 +480,8 @@ fn a_message_exported_only_by_a_facade_is_composed() {
             name: "Engine".into(),
             entry: "nodes@0.1.0".into(),
             node: "Engine".into(),
+            provides: Vec::new(),
+            needs: Default::default(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -482,6 +493,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
             "all".to_string(),
             vec!["A".to_string(), "Engine".to_string()],
         )]),
+        properties: Vec::new(),
     };
     let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime");
     let rendered = draft
@@ -603,6 +615,8 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
             name: "Engine".into(),
             entry: "deployment@0.1.0".into(),
             node: "Engine".into(),
+            provides: Vec::new(),
+            needs: Default::default(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -614,6 +628,7 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
             "all".to_string(),
             vec!["A".to_string(), "Engine".to_string()],
         )]),
+        properties: Vec::new(),
     };
     let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime");
     let rendered = draft
@@ -724,6 +739,8 @@ fn a_message_no_crate_defines_or_exports_is_named() {
             name: "Engine".into(),
             entry: "nodes@0.1.0".into(),
             node: "Engine".into(),
+            provides: Vec::new(),
+            needs: Default::default(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -732,6 +749,7 @@ fn a_message_no_crate_defines_or_exports_is_named() {
             backward: Vec::new(),
         },
         segments: BTreeMap::new(),
+        properties: Vec::new(),
     };
     let mut problems = draft
         .render(&catalog, &Gdl::Path("/gdl".into()))
@@ -849,6 +867,8 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
             name: "Engine".into(),
             entry: "nodes@0.1.0".into(),
             node: "Engine".into(),
+            provides: Vec::new(),
+            needs: Default::default(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -857,6 +877,7 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
             backward: Vec::new(),
         },
         segments: BTreeMap::new(),
+        properties: Vec::new(),
     };
     let problems = draft
         .render(&catalog, &Gdl::Path("/gdl".into()))

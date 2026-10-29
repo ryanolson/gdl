@@ -50,6 +50,10 @@ You can also drag nodes and messages from the catalogue onto slots and cards. Th
 
 For a `Service` frontend, each enabled endpoint gets its own arm. A dangling **+** offers **Add node**, **Connect existing**, and **Identity**. **Connect existing** shares a sink across arms. The canvas draws a shared sink once. A sink must match both the request and the response types. While you insert a conversion chain, an incomplete type match stays editable, and deployment stays disabled until the types align. [Hosted frontends](frontends.md) explains roots, shared sinks, and identity nodes.
 
+### Declare properties
+
+Open **Property kinds** under the canvas heading to declare a kind and the message of its keys, with **Add kind**. In a node's settings, **Provides** lists the kinds its instance has, `model, region`, and **Needs** the kinds it reads, `model from sets`. Each node's box shows them, and the diagram draws them on the node and in its title. The draft writes them into the graph file ([Declare properties](define-a-graph.md#declare-properties)). The composer places no classes, so the check refuses a need: the graph file and the diagram still show it, and a spec with the class's tables can take the exported graph.
+
 ## Cut it into segments
 
 **Segments** opens once the graph passes.

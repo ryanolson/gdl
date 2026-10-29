@@ -47,6 +47,31 @@ pub struct Draft {
     pub routing: BTreeMap<String, gdl_model::RequestRouter>,
     /// Segment name to the nodes it hosts.
     pub segments: BTreeMap<String, Vec<String>>,
+    /// The property kinds the graph declares, each with the message type
+    /// of its keys.
+    #[serde(default)]
+    pub properties: Vec<Property>,
+}
+
+/// One declared property kind: `property <kind>: <Message>;`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Property {
+    /// The kind's name.
+    pub kind: String,
+    /// The message type of its keys.
+    pub message: Origin,
+}
+
+/// A kind a node reads, and the class whose pools it reads it from:
+/// `needs <kind> from <class>`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Need {
+    /// The kind.
+    pub kind: String,
+    /// The class.
+    pub class: String,
 }
 
 /// A built-in identity node or operator with explicit port types.
@@ -84,6 +109,10 @@ pub struct EntryPipeline {
     /// Response transforms in order from downstream to upstream.
     #[serde(default)]
     pub backward: Vec<Instance>,
+    /// The property kinds the entry's adapters read, each with the class
+    /// whose pools they read it from: the entry table's `needs`.
+    #[serde(default)]
+    pub needs: BTreeMap<String, String>,
 }
 
 /// The source: its name, the request it takes, and the item its response
@@ -122,6 +151,12 @@ pub struct Instance {
     pub entry: String,
     /// The node's name in that entry.
     pub node: String,
+    /// The property kinds the node's instance has: `provides <kind>`.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// The property kinds the node reads: `needs <kind> from <class>`.
+    #[serde(default)]
+    pub needs: Vec<Need>,
 }
 
 /// A hop: forward nodes, the inner end, and backward nodes in the order
@@ -139,6 +174,24 @@ pub struct Hop {
     /// Backward nodes, in response order.
     #[serde(default)]
     pub backward: Vec<String>,
+}
+
+/// What a node provides and needs, as the graph file writes it after the
+/// node's signature.
+fn clauses(instance: &Instance) -> String {
+    let mut text = String::new();
+    if !instance.provides.is_empty() {
+        text.push_str(&format!(" provides {}", instance.provides.join(", ")));
+    }
+    if !instance.needs.is_empty() {
+        let needs: Vec<String> = instance
+            .needs
+            .iter()
+            .map(|need| format!("{} from {}", need.kind, need.class))
+            .collect();
+        text.push_str(&format!(" needs {}", needs.join(", ")));
+    }
+    text
 }
 
 fn entry_pipeline<'a>(
@@ -197,6 +250,12 @@ fn entry_pipeline<'a>(
     }
     if let Some(target) = &pipeline.target {
         result.insert("target".into(), target.clone().into());
+    }
+    if !pipeline.needs.is_empty() {
+        result.insert(
+            "needs".into(),
+            toml::Value::try_from(&pipeline.needs).expect("kind and class names"),
+        );
     }
     if let Some(nested) = &pipeline.nested {
         result.insert(
@@ -326,6 +385,37 @@ impl Draft {
                 .keys()
                 .filter_map(|segment| gdl_model::segment_name_problem(segment)),
         );
+        // A kind and a class are written into the graph file as they are,
+        // as a node's name is.
+        for property in &self.properties {
+            if let Err(why) = gdl_model::check_property_kind(&property.kind) {
+                problems.push(format!("property `{}`: {why}", property.kind));
+            }
+        }
+        for instance in &self.nodes {
+            for kind in instance
+                .provides
+                .iter()
+                .chain(instance.needs.iter().map(|n| &n.kind))
+            {
+                if let Err(why) = gdl_model::check_property_kind(kind) {
+                    problems.push(format!("node `{}`: {why}", instance.name));
+                }
+            }
+            for need in &instance.needs {
+                if let Err(why) = gdl_model::check_class_name(&need.class) {
+                    problems.push(format!("node `{}`: {why}", instance.name));
+                }
+            }
+        }
+        for instance in self.entries.values().flat_map(arm_instances) {
+            if !instance.provides.is_empty() || !instance.needs.is_empty() {
+                problems.push(format!(
+                    "entry node `{}`: an entry adapter provides no property, and reads the kinds its entry's `needs` names",
+                    instance.name
+                ));
+            }
+        }
         let entries: BTreeMap<String, &Entry> = catalog.entries().map(|e| (e.key(), e)).collect();
 
         // Each instance's catalogue node.
@@ -376,6 +466,7 @@ impl Draft {
                 used.extend(port.head.iter().chain(&port.item));
             }
         }
+        used.extend(self.properties.iter().map(|property| &property.message));
         let names = Names::new(&used, &entries, &mut problems);
         if !problems.is_empty() {
             return Err(problems);
@@ -392,6 +483,13 @@ impl Draft {
 
     fn graph_text(&self, nodes: &BTreeMap<&str, (&Entry, &NodeEntry)>, names: &Names) -> String {
         let mut text = format!("name = {:?}, schema = 1;\n", self.name);
+        for property in &self.properties {
+            text.push_str(&format!(
+                "property {}: {};\n",
+                property.kind,
+                names.name(&property.message)
+            ));
+        }
         let source = &self.source.request;
         text.push_str(&format!(
             "source {}: {} -> stream {};\n",
@@ -428,7 +526,12 @@ impl Draft {
                 // The source signature was emitted above.
                 Role::Source => continue,
             };
-            text.push_str(&format!("{} {}: {signature};\n", node.role, instance.name));
+            text.push_str(&format!(
+                "{} {}: {signature}{};\n",
+                node.role,
+                instance.name,
+                clauses(instance)
+            ));
         }
         for pipeline in &self.pipelines {
             text.push_str(&format!(

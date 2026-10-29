@@ -233,3 +233,35 @@ fn a_need_the_layout_cannot_meet_is_refused_for_what_it_is() {
         ]
     );
 }
+
+/// A diagram draws the declarations: the title says each kind's type,
+/// and a node's label what it provides and needs, with each need's class.
+/// A graph that declares none draws as it did.
+#[test]
+fn a_diagram_draws_what_each_node_provides_and_needs() {
+    let declared = manifest(vec![shard()]);
+    let mermaid = declared.to_mermaid(None).expect("a diagram");
+    assert!(
+        mermaid.contains("title: \"classed; property shard: Shard\""),
+        "{mermaid}"
+    );
+    assert!(
+        mermaid.contains("n1[[\"F<br/>operator<br/>needs shard from model_x\"]]"),
+        "{mermaid}"
+    );
+    assert!(
+        mermaid.contains("n2[(\"D<br/>sink<br/>provides shard\")]"),
+        "{mermaid}"
+    );
+    let dot = declared.to_dot(None).expect("a diagram");
+    assert!(dot.contains("label=\"property shard: Shard\""), "{dot}");
+    assert!(dot.contains("\"D\\nsink\\nprovides shard\""), "{dot}");
+    let plain = manifest(vec![]);
+    assert!(
+        !plain
+            .to_mermaid(None)
+            .expect("a diagram")
+            .contains("provides")
+    );
+    assert!(!plain.to_dot(None).expect("a diagram").contains("labelloc"));
+}
