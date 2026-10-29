@@ -1758,7 +1758,7 @@ const historyFields=['name','source-name','source-request','source-header','sour
 const editHistory=[];
 let historyIndex=-1;
 function recordHistory() {
-  const snapshot=JSON.stringify({hop:state.hop,pipelines:state.pipelines,usedNames:state.usedNames,frontend:state.frontend,placement:state.placement,routing:state.routing,segmentNames:state.segmentNames,fields:Object.fromEntries(historyFields.map(id=>[id,$(id).value]))});
+  const snapshot=JSON.stringify({hop:state.hop,pipelines:state.pipelines,usedNames:state.usedNames,frontend:state.frontend,placement:state.placement,routing:state.routing,segmentNames:state.segmentNames,properties:state.properties,fields:Object.fromEntries(historyFields.map(id=>[id,$(id).value]))});
   if(editHistory[historyIndex]!==snapshot) {
     editHistory.splice(historyIndex+1); editHistory.push(snapshot);
     if(editHistory.length>100) editHistory.shift();
@@ -1773,7 +1773,7 @@ function restoreEdit(index) {
   if(index<0 || index>=editHistory.length) return;
   historyIndex=index;
   const snapshot=JSON.parse(editHistory[index]);
-  Object.assign(state,{hop:snapshot.hop,pipelines:snapshot.pipelines || [],usedNames:snapshot.usedNames || [],frontend:snapshot.frontend,placement:snapshot.placement,routing:snapshot.routing,segmentNames:snapshot.segmentNames});
+  Object.assign(state,{hop:snapshot.hop,pipelines:snapshot.pipelines || [],usedNames:snapshot.usedNames || [],frontend:snapshot.frontend,placement:snapshot.placement,routing:snapshot.routing,segmentNames:snapshot.segmentNames,properties:snapshot.properties || []});
   for(const [id,value] of Object.entries(snapshot.fields)) $(id).value=value;
   $('name-display').textContent=$('name').value;
   $('source-frontend').value=state.frontend?`${state.frontend.entry} ${state.frontend.node.name}`:'';
@@ -1783,7 +1783,7 @@ function restoreEdit(index) {
 function clearGraph() {
   recordHistory();
   Object.assign(state,{mode:'graph',validated:false,hop:newHop(),pipelines:[],usedNames:[],frontend:null,
-    placement:Object.create(null),routing:Object.create(null),segmentNames:Object.create(null)});
+    placement:Object.create(null),routing:Object.create(null),segmentNames:Object.create(null),properties:[]});
   for(const id of ['source-request','source-header','source-response','source-frontend']) $(id).value='';
   $('source-name').value='Source';$('input-mode').value='single';
   $('name').value='composed';$('name-display').textContent='composed';

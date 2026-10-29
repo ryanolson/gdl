@@ -1028,3 +1028,20 @@ test('a node box shows what the node provides and needs', () => {
     const shown=box('Echo', null, instance);`);
   assert.equal(run("shown.children.find(c=>c.className==='property-badge').textContent"), 'provides shard');
 });
+
+test('property declarations follow undo, redo, and Clear graph as graph nodes do', () => {
+  const run = editor();
+  run(`render = () => recordHistory(); graphComplete = () => false;
+    recordHistory();
+    state.properties = [{kind:'shard', message:'p@1 p::Shard'}];
+    recordHistory();
+    undoEdit();`);
+  const declared = [{kind:'shard', message:'p@1 p::Shard'}];
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), []);
+  run('redoEdit();');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), declared);
+  run('clearGraph();');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), []);
+  run('undoEdit();');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), declared);
+});
