@@ -154,6 +154,119 @@ fn the_dir_backend_takes_its_path_and_no_other_backend_does() {
     }
 }
 
+/// The `dynamodb` backend takes its two tables and its region, which it
+/// requires, and an endpoint, which it does not; every one of its keys is
+/// refused with any other backend, and the other backends' keys with it,
+/// so that nothing sits unread.
+#[test]
+fn the_dynamodb_backend_takes_its_tables_and_region_and_no_other_backend_does() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    const TABLES: &str = "records_table = 'gdl-pools'\nlists_table = 'gdl-pool-lists'\n";
+    let pool = settings(&format!(
+        "{LEAST}directory = 'dynamodb'\n{TABLES}aws_region = 'eu-west-1'\n"
+    ));
+    assert_eq!(
+        pool.directory,
+        DirectoryBackend::DynamoDb {
+            records_table: "gdl-pools".into(),
+            lists_table: "gdl-pool-lists".into(),
+            aws_region: "eu-west-1".into(),
+            endpoint: None,
+        }
+    );
+    let text = toml::to_string(&pool).expect("toml");
+    assert_eq!(settings(&text), pool, "{text}");
+    let local = settings(&format!(
+        "{LEAST}directory = 'dynamodb'\n{TABLES}aws_region = 'us-east-1'\nendpoint = 'http://dynamodb:8000'\n"
+    ));
+    let DirectoryBackend::DynamoDb { endpoint, .. } = &local.directory else {
+        panic!("{local:?}");
+    };
+    assert_eq!(endpoint.as_deref(), Some("http://dynamodb:8000"));
+    let text = toml::to_string(&local).expect("toml");
+    assert_eq!(settings(&text), local, "{text}");
+
+    const REGION: &str = "aws_region = 'us-east-1'\n";
+    for (bad, why) in [
+        (
+            format!("directory = 'dynamodb'\nlists_table = 'l'\n{REGION}"),
+            "[pool] directory: is \"dynamodb\", which needs `records_table`",
+        ),
+        (
+            format!("directory = 'dynamodb'\nrecords_table = 'rec'\n{REGION}"),
+            "[pool] directory: is \"dynamodb\", which needs `lists_table`",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}"),
+            "[pool] directory: is \"dynamodb\", which needs `aws_region`",
+        ),
+        (
+            format!("directory = 'dynamodb'\nrecords_table = 'a b'\nlists_table = 'l'\n{REGION}"),
+            "[pool] records_table: \"a b\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\nrecords_table = 'ab'\nlists_table = 'l'\n{REGION}"),
+            "[pool] records_table: \"ab\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}aws_region = 'US East'\n"),
+            "[pool] aws_region: \"US East\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}{REGION}endpoint = 'dynamodb:8000'\n"),
+            "[pool] endpoint: \"dynamodb:8000\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}{REGION}parent_hub = 'global-hub:1337'\n"),
+            "read only by the `relay` backend, not by directory = \"dynamodb\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}{REGION}state_dir = '/s'\n"),
+            "read only by the `relay` backend, not by directory = \"dynamodb\"",
+        ),
+        (
+            format!("directory = 'dynamodb'\n{TABLES}{REGION}dir = '/srv/pools'\n"),
+            "read only by the `dir` backend, not by directory = \"dynamodb\"",
+        ),
+        (
+            TABLES.to_string(),
+            "[pool] records_table: \"gdl-pools\" is read only by the `dynamodb` backend, not by directory = \"relay\"",
+        ),
+        (
+            format!("directory = 'dir'\ndir = '/srv/pools'\n{REGION}"),
+            "[pool] aws_region: \"us-east-1\" is read only by the `dynamodb` backend, not by directory = \"dir\"",
+        ),
+        (
+            "directory = 'memory'\nendpoint = 'http://dynamodb:8000'\n".to_string(),
+            "[pool] endpoint: \"http://dynamodb:8000\" is read only by the `dynamodb` backend, not by directory = \"memory\"",
+        ),
+    ] {
+        let Err(error) = toml::from_str::<PoolSettings>(&format!("{LEAST}{bad}")) else {
+            panic!("{bad}: accepted");
+        };
+        assert!(error.to_string().contains(why), "{bad}: {error}");
+    }
+}
+
+/// A pool's hub under the `dynamodb` backend publishes to the tables, so
+/// it needs neither a parent's hub nor a state directory, whichever
+/// classes its class sends to or is sent from.
+#[test]
+fn a_hub_under_the_dynamodb_backend_needs_no_parent_hub_or_state_dir() {
+    const DYNAMODB: &str = "directory = 'dynamodb'\nrecords_table = 'gdl-pools'\nlists_table = 'gdl-pool-lists'\naws_region = 'us-east-1'\n";
+    let child = settings(&format!(
+        "name = 'm'\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n{DYNAMODB}"
+    ));
+    child.check_hub(&classed()).expect("a child");
+    child
+        .check(&classed(), "d")
+        .expect("an instance of the child");
+    let parent = settings(&format!(
+        "name = 'g'\nclass = 'global'\nregion = 'r'\n{DYNAMODB}"
+    ));
+    parent.check_hub(&classed()).expect("a parent");
+}
+
 /// The address other pools' hubs reach this pool's hub at is `host:port`,
 /// with a host name, an IPv4 address, or a bracketed IPv6 address.
 #[test]

@@ -142,10 +142,13 @@ The fleet file fills in each pool's `[pool]` table in its segments' settings. Th
 | `layout` | the layout the pool runs. Read and checked for its shape. Nothing else in an instance or hub reads it. | none |
 | `home` | the parent pool | none |
 | `parents` | in place of `home`, the parent class: every pool of it follows this pool. Refused with `home`. A hub that publishes through `relay` refuses it. | none |
-| `directory` | where pool records are published: `relay`, `memory` (one directory per process, for tests), or `dir` | `relay` |
+| `directory` | where pool records are published: `relay`, `memory` (one directory per process, for tests), `dir`, or `dynamodb` (a hub built with its `dynamodb` feature) | `relay` |
 | `parent_hub` | the parent pool's hub, `host:port`, where the pool's hub reports its record. With `relay`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with the other backends. A fleet bundle sets it to `<home>:1337`. | none |
 | `state_dir` | where the pool's hub keeps the records its children report, across its restart. With `relay`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with the other backends. Only the hub reads it. A fleet bundle sets it to `/var/lib/gdl-hub`, on a volume of the hub's own. | none |
 | `dir` | the shared directory. Required with `directory = "dir"` and refused with the others. | none |
+| `records_table`, `lists_table` | the DynamoDB tables. Required with `directory = "dynamodb"` and refused with the others. Only the hub reads them. | none |
+| `aws_region` | the AWS region whose copy of the tables the hub uses. Required with `directory = "dynamodb"` and refused with the others. Only the hub reads it. | none |
+| `endpoint` | a DynamoDB Local, `http://host:port`, which the hub uses instead of AWS, with fixed test credentials. Only with `directory = "dynamodb"`. Only the hub reads it. | none |
 | `hub` | the address, `host:port`, at which other pools' hubs reach this pool's hub. Only the hub reads it. | none |
 | `summary_ms` | the load summary's period. Least 1000. | 10000 |
 | `ready.<segment>` | the quorum. A segment it does not name needs 1. | 1 |

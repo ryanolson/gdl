@@ -994,6 +994,7 @@ fn defaults() -> Vec<(&'static str, String)> {
         DirectoryBackend::Relay { .. } => "relay",
         DirectoryBackend::Memory => "memory",
         DirectoryBackend::Dir { .. } => "dir",
+        DirectoryBackend::DynamoDb { .. } => "dynamodb",
     };
     vec![
         (

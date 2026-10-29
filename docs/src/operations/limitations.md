@@ -488,7 +488,7 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Child's start:** a child's hub first reads its pool's last record from its parent's hub, every 1 s until it can. It settles its epoch, and serves its pool's watch, only once its parent's hub has taken a report. While its parent's hub cannot be reached from the child's start, the child's instances cannot watch their own pool, so they do not learn of a drain. The child reports again on each change of state and at its own heartbeat.
 - **Contract:** so `relay` does not keep one of the directory's rules ([The contract](../concepts/pools.md#the-contract)): a watch does not give every record of the class, only the hub's own children. `the_middle_of_a_chain_reports_up_and_holds_its_childrens_records` and `the_parent_refuses_what_it_cannot_verify` in `crates/gdl-hub/tests/relay.rs` hold it.
 - **Why:** the mesh among parent hubs, from seeds, is not built.
-- **Workaround:** a backend that keeps every rule, such as `dir` on one host, or one of another crate given to `gdl_hub::hub_builder_with`.
+- **Workaround:** a backend that keeps every rule, such as `dir` on one host, or `dynamodb` across hosts and regions ([The DynamoDB backend](../concepts/pools.md#the-dynamodb-backend)).
 - **Lifts:** the relay mesh among parent hubs.
 
 ### A child's report to its parent's hub carries no credential
@@ -696,6 +696,11 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Why:** the backend needs no service and no file-watching crate, and it keeps one file per pool rather than an ordered log.
 - **Workaround:** none needed for a reader. `PoolView` keeps each pool's newest record, so a missed write loses no state. Use a fresh directory for each deployment.
 - **Lifts:** a backend with an ordered, shared log. The `relay` backend is not polled, and needs no shared directory. The DynamoDB backend is polled too ([below](#the-dynamodb-pool-directory-is-polled-and-its-replication-lag-is-not-measured)).
+
+### The stock hub reads DynamoDB only when built with its `dynamodb` feature
+- **What:** the `gdl-hub` binary takes `directory = "dynamodb"`, and runs `gdl-hub --tables`, only when it is built with `--features dynamodb`. A hub built without it refuses both before it binds a port, and says how to build one that takes them.
+- **Why:** the feature links the AWS SDK, its credential chain, and a TLS stack, the heaviest dependencies in the workspace, which a hub under `relay` or `dir` never uses (`crates/gdl-pools-dynamodb/tests/dependencies.rs`).
+- **Workaround:** `cargo install gdl-hub --features dynamodb`. See [The DynamoDB backend](../concepts/pools.md#the-dynamodb-backend).
 
 ### The DynamoDB pool directory is polled, and its replication lag is not measured
 - **What:** a watch of the DynamoDB backend (`gdl_pools_dynamodb::DynamoDirectory`) queries its class once per period, 1 s by default. A change reaches a reader up to a period late, plus the time that global tables take to copy it to the reader's region. Two writes of one pool between two queries are seen as one. A resume token works only through the handle, and its clones, whose watch made it. An item deleted by hand while it is watched is not reported: a reader keeps the record until its lease ends.

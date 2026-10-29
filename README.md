@@ -37,7 +37,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `k8s`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-pools` | `gdl`, hub, and runtime | The pool plane's shared types: the pool record, a pool's state, load summary, presence, and properties, the `PoolDirectory` backends, and an operator's commands for a pool whose hub is gone. No velo |
-| `gdl-pools-dynamodb` | Deployments across regions | A pool directory in DynamoDB global tables, for a hub built with `gdl_hub::hub_builder_with` |
+| `gdl-pools-dynamodb` | Deployments across regions | A pool directory in DynamoDB global tables, which the `gdl-hub` binary takes with its `dynamodb` feature |
 | `gdl-watch` | Hub and runtime | The watches a pool's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a pool's quorum, health, record, follows, and keyed records |
 
@@ -104,7 +104,7 @@ timeout 300 cargo nextest run --workspace
 timeout 60 cargo test --workspace --doc             # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
 bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, python3
-bash scripts/dynamodb-local.sh                      # the DynamoDB directory against DynamoDB Local; needs Docker
+bash scripts/dynamodb-local.sh                      # the DynamoDB directory and the hub on it against DynamoDB Local; needs Docker
 bash scripts/kubeconform.sh                         # the pinned Kubernetes objects against pinned schemas; INSTALL_TOOLS=1 fetches them
 ```
 

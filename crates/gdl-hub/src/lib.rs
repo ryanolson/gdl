@@ -42,6 +42,8 @@
 //! and write by request and answer
 //! (`POST /v1/ext/gdl-keyed/instances/{id}/keyed` on the control
 //! listener, a [`gdl_watch::KeyedAsk`]).
+#[cfg(feature = "dynamodb")]
+mod dynamodb;
 mod fanout;
 mod follow;
 mod keyed;
@@ -50,6 +52,8 @@ mod quorum;
 mod report;
 mod setup;
 
+#[cfg(feature = "dynamodb")]
+pub use dynamodb::ensure_tables_from_vars;
 pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
 pub use pool::{

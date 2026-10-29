@@ -88,10 +88,13 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `layout` | none | the spec's layout that the pool runs. Read and checked for shape only |
 | `home` | none | the parent pool |
 | `parents` | none | in place of `home`, the parent class: every pool of it follows this pool. Refused with `home`, and by a hub that publishes through `relay`. An instance takes it with any backend |
-| `directory` | `relay` | `relay`, `memory`, or `dir`. A hub process runs `relay` or `dir` |
+| `directory` | `relay` | `relay`, `memory`, `dir`, or `dynamodb`. A hub process runs `relay`, `dir`, or, built with its `dynamodb` feature, `dynamodb` |
 | `parent_hub` | none | the parent pool's hub, `host:port`, where the pool's hub reports its record. With `directory = "relay"`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with another backend |
 | `state_dir` | none | where the pool's hub keeps the records its children report, so that it still holds them after it restarts. With `directory = "relay"`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with another backend. An instance ignores it |
 | `dir` | none | the shared directory. Required with `directory = "dir"`, refused otherwise |
+| `records_table`, `lists_table` | none | the DynamoDB tables' names. Required with `directory = "dynamodb"`, refused otherwise. An instance ignores them |
+| `aws_region` | none | the AWS region whose copy of the tables the hub uses, such as `us-east-1`. Required with `directory = "dynamodb"`, refused otherwise. An instance ignores it |
+| `endpoint` | none | a DynamoDB Local, `http://host:port`, used instead of AWS, with fixed test credentials. With `directory = "dynamodb"` only. An instance ignores it |
 | `hub` | none | `host:port` where other pools' hubs reach this pool's hub. An instance ignores it |
 | `summary_ms` | 10000 (`PoolSettings::DEFAULT_SUMMARY`) | the load summary's period. At least 1000 |
 | `[pool.ready]` | 1 per segment (`DEFAULT_QUORUM`) | the quorum of each segment of the class |

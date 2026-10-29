@@ -422,8 +422,8 @@ fn settings(directory: DirectoryBackend) -> PoolSettings {
 }
 
 /// A lease that expires between heartbeats must be refused for settings built in Rust too.
-#[test]
-fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
+#[tokio::test]
+async fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
     let dir = tempfile::Builder::new()
         .prefix("gdl-hub-timing-")
         .tempdir()
@@ -431,9 +431,13 @@ fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
     let mut pool = settings(DirectoryBackend::Dir {
         path: dir.path().to_path_buf(),
     });
-    assert!(hub_builder(config(), spec(), Some(pool.clone())).is_ok());
+    assert!(
+        hub_builder(config(), spec(), Some(pool.clone()))
+            .await
+            .is_ok()
+    );
     pool.timing.lease = pool.timing.heartbeat;
-    let result = hub_builder(config(), spec(), Some(pool));
+    let result = hub_builder(config(), spec(), Some(pool)).await;
     assert!(
         result.is_err(),
         "hub_builder accepted lease_ms = heartbeat_ms = 10000"
@@ -445,8 +449,8 @@ fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
 /// A bound of zero on a lost chooser, built in code, is refused as the
 /// reader refuses it, naming its key: the hub would stop waiting for a
 /// chooser the moment its watch of the relay closed.
-#[test]
-fn hub_builder_refuses_a_typed_lost_chooser_bound_of_zero() {
+#[tokio::test]
+async fn hub_builder_refuses_a_typed_lost_chooser_bound_of_zero() {
     let dir = tempfile::Builder::new()
         .prefix("gdl-hub-timing-")
         .tempdir()
@@ -456,6 +460,7 @@ fn hub_builder_refuses_a_typed_lost_chooser_bound_of_zero() {
     });
     pool.timing.lost_chooser = Duration::ZERO;
     let error = hub_builder(config(), spec(), Some(pool))
+        .await
         .err()
         .expect("a bound of zero is refused");
     assert!(error.to_string().contains("lost_chooser_ms"), "{error}");
@@ -463,8 +468,8 @@ fn hub_builder_refuses_a_typed_lost_chooser_bound_of_zero() {
 
 /// A watch buffer past its ceiling, built in code, is refused as the
 /// reader refuses it, naming its key, before the hub takes its slots.
-#[test]
-fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
+#[tokio::test]
+async fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
     let dir = tempfile::Builder::new()
         .prefix("gdl-hub-timing-")
         .tempdir()
@@ -473,7 +478,7 @@ fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
         path: dir.path().to_path_buf(),
     });
     pool.timing.watch_buffer = HubTiming::MAX_WATCH_BUFFER + 1;
-    let Err(error) = hub_builder(config(), spec(), Some(pool)) else {
+    let Err(error) = hub_builder(config(), spec(), Some(pool)).await else {
         panic!("hub_builder accepted a watch buffer past its ceiling");
     };
     assert!(error.to_string().contains("watch_buffer"), "{error}");
@@ -481,8 +486,8 @@ fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
 
 /// A keyed record capacity of zero, built in code, is refused as the
 /// reader refuses it, naming its key.
-#[test]
-fn hub_builder_refuses_a_typed_keyed_capacity_of_zero() {
+#[tokio::test]
+async fn hub_builder_refuses_a_typed_keyed_capacity_of_zero() {
     let dir = tempfile::Builder::new()
         .prefix("gdl-hub-timing-")
         .tempdir()
@@ -491,7 +496,7 @@ fn hub_builder_refuses_a_typed_keyed_capacity_of_zero() {
         path: dir.path().to_path_buf(),
     });
     pool.timing.keyed_capacity = 0;
-    let Err(error) = hub_builder(config(), spec(), Some(pool)) else {
+    let Err(error) = hub_builder(config(), spec(), Some(pool)).await else {
         panic!("hub_builder accepted a keyed capacity of zero");
     };
     assert!(error.to_string().contains("keyed_capacity"), "{error}");
@@ -509,6 +514,7 @@ async fn a_pool_with_the_dir_backend_publishes_into_its_directory() {
         path: dir.path().to_path_buf(),
     });
     let hub = hub_builder(config(), spec(), Some(pool))
+        .await
         .expect("a dir pool")
         .serve()
         .await
@@ -563,7 +569,7 @@ async fn a_shared_pool_is_refused_under_relay_and_published_under_dir() {
             state_dir: None,
         })
     };
-    let Err(error) = hub_builder(config(), spec(), Some(relay)) else {
+    let Err(error) = hub_builder(config(), spec(), Some(relay)).await else {
         panic!("hub_builder accepted a shared pool under relay");
     };
     assert!(error.to_string().contains("[pool] parents"), "{error}");
@@ -579,6 +585,7 @@ async fn a_shared_pool_is_refused_under_relay_and_published_under_dir() {
         })
     };
     let hub = hub_builder(config(), spec(), Some(pool))
+        .await
         .expect("a shared pool under dir")
         .serve()
         .await
@@ -605,6 +612,7 @@ async fn a_shared_pool_is_refused_under_relay_and_published_under_dir() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hub_without_a_pool_runs_admission_alone() {
     let hub = hub_builder(config(), spec(), None)
+        .await
         .expect("no pool")
         .serve()
         .await
@@ -627,6 +635,7 @@ async fn the_hub_binary_serves_the_watch_caps_its_settings_give() {
     });
     pool.timing.watch_caps.pool = 1;
     let hub = hub_builder(config(), spec(), Some(pool))
+        .await
         .expect("a dir pool")
         .serve()
         .await
@@ -651,9 +660,10 @@ async fn the_hub_binary_serves_the_watch_caps_its_settings_give() {
 
 /// `memory` is one directory inside one process: a hub binary refuses it
 /// before it serves, and says what to set.
-#[test]
-fn the_memory_backend_is_refused() {
-    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::Memory))) else {
+#[tokio::test]
+async fn the_memory_backend_is_refused() {
+    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::Memory))).await
+    else {
         panic!("accepted memory");
     };
     let error = error.to_string();
@@ -665,7 +675,7 @@ fn the_memory_backend_is_refused() {
 /// to report to, and serves once it has one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pool_with_the_relay_backend_needs_its_parents_hub() {
-    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::DEFAULT)))
+    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::DEFAULT))).await
     else {
         panic!("a child without its parent's hub");
     };
@@ -675,6 +685,7 @@ async fn a_pool_with_the_relay_backend_needs_its_parents_hub() {
     );
 
     let parent = hub_builder(config(), spec(), None)
+        .await
         .expect("no pool")
         .serve()
         .await
@@ -684,6 +695,7 @@ async fn a_pool_with_the_relay_backend_needs_its_parents_hub() {
         state_dir: None,
     };
     let hub = hub_builder(config(), spec(), Some(settings(relay)))
+        .await
         .expect("a relay pool")
         .serve()
         .await

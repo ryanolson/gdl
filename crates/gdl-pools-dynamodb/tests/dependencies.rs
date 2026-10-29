@@ -1,7 +1,11 @@
 //! What the DynamoDB directory links, and who links it. The AWS SDK is the
 //! heaviest dependency in the workspace, so it stays in this crate: no
-//! other workspace crate depends on it or on this crate, and the crate
-//! links neither the transport nor a TLS stack of its own.
+//! other workspace crate depends on it or on this crate by default, and the
+//! crate links neither the transport nor a TLS stack of its own. The one
+//! exception is opt-in: `gdl-hub`'s `dynamodb` feature, off by default,
+//! with which the stock hub binary publishes to DynamoDB. The hub must then
+//! build the client itself, with a credential chain and an HTTPS client,
+//! which only a program can choose, so it links the SDK.
 
 use std::process::Command;
 
@@ -22,25 +26,42 @@ fn tree(args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("utf-8")
 }
 
-/// Every workspace crate that reaches the SDK, by any kind of edge, is
-/// this one: the rest of the workspace builds without it.
-#[test]
-fn only_this_crate_links_the_aws_sdk() {
-    let dependents = tree(&[
+/// The workspace crates that reach `package`, by any kind of edge, with
+/// the further `args`.
+fn dependents(package: &str, more: &[&str]) -> (Vec<String>, String) {
+    let mut args = vec![
         "--workspace",
         "--invert",
-        "aws-sdk-dynamodb",
+        package,
         "--edges",
         "normal,build,dev",
-    ]);
-    let mut crates: Vec<&str> = dependents
+    ];
+    args.extend(more);
+    let dependents = tree(&args);
+    let mut crates: Vec<String> = dependents
         .lines()
         .filter(|line| line.starts_with("gdl"))
         .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
         .collect();
     crates.sort_unstable();
     crates.dedup();
-    assert_eq!(crates, ["gdl-pools-dynamodb"], "{dependents}");
+    (crates, dependents)
+}
+
+/// Every workspace crate that reaches the SDK by default is this one: the
+/// rest of the workspace builds without it. With every feature on, the
+/// hub's `dynamodb` feature makes the hub depend on the SDK and this crate,
+/// and no other crate depends on either itself.
+#[test]
+fn only_this_crate_links_the_aws_sdk() {
+    let (crates, tree) = dependents("aws-sdk-dynamodb", &[]);
+    assert_eq!(crates, ["gdl-pools-dynamodb"], "{tree}");
+    let direct = ["--all-features", "--depth", "1"];
+    let (crates, tree) = dependents("aws-sdk-dynamodb", &direct);
+    assert_eq!(crates, ["gdl-hub", "gdl-pools-dynamodb"], "{tree}");
+    let (crates, tree) = dependents("gdl-pools-dynamodb", &direct);
+    assert_eq!(crates, ["gdl-hub", "gdl-pools-dynamodb"], "{tree}");
 }
 
 /// A pool directory backend needs only the trait: no velo, as for

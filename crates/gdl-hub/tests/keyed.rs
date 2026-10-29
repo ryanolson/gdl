@@ -163,6 +163,7 @@ async fn a_check_answers_unchanged_then_the_newer_record_then_gone() {
     };
     pool.timing.keyed_capacity = 1;
     let hub = hub_builder(config(), spec(), Some(pool))
+        .await
         .expect("a pool's hub")
         .serve()
         .await
@@ -308,6 +309,7 @@ async fn only_the_hubs_own_instances_reach_its_table() {
         [KeyedAnswer::Missing]
     );
     let plain = hub_builder(config(), spec(), None)
+        .await
         .expect("no pool")
         .serve()
         .await

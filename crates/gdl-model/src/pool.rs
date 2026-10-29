@@ -20,9 +20,13 @@ use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent pool, for a class that another sends to: whose hub follows this one
 /// # parents = "global"         # or, in place of `home`, the parent class: every pool of it follows this one (not with "relay")
-/// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
+/// directory = "relay"          # optional: "relay" (the default), "memory", "dir", or "dynamodb"
 /// parent_hub = "global-hub:1337" # with "relay", for a class that another sends to: the parent's hub
 /// # dir = "/var/lib/gdl/pools" # with "dir", and only with it: the shared directory
+/// # records_table = "gdl-pools"     # with "dynamodb", and only with it: the records table,
+/// # lists_table = "gdl-pool-lists"  # the lists table,
+/// # aws_region = "us-east-1"        # the region whose copy of the tables the hub uses,
+/// # endpoint = "http://dynamodb:8000" # and, optionally, a DynamoDB Local to use instead of AWS
 /// hub = "model-x-01-hub:1337"  # optional: where other pools' hubs reach this pool's hub
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// hold_ms = 2000               # optional, the hub's alone: how long the quorum holds before `ready`
@@ -74,9 +78,10 @@ pub struct PoolSettings {
     pub parent: Option<Parent>,
     /// Where the pool's record is published and the other pools are found:
     /// the `directory` key, with the `parent_hub` and `state_dir` keys for
-    /// [`DirectoryBackend::Relay`] and the `dir` key for
-    /// [`DirectoryBackend::Dir`]; [`DirectoryBackend::DEFAULT`] when it is
-    /// not set.
+    /// [`DirectoryBackend::Relay`], the `dir` key for
+    /// [`DirectoryBackend::Dir`], and the `records_table`, `lists_table`,
+    /// `aws_region`, and `endpoint` keys for [`DirectoryBackend::DynamoDb`];
+    /// [`DirectoryBackend::DEFAULT`] when it is not set.
     pub directory: DirectoryBackend,
     /// Usable instances each segment of the class needs for the pool to be
     /// ready; see [`PoolSettings::quorum`].
@@ -289,6 +294,25 @@ pub enum DirectoryBackend {
         /// process's working directory's.
         path: PathBuf,
     },
+    /// Two DynamoDB tables, which global tables replicate to every region,
+    /// so that every hub reads every pool's record, whatever its region.
+    /// The hub needs the `dynamodb` feature of `gdl-hub`.
+    DynamoDb {
+        /// The records table: one item per pool.
+        records_table: String,
+        /// The lists table: one item per property list.
+        lists_table: String,
+        /// The AWS region whose copy of the tables the hub reads and
+        /// writes. A key apart from the pool's `region`, which is a name
+        /// of the fleet's and need not be an AWS region.
+        aws_region: String,
+        /// A DynamoDB Local, `http://host:port`, to use instead of AWS.
+        /// The hub then signs with fixed test credentials, which DynamoDB
+        /// Local never checks; without it, the hub takes its credentials
+        /// from its environment, such as a Kubernetes service account's
+        /// role.
+        endpoint: Option<String>,
+    },
 }
 
 impl DirectoryBackend {
@@ -298,6 +322,35 @@ impl DirectoryBackend {
         parent_hub: None,
         state_dir: None,
     };
+}
+
+impl DirectoryBackend {
+    /// The `dynamodb` backend with its keys, checked as reading `[pool]`
+    /// checks them: each table's name is a DynamoDB table's, the region an
+    /// AWS region's code, and the endpoint an `http://` or `https://` URL.
+    /// A problem names its key in `[pool]`.
+    pub fn dynamodb(
+        records_table: String,
+        lists_table: String,
+        aws_region: String,
+        endpoint: Option<String>,
+    ) -> Result<Self, Problems> {
+        let at = |key: &str, message: String| {
+            Problems::from(Problem::at(Some("pool".into()), Some(key.into()), message))
+        };
+        check_table_name(&records_table).map_err(|why| at("records_table", why))?;
+        check_table_name(&lists_table).map_err(|why| at("lists_table", why))?;
+        check_aws_region(&aws_region).map_err(|why| at("aws_region", why))?;
+        if let Some(endpoint) = &endpoint {
+            check_endpoint(endpoint).map_err(|why| at("endpoint", why))?;
+        }
+        Ok(Self::DynamoDb {
+            records_table,
+            lists_table,
+            aws_region,
+            endpoint,
+        })
+    }
 }
 
 impl Default for DirectoryBackend {
@@ -704,6 +757,54 @@ pub fn check_hub_address(address: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `name` can name a DynamoDB table: 3 to 255 letters, digits,
+/// `_`, `-`, and `.`, DynamoDB's own rule, so that a bad name is refused
+/// where it is written rather than at the hub's first call.
+fn check_table_name(name: &str) -> Result<(), String> {
+    let shaped = (3..=255).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name:?} must be a DynamoDB table name: 3 to 255 letters, digits, `_`, `-`, and `.`"
+        ))
+    }
+}
+
+/// Whether `region` can be an AWS region's code, such as `us-east-1`:
+/// lowercase letters, digits, and `-`.
+fn check_aws_region(region: &str) -> Result<(), String> {
+    let shaped = region.starts_with(|c: char| c.is_ascii_lowercase())
+        && region
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!(
+            "{region:?} must be an AWS region's code, such as `us-east-1`"
+        ))
+    }
+}
+
+/// Whether `endpoint` can be a DynamoDB Local's address: an `http://` or
+/// `https://` URL with a host.
+fn check_endpoint(endpoint: &str) -> Result<(), String> {
+    let host = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"));
+    if host.is_some_and(|host| !host.is_empty() && !host.contains(char::is_whitespace)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{endpoint:?} must be a URL, `http://host:port`, of a DynamoDB Local"
+        ))
+    }
+}
+
 /// Whether `summary` can be a load summary's period: at least
 /// [`PoolSettings::MIN_SUMMARY`]. Reading [`PoolSettings`] applies it; a
 /// hub applies it again to settings made in code.
@@ -769,7 +870,8 @@ pub(crate) fn check_label(kind: &str, name: &str) -> Result<(), String> {
 }
 
 /// The `[pool]` table as written. `directory`, `parent_hub`, `state_dir`,
-/// and `dir` are keys of one choice, so that the settings read flat (`GDL_POOL__DIR`),
+/// `dir`, and the `dynamodb` backend's keys are keys of one choice, so
+/// that the settings read flat (`GDL_POOL__DIR`),
 /// and they are joined here, where a key given to a backend that reads
 /// none can be refused rather than left unread.
 #[derive(Serialize, Deserialize)]
@@ -792,6 +894,14 @@ struct Table {
     state_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    records_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lists_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aws_region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -858,6 +968,7 @@ enum Backend {
     Relay,
     Memory,
     Dir,
+    Dynamodb,
 }
 
 impl Backend {
@@ -866,6 +977,7 @@ impl Backend {
             Backend::Relay => "relay",
             Backend::Memory => "memory",
             Backend::Dir => "dir",
+            Backend::Dynamodb => "dynamodb",
         }
     }
 }
@@ -906,6 +1018,24 @@ impl TryFrom<Table> for PoolSettings {
                 ));
             }
         }
+        if !matches!(table.directory, Backend::Dynamodb) {
+            for (key, value) in [
+                ("records_table", &table.records_table),
+                ("lists_table", &table.lists_table),
+                ("aws_region", &table.aws_region),
+                ("endpoint", &table.endpoint),
+            ] {
+                if let Some(value) = value {
+                    return Err(at(
+                        key,
+                        format!(
+                            "{value:?} is read only by the `dynamodb` backend, not by directory = \"{}\"",
+                            table.directory.name()
+                        ),
+                    ));
+                }
+            }
+        }
         let timing = hub_timing(&table)?;
         let parent =
             Parent::from_keys(table.home, table.parents).map_err(|(key, why)| at(key, why))?;
@@ -923,6 +1053,29 @@ impl TryFrom<Table> for PoolSettings {
                     "directory",
                     "is \"dir\", which needs `dir`, the path of the shared directory".into(),
                 ));
+            }
+            (Backend::Dynamodb, None) => {
+                let needs = |key: &str, what: &str| {
+                    at(
+                        "directory",
+                        format!("is \"dynamodb\", which needs `{key}`, {what}"),
+                    )
+                };
+                DirectoryBackend::dynamodb(
+                    table
+                        .records_table
+                        .ok_or_else(|| needs("records_table", "the records table's name"))?,
+                    table
+                        .lists_table
+                        .ok_or_else(|| needs("lists_table", "the lists table's name"))?,
+                    table.aws_region.ok_or_else(|| {
+                        needs(
+                            "aws_region",
+                            "the AWS region whose copy of the tables the hub uses",
+                        )
+                    })?,
+                    table.endpoint,
+                )?
             }
             (backend, Some(path)) => {
                 return Err(at(
@@ -1094,6 +1247,8 @@ pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
 
 impl From<PoolSettings> for Table {
     fn from(settings: PoolSettings) -> Self {
+        let (mut records_table, mut lists_table, mut aws_region, mut endpoint) =
+            (None, None, None, None);
         let (directory, parent_hub, state_dir, dir) = match settings.directory {
             DirectoryBackend::Relay {
                 parent_hub,
@@ -1101,6 +1256,16 @@ impl From<PoolSettings> for Table {
             } => (Backend::Relay, parent_hub, state_dir, None),
             DirectoryBackend::Memory => (Backend::Memory, None, None, None),
             DirectoryBackend::Dir { path } => (Backend::Dir, None, None, Some(path)),
+            DirectoryBackend::DynamoDb {
+                records_table: records,
+                lists_table: lists,
+                aws_region: region,
+                endpoint: local,
+            } => {
+                (records_table, lists_table, aws_region, endpoint) =
+                    (Some(records), Some(lists), Some(region), local);
+                (Backend::Dynamodb, None, None, None)
+            }
         };
         let (home, parents) = Parent::into_keys(settings.parent);
         Self {
@@ -1114,6 +1279,10 @@ impl From<PoolSettings> for Table {
             parent_hub,
             state_dir,
             dir,
+            records_table,
+            lists_table,
+            aws_region,
+            endpoint,
             ready: settings.ready,
             requires: settings.requires,
             hub: settings.hub,

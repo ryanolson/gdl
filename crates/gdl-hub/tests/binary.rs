@@ -84,6 +84,47 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
     }
 }
 
+/// A hub built without its `dynamodb` feature refuses the `dynamodb`
+/// backend, and the tables step, before it binds a port, and says how to
+/// build one that takes them.
+#[cfg(not(feature = "dynamodb"))]
+#[test]
+fn the_binary_without_its_dynamodb_feature_says_so() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-binary-")
+        .tempdir()
+        .expect("a directory");
+    let deployment = dir.path().join("deployment.json");
+    std::fs::write(
+        &deployment,
+        serde_json::to_vec(&spec()).expect("valid test fixture"),
+    )
+    .expect("written");
+    for args in [vec![deployment.as_os_str()], vec!["--tables".as_ref()]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+            .args(&args)
+            .env("GDL_POOL__NAME", "global-us")
+            .env("GDL_POOL__CLASS", "global")
+            .env("GDL_POOL__REGION", "us-east-1")
+            .env("GDL_POOL__HUB", "global-us:1337")
+            .env("GDL_POOL__DIRECTORY", "dynamodb")
+            .env("GDL_POOL__RECORDS_TABLE", "gdl-pools")
+            .env("GDL_POOL__LISTS_TABLE", "gdl-pool-lists")
+            .env("GDL_POOL__AWS_REGION", "us-east-1")
+            .env("GDL_HUB__PUBLIC_PORT", "0")
+            .env("GDL_HUB__CONTROL_PORT", "0")
+            .output()
+            .expect("the binary runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: started");
+        assert!(
+            stderr.contains("built without its `dynamodb` feature")
+                && stderr.contains("cargo install gdl-hub --features dynamodb"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
 /// A parent pool's hub keeps its children's records in its state
 /// directory: the binary refuses to start without one, or with one it
 /// cannot read, rather than start without the records it kept.

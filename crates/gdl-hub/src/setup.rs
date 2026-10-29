@@ -71,13 +71,17 @@ pub fn pool_from_vars(
 /// records) and its [`PoolReadiness`] publishing to the directory its settings name, at the
 /// pace its settings give ([`PoolTiming::from_settings`]): `relay`, reporting to its parent's hub
 /// and keeping its children's records in its state directory
-/// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
+/// ([`HubDirectory`]), `dir`, or, with the `dynamodb` feature, `dynamodb`,
+/// whose client it builds from the settings: with an `endpoint`, a
+/// DynamoDB Local's, it signs with fixed test credentials, and without
+/// one it takes its credentials from the process's environment, such as a
+/// Kubernetes service account's role. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
 /// Settings made in code are checked as reading them checks them
 /// ([`gdl_model::check_hub_timing`]): a timing the hub cannot run at is
 /// refused, naming its key. [`hub_builder_with`] takes a directory that
 /// the settings cannot name.
-pub fn hub_builder(
+pub async fn hub_builder(
     config: HubConfig,
     spec: DeploymentSpec,
     pool: Option<PoolSettings>,
@@ -104,6 +108,30 @@ pub fn hub_builder(
             };
             hub_builder_with(config, spec, pool, directory)
         }
+        #[cfg(feature = "dynamodb")]
+        DirectoryBackend::DynamoDb {
+            records_table,
+            lists_table,
+            aws_region,
+            endpoint,
+        } => {
+            let directory = crate::dynamodb::directory(
+                records_table,
+                lists_table,
+                aws_region,
+                endpoint.as_deref(),
+            )
+            .await;
+            let pool = PoolSettings {
+                directory: DirectoryBackend::DEFAULT,
+                ..pool
+            };
+            hub_builder_with(config, spec, pool, directory)
+        }
+        #[cfg(not(feature = "dynamodb"))]
+        DirectoryBackend::DynamoDb { .. } => Err(PoolError::new(
+            "[pool] directory = \"dynamodb\": this gdl-hub is built without its `dynamodb` feature, which links the AWS SDK; install it with `cargo install gdl-hub --features dynamodb`",
+        )),
         DirectoryBackend::Memory => Err(PoolError::new(
             "[pool] directory = \"memory\" is a directory inside one process, which no other hub can read: a hub process publishes with GDL_POOL__DIRECTORY=relay, the default, and GDL_POOL__PARENT_HUB=<its parent pool's hub> for a class that another sends to",
         )),
@@ -120,8 +148,8 @@ pub fn hub_builder(
 /// parent's hub that takes its children's records does, adds its own
 /// extension to the builder this returns.
 ///
-/// `pool` names no directory of its own: settings whose `directory`,
-/// `parent_hub`, `state_dir`, or `dir` key is set are refused, so that nothing they say
+/// `pool` names no directory of its own: settings whose `directory` key,
+/// or any key of a backend, is set are refused, so that nothing they say
 /// is left unread. The rest is checked as [`hub_builder`] checks it.
 /// [`pool_from_env`] reads the settings of the `gdl-hub` binary, whose
 /// default backend is `relay`, so it asks a child pool for `parent_hub`:
@@ -163,7 +191,7 @@ fn pool_hub(
 /// order, so that a later variable overrides an earlier one as within one
 /// provider: the keys after the prefix, matched without regard to case,
 /// with `__` between nested keys.
-fn variables(
+pub(crate) fn variables(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> impl Iterator<Item = Variable> {
     const PREFIX: &str = "GDL_POOL__";
@@ -182,10 +210,10 @@ fn variables(
 }
 
 /// One environment variable, as a provider named for it.
-struct Variable {
-    name: String,
-    key: String,
-    value: String,
+pub(crate) struct Variable {
+    pub(crate) name: String,
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
 impl Provider for Variable {
