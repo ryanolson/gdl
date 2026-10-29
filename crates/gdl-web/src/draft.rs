@@ -284,12 +284,42 @@ impl Draft {
                 .iter()
                 .map(|p| ("pipeline root", p.source.name.as_str())),
         );
+        let refusal = |what: &str, name: &str| {
+            format!(
+                "{what} name `{name}`: a name is letters, digits, and `_`, and does not start with a digit"
+            )
+        };
         for (what, name) in named {
             if !identifier(name) {
-                problems.push(format!(
-                    "{what} name `{name}`: a name is letters, digits, and `_`, and does not start with a digit"
-                ));
+                problems.push(refusal(what, name));
             }
+        }
+        // A hop's names are written into the topology as they are, so a
+        // name that is not an identifier could add statements or brackets
+        // there. Each is named by its place in the draft, a path as long as
+        // the nesting, and only when it is refused: a place that quoted a
+        // pipeline's root for each of its names would multiply a small
+        // draft into gigabytes.
+        fn walk_hop(hop: &Hop, at: &str, check: &mut dyn FnMut(&str, &str, &str)) {
+            for name in &hop.forward {
+                check(at, "forward", name);
+            }
+            check(at, "inner", &hop.inner);
+            if let Some(nested) = &hop.nested {
+                walk_hop(nested, &format!("{at}.nested"), check);
+            }
+            for name in &hop.backward {
+                check(at, "backward", name);
+            }
+        }
+        let mut check = |at: &str, field: &str, name: &str| {
+            if !identifier(name) {
+                problems.push(refusal(&format!("{at}.{field}"), name));
+            }
+        };
+        walk_hop(&self.hop, "hop", &mut check);
+        for (i, pipeline) in self.pipelines.iter().enumerate() {
+            walk_hop(&pipeline.hop, &format!("pipelines[{i}].hop"), &mut check);
         }
         problems.extend(
             self.segments

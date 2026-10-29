@@ -250,11 +250,96 @@ async fn a_check_refuses_what_generation_refuses() {
     );
 }
 
-/// A draft's hop names reach its graph file as written, after the last
-/// node, so a draft cannot put a type where the parser reads one; it can
-/// nest an operator's hop, or brackets, deep enough to overflow the stack
-/// of the blocking thread that checks it, and abort the server. The
-/// generator refuses the text before it parses it, and the server answers.
+/// A hop name is a name in the graph file like any other, so a draft's hop
+/// name that is not an identifier is refused with the other names' rule,
+/// at the field that holds it. Written as it is, it would add statements or
+/// brackets to the topology, and the user would get a problem about a graph
+/// file the page never showed.
+#[tokio::test]
+async fn a_draft_hop_name_that_is_not_an_identifier_is_refused() {
+    let temp = scratch("hop-names");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
+    let rule = "a name is letters, digits, and `_`, and does not start with a digit";
+    let refused = |hop: Value, pipelines: Value| {
+        let router = router.clone();
+        async move {
+            let mut draft = draft(
+                "regproto::Words",
+                "Engine",
+                json!({ "all": ["A", "Engine"] }),
+            );
+            draft["hop"] = hop;
+            draft["pipelines"] = pipelines;
+            let (_, body) = json_call(&router, "POST", "/api/check", Some(draft.clone())).await;
+            assert_eq!(body["ok"], false, "{body:#}");
+            let (status, exported) = json_call(&router, "POST", "/api/export", Some(draft)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{exported:#}");
+            assert_eq!(exported["problems"], body["problems"]);
+            body["problems"]
+                .as_array()
+                .expect("problems")
+                .iter()
+                .map(|p| p.as_str().expect("a problem").to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let injected = "Engine;\ntopology: A => Engine";
+    assert_eq!(
+        refused(json!({ "inner": injected }), json!([])).await,
+        [format!("hop.inner name `{injected}`: {rule}")]
+    );
+    assert_eq!(
+        refused(
+            json!({ "forward": ["Pass)"], "inner": "Engine" }),
+            json!([])
+        )
+        .await,
+        [format!("hop.forward name `Pass)`: {rule}")]
+    );
+    assert_eq!(
+        refused(
+            json!({ "inner": "Engine", "backward": ["9Late"] }),
+            json!([])
+        )
+        .await,
+        [format!("hop.backward name `9Late`: {rule}")]
+    );
+    assert_eq!(
+        refused(
+            json!({ "inner": "Engine", "nested": { "inner": "Engine", "nested": { "inner": "Engine }" } } }),
+            json!([])
+        )
+        .await,
+        [format!("hop.nested.nested.inner name `Engine }}`: {rule}")]
+    );
+    let second = json!([{
+        "source": {
+            "name": "B",
+            "request": { "head": origin("regproto::Words") },
+            "response": origin("regproto::Token"),
+        },
+        "hop": { "inner": "Engine", "backward": [""] },
+    }]);
+    assert_eq!(
+        refused(json!({ "inner": "Engine" }), second).await,
+        [format!("pipelines[0].hop.backward name ``: {rule}")]
+    );
+    // Brackets nested far past the parser's depth bound, in one name, are
+    // refused by the name's rule before any graph text is written or read.
+    let deep = format!("Engine{}{}", " { Engine".repeat(5_000), " }".repeat(5_000));
+    assert_eq!(
+        refused(json!({ "inner": deep }), json!([])).await,
+        [format!("hop.inner name `{deep}`: {rule}")]
+    );
+}
+
+/// Operators' hops nest as brackets in the topology, so a draft of valid
+/// names can still nest them deep enough to overflow the stack of the
+/// blocking thread that checks it, and abort the server. The generator
+/// refuses the text before it parses it, and the server answers. JSON
+/// bounds the nesting at 128 levels, so 32 is past the graph's bound and
+/// well inside what a draft can carry.
 #[tokio::test]
 async fn a_draft_with_deeply_nested_hops_is_refused_without_aborting() {
     let temp = scratch("deep");
@@ -265,11 +350,11 @@ async fn a_draft_with_deeply_nested_hops_is_refused_without_aborting() {
         "Engine",
         json!({ "all": ["A", "Engine"] }),
     );
-    deep["hop"]["inner"] = json!(format!(
-        "Engine{}{}",
-        " { Engine".repeat(5_000),
-        " }".repeat(5_000)
-    ));
+    let mut hop = json!({ "inner": "Engine" });
+    for _ in 0..32 {
+        hop = json!({ "inner": "Engine", "nested": hop });
+    }
+    deep["hop"] = hop;
     let (_, body) = json_call(&router, "POST", "/api/check", Some(deep.clone())).await;
     assert_eq!(body["ok"], false, "{body:#}");
     let problems = body["problems"].to_string();
@@ -282,6 +367,72 @@ async fn a_draft_with_deeply_nested_hops_is_refused_without_aborting() {
             .contains("more than 16 levels deep"),
         "{body:#}"
     );
+}
+
+/// A hop's problems name its place in the draft, never a pipeline's root:
+/// a draft of a long root and many hop names, valid or not, is checked in
+/// memory that grows with the draft, not with their product. Each case runs
+/// in a child process under a 512 MiB address-space limit, so a failure is
+/// an allocation abort there, not in the test runner.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_long_pipeline_root_does_not_multiply_hop_check_memory() {
+    const TEST: &str = "a_long_pipeline_root_does_not_multiply_hop_check_memory";
+    const CHILD: &str = "GDL_HOP_MEMORY_CASE";
+    if let Ok(case) = std::env::var(CHILD) {
+        let temp = scratch("hop-memory");
+        let router = router(temp.path(), fixture_catalog());
+        let mut draft = draft(
+            "regproto::Words",
+            "Engine",
+            json!({ "all": ["A", "Engine"] }),
+        );
+        let root = if case == "short-root" {
+            "B".to_string()
+        } else {
+            "P".repeat(65_536)
+        };
+        let count = if case == "single-hop" { 1 } else { 16_384 };
+        let name = if case == "wide-bad-hop" {
+            "9"
+        } else {
+            "Engine"
+        };
+        draft["pipelines"] = json!([{
+            "source": {
+                "name": root,
+                "request": { "head": origin("regproto::Words") },
+                "response": origin("regproto::Token"),
+            },
+            "hop": { "forward": vec![name; count], "inner": "Engine" },
+        }]);
+        let bytes = draft.to_string().len();
+        assert!(bytes < 256 * 1024, "request is {bytes} bytes");
+        println!("{case}: {bytes} JSON bytes");
+        let (status, body) = json_call(&router, "POST", "/api/check", Some(draft)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], false);
+        return;
+    }
+
+    // Isolate an allocation failure so it cannot abort the test runner.
+    for case in ["short-root", "single-hop", "wide-hop", "wide-bad-hop"] {
+        let output = std::process::Command::new("timeout")
+            .args(["5", "prlimit", "--as=536870912", "--core=0", "--"])
+            .arg(std::env::current_exe().expect("test binary"))
+            .args(["--exact", TEST, "--nocapture", "--include-ignored"])
+            .env(CHILD, case)
+            .env("MALLOC_ARENA_MAX", "1")
+            .output()
+            .expect("bounded child");
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "{case}: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 /// A draft that checks exports: the archive `cargo gdl export` writes,
