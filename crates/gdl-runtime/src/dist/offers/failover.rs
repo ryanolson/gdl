@@ -994,7 +994,7 @@ async fn an_address_another_deployment_holds_is_not_offered_to() {
 /// outlasts the segment's own, which neither replaces nor undoes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drains_refusal_outlasts_the_segments_own() {
-    use crate::dist::offers::Decline;
+    use gdl::Decline;
 
     let fixture = fixture(vec![accepting()], config(0)).await;
     let rt = &fixture.rt;
@@ -1030,10 +1030,10 @@ async fn a_drains_refusal_outlasts_the_segments_own() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_full_draining_entry_still_declines_as_gone() {
     use crate::dist::hop::Register;
-    use crate::dist::offers::Decline;
     use crate::dist::segment::Deployment;
     use crate::dist::stages::{BwdEnd, DSink, FwdEnd};
     use crate::wire::Codec;
+    use gdl::Decline;
 
     let node = bind_node(([127, 0, 0, 1], 0).into())
         .await

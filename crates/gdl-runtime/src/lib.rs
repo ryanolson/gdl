@@ -23,9 +23,8 @@ pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDe
 #[doc(hidden)]
 pub use dist::EncodedItem;
 pub use dist::{
-    BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Decline, Deployment,
-    Entries, FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad, Served,
-    bind_node,
+    BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
+    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad, Served, bind_node,
 };
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};

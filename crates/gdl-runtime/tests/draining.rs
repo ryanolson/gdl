@@ -26,12 +26,12 @@ use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, s
 use common::proxy::Mode;
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use futures::StreamExt;
-use gdl::{Cx, ErrorKind, FollowedPools, Next, Selectors};
+use gdl::{Cx, Decline, ErrorKind, FollowedPools, Next, Selectors};
 use gdl_hub::PoolReadiness;
 use gdl_model::{SegmentPhase, segment_service};
 use gdl_pools::{PoolDirectory, PoolEvent, PoolRecord};
 use gdl_runtime::{
-    Decline, Deployment, DeploymentSpec, PoolState, Pools, Register, RequestRouter, RuntimeConfig,
+    Deployment, DeploymentSpec, PoolState, Pools, Register, RequestRouter, RuntimeConfig,
 };
 use gdl_watch::PoolWatchEvent;
 use tokio::task::JoinHandle;

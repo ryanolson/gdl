@@ -23,7 +23,7 @@
 //! another class, which a draining pool's entry instance declines.
 
 use futures::future::BoxFuture;
-use gdl::{Cx, Error, ErrorKind, Result};
+use gdl::{Cx, Decline, Error, ErrorKind, Result};
 use gdl_model::ClassBoundary;
 use velo::InstanceId;
 
@@ -85,29 +85,6 @@ impl Missed {
 /// deadline, a codec error) is the request's own.
 pub(crate) fn declines(error: &Error) -> bool {
     matches!(error.kind(), ErrorKind::Overloaded | ErrorKind::Placement)
-}
-
-/// Why an entry declined an offer, for a chooser that sent it from
-/// another class: whether to damp only this pool, to pass it over until
-/// its follow changes, or to offer the request to the pool's other entry
-/// instances. A segment declines offers by its own policy with
-/// [`Segment::decline_offers_as`](super::Segment::decline_offers_as).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Decline {
-    /// The pool has no room now, or this instance retired: the chooser
-    /// damps the pool, and offers it requests again after the window.
-    #[default]
-    Full,
-    /// The pool takes no work from other pools until its state changes,
-    /// as a draining pool does: the chooser passes it over until its
-    /// follow changes.
-    Gone,
-    /// This instance cannot serve the request, and another entry instance
-    /// of its pool may: for example, it does not have the request's property.
-    /// The chooser offers the request to each other entry instance of the
-    /// pool once, and to another pool only when every one declined. It
-    /// damps nothing, since the decline says nothing of the pool's room.
-    Instance,
 }
 
 /// The reasons as they follow a refusal in the reply.
@@ -457,10 +434,10 @@ mod failover;
 mod tests {
     use std::cell::Cell;
 
-    use super::{Answer, Boundary, Decline, Missed, delivered, offered_hops, refusal};
+    use super::{Answer, Boundary, Missed, delivered, offered_hops, refusal};
     use crate::dist::envelope::{Accepted, decode, encode};
     use crate::dist::fabric::Offered;
-    use gdl::{Error, ErrorKind};
+    use gdl::{Decline, Error, ErrorKind};
 
     /// A request fails with its last refusal; a hand-off that never left
     /// is the error only while no entry has refused it.

@@ -14,11 +14,12 @@ use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 #[cfg(feature = "hub")]
 use super::offers::Answer;
-use super::offers::{Decline, Offer, Refusal, Refused};
+use super::offers::{Offer, Refusal, Refused};
 use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
+use gdl::Decline;
 use gdl::{Error, ErrorKind, Result};
 use gdl::{FollowedPools, HomeFirstAt, HubRecords, InstanceProperties, PoolPolicies, Selectors};
 use gdl_model::{Layout, RequestRouter};

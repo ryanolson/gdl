@@ -29,7 +29,6 @@ pub(crate) use fabric::shut_down;
 pub(crate) use fabric::{Parent, PoolDrain};
 pub use hop::{DHop, Register};
 pub(crate) use launch::{announce, announced, follow as follow_directory};
-pub use offers::Decline;
 #[cfg(feature = "hub")]
 pub use pools::{FollowedPool, Pools};
 #[cfg(feature = "hub")]

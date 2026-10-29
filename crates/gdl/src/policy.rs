@@ -25,10 +25,12 @@ use crate::followed::{NO_PROPERTIES, PropertyIndexes, PropertyKinds};
 use crate::select::{Head, sealed::Sealed};
 
 mod damped;
+mod decline;
 mod home_first;
 mod round_robin;
 
 pub use damped::{Damped, Window};
+pub use decline::Decline;
 pub use gdl_pools::{LoadSummary, PoolCondition, PoolState, PropertyState};
 pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;

@@ -15,9 +15,10 @@ use super::super::{EntryTable, PoolTable, Pools, pool_id, targets};
 use super::tests::{layout, layout_under};
 use crate::dist::envelope::{Accepted, Forward, VERSION, WireCx, decode, encode};
 use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
-use crate::dist::offers::{Decline, refusal};
+use crate::dist::offers::refusal;
 use crate::dist::roster::{Policy, Roster, selector_id};
 use crate::dist::runtime::{Router, Runtime, RuntimeConfig, Within};
+use gdl::Decline;
 
 /// Full refusals stay Overloaded while at least one offered pool is not
 /// gone. Concurrent acceptances and gone refusals can move the mark between

@@ -25,8 +25,9 @@ use super::meter::Outcome;
 use super::{Crossing, PoolLease};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
-use crate::dist::offers::{Answer, Decline, Missed, delivered};
+use crate::dist::offers::{Answer, Missed, delivered};
 use crate::dist::runtime::{Handed, Held, Runtime, Within};
+use gdl::Decline;
 
 /// What became of an offer, as `crossing` sent it to the pool `pool`
 /// with `held`. A pool that declined it is damped, or passed over until
@@ -264,9 +265,9 @@ mod tests {
     use crate::dist::counting::{Counted, counted, counting};
     use crate::dist::envelope::{Accepted, VERSION, WireCx};
     use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
-    use crate::dist::offers::Decline;
     use crate::dist::roster::{Policy, Roster};
     use crate::dist::runtime::{Router, RuntimeConfig};
+    use gdl::Decline;
 
     /// Changes the request's `session` meta, which the request sets too.
     struct Replacing;

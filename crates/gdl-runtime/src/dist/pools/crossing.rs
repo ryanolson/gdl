@@ -21,9 +21,9 @@ use super::damping::Damping;
 use super::lease::PoolLease;
 use super::policy;
 use super::{EntryTable, PoolTable, Pools};
-use crate::dist::offers::Decline;
 use crate::dist::roster::{CHOICES, Policy, turn};
 use crate::dist::runtime::Within;
+use gdl::Decline;
 
 /// One hand-off into another class, as a chooser sends it.
 pub(crate) struct Crossing {

@@ -24,7 +24,9 @@ use prometheus::Registry;
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::{self, MetricFamily, MetricType};
 
-use crate::dist::offers::{Answer, Decline, Missed};
+use gdl::Decline;
+
+use crate::dist::offers::{Answer, Missed};
 
 /// The most shards a pool's counts are split into.
 const SHARD_LIMIT: usize = 64;

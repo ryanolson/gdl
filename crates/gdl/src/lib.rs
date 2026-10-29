@@ -55,8 +55,9 @@ pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
 pub use policy::{
-    ChoiceLease, Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool, PoolChoice,
-    PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, PropertyState, RoundRobin,
+    ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool,
+    PoolChoice, PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, PropertyState,
+    RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime
