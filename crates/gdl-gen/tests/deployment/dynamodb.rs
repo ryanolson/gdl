@@ -92,6 +92,30 @@ fn a_dynamodb_fleet_runs_one_local_and_the_tables_step_before_its_hubs() {
         };
         expected.hub = Some(format!("{}:1337", pool.name));
         assert_eq!(read, expected);
+        // Each of its segments reads the same `[pool]`, which fits an
+        // instance of the segment.
+        let layout =
+            gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
+        let mut segments = 0;
+        for (name, service) in services {
+            let Some(segment) = name.strip_prefix(&format!("{}_", pool.name)) else {
+                continue;
+            };
+            let vars = service["environment"]
+                .as_object()
+                .expect("the segment's variables")
+                .iter()
+                .filter(|(name, _)| name.starts_with("GDL_POOL__"))
+                .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
+            let own = gdl_hub::pool_from_vars(&deployment, vars)
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .expect("a pool");
+            assert_eq!(own, read, "{name}");
+            own.check(&layout, segment)
+                .unwrap_or_else(|problems| panic!("{name}: {problems}"));
+            segments += 1;
+        }
+        assert!(segments > 0, "{}", pool.name);
     }
     assert!(compose.get("volumes").is_none(), "{compose}");
 
