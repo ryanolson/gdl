@@ -198,7 +198,8 @@ fn a_fleets_objects_are_pinned() {
 
 /// Each object carries the fleet's label, and each of a pool's objects
 /// its pool's, class's, and segment's; a Deployment's selector picks its
-/// own pods only, and a hub's is never a segment's.
+/// own pods only, by the labels that name them, and a hub's is never a
+/// segment's.
 #[test]
 fn every_object_is_labelled_and_selects_its_own_pods() {
     let mirror = Mirror::new();
@@ -220,12 +221,24 @@ fn every_object_is_labelled_and_selects_its_own_pods() {
             kind != "ConfigMap",
             "{kind} {name}"
         );
+        // A selector names its pods by fleet, pool, and segment only: a
+        // Deployment's selector cannot change, and a class's name can.
+        let selector = match kind.as_str() {
+            "Deployment" => &object["spec"]["selector"]["matchLabels"],
+            "Service" => &object["spec"]["selector"],
+            _ => continue,
+        };
+        let keys: Vec<&String> = selector.as_object().expect("a selector").keys().collect();
+        assert_eq!(
+            keys,
+            ["gdl.dev/fleet", "gdl.dev/pool", "gdl.dev/segment"],
+            "{kind} {name}"
+        );
         if kind == "Deployment" {
-            let selector = &object["spec"]["selector"]["matchLabels"];
-            assert_eq!(
-                selector, &object["spec"]["template"]["metadata"]["labels"],
-                "{name}"
-            );
+            let template = &object["spec"]["template"]["metadata"]["labels"];
+            for (key, value) in selector.as_object().expect("a selector") {
+                assert_eq!(&template[key], value, "{name}: {key}");
+            }
             selectors.push((
                 object["metadata"]["namespace"].clone(),
                 selector["gdl.dev/pool"].clone(),
@@ -725,6 +738,8 @@ mod images;
 mod labels;
 #[path = "k8s/probes.rs"]
 mod probes;
+#[path = "k8s/rollout.rs"]
+mod rollout;
 #[path = "k8s/secrets.rs"]
 mod secrets;
 #[path = "k8s/variables.rs"]

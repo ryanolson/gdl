@@ -59,7 +59,6 @@
     "replicas": 1,
     "selector": {
       "matchLabels": {
-        "gdl.dev/class": "global",
         "gdl.dev/fleet": "api",
         "gdl.dev/pool": "global-us",
         "gdl.dev/segment": "hub"
@@ -231,7 +230,6 @@
       }
     ],
     "selector": {
-      "gdl.dev/class": "global",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
       "gdl.dev/segment": "hub"
@@ -257,7 +255,6 @@
     "replicas": 2,
     "selector": {
       "matchLabels": {
-        "gdl.dev/class": "global",
         "gdl.dev/fleet": "api",
         "gdl.dev/pool": "global-us",
         "gdl.dev/segment": "front"
@@ -429,7 +426,6 @@
       }
     ],
     "selector": {
-      "gdl.dev/class": "global",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
       "gdl.dev/segment": "front"

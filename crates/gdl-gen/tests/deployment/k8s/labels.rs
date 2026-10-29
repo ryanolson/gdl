@@ -41,8 +41,8 @@ fn class_labels_fit_the_kubernetes_limit() {
 }
 
 /// A class over 63 characters is labelled by its start and its hash, the
-/// same on every object and in every selector, and each object keeps its
-/// whole name in the annotation of the label's key.
+/// same on every object and pod template, and each object keeps its whole
+/// name in the annotation of the label's key.
 #[test]
 fn a_long_class_keeps_its_whole_name_in_an_annotation() {
     let mirror = Mirror::new();
@@ -58,9 +58,11 @@ fn a_long_class_keeps_its_whole_name_in_an_annotation() {
     let template = &hub["spec"]["template"]["metadata"];
     assert_eq!(template["labels"]["gdl.dev/class"], label);
     assert_eq!(template["annotations"]["gdl.dev/class"], name);
-    assert_eq!(
-        hub["spec"]["selector"]["matchLabels"]["gdl.dev/class"],
-        label
+    // A selector never holds the class, which a fleet can rename.
+    assert!(
+        hub["spec"]["selector"]["matchLabels"]
+            .get("gdl.dev/class")
+            .is_none()
     );
     let config = &objects[&("ConfigMap".into(), "model-x-us".into())];
     assert_eq!(config["metadata"]["annotations"]["gdl.dev/class"], name);

@@ -2,8 +2,10 @@
 //! file of them is a YAML stream that `kubectl apply` and `kubeconform`
 //! read. Every object of a pool carries the labels `gdl.dev/fleet`,
 //! `gdl.dev/pool`, `gdl.dev/class`, and `gdl.dev/segment` (`hub` for its
-//! hub's, which no segment can be named), and a Deployment selects its
-//! pods by all four, so that no two select one pod.
+//! hub's, which no segment can be named). A Deployment and a Service
+//! select pods only by the labels that name them, `gdl.dev/fleet`,
+//! `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects
+//! share: a Deployment's selector cannot change, and a class's name can.
 
 use std::collections::BTreeMap;
 
@@ -153,6 +155,18 @@ pub(super) struct Pod<'a> {
 }
 
 impl Pod<'_> {
+    /// The selector of the pool's pods of `segment`, `hub` for its hub's:
+    /// the labels that name the pods, and not the class, which a fleet can
+    /// rename while Kubernetes refuses a change to a Deployment's selector.
+    fn selector(&self, segment: &str) -> Value {
+        let labels = self.labels(Some(segment));
+        ["gdl.dev/fleet", "gdl.dev/pool", "gdl.dev/segment"]
+            .into_iter()
+            .map(|key| (key.to_string(), labels[key].clone()))
+            .collect::<Map<_, _>>()
+            .into()
+    }
+
     /// The labels of the pool's objects of `segment`, `hub` for its hub's.
     fn labels(&self, segment: Option<&str>) -> Value {
         self.named(segment)
@@ -285,7 +299,7 @@ impl Pod<'_> {
             "metadata": self.metadata(&self.pool.name, "hub"),
             "spec": {
                 "type": "ClusterIP",
-                "selector": self.labels(Some("hub")),
+                "selector": self.selector("hub"),
                 "ports": [
                     {"name": "public", "port": HUB_PUBLIC_PORT, "targetPort": HUB_PUBLIC_PORT},
                     {"name": "control", "port": HUB_CONTROL_PORT, "targetPort": HUB_CONTROL_PORT},
@@ -367,7 +381,7 @@ impl Pod<'_> {
             "metadata": self.metadata(&object_name(&self.pool.name, &segment.name), &segment.name),
             "spec": {
                 "type": "ClusterIP",
-                "selector": self.labels(Some(&segment.name)),
+                "selector": self.selector(&segment.name),
                 "ports": segment.ports.iter().map(Port::service).collect::<Vec<_>>(),
             },
         })
@@ -390,7 +404,7 @@ impl Pod<'_> {
         annotations.insert("gdl.dev/config".into(), checksum.into());
         let mut spec = json!({
             "replicas": replicas,
-            "selector": {"matchLabels": labels},
+            "selector": {"matchLabels": self.selector(segment)},
             "template": {
                 "metadata": {"labels": labels, "annotations": annotations},
                 "spec": pod,

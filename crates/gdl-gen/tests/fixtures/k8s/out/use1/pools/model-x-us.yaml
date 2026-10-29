@@ -34,7 +34,6 @@
     "replicas": 1,
     "selector": {
       "matchLabels": {
-        "gdl.dev/class": "model_x",
         "gdl.dev/fleet": "api",
         "gdl.dev/pool": "model-x-us",
         "gdl.dev/segment": "hub"
@@ -197,7 +196,6 @@
       }
     ],
     "selector": {
-      "gdl.dev/class": "model_x",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
       "gdl.dev/segment": "hub"
@@ -223,7 +221,6 @@
     "replicas": 2,
     "selector": {
       "matchLabels": {
-        "gdl.dev/class": "model_x",
         "gdl.dev/fleet": "api",
         "gdl.dev/pool": "model-x-us",
         "gdl.dev/segment": "engine"
