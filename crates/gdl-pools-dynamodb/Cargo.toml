@@ -31,6 +31,9 @@ required-features = ["dynamodb-local"]
 # HTTPS client.
 aws-smithy-http-client = { version = "1", default-features = false, features = ["default-client"] }
 gdl-pools = { path = "../gdl-pools", features = ["conformance"] }
+# A scripted DynamoDB endpoint for the tables step's cases that DynamoDB
+# Local cannot stage: a table that is not active, a denied TTL.
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread"] }
 
 [lints]
 workspace = true

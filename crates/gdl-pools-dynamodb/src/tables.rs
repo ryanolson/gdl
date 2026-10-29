@@ -11,7 +11,7 @@ use aws_sdk_dynamodb::{
     operation::{create_table::CreateTableError, describe_table::DescribeTableError},
     types::{
         AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
-        TableDescription, TimeToLiveSpecification,
+        TableDescription, TimeToLiveSpecification, TimeToLiveStatus,
     },
 };
 use gdl_pools::DirectoryError;
@@ -38,9 +38,11 @@ pub enum TableOutcome {
 
 impl DynamoDirectory {
     /// Make each of the two tables that is absent, in this client's region
-    /// alone, with on-demand billing, and TTL on a lists table it makes;
-    /// leave each that exists, after checking that its keys are the
-    /// directory's. Returns what it did with the records table and with the
+    /// alone, with on-demand billing; leave each that exists, after
+    /// checking that its keys are the directory's; and turn on TTL on the
+    /// lists table when it is off, whether the table was made or kept, so
+    /// that a step run again after a failed TTL call does not pass without
+    /// it. Returns what it did with the records table and with the
     /// lists table, in that order. Run once before the hubs start: for
     /// DynamoDB Local, for trials, and for a deployment whose role may make
     /// tables. A deployment across regions makes its global tables, with
@@ -51,7 +53,10 @@ impl DynamoDirectory {
     ///
     /// [`DirectoryError::Refused`], naming the table, when a table exists
     /// with other keys: the directory cannot use it, and it is not changed.
-    /// [`DirectoryError::Unavailable`] when a table cannot be read or made.
+    /// [`DirectoryError::Refused`], naming the table, when the lists
+    /// table's TTL is on for another attribute.
+    /// [`DirectoryError::Unavailable`] when a table cannot be read or made,
+    /// or its TTL cannot be read or turned on.
     pub async fn ensure_tables(
         client: &Client,
         tables: &Tables,
@@ -66,24 +71,53 @@ impl DynamoDirectory {
                 active(client, table).await?;
             }
         }
-        if lists == TableOutcome::Made {
-            let ttl = TimeToLiveSpecification::builder()
-                .attribute_name(EXPIRES_AT)
-                .enabled(true)
-                .build()
-                .expect("TTL has its attribute and switch");
-            client
-                .update_time_to_live()
-                .table_name(&tables.lists)
-                .time_to_live_specification(ttl)
-                .send()
-                .await
-                .map_err(|error| {
-                    unavailable(&format!("turning on TTL of {}", tables.lists), error)
-                })?;
-        }
+        ttl(client, &tables.lists).await?;
         Ok((records, lists))
     }
+}
+
+/// Turn on TTL on `expires_at` of `table` when it is off; leave it when it
+/// is on, or turning on, for that attribute.
+async fn ttl(client: &Client, table: &str) -> Result<(), DirectoryError> {
+    let described = client
+        .describe_time_to_live()
+        .table_name(table)
+        .send()
+        .await
+        .map_err(|error| unavailable(&format!("reading the TTL of {table}"), error))?;
+    let ttl = described.time_to_live_description();
+    let status = ttl.and_then(|ttl| ttl.time_to_live_status());
+    let attribute = ttl.and_then(|ttl| ttl.attribute_name());
+    match status {
+        Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling) => {
+            return match attribute {
+                Some(EXPIRES_AT) => Ok(()),
+                other => Err(DirectoryError::Refused(format!(
+                    "table {table} has TTL on {}, and the directory needs it on {EXPIRES_AT}: name another table, or turn its TTL off",
+                    other.unwrap_or("?")
+                ))),
+            };
+        }
+        Some(TimeToLiveStatus::Disabling) => {
+            return Err(DirectoryError::Unavailable(format!(
+                "the TTL of {table} is being turned off; run the step again once it is off"
+            )));
+        }
+        _ => {}
+    }
+    let ttl = TimeToLiveSpecification::builder()
+        .attribute_name(EXPIRES_AT)
+        .enabled(true)
+        .build()
+        .expect("TTL has its attribute and switch");
+    client
+        .update_time_to_live()
+        .table_name(table)
+        .time_to_live_specification(ttl)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|error| unavailable(&format!("turning on TTL of {table}"), error))
 }
 
 /// Wait for `table` to be active, within [`TABLE_ACTIVE`].
