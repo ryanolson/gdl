@@ -37,10 +37,10 @@ const IDLE: Duration = Duration::from_secs(30);
 /// The most of a refusal's body kept for its error.
 const REFUSAL: usize = 1024;
 
-/// Watches pools' hubs, over one pool of connections: their pools, and
+/// Watches pools' hubs, over one set of connections: their pools, and
 /// what they follow, each watch within its limits. Its clones share the
-/// pool, and the count of the events of a kind this build does not know
-/// that they have read.
+/// connections, and the count of the events of a kind this build does not
+/// know that they have read.
 #[derive(Debug, Clone)]
 pub struct PoolWatcher {
     http: reqwest::Client,
