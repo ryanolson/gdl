@@ -52,7 +52,7 @@ For a `Service` frontend, each enabled endpoint gets its own arm. A dangling **+
 
 ### Declare properties
 
-Open **Property kinds** under the canvas heading to declare a kind and the message of its keys, with **Add kind**. In a node's settings, **Provides** lists the kinds its instance has, `model, region`, and **Needs** the kinds it reads, `model from sets`. Each node's box shows them, and the diagram draws them on the node and in its title. The draft writes them into the graph file ([Declare properties](define-a-graph.md#declare-properties)). The composer places no classes, so the check refuses a need: the graph file and the diagram still show it, and a spec with the class's tables can take the exported graph.
+Open **Property kinds** under the canvas heading to declare a kind and the message of its keys, with **Add kind**. In a node's settings, **Provides** lists the kinds its instance has, `model, region`, and **Needs** the kinds it reads, `model from sets`. The source card has the same fields once a frontend hosts the source. Each node's box shows them, and the diagram draws them on the node and in its title. The draft writes them into the graph file ([Declare properties](define-a-graph.md#declare-properties)). The composer places no classes, so the check refuses a need: the graph file and the diagram still show it, and a spec with the class's tables can take the exported graph.
 
 ## Cut it into segments
 

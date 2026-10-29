@@ -4,6 +4,79 @@ use super::*;
 
 const REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
+#[test]
+fn a_source_keeps_its_property_clauses() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-source-properties-")
+        .tempdir()
+        .expect("catalogue directory");
+    let mut catalog = catalog(temp.path());
+    let engine = catalog
+        .entries()
+        .flat_map(|entry| &entry.offer.nodes)
+        .find(|node| node.name == "Engine")
+        .expect("sink")
+        .clone();
+    catalog
+        .add(Entry {
+            added: "2026-10-29T00:00:00Z".into(),
+            checksum: None,
+            offer: Offer {
+                package: "front".into(),
+                version: "0.1.0".into(),
+                source: REGISTRY.into(),
+                messages: Vec::new(),
+                exports: Vec::new(),
+                nodes: vec![NodeEntry {
+                    name: "Frontend".into(),
+                    role: Role::Source,
+                    ty: "front::Frontend".into(),
+                    ..engine
+                }],
+                policies: Vec::new(),
+                selectors: Vec::new(),
+                skipped: Vec::new(),
+                skipped_policies: Vec::new(),
+                skipped_selectors: Vec::new(),
+            },
+        })
+        .expect("frontend entry");
+    let draft: Draft = serde_json::from_value(serde_json::json!({
+        "name": "sourceprops",
+        "source": {
+            "name": "A",
+            "request": {"head": origin("proto::match")},
+            "response": origin("proto::Token")
+        },
+        "nodes": [
+            {"name": "A", "entry": "front@0.1.0", "node": "Frontend",
+             "provides": ["shard"], "needs": [{"kind": "shard", "class": "engines"}]},
+            {"name": "Engine", "entry": "nodes@0.1.0", "node": "Engine", "provides": ["shard"]}
+        ],
+        "hop": {"inner": "Engine"},
+        "segments": {"all": ["A", "Engine"]},
+        "properties": [{"kind": "shard", "message": origin("proto::Token")}]
+    }))
+    .expect("draft");
+    let rendered = draft
+        .render(&catalog, &Gdl::Path("/gdl".into()))
+        .expect("rendered");
+    assert!(
+        rendered
+            .graph
+            .contains("sink Engine: r#match -> stream Token provides shard;"),
+        "{}",
+        rendered.graph
+    );
+    assert!(
+        rendered
+            .graph
+            .contains("source A: r#match -> stream Token provides shard needs shard from engines;"),
+        "source declarations disappeared:\n{}",
+        rendered.graph
+    );
+}
+
 fn origin(path: &str) -> Origin {
     Origin {
         package: "proto".into(),

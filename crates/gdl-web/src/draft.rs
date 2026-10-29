@@ -491,11 +491,18 @@ impl Draft {
             ));
         }
         let source = &self.source.request;
+        // A bound frontend is the source's instance: its clauses go on
+        // the source's line.
+        let frontend = self
+            .nodes
+            .iter()
+            .find(|instance| instance.name == self.source.name);
         text.push_str(&format!(
-            "source {}: {} -> stream {};\n",
+            "source {}: {} -> stream {}{};\n",
             self.source.name,
             request(names, source.head.as_ref(), source.item.as_ref()),
-            names.name(&self.source.response)
+            names.name(&self.source.response),
+            frontend.map(clauses).unwrap_or_default()
         ));
         for instance in &self.nodes {
             let Some((_, node)) = nodes.get(instance.name.as_str()) else {

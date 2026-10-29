@@ -1218,6 +1218,7 @@ function placementControls(names) {
 
 function render(validate = true) {
   $("source-config").replaceChildren(configControls(state.frontend));
+  if (state.frontend) $("source-config").append(propertyControls(state.frontend));
   renderProperties();
   $("source-ports").hidden=!!state.frontend?.node.entries?.length;
   $("source-title").textContent = $("source-name").value;
@@ -1293,7 +1294,7 @@ function draft() {
       response: first?.response || chosenMessage($("source-response")),
     },
     nodes: [
-      ...(state.frontend ? [{name:$("source-name").value,entry:state.frontend.entry,node:state.frontend.node.name,config:graphConfig(state.frontend)}] : []),
+      ...(state.frontend ? [{name:$("source-name").value,entry:state.frontend.entry,node:state.frontend.node.name,config:graphConfig(state.frontend),provides:state.frontend.provides||[],needs:state.frontend.needs||[]}] : []),
       ...[...names.entries()].filter(([n])=>!n.node.identity).map(([n, name]) => ({ name, entry: n.entry, node: n.node.name, config:graphConfig(n), provides:n.provides||[], needs:n.needs||[] })),
     ],
     properties: propertyDraft(),

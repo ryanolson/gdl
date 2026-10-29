@@ -1016,7 +1016,9 @@ test('the draft carries the declared kinds and what each node provides and needs
   assert.equal(run('JSON.stringify(output.properties.map(p=>[p.kind,p.message.path]))'), '[["shard","p::Shard"]]', 'only finished declarations');
   assert.equal(run('JSON.stringify(output.nodes.find(n=>n.node==="Echo").provides)'), '["shard"]');
   assert.equal(run('JSON.stringify(output.nodes.find(n=>n.node==="Echo").needs)'), '[{"kind":"shard","class":"sets"}]');
-  assert.equal(run('output.nodes.find(n=>n.node==="Api").provides'), undefined, 'the frontend provides nothing');
+  assert.equal(run('JSON.stringify(output.nodes.find(n=>n.node==="Api").provides)'), '[]');
+  run(`state.frontend.needs=[{kind:'shard',class:'sets'}];`);
+  assert.equal(run('JSON.stringify(draft().nodes.find(n=>n.node==="Api").needs)'), '[{"kind":"shard","class":"sets"}]', 'the frontend says what it needs');
 });
 
 test('a node box shows what the node provides and needs', () => {
