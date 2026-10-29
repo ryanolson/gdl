@@ -35,6 +35,18 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
         ));
     }
     let declared: Vec<&str> = settings.secret_names().collect();
+    // A secret is the file of its name in a projected volume, whose paths
+    // Kubernetes refuses to start with `..`. The spec already refuses a
+    // name with `/`, and `.` and `..` alone.
+    for secret in declared.iter().filter(|secret| secret.starts_with("..")) {
+        problems.push(Problem::at(
+            Some(format!("deployment.secrets.{secret}")),
+            None,
+            format!(
+                "secret `{secret}` starts with `..`, which a Kubernetes projected volume refuses as a file's path: rename it"
+            ),
+        ));
+    }
     for (name, cluster) in fleet.clusters() {
         let table = || Some(format!("cluster.{name}"));
         match &cluster.registry {

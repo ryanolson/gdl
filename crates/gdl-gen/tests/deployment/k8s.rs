@@ -725,5 +725,7 @@ mod images;
 mod labels;
 #[path = "k8s/probes.rs"]
 mod probes;
+#[path = "k8s/secrets.rs"]
+mod secrets;
 #[path = "k8s/variables.rs"]
 mod variables;
