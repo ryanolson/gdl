@@ -158,6 +158,12 @@ impl Unit<'_> {
                 format!("optional: pool policy {name}'s Build::Config"),
             ));
         }
+        for (name, _) in &self.selectors {
+            rows.push((
+                format!("[selector.{name}]"),
+                format!("optional: selector {name}'s Build::Config"),
+            ));
+        }
         if frontend.is_some() {
             rows.push((
                 "[frontend]".to_string(),

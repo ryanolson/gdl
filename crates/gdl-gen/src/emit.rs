@@ -126,6 +126,7 @@ pub(crate) fn files(
             crossings: Vec::new(),
             fed: Vec::new(),
             policies: crate::policies::registered(spec, layout, segment),
+            selectors: crate::selectors::registered(spec, layout, segment),
         };
         unit.crossings = crossings(manifest, layout, segment)?;
         // The source's request and item the binary reads and writes as
@@ -405,6 +406,9 @@ struct Unit<'a> {
     /// The bound pool policies it builds and registers, by name: those of
     /// the classes it chooses pools of.
     policies: Vec<(&'a str, &'a crate::spec::Bind)>,
+    /// The bound selectors it builds and registers, by name: those of the
+    /// crossings it sends.
+    selectors: Vec<(&'a str, &'a crate::spec::Bind)>,
     crate_dir: &'a Path,
     out: &'a Path,
     deps: Deps,
@@ -579,8 +583,8 @@ impl Unit<'_> {
                 implementations.insert(&node.bind.package, &node.bind.source);
             }
         }
-        for (_, policy) in &self.policies {
-            implementations.insert(&policy.package, &policy.source);
+        for (_, bind) in self.policies.iter().chain(&self.selectors) {
+            implementations.insert(&bind.package, &bind.source);
         }
         for (package, source) in implementations {
             let source = source.source(&|path| self.path_to(path));
@@ -681,6 +685,16 @@ impl Unit<'_> {
             .map(|(name, bind)| format!("{name:?} = ::{};", binary::rooted(&bind.ty)))
             .collect();
         block(&mut text, "policies", &policies);
+        // Only when there are any: a spec that binds no selector keeps its
+        // golden crates (`tests/fixtures/golden`).
+        if !self.selectors.is_empty() {
+            let selectors: Vec<String> = self
+                .selectors
+                .iter()
+                .map(|(name, bind)| format!("{name:?} = ::{};", binary::rooted(&bind.ty)))
+                .collect();
+            block(&mut text, "selectors", &selectors);
+        }
         text.push_str(&self.serve());
         let _ = writeln!(text, "}}");
         text

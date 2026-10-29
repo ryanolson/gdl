@@ -75,7 +75,7 @@ Engine = "random"                        # "round_robin" (the default) or "rando
 Detokenize = { selector = "affinity" }   # a named selector
 ```
 
-The key must be the first stage of a remote forward run. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`, and the sending segment can register others. [Routing](routing.md) covers selectors and offers.
+The key must be the first stage of a remote forward run. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`. The spec can bind others from their crates, or the sending segment can register them in code. [Routing](routing.md) covers selectors and offers.
 
 ## Classes
 

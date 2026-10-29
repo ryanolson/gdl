@@ -113,6 +113,7 @@ pub(crate) fn validate(
     let mut problems = spec.problems.clone();
     let (layouts, placed) = unbound(spec, manifest);
     problems.extend(crate::policies::problems(spec, manifest, &layouts));
+    problems.extend(crate::selectors::problems(spec, manifest, &layouts));
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
     let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
     let bindings: BTreeMap<_, _> = spec
@@ -209,6 +210,9 @@ pub(crate) fn validate(
             let policies = layout
                 .map(|layout| crate::policies::registered(spec, layout, segment))
                 .unwrap_or_default();
+            let selectors = layout
+                .map(|layout| crate::selectors::registered(spec, layout, segment))
+                .unwrap_or_default();
             let mut hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
             if hosted.contains(source_name) {
                 hosted.extend(entry_names.iter().copied());
@@ -237,6 +241,13 @@ pub(crate) fn validate(
                 if package == bind.package {
                     problems.push(format!(
                         "[{at}]: segment `{segment}` becomes package `{package}`, the name of [pool_policy.{name}]'s crate"
+                    ));
+                }
+            }
+            for (name, bind) in &selectors {
+                if package == bind.package {
+                    problems.push(format!(
+                        "[{at}]: segment `{segment}` becomes package `{package}`, the name of [selector.{name}]'s crate"
                     ));
                 }
             }
@@ -366,6 +377,24 @@ pub(crate) fn validate(
                     );
                 }
             }
+            // A selector's crate likewise, and it may be a policy's too.
+            for (name, bind) in &selectors {
+                let hosts_it = bindings
+                    .iter()
+                    .any(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
+                    || policies.iter().any(|(_, b)| b.package == bind.package);
+                let first = selectors
+                    .iter()
+                    .find(|(_, b)| b.package == bind.package)
+                    .map_or(*name, |(n, _)| *n);
+                if !hosts_it {
+                    key(
+                        &bind.package,
+                        format!("[selector.{first}]'s package"),
+                        &mut problems,
+                    );
+                }
+            }
             match packages.insert(package.clone(), (laid.name, segment)) {
                 Some((layout, other)) if layout == laid.name => problems.push(format!(
                     "[{at}]: segments `{other}` and `{segment}` both become package `{package}`"
@@ -433,6 +462,9 @@ pub(crate) fn validate(
     }
     for (name, bind) in &spec.pool_policies {
         give(format!("[pool_policy.{name}]"), bind, &mut problems);
+    }
+    for (name, bind) in &spec.selectors {
+        give(format!("[selector.{name}]"), bind, &mut problems);
     }
     // A graph spec has reported each node that did not bind already.
     for node in &manifest.nodes {

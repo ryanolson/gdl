@@ -58,6 +58,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
             })
             .collect(),
         pool_policies: BTreeMap::new(),
+        selectors: BTreeMap::new(),
         allocator: Allocator::DEFAULT,
         problems: Vec::new(),
     }
@@ -1377,4 +1378,182 @@ fn a_spec_without_selectors_generates_the_golden_crates() {
             file.display()
         );
     }
+}
+
+/// `S` in `front` sends to `F` in `prep`, which sends to `D` in `engine`;
+/// the crossing into `F` is routed by `into_f`, the one into `D` by
+/// `into_d`. Two message types, so that a check that reads the wrong
+/// edge of a crossing finds the wrong one.
+fn chain(into_f: &str, into_d: &str) -> (Manifest, gdl_model::Placement) {
+    let node = |name: &str, role, binding: Option<&str>| NodeInfo {
+        name: name.into(),
+        role,
+        binding: binding.map(str::to_string),
+    };
+    let manifest = Manifest {
+        name: "tiny".into(),
+        schema: 1,
+        nodes: vec![
+            node("S", Role::Source, None),
+            node("F", Role::Forward, Some("f")),
+            node("D", Role::Sink, Some("d")),
+        ],
+        hops: vec![HopInfo {
+            outer: "S".into(),
+            forward: vec!["F".into()],
+            inner: "D".into(),
+            backward: vec![],
+            forward_types: vec![
+                TypeInfo::new("Req", true, Default::default()),
+                TypeInfo::new("Prepared", true, Default::default()),
+            ],
+            backward_types: vec![TypeInfo::new("Item", true, Default::default())],
+        }],
+    };
+    let selector = |name: &str| gdl_model::RequestRouter::Selector(name.into());
+    let placement = gdl_model::Placement::new()
+        .segment("front", ["S"])
+        .segment("prep", ["F"])
+        .segment("engine", ["D"])
+        .route("F", selector(into_f))
+        .route("D", selector(into_d));
+    (manifest, placement)
+}
+
+/// Only the segment that sends through a bound selector depends on its
+/// crate and registers it, once, by its name; gdl's own selector, and a
+/// segment that only receives, change nothing.
+#[test]
+fn only_the_sender_registers_a_bound_selector() {
+    let (manifest, placement) = chain("by_length", "least_loaded");
+    let mut spec = spec(
+        placement,
+        &[("F", "tiny_nodes::Prep"), ("D", "tiny_nodes::Engine")],
+    );
+    spec.selectors
+        .insert("by_length".into(), router("tiny_router::ByLength"));
+    let files = rendered(&spec, &manifest, Path::new("/out")).expect("rendered");
+    let file = |path: &str| files[Path::new(path)].as_str();
+    assert!(
+        file("front/Cargo.toml").contains("tiny-router = { path = \"../../work/router\" }"),
+        "{}",
+        file("front/Cargo.toml")
+    );
+    let front = file("front/src/lib.rs");
+    assert!(
+        front.contains(
+            "    policies: [];\n    selectors: [\n        \"by_length\" = ::tiny_router::ByLength;\n    ];\n"
+        ),
+        "{front}"
+    );
+    assert!(file("front/src/main.rs").contains("[selector.by_length]"));
+    for path in [
+        "prep/Cargo.toml",
+        "prep/src/lib.rs",
+        "prep/src/main.rs",
+        "engine/Cargo.toml",
+        "engine/src/lib.rs",
+        "engine/src/main.rs",
+    ] {
+        assert!(!file(path).contains("router"), "{path}");
+        assert!(!file(path).contains("selectors:"), "{path}");
+        assert!(!file(path).contains("[selector."), "{path}");
+    }
+}
+
+/// A crate that offers both the chooser's pool policy and the selector it
+/// sends through is one dependency of the chooser, which registers each.
+#[test]
+fn a_crate_of_a_pool_policy_and_a_selector_is_one_dependency() {
+    let (manifest, _) = chain("by_length", "by_length");
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\", \"F\"]\n[segment.engine]\nnodes = [\"D\"]\n\
+         [routing]\nD = { selector = \"by_length\" }\n\
+         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+         [pools.model_x]\npolicy = \"by_model\"\n",
+    )
+    .expect("a placement");
+    let mut spec = spec(
+        placement,
+        &[("F", "tiny_nodes::Prep"), ("D", "tiny_nodes::Engine")],
+    );
+    spec.selectors
+        .insert("by_length".into(), router("tiny_router::ByLength"));
+    spec.pool_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    check(&spec, &manifest).expect("valid");
+    let files = rendered(&spec, &manifest, Path::new("/out")).expect("rendered");
+    let front = &files[Path::new("front/src/lib.rs")];
+    assert_eq!(front.matches("\"by_length\" = ").count(), 1, "{front}");
+    let cargo = &files[Path::new("front/Cargo.toml")];
+    assert_eq!(cargo.matches("tiny-router = ").count(), 1, "{cargo}");
+}
+
+/// A selector table is refused, before its crate is read, for a name a
+/// placement cannot use or gdl's own, a type outside its crate, a name a
+/// bound pool policy or a node has too, and a name no `[routing]` uses.
+#[test]
+fn check_refuses_a_selector_table_it_can_judge_unread() {
+    let cases = [
+        (
+            "By-Length",
+            "tiny_router::ByLength",
+            "[selector.By-Length]: ",
+        ),
+        (
+            "least_loaded",
+            "tiny_router::ByLength",
+            "`least_loaded` is gdl's own selector",
+        ),
+        ("by_length", "", "[selector.by_length]: `type` is empty"),
+        (
+            "by_length",
+            "other::ByLength",
+            "type `other::ByLength` is not in crate `tiny_router`",
+        ),
+        (
+            "unused",
+            "tiny_router::ByLength",
+            "no `[routing]` router names `unused`",
+        ),
+    ];
+    // Both crossings route through `by_length`, which is bound well; each
+    // case binds one more table, or binds `by_length` badly.
+    let (manifest, placement) = chain("by_length", "by_length");
+    for (name, ty, expected) in cases {
+        let mut spec = spec(
+            placement.clone(),
+            &[("F", "tiny_nodes::Prep"), ("D", "tiny_nodes::Engine")],
+        );
+        spec.selectors
+            .insert("by_length".into(), router("tiny_router::ByLength"));
+        spec.selectors.insert(name.into(), router(ty));
+        let error = check(&spec, &manifest).expect_err(name).to_string();
+        assert!(error.contains(expected), "{name}: {expected} in {error}");
+    }
+    // A pool policy bound under the selector's name: the builder would
+    // register both metrics under it.
+    let (manifest, _) = chain("by_model", "by_model");
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\", \"F\"]\n[segment.engine]\nnodes = [\"D\"]\n\
+         [routing]\nD = { selector = \"by_model\" }\n\
+         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+         [pools.model_x]\npolicy = \"by_model\"\n",
+    )
+    .expect("a placement");
+    let mut spec = spec(
+        placement,
+        &[("F", "tiny_nodes::Prep"), ("D", "tiny_nodes::Engine")],
+    );
+    spec.selectors
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    spec.pool_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    let error = check(&spec, &manifest)
+        .expect_err("a policy's name")
+        .to_string();
+    assert!(
+        error.contains("builds a node, entry adapter, or pool policy `by_model`"),
+        "{error}"
+    );
 }

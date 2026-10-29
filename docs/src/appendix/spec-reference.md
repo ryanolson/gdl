@@ -4,7 +4,7 @@ This appendix lists every table and key of `gdl.toml` (the spec), `fleet.toml` (
 
 ## gdl.toml
 
-A spec names the graph with `[contract]` or with `[graph]`, never both. `[messages]` goes with `[graph]`. `[nodes]` goes with `[graph]`, and `[bind.*]` goes with `[contract]`. `[pool_policy.*]` and `[binary]` go with either. `[gdl]` is always required.
+A spec names the graph with `[contract]` or with `[graph]`, never both. `[messages]` goes with `[graph]`. `[nodes]` goes with `[graph]`, and `[bind.*]` goes with `[contract]`. `[pool_policy.*]`, `[selector.*]`, and `[binary]` go with either. `[gdl]` is always required.
 
 ### Graph source
 
@@ -26,6 +26,9 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 | `[pool_policy.<name>] git`, `rev` | a repository and a revision. Both are required together. | one source is required |
 | `[pool_policy.<name>] lib` | the crate's library name, with `git` only, when it differs from the package's | optional |
 | `[pool_policy.<name>] type` | the type that implements `gdl::PoolPolicy` and `gdl::Build`, at the root of the crate's library | required |
+| `[selector.<name>] crate` | the package of a selector that a `[routing]` router names | required |
+| `[selector.<name>] path`, `version`, `git`, `rev`, `lib` | the crate's source, as for `[pool_policy.<name>]` | one source is required |
+| `[selector.<name>] type` | the type that implements `gdl::Selector` and `gdl::Build`, at the root of the crate's library | required |
 | `[gdl] path` | a `gdl-runtime` directory | |
 | `[gdl] version` | a registry version | |
 | `[gdl] git`, `rev` | a repository and a revision. Both are required together. | |
@@ -33,6 +36,8 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 `[gdl]` takes exactly one of `path`, `version`, and `git` with `rev`. `cargo gdl build` takes any of them. `compose --local`, and `k8s`, `images`, and `deploy` with `--local`, take only `path`: their images build gdl and its hub from that workspace, and the crates the spec names by path, as Git holds them on this machine. A listed package appears once, and two listed message libraries cannot share a name. A `name@version` entry is fetched, and its library must be named for its package.
 
 A `[pool_policy.<name>]` table binds a policy name to its crate and type. It names the crate by exactly one of `path`, `version`, and `git` with `rev`, as `[nodes] crates` can. A crate named by `version` must name its library for its package. The name follows the rule for a registered pool policy below. It must not be the name of a node or an entry adapter, or a `[config]` key, since the segment builds the policy under it. Some layout's `[pools.<class>] policy` must name it. `check` reads the crate and refuses a type that the crate does not offer as a pool policy. In a spec with a `[graph]` file, it also refuses a policy whose `Head` does not fit the request that crosses into a class that names it. Each segment that chooses pools of a class whose policy the table binds depends on the crate, builds the policy from its `[pool_policy.<name>]` settings table, and registers it. No other segment depends on the crate. [Write a pool policy](../guides/write-a-pool-policy.md) shows one.
+
+A `[selector.<name>]` table binds a selector name to its crate and type, as a `[pool_policy.<name>]` table binds a policy's, and takes the same sources. The name follows the rule for a selector below, and is not `affinity` or `least_loaded`, gdl's own. It must not be the name of a node, an entry adapter, a `[config]` key, or a bound pool policy. Some layout's `[routing]` must name it. `check` reads the crate and refuses a type that the crate does not offer as a selector. In a spec with a `[graph]` file, it also refuses a selector whose `Head` does not fit the request of a crossing that names it. Each segment that sends through such a crossing depends on the crate, builds the selector from its `[selector.<name>]` settings table, and registers it. No other segment depends on the crate. [Write a selector](../guides/write-a-selector.md) shows one.
 
 ### Placement
 

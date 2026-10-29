@@ -28,9 +28,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** nothing of the response reaches that segment, so it has no event to end the lease on without a task per request. See [Routing, selectors, and offers](../concepts/routing.md).
 - **Workaround:** place the node before the boundary in the outer end's segment.
 
-### A selector from another crate needs code that registers it
-- **What:** a generated segment binary knows only gdl's own selectors (`affinity`, `least_loaded`), and a placement that names another one fails that segment's start. Register it with `builder.selector::<S>("<name>")` in a hand-written `SegmentBinary`, or in `RuntimeConfig::selectors` in process. See [Write a selector](../guides/write-a-selector.md). The generator binding selector crates would lift this.
-
 ### A projection is not checked against what its edge type writes
 - **What:** `derive(gdl::Projection)` checks each field's Rust name and type against the edge type when it builds. Registering the router, or an entry's want (`InstanceProperties::wants`), compares the field names that each type's `Deserialize` reads, from the list serde's derive gives `deserialize_struct`. Four edge types pass these checks, and the projection still cannot read what they write:
   - one that writes a field under a name it does not read, with `rename(serialize = ...)`, or that reads a name only as an `alias`;
@@ -42,13 +39,13 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** serde's list is flat and holds only the names a type reads. It does not say which field has a name, nor which names or codecs the type writes with, and gdl has no value of the edge type to write.
 - **Workaround:** in the policy crate's tests, encode a value of the edge type and decode the projection from those bytes. `crates/gdl/tests/projection.rs` shows the first two cases.
 
-### A contract spec's bound pool policy is checked against its crossing only at start
-- **What:** `cargo gdl check` compares a bound pool policy's `Head` with the request that crosses into its class only for a spec with a `[graph]` file. For a spec with a `[contract]` crate, a `Head` that does not fit passes check, and the chooser refuses to start. See [Write a pool policy](../guides/write-a-pool-policy.md#4-bind-it-in-the-spec).
+### A contract spec's bound pool policy or selector is checked against its crossing only at start
+- **What:** `cargo gdl check` compares a bound pool policy's or selector's `Head` with the request that crosses there only for a spec with a `[graph]` file. For a spec with a `[contract]` crate, a `Head` that does not fit passes check, and the segment that sends through it refuses to start. See [Write a pool policy](../guides/write-a-pool-policy.md#4-bind-it-in-the-spec) and [Write a selector](../guides/write-a-selector.md#3-bind-it-in-the-spec).
 - **Why:** check knows a contract's messages only by how the contract spells them, not by the package that defines them, so it cannot tell two messages of the same name apart.
-- **Workaround:** start the chooser once in a test, or describe the graph in a graph file.
+- **Workaround:** start the sending segment once in a test, or describe the graph in a graph file.
 
-### The reader finds a pool policy only where it can follow the trait's path
-- **What:** `cargo gdl check` takes a type as a pool policy only when the source reader follows the path of its impl's trait, through `use`s, renames, and globs, to gdl's `PoolPolicy`. It does not see an impl that a macro writes, and it enters only packages that depend on gdl. A policy it cannot find is refused with "implements no pool policy", although the crate builds. A name `gdl` that a module or a glob of a crate without gdl binds (`use helper::routing as gdl`, or `use helper::*` where `helper` has a module `gdl`) hides the gdl crate, but the reader does not see that binding: check accepts the trait it finds through it, and the chooser's build fails with `E0277`.
+### The reader finds a pool policy or a selector only where it can follow the trait's path
+- **What:** `cargo gdl check` takes a type as a pool policy or a selector only when the source reader follows the path of its impl's trait, through `use`s, renames, and globs, to gdl's `PoolPolicy` or `Selector`. It does not see an impl that a macro writes, and it enters only packages that depend on gdl. A type it cannot find is refused with "implements no pool policy" or "implements no selector", although the crate builds. A name `gdl` that a module or a glob of a crate without gdl binds (`use helper::routing as gdl`, or `use helper::*` where `helper` has a module `gdl`) hides the gdl crate, but the reader does not see that binding: check accepts the trait it finds through it, and the generated segment's build fails with `E0277`.
 - **Workaround:** write the impl by hand, name the trait through `gdl` or a crate that depends on it, and give no other item the name `gdl`.
 
 ### An instance that does not know `OutcomeUnknown` refuses it

@@ -379,7 +379,8 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
     let takes = !segment.nodes.is_empty()
         || frontend.is_some()
         || service.is_some()
-        || !policies.is_empty();
+        || !policies.is_empty()
+        || !segment.selectors.is_empty();
     let builder = if takes {
         format_ident!("builder")
     } else {
@@ -440,6 +441,12 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
             #(#built)*
         }
     });
+    // Each from its `[selector.<name>]` settings table, which the
+    // runtime holds; the builder keeps its readiness.
+    let selectors = segment
+        .selectors
+        .iter()
+        .map(|(name, ty)| quote!(builder.selector::<#ty>(#name).await?;));
     let done = if built.extra() {
         let fields = &built.fields;
         quote!(Ok(Hosts { #(#fields),* }))
@@ -453,6 +460,7 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
             #frontend
             #adapters
             #policies
+            #(#selectors)*
             #done
         }
     }

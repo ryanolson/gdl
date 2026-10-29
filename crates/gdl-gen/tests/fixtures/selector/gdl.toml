@@ -1,0 +1,27 @@
+# `front` hosts the source and `Prep`, and sends each prepared request to
+# `model` through the selector `by_text`, bound to its crate and type.
+[graph]
+path = "selector.gdl"
+
+[messages]
+crates = ["messages"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Prep"]
+
+[segment.model]
+nodes = ["Model"]
+
+[routing]
+Model = { selector = "by_text" }
+
+[selector.by_text]
+crate = "selector-router"
+path = "router"
+type = "selector_router::ByText"

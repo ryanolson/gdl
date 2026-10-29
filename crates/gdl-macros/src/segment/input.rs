@@ -12,8 +12,13 @@
 //! feeds: [reads_json, writes_json];
 //! nodes: [Preprocess preprocess = ::chat_front_nodes::Preprocess; ...];
 //! policies: ["by_model" = ::policy_router::ByModel; ...];
+//! selectors: ["by_length" = ::routers::ByLength; ...];
 //! serve: json_lines;
 //! ```
+//!
+//! `selectors` is written only when the segment sends through a selector
+//! that the spec binds, so that a spec that binds none keeps its golden
+//! crates (`crates/gdl-gen/tests/fixtures/golden`).
 //!
 //! A crossing is its check (`crosses` or `anchors`), its alias, and its
 //! port: the receiving node, the declaration trait, the port, and `head` or
@@ -42,6 +47,8 @@ pub(crate) struct Segment {
     pub(crate) nodes: Vec<Node>,
     /// The pool policies it builds and registers, by name.
     pub(crate) policies: Vec<(LitStr, Path)>,
+    /// The selectors it builds and registers, by name.
+    pub(crate) selectors: Vec<(LitStr, Path)>,
     pub(crate) serve: Serve,
 }
 
@@ -207,13 +214,26 @@ impl Parse for Segment {
             Ok(Node { name, binding, ty })
         })?;
         end()?;
-        field("policies")?;
-        let policies = entries(input, |input| {
+        let named = |input: ParseStream<'_>| -> syn::Result<(LitStr, Path)> {
             let name = input.parse()?;
             input.parse::<Token![=]>()?;
             Ok((name, input.parse()?))
-        })?;
+        };
+        field("policies")?;
+        let policies = entries(input, named)?;
         end()?;
+        let selectors = if input
+            .fork()
+            .parse::<Ident>()
+            .is_ok_and(|key| key == "selectors")
+        {
+            field("selectors")?;
+            let selectors = entries(input, named)?;
+            end()?;
+            selectors
+        } else {
+            Vec::new()
+        };
         field("serve")?;
         let serve = input.parse()?;
         end()?;
@@ -229,6 +249,7 @@ impl Parse for Segment {
             feeds,
             nodes,
             policies,
+            selectors,
             serve,
         })
     }

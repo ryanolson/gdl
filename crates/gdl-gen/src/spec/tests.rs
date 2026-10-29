@@ -433,6 +433,64 @@ fn a_pool_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
     }
 }
 
+/// A `[selector.<name>]` table names a selector's crate and type as a
+/// `[pool_policy.<name>]` table names a policy's: by a directory, whose
+/// manifest must name the package, an exact version, or a Git revision.
+/// Its problems name its own table.
+#[test]
+fn a_spec_binds_a_selector_to_its_crate() {
+    let temp = contract_dir("selector");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("router")).expect("dir");
+    std::fs::write(
+        dir.join("router/Cargo.toml"),
+        "[package]\nname = \"my-routers\"\n[lib]\nname = \"routers\"\n",
+    )
+    .expect("write");
+    let head = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n";
+    let file = dir.join("gdl.toml");
+    std::fs::write(
+        &file,
+        format!("{head}[selector.load_aware]\ncrate = \"my-routers\"\npath = \"router\"\ntype = \"routers::LoadAware\"\n"),
+    )
+    .expect("write");
+    let spec = Spec::load(&file).expect("spec");
+    assert!(spec.problems.is_empty(), "{:?}", spec.problems);
+    let selector = &spec.selectors["load_aware"];
+    assert_eq!(selector.package, "my-routers");
+    assert_eq!(selector.lib, "routers", "the library its manifest names");
+    assert_eq!(selector.source, CrateSource::Path(dir.join("router")));
+    assert_eq!(selector.ty, "routers::LoadAware");
+    assert!(spec.pool_policies.is_empty());
+    let selector = |source: &str| {
+        let text = format!(
+            "{head}[selector.load_aware]\ncrate = \"my-routers\"\n{source}type = \"my_routers::LoadAware\"\n"
+        );
+        Spec::parse(&text, &file, dir).map(|spec| spec.selectors["load_aware"].clone())
+    };
+    let versioned = selector("version = \"0.3.1\"\n").expect("a version");
+    assert_eq!(versioned.source, CrateSource::Version("0.3.1".into()));
+    assert_eq!(versioned.lib, "my_routers");
+    let error = selector("").expect_err("no source").to_string();
+    assert!(
+        error.contains("[selector.load_aware] needs exactly one of"),
+        "{error}"
+    );
+    std::fs::write(
+        &file,
+        format!("{head}[selector.load_aware]\ncrate = \"other\"\npath = \"router\"\ntype = \"routers::LoadAware\"\n"),
+    )
+    .expect("write");
+    let spec = Spec::load(&file).expect("the spec itself parses");
+    assert!(
+        spec.problems.len() == 1
+            && spec.problems[0].starts_with("[selector.load_aware]: ")
+            && spec.problems[0].ends_with("holds package `my-routers`, not `other`"),
+        "{:?}",
+        spec.problems
+    );
+}
+
 /// A table that names its crate by a directory is written back as it was
 /// read.
 #[test]
@@ -895,6 +953,7 @@ fn a_spec_reads_back_what_it_writes() {
         "pin",
         "bind",
         "pool_policy",
+        "selector",
         "nodes",
         "contract",
         "binary",

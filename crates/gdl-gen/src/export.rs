@@ -131,6 +131,7 @@ fn portable(spec: &Spec) -> bool {
             .map(|c| &c.source)
             .chain(source.nodes.iter().map(|c| &c.source))
             .chain(spec.pool_policies.values().map(|b| &b.source))
+            .chain(spec.selectors.values().map(|b| &b.source))
             .all(|s| matches!(s, CrateSource::Version(_) | CrateSource::Git { .. }))
 }
 

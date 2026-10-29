@@ -4,7 +4,7 @@
 //! whose `[pools.<class>] policy` a table binds builds that policy from its
 //! settings and registers it; no other segment depends on the crate.
 
-use gdl_extract::{Offer, Origin, PolicyEntry, PolicyHead};
+use gdl_extract::{Offer, Origin, PolicyEntry, PolicyHead, Skipped};
 
 use crate::Offers;
 use crate::spec::{Bind, ListedCrate, Spec};
@@ -62,15 +62,7 @@ pub(crate) fn problems(
                 "{at}: the segment builds a node or entry adapter `{name}`; name the policy apart from it"
             ));
         }
-        match type_crate(&bind.ty) {
-            _ if bind.ty.trim().is_empty() => problems.push(format!("{at}: `type` is empty")),
-            None => problems.push(format!("{at}: type `{}` is not a Rust type path", bind.ty)),
-            Some(krate) if krate != bind.lib => problems.push(format!(
-                "{at}: type `{}` is not in crate `{}`",
-                bind.ty, bind.lib
-            )),
-            Some(_) => {}
-        }
+        problems.extend(type_problem(bind).map(|problem| format!("{at}: {problem}")));
         // Judged only where every layout fits its graph: one that does not
         // names no class's policy, and is refused for what it is.
         let named = layouts.values().any(|layout| {
@@ -91,6 +83,52 @@ pub(crate) fn problems(
     problems
 }
 
+/// Why `bind`'s type cannot be its crate's: an empty one, one that is not
+/// a Rust type path, and one that does not start with the crate's library.
+pub(crate) fn type_problem(bind: &Bind) -> Option<String> {
+    match type_crate(&bind.ty) {
+        _ if bind.ty.trim().is_empty() => Some("`type` is empty".into()),
+        None => Some(format!("type `{}` is not a Rust type path", bind.ty)),
+        Some(krate) if krate != bind.lib => {
+            Some(format!("type `{}` is not in crate `{}`", bind.ty, bind.lib))
+        }
+        Some(_) => None,
+    }
+}
+
+/// What the reader finds `bind`'s crate offers, for table `at`: none when
+/// the crate's manifest could not be read, which was reported when the
+/// spec was loaded; why, when the reader cannot read the crate. Offers come
+/// from `from`, as a node crate's do.
+pub(crate) fn read_offer(
+    spec: &Spec,
+    at: &str,
+    bind: &Bind,
+    target: &std::path::Path,
+    from: Offers<'_>,
+) -> Result<Option<Offer>, Vec<String>> {
+    if spec
+        .problems
+        .iter()
+        .any(|p| p.starts_with(&format!("{at}: ")))
+    {
+        return Ok(None);
+    }
+    let listed = ListedCrate {
+        package: bind.package.clone(),
+        lib: bind.lib.clone(),
+        source: bind.source.clone(),
+    };
+    match crate::offers(std::slice::from_ref(&listed), target, from) {
+        Ok(offers) => Ok(offers.into_iter().next()),
+        Err(error) => Err(error
+            .0
+            .iter()
+            .map(|problem| format!("{at}: crate `{}`: {problem}", bind.package))
+            .collect()),
+    }
+}
+
 /// What is wrong with each `[pool_policy.<name>]` table whose crate the
 /// reader can reach: a crate it cannot read, a type that is not a pool
 /// policy the crate offers, and a policy whose `Head` does not fit a
@@ -107,84 +145,70 @@ pub(crate) fn resolve(
     let mut problems = Vec::new();
     for (name, bind) in &spec.pool_policies {
         let at = format!("[pool_policy.{name}]");
-        // A crate whose manifest could not be read was reported when the
-        // spec was loaded.
-        if spec
-            .problems
-            .iter()
-            .any(|p| p.starts_with(&format!("{at}: ")))
-        {
-            continue;
-        }
-        let listed = ListedCrate {
-            package: bind.package.clone(),
-            lib: bind.lib.clone(),
-            source: bind.source.clone(),
-        };
-        match crate::offers(std::slice::from_ref(&listed), target, from) {
-            Ok(offers) => {
-                let Some(offer) = offers.first() else {
-                    continue;
-                };
-                match offered(offer, bind) {
-                    Err(problem) => problems.push(format!("{at}: {problem}")),
-                    Ok(policy) => problems.extend(
-                        resolution
-                            .into_iter()
-                            .flat_map(|resolution| {
-                                misfits(spec, manifest, resolution, name, &policy.head)
-                            })
-                            .map(|problem| format!("{at}: {problem}")),
-                    ),
-                }
+        let offer = match read_offer(spec, &at, bind, target, from) {
+            Ok(Some(offer)) => offer,
+            Ok(None) => continue,
+            Err(unread) => {
+                problems.extend(unread);
+                continue;
             }
-            Err(error) => problems.extend(
-                error
-                    .0
-                    .iter()
-                    .map(|problem| format!("{at}: crate `{}`: {problem}", bind.package)),
+        };
+        match offered(
+            &offer,
+            &offer.policies,
+            &offer.skipped_policies,
+            bind,
+            "pool policy",
+        ) {
+            Err(problem) => problems.push(format!("{at}: {problem}")),
+            Ok(policy) => problems.extend(
+                resolution
+                    .into_iter()
+                    .flat_map(|resolution| misfits(spec, manifest, resolution, name, &policy.head))
+                    .map(|problem| format!("{at}: {problem}")),
             ),
         }
     }
     problems
 }
 
-/// The pool policy `offer` holds for `bind`'s type, or why it holds none.
-/// The reader offers a policy only where the crate root reaches it by its
-/// name, so the type must be written as that path: the crate, then the
-/// name.
-fn offered<'o>(offer: &'o Offer, bind: &Bind) -> Result<&'o PolicyEntry, String> {
+/// The entry of `entries`, `offer`'s pool policies or selectors, for
+/// `bind`'s type, or why it has none; `noun` names what it is. The reader
+/// offers one only where the crate root reaches it by its name, so the
+/// type must be written as that path: the crate, then the name.
+pub(crate) fn offered<'o>(
+    offer: &Offer,
+    entries: &'o [PolicyEntry],
+    skipped: &[Skipped],
+    bind: &Bind,
+    noun: &str,
+) -> Result<&'o PolicyEntry, String> {
     let unraw = |path: &str| path.trim().trim_start_matches("::").replace("r#", "");
     let written = unraw(&bind.ty);
     let at_root = |name: &str| format!("{}::{name}", unraw(&bind.lib));
     let name = written.rsplit("::").next().unwrap_or_default().to_string();
-    if let Some(policy) = offer
-        .policies
-        .iter()
-        .find(|policy| at_root(&policy.name) == written)
-    {
-        return Ok(policy);
+    if let Some(entry) = entries.iter().find(|entry| at_root(&entry.name) == written) {
+        return Ok(entry);
     }
-    if offer.policies.iter().any(|policy| policy.name == name) {
+    if entries.iter().any(|entry| entry.name == name) {
         return Err(format!(
-            "crate `{}` offers pool policy `{name}` at `{}`; write that path",
+            "crate `{}` offers {noun} `{name}` at `{}`; write that path",
             offer.package,
             at_root(&name)
         ));
     }
-    if let Some(skipped) = offer.skipped_policies.iter().find(|s| s.name == name) {
+    if let Some(skipped) = skipped.iter().find(|s| s.name == name) {
         return Err(format!(
             "crate `{}` leaves `{name}` out: {}",
             offer.package, skipped.problem
         ));
     }
-    let offered: Vec<String> = offer
-        .policies
+    let offered: Vec<String> = entries
         .iter()
-        .map(|policy| format!("`{}`", policy.name))
+        .map(|entry| format!("`{}`", entry.name))
         .collect();
     Err(format!(
-        "crate `{}` implements no pool policy `{name}`; {}",
+        "crate `{}` implements no {noun} `{name}`; {}",
         offer.package,
         match offered.as_slice() {
             [] => "it implements none".to_string(),
@@ -241,7 +265,7 @@ fn misfits(
 /// identity, `()` where a message crosses or the reverse, and a
 /// projection, which reads fields by name, on an edge encoded as
 /// `msgpack_array`. `Encoded` reads any head.
-fn misfit(
+pub(crate) fn misfit(
     resolution: &crate::Resolution,
     edge: &gdl_model::TypeInfo,
     head: &PolicyHead,

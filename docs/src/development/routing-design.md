@@ -44,7 +44,7 @@ A selector name is words of lowercase letters and digits joined by single `_`s, 
 
 ## Selectors from other crates
 
-A generated binary routes only with gdl's own selectors. A selector from a crate that the segment does not otherwise link needs code that names its type. **Rejected: link-time registration (`linkme`).** The linker does not reliably keep a registration from a crate that nothing references. Emitted code can name the type: the spec would name the crate and the type, and the generator would emit the dependency and one `builder.selector::<T>("<name>")` line. That is not built.
+A selector from a crate that the segment does not otherwise link needs code that names its type. The spec's `[selector.<name>]` table names the crate and the type, and the generator emits the dependency and one `builder.selector::<T>("<name>")` line in the `build` of each segment that sends through a crossing that names it. The runtime and the generator take those segments from one rule, `Layout::sent_selectors`, so that the segment that registers a selector is the one that routes with it. `segment!` takes its `selectors` list only when it has one, so a spec without selector tables generates no `selectors` key, and its crates do not change (`tests/fixtures/golden` in `gdl-gen`). **Rejected: link-time registration (`linkme`).** The linker does not reliably keep a registration from a crate that nothing references. **Rejected: a dependency in every segment.** Each binary would link a crate it never calls, and a receiving segment would build a selector it never runs.
 
 ## Offers
 

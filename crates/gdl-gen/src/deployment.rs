@@ -337,13 +337,14 @@ impl Bundle {
                 spec.bind
                     .values()
                     .chain(spec.pool_policies.values())
+                    .chain(spec.selectors.values())
                     .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
                     .map(|binding| binding.package.as_str()),
             )
             .collect();
         if !local.is_empty() && sources == Sources::Fetched {
             return Err(Error::new(format!(
-                "Deploy requires Git or crates.io node, message, and pool policy packages. Re-import these local packages from Git or crates.io: {}",
+                "Deploy requires Git or crates.io node, message, pool policy, and selector packages. Re-import these local packages from Git or crates.io: {}",
                 local.join(", ")
             )));
         }

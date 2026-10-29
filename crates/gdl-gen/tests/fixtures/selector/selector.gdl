@@ -1,0 +1,7 @@
+// The front prepares each request and sends it to the model through the
+// selector its placement names.
+name = "selector", schema = 1;
+source  Front: Ask -> stream Answer;
+forward Prep: Ask -> Prepared;
+sink    Model: Prepared -> stream Answer;
+topology: Front => Prep => Model;

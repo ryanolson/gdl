@@ -1,0 +1,9 @@
+# A selector from a crate of its own, bound by the spec: a graph whose
+# front segment sends its prepared request to the model segment through
+# the selector `by_text`, which the crate `selector-router` implements.
+# Its own workspace: read and built by `tests/selector.rs`, never by the
+# repository's. Each crate names its dependencies itself, as a crate that
+# a generated segment depends on by path must.
+[workspace]
+members = ["messages", "nodes", "router"]
+resolver = "3"

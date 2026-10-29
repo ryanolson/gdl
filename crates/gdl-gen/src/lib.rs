@@ -49,6 +49,7 @@ mod output;
 mod paths;
 mod policies;
 mod resolve;
+mod selectors;
 mod service;
 mod spec;
 mod validate;
@@ -149,8 +150,8 @@ fn render_with(
 
 /// `spec` with its graph's nodes bound to the nodes its node crates offer,
 /// in place of the `[bind.*]` tables of a contract spec, which keeps its
-/// own; and with what is wrong with its pool policies' crates among its
-/// problems.
+/// own; and with what is wrong with its pool policies' and selectors'
+/// crates among its problems.
 fn bound<'s>(
     spec: &'s Spec,
     prepared: &Prepared,
@@ -158,9 +159,13 @@ fn bound<'s>(
     from: Offers<'_>,
 ) -> Result<std::borrow::Cow<'s, Spec>, Error> {
     let mut spec = bound_nodes(spec, prepared, target, from)?;
+    let resolution = prepared.graph.as_ref().map(|(_, resolution)| resolution);
     if !spec.pool_policies.is_empty() {
-        let resolution = prepared.graph.as_ref().map(|(_, resolution)| resolution);
         let problems = policies::resolve(&spec, target, from, &prepared.manifest, resolution);
+        spec.to_mut().problems.extend(problems);
+    }
+    if !spec.selectors.is_empty() {
+        let problems = selectors::resolve(&spec, target, from, &prepared.manifest, resolution);
         spec.to_mut().problems.extend(problems);
     }
     Ok(spec)

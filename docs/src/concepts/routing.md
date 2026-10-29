@@ -40,7 +40,7 @@ A crossing can name a selector instead: `{ selector = "<name>" }`. A selector is
 - the instances that declined this request so far (`request.declined()`);
 - the destination segment's eligible instances (`Instances`), never empty.
 
-When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode. A `gdl::Projected<P>` must name the edge's type as `P::Of`, and its edge must not be encoded as `msgpack_array`, which carries no field names. A pool policy's `Head` is checked the same way ([Choosing a pool](pool-routing.md#a-registered-policy)).
+When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode. A `gdl::Projected<P>` must name the edge's type as `P::Of`, and its edge must not be encoded as `msgpack_array`, which carries no field names. A pool policy's `Head` is checked the same way ([Choosing a pool](pool-routing.md#a-registered-policy)). For a selector that the spec binds, `cargo gdl check` makes the same check before anything is built.
 
 A selector returns a `Choice` made from one of the `Instance`s it was given. Neither type has a public constructor, so a selector cannot name an instance outside the table. A choice can carry two things:
 
@@ -67,7 +67,7 @@ Two selectors come with gdl. A crossing can name them with nothing registered.
 
 After instances decline a request, each one chooses among those that have not declined it: `affinity` the key's next instance, the same from every sender, and `least_loaded` the least loaded one. When every instance has declined, each chooses from all of them again.
 
-A sending process builds one selector per name. Every crossing that names it shares it, so a selector that routes two hops into one segment keeps one view of its load. [Write a selector](../guides/write-a-selector.md) shows how to write and register one.
+A sending process builds one selector per name. Every crossing that names it shares it, so a selector that routes two hops into one segment keeps one view of its load. [Write a selector](../guides/write-a-selector.md) shows how to write one, bind it in the spec, or register it in code.
 
 ## Every hand-off is an offer
 

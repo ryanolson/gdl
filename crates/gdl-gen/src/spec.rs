@@ -47,6 +47,11 @@
 //! type = "router::ByModel"       # class build and register; or, for
 //!                                # `path`, `version = "0.3.1"`, or `git`
 //!                                # and `rev` (with `lib` if it differs)
+//!
+//! [selector.by_length]           # optional: a selector that a `[routing]`
+//! crate = "router"               # router names, and the segments that
+//! path = "router"                # send through it build and register;
+//! type = "router::ByLength"      # its crate as a pool policy's
 //! ```
 
 use std::collections::BTreeMap;
@@ -84,6 +89,10 @@ pub struct Spec {
     /// Pool policy name to implementation: what the segments that choose
     /// pools of a class whose policy has that name build and register.
     pub(crate) pool_policies: BTreeMap<String, Bind>,
+    /// Selector name to implementation: what the segments that send
+    /// through a crossing whose `[routing]` router names it build and
+    /// register.
+    pub(crate) selectors: BTreeMap<String, Bind>,
     /// The global allocator of each generated segment binary.
     pub(crate) allocator: Allocator,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -360,6 +369,8 @@ struct Raw {
     bind: BTreeMap<String, RawBind>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pool_policy: BTreeMap<String, RawPolicy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    selector: BTreeMap<String, RawPolicy>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -492,8 +503,8 @@ struct RawBind {
     ty: String,
 }
 
-/// A `[pool_policy.<name>]` table: its crate, by one of the sources a
-/// `[nodes] crates` entry takes, and its type.
+/// A `[pool_policy.<name>]` or `[selector.<name>]` table: its crate, by
+/// one of the sources a `[nodes] crates` entry takes, and its type.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPolicy {
@@ -518,7 +529,7 @@ impl RawPolicy {
     /// table names no one source. A directory's library is read from its
     /// manifest when the spec is loaded; a version names the library for
     /// the package, as `name@version` does.
-    fn bind(self, name: &str, dir: &Path) -> Result<Bind, Error> {
+    fn bind(self, table: &str, dir: &Path) -> Result<Bind, Error> {
         let Self {
             package,
             path,
@@ -538,7 +549,7 @@ impl RawPolicy {
             }
             _ => {
                 return Err(Error::new(format!(
-                    "[pool_policy.{name}] needs exactly one of `path`, `version`, and `git` with `rev`; `lib` goes only with `git`"
+                    "[{table}] needs exactly one of `path`, `version`, and `git` with `rev`; `lib` goes only with `git`"
                 )));
             }
         };
@@ -611,6 +622,11 @@ impl Spec {
             self.pool_policies
                 .iter_mut()
                 .map(|(name, bind)| (format!("pool_policy.{name}"), bind)),
+        )
+        .chain(
+            self.selectors
+                .iter_mut()
+                .map(|(name, bind)| (format!("selector.{name}"), bind)),
         );
         for (table, bind) in tables {
             let CrateSource::Path(path) = &bind.source else {
@@ -725,7 +741,18 @@ impl Spec {
         let pool_policies = raw
             .pool_policy
             .into_iter()
-            .map(|(name, table)| Ok((name.clone(), table.bind(&name, dir)?)))
+            .map(|(name, table)| {
+                let bind = table.bind(&format!("pool_policy.{name}"), dir)?;
+                Ok((name, bind))
+            })
+            .collect::<Result<_, Error>>()?;
+        let selectors = raw
+            .selector
+            .into_iter()
+            .map(|(name, table)| {
+                let bind = table.bind(&format!("selector.{name}"), dir)?;
+                Ok((name, bind))
+            })
             .collect::<Result<_, Error>>()?;
         Ok(Self {
             deployment: raw.deployment,
@@ -741,6 +768,7 @@ impl Spec {
             placements,
             bind,
             pool_policies,
+            selectors,
             allocator: raw
                 .binary
                 .and_then(|binary| binary.allocator)
