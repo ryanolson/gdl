@@ -211,6 +211,10 @@ fn each_cluster_refusal_names_its_pool_or_cluster() {
             format!("{TWO}{G_IN_A}[cluster.c]\ncontext = 'c'\nnamespace = 'gdl'\nregion = 'r'\nenv = {{ 1BAD = 'x' }}\n"),
             "[cluster.c] env.1BAD: not a variable's name: letters, digits, and `_`, not starting with a digit".into(),
         ),
+        (
+            format!("{TWO}{G_IN_A}[cluster.c]\ncontext = ''\nnamespace = 'gdl'\nregion = 'r'\n"),
+            "[cluster.c] context: is empty; a cluster names the kube context that reaches it".into(),
+        ),
     ];
     for (text, expected) in cases {
         assert_eq!(problems(&text), std::slice::from_ref(&expected), "{text}");

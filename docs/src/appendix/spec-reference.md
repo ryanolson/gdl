@@ -99,7 +99,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | Key | Meaning | Default |
 |---|---|---|
 | `[fleet] name` | the fleet's name, which labels the objects it deploys | none |
-| `[cluster.<name>] context` | the kube context that reaches the cluster | required |
+| `[cluster.<name>] context` | the kube context that reaches the cluster, not empty | required |
 | `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
 | `[cluster.<name>] region` | the region of every pool in the cluster | required |
 | `[cluster.<name>] registry` | the registry the cluster pulls images from | none |

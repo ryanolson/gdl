@@ -105,6 +105,11 @@ pub enum FleetError {
         /// Why the name is refused.
         reason: String,
     },
+    /// A cluster's context is empty.
+    EmptyContext {
+        /// The cluster.
+        cluster: String,
+    },
     /// A cluster's namespace is not a Kubernetes namespace's name.
     InvalidNamespace {
         /// The cluster.
@@ -359,6 +364,11 @@ impl FleetError {
                 cluster: name,
                 reason,
             } => (cluster(name), None, reason.clone()),
+            Self::EmptyContext { cluster: name } => (
+                cluster(name),
+                key("context"),
+                "is empty; a cluster names the kube context that reaches it".into(),
+            ),
             Self::InvalidNamespace {
                 cluster: name,
                 reason,

@@ -85,7 +85,7 @@ impl Header {
 }
 
 /// What is wrong with the fleet's clusters, each at its own table: their
-/// names, regions, namespaces, Secret names, and variables, and two that
+/// names, contexts, regions, namespaces, Secret names, and variables, and two that
 /// share a context and a namespace, reported at the later in name order.
 pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut Vec<FleetError>) {
     let mut first: BTreeMap<(&str, &str), &str> = BTreeMap::new();
@@ -94,6 +94,11 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
             errors.push(FleetError::InvalidClusterName {
                 cluster: name.clone(),
                 reason,
+            });
+        }
+        if cluster.context.is_empty() {
+            errors.push(FleetError::EmptyContext {
+                cluster: name.clone(),
             });
         }
         if let Err(reason) = check_region_name(&cluster.region) {
