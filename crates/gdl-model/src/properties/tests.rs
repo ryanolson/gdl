@@ -152,3 +152,15 @@ fn a_key_is_encoded_from_its_type() {
     assert_eq!(key, PropertyKey::new("test", json!({"name": "a"})));
     assert_eq!(key.kind(), "test");
 }
+
+#[test]
+#[ignore = "F1: JSON decoding changes a finite float key and its property identity"]
+fn a_float_property_keeps_its_identity_after_a_json_round_trip() {
+    for number in [json!(1), json!(1.5), json!(1.5801779765215413)] {
+        let key = PropertyKey::new("test", json!({ "ratio": number }));
+        let wire = serde_json::to_string(&key).expect("encoded");
+        let read: PropertyKey = serde_json::from_str(&wire).expect("read");
+        assert_eq!(key, read, "a report or stored record must keep {wire}");
+        assert_eq!(key.cmp(&read), Ordering::Equal);
+    }
+}
