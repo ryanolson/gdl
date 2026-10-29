@@ -31,6 +31,85 @@ const SEGMENTS: &[&str] = &["a", "d"];
 const LLAMA: &str = "llama-01-us-east-1";
 const QWEN: &str = "qwen-01-us-east-1";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_policy_registered_in_code_requires_its_property_supply() {
+    struct NeedsShard;
+
+    impl PoolPolicy for NeedsShard {
+        type Head = gdl::Encoded;
+        const NEEDS: &'static [&'static str] = &["shard"];
+
+        fn properties(&self, kinds: &gdl::PropertyKinds) -> gdl::Result<()> {
+            kinds.register(&gdl::PropertyKind::<u32>::new("shard"))
+        }
+
+        fn choose(
+            &self,
+            _: PoolRequest<'_, gdl::Encoded>,
+            _: &[Pool],
+        ) -> Result<PoolChoice, NoPool> {
+            Err(NoPool::new())
+        }
+    }
+
+    let mut spec = spec("needs_shard");
+    spec.graph.properties.push(gdl_model::PropertyInfo {
+        kind: "shard".into(),
+        ty: TypeInfo::new("u32", true, Default::default()),
+        providers: Vec::new(),
+        needs: Vec::new(),
+    });
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("layout");
+    let problems = gdl_model::property_supply(
+        &spec.graph,
+        &layout,
+        &[gdl_model::PropertyConsumer {
+            consumer: "pool policy `needs_shard`".into(),
+            kind: "shard".into(),
+            class: "model".into(),
+            segment: None,
+        }],
+    );
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("no entry segment"), "{problems:?}");
+
+    let directory = Resolving::new();
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let mut policies = PoolPolicies::new();
+    policies.add("needs_shard", NeedsShard).expect("policy");
+    let config = chooser_settings(&global, policies);
+    gdl_runtime::declare_properties(
+        &spec.graph,
+        &spec.placement,
+        "a",
+        &[gdl::PropertyType::of::<u32>("shard")],
+        &[],
+        &config.runtime.properties,
+        &config.runtime.followed,
+    )
+    .expect("declared types");
+    let process = gdl_runtime::Process::start(&config).await.expect("process");
+    let launched = tokio::time::timeout(
+        WAIT,
+        config.launch(&process, "a", SEGMENTS, &spec, async { Ok(()) }),
+    )
+    .await
+    .expect("launch returns within the bound");
+    let accepted = launched.is_ok();
+    let refused = launched.as_ref().err().map(ToString::to_string);
+    drop(launched);
+    global.shutdown().await.expect("hub shuts down");
+    assert!(
+        !accepted,
+        "the chooser launches with NEEDS = [shard], although model has neither a provider nor pools.model.provides"
+    );
+    let refused = refused.unwrap_or_default();
+    assert!(
+        refused.contains("pool policy `needs_shard` needs property `shard` from class `model`"),
+        "{refused}"
+    );
+}
+
 /// What the frontend sends into the model class: the request, and the
 /// hint a router reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]

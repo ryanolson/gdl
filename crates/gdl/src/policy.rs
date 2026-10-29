@@ -698,6 +698,9 @@ pub trait ErasedPolicy: Send + Sync + 'static {
 
     /// Register the property kinds it reads.
     fn properties(&self, kinds: &PropertyKinds) -> Result<()>;
+
+    /// The property kinds it reads: its [`PoolPolicy::NEEDS`].
+    fn needs(&self) -> &'static [&'static str];
 }
 
 /// A typed pool policy behind [`ErasedPolicy`].
@@ -739,6 +742,10 @@ impl<P: PoolPolicy> ErasedPolicy for TypedPolicy<P> {
 
     fn properties(&self, kinds: &PropertyKinds) -> Result<()> {
         self.0.properties(&kinds.limited(P::NEEDS, "the policy"))
+    }
+
+    fn needs(&self) -> &'static [&'static str] {
+        P::NEEDS
     }
 }
 

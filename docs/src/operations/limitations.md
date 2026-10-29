@@ -137,11 +137,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** bump the graph's `schema` when a property type's fields or serde attributes change, as for an edge type. The contract hash then changes, and pools of the two builds do not follow or offer to each other.
 - **Lifts:** a fingerprint of each message's fields in the contract hash, for edge and property types alike.
 
-### A pool policy registered in code is not checked for supply
-- **What:** a policy that a binary registers with `Builder::pool_policy`, not through a spec's `[pool_policy.<name>]` table, is not held to its `NEEDS` by `cargo gdl check`. At start the runtime still refuses a kind it reads that `NEEDS` does not name.
-- **Why:** the check reads `NEEDS` from the source of the crates the spec binds. It cannot see a policy that only code names.
-- **Workaround:** bind the policy in the spec.
-
 ### A graph assembled hop by hop is not held to its declarations
 - **What:** a program that builds a segment's hops with `Deployment::hop` itself, not through the contract's `assemble`, as some of the runtime's tests do, sets and reads any property kind with any type.
 - **Why:** the contract's `assemble` holds the deployment to its `property_types()`. `Deployment::new` and `Deployment::hop` have no types to hold it to.

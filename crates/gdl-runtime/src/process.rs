@@ -389,7 +389,12 @@ impl<H> ProcessConfig<H> {
             // A chooser that cannot run its pool policy refuses before it
             // registers or loads.
             #[cfg(feature = "hub")]
-            crate::dist::check_pool_policies(&layout, segment, &self.runtime.pool_policies)?;
+            crate::dist::check_pool_policies(
+                &deployment.graph,
+                &layout,
+                segment,
+                &self.runtime.pool_policies,
+            )?;
         }
         let barrier = barrier::Barrier::new(&layout, segment, self.pool.is_some());
         let inner: Vec<String> = layout

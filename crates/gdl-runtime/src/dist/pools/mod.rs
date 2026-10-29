@@ -521,15 +521,40 @@ pub(crate) use gdl::__runtime::pool_id;
 /// sends to, a pool policy that `policies` does not register and gdl does
 /// not have. Nothing for a segment that sends into no other class.
 pub(crate) fn check_policies(
+    manifest: &gdl_model::Manifest,
     layout: &Layout,
     segment: &str,
     policies: &gdl::PoolPolicies,
 ) -> gdl::Result<()> {
-    // Only whether each name resolves: the thresholds play no part.
+    // Whether each name resolves, and whether the class supplies what the
+    // policy needs, as `cargo gdl check` holds a bound policy to it: one
+    // registered in code is checked only here. The thresholds play no
+    // part.
+    let mut consumers = Vec::new();
     for class in entries(layout, segment).keys() {
-        policy::of(layout, class, policies, gdl::HomeFirstAt::DEFAULT)?;
+        let (name, policy) = policy::of(layout, class, policies, gdl::HomeFirstAt::DEFAULT)?;
+        consumers.extend(
+            policy
+                .needs()
+                .iter()
+                .map(|kind| gdl_model::PropertyConsumer {
+                    consumer: format!("pool policy `{name}`"),
+                    kind: (*kind).to_string(),
+                    class: class.clone(),
+                    segment: None,
+                }),
+        );
     }
-    Ok(())
+    // The graph's own needs are checked where they are written.
+    let unmet: Vec<String> = gdl_model::property_supply(manifest, layout, &consumers)
+        .into_iter()
+        .filter(|problem| consumers.iter().any(|c| problem.starts_with(&c.consumer)))
+        .collect();
+    if unmet.is_empty() {
+        Ok(())
+    } else {
+        Err(gdl::Error::new(gdl::ErrorKind::Placement, unmet.join("\n")))
+    }
 }
 
 /// What `segment` sends into other classes: for each class one of its
