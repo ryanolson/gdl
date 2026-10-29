@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use std::path::PathBuf;
+
 use super::context::{Context, HostPatch};
 use crate::{Error, Files};
 
@@ -28,46 +30,60 @@ pub(super) fn write(out: &Path, files: &Files, context: &Context) -> Result<(), 
             std::fs::copy(lock, dir.join("Cargo.lock"))
                 .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
         }
-        let mut metadata = resolve(&dir, context.root())?;
-        let carried = context.host_patches(files, segment);
-        // An update can move other patched packages with it, so the pins
-        // are read again after each.
-        let mut tried = BTreeSet::new();
-        while let Some((package, locked, version)) = host_pins(&dir, &carried)?.into_iter().next() {
-            if !tried.insert((package.clone(), version.clone())) {
-                return Err(Error::new(format!(
-                    "`--local`: segment crate {} does not build the host's patch of `{package}` {version}, which the host's lock takes: another crate it builds needs another version",
-                    dir.display()
-                )));
-            }
-            update(&dir, context.root(), &package, &locked, &version)?;
-            metadata = resolve(&dir, context.root())?;
-        }
-        let copies: Vec<String> = metadata["packages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|package| package["name"].as_str().is_some_and(|n| context.is_gdl(n)))
-            .filter_map(|package| {
-                let source = package["source"].as_str()?;
-                Some(format!("`{}` from {source}", package["name"].as_str()?))
-            })
-            .collect();
-        if !copies.is_empty() {
-            let mut why = String::from(
-                "Only a crate from Git or a registry takes gdl from that source, so the segment does not patch it. Take gdl from that source in a crate by path, or take that crate by path",
-            );
-            for unread in context.unread() {
-                why.push_str(&format!(
-                    ". The patch also skipped a crate it could not read: {unread}"
-                ));
-            }
+        let carried = context.host_patches(files, &[PathBuf::from(segment)]);
+        settle(&dir, &carried, context)?;
+    }
+    Ok(())
+}
+
+/// Resolve the lock of the workspace in `dir`, which builds generated
+/// crates that carry the host patches `carried`: move each package the
+/// lock takes in place of a host patch the host uses to the patch's
+/// version, and refuse a second copy of a gdl crate, from a source that no
+/// crate the workspace reaches by path names, which its patch therefore
+/// misses.
+pub(crate) fn settle(dir: &Path, carried: &[HostPatch], context: &Context) -> Result<(), Error> {
+    let prefix = context.prefix();
+    let cwd = context.cwd();
+    let mut metadata = resolve(dir, cwd, prefix)?;
+    // An update can move other patched packages with it, so the pins
+    // are read again after each.
+    let mut tried = BTreeSet::new();
+    while let Some((package, locked, version)) = host_pins(dir, carried, prefix)?.into_iter().next()
+    {
+        if !tried.insert((package.clone(), version.clone())) {
             return Err(Error::new(format!(
-                "`--local`: segment crate {} would build a second copy of gdl: {}. {why}",
-                dir.display(),
-                copies.join(", ")
+                "{prefix}: segment crate {} does not build the host's patch of `{package}` {version}, which the host's lock takes: another crate it builds needs another version",
+                dir.display()
             )));
         }
+        update(dir, cwd, &package, &locked, &version, prefix)?;
+        metadata = resolve(dir, cwd, prefix)?;
+    }
+    let copies: Vec<String> = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|package| package["name"].as_str().is_some_and(|n| context.is_gdl(n)))
+        .filter_map(|package| {
+            let source = package["source"].as_str()?;
+            Some(format!("`{}` from {source}", package["name"].as_str()?))
+        })
+        .collect();
+    if !copies.is_empty() {
+        let mut why = String::from(
+            "Only a crate from Git or a registry takes gdl from that source, so the segment does not patch it. Take gdl from that source in a crate by path, or take that crate by path",
+        );
+        for unread in context.unread() {
+            why.push_str(&format!(
+                ". The patch also skipped a crate it could not read: {unread}"
+            ));
+        }
+        return Err(Error::new(format!(
+            "{prefix}: segment crate {} would build a second copy of gdl: {}. {why}",
+            dir.display(),
+            copies.join(", ")
+        )));
     }
     Ok(())
 }
@@ -79,18 +95,22 @@ pub(super) fn write(out: &Path, files: &Files, context: &Context) -> Result<(), 
 /// package at a version the patch does not give, and Cargo then keeps that
 /// version and leaves the patch unused. A patch of a package the segment
 /// does not build, such as the host's dev-dependency, is none.
-fn host_pins(dir: &Path, carried: &[HostPatch]) -> Result<Vec<(String, String, String)>, Error> {
+fn host_pins(
+    dir: &Path,
+    carried: &[HostPatch],
+    prefix: &str,
+) -> Result<Vec<(String, String, String)>, Error> {
     let lock = dir.join("Cargo.lock");
-    let segment = unused(&lock)?;
+    let segment = unused(&lock, prefix)?;
     let mut pins = Vec::new();
     for (package, version) in segment {
-        let Some(locked) = locked_in_place(&lock, &package, &version)? else {
+        let Some(locked) = locked_in_place(&lock, &package, &version, prefix)? else {
             continue;
         };
         let host = carried
             .iter()
             .filter(|patch| patch.package == package)
-            .map(|patch| unused(&patch.workspace.join("Cargo.lock")))
+            .map(|patch| unused(&patch.workspace.join("Cargo.lock"), prefix))
             .collect::<Result<Vec<_>, _>>()?;
         // A host whose lock leaves the patch unused builds without it too.
         let used = host
@@ -106,12 +126,17 @@ fn host_pins(dir: &Path, carried: &[HostPatch]) -> Result<Vec<(String, String, S
 /// The version of `package` that the lock file `lock` takes from a source
 /// in place of the patch at `version`: the one Cargo takes as compatible,
 /// with the same leftmost nonzero part. None when it takes none.
-fn locked_in_place(lock: &Path, package: &str, version: &str) -> Result<Option<String>, Error> {
+fn locked_in_place(
+    lock: &Path,
+    package: &str,
+    version: &str,
+    prefix: &str,
+) -> Result<Option<String>, Error> {
     let text = std::fs::read_to_string(lock)
-        .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
+        .map_err(|e| Error::new(format!("{prefix}: {}: {e}", lock.display())))?;
     let lock: toml::Table = text
         .parse()
-        .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
+        .map_err(|e| Error::new(format!("{prefix}: {}: {e}", lock.display())))?;
     let packages = lock.get("package").and_then(toml::Value::as_array);
     Ok(packages
         .into_iter()
@@ -148,13 +173,13 @@ fn compatible(a: &str, b: &str) -> bool {
 
 /// The `[[patch.unused]]` entries of the lock file `lock`, by package and
 /// version: none when there is no lock.
-fn unused(lock: &Path) -> Result<Vec<(String, String)>, Error> {
+fn unused(lock: &Path, prefix: &str) -> Result<Vec<(String, String)>, Error> {
     let Ok(text) = std::fs::read_to_string(lock) else {
         return Ok(Vec::new());
     };
     let lock: toml::Table = text
         .parse()
-        .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
+        .map_err(|e| Error::new(format!("{prefix}: {}: {e}", lock.display())))?;
     let entries = lock
         .get("patch")
         .and_then(|patch| patch.get("unused"))
@@ -179,6 +204,7 @@ fn update(
     package: &str,
     locked: &str,
     version: &str,
+    prefix: &str,
 ) -> Result<(), Error> {
     let spec = format!("{package}@{locked}");
     let output =
@@ -194,10 +220,10 @@ fn update(
             ])
             .arg(dir.join("Cargo.toml"))
             .output()
-            .map_err(|e| Error::new(format!("`--local`: running cargo update: {e}")))?;
+            .map_err(|e| Error::new(format!("{prefix}: running cargo update: {e}")))?;
     if !output.status.success() {
         return Err(Error::new(format!(
-            "`--local`: segment crate {} does not build the host's patch of `{package}` {version}, which the host's lock takes, and moving its lock to it failed: {}",
+            "{prefix}: segment crate {} does not build the host's patch of `{package}` {version}, which the host's lock takes, and moving its lock to it failed: {}",
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -208,17 +234,17 @@ fn update(
 /// `cargo metadata` of the crate in `dir`, which resolves it and writes
 /// its lock. It runs in the context's root, `root`, as the image build
 /// does, so that both read the same Cargo configuration.
-fn resolve(dir: &Path, root: &Path) -> Result<serde_json::Value, Error> {
+fn resolve(dir: &Path, root: &Path, prefix: &str) -> Result<serde_json::Value, Error> {
     let output =
         std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(root)
             .args(["metadata", "--format-version", "1", "--manifest-path"])
             .arg(dir.join("Cargo.toml"))
             .output()
-            .map_err(|e| Error::new(format!("`--local`: running cargo metadata: {e}")))?;
+            .map_err(|e| Error::new(format!("{prefix}: running cargo metadata: {e}")))?;
     if !output.status.success() {
         return Err(Error::new(format!(
-            "`--local`: resolving {} to write its lock: {}",
+            "{prefix}: resolving {} to write its lock: {}",
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));

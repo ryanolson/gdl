@@ -5,6 +5,7 @@
 //! cargo gdl catalog <dir>
 //! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+//! cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
@@ -25,7 +26,12 @@
 //! graph file resolves to. `generate` writes one crate per segment, and the
 //! contract crate of a graph file, into `--out`, each layout's segments in
 //! a directory of their own when the spec has several; with `--check` it writes
-//! nothing and fails if the files there differ. `check` checks the spec
+//! nothing and fails if the files there differ. `build` generates the same
+//! crates as one workspace in `<target-dir>/gdl/<graph>/<spec stem>`,
+//! never in the source tree, builds every segment, copies each binary to
+//! `--out`, else to `bin/<profile>` beside that workspace, and prints each
+//! copy's path. It writes only the files whose text changed, so Cargo
+//! rebuilds only what a change reaches. `check` checks the spec
 //! as `generate` does, and with `--fleet` the fleet file against it,
 //! writing nothing; it prints every problem in both files, each with its
 //! file, table, and key, and fails if there is any. `diagram` prints the
@@ -49,6 +55,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl catalog <dir>
        cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+       cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
@@ -74,6 +81,10 @@ enum Command {
     Generate {
         out: PathBuf,
         check: bool,
+    },
+    Build {
+        out: Option<PathBuf>,
+        release: bool,
     },
     Diagram(Format),
     Export {
@@ -101,6 +112,7 @@ fn args() -> Result<Args, String> {
         (None, None, None, None, None, None);
     let mut fleet = None;
     let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
+    let mut release = false;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -118,6 +130,7 @@ fn args() -> Result<Args, String> {
             Some("--verify") => verify = true,
             Some("--probe") => probe = true,
             Some("--local") => local = true,
+            Some("--release") => release = true,
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
             }
@@ -137,6 +150,10 @@ fn args() -> Result<Args, String> {
         "generate" => Command::Generate {
             out: out.ok_or_else(|| USAGE.to_string())?,
             check,
+        },
+        "build" => Command::Build {
+            out: out.take(),
+            release: std::mem::take(&mut release),
         },
         "compose" => Command::Compose {
             out: out.ok_or_else(|| USAGE.to_string())?,
@@ -161,8 +178,9 @@ fn args() -> Result<Args, String> {
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
-    // `--fleet` and `--local` are for the commands that took them above.
-    if (needs_spec && spec.is_none()) || fleet.is_some() || local {
+    // `--fleet`, `--local`, and `--release` are for the commands that took
+    // them above.
+    if (needs_spec && spec.is_none()) || fleet.is_some() || local || release {
         return Err(USAGE.to_string());
     }
     Ok(Args {
@@ -292,6 +310,17 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let target = target(spec.dir());
             let bytes = gdl_gen::export(&spec, &target, gdl_gen::Offers::Read).map_err(located)?;
             std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+        }
+        Command::Build { out, release } => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            let how = gdl_gen::Build {
+                out: out.clone(),
+                release: *release,
+            };
+            for binary in gdl_gen::build(&spec, &target, &how).map_err(located)? {
+                println!("{}", binary.display());
+            }
         }
         Command::Generate { out, check } => {
             let spec = spec()?;

@@ -1,6 +1,6 @@
 # Split, generate, and draw
 
-This guide takes a graph from a spec to checked, generated segment crates. [Specs, segments, and layouts](../concepts/placement.md) explains what a placement means. The generator is the `cargo-gdl` binary of `crates/gdl-gen`. Install it with `cargo install --path crates/gdl-gen`, or run it from a checkout with `cargo run -p gdl-gen --`.
+This guide takes a graph from a spec to checked, generated segment crates and built segment binaries. [Specs, segments, and layouts](../concepts/placement.md) explains what a placement means. The generator is the `cargo-gdl` binary of `crates/gdl-gen`. Install it with `cargo install --path crates/gdl-gen`, or run it from a checkout with `cargo run -p gdl-gen --`.
 
 ## The commands
 
@@ -12,6 +12,7 @@ This guide takes a graph from a spec to checked, generated segment crates. [Spec
 | `catalog <dir>` | Prints a working catalogue's index. | stdout |
 | `resolve --spec <gdl.toml>` | Checks a graph file's names and prints the type each one resolves to. | stdout |
 | `generate --spec <gdl.toml> --out <dir> [--check]` | Writes the contract crate of a graph file and one crate per segment. With `--check` it writes nothing and fails on drift. | `--out` |
+| `build --spec <gdl.toml> [--out <dir>] [--release]` | Generates the same crates as one workspace in the target directory, builds every segment, and copies each binary out. Prints each binary's path. | the target directory, and `--out` |
 | `check --spec <gdl.toml> [--fleet <fleet.toml>]` | Checks the spec as `generate` does, and a fleet file against it. Prints every problem. | nothing |
 | `diagram --spec <gdl.toml> --format dot\|mermaid` | Draws the placed graph. Takes a spec of one layout. | stdout |
 | `export --spec <gdl.toml> --out <file.tar.gz>` | Writes the generated crates as one archive with `build-all.sh`. Takes a spec of one layout. | the archive |
@@ -72,7 +73,31 @@ cargo gdl: 3 problems
 
 Every table refuses a key it does not know. A table of names (a segment in `ready`, a class in `requires`, a node in `[config]` or `[nodes] pin`) refuses a name that is not in the spec. A file that does not parse is one problem, and the other file is still checked. When the spec does not read, `check` judges only what needs no layout in the fleet file and says once that the cells' children were not checked. `generate`, `resolve`, `diagram`, and `export` report the spec's problems the same way.
 
+## Build
+
+```bash
+cargo gdl build --spec examples/chat/gdl.toml
+```
+
+`build` is the short way from a spec to binaries. It generates the contract and segment crates into `<target-dir>/gdl/<graph>/<spec stem>/workspace/`, as one Cargo workspace, and runs one `cargo build` there. It never writes the source tree. It copies each segment's binary to `--out`, else to `bin/<profile>/` beside that workspace, and prints one path per line:
+
+```text
+/home/me/dynamo-gdl/examples/chat/target/gdl/chat/gdl/bin/debug/chat-engine
+/home/me/dynamo-gdl/examples/chat/target/gdl/chat/gdl/bin/debug/chat-front
+/home/me/dynamo-gdl/examples/chat/target/gdl/chat/gdl/bin/debug/chat-post
+```
+
+- Run it again after any change. It renders every file, but writes only the files whose text changed, so Cargo rebuilds only the crates a change reaches. A run with no change compiles nothing and copies nothing.
+- A segment the spec no longer has is removed, with its binary. The generator removes only files it wrote. A file of yours in the workspace is kept, or the run fails and names it, as for `generate`. In `--out`, it writes over or removes only the binaries it copied there.
+- `--release` builds with one codegen unit and fat LTO, the profile of the `export` and `compose` images.
+- With several layouts, each layout's crates go in `<layout>/`, as for `generate`, and every segment of every layout is built.
+- Cargo runs in the spec's directory, so the `.cargo/config.toml` there applies. `CARGO_NET_OFFLINE` and the other Cargo variables apply too. The build uses the Cargo and Rust that run `cargo gdl`, as every command does. Run it in your project, so that rustup picks the project's toolchain.
+
+[Code generation](../concepts/generation.md#the-build-workspace) says how the workspace takes your crates, patches, and lock.
+
 ## Generate
+
+Use `generate` when you want the crates in your own tree, to read them, or to build them in your own workspace.
 
 ```bash
 cargo gdl generate --spec examples/chat/gdl.toml --out examples/chat/segments

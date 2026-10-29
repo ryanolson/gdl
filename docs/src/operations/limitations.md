@@ -300,6 +300,20 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **A left-out node behind a parameter alias:** when the reader leaves out a node's alias, it follows aliases to the generic type to learn that it is a node, without binding their arguments. An alias whose body is its own parameter (`type Selected<N> = N`, then `Selected<Relay<Arc<Token>>>`) hides the node, so the left-out entry keeps its module path, and `--verify` reports the build's root registration as a difference. Name the node's type directly in the alias.
 - **Earlier `gdl-message` pin:** for a crate that exports a message and pins a `gdl-message` whose export entries lack `wire` and `encoding`, `--verify` stops at "reading the crate's registrations" with a missing field `wire`. The program `--verify` builds links the crate's own `gdl-message`, and a default for either field would show as a difference, not a match. Run `--verify` with a `cargo-gdl` of the same revision as the crate's `gdl-message`, or move the pin.
 
+### `cargo gdl build` unifies features across segments
+- **What:** `cargo gdl build` builds every segment in one Cargo workspace, so a dependency that two segments share gets the features both ask for. A segment whose node crate relies on a feature that only another segment turns on builds there, and fails in its `export` or `compose` image, which builds each segment alone. The runtime's `json-lines` feature, which only the source's segment asks for, reaches every segment.
+- **Why:** one build compiles each shared dependency once and links the segments in parallel. A build per segment links them one after another.
+- **Workaround:** name each feature a node crate uses in that crate's own `Cargo.toml`. `cargo gdl export` builds each segment alone. See [Code generation](../concepts/generation.md#the-build-workspace).
+
+### Builds in two target directories that copy to one `--out` are not ordered
+- **What:** one `cargo gdl build` runs at a time in a target directory. Two builds with different target directories, run at once with the same `--out`, can both copy a binary of one name there. The last copy wins, and each build records the binary as its own.
+- **Why:** the lock is in the target directory, where Cargo writes the binaries. A lock in `--out` would add a file to a directory of the user's.
+- **Workaround:** give each target directory its own `--out`, or run the builds one after another.
+
+### Reading a crate's offers can write its workspace's lock
+- **What:** every command that reads the spec's crates from source (`generate`, `build`, `check`, `resolve`, `compose`) runs `cargo metadata` in each crate's workspace. When that workspace's `Cargo.lock` is missing or out of date, Cargo writes it, as `cargo build` there would. This is the one write outside the target directory.
+- **Why:** the reader needs the resolved dependencies, and stable Cargo cannot resolve to another lock file. A `--locked` read would fail the usual loop of editing a node's `Cargo.toml` and building.
+
 ### `--probe` costs a build, and only the catalogue uses it
 - **What:** `cargo gdl extract --probe` builds the crate's registrations, as `--verify` does. For a small protocols crate that depends on `gdl-message` and serde, a cold probe took 4.6 s and 214 MB of target directory, a probe with nothing to rebuild 0.14 s, and a read alone 0.07 s (a 20-core Arm host under other load, debug `cargo-gdl`). A crate with more dependencies costs more. A published version is probed once. A crate from a directory is built at each `--probe`, and Cargo rebuilds only what changed. The probe builds default features only. `cargo gdl generate` and `check` read each crate from source, so they use the reader's reading, not the probe's.
 - **Why:** a probe runs the crate's build scripts and proc macros, and needs a toolchain. So it is opt-in, and never the default. A spec names crates, not catalogue entries.

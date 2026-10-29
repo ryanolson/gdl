@@ -128,8 +128,8 @@ use crate::{
 };
 
 mod cells;
-mod context;
-mod locks;
+pub(crate) mod context;
+pub(crate) mod locks;
 mod variables;
 
 /// Where a bundle's images take the crates they build.
@@ -321,7 +321,8 @@ impl Bundle {
             Some(runtime) => Some(context::Context::find(
                 &crate::dump::absolute(out)?,
                 &files,
-                runtime,
+                Some(runtime),
+                context::Mode::Image,
             )?),
             None => None,
         };
@@ -454,7 +455,8 @@ impl Bundle {
         // or move a Git dependency to its newest commit.
         let locked = match &self.context {
             Some(context) => {
-                let patch = context.patch(&self.files, &crate_dir)?;
+                let patch =
+                    context.patch(&self.files, std::slice::from_ref(&crate_dir), &crate_dir)?;
                 if let Some(manifest) = self.files.get_mut(&crate_dir.join("Cargo.toml")) {
                     manifest.push_str(&patch);
                     // The host's Rust may be newer than the image's: Cargo

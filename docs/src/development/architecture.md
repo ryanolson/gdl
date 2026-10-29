@@ -11,7 +11,7 @@ The root workspace has thirteen crates. Each example is its own workspace, outsi
 | `gdl-message` | `gdl-model` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue |
 | `gdl-macros` | `gdl-model`, `gdl-syntax` | `graph!`, `derive(Message)`, `derive(Node)`, `derive(Config)`, `derive(Metrics)`, `derive(Endpoints)`, and `#[export]` |
 | `gdl-extract` | `gdl-model`, `gdl-syntax` | The source reader and the working catalogue |
-| `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
+| `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
 | `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a cell whose hub is gone (`CellCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
 | `gdl-cells-dynamodb` | `gdl-cells`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` cell directory backend, in DynamoDB global tables. The only crate that links the AWS SDK, and nothing in the workspace depends on it. Its tests against DynamoDB Local run outside the default suite (`scripts/dynamodb-local.sh`) |

@@ -33,6 +33,7 @@
 //! generating it would, writing nothing, with the crates' offers read from
 //! source or given by a loaded catalogue.
 
+mod build;
 mod contract;
 mod deployment;
 mod dump;
@@ -56,6 +57,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use build::{Build, build};
 pub use deployment::{ComposeBundle, Sources, compose, compose_bundle, compose_files};
 use emit::MARKER;
 pub use export::export;

@@ -12,15 +12,20 @@ use crate::dump::toml_string;
 use crate::paths::{display, normalize, relative};
 use crate::{Error, Files, emit};
 
-/// Where a local bundle's images build from.
+/// Where a local bundle's images build from, or where `cargo gdl build`
+/// builds: the crates the generated manifests reach by path, their
+/// workspaces' patches, and gdl's workspace.
 #[derive(Clone)]
-pub(super) struct Context {
+pub(crate) struct Context {
+    /// What the context is for.
+    mode: Mode,
     /// The context's root, absolute.
     root: PathBuf,
     /// The bundle, from the root.
     bundle: PathBuf,
-    /// The hub's crate, from the root.
-    hub: PathBuf,
+    /// The hub's crate, from the root, when gdl comes from `[gdl] path`
+    /// and its workspace has one.
+    hub: Option<PathBuf>,
     /// The lock file of the gdl workspace, absolute, when it has one.
     lock: Option<PathBuf>,
     /// The directory of each package of the gdl workspace, absolute, by
@@ -38,6 +43,29 @@ pub(super) struct Context {
     /// with the reason. The image build can still build such a crate: a
     /// dependency's own dev-dependencies, for one, need not exist.
     unread: Vec<String>,
+}
+
+/// What a [`Context`] is for.
+#[derive(Clone, Debug)]
+pub(crate) enum Mode {
+    /// The images of a bundle of local sources. Docker copies the
+    /// context's root into each image, so the root must be a directory
+    /// that holds every crate, and the bundle's files name paths from it.
+    Image,
+    /// `cargo gdl build`, which builds where the crates are: there is no
+    /// image context to refuse, and Cargo runs in `cwd`, the spec's
+    /// directory, so that the configuration there applies.
+    Build { cwd: PathBuf },
+}
+
+impl Mode {
+    /// How an error names the command.
+    fn prefix(&self) -> &'static str {
+        match self {
+            Self::Image => "`--local`",
+            Self::Build { .. } => "`build`",
+        }
+    }
 }
 
 /// An entry of a host workspace's `[patch]` tables: Cargo applies it to
@@ -60,9 +88,9 @@ type GdlPatches = BTreeMap<String, BTreeMap<String, PathBuf>>;
 
 /// A host entry a segment carries: the package it patches, and the root
 /// of the workspace whose lock says which copy the host builds.
-pub(super) struct HostPatch {
-    pub(super) package: String,
-    pub(super) workspace: PathBuf,
+pub(crate) struct HostPatch {
+    pub(crate) package: String,
+    pub(crate) workspace: PathBuf,
 }
 
 /// A dependency of a crate the bundle reaches by path, as `cargo metadata`
@@ -80,12 +108,30 @@ struct Dependency {
 impl Context {
     /// The context of the bundle in `out` (absolute), whose generated
     /// `files` name their dependencies relative to themselves, and whose
-    /// runtime is the `gdl-runtime` crate in `runtime`. A crate named by
-    /// path in a crate named by path is seen only through its workspace,
-    /// when one of these directories holds it.
-    pub(super) fn find(out: &Path, files: &Files, runtime: &Path) -> Result<Self, Error> {
-        let gdl = gdl_workspace(runtime)?;
-        let lock = Some(gdl.root.join("Cargo.lock")).filter(|lock| lock.exists());
+    /// runtime is the `gdl-runtime` crate in `runtime`, when gdl comes by
+    /// path. A crate named by path in a crate named by path is seen only
+    /// through its workspace, when one of these directories holds it.
+    pub(crate) fn find(
+        out: &Path,
+        files: &Files,
+        runtime: Option<&Path>,
+        mode: Mode,
+    ) -> Result<Self, Error> {
+        let prefix = mode.prefix();
+        // `[gdl] path` is relative to where the generator runs, and Cargo
+        // runs elsewhere.
+        let gdl = match runtime {
+            Some(runtime) => Some(gdl_workspace(&crate::dump::absolute(runtime)?, &mode)?),
+            None => None,
+        };
+        let lock = gdl
+            .as_ref()
+            .map(|gdl| gdl.root.join("Cargo.lock"))
+            .filter(|lock| lock.exists());
+        let members = gdl
+            .as_ref()
+            .map(|gdl| gdl.members.clone())
+            .unwrap_or_default();
         let mut by_path = BTreeSet::new();
         for (path, text) in files {
             if path.file_name().is_none_or(|name| name != "Cargo.toml") {
@@ -94,7 +140,11 @@ impl Context {
             let krate = normalize(&out.join(path.parent().unwrap_or(Path::new(""))));
             by_path.extend(path_dependencies(&krate, text));
         }
-        let mut needed = BTreeSet::from([out.to_path_buf(), gdl.hub.clone(), gdl.root.clone()]);
+        let mut needed = BTreeSet::from([out.to_path_buf()]);
+        if let Some(gdl) = &gdl {
+            needed.insert(gdl.root.clone());
+            needed.extend(gdl.hub.clone());
+        }
         needed.extend(by_path.iter().cloned());
         let workspaces: Vec<PathBuf> = needed.iter().filter_map(|dir| workspace_of(dir)).collect();
         needed.extend(workspaces);
@@ -104,22 +154,30 @@ impl Context {
             .reduce(common)
             .unwrap_or(out)
             .to_path_buf();
-        if root
-            .components()
-            .all(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
-        {
+        let image = matches!(mode, Mode::Image);
+        let only_root = |root: &Path| {
+            root.components()
+                .all(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
+        };
+        if image && only_root(&root) {
             return Err(shared_only_the_root(&root, &needed));
         }
+        let cwd = |root: &Path| match &mode {
+            Mode::Image => root.to_path_buf(),
+            Mode::Build { cwd } => cwd.clone(),
+        };
         let Walked {
             mut crates,
             mut patches,
             mut unread,
-        } = path_crates(&by_path, out, &gdl.members, &root);
+        } = path_crates(&by_path, out, &members, &cwd(&root), prefix);
         // The segments take gdl's crates by path, from its workspace.
-        let own = workspace_patches(&gdl.root);
-        if !own.is_empty() {
-            for dir in gdl.members.values() {
-                patches.insert(dir.clone(), own.clone());
+        if let Some(gdl) = &gdl {
+            let own = workspace_patches(&gdl.root);
+            if !own.is_empty() {
+                for dir in gdl.members.values() {
+                    patches.insert(dir.clone(), own.clone());
+                }
             }
         }
         // A crate that a host workspace patches in by path is built as any
@@ -130,7 +188,7 @@ impl Context {
         let taken: BTreeSet<(String, &str)> = reachable(&by_path, &crates)
             .into_iter()
             .flat_map(|dir| crates.get(dir).into_iter().flatten())
-            .filter(|dependency| gdl.members.contains_key(&dependency.name))
+            .filter(|dependency| members.contains_key(&dependency.name))
             .filter_map(|dependency| {
                 let source = dependency.source.as_deref()?;
                 Some((source_id(&patch_key(source)), dependency.name.as_str()))
@@ -140,7 +198,7 @@ impl Context {
             .iter()
             .flat_map(|dir| patches.get(dir).into_iter().flatten())
             // The segment never carries a host's patch of gdl ([`tables`]).
-            .filter(|entry| !gdl.members.contains_key(entry.package()))
+            .filter(|entry| !members.contains_key(entry.package()))
             .filter(|entry| !taken.contains(&(source_id(&entry.key), entry.name.as_str())))
             .filter_map(Patch::path)
             .collect();
@@ -171,38 +229,54 @@ impl Context {
             // Cargo applies a patch only from the workspace it builds, and
             // the host builds the patched crate in the patching workspace:
             // the patched crate's own workspace patches nothing.
-            let mut more = path_crates(&unwalked, out, &gdl.members, &root);
+            let mut more = path_crates(&unwalked, out, &members, &cwd(&root), prefix);
             for (dir, dependencies) in more.crates {
                 crates.entry(dir).or_insert(dependencies);
             }
             unread.append(&mut more.unread);
         }
-        if root
-            .components()
-            .all(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
-        {
+        if image && only_root(&root) {
             return Err(shared_only_the_root(&root, &needed));
         }
         let from = |path: &Path| relative(&root, path);
         let context = Self {
             bundle: from(out),
-            hub: from(&gdl.hub),
+            hub: gdl.as_ref().and_then(|gdl| gdl.hub.as_deref()).map(from),
             lock,
-            members: gdl.members,
-            rust_version: gdl.rust_version,
+            members,
+            rust_version: gdl.and_then(|gdl| gdl.rust_version),
             crates,
             patches,
             unread,
             root,
+            mode,
         };
-        writable("the bundle's path", &context.bundle)?;
-        writable("the hub's crate's path", &context.hub)?;
+        if image {
+            writable("the bundle's path", &context.bundle)?;
+            if let Some(hub) = &context.hub {
+                writable("the hub's crate's path", hub)?;
+            }
+        }
         Ok(context)
     }
 
     /// The context's root, absolute.
     pub(super) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where Cargo runs: the image build's root, or the spec's directory
+    /// for `cargo gdl build`.
+    pub(crate) fn cwd(&self) -> &Path {
+        match &self.mode {
+            Mode::Image => &self.root,
+            Mode::Build { cwd } => cwd,
+        }
+    }
+
+    /// How an error names the command.
+    pub(crate) fn prefix(&self) -> &'static str {
+        self.mode.prefix()
     }
 
     /// The context from the bundle, as `compose.yaml` names it.
@@ -217,13 +291,14 @@ impl Context {
         display(&self.bundle.join(path))
     }
 
-    /// The hub's crate, from the context's root.
+    /// The hub's crate, from the context's root. An image context always
+    /// has one: [`gdl_workspace`] refuses a gdl workspace without it.
     pub(super) fn hub(&self) -> String {
-        display(&self.hub)
+        self.hub.as_deref().map(display).unwrap_or_default()
     }
 
     /// The gdl workspace's lock file, absolute.
-    pub(super) fn lock(&self) -> Option<&Path> {
+    pub(crate) fn lock(&self) -> Option<&Path> {
         self.lock.as_deref()
     }
 
@@ -244,8 +319,11 @@ impl Context {
         self.members.contains_key(name)
     }
 
-    /// The `[patch]` tables of the segment crate in `krate`, a path in the
-    /// bundle, whose manifest and every other generated one `files` holds.
+    /// The `[patch]` tables of the workspace in `at`, a path in the bundle,
+    /// that builds the generated crates `krates`, paths in the bundle,
+    /// whose manifests and every other generated one `files` holds: a
+    /// segment crate of a bundle, which is its own workspace, or every
+    /// crate `cargo gdl build` generates, from its workspace's root.
     ///
     /// The segment is a workspace of its own, so its patch applies to every
     /// crate it builds, and Cargo reads no other workspace's. It carries
@@ -260,17 +338,28 @@ impl Context {
     /// that patch one name of one source differently are refused: the
     /// segment cannot build what both build. Empty when there is nothing
     /// to patch.
-    pub(super) fn patch(&self, files: &Files, krate: &Path) -> Result<String, Error> {
-        let (gdl, host) = self.reached(files, krate);
-        let segment = normalize(&self.root.join(&self.bundle).join(krate));
-        tables(&segment, &gdl, &host, |name| self.is_gdl(name))
+    pub(crate) fn patch(
+        &self,
+        files: &Files,
+        krates: &[PathBuf],
+        at: &Path,
+    ) -> Result<String, Error> {
+        let (gdl, host) = self.reached(files, krates);
+        let segment = normalize(&self.root.join(&self.bundle).join(at));
+        tables(
+            &segment,
+            &gdl,
+            &host,
+            |name| self.is_gdl(name),
+            self.prefix(),
+        )
     }
 
-    /// The host entries that the segment crate in `krate` carries, with
+    /// The host entries that the generated crates `krates` carry, with
     /// the workspace of each, as [`Self::patch`] writes them, before two
     /// spellings of one entry merge.
-    pub(super) fn host_patches(&self, files: &Files, krate: &Path) -> Vec<HostPatch> {
-        let (gdl, host) = self.reached(files, krate);
+    pub(crate) fn host_patches(&self, files: &Files, krates: &[PathBuf]) -> Vec<HostPatch> {
+        let (gdl, host) = self.reached(files, krates);
         host.into_iter()
             .filter(|entry| {
                 let named = gdl.iter().any(|(key, names)| {
@@ -285,15 +374,17 @@ impl Context {
             .collect()
     }
 
-    /// The gdl packages that the segment crate in `krate` patches, by
-    /// source, with their directories, and the host entries it carries.
-    fn reached(&self, files: &Files, krate: &Path) -> (GdlPatches, Vec<&Patch>) {
+    /// The gdl packages that the generated crates `krates` patch, by
+    /// source, with their directories, and the host entries they carry.
+    fn reached(&self, files: &Files, krates: &[PathBuf]) -> (GdlPatches, Vec<&Patch>) {
         let out = self.root.join(&self.bundle);
-        let segment = normalize(&out.join(krate));
         let mut gdl: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
         let mut host: Vec<&Patch> = Vec::new();
         let mut seen = BTreeSet::new();
-        let mut queue = vec![segment.clone()];
+        let mut queue: Vec<PathBuf> = krates
+            .iter()
+            .map(|krate| normalize(&out.join(krate)))
+            .collect();
         while let Some(dir) = queue.pop() {
             if !seen.insert(dir.clone()) {
                 continue;
@@ -434,30 +525,37 @@ struct Workspace {
     /// Its root, absolute.
     root: PathBuf,
     /// Its `gdl-hub` crate, absolute: the hub is built from the same
-    /// sources as the runtime the segments link.
-    hub: PathBuf,
+    /// sources as the runtime the segments link. Only an image needs it.
+    hub: Option<PathBuf>,
     /// The directory of each of its packages, absolute, by name.
     members: BTreeMap<String, PathBuf>,
     /// `gdl-runtime`'s `rust-version`.
     rust_version: Option<String>,
 }
 
-/// The workspace that holds the `gdl-runtime` crate in `runtime`.
-fn gdl_workspace(runtime: &Path) -> Result<Workspace, Error> {
-    let metadata = metadata(runtime, runtime)?;
+/// The workspace that holds the `gdl-runtime` crate in `runtime`. An
+/// image context refuses one without a `gdl-hub` crate.
+fn gdl_workspace(runtime: &Path, mode: &Mode) -> Result<Workspace, Error> {
+    let prefix = mode.prefix();
+    let cwd = match mode {
+        Mode::Image => runtime,
+        Mode::Build { cwd } => cwd.as_path(),
+    };
+    let metadata = metadata(runtime, cwd, prefix)?;
     let root = metadata["workspace_root"]
         .as_str()
         .map(|root| normalize(Path::new(root)))
-        .ok_or_else(|| Error::new("`--local`: cargo metadata names no workspace root"))?;
+        .ok_or_else(|| Error::new(format!("{prefix}: cargo metadata names no workspace root")))?;
     let members: BTreeMap<String, PathBuf> = packages(&metadata)
         .map(|(name, dir, _)| (name.to_string(), dir))
         .collect();
-    let hub = members.get("gdl-hub").cloned().ok_or_else(|| {
-        Error::new(format!(
+    let hub = members.get("gdl-hub").cloned();
+    if hub.is_none() && matches!(mode, Mode::Image) {
+        return Err(Error::new(format!(
             "`--local`: the workspace of [gdl] path, {}, has no `gdl-hub` crate to build the hub from",
             root.display()
-        ))
-    })?;
+        )));
+    }
     let rust_version = metadata["packages"]
         .as_array()
         .into_iter()
@@ -485,6 +583,7 @@ fn path_crates(
     out: &Path,
     gdl: &BTreeMap<String, PathBuf>,
     root: &Path,
+    prefix: &str,
 ) -> Walked {
     let mut crates = BTreeMap::new();
     let mut patches = BTreeMap::new();
@@ -500,7 +599,7 @@ fn path_crates(
             // The image build reports a crate that is not there.
             continue;
         }
-        let metadata = match metadata(&dir, root) {
+        let metadata = match metadata(&dir, root, prefix) {
             Ok(metadata) => metadata,
             Err(error) => {
                 unread.push(error.to_string());
@@ -614,7 +713,7 @@ fn workspace_patches(workspace: &Path) -> Vec<Patch> {
 
 /// `cargo metadata --no-deps` of the crate in `dir`, run in `cwd`, which
 /// reads its workspace's manifests and resolves nothing.
-fn metadata(dir: &Path, cwd: &Path) -> Result<serde_json::Value, Error> {
+fn metadata(dir: &Path, cwd: &Path, prefix: &str) -> Result<serde_json::Value, Error> {
     let output =
         std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(cwd)
@@ -627,10 +726,10 @@ fn metadata(dir: &Path, cwd: &Path) -> Result<serde_json::Value, Error> {
             ])
             .arg(dir.join("Cargo.toml"))
             .output()
-            .map_err(|e| Error::new(format!("`--local`: running cargo metadata: {e}")))?;
+            .map_err(|e| Error::new(format!("{prefix}: running cargo metadata: {e}")))?;
     if !output.status.success() {
         return Err(Error::new(format!(
-            "`--local`: cargo metadata for {}: {}",
+            "{prefix}: cargo metadata for {}: {}",
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -688,6 +787,7 @@ fn tables(
     gdl: &GdlPatches,
     host: &[&Patch],
     is_gdl: impl Fn(&str) -> bool,
+    prefix: &str,
 ) -> Result<String, Error> {
     // Each source's table is written as gdl names it, else as the first
     // host that patches it does: two spellings of one source are one.
@@ -708,7 +808,7 @@ fn tables(
         match names.get(entry.name.as_str()) {
             Some(first) if first.value != entry.value => {
                 return Err(Error::new(format!(
-                    "`--local`: segment crate {} builds crates of two workspaces that patch `{}` from {} differently, {} with {} and {} with {}; Cargo reads only the segment's patch, which can give one: patch it alike in both",
+                    "{prefix}: segment crate {} builds crates of two workspaces that patch `{}` from {} differently, {} with {} and {} with {}; Cargo reads only the segment's patch, which can give one: patch it alike in both",
                     display(segment),
                     entry.name,
                     toml_string(&entry.key),
@@ -857,7 +957,7 @@ mod tests {
     /// a segment wrote it before it carried a host's.
     #[test]
     fn without_a_host_patch_the_text_is_gdls_alone() {
-        let text = tables(Path::new(SEGMENT), &gdl(GDL), &[], is_gdl).expect("tables");
+        let text = tables(Path::new(SEGMENT), &gdl(GDL), &[], is_gdl, "`--local`").expect("tables");
         assert_eq!(
             text,
             format!(
@@ -865,7 +965,14 @@ mod tests {
             )
         );
         assert_eq!(
-            tables(Path::new(SEGMENT), &BTreeMap::new(), &[], is_gdl).expect("tables"),
+            tables(
+                Path::new(SEGMENT),
+                &BTreeMap::new(),
+                &[],
+                is_gdl,
+                "`--local`"
+            )
+            .expect("tables"),
             ""
         );
     }
@@ -892,6 +999,7 @@ mod tests {
             &gdl("crates-io"),
             &[&git, &path],
             is_gdl,
+            "`--local`",
         )
         .expect("tables");
         assert_eq!(text.matches("[patch.").count(), 1, "{text}");
@@ -945,6 +1053,7 @@ mod tests {
             &gdl(GDL),
             &[&same, &other, &renamed, &alias, &kept],
             is_gdl,
+            "`--local`",
         )
         .expect("tables");
         assert_eq!(
@@ -982,13 +1091,26 @@ mod tests {
             "pinned",
             "path = \"/work/vendor/pinned\"",
         );
-        let text = tables(Path::new(SEGMENT), &BTreeMap::new(), &[&a, &b], is_gdl).expect("alike");
+        let text = tables(
+            Path::new(SEGMENT),
+            &BTreeMap::new(),
+            &[&a, &b],
+            is_gdl,
+            "`--local`",
+        )
+        .expect("alike");
         assert_eq!(text.matches("pinned = ").count(), 1, "{text}");
 
         let c = entry("/work/c", "crates-io", "pinned", "version = \"=1.2.3\"");
-        let error = tables(Path::new(SEGMENT), &BTreeMap::new(), &[&a, &c], is_gdl)
-            .expect_err("two patches of one name")
-            .to_string();
+        let error = tables(
+            Path::new(SEGMENT),
+            &BTreeMap::new(),
+            &[&a, &c],
+            is_gdl,
+            "`--local`",
+        )
+        .expect_err("two patches of one name")
+        .to_string();
         assert!(error.contains("`pinned`"), "{error}");
         assert!(
             error.contains("/work/a") && error.contains("/work/c"),
@@ -1050,6 +1172,69 @@ mod tests {
         }
     }
 
+    /// `cargo gdl build` builds where the crates are: a target directory
+    /// that shares only `/` with them is no image context to refuse. With
+    /// gdl from Git or a version there is no gdl workspace, and the host's
+    /// patches still apply.
+    #[test]
+    fn a_build_context_may_share_only_the_root_and_needs_no_gdl_path() {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-build-context-")
+            .tempdir()
+            .expect("a workspace");
+        let host = temp.path().canonicalize().expect("the workspace path");
+        std::fs::write(
+            host.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"node\"]\nresolver = \"3\"\n\
+             [patch.crates-io]\ngdl-host-pinned = { path = \"pinned\" }\n",
+        )
+        .expect("the root manifest");
+        let node = host.join("node");
+        std::fs::create_dir_all(node.join("src")).expect("a crate");
+        std::fs::write(node.join("src/lib.rs"), "").expect("a library");
+        std::fs::write(
+            node.join("Cargo.toml"),
+            "[package]\nname = \"node\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("a manifest");
+        // Under the repository, where the target directory is: the two
+        // share only `/` when the system's temporary directory is not
+        // under it.
+        let out = crate::dump::absolute(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gdl-build-context/workspace"),
+        )
+        .expect("the workspace's path");
+        let from = out.join("main");
+        let files = crate::Files::from([(
+            PathBuf::from("main/Cargo.toml"),
+            format!(
+                "[package]\nname = \"segment\"\nversion = \"1.0.0\"\n[dependencies]\nnode = {{ path = {} }}\n",
+                crate::dump::toml_string(&crate::paths::display(&crate::paths::relative(
+                    &from, &node
+                )))
+            ),
+        )]);
+        let shared = out
+            .ancestors()
+            .find(|dir| host.starts_with(dir))
+            .expect("a shared directory");
+        if shared.parent().is_none() {
+            let refused = super::Context::find(&out, &files, None, super::Mode::Image);
+            assert!(refused.is_err(), "an image context of `/`");
+        }
+        let context =
+            super::Context::find(&out, &files, None, super::Mode::Build { cwd: host.clone() })
+                .expect("the context");
+        let patch = context
+            .patch(&files, &[PathBuf::from("main")], Path::new(""))
+            .expect("the patch");
+        assert!(patch.contains("gdl-host-pinned"), "{patch}");
+        assert!(
+            patch.contains("path = \"../"),
+            "written from the root: {patch}"
+        );
+    }
+
     /// The generated manifest takes the runtime by path, so its workspace
     /// patches apply just like those of any other direct path dependency.
     #[test]
@@ -1106,9 +1291,16 @@ mod tests {
              [dependencies]\ngdl-runtime = { path = \"../../gdl-runtime\" }\n"
                 .into(),
         )]);
-        let context = super::Context::find(&root.join("bundle"), &files, &root.join("gdl-runtime"))
-            .expect("the context");
-        let patch = context.patch(&files, Path::new("main")).expect("the patch");
+        let context = super::Context::find(
+            &root.join("bundle"),
+            &files,
+            Some(&root.join("gdl-runtime")),
+            super::Mode::Image,
+        )
+        .expect("the context");
+        let patch = context
+            .patch(&files, &[PathBuf::from("main")], Path::new("main"))
+            .expect("the patch");
         assert!(
             patch.contains("gdl-host-pinned"),
             "the segment loses the runtime workspace's patch: {patch:?}"

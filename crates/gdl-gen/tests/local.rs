@@ -232,6 +232,40 @@ fn a_bundle_that_shares_only_the_root_with_its_crates_is_refused() {
     );
 }
 
+/// A spec given by a relative path names gdl by a path relative to where
+/// the generator runs: the bundle still finds gdl's workspace. Run from the
+/// repository's root, whose depth differs from `crates/gdl-runtime`'s, so
+/// that a path read from the wrong directory names nothing.
+#[test]
+fn a_spec_given_by_a_relative_path_finds_gdl() {
+    std::fs::create_dir_all(root().join("target")).expect("the target directory");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-local-relative-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .current_dir(root())
+        .args([
+            "gdl",
+            "compose",
+            "--local",
+            "--spec",
+            "examples/http/gdl.toml",
+            "--out",
+        ])
+        .arg(temp.path().join("bundle"))
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo gdl compose");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `--local` builds gdl from its `[gdl] path`: a spec that names gdl by Git
 /// builds without it. A contract spec is refused in either mode.
 #[test]

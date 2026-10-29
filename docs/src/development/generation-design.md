@@ -48,6 +48,19 @@ Emitted code is checked only when a generated crate builds. The segment `main` o
 
 Hub discovery brings the hub client and its HTTP stack. Only a spec with a `[deployment]` table, or `compose`, asks the generated crates for the `hub` feature. An export without one carries no hub client.
 
+## Build
+
+`cargo gdl build` generates into the target directory and builds there. These were the choices.
+
+- **Write only what changed.** Each run renders every file, and writes only the files whose text differs, through the same writer as `generate`. Rejected: delete the directory and write it again. Every file's time would change, so Cargo would rebuild and relink every segment, and a fat LTO link is most of a release build.
+- **One workspace.** One `cargo build` compiles each shared dependency once and links the segments in parallel. The cost is feature unification, the failure in "Crates, not Cargo features": a segment can build here with a feature only another segment turns on, and fail in its image. `generate` into a user's workspace already has that cost. Rejected: one workspace per segment, as `export` writes. It needs a resolve and a `cargo build` for each segment, and links them one after another.
+- **The compose code for crates by path.** The patches, the gdl patch, and the lock steps are those of `compose --local`, called with a mode that skips the image context's checks. Rejected: a second copy, since two copies of one rule drift.
+- **A directory per spec, a lock per target directory.** Specs of one graph each mark the other's crates stale in a shared directory. Their binaries can share a name, which Cargo writes to one path, and Cargo's lock ends before the copy.
+- **A record of each copy.** A build removes or writes over a binary in `--out` only while the binary's size and time match what it copied. A name alone would let it remove a file someone put there.
+- **The lock as the user's.** The workspace's lock starts from the lock of the workspace that holds the spec. Starting again on every run would undo what Cargo writes. Rejected: `--locked` reads of the user's crates, which would fail the usual loop of editing a node's `Cargo.toml` and building.
+- **Rejected: a `build.rs`.** A build script cannot add packages to a build or make another package's binary.
+- **Rejected: `generate --out` adding workspace members.** It writes the user's `Cargo.toml`, and generated crates in the source tree drift.
+
 ## Export
 
 - **One crate per segment, each its own workspace.** A shared workspace would unify features and resolve one dependency set for all segments, which is the failure above. The cost is one `cargo build` per segment. `build-all.sh` runs them into one `CARGO_TARGET_DIR` so they share a cache.

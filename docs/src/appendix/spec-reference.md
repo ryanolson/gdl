@@ -30,7 +30,7 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 | `[gdl] version` | a registry version | |
 | `[gdl] git`, `rev` | a repository and a revision. Both are required together. | |
 
-`[gdl]` takes exactly one of `path`, `version`, and `git` with `rev`. A listed package appears once, and two listed message libraries cannot share a name. A `name@version` entry is fetched, and its library must be named for its package.
+`[gdl]` takes exactly one of `path`, `version`, and `git` with `rev`. `cargo gdl build` takes any of them. `compose --local` takes only `path`. A listed package appears once, and two listed message libraries cannot share a name. A `name@version` entry is fetched, and its library must be named for its package.
 
 A `[cell_policy.<name>]` table binds a policy name to its crate and type. It names the crate by exactly one of `path`, `version`, and `git` with `rev`, as `[nodes] crates` can. A crate named by `version` must name its library for its package. The name follows the rule for a registered cell policy below. It must not be the name of a node or an entry adapter, or a `[config]` key, since the segment builds the policy under it. Some layout's `[cells.<class>] policy` must name it. `check` reads the crate and refuses a type that the crate does not offer as a cell policy. In a spec with a `[graph]` file, it also refuses a policy whose `Head` does not fit the request that crosses into a class that names it. Each segment that chooses cells of a class whose policy the table binds depends on the crate, builds the policy from its `[cell_policy.<name>]` settings table, and registers it. No other segment depends on the crate. [Write a cell policy](../guides/write-a-cell-policy.md) shows one.
 

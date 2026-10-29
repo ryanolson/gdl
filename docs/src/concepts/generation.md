@@ -74,6 +74,30 @@ Every generated file starts with a do-not-edit marker and the command that regen
 - `generate --check` writes nothing. It fails if a generated file is missing, changed, or stale (marked, but no longer produced), or if a segment crate holds a file the generator did not write. A Cargo build directory is recognized by its `CACHEDIR.TAG` and is not drift.
 - A graph spec writes nothing in the output while it checks or draws: the manifest is built in memory, or, for a contract spec, from a copy of the contract in the target directory, named by its content.
 
+## The build workspace
+
+`cargo gdl build` renders what `generate` renders, into a directory of the target directory, and builds it there. The source tree is never written.
+
+```text
+<target-dir>/gdl/build.lock              one build at a time in this target directory
+<target-dir>/gdl/<graph>/<spec stem>/
+  workspace/                             the generated crates, as one Cargo workspace
+  bin/<profile>/                         the binaries, unless --out names another directory
+  binaries.toml  seed.lock  lock-inputs  what the next run compares with
+```
+
+- The directory is named for the graph and the spec's file stem, so specs of one graph, such as `examples/film/gdl.toml` and `compact.toml`, build apart.
+- The workspace's root manifest lists each generated crate as a member, by name. It holds the release profile, one codegen unit and fat LTO, and the `[patch]` tables, since Cargo reads both only at a workspace's root. The members carry neither, as `generate` writes them.
+- The members name your node, message, and policy crates by relative path. They are not members, and Cargo reads their `workspace = true` keys from their own workspaces.
+- The root carries the `[patch]` entries of each workspace that a generated crate reaches by path, as `compose --local` does, so that the build takes the copies your own builds take. With `[gdl] path`, it also patches each gdl package that a node crate takes from another source, so that the build links one copy of gdl. Two workspaces that patch one package differently are refused.
+- The lock starts from the lock of the workspace that holds the spec, so the build takes the versions your crates are built and tested with. With none, it starts from gdl's workspace lock. It starts again only when that lock changes. Otherwise Cargo keeps the lock it wrote.
+- Each run renders every file and writes only the files whose text changed. Cargo rebuilds a crate when one of its files changes, so a run rebuilds and relinks only the segments that a change reaches.
+- A generated file that is no longer produced is removed, and so is a directory that this leaves empty. The generator removes only files that carry its marker. A file it did not write, in a crate it still produces, fails the run, as for `generate`. A `workspace/` that holds files but not the generator's stamp, `.gdl-generated`, is refused, and so is a symbolic link in it or above it in the target directory, which the generator never makes.
+- Cargo builds the whole workspace once, in the spec's directory, so the Cargo configuration there applies. It is the Cargo that runs `cargo gdl`, with its toolchain. Each segment's binary is copied out when it differs from the copy. `binaries.toml` records each copy's size and time, by destination. The build writes over or removes a copy only while it still matches that record. It refuses any other file at that name, and keeps a copy that someone replaced. A file that someone put there with the same bytes is left as it is, and stays theirs.
+- One build runs at a time in a target directory. Two specs can make packages of one name, and Cargo puts both binaries at one path, so a build holds `gdl/build.lock` from the render to the copy. A build that waits says so.
+
+One build unifies features across the segments, which `export` and `compose` images do not: [Known limitations](../operations/limitations.md#cargo-gdl-build-unifies-features-across-segments).
+
 ## Export and images
 
 `cargo gdl export` renders what `generate` renders, in memory, as one `.tar.gz` under a directory named for the graph, plus a `README.md` and `build-all.sh`. Each crate in the archive is its own Cargo workspace, so each segment's build resolves only its own dependencies. The builds share one target directory.

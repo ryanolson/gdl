@@ -1,6 +1,6 @@
 # Getting started
 
-This guide runs the chat example as three segments on one machine. You generate the segment crates, build them, and send one request.
+This guide runs the chat example as three segments on one machine. You build the segments with one command, and send one request.
 
 You need a checkout of this repository and Rust 1.93.1, which `rust-toolchain.toml` pins. velo comes from Git, so the first build needs the network.
 
@@ -52,14 +52,13 @@ cargo run -p gdl-gen -- diagram --spec examples/chat/gdl.toml --format mermaid
 
 `check` prints `cargo gdl: no problems`. The diagram shows the three segments and the edges that cross them. See [Specs, segments, and layouts](../concepts/placement.md).
 
-## Generate and build the segments
+## Build the segments
 
 ```bash
-cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments
-cargo build --manifest-path examples/chat/Cargo.toml --bins
+cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 ```
 
-`generate` writes a contract crate and one crate per segment under `segments/`, and a `crossings.txt` that counts the crossings of one request. Do not edit `segments/` by hand. Regenerate it. The build makes the binaries `chat-front`, `chat-engine`, and `chat-post` in `examples/chat/target/debug`. See [Code generation](../concepts/generation.md).
+`build` generates a contract crate and one crate per segment in `examples/chat/target/gdl/chat/gdl/workspace/`, and a `crossings.txt` that counts the crossings of one request. Then it builds them and prints the paths of the binaries `chat-engine`, `chat-front`, and `chat-post`, in `examples/chat/target/gdl/chat/gdl/bin/debug`. It writes nothing outside the target directory. Run it again after a change: it rebuilds only what the change reaches. See [Split, generate, and draw](split-and-generate.md#build) and [Code generation](../concepts/generation.md).
 
 ## Configure and start the segments
 
@@ -77,7 +76,7 @@ printf '[node.Engine]\nuppercase = true\n' >> engine.toml
 Start the engine and the post segment in the background, then send a request to the front segment. The front segment reads one JSON line from stdin for each request:
 
 ```bash
-BIN=$REPO/examples/chat/target/debug
+BIN=$REPO/examples/chat/target/gdl/chat/gdl/bin/debug
 $BIN/chat-engine engine.toml &
 $BIN/chat-post post.toml &
 echo '{"text": "hello big wide world", "max_words": 3}' | $BIN/chat-front front.toml

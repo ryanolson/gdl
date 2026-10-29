@@ -212,7 +212,12 @@ impl Chat {
     /// stdout piped when `piped`, else closed and dropped. Its stderr is
     /// piped.
     pub fn spawn(&self, segment: &str, config: &Path, piped: bool) -> Running {
-        let mut command = generated(built().join(format!("chat-{segment}")));
+        self.spawn_from(built(), segment, config, piped)
+    }
+
+    /// [`Chat::spawn`], with the binaries in `bin`.
+    pub fn spawn_from(&self, bin: &Path, segment: &str, config: &Path, piped: bool) -> Running {
+        let mut command = generated(bin.join(format!("chat-{segment}")));
         command.arg(config).stderr(Stdio::piped());
         if piped {
             command.stdin(Stdio::piped()).stdout(Stdio::piped());

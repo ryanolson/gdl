@@ -42,6 +42,10 @@ pub(crate) enum Deps {
     /// on this machine, from a build context that holds them and the
     /// bundle, where the relative paths resolve as they do on disk.
     Local,
+    /// By paths relative to each manifest, as members of the one workspace
+    /// that `cargo gdl build` generates in the target directory, whose root
+    /// holds the profile and the patch.
+    Build,
 }
 
 impl Deps {
@@ -51,7 +55,7 @@ impl Deps {
         let target = crate::dump::absolute(target).unwrap_or_else(|_| target.to_path_buf());
         let path = match self {
             Self::Exported => target,
-            Self::Relative | Self::Local => relative(from, &target),
+            Self::Relative | Self::Local | Self::Build => relative(from, &target),
         };
         crate::dump::toml_string(&display(&path))
     }
@@ -60,7 +64,7 @@ impl Deps {
     /// outside the workspace it was written in.
     pub(crate) fn workspace(self) -> &'static str {
         match self {
-            Self::Relative => "",
+            Self::Relative | Self::Build => "",
             Self::Exported => {
                 "\n# Its own workspace, wherever the tarball is expanded.\n[workspace]\n"
             }
@@ -77,7 +81,7 @@ impl Deps {
     /// (`docs/src/operations/benchmarking.md`, "Release profiles").
     pub(crate) fn profile(self) -> &'static str {
         match self {
-            Self::Relative => "",
+            Self::Relative | Self::Build => "",
             Self::Exported | Self::Local => {
                 "\n# The profile its image is built with.\n[profile.release]\ncodegen-units = 1\nlto = \"fat\"\n"
             }
@@ -341,6 +345,12 @@ fn regenerate_command(
         return format!(
             "cargo gdl compose --local --spec \"{}\" --out <directory>",
             spec_file.escape_debug()
+        );
+    }
+    if deps == Deps::Build {
+        return format!(
+            "cargo gdl build --spec \"{}\"",
+            display(&spec_dir.join(file)).escape_debug()
         );
     }
     if deps == Deps::Exported {

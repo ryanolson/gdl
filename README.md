@@ -2,7 +2,7 @@
 
 gdl is a graph definition language and runtime for request/response streaming pipelines. A request goes into a graph of nodes, and a stream of items comes back. The same graph runs in one process, or split into segments that run as separate programs and talk over [velo](https://github.com/ai-dynamo/velo).
 
-You define the graph once, with its message types. A placement puts each node in a segment. The generator, `cargo gdl generate`, writes one crate per segment, and each segment crate depends only on the implementations of the nodes that it hosts.
+You define the graph once, with its message types. A placement puts each node in a segment. The generator writes one crate per segment, and each segment crate depends only on the implementations of the nodes that it hosts. `cargo gdl build` generates the crates in the target directory and builds them. `cargo gdl generate` writes them into your tree.
 
 NOTE: gdl is experimental. Its design and tests are still in progress, and its APIs are not stable.
 
@@ -33,7 +33,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-message` | Authors of messages | `derive(Message)` and the message catalogue, without the runtime |
 | `gdl-macros` | Internal | `graph!` and the derives |
 | `gdl-extract` | Tools | The source reader and the working catalogue |
-| `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
+| `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state, load summary, presence, and models, the `CellDirectory` backends, and an operator's commands for a cell whose hub is gone. No velo |
 | `gdl-cells-dynamodb` | Deployments across regions | A cell directory in DynamoDB global tables, for a hub built with `gdl_hub::hub_builder_with` |
@@ -81,11 +81,10 @@ nodes = ["Engine"]
 nodes = ["Detokenize", "Format"]
 ```
 
-Generate the segment crates and build the three binaries:
+Generate the segment crates and build the three binaries, in `examples/chat/target`:
 
 ```bash
-cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments
-cargo build --manifest-path examples/chat/Cargo.toml --bins
+cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 ```
 
 [Getting started](docs/src/guides/getting-started.md) writes the three config files, starts the segments, and sends a request.
