@@ -52,6 +52,7 @@ fn trio() -> Manifest {
             ),
             hop("Tell", &[], "Spare", &[]),
         ],
+        properties: Vec::new(),
     }
 }
 

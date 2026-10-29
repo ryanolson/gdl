@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::Instant;
 
-use crate::{Error, ErrorKind, PropertyKind, Result};
+use crate::{Error, ErrorKind, PropertyKind, PropertyType, Result};
 
 /// The property indexes of one class, one for each registered kind, from
 /// one table: what [`ClassPools::properties`](crate::ClassPools::properties)
@@ -87,13 +87,15 @@ impl PropertyIndexes {
 
     /// The indexes of each kind in `kinds`, decoded from `listed`: each
     /// property some pool lists, with that pool. A key that does not
-    /// decode to its kind's type is left out, and counted
-    /// ([`PropertyIndex::undecoded`]).
+    /// decode to its kind's type is left out, counted
+    /// ([`PropertyIndex::undecoded`]), and given to `undecoded` with its
+    /// pool and why, for the chooser to log.
     #[doc(hidden)]
     pub fn decode(
         kinds: &PropertyKindsNow,
         synced: bool,
         listed: &[(PropertyKey, PropertyPool)],
+        undecoded: &mut dyn FnMut(&PropertyKey, &PropertyPool, String),
     ) -> Self {
         Self {
             synced,
@@ -103,7 +105,7 @@ impl PropertyIndexes {
                 .map(|kind| Decoded {
                     kind: kind.name,
                     key: kind.key,
-                    index: (kind.decode)(kind.name, synced, listed),
+                    index: (kind.decode)(kind.name, synced, listed, undecoded),
                 })
                 .collect(),
         }
@@ -364,9 +366,24 @@ impl PropertyPool {
 /// each a name and a key type: what a chooser decodes. One name has one
 /// type: a second type under a registered name is refused. Cheap to
 /// clone; every clone registers in the same set.
+///
+/// The runtime declares the graph's kinds ([`PropertyKinds::declare`]):
+/// from then on a kind the graph does not declare, or one registered with
+/// another type than the declared one, is refused, and so is one
+/// registered before.
 #[derive(Clone, Default)]
 pub struct PropertyKinds {
     shared: Arc<Mutex<Registered>>,
+    /// The kinds this handle may register, and who registers through it:
+    /// a pool policy's `NEEDS`. `None` for any kind.
+    limit: Option<Limit>,
+}
+
+/// The kinds one reader says it needs.
+#[derive(Clone)]
+struct Limit {
+    needs: &'static [&'static str],
+    reader: Arc<str>,
 }
 
 /// The registered kinds, and how many changes they have had.
@@ -374,6 +391,8 @@ pub struct PropertyKinds {
 struct Registered {
     kinds: Vec<Kind>,
     changes: u64,
+    /// The graph's kinds, once the runtime declares them.
+    declared: Option<Vec<PropertyType>>,
 }
 
 /// One registered kind, with the function that decodes its keys.
@@ -386,8 +405,14 @@ struct Kind {
 }
 
 /// What makes one kind's index, its type erased, from the kind's name,
-/// whether the table is synced, and what the class's pools list.
-type Decode = fn(&'static str, bool, &[(PropertyKey, PropertyPool)]) -> Box<dyn Any + Send + Sync>;
+/// whether the table is synced, and what the class's pools list, giving
+/// each key that does not decode to the last argument.
+type Decode = fn(
+    &'static str,
+    bool,
+    &[(PropertyKey, PropertyPool)],
+    &mut dyn FnMut(&PropertyKey, &PropertyPool, String),
+) -> Box<dyn Any + Send + Sync>;
 
 impl PropertyKinds {
     /// No kind.
@@ -405,7 +430,25 @@ impl PropertyKinds {
     {
         let name = kind.name();
         gdl_model::check_property_kind(name).map_err(|why| Error::new(ErrorKind::Node, why))?;
+        if let Some(Limit { needs, reader }) = &self.limit
+            && !needs.contains(&name)
+        {
+            return Err(Error::new(
+                ErrorKind::Node,
+                format!("{reader} reads property kind `{name}`, which its `NEEDS` does not name"),
+            ));
+        }
         let mut registered = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(declared) = &registered.declared
+            && let Some(why) = PropertyType::misfit(
+                declared,
+                name,
+                Some((TypeId::of::<T>(), std::any::type_name::<T>())),
+                || undeclared(name),
+            )
+        {
+            return Err(Error::new(ErrorKind::Node, why));
+        }
         match registered.kinds.iter().find(|kind| kind.name == name) {
             Some(kind) if kind.key == TypeId::of::<T>() => Ok(()),
             Some(kind) => Err(Error::new(
@@ -426,6 +469,48 @@ impl PropertyKinds {
                 registered.changes += 1;
                 Ok(())
             }
+        }
+    }
+
+    /// Hold the kinds to `declared`, the graph's: refused, and nothing
+    /// declared, when a kind registered already is not among them or was
+    /// registered with another type, and when the kinds were declared
+    /// before with others. The runtime calls it once, when the segment
+    /// starts.
+    #[doc(hidden)]
+    pub fn declare(&self, declared: Vec<PropertyType>) -> Result<()> {
+        let mut registered = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        for kind in &registered.kinds {
+            let key = Some((kind.key, kind.key_name));
+            if let Some(why) =
+                PropertyType::misfit(&declared, kind.name, key, || undeclared(kind.name))
+            {
+                return Err(Error::new(ErrorKind::Node, why));
+            }
+        }
+        match &registered.declared {
+            Some(held) if *held != declared => Err(Error::new(
+                ErrorKind::Node,
+                "the graph's property kinds are declared twice, with other kinds",
+            )),
+            _ => {
+                registered.declared = Some(declared);
+                Ok(())
+            }
+        }
+    }
+
+    /// A handle on the same kinds that registers only `needs`, for
+    /// `reader`: a pool policy, held to its `NEEDS`, so that what the
+    /// generator's supply check reads of it is what it reads.
+    #[doc(hidden)]
+    pub fn limited(&self, needs: &'static [&'static str], reader: impl Into<Arc<str>>) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            limit: Some(Limit {
+                needs,
+                reader: reader.into(),
+            }),
         }
     }
 
@@ -466,6 +551,14 @@ impl fmt::Debug for PropertyKinds {
     }
 }
 
+/// Why a reader cannot register kind `kind`, which the graph does not
+/// declare.
+fn undeclared(kind: &str) -> String {
+    format!(
+        "property kind `{kind}` is not declared in the graph: it says `property {kind}: <Type>;`"
+    )
+}
+
 /// The registered kinds at one moment, to decode by.
 #[doc(hidden)]
 pub struct PropertyKindsNow {
@@ -477,6 +570,7 @@ fn decode<T>(
     kind: &'static str,
     synced: bool,
     listed: &[(PropertyKey, PropertyPool)],
+    left_out: &mut dyn FnMut(&PropertyKey, &PropertyPool, String),
 ) -> Box<dyn Any + Send + Sync>
 where
     T: DeserializeOwned + Ord + Send + Sync + 'static,
@@ -486,9 +580,10 @@ where
         .iter()
         .filter(|(key, _)| key.kind() == kind)
         .filter_map(|(key, pool)| match T::deserialize(key.key()) {
-            Ok(key) => Some((key, pool.clone())),
-            Err(_) => {
+            Ok(decoded) => Some((decoded, pool.clone())),
+            Err(error) => {
                 undecoded += 1;
+                left_out(key, pool, error.to_string());
                 None
             }
         })

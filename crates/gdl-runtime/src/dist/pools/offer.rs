@@ -575,6 +575,7 @@ mod tests {
                 forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
                 backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             }],
+            properties: Vec::new(),
         };
         let placement = gdl_model::Placement::new()
             .segment("a", ["S"])
@@ -1211,6 +1212,7 @@ mod tests {
     async fn a_registered_policy_chooses_the_pool_by_the_head() {
         let layout = layout_under(gdl_model::PoolPolicy {
             policy: "by_text".into(),
+            provides: Vec::new(),
         });
         let chooser = bind_node(([127, 0, 0, 1], 0).into())
             .await
@@ -1745,6 +1747,7 @@ mod tests {
         for name in ["round_robin", "home_first"] {
             let layout = layout_under(gdl_model::PoolPolicy {
                 policy: name.into(),
+                provides: Vec::new(),
             });
             let (crossing, _pools) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
             let mut best = Duration::MAX;
@@ -1930,6 +1933,7 @@ mod tests {
         ] {
             let layout = layout_under(gdl_model::PoolPolicy {
                 policy: name.into(),
+                provides: Vec::new(),
             });
             let (crossing, pools) =
                 followed_with(&layout, &["m1", "m2", "m3", "m4", "m5"], &policies);
@@ -2029,6 +2033,7 @@ mod tests {
         policies.add("leasing", Leasing).expect("registered");
         let layout = layout_under(gdl_model::PoolPolicy {
             policy: "leasing".into(),
+            provides: Vec::new(),
         });
         let (crossing, _pools) = followed_with(&layout, &["m1", "m2"], &policies);
         let before = counted();

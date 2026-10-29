@@ -35,6 +35,7 @@ fn spec() -> DeploymentSpec {
             forward_types: vec![TypeInfo::new("Request", true, Default::default())],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     DeploymentSpec::new(
         graph,
@@ -675,6 +676,7 @@ async fn an_instance_announces_before_it_waits_for_its_roster() {
                 },
             ],
             hops: vec![hop("Source", "Mid"), hop("Mid", "Echo")],
+            properties: Vec::new(),
         },
         Placement::new()
             .segment("front", ["Source"])
@@ -795,6 +797,7 @@ async fn a_returning_forward_path_does_not_deadlock_readiness() {
                 ],
                 backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             }],
+            properties: Vec::new(),
         },
         Placement::new()
             .segment("front", ["S", "D"])

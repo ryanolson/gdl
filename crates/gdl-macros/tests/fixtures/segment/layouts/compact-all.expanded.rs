@@ -62,6 +62,14 @@ pub fn start(
 > {
     let placement = gdl_runtime::Placement::from_toml(PLACEMENT)?;
     let manifest = contract::manifest();
+    gdl_runtime::declare_properties(
+        &manifest,
+        &placement,
+        SEGMENT,
+        &contract::property_types(),
+        &config.properties,
+        &config.followed,
+    )?;
     let deployment =
         gdl_runtime::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;
     let root = contract::assemble(
@@ -179,6 +187,10 @@ impl gdl_runtime::SegmentBinary for Binary {
             contract::manifest(),
             gdl_runtime::Placement::from_toml(PLACEMENT)?,
         )?)
+    }
+
+    fn property_types() -> ::std::vec::Vec<gdl_runtime::gdl::PropertyType> {
+        contract::property_types()
     }
 
     fn start(

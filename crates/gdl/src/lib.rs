@@ -63,7 +63,7 @@ pub use policy::{
 /// its metric types through here, so they are the types the runtime
 /// registers and serves.
 pub use prometheus;
-pub use properties::{InstanceProperties, PropertyKind};
+pub use properties::{InstanceProperties, PropertyKind, PropertyType};
 pub use records::{
     Checked, Expected, HubRecords, PoolRecords, Record, RecordsUnavailable, Written,
 };

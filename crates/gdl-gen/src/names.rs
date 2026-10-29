@@ -81,6 +81,24 @@ impl GraphFile {
                 }
             }
         }
+        for property in &graph.properties {
+            match name(&property.ty) {
+                Ok(Name::Message(name)) => uses
+                    .entry(name)
+                    .or_default()
+                    .push(format!("property {}", property.kind)),
+                // A property of `()` is refused with the manifest, as
+                // `graph!` refuses it.
+                Ok(Name::Unit) => {}
+                Err(()) => problems.push(at(
+                    property.ty.span(),
+                    &format!(
+                        "a graph file names messages, and `{}` is not a message name",
+                        property.ty.to_token_stream()
+                    ),
+                )),
+            }
+        }
         // The `()` that a bare `stream Item` stands for carries the span of
         // its `stream` keyword, so every position has a place in the file.
         let mut differ = |from: &syn::Ident, to: &syn::Ident, sent: &Type, taken_ty: &Type| {

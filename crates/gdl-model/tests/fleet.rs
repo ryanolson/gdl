@@ -49,6 +49,7 @@ fn manifest() -> Manifest {
             hop("Route", "Model", &[]),
             hop("Model", "Engine", &["Detok"]),
         ],
+        properties: Vec::new(),
     }
 }
 

@@ -788,6 +788,7 @@ pub fn reference_manifest(wire: impl Fn(&str) -> bool) -> gdl_runtime::Manifest 
                 backward_types: vec![ty("Raw"), ty("Tok"), ty("Out")],
             },
         ],
+        properties: Vec::new(),
     }
 }
 

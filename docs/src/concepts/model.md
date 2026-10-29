@@ -37,6 +37,12 @@ Hop 0 has outer end A (the source), inner end B (an operator), and backward node
 
 A stage is one position in a hop: a forward node, the inner end, or a backward node. A graph can have several source roots, and a sink can take requests from several roots through explicit connections. [Hosted frontends and service entries](../guides/frontends.md) describes those shapes. The graph syntax is in [Define a graph](../guides/define-a-graph.md).
 
+## Properties
+
+A graph also declares the kinds of property its pools serve, such as the model a pool of engines has loaded. A property is not on an edge. A node in an entry segment of a class says that its instance has properties of a kind (`provides`). A node, an entry adapter, or a pool policy reads them from the pools of a class (`needs`). The graph declares each kind with the message type of its keys.
+
+So the graph says two things on two axes: what a request and its response carry along the hops, and which properties each class's pools must supply. `cargo gdl check` and `cargo gdl build` refuse a class that a reader needs a kind from when nothing supplies the kind to it. [Define a graph](../guides/define-a-graph.md#declare-properties) gives the syntax, and [Classes and pools](pools.md#properties) says how a pool publishes its properties.
+
 ## Role traits
 
 A node implementation implements one role trait from the `gdl` crate. Each method returns `impl Future + Send`. On the local path, only a node's output stream and a streamed request's items are boxed.

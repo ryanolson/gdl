@@ -161,8 +161,11 @@ fn bound<'s>(
     let mut spec = bound_nodes(spec, prepared, target, from)?;
     let resolution = prepared.graph.as_ref().map(|(_, resolution)| resolution);
     if !spec.pool_policies.is_empty() {
-        let problems = policies::resolve(&spec, target, from, &prepared.manifest, resolution);
-        spec.to_mut().problems.extend(problems);
+        let (problems, needs) =
+            policies::resolve(&spec, target, from, &prepared.manifest, resolution);
+        let spec = spec.to_mut();
+        spec.problems.extend(problems);
+        spec.policy_needs = needs;
     }
     if !spec.selectors.is_empty() {
         let problems = selectors::resolve(&spec, target, from, &prepared.manifest, resolution);

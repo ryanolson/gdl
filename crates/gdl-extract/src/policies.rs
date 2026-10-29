@@ -142,6 +142,7 @@ fn entry(
     let i = &resolver.crates[krate].modules[module].impls[index];
     let (self_ty, params) = (i.self_ty.clone(), i.params());
     let head = i.types.iter().find(|(name, ..)| name == "Head").cloned();
+    let needs = i.needs.clone();
     let written = match &self_ty {
         syn::Type::Path(path) => path
             .path
@@ -193,7 +194,56 @@ fn entry(
                 quote::ToTokens::to_token_stream(&head)
             ))
         })?;
-    Ok(PolicyEntry { name, ty, head })
+    let needs = match needs {
+        None => Vec::new(),
+        Some((expr, at)) => read_needs(&expr).map_err(|why| Skipped {
+            name: written.clone(),
+            path: None,
+            problem: format!("{at}: pool policy `{written}` {why}"),
+        })?,
+    };
+    Ok(PolicyEntry {
+        name,
+        ty,
+        head,
+        needs,
+    })
+}
+
+/// The kinds a policy's `NEEDS` names: a list of string literals, `&[]` or
+/// `&["model", "region"]`, each a property kind's name, once. The reader
+/// does not compile the crate, so any other expression, a constant's name
+/// among them, is refused rather than guessed at.
+fn read_needs(expr: &syn::Expr) -> Result<Vec<String>, String> {
+    let refused = || {
+        format!(
+            "writes `NEEDS` as `{}`; write it as a list of string literals, `&[\"model\"]`, which the reader reads without compiling the crate",
+            quote::ToTokens::to_token_stream(expr)
+        )
+    };
+    let syn::Expr::Reference(reference) = expr else {
+        return Err(refused());
+    };
+    let syn::Expr::Array(array) = &*reference.expr else {
+        return Err(refused());
+    };
+    let mut needs = Vec::with_capacity(array.elems.len());
+    for elem in &array.elems {
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(kind),
+            ..
+        }) = elem
+        else {
+            return Err(refused());
+        };
+        let kind = kind.value();
+        gdl_model::check_property_kind(&kind).map_err(|why| format!("needs `{kind}`: {why}"))?;
+        if needs.contains(&kind) {
+            return Err(format!("names property kind `{kind}` twice in `NEEDS`"));
+        }
+        needs.push(kind);
+    }
+    Ok(needs)
 }
 
 /// What a policy's `Head`, resolved, reads: `()`, gdl's `Encoded` or

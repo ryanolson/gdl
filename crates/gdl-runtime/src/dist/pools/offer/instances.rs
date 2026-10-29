@@ -242,6 +242,7 @@ impl Fleet {
     fn router(&self, policy: &str, policies: &gdl::PoolPolicies, within: Within) -> Router {
         let layout = layout_under(gdl_model::PoolPolicy {
             policy: policy.into(),
+            provides: Vec::new(),
         });
         let mut targets = targets(
             &layout,

@@ -56,6 +56,7 @@ fn deployment() -> DeploymentSpec {
             forward_types: vec![TypeInfo::new("Request", true, Default::default())],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     DeploymentSpec::new(graph, Placement::new().segment("front", ["Source", "Echo"]))
         .expect("valid test fixture")

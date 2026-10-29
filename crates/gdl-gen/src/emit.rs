@@ -788,6 +788,7 @@ mod tests {
                 forward_types: vec![TypeInfo::new("Req", true, Default::default())],
                 backward_types: vec![TypeInfo::new("Item", true, Default::default())],
             }],
+            properties: Vec::new(),
         };
         let placement = gdl_model::Placement::from_toml(
             "[segment.s]\nnodes = [\"S\"]\n\n[segment.d]\nnodes = [\"D\"]\n",
@@ -839,6 +840,7 @@ mod tests {
                 forward_types: vec![ty("One"), ty("Two"), ty("Three")],
                 backward_types: vec![ty("Item")],
             }],
+            properties: Vec::new(),
         };
         let placement = gdl_model::Placement::from_toml(
             "[segment.a]\nnodes = [\"A\"]\n\n[segment.m]\nnodes = [\"to_B\", \"A_to\"]\n\n[segment.b]\nnodes = [\"B\"]\n",

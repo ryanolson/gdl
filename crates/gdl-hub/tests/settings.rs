@@ -9,12 +9,13 @@ use futures::StreamExt;
 use gdl_hub::{PoolTiming, hub_builder, pool_from_env, pool_from_vars};
 use gdl_model::{
     DeploymentSpec, DirectoryBackend, HopInfo, HubTiming, Manifest, NodeInfo, Placement,
-    PoolSettings, Role, TypeInfo, WatchCaps,
+    PoolPolicy, PoolSettings, PropertyInfo, Role, TypeInfo, WatchCaps,
 };
 use gdl_pools::{DirDirectory, PoolDirectory, PoolEvent, PoolState};
 use velo_hub::{Hub, HubConfig};
 
-/// `S => D` in two classes: `global` runs `a`, and `model_x` runs `d`.
+/// `S => D` in two classes: `global` runs `a`, and `model_x` runs `d`,
+/// whose pools may serve the property kind `test` from their settings.
 fn spec() -> DeploymentSpec {
     let graph = Manifest {
         name: "pools".into(),
@@ -39,12 +40,25 @@ fn spec() -> DeploymentSpec {
             forward_types: vec![TypeInfo::new("T", true, Default::default())],
             backward_types: vec![TypeInfo::new("T", true, Default::default())],
         }],
+        properties: vec![PropertyInfo {
+            kind: "test".into(),
+            ty: TypeInfo::new("T", true, Default::default()),
+            providers: vec![],
+            needs: vec![],
+        }],
     };
     let placement = Placement::new()
         .segment("a", ["S"])
         .segment("d", ["D"])
         .class("global", ["a"])
-        .class("model_x", ["d"]);
+        .class("model_x", ["d"])
+        .pool_policy(
+            "model_x",
+            PoolPolicy {
+                provides: vec!["test".into()],
+                ..PoolPolicy::default()
+            },
+        );
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 

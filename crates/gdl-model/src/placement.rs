@@ -311,6 +311,13 @@ impl Placement {
                     why,
                 ));
             }
+            if let Err(why) = pools::check_provides(policy) {
+                problems.push(Problem::at(
+                    Some(format!("pools.{class}")),
+                    Some("provides".into()),
+                    why,
+                ));
+            }
         }
         if problems.is_empty() {
             Ok(placement)
@@ -334,8 +341,9 @@ impl Placement {
     }
 
     /// The placement hash changes with node placement, segment names,
-    /// request routing policies, classes, and each class's effective pool
-    /// policy, a default one included. Node order inside a segment, and
+    /// request routing policies, classes, each class's effective pool
+    /// policy, a default one included, and the property kinds each class's
+    /// pools serve from their settings (`[pools.<class>] provides`). Node order inside a segment, and
     /// segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();

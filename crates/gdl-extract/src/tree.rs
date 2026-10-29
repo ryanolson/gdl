@@ -267,6 +267,9 @@ pub(crate) struct Impl {
     pub(crate) self_ty: syn::Type,
     /// Its associated types: name, type, and where.
     pub(crate) types: Vec<(String, syn::Type, Location)>,
+    /// Its associated const `NEEDS`, a pool policy's property kinds, with
+    /// where: the one const the reader reads, so no other is kept.
+    pub(crate) needs: Option<(syn::Expr, Location)>,
 }
 
 impl Impl {
@@ -795,11 +798,19 @@ impl Reader<'_> {
                             _ => None,
                         })
                         .collect();
+                    let needs = i.items.iter().find_map(|item| match item {
+                        syn::ImplItem::Const(c) if c.ident == "NEEDS" => {
+                            self.settings.attributes(&c.attrs, self.features)?;
+                            Some((c.expr.clone(), at(c.expr.span())))
+                        }
+                        _ => None,
+                    });
                     krate.modules[module].impls.push(Impl {
                         generics: i.generics.clone(),
                         trait_path: i.trait_.as_ref().map(|(_, path, _)| path.clone()),
                         self_ty: (*i.self_ty).clone(),
                         types,
+                        needs,
                     });
                 }
                 Item::Mod(m) => {

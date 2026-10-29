@@ -48,6 +48,7 @@ pub fn home_first() -> Placement {
         "model_x",
         gdl_model::PoolPolicy {
             policy: "home_first".into(),
+            provides: Vec::new(),
         },
     )
 }

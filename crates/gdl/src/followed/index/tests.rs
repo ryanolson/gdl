@@ -198,6 +198,7 @@ fn a_key_that_does_not_decode_is_left_out_and_counted() {
         )
     };
     let (_, now) = kinds.snapshot();
+    let mut left_out = Vec::new();
     let indexes = PropertyIndexes::decode(
         &now,
         true,
@@ -212,6 +213,7 @@ fn a_key_that_does_not_decode_is_left_out_and_counted() {
             listed("test", json!({"name": "qwen", "weight": 2}), "model-x-04"),
             listed("other", json!({"name": "qwen"}), "model-x-05"),
         ],
+        &mut |key, pool, why| left_out.push((pool.pool().to_string(), key.kind().to_string(), why)),
     );
     assert!(indexes.is_synced());
     let index = indexes.get(&TEST).expect("registered");
@@ -225,6 +227,16 @@ fn a_key_that_does_not_decode_is_left_out_and_counted() {
         2,
         "a name of another type, an unknown field"
     );
+    // Each one left out is given with its pool, its kind, and why, for the
+    // chooser to log.
+    let left_out: Vec<(&str, &str)> = left_out
+        .iter()
+        .map(|(pool, kind, why)| {
+            assert!(!why.is_empty(), "{pool}: no reason");
+            (pool.as_str(), kind.as_str())
+        })
+        .collect();
+    assert_eq!(left_out, [("model-x-03", "test"), ("model-x-04", "test")]);
     let empty = indexes.get(&EMPTY).expect("registered");
     assert!(empty.is_empty() && empty.is_synced());
     assert!(indexes.get(&PropertyKind::<Test>::new("other")).is_none());
@@ -259,6 +271,7 @@ fn two_keys_that_decode_alike_are_one_entry_the_first() {
                 pool("model-x-01", PropertyState::Ready),
             ),
         ],
+        &mut |_, _, _| {},
     );
     let index = indexes.get(&LAX).expect("registered");
     assert_eq!(index.entries().len(), 1);
@@ -317,6 +330,7 @@ fn a_required_null_field_decodes_from_its_own_kind() {
         &now,
         true,
         &[(encoded, pool("model-x-01", PropertyState::Ready))],
+        &mut |_, _, _| {},
     );
     let index = indexes.get(&NULLABLE).expect("registered");
     assert_eq!(index.undecoded(), 0, "the kind must decode its own key");

@@ -57,6 +57,7 @@ fn registration_must_match_graph_placement_and_segment() {
             forward_types: vec![TypeInfo::new("Request", true, Default::default())],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new().segment("s1", ["Source", "Echo"]);
     let spec = DeploymentSpec::new(graph, placement).expect("valid deployment");

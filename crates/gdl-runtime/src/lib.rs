@@ -11,6 +11,7 @@
 mod binary;
 mod config;
 mod decl;
+mod declared;
 mod dist;
 #[cfg(feature = "json-lines")]
 mod json;
@@ -20,6 +21,7 @@ mod wire;
 pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use config::build_node;
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
+pub use declared::declare_properties;
 #[doc(hidden)]
 pub use dist::EncodedItem;
 pub use dist::{
@@ -42,8 +44,9 @@ pub use gdl::message_encoding;
 pub use gdl_model::{
     CrossingReport, DeploymentSpec, DirectoryBackend, Encoding, GraphConfig, HUB_CONTROL_PORT,
     HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
-    PlacementError, PlacementErrors, PoolSettings, RequestRouter, Role, Run, SELECTORS,
-    SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout, resolve_config,
+    PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed, RequestRouter, Role,
+    Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout,
+    resolve_config,
 };
 #[cfg(feature = "hub")]
 pub use gdl_pools::PoolState;

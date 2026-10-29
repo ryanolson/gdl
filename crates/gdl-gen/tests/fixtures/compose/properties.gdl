@@ -1,0 +1,8 @@
+// Property declarations: the manifest built without compiling must match
+// the compiled contract's, declarations and all.
+name = "properties", schema = 1;
+property shard: Shard;
+source   A: Prompt -> stream Chunk needs shard from engines;
+operator R: (Prompt -> stream Chunk) over (Prompt -> stream Chunk);
+sink     B: Prompt -> stream Chunk provides shard;
+topology: A => R { B };

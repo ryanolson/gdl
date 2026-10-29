@@ -196,6 +196,7 @@ fn names_and_types_are_escaped() {
                 Default::default(),
             )],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new().segment("my \"seg\"", ["start", "end"]);
     let layout = layout(&manifest, &placement).expect("layout");
@@ -265,6 +266,7 @@ fn a_layout_of_another_graph_is_refused() {
             forward_types: vec![TypeInfo::new("u32", true, Default::default())],
             backward_types: vec![TypeInfo::new("u32", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let reference = three_segments();
     for drawn in [
@@ -334,6 +336,7 @@ fn a_type_named_by_its_path_is_labeled_by_its_name() {
                 Default::default(),
             )],
         }],
+        properties: Vec::new(),
     };
     let mermaid = manifest.to_mermaid(None).expect("draw");
     assert!(

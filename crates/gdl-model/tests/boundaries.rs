@@ -34,6 +34,7 @@ fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
                 backward_types: (0..=backward.len()).map(|_| ty()).collect(),
             })
             .collect(),
+        properties: Vec::new(),
     }
 }
 

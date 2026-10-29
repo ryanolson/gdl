@@ -132,10 +132,36 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** velo waiting for staged payloads at shutdown. See [velo](../development/velo.md).
 
 ### A property type that encodes differently in two builds names two properties
-- **What:** two builds whose property type encodes one value differently, for example one that skips a missing optional field and one that writes it as `null`, report two keys for it. The pool's record lists both, and a reader that asks for one does not find the other.
-- **Why:** a `null` field and a missing field are two values ([Pools design](../development/pools-design.md#a-property-is-a-typed-key-that-the-middle-carries-as-json)), and nothing checks yet that every build of a fleet encodes a property type alike.
-- **Workaround:** change a property type's encoding only as a change of the graph's contract: move every pool to the new build in one step.
-- **Lifts:** property types in the contract hash, as edge types are.
+- **What:** two builds whose property type keeps its name and codec but encodes one value differently, for example one that skips a missing optional field and one that writes it as `null`, report two keys for it. The pool's record lists both, and a reader that asks for one does not find the other.
+- **Why:** a `null` field and a missing field are two values ([Pools design](../development/pools-design.md#a-property-is-a-typed-key-that-the-middle-carries-as-json)). The contract hash covers a property type as it covers an edge type: by its name, its codec, and the codec's revision, not by its fields or its serde attributes.
+- **Workaround:** bump the graph's `schema` when a property type's fields or serde attributes change, as for an edge type. The contract hash then changes, and pools of the two builds do not follow or offer to each other.
+- **Lifts:** a fingerprint of each message's fields in the contract hash, for edge and property types alike.
+
+### A node that reads a kind without saying `needs` escapes the supply check
+- **What:** a node can register a declared kind with `FollowedPools::register` and read it, though the graph does not say `needs <kind> from <class>` on it. `cargo gdl check` then does not hold its class to a supply of the kind.
+- **Why:** the runtime holds a reader to the graph's declared kinds and their types, not to the needs of its own segment. A registration does not say which node made it.
+- **Workaround:** say `needs` on each node that reads a kind.
+- **Lifts:** a registration that names its reader, held to that reader's needs.
+
+### A pool policy registered in code is not checked for supply
+- **What:** a policy that a binary registers with `Builder::pool_policy`, not through a spec's `[pool_policy.<name>]` table, is not held to its `NEEDS` by `cargo gdl check`. At start the runtime still refuses a kind it reads that `NEEDS` does not name.
+- **Why:** the check reads `NEEDS` from the source of the crates the spec binds. It cannot see a policy that only code names.
+- **Workaround:** bind the policy in the spec.
+
+### A catalogue entry read before `NEEDS` reads as needing nothing
+- **What:** a working-catalogue entry that the reader wrote before it read `NEEDS` has no `needs` for its pool policies. A check from that catalogue, the composer's included, holds no class to a supply for them.
+- **Why:** the field is left out when it is empty, so an entry without it reads as a policy that needs nothing. An entry carries no version of the reader that wrote it.
+- **Recovery:** extract the policy's crate again with `cargo gdl extract`, or import it again in the composer.
+
+### Only a generated segment is held to its graph's declarations
+- **What:** a program that deploys a segment with `Deployment::new` itself, as the runtime's tests do, sets and reads any property kind with any type.
+- **Why:** the generated binary and the generated `start` call `declare_properties` with the contract's `property_types()`. `Deployment::new` takes no types.
+- **Workaround:** call `gdl_runtime::declare_properties` with the contract's `property_types()` before the build.
+
+### A graph that needs a property from a class cannot run in a layout without that class
+- **What:** `needs <kind> from <class>` names a class of the placement. `cargo gdl check` refuses each layout that lacks the class, a compact layout of one segment included.
+- **Why:** a reader in that layout has no pools of the class to read, and the class name is part of the contract.
+- **Workaround:** give each layout the class, or keep the graph that runs without pools apart.
 
 ### A fleet does not mix builds from before and after the pool rename
 - **What:** a hub of a build from before pools were named pools serves its routes under `/v1/ext/gdl-cell/...`. A hub of this build serves `/v1/ext/gdl-pool/...` and refuses the old path. The two builds cannot follow, watch, or drain each other, and an instance of one cannot join a hub of the other.

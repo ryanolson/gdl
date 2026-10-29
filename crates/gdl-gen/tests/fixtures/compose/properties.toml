@@ -1,0 +1,9 @@
+# A graph that declares a property kind.
+[graph]
+path = "properties.gdl"
+
+[messages]
+crates = ["chat-protocols"]
+
+[gdl]
+path = "../../../../gdl-runtime"

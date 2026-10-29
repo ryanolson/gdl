@@ -75,6 +75,7 @@ impl PoolPolicy for ByShard {
 - `request` also gives the chooser's region, the clock, the damped pools (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
 - `choose` is not `async`, and it runs once per attempt. It runs once more when every pool that declined the request is gone, to learn whether it chooses another. That choice is dropped and offered nothing. Take no lock in it, and allocate nothing when it chooses a pool.
 - Override `eligible` when a pool can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a pool is eligible while it takes work.
+- A policy that reads the class's property index names each kind it reads in `const NEEDS: &'static [&'static str] = &["model"];`, and registers each in `properties`. `cargo gdl check` reads `NEEDS` from the source, as a list of string literals, and fails unless each pool of the class the policy chooses for supplies each kind ([Define a graph](define-a-graph.md#declare-properties)). The runtime refuses a registration of a kind that `NEEDS` does not name, and the segment does not start. By default a policy needs none.
 
 ### Choose as gdl's own policies do, among the pools you keep
 

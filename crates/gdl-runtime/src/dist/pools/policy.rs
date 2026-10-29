@@ -91,6 +91,7 @@ mod tests {
                 forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
                 backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             }],
+            properties: Vec::new(),
         };
         let mut placement = gdl_model::Placement::new()
             .segment("a", ["S"])
@@ -102,6 +103,7 @@ mod tests {
                 "model_x",
                 PoolPolicy {
                     policy: policy.into(),
+                    provides: Vec::new(),
                 },
             );
         }

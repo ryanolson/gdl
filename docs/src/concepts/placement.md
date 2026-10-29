@@ -22,12 +22,13 @@ A deployment is identified by two hashes. Every envelope carries both, and an in
 
 | Hash | Covers |
 |---|---|
-| contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision |
-| placement hash | each segment's name and node set; the non-default `[routing]` entries; the classes and their segment sets; each class's effective pool policy |
+| contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision; each declared property kind, with its type, encoding, and revision, and the nodes that provide and need it |
+| placement hash | each segment's name and node set; the non-default `[routing]` entries; the classes and their segment sets; each class's effective pool policy; the property kinds each class's `[pools.<class>] provides` names |
 
 - Order does not matter. Node order inside a segment and segment order inside a class do not change a hash.
 - Defaults are not recorded. A placement that spells out `round_robin` for a boundary has the hash of one that leaves it unsaid. For pool policies the exception is deliberate: each class's effective policy is hashed, default included, so that a future change of default changes the hash and not what a placement means.
-- A placement without classes keeps the hash it had before classes existed.
+- A placement without classes keeps the hash it had before classes existed. A graph without property declarations, and a placement whose tables provide nothing, keep theirs too.
+- Pools whose graphs declare other properties, or the same kind with another type, have different contract hashes, so they never follow or offer to each other. A property's value is never in a hash.
 - A segment's binary carries the hashes of the placement it was generated for. A hub admits only registrations whose hashes match its deployment: [The hub](hub.md).
 - Pools are runtime topology and are not part of the placement. [Classes and pools](pools.md) covers them.
 
@@ -45,6 +46,12 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | Every cut or anchor-carried message is a wire type | the segment's build ([assertions](generation.md#the-crossing-assertions)) |
 | A `[routing]` key names a node that starts a remote request run | `check`, `generate`, and segment start |
 | Classes: each segment in exactly one, the boundary rule, no cycle, a pool policy only for a class a boundary enters | `check`, `generate`, and segment start |
+| A property kind is declared once, with a wire type; a node provides and needs only declared kinds | `check`, `generate`, and `graph!` |
+| A property's key type implements `Serialize`, `DeserializeOwned`, `Ord`, `Send`, and `Sync` | the contract's build, at the declaration |
+| Each kind a node, an entry adapter, or a pool policy needs from a class is declared, the class is in the layout and chosen where the reader runs, and an entry segment of it provides the kind, or `[pools.<class>] provides` names it | `check`, `generate`, `build` |
+| A node sets only a kind its segment's nodes provide, and sets and reads each kind with its declared type | the node's build, at segment start |
+| A pool policy registers only the kinds its `NEEDS` names | segment start |
+| A pool serves from its settings only the kinds `[pools.<class>] provides` names | the pool's hub start |
 | The deployment was made for this contract | `assemble`, at segment start |
 | A hosted node has a binding | `assemble`, at segment start |
 | The envelope's hashes match the receiver's | every request |

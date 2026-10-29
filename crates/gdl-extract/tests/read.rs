@@ -1427,7 +1427,9 @@ fn an_alias_of_an_argument_the_reader_cannot_name_is_left_out_alone() {
 /// crate is read without a problem. An impl of a local trait of gdl's
 /// trait's name, also one a local module named `gdl` holds, is no policy
 /// at all, even after a glob of gdl; the trait reached through a parent's
-/// `use` or rename of it, or through `use gdl::{self}`, is gdl's.
+/// `use` or rename of it, or through `use gdl::{self}`, is gdl's. Each
+/// policy's `NEEDS` is read as its list of string literals; one written
+/// otherwise, or naming a kind twice, leaves the policy out.
 #[test]
 fn a_crate_offers_its_pool_policies_with_their_heads() {
     use gdl_extract::PolicyHead;
@@ -1484,9 +1486,38 @@ fn a_crate_offers_its_pool_policies_with_their_heads() {
         .collect();
     assert_eq!(
         skipped,
-        ["Generic", "Hidden"],
+        ["Generic", "Computed", "Twice", "Hidden"],
         "{:?}",
         offer.skipped_policies
+    );
+    let needs: Vec<(&str, &[String])> = offer
+        .policies
+        .iter()
+        .filter(|p| !p.needs.is_empty())
+        .map(|p| (p.name.as_str(), p.needs.as_slice()))
+        .collect();
+    assert_eq!(
+        needs,
+        [("Whole", &["model".to_string(), "region".to_string()][..])]
+    );
+    let why = |name: &str| {
+        &offer
+            .skipped_policies
+            .iter()
+            .find(|s| s.name == name)
+            .expect("skipped")
+            .problem
+    };
+    assert!(
+        why("Computed")
+            .contains("writes `NEEDS` as `KINDS`; write it as a list of string literals"),
+        "{}",
+        why("Computed")
+    );
+    assert!(
+        why("Twice").contains("names property kind `model` twice in `NEEDS`"),
+        "{}",
+        why("Twice")
     );
     assert!(offer.skipped.is_empty(), "{:?}", offer.skipped);
     // A catalogue entry keeps them.

@@ -26,6 +26,7 @@ fn manifest() -> Manifest {
             forward_types: vec![TypeInfo::new("Request", true, Default::default()); 2],
             backward_types: vec![TypeInfo::new("LocalReply", false, Default::default())],
         }],
+        properties: Vec::new(),
     }
 }
 

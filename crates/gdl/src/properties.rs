@@ -13,10 +13,11 @@
 //! not have, before it admits anything, and reads the instance's keys from
 //! a copy that the node's last list replaced, with no lock.
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use gdl_model::{EntryState, PropertyEntry, PropertyKey, PropertyLists};
 use serde::Serialize;
@@ -101,6 +102,74 @@ impl<T: Serialize + DeserializeOwned + Ord + Send + Sync + 'static> PropertyKind
     }
 }
 
+/// A property kind a graph declares (`property <kind>: <Type>;`), with
+/// the Rust type of its keys: what `graph!` gives the runtime for each
+/// declaration, so that a segment's providers and readers are held to
+/// the declared type by [`TypeId`], as a selector's head is held to its
+/// edge. The bounds are [`PropertyKind`]'s, so a type that cannot be a
+/// property's key cannot be declared.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PropertyType {
+    kind: &'static str,
+    key: TypeId,
+    key_name: &'static str,
+}
+
+impl PropertyType {
+    /// Kind `kind`, whose keys are `T`s.
+    pub fn of<T: Serialize + DeserializeOwned + Ord + Send + Sync + 'static>(
+        kind: &'static str,
+    ) -> Self {
+        Self {
+            kind,
+            key: TypeId::of::<T>(),
+            key_name: std::any::type_name::<T>(),
+        }
+    }
+
+    /// The kind's name.
+    #[inline]
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// The name of its keys' type.
+    #[inline]
+    pub fn key_name(&self) -> &'static str {
+        self.key_name
+    }
+
+    /// Why a reader or provider of kind `kind` whose keys are of type
+    /// `key_name` does not fit `declared`, if it does not: a kind not
+    /// among them, or another type.
+    pub(crate) fn misfit(
+        declared: &[Self],
+        kind: &str,
+        key: Option<(TypeId, &'static str)>,
+        missing: impl FnOnce() -> String,
+    ) -> Option<String> {
+        let Some(found) = declared.iter().find(|d| d.kind == kind) else {
+            return Some(missing());
+        };
+        match key {
+            Some((key, name)) if key != found.key => Some(format!(
+                "property kind `{kind}` is declared with keys of type `{}`, not `{name}`",
+                found.key_name
+            )),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for PropertyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PropertyType")
+            .field(&self.kind)
+            .field(&self.key_name)
+            .finish()
+    }
+}
+
 /// A handle by which a node says which properties its instance has, and
 /// whether it can serve each now: one list for each kind. Cheap to clone;
 /// every clone sets the same lists.
@@ -117,10 +186,18 @@ impl<T: Serialize + DeserializeOwned + Ord + Send + Sync + 'static> PropertyKind
 /// A property that a node drops from its list while its drain has not
 /// been reported yet stays in the list as `draining` until a report that
 /// carries it is taken, so that its hub sees it drain, not vanish.
+///
+/// The runtime declares the kinds the segment's nodes provide
+/// ([`InstanceProperties::declare`]), as the graph says them: from then on
+/// a kind that none of them provides, or a key of another type than the
+/// declared one, is refused, and so is one set before.
 #[derive(Clone)]
 pub struct InstanceProperties {
     said: Arc<watch::Sender<Arc<PropertyLists>>>,
     drains: Arc<Mutex<Drains>>,
+    /// The kinds the segment's nodes provide, once the runtime declares
+    /// them; until then, as for a handle no runtime reads, every kind.
+    declared: Arc<OnceLock<Vec<PropertyType>>>,
     /// Whether a drain awaits a report that carries it being taken.
     unreported: Arc<watch::Sender<bool>>,
     /// What the instance's offers want, each holding the instance's keys
@@ -140,6 +217,8 @@ struct Drains {
     /// Those of them the node has dropped from its list since: they stay
     /// in the list, as `draining`, until a report carries them.
     leaving: BTreeMap<PropertyKey, PropertyEntry>,
+    /// The type each kind was set with: none for entries set encoded.
+    types: BTreeMap<String, Option<(TypeId, &'static str)>>,
 }
 
 impl Drains {
@@ -165,9 +244,33 @@ impl InstanceProperties {
         Self {
             said: Arc::new(watch::Sender::new(Arc::default())),
             drains: Arc::default(),
+            declared: Arc::default(),
             unreported: Arc::new(watch::Sender::new(false)),
             wanted: Arc::default(),
         }
+    }
+
+    /// Hold the handle to `provided`, the kinds the segment's nodes
+    /// provide, each with its declared type: refused, and nothing
+    /// declared, when a kind set already is not among them or was set with
+    /// another type, and when the handle was declared with other kinds.
+    /// The runtime calls it once, when the segment starts.
+    #[doc(hidden)]
+    pub fn declare(&self, provided: Vec<PropertyType>) -> Result<()> {
+        let drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
+        for (kind, key) in &drains.types {
+            if let Some(why) = PropertyType::misfit(&provided, kind, *key, || unprovided(kind)) {
+                return Err(Error::new(ErrorKind::Node, why));
+            }
+        }
+        let held = self.declared.get_or_init(|| provided.clone());
+        if *held != provided {
+            return Err(Error::new(
+                ErrorKind::Node,
+                "the instance's properties are declared twice, with other kinds",
+            ));
+        }
+        Ok(())
     }
 
     /// The handle of the segment whose nodes the runtime is building:
@@ -195,7 +298,8 @@ impl InstanceProperties {
             .into_iter()
             .map(|(key, state)| Ok(PropertyEntry::new(kind.encode(&key)?, state)))
             .collect::<Result<Vec<_>>>()?;
-        self.set_entries(kind.name(), entries)
+        let key = Some((TypeId::of::<T>(), std::any::type_name::<T>()));
+        self.set_typed(kind.name(), key, entries)
     }
 
     /// Say that each offer from another class wants the property of `kind`
@@ -265,10 +369,25 @@ impl InstanceProperties {
     }
 
     /// [`InstanceProperties::set`] of entries encoded already, for a
-    /// runtime that carries them and for tests.
+    /// runtime that carries them and for tests. Only the kind is held to
+    /// the declaration: the keys have no type here.
     #[doc(hidden)]
     pub fn set_entries(&self, kind: &str, entries: Vec<PropertyEntry>) -> Result<()> {
+        self.set_typed(kind, None, entries)
+    }
+
+    fn set_typed(
+        &self,
+        kind: &str,
+        key: Option<(TypeId, &'static str)>,
+        entries: Vec<PropertyEntry>,
+    ) -> Result<()> {
         gdl_model::check_property_kind(kind).map_err(|why| Error::new(ErrorKind::Node, why))?;
+        if let Some(provided) = self.declared.get()
+            && let Some(why) = PropertyType::misfit(provided, kind, key, || unprovided(kind))
+        {
+            return Err(Error::new(ErrorKind::Node, why));
+        }
         let mut keys = BTreeSet::new();
         for entry in &entries {
             let key = entry.property();
@@ -293,7 +412,9 @@ impl InstanceProperties {
             set,
             unreported,
             leaving,
+            types,
         } = &mut *drains;
+        types.insert(kind.to_string(), key);
         let before = set.get(kind).map(Vec::as_slice).unwrap_or_default();
         for entry in before {
             let key = entry.property();
@@ -385,6 +506,14 @@ impl InstanceProperties {
     pub async fn scope<F: Future>(&self, build: F) -> F::Output {
         BUILDING.scope(self.clone(), build).await
     }
+}
+
+/// Why a node cannot set kind `kind` in a segment none of whose nodes
+/// provides it.
+fn unprovided(kind: &str) -> String {
+    format!(
+        "property kind `{kind}` is not one this segment's nodes provide: the graph says `provides {kind}` on the node that sets it"
+    )
 }
 
 impl Default for InstanceProperties {

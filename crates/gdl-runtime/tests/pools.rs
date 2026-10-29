@@ -207,6 +207,7 @@ async fn a_placement_without_classes_follows_nothing() {
             forward_types: vec![TypeInfo::new("T", true, Default::default())],
             backward_types: vec![TypeInfo::new("T", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let spec = DeploymentSpec::new(
         graph,

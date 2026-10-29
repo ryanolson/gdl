@@ -37,6 +37,7 @@ fn spec() -> DeploymentSpec {
             forward_types: vec![TypeInfo::new("T", true, Default::default())],
             backward_types: vec![TypeInfo::new("T", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new()
         .segment("a", ["S"])

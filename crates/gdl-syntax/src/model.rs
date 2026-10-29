@@ -12,7 +12,7 @@ use syn::{Ident, LitInt, LitStr, Type};
 
 use gdl_model::Role;
 
-use crate::parse::{Element, GraphInput, Request, Sig};
+use crate::parse::{Element, GraphInput, PropertyDecl, Request, Sig};
 
 /// A graph whose structure is checked: the result of [`Graph::parse`].
 pub struct Graph {
@@ -24,6 +24,16 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     /// Each source root followed by its nested hops, in topology order.
     pub hops: Vec<Hop>,
+    /// Every declared property kind, in declaration order.
+    pub properties: Vec<Property>,
+}
+
+/// One declared property kind: `property model: Model;`.
+pub struct Property {
+    /// The kind's name.
+    pub kind: Ident,
+    /// The message type of its keys.
+    pub ty: Type,
 }
 
 /// One declared node.
@@ -35,6 +45,11 @@ pub struct Node {
     /// The node's setter on `Bindings` and its field there: the node's name
     /// in snake case, raw when it is a keyword. Sources and built-in identities have none.
     pub binding: Option<Ident>,
+    /// The property kinds its instance has: `provides model`.
+    pub provides: Vec<Ident>,
+    /// The property kinds it reads, each with the class whose pools it
+    /// reads them from: `needs model from sets`.
+    pub needs: Vec<(Ident, Ident)>,
 }
 
 /// One hop: outer end, forward chain, inner end, backward chain.
@@ -103,9 +118,11 @@ impl Graph {
                 return Err(syn::Error::new(node.ident.span(), "node declared twice"));
             }
         }
+        let properties = properties(input.properties)?;
         let mut bindings: BTreeMap<String, Ident> = BTreeMap::new();
         let mut nodes: Vec<Node> = Vec::with_capacity(input.nodes.len());
         for decl in input.nodes {
+            declared_uses(&decl, &properties)?;
             // The name goes into the manifest and the generated segment
             // code as written; `r#` would have to be stripped in one and
             // kept in the other.
@@ -124,6 +141,8 @@ impl Graph {
                 ident: decl.ident,
                 sig: decl.sig,
                 binding,
+                provides: decl.provides,
+                needs: decl.needs,
             });
         }
         let sources: Vec<&Node> = nodes.iter().filter(|n| n.role() == Role::Source).collect();
@@ -173,6 +192,7 @@ impl Graph {
             schema: input.schema,
             nodes,
             hops,
+            properties,
         })
     }
 
@@ -265,6 +285,70 @@ impl Graph {
             .find(|n| n.role() == Role::Source)
             .expect("checked: at least one source")
     }
+}
+
+/// The declared kinds, each a property kind's name, once.
+fn properties(decls: Vec<PropertyDecl>) -> syn::Result<Vec<Property>> {
+    let mut properties: Vec<Property> = Vec::with_capacity(decls.len());
+    for PropertyDecl { kind, ty } in decls {
+        let name = kind.to_string();
+        gdl_model::check_property_kind(&name).map_err(|why| syn::Error::new(kind.span(), why))?;
+        if properties.iter().any(|p| p.kind == kind) {
+            return Err(syn::Error::new(
+                kind.span(),
+                format!("property kind `{name}` is declared twice"),
+            ));
+        }
+        properties.push(Property { kind, ty });
+    }
+    Ok(properties)
+}
+
+/// What a node provides and needs: declared kinds, each once, read from
+/// classes of a class name's shape, and none for a built-in identity,
+/// which has no implementation to set or read them.
+fn declared_uses(decl: &crate::parse::NodeDecl, properties: &[Property]) -> syn::Result<()> {
+    let node = &decl.ident;
+    if decl.builtin
+        && let Some(first) = decl.provides.first().or(decl.needs.first().map(|(k, _)| k))
+    {
+        return Err(syn::Error::new(
+            first.span(),
+            "a built-in identity has no implementation, so it provides and needs no property",
+        ));
+    }
+    let declared = |kind: &Ident| -> syn::Result<()> {
+        if properties.iter().any(|p| p.kind == *kind) {
+            return Ok(());
+        }
+        Err(syn::Error::new(
+            kind.span(),
+            format!(
+                "property kind `{kind}` is not declared: declare it with `property {kind}: <Type>;`"
+            ),
+        ))
+    };
+    for (index, kind) in decl.provides.iter().enumerate() {
+        declared(kind)?;
+        if decl.provides[..index].contains(kind) {
+            return Err(syn::Error::new(
+                kind.span(),
+                format!("node `{node}` provides property kind `{kind}` twice"),
+            ));
+        }
+    }
+    for (index, (kind, class)) in decl.needs.iter().enumerate() {
+        declared(kind)?;
+        gdl_model::check_class_name(&class.to_string())
+            .map_err(|why| syn::Error::new(class.span(), why))?;
+        if decl.needs[..index].contains(&(kind.clone(), class.clone())) {
+            return Err(syn::Error::new(
+                kind.span(),
+                format!("node `{node}` needs property kind `{kind}` from class `{class}` twice"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The binding name of a non-source node, checked against the names the

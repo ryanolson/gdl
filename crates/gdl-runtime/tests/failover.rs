@@ -915,6 +915,7 @@ impl Outcomes {
             "model_x",
             gdl_model::PoolPolicy {
                 policy: "outcomes".into(),
+                provides: Vec::new(),
             },
         )
     }

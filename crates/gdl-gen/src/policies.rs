@@ -135,14 +135,17 @@ pub(crate) fn read_offer(
 /// request that crosses into a class that names it. Offers come from
 /// `from`, as a node crate's do. The heads are checked only where
 /// `resolution` gives the graph's messages their identity: a graph file's.
+/// And the property kinds each policy it found reads, by name, for the
+/// supply check.
 pub(crate) fn resolve(
     spec: &Spec,
     target: &std::path::Path,
     from: Offers<'_>,
     manifest: &gdl_model::Manifest,
     resolution: Option<&crate::Resolution>,
-) -> Vec<String> {
+) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
     let mut problems = Vec::new();
+    let mut needs = std::collections::BTreeMap::new();
     for (name, bind) in &spec.pool_policies {
         let at = format!("[pool_policy.{name}]");
         let offer = match read_offer(spec, &at, bind, target, from) {
@@ -161,15 +164,20 @@ pub(crate) fn resolve(
             "pool policy",
         ) {
             Err(problem) => problems.push(format!("{at}: {problem}")),
-            Ok(policy) => problems.extend(
-                resolution
-                    .into_iter()
-                    .flat_map(|resolution| misfits(spec, manifest, resolution, name, &policy.head))
-                    .map(|problem| format!("{at}: {problem}")),
-            ),
+            Ok(policy) => {
+                needs.insert(name.clone(), policy.needs.clone());
+                problems.extend(
+                    resolution
+                        .into_iter()
+                        .flat_map(|resolution| {
+                            misfits(spec, manifest, resolution, name, &policy.head)
+                        })
+                        .map(|problem| format!("{at}: {problem}")),
+                )
+            }
         }
     }
-    problems
+    (problems, needs)
 }
 
 /// The entry of `entries`, `offer`'s pool policies or selectors, for

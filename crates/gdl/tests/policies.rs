@@ -391,6 +391,7 @@ struct ByProperty {
 
 impl PoolPolicy for ByProperty {
     type Head = gdl::Encoded;
+    const NEEDS: &'static [&'static str] = &["test"];
 
     fn choose(
         &self,
@@ -458,6 +459,7 @@ fn a_policy_registers_the_kinds_it_reads_and_chooses_by_them() {
     struct Other;
     impl PoolPolicy for Other {
         type Head = gdl::Encoded;
+        const NEEDS: &'static [&'static str] = &["test"];
         fn choose(
             &self,
             _: PoolRequest<'_, gdl::Encoded>,
@@ -474,4 +476,43 @@ fn a_policy_registers_the_kinds_it_reads_and_chooses_by_them() {
         .register_properties(&kinds)
         .expect_err("another type under `test`");
     assert!(error.to_string().contains("`other`"), "{error}");
+}
+
+/// A policy reads only the kinds its `NEEDS` names, so that what the
+/// generator's supply check reads of its source is what it reads: one that
+/// registers another kind fails the segment's start, naming the policy and
+/// the kind.
+#[test]
+fn a_policy_registers_only_the_kinds_its_needs_names() {
+    struct Unsaid;
+    impl PoolPolicy for Unsaid {
+        type Head = gdl::Encoded;
+        const NEEDS: &'static [&'static str] = &["region"];
+        fn choose(
+            &self,
+            _: PoolRequest<'_, gdl::Encoded>,
+            _: &[Pool],
+        ) -> Result<PoolChoice, NoPool> {
+            Err(NoPool::new())
+        }
+        fn properties(&self, kinds: &gdl::PropertyKinds) -> gdl::Result<()> {
+            kinds.register(&gdl::PropertyKind::<Test>::new("test"))
+        }
+    }
+    let mut policies = PoolPolicies::new();
+    policies.add("unsaid", Unsaid).expect("registered");
+    let kinds = gdl::PropertyKinds::new();
+    let error = policies
+        .register_properties(&kinds)
+        .expect_err("a kind its NEEDS does not name");
+    let error = error.to_string();
+    assert!(error.contains("pool policy `unsaid`"), "{error}");
+    assert!(
+        error.contains("the policy reads property kind `test`, which its `NEEDS` does not name"),
+        "{error}"
+    );
+    assert!(
+        format!("{kinds:?}") == "[]",
+        "nothing registered: {kinds:?}"
+    );
 }

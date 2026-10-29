@@ -20,5 +20,5 @@ pub use endpoint::{Endpoint, endpoints};
 pub use gdl_model::Role;
 pub use manifest::spelled;
 pub use metrics::metric_fields;
-pub use model::{Edge, Graph, Hop, Node, identifier, message_name};
+pub use model::{Edge, Graph, Hop, Node, Property, identifier, message_name};
 pub use parse::{Request, Sig};

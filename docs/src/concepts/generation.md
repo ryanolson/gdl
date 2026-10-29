@@ -24,6 +24,7 @@ A contract holds the graph's message types and one `gdl_runtime::graph!` invocat
 - `assemble(&deployment, bindings)`: the part one segment runs. It fails if the deployment was made for another contract, or if a hosted node has no binding.
 - `manifest()`: the graph as data, with each edge's message, wire capability, and encoding. `manifest().contract_hash()` is the contract hash. There is no hash constant.
 - `SourceReq` and `SourceItem`: the source's request and item types. A graph with several roots has no one source, so it has neither.
+- `property_types()`: each declared property kind with its key's Rust type. A segment's binary, and its library's `start`, pass it to the runtime, which holds every node that sets or reads a kind to the declared type. A type that cannot be a property's key fails to build at its declaration.
 
 The expansion names gdl only through the path that `graph!` passes as `$crate`, so a contract can depend on gdl under another name. Every name it introduces starts with `__gdl`, and every other path is rooted.
 
@@ -38,7 +39,7 @@ The expansion names gdl only through the path that `graph!` passes as `$crate`, 
 
 A graph spec compiles nothing. The manifest comes from the graph file, the resolution of each name, and each message's wire capability and encoding as the reader found them. A crate whose build needs a toolkit that is not installed, CUDA for example, can therefore compose on a machine without it. A contract spec compiles only the contract crate. The program that reads its manifest starts from the lock file of the contract's workspace, so it builds the versions that workspace builds, and Cargo reads no registry index for them. The program holds a lock file in the target directory from writing the program until it has run.
 
-The manifest builder, the placement checks, the layouts, and the diagrams live in `gdl-model` and `gdl-syntax`. Neither links the runtime, and both build for `wasm32-unknown-unknown`. The generator and the composer therefore apply one copy of each rule. The model spells a type as a rooted path (`:: chat_protocols :: Words`), because the contract hash covers that spelling. A test holds the model's manifest equal to the compiled contract's, hash included, on the chat example and two fixtures.
+The manifest builder, the placement checks, the layouts, and the diagrams live in `gdl-model` and `gdl-syntax`. Neither links the runtime, and both build for `wasm32-unknown-unknown`. The generator and the composer therefore apply one copy of each rule. The model spells a type as a rooted path (`:: chat_protocols :: Words`), because the contract hash covers that spelling. A test holds the model's manifest equal to the compiled contract's, hash included, on the chat example and several fixtures, one of them with property declarations.
 
 The generated contract writes each message by a rooted public path through a listed crate. [Messages and encodings](messages.md) says how a name becomes that path.
 

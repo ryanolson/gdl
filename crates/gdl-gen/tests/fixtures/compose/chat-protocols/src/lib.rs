@@ -54,3 +54,10 @@ pub struct Text {
     /// The text.
     pub text: String,
 }
+
+/// A shard a pool serves: a property's key, compared field by field.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, gdl_message::Message)]
+pub struct Shard {
+    /// The shard's name.
+    pub name: String,
+}

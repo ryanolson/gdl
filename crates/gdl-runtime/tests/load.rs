@@ -504,6 +504,7 @@ async fn a_kind_a_node_registers_reaches_the_choosers_index() {
     struct Other;
     impl gdl::PoolPolicy for Other {
         type Head = gdl::Encoded;
+        const NEEDS: &'static [&'static str] = &["test"];
         fn choose(
             &self,
             _: gdl::PoolRequest<'_, gdl::Encoded>,
@@ -529,7 +530,7 @@ async fn a_kind_a_node_registers_reaches_the_choosers_index() {
         Err(refused) => refused.to_string(),
     };
     assert!(
-        refused.contains("property kind `test`") && refused.contains("`other`"),
+        refused.contains("property kind `test` is registered with") && refused.contains("`other`"),
         "{refused}"
     );
     drop(chooser);

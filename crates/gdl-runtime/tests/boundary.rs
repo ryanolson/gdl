@@ -464,6 +464,7 @@ async fn a_chooser_refuses_a_pool_policy_it_does_not_have() {
         "model_x",
         PoolPolicy {
             policy: "nearest".into(),
+            provides: Vec::new(),
         },
     ));
     let events = Events::new();

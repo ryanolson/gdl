@@ -41,6 +41,7 @@ fn manifest() -> Manifest {
                 backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             },
         ],
+        properties: Vec::new(),
     }
 }
 

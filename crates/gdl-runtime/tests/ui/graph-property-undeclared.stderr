@@ -1,0 +1,5 @@
+error: property kind `shard` is not declared: declare it with `property shard: <Type>;`
+ --> tests/ui/graph-property-undeclared.rs:8:42
+  |
+8 |     sink   D: u32 -> stream u32 provides shard;
+  |                                          ^^^^^

@@ -95,6 +95,7 @@ pub(super) fn manifest() -> gdl_model::Manifest {
             forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
         }],
+        properties: Vec::new(),
     }
 }
 

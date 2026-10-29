@@ -994,6 +994,7 @@ mod tests {
                     forward_types: vec![TypeInfo::new("Request", true, Default::default())],
                     backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
                 }],
+                properties: Vec::new(),
             };
             let placement = Placement::new()
                 .segment("front", ["Source"])

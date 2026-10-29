@@ -147,6 +147,7 @@ fn spec(policy: &str) -> DeploymentSpec {
             forward_types: vec![TypeInfo::new("Routed", true, Default::default())],
             backward_types: vec![TypeInfo::new("String", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new()
         .segment("a", ["S"])
@@ -157,6 +158,7 @@ fn spec(policy: &str) -> DeploymentSpec {
             "model",
             gdl_model::PoolPolicy {
                 policy: policy.into(),
+                provides: Vec::new(),
             },
         );
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
@@ -403,6 +405,10 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
         Ok(spec("by_shard"))
     }
 
+    fn property_types() -> Vec<gdl::PropertyType> {
+        Vec::new()
+    }
+
     fn start(
         _: (),
         node: gdl_runtime::velo::Velo,
@@ -518,6 +524,10 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
         Ok(spec("by_shard"))
     }
 
+    fn property_types() -> Vec<gdl::PropertyType> {
+        Vec::new()
+    }
+
     fn start(
         (): (),
         node: gdl_runtime::velo::Velo,
@@ -609,6 +619,10 @@ impl gdl_runtime::SegmentBinary for Counting {
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
         Ok(spec("by_shard"))
+    }
+
+    fn property_types() -> Vec<gdl::PropertyType> {
+        Vec::new()
     }
 
     fn start(

@@ -645,7 +645,7 @@ impl PoolSettings {
                 }
                 _ => None,
             };
-            let properties = (!self.properties.is_empty() && sent_to(layout, class).is_none())
+            let unsent = (!self.properties.is_empty() && sent_to(layout, class).is_none())
                 .then(|| {
                     at(
                         "properties".into(),
@@ -654,6 +654,29 @@ impl PoolSettings {
                         ),
                     )
                 });
+            // The supply check counts a kind as served from settings only
+            // where `[pools.<class>] provides` names it; a pool that served
+            // another would serve what no check knows of.
+            let provides = layout
+                .pool_policy(class)
+                .map(|policy| policy.provides.as_slice())
+                .unwrap_or_default();
+            let kinds: BTreeSet<&str> = match unsent {
+                Some(_) => BTreeSet::new(),
+                None => self.properties.iter().map(PropertyKey::kind).collect(),
+            };
+            let undeclared = kinds
+                .into_iter()
+                .filter(|kind| !provides.iter().any(|p| p == kind))
+                .map(|kind| {
+                    at(
+                        format!("properties.{kind}"),
+                        format!(
+                            "`[pools.{class}] provides` does not name property kind `{kind}`, so the pool cannot serve it from its settings"
+                        ),
+                    )
+                });
+            let properties = unsent.into_iter().chain(undeclared);
             own.into_iter()
                 .chain(strays)
                 .chain(requires)

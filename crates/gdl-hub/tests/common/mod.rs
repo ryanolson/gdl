@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use gdl_hub::{GraphAdmission, PoolHealth, PoolReadiness, PoolTiming};
 use gdl_model::{
-    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PoolSettings, Role, SegmentPhase,
-    TypeInfo, segment_service,
+    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PoolPolicy, PoolSettings, PropertyInfo,
+    Role, SegmentPhase, TypeInfo, segment_service,
 };
 use gdl_pools::{
     DirectoryError, MemoryDirectory, MemoryWatch, PoolDirectory, PoolEvent, PoolRecord, PoolState,
@@ -31,6 +31,8 @@ pub const WAIT: Duration = Duration::from_secs(5);
 
 /// `S => F { D }` in two classes: `global` runs `a` (S), and `model_x`
 /// runs `f` (F) and `d` (D); the boundary is the inner end of S's hop.
+/// The graph declares the property kinds `test` and `shard`, which the
+/// pools of `model_x` may serve from their settings.
 pub fn spec() -> DeploymentSpec {
     let node = |name: &str, role| NodeInfo {
         name: name.into(),
@@ -54,13 +56,28 @@ pub fn spec() -> DeploymentSpec {
             node("D", Role::Sink),
         ],
         hops: vec![hop("S", "F"), hop("F", "D")],
+        properties: ["shard", "test"]
+            .map(|kind| PropertyInfo {
+                kind: kind.into(),
+                ty: TypeInfo::new("T", true, Default::default()),
+                providers: vec![],
+                needs: vec![],
+            })
+            .into(),
     };
     let placement = Placement::new()
         .segment("a", ["S"])
         .segment("f", ["F"])
         .segment("d", ["D"])
         .class("global", ["a"])
-        .class("model_x", ["f", "d"]);
+        .class("model_x", ["f", "d"])
+        .pool_policy(
+            "model_x",
+            PoolPolicy {
+                provides: vec!["shard".into(), "test".into()],
+                ..PoolPolicy::default()
+            },
+        );
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 

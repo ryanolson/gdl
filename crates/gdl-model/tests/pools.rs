@@ -44,6 +44,7 @@ fn manifest() -> Manifest {
                 backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             },
         ],
+        properties: Vec::new(),
     }
 }
 
@@ -79,6 +80,7 @@ fn built() -> Placement {
 fn policy(policy: &str) -> PoolPolicy {
     PoolPolicy {
         policy: policy.into(),
+        provides: Vec::new(),
     }
 }
 
@@ -565,4 +567,83 @@ fn a_spelled_default_for_a_missing_name_is_refused() {
     assert_eq!(entered.hash(), CLASSED_HASH);
     layout(&manifest(), &entered).expect("a layout");
     layout(&manifest(), &built()).expect("a layout");
+}
+
+/// `provides` names the property kinds a class's pools serve from their
+/// settings. A table that sets only it is kept, not dropped as a default,
+/// it reads back from TOML and JSON, and it enters the hash in kind
+/// order. A placement whose tables provide nothing keeps its hash.
+#[test]
+fn a_classs_pools_provide_kinds_from_their_settings() {
+    let provided = parsed("[pools.model_x]\nprovides = ['shard', 'region']\n");
+    let expected = PoolPolicy {
+        provides: vec!["shard".into(), "region".into()],
+        ..PoolPolicy::default()
+    };
+    assert_eq!(
+        provided,
+        built().pool_policy("model_x", expected.clone()),
+        "a table of provides alone is kept"
+    );
+    let laid = layout(&manifest(), &provided).expect("a layout");
+    assert_eq!(laid.pool_policy("model_x"), Some(&expected));
+    let text = toml::to_string(&provided).expect("toml");
+    assert_eq!(
+        Placement::from_toml(&text).expect("a placement"),
+        provided,
+        "{text}"
+    );
+    let json = serde_json::to_string(&provided).expect("json");
+    assert_eq!(
+        serde_json::from_str::<Placement>(&json).expect("json"),
+        provided,
+        "{json}"
+    );
+
+    assert_eq!(
+        parsed("[pools.model_x]\nprovides = []\n").hash(),
+        CLASSED_HASH
+    );
+    let reordered = parsed("[pools.model_x]\nprovides = ['region', 'shard']\n");
+    assert_eq!(reordered.hash(), provided.hash());
+    let hashes: std::collections::BTreeSet<u64> = [
+        "",
+        "provides = ['shard']\n",
+        "provides = ['region']\n",
+        "provides = ['shard', 'region']\n",
+        "policy = 'home_first'\nprovides = ['shard']\n",
+    ]
+    .into_iter()
+    .map(|table| parsed(&format!("[pools.model_x]\n{table}")).hash())
+    .collect();
+    assert_eq!(hashes.len(), 5);
+}
+
+/// A kind `provides` names is a property kind's name, once.
+#[test]
+fn a_provided_kind_is_a_property_kind_named_once() {
+    for (table, why) in [
+        ("provides = ['Shard']", "property kind name"),
+        (
+            "provides = ['shard', 'shard']",
+            "property kind `shard` is named twice",
+        ),
+    ] {
+        let text = format!("{SEGMENTS}{CLASSES}[pools.model_x]\n{table}\n");
+        let refused = Placement::from_toml(&text).expect_err(&text).to_string();
+        assert!(refused.contains("[pools.model_x] provides"), "{refused}");
+        assert!(refused.contains(why), "{refused}");
+        let built = built().pool_policy(
+            "model_x",
+            PoolPolicy {
+                provides: toml::from_str::<PoolPolicy>(table).expect("toml").provides,
+                ..PoolPolicy::default()
+            },
+        );
+        assert!(
+            refusals(&built).iter().any(|r| r.contains(why)),
+            "{:?}",
+            refusals(&built)
+        );
+    }
 }

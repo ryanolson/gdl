@@ -22,6 +22,7 @@ mod placement;
 mod pool;
 mod problem;
 mod properties;
+mod supply;
 
 use std::fmt;
 
@@ -37,7 +38,7 @@ pub use fleet::{
     Cluster, ClusterResources, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors,
     FleetMetrics, FleetTable, HUB, PoolResources, Quantities, Quantity, Resources, Toleration,
 };
-pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
+pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
     RUNTIME_METRICS, WORKER_LABEL,
@@ -57,6 +58,7 @@ pub use problem::{Origin, Problem, Problems, read_toml};
 pub use properties::{
     EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind, read_each,
 };
+pub use supply::{PropertyConsumer, property_supply};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

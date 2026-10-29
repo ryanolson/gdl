@@ -28,6 +28,28 @@ Keep these rules in mind:
 - `schema` is a number you own. Bump it when a message's serde representation changes. A change of codec changes the contract hash on its own.
 - `identity N: request Req;` and its two siblings declare a built-in node that needs no implementation. [Hosted frontends](frontends.md) uses them.
 
+## Declare properties
+
+A graph declares each property kind its pools serve, and the message type of its keys. After its signature, a node says the kinds its instance has, and the kinds it reads, each with the class whose pools it reads it from:
+
+```text
+name = "sets", schema = 1;
+property model: Model;
+source   Front: Ask -> stream Answer;
+operator Gate: (Ask -> stream Answer) over (Ask -> stream Answer) needs model from sets;
+sink     Engine: Ask -> stream Answer provides model;
+topology: Front => Gate { Engine };
+```
+
+- `property <kind>: <Message>;` goes among the nodes. The kind is a settings key's shape: lowercase letters, digits, and `_`. The message must be a wire type, as the type of an edge that may be cut is, and its Rust type must implement `Ord`, since a reader's index sorts by it.
+- `provides a, b` lists the kinds a node's instance sets with `InstanceProperties::set`. Only a node in an entry segment of a class reports them.
+- `needs a from x, b from y` lists the kinds a node reads, each from the pools of a class of the placement. The class name is then part of the contract.
+- A built-in identity provides and needs nothing. Each kind is declared once, and a node names a kind once in each list.
+
+An entry adapter or a pool policy reads a kind too. It says so outside the graph: an adapter in its `[entry.<name>]` table, and a policy in its Rust type ([Write a pool policy](write-a-pool-policy.md#2-implement-gdlpoolpolicy)). A class whose pools serve a kind from their settings, not from a node, says so in its `[pools.<class>]` table ([Spec reference](../appendix/spec-reference.md#placement)).
+
+`cargo gdl check` and `cargo gdl build` then check, in each layout, that each kind a node, an adapter, or a policy needs from a class is supplied: a node in an entry segment of the class provides it, or `[pools.<class>] provides` names it. Otherwise they fail, naming the kind, the reader, and the class. When a segment starts, each node that sets or reads a kind must use the declared type, and a node may set only a kind that a node of its segment provides.
+
 ## Offer the messages
 
 A protocols crate depends on `gdl-message` and derives `Message` for each type the graph names, as [Messages and encodings](../concepts/messages.md#offering-a-message) shows. Every type needs `Serialize` and `DeserializeOwned` to cross segments, and must be `Send + 'static`.

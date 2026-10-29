@@ -147,6 +147,7 @@ fn roots(n: usize) -> (Manifest, Placement) {
         schema: 1,
         nodes,
         hops,
+        properties: Vec::new(),
     };
     (manifest, placement)
 }

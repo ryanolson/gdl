@@ -35,6 +35,7 @@ fn manifest() -> Manifest {
             node("G", Role::Sink),
         ],
         hops: vec![hop("S", "F"), hop("T", "G")],
+        properties: Vec::new(),
     }
 }
 

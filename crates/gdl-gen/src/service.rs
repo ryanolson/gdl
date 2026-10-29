@@ -36,6 +36,11 @@ pub(crate) struct EntrySpec {
     pub(crate) nested: Option<Box<EntrySpec>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) backward: Vec<String>,
+    /// The property kinds the entry's adapters read, each with the class
+    /// whose pools they read it from: `needs = { model = "sets" }`. Only
+    /// an entry's own table says it, not a nested hop's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) needs: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct EntryBinding {

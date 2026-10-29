@@ -7,11 +7,11 @@ use crate::manifest::Manifest;
 
 use super::{ClassBoundary, Placement, PlacementError};
 
-/// How a chooser picks a pool of a class it sends to: a placement's
-/// `[pools.<class>]` table. Its one key is optional in the table, and a
-/// value equal to its default is not recorded. Unknown keys are refused,
-/// `spill_rtt_ms` and `max_near` among them: they chose near pools, which
-/// a chooser does not follow.
+/// How a chooser picks a pool of a class it sends to, and what the class's
+/// pools serve from their settings: a placement's `[pools.<class>]` table.
+/// Each key is optional in the table, and a table equal to the default is
+/// not recorded. Unknown keys are refused, `spill_rtt_ms` and `max_near`
+/// among them: they chose near pools, which a chooser does not follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PoolPolicy {
@@ -20,6 +20,13 @@ pub struct PoolPolicy {
     /// policy can be registered by a deployment.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
+    /// The property kinds the class's pools serve from their settings
+    /// (`[pool.properties]`) rather than from a node that provides them:
+    /// each counts as supplied for the class when a reader needs it, and a
+    /// pool's settings may declare properties of these kinds only. Empty
+    /// by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<String>,
 }
 
 impl PoolPolicy {
@@ -31,6 +38,7 @@ impl Default for PoolPolicy {
     fn default() -> Self {
         Self {
             policy: Self::DEFAULT_POLICY.into(),
+            provides: Vec::new(),
         }
     }
 }
@@ -55,6 +63,19 @@ pub(super) fn check_policy_name(policy: &PoolPolicy) -> Result<(), String> {
     super::check_pool_policy_name(&policy.policy)
 }
 
+/// Why `policy`'s `provides` cannot be read, if it cannot: a kind that has
+/// not a settings key's shape, or one named twice.
+pub(super) fn check_provides(policy: &PoolPolicy) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for kind in &policy.provides {
+        crate::check_property_kind(kind)?;
+        if !seen.insert(kind) {
+            return Err(format!("property kind `{kind}` is named twice"));
+        }
+    }
+    Ok(())
+}
+
 /// Hash the pool policies after the classes: each class's effective
 /// policy, the default included, so that a change of default changes the
 /// hash rather than what a placement means, and each table that names no
@@ -63,6 +84,10 @@ pub(super) fn check_policy_name(policy: &PoolPolicy) -> Result<(), String> {
 /// length can have and the classes' marker is not, so no pool policy
 /// hashes as any of them. A placement with neither classes nor tables
 /// writes nothing and keeps the hash it had before pool policies existed.
+///
+/// Then each table's `provides`, in kind order, after a marker of its own,
+/// for the tables that name a kind: a placement whose tables name none
+/// keeps the hash it had before `provides` existed.
 pub(super) fn hash<'a>(
     h: &mut Fnv,
     classes: impl Iterator<Item = &'a String> + Clone,
@@ -81,6 +106,20 @@ pub(super) fn hash<'a>(
                 .get(class)
                 .map_or(PoolPolicy::DEFAULT_POLICY, |policy| &policy.policy),
         );
+    }
+    let provided: Vec<(&String, BTreeSet<&str>)> = pools
+        .iter()
+        .filter(|(_, policy)| !policy.provides.is_empty())
+        .map(|(class, policy)| (class, policy.provides.iter().map(String::as_str).collect()))
+        .collect();
+    if provided.is_empty() {
+        return;
+    }
+    h.u64(u64::MAX - 2);
+    h.u64(provided.len() as u64);
+    for (class, kinds) in provided {
+        h.str(class);
+        h.strs(&kinds.into_iter().collect::<Vec<_>>());
     }
 }
 
@@ -126,6 +165,12 @@ pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
     for (class, policy) in &placement.pools {
         if let Err(reason) = check_policy_name(policy) {
             errors.push(PlacementError::InvalidPoolPolicy {
+                class: class.clone(),
+                reason,
+            });
+        }
+        if let Err(reason) = check_provides(policy) {
+            errors.push(PlacementError::InvalidPoolProvides {
                 class: class.clone(),
                 reason,
             });

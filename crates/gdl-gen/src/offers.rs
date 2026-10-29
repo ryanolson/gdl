@@ -230,6 +230,7 @@ mod tests {
             name: "ByText".into(),
             ty: "router_library::ByText".into(),
             head: gdl_extract::PolicyHead::Encoded,
+            needs: Vec::new(),
         };
         let empty = Offer {
             package: "selector-router".into(),

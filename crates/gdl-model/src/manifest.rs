@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::hash::Fnv;
 use crate::{Encoding, Role};
 
+mod properties;
+
 /// The shape of a graph as data: its nodes, hops, and typed edges.
 ///
 /// `graph!` emits one per contract crate; the generator reads it to validate
@@ -20,6 +22,44 @@ pub struct Manifest {
     pub nodes: Vec<NodeInfo>,
     /// Each root followed by its nested hops, in topology order.
     pub hops: Vec<HopInfo>,
+    /// The property kinds the graph declares (`property <kind>: <Type>;`),
+    /// in declaration order, with the nodes that provide and need each.
+    /// Left out when there are none, so a manifest without them reads and
+    /// writes as it did before properties were declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<PropertyInfo>,
+}
+
+/// One property kind a graph declares: its name, the message type of its
+/// keys, and the nodes that provide it and that need it. A property is
+/// not on any edge: the nodes of a pool's entry segments provide it, and
+/// a reader of the class's pools needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyInfo {
+    /// The kind's name, a settings key's shape
+    /// ([`check_property_kind`](crate::check_property_kind)).
+    pub kind: String,
+    /// The type of the kind's keys: a wire type, as the type of an edge
+    /// that may be cut is. Never streamed.
+    #[serde(rename = "type")]
+    pub ty: TypeInfo,
+    /// The nodes that say their instance has properties of this kind
+    /// (`provides <kind>`), in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// The nodes that read this kind from a class's pools
+    /// (`needs <kind> from <class>`), in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<PropertyNeed>,
+}
+
+/// A node that reads a property kind from the pools of a class.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PropertyNeed {
+    /// The node.
+    pub node: String,
+    /// The class whose pools it reads the kind from.
+    pub class: String,
 }
 
 /// One node.
@@ -154,8 +194,11 @@ impl HopInfo {
 impl Manifest {
     /// The contract hash: changes when the name, schema, nodes, roles,
     /// topology, or edge types and encodings (including which requests are streamed,
-    /// and their item types) change. Deployments check it so that segments
-    /// built from different contracts never exchange traffic.
+    /// and their item types) change, and when a declared property kind, its
+    /// type and encoding, or a node that provides or needs it changes.
+    /// Deployments check it so that segments built from different
+    /// contracts never exchange traffic, and pools whose graphs declare
+    /// different properties never follow or offer to each other.
     pub fn contract_hash(&self) -> u64 {
         let mut h = Fnv::new();
         h.str(&self.name);
@@ -184,7 +227,15 @@ impl Manifest {
                 }
             }
         }
+        properties::hash(&mut h, &self.properties);
         h.finish()
+    }
+
+    /// The declared property kind named `kind`.
+    pub fn property(&self, kind: &str) -> Option<&PropertyInfo> {
+        self.properties
+            .iter()
+            .find(|property| property.kind == kind)
     }
 
     /// The node with this name.

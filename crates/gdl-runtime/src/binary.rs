@@ -23,7 +23,7 @@ use gdl::Metrics;
 use gdl::Result;
 use gdl::{
     Affinity, FollowedPools, HubRecords, InstanceProperties, LeastLoaded, PoolPolicies, PoolPolicy,
-    Selector, Selectors,
+    PropertyType, Selector, Selectors,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
@@ -72,6 +72,10 @@ pub trait SegmentBinary {
     /// The deployment the segment belongs to: the contract's manifest and
     /// the placement the crate was generated for.
     fn deployment() -> Result<DeploymentSpec>;
+
+    /// Each property kind the graph declares, with the type of its keys:
+    /// the contract's `property_types()`.
+    fn property_types() -> Vec<PropertyType>;
 
     /// Start the segment's graph on `node`, with every instance in
     /// `roster`, and say what it serves once every segment is ready.
@@ -125,6 +129,16 @@ pub async fn run_segment<B: SegmentBinary>(
         registry.clone(),
         config.selector_tables().clone(),
         config.runtime.records.clone(),
+    )?;
+    // Before the build: a node that sets or reads a kind the graph does
+    // not give it is refused at the call, and fails its build.
+    crate::declare_properties(
+        &deployment.graph,
+        &deployment.placement,
+        B::SEGMENT,
+        &B::property_types(),
+        &builder.properties,
+        &builder.followed,
     )?;
     let hosts = B::build(settings, &builder).await?;
     // gdl's own selectors, configured in the settings and not registered

@@ -250,7 +250,7 @@ fn extract_writes_a_working_catalogue_entry() {
     );
     let entry =
         gdl_gen::Entry::from_toml(&std::fs::read_to_string(&entry).expect("entry")).expect("entry");
-    assert_eq!(entry.offer.messages.len(), 6);
+    assert_eq!(entry.offer.messages.len(), 7);
     // A path package: when it was added, and no registry checksum.
     assert_eq!(
         entry.added.len(),

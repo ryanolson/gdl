@@ -25,6 +25,28 @@ mod adder {
     }
 }
 
+mod shards {
+    gdl_runtime::graph! {
+        name = "shards", schema = 1;
+        property shard: super::Shard;
+        source Ask: u32 -> stream u32;
+        sink Serve: u32 -> stream u32 provides shard;
+        topology: Ask => Serve;
+    }
+}
+
+/// The key of the `shards` graph's property kind.
+#[derive(serde::Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Shard {
+    name: String,
+}
+
+/// Another type, which a node could set under `shard` by mistake.
+#[derive(serde::Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Other {
+    name: String,
+}
+
 /// The longest any case waits for something it expects.
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -208,6 +230,92 @@ fn start_adder(
     deployment.start(root)
 }
 
+/// The `shards` graph's sink, which says in its build that its instance
+/// has shard `a`: as `Shard` when `SETS` is 0, as `Other` when it is 1,
+/// and under the undeclared kind `region` when it is 2. When it is 3, it
+/// reads `shard` as `Other` from the pools its segment follows instead.
+struct Serve<const SETS: u8>;
+
+impl<const SETS: u8> gdl::Build for Serve<SETS> {
+    type Config = toml::Table;
+    type Metrics = ();
+    async fn build(_config: toml::Table, (): ()) -> gdl::Result<Self> {
+        let properties = gdl::InstanceProperties::current();
+        let ready = gdl::EntryState::Ready;
+        match SETS {
+            0 => properties.set(
+                &gdl::PropertyKind::<Shard>::new("shard"),
+                [(Shard { name: "a".into() }, ready)],
+            )?,
+            1 => properties.set(
+                &gdl::PropertyKind::<Other>::new("shard"),
+                [(Other { name: "a".into() }, ready)],
+            )?,
+            3 => {
+                gdl::FollowedPools::current().register(&gdl::PropertyKind::<Other>::new("shard"))?
+            }
+            _ => properties.set(
+                &gdl::PropertyKind::<Shard>::new("region"),
+                [(Shard { name: "a".into() }, ready)],
+            )?,
+        }
+        Ok(Self)
+    }
+}
+
+impl<const SETS: u8> gdl::Sink for Serve<SETS> {
+    type Req = u32;
+    type Item = u32;
+    async fn generate(&self, _cx: Cx, req: u32) -> gdl::Result<gdl::Items<u32>> {
+        Ok(gdl::items(futures::stream::iter([Ok(req)])))
+    }
+}
+
+/// A segment binary of the `shards` graph that hosts [`Serve`], and
+/// serves nothing once it starts.
+struct Providing<const SETS: u8>;
+
+impl<const SETS: u8> gdl_runtime::SegmentBinary for Providing<SETS> {
+    const PACKAGE: &'static str = "shards-only";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = Settings;
+    type Hosts = Serve<SETS>;
+
+    async fn build(_settings: Settings, builder: &Builder) -> Result<Serve<SETS>, Failure> {
+        builder.build::<Serve<SETS>>("Serve", None).await
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        Ok(DeploymentSpec::new(
+            shards::manifest(),
+            Placement::new().segment("only", ["Ask", "Serve"]),
+        )?)
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        shards::property_types()
+    }
+
+    fn start(
+        serve: Serve<SETS>,
+        node: gdl_runtime::velo::Velo,
+        roster: &Roster,
+        runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        let placement = Placement::new().segment("only", ["Ask", "Serve"]);
+        let manifest = shards::manifest();
+        let deployment =
+            gdl_runtime::Deployment::new(node, &manifest, &placement, "only", roster, runtime)?;
+        let root = shards::assemble(&deployment, shards::Bindings::new().serve(serve))?;
+        let segment = deployment.start(root)?;
+        Ok(Serving::new(segment, |_segment, _shutdown| async move {
+            Ok(())
+        }))
+    }
+}
+
 /// Tables with no class in them.
 struct NoPools;
 
@@ -242,6 +350,10 @@ impl gdl_runtime::SegmentBinary for Adder {
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
         deployment()
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
     }
 
     fn start(
@@ -296,6 +408,10 @@ impl gdl_runtime::SegmentBinary for Stopping {
         deployment()
     }
 
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
+    }
+
     fn start(
         _add: Add,
         _node: gdl_runtime::velo::Velo,
@@ -326,6 +442,10 @@ impl gdl_runtime::SegmentBinary for Conflicting {
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
         deployment()
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
     }
 
     fn start(
@@ -359,6 +479,10 @@ impl<First: Named, Second: Named> gdl_runtime::SegmentBinary for Clashing<First,
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
         deployment()
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
     }
 
     fn start(
@@ -413,6 +537,44 @@ async fn a_segment_binary_runs_its_lifecycle() {
     gdls_own_selector_is_built_from_its_table().await;
     a_selector_table_nothing_registers_is_refused().await;
     a_registered_selector_is_built_with_its_settings_and_metrics().await;
+    a_provider_sets_only_its_declared_kind_and_type().await;
+}
+
+/// The graph declares `shard` with keys of type `Shard`, and `Serve`
+/// provides it: a build that sets it so starts the segment, and one that
+/// sets it with another type, sets a kind the segment's nodes do not
+/// provide, or reads it with another type, fails, naming the kind, before
+/// the instance meets its peers.
+async fn a_provider_sets_only_its_declared_kind_and_type() {
+    let (_dir, file) = settings("");
+    run::<Providing<0>>(std::slice::from_ref(&file))
+        .await
+        .expect("the declared kind, of its type");
+    let error = run::<Providing<1>>(std::slice::from_ref(&file))
+        .await
+        .expect_err("another type");
+    assert!(
+        error.starts_with(
+            "building Serve: node error: property kind `shard` is declared with keys of type `"
+        ) && error.ends_with("Shard`, not `binary::Other`"),
+        "{error}"
+    );
+    let error = run::<Providing<2>>(std::slice::from_ref(&file))
+        .await
+        .expect_err("another kind");
+    assert_eq!(
+        error,
+        "building Serve: node error: property kind `region` is not one this segment's nodes provide: the graph says `provides region` on the node that sets it"
+    );
+    let error = run::<Providing<3>>(&[file])
+        .await
+        .expect_err("a reader of another type");
+    assert!(
+        error.starts_with(
+            "building Serve: node error: property kind `shard` is declared with keys of type `"
+        ) && error.ends_with("Shard`, not `binary::Other`"),
+        "{error}"
+    );
 }
 
 /// The signals are taken before any node is built: a stop then ends the
@@ -596,6 +758,10 @@ impl gdl_runtime::SegmentBinary for Selecting {
         deployment()
     }
 
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
+    }
+
     fn start(
         add: Add,
         node: gdl_runtime::velo::Velo,
@@ -643,6 +809,10 @@ impl gdl_runtime::SegmentBinary for Plain {
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
         deployment()
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        Vec::new()
     }
 
     fn start(

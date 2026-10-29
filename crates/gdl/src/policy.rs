@@ -91,11 +91,21 @@ pub trait PoolPolicy: Send + Sync + 'static {
         false
     }
 
+    /// The property kinds the policy reads from
+    /// [`PoolRequest::properties`], by name: what `cargo gdl check` reads
+    /// of the policy's source, to check that each pool of the class it
+    /// chooses for supplies them. Written as a list of string literals,
+    /// `&["model"]`, which the source reader reads without compiling the
+    /// crate. A kind [`PoolPolicy::properties`] registers must be among
+    /// them. By default, none.
+    const NEEDS: &'static [&'static str] = &[];
+
     /// Register in `kinds` each property kind the policy reads from
     /// [`PoolRequest::properties`], so that the chooser decodes it
     /// ([`PropertyKinds::register`]). The runtime calls it once, before the
     /// chooser reads the class's pools; a refusal fails the segment's
-    /// start. By default, none.
+    /// start, and so does a kind that [`PoolPolicy::NEEDS`] does not name.
+    /// By default, none.
     fn properties(&self, kinds: &PropertyKinds) -> Result<()> {
         let _ = kinds;
         Ok(())
@@ -728,7 +738,7 @@ impl<P: PoolPolicy> ErasedPolicy for TypedPolicy<P> {
     }
 
     fn properties(&self, kinds: &PropertyKinds) -> Result<()> {
-        self.0.properties(kinds)
+        self.0.properties(&kinds.limited(P::NEEDS, "the policy"))
     }
 }
 

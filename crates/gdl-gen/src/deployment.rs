@@ -1111,6 +1111,7 @@ mod tests {
                 forward_types: vec![request],
                 backward_types: vec![item],
             }],
+            properties: Vec::new(),
         }
     }
 

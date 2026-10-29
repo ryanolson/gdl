@@ -24,6 +24,7 @@ fn manifest() -> Manifest {
             forward_types: vec![TypeInfo::new("Req", true, Default::default())],
             backward_types: vec![TypeInfo::new("Item", true, Default::default())],
         }],
+        properties: Vec::new(),
     }
 }
 
@@ -59,6 +60,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
             .collect(),
         pool_policies: BTreeMap::new(),
         selectors: BTreeMap::new(),
+        policy_needs: BTreeMap::new(),
         allocator: Allocator::DEFAULT,
         problems: Vec::new(),
     }
@@ -83,6 +85,91 @@ fn split() -> gdl_model::Placement {
     gdl_model::Placement::new()
         .segment("front", ["S"])
         .segment("engine", ["D"])
+}
+
+/// [`manifest`], declaring `shard`, which `providers` provide and S needs
+/// from class `engines`.
+fn declared(providers: &[&str]) -> Manifest {
+    Manifest {
+        properties: vec![gdl_model::PropertyInfo {
+            kind: "shard".into(),
+            ty: TypeInfo::new(":: tiny :: Shard", true, Default::default()),
+            providers: providers.iter().map(|node| node.to_string()).collect(),
+            needs: vec![gdl_model::PropertyNeed {
+                node: "S".into(),
+                class: "engines".into(),
+            }],
+        }],
+        ..manifest()
+    }
+}
+
+/// [`split`] in two classes: `front` in `global`, `engine` in `engines`.
+fn engines(pools: gdl_model::PoolPolicy) -> gdl_model::Placement {
+    split()
+        .class("global", ["front"])
+        .class("engines", ["engine"])
+        .pool_policy("engines", pools)
+}
+
+/// `check` and `build` both refuse a class that a reader needs a kind
+/// from when no entry segment of it provides the kind and its pools'
+/// settings do not, naming the kind, the reader, and the class; a
+/// provider in the entry segment, or `[pools.<class>] provides`, meets it.
+#[test]
+fn a_need_that_no_pool_of_the_class_supplies_is_refused() {
+    let unsupplied = spec(
+        engines(gdl_model::PoolPolicy::default()),
+        &[("D", "tiny_nodes::D")],
+    );
+    let out = Path::new("/work/out");
+    let unmet = "node `S` needs property `shard` from class `engines`, but no entry segment of class `engines` (`engine`) hosts a node that provides it, and `[pools.engines] provides` does not name it";
+    let checked = check(&unsupplied, &declared(&[])).expect_err("unsupplied");
+    assert_eq!(checked.to_string(), unmet);
+    let built = rendered(&unsupplied, &declared(&[]), out).expect_err("unsupplied");
+    assert_eq!(built.to_string(), unmet);
+
+    check(&unsupplied, &declared(&["D"])).expect("D provides it in the entry segment");
+    let settings = spec(
+        engines(gdl_model::PoolPolicy {
+            provides: vec!["shard".into()],
+            ..Default::default()
+        }),
+        &[("D", "tiny_nodes::D")],
+    );
+    check(&settings, &declared(&[])).expect("the pools' settings provide it");
+}
+
+/// An entry adapter says what it reads in its `[entry.*]` table, and a
+/// pool policy in its `NEEDS`, for the class it chooses for: each is held
+/// to the class's supply as a graph node is, and named in the problem.
+#[test]
+fn an_entry_adapter_and_a_pool_policy_need_kinds_too() {
+    let mut spec = spec(
+        engines(gdl_model::PoolPolicy {
+            policy: "router".into(),
+            ..Default::default()
+        }),
+        &[("D", "tiny_nodes::D")],
+    );
+    spec.entry.insert(
+        "messages".into(),
+        service::EntrySpec {
+            needs: BTreeMap::from([("shard".into(), "engines".into())]),
+            ..Default::default()
+        },
+    );
+    spec.policy_needs
+        .insert("router".into(), vec!["shard".into()]);
+    let problems = check(&spec, &declared(&[]))
+        .expect_err("unsupplied")
+        .to_string();
+    for reader in ["node `S`", "entry `messages`", "pool policy `router`"] {
+        let unmet = format!(
+            "{reader} needs property `shard` from class `engines`, but no entry segment of class `engines` (`engine`) hosts a node that provides it"
+        );
+        assert!(problems.contains(&unmet), "{reader}: {problems}");
+    }
 }
 
 /// The contract hash covers the path each name resolves to: the same
@@ -118,6 +205,7 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         root.join("tests/fixtures/compose/versions-pinned.toml"),
         root.join("tests/fixtures/compose/streamed.toml"),
         root.join("tests/fixtures/compose/facade.toml"),
+        root.join("tests/fixtures/compose/properties.toml"),
     ] {
         let spec = Spec::load(&spec).expect("spec");
         let built = prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
@@ -1255,6 +1343,7 @@ fn a_policy_two_classes_share_is_registered_once() {
             node("B", Role::Sink, Some("b")),
         ],
         hops: vec![hop("S", "A"), hop("T", "B")],
+        properties: Vec::new(),
     };
     let placement = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = [\"S\", \"T\"]\n[segment.a]\nnodes = [\"A\"]\n[segment.b]\nnodes = [\"B\"]\n\
@@ -1409,6 +1498,7 @@ fn chain(into_f: &str, into_d: &str) -> (Manifest, gdl_model::Placement) {
             ],
             backward_types: vec![TypeInfo::new("Item", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let selector = |name: &str| gdl_model::RequestRouter::Selector(name.into());
     let placement = gdl_model::Placement::new()

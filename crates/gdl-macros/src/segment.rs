@@ -176,6 +176,14 @@ fn start(segment: &Segment, krate: &TokenStream) -> TokenStream {
         ) -> #krate::gdl::Result<#krate::Segment<#root>> {
             let placement = #krate::Placement::from_toml(PLACEMENT)?;
             let manifest = contract::manifest();
+            #krate::declare_properties(
+                &manifest,
+                &placement,
+                SEGMENT,
+                &contract::property_types(),
+                &config.properties,
+                &config.followed,
+            )?;
             let deployment =
                 #krate::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;
             #unbound
@@ -288,6 +296,9 @@ fn binary(segment: &Segment, krate: &TokenStream) -> TokenStream {
                     contract::manifest(),
                     #krate::Placement::from_toml(PLACEMENT)?,
                 )?)
+            }
+            fn property_types() -> ::std::vec::Vec<#krate::gdl::PropertyType> {
+                contract::property_types()
             }
             #start
         }

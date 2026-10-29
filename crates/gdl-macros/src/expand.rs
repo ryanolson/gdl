@@ -8,6 +8,8 @@
 //!   the node;
 //! - `manifest()`: the graph as data, with each edge's wire capability
 //!   decided by the probe at the edge's concrete type;
+//! - `property_types()`: each declared property kind with its key type,
+//!   which the runtime holds the segment's providers and readers to;
 //! - `assemble()`: the distributed hops for one segment;
 //! - `local()`: the whole graph as nested calls in one process;
 //! - `SourceReq` and `SourceItem`: the source's request and item types, so
@@ -37,6 +39,7 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let nodes = expand_nodes(graph, krate);
     let bindings = expand_bindings(graph, krate);
     let manifest = expand_manifest(graph, krate);
+    let properties = expand_property_types(graph, krate);
     let assemble = expand_assemble(graph, krate);
     let local = expand_local(graph, krate);
     let source = expand_source_types(graph, krate);
@@ -47,6 +50,7 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
         #nodes
         #bindings
         #manifest
+        #properties
         #assemble
         #local
     }
@@ -436,16 +440,57 @@ fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
             }
         }
     });
+    let properties = graph.properties.iter().map(|property| {
+        // The providers and needs as the graph file's manifest has them,
+        // from the same rule; the type is the caller's.
+        let declared = graph.property(
+            &property.kind,
+            gdl_model::TypeInfo::new("", true, Default::default()),
+        );
+        let kind = string(&declared.kind);
+        let ty = type_info(&property.ty, krate);
+        let providers = declared.providers.iter().map(|node| string(node));
+        let needs = declared.needs.iter().map(|need| {
+            let (node, class) = (string(&need.node), string(&need.class));
+            quote!(#krate::PropertyNeed { node: #node, class: #class })
+        });
+        quote! {
+            #krate::PropertyInfo {
+                kind: #kind,
+                ty: #ty,
+                providers: ::std::vec![#(#providers),*],
+                needs: ::std::vec![#(#needs),*],
+            }
+        }
+    });
     quote! {
-        /// The graph as data: nodes, hops, and each edge's type and wire
-        /// capability.
+        /// The graph as data: nodes, hops, each edge's type and wire
+        /// capability, and the declared property kinds.
         pub fn manifest() -> #krate::Manifest {
             #krate::Manifest {
                 name: #name,
                 schema: #schema,
                 nodes: ::std::vec![#(#nodes),*],
                 hops: ::std::vec![#(#hops),*],
+                properties: ::std::vec![#(#properties),*],
             }
+        }
+    }
+}
+
+/// `property_types()`. Each type is named at the invocation's level, and
+/// spanned there, so a type that cannot be a property's key fails to build
+/// at its declaration.
+fn expand_property_types(graph: &Graph, krate: &TokenStream) -> TokenStream {
+    let types = graph.properties.iter().map(|property| {
+        let ty = &property.ty;
+        let kind = property.kind.to_string();
+        quote_spanned!(ty.span()=> #krate::gdl::PropertyType::of::<#ty>(#kind))
+    });
+    quote! {
+        /// Each declared property kind, with the type of its keys.
+        pub fn property_types() -> ::std::vec::Vec<#krate::gdl::PropertyType> {
+            ::std::vec![#(#types),*]
         }
     }
 }

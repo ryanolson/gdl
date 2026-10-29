@@ -26,6 +26,7 @@ fn manifest() -> Manifest {
             forward_types: vec![TypeInfo::new("Request", true, Default::default())],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     }
 }
 const SPLIT: &str = "[segment.front]\nnodes=['S']\n[segment.worker]\nnodes=['D']\n";
@@ -136,6 +137,7 @@ fn a_segment_sends_to_the_next_run_and_the_runs_it_opens() {
                 TypeInfo::new("Reply", true, Default::default()),
             ],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new()
         .segment("front", ["S"])
@@ -193,6 +195,7 @@ fn a_forward_path_that_returns_sends_both_ways() {
             ],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let placement = Placement::new()
         .segment("front", ["S", "D"])
@@ -336,6 +339,7 @@ fn a_segment_sends_through_the_selectors_of_the_crossings_it_sends() {
             ],
             backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
+        properties: Vec::new(),
     };
     let selector = |name: &str| gdl_model::RequestRouter::Selector(name.into());
     let placement = Placement::new()

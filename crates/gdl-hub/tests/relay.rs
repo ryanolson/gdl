@@ -224,6 +224,7 @@ fn chain() -> DeploymentSpec {
             node("G", Role::Sink),
         ],
         hops: vec![hop("S", "F"), hop("T", "G")],
+        properties: Vec::new(),
     };
     let placement = Placement::new()
         .segment("s", ["S"])

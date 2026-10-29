@@ -70,6 +70,7 @@ fn spec() -> DeploymentSpec {
         "model_x",
         gdl_model::PoolPolicy {
             policy: "pinned".into(),
+            provides: Vec::new(),
         },
     ))
 }

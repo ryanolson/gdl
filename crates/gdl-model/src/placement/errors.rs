@@ -145,6 +145,14 @@ pub enum PlacementError {
         /// Why the name is refused.
         reason: String,
     },
+    /// A `[pools.<class>]` table's `provides` names a kind that cannot be
+    /// a property kind, or names one twice.
+    InvalidPoolProvides {
+        /// The class the table is for.
+        class: String,
+        /// Why it is refused.
+        reason: String,
+    },
     /// A placement without classes has a pool policy.
     PoolPolicyWithoutClasses {
         /// The class the policy names.
@@ -221,6 +229,9 @@ impl PlacementError {
                 at(format!("class.{class}"), Some("segments"))
             }
             Self::InvalidPoolPolicy { class, .. } => at(format!("pools.{class}"), Some("policy")),
+            Self::InvalidPoolProvides { class, .. } => {
+                at(format!("pools.{class}"), Some("provides"))
+            }
             Self::PoolPolicyWithoutClasses { class }
             | Self::PoolPolicyUnknownClass { class }
             | Self::PoolPolicyNotEntered { class } => at(format!("pools.{class}"), None),
@@ -305,6 +316,9 @@ impl fmt::Display for PlacementError {
             }
             Self::InvalidPoolPolicy { class, reason } => {
                 write!(f, "pool policy `[pools.{class}]`: {reason}")
+            }
+            Self::InvalidPoolProvides { class, reason } => {
+                write!(f, "`[pools.{class}] provides`: {reason}")
             }
             Self::PoolPolicyWithoutClasses { class } => write!(
                 f,

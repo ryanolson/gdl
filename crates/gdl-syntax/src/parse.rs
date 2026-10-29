@@ -18,7 +18,18 @@
 //! A request position (a source's, sink's, or operator's request, and both
 //! sides of a forward node) also takes a streamed request: `Head + stream
 //! Item`, or `stream Item` for a head of `()`.
+//!
+//! Among the nodes, `property model: Model;` declares a property kind and
+//! the message type of its keys. After its signature, a node says which
+//! kinds its instance has, `provides model, region`, and which it reads
+//! from the pools of a class, `needs model from sets`:
+//!
+//! ```text
+//! property model: Model;
+//! sink Engine: Req -> stream Item provides model;
+//! ```
 
+use syn::ext::IdentExt as _;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitInt, LitStr, Token, Type, braced, parenthesized};
 
@@ -36,11 +47,16 @@ mod kw {
     syn::custom_keyword!(stream);
     syn::custom_keyword!(over);
     syn::custom_keyword!(topology);
+    syn::custom_keyword!(property);
+    syn::custom_keyword!(provides);
+    syn::custom_keyword!(needs);
+    syn::custom_keyword!(from);
 }
 
 pub(crate) struct GraphInput {
     pub(crate) name: LitStr,
     pub(crate) schema: LitInt,
+    pub(crate) properties: Vec<PropertyDecl>,
     pub(crate) nodes: Vec<NodeDecl>,
     pub(crate) topology: Vec<Vec<Element>>,
     pub(crate) topology_span: proc_macro2::Span,
@@ -50,6 +66,19 @@ pub(crate) struct NodeDecl {
     pub(crate) builtin: bool,
     pub(crate) ident: Ident,
     pub(crate) sig: Sig,
+    /// The kinds after `provides`.
+    pub(crate) provides: Vec<Ident>,
+    /// Each kind and class after `needs`: `model from sets`.
+    pub(crate) needs: Needs,
+}
+
+/// Each kind a node needs, and the class it reads the kind from.
+pub(crate) type Needs = Vec<(Ident, Ident)>;
+
+/// `property model: Model;`
+pub(crate) struct PropertyDecl {
+    pub(crate) kind: Ident,
+    pub(crate) ty: Type,
 }
 
 // Built once per declared node while the macro expands; its size costs
@@ -126,9 +155,13 @@ impl Parse for GraphInput {
         let schema: LitInt = input.parse()?;
         input.parse::<Token![;]>()?;
 
-        let mut nodes = Vec::new();
+        let (mut properties, mut nodes) = (Vec::new(), Vec::new());
         while !input.peek(kw::topology) {
-            nodes.push(input.parse()?);
+            if input.peek(kw::property) {
+                properties.push(input.parse()?);
+            } else {
+                nodes.push(input.parse()?);
+            }
         }
         let topology_kw = input.parse::<kw::topology>()?;
         input.parse::<Token![:]>()?;
@@ -143,6 +176,7 @@ impl Parse for GraphInput {
         Ok(Self {
             name,
             schema,
+            properties,
             nodes,
             topology,
             topology_span: topology_kw.span,
@@ -244,12 +278,72 @@ impl Parse for NodeDecl {
                 Sig::Sink { req, item }
             }
         };
+        let (provides, needs) = clauses(input)?;
         input.parse::<Token![;]>()?;
         Ok(Self {
             ident,
             sig,
             builtin: sig_kind >= 5,
+            provides,
+            needs,
         })
+    }
+}
+
+impl Parse for PropertyDecl {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        input.parse::<kw::property>()?;
+        // Any word, keywords included, so that the kind check, not the
+        // parser, says what is wrong with one.
+        let kind = Ident::parse_any(input)?;
+        input.parse::<Token![:]>()?;
+        let ty = Type::without_plus(input)?;
+        input.parse::<Token![;]>()?;
+        Ok(Self { kind, ty })
+    }
+}
+
+/// `provides a, b` and `needs a from x, b from y`, each at most once, in
+/// either order, after a node's signature.
+fn clauses(input: ParseStream<'_>) -> syn::Result<(Vec<Ident>, Needs)> {
+    let (mut provides, mut needs) = (None, None);
+    loop {
+        if input.peek(kw::provides) {
+            let said = input.parse::<kw::provides>()?;
+            if provides.is_some() {
+                return Err(syn::Error::new(
+                    said.span,
+                    "`provides` is said once: list its kinds after it, `provides a, b`",
+                ));
+            }
+            let mut kinds = vec![Ident::parse_any(input)?];
+            while input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+                kinds.push(Ident::parse_any(input)?);
+            }
+            provides = Some(kinds);
+        } else if input.peek(kw::needs) {
+            let said = input.parse::<kw::needs>()?;
+            if needs.is_some() {
+                return Err(syn::Error::new(
+                    said.span,
+                    "`needs` is said once: list its kinds after it, `needs a from x, b from y`",
+                ));
+            }
+            let mut kinds = Vec::new();
+            loop {
+                let kind = Ident::parse_any(input)?;
+                input.parse::<kw::from>()?;
+                kinds.push((kind, Ident::parse_any(input)?));
+                if !input.peek(Token![,]) {
+                    break;
+                }
+                input.parse::<Token![,]>()?;
+            }
+            needs = Some(kinds);
+        } else {
+            return Ok((provides.unwrap_or_default(), needs.unwrap_or_default()));
+        }
     }
 }
 

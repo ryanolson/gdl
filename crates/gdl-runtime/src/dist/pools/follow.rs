@@ -678,10 +678,23 @@ impl<R: Registry> Follows<R> {
             return Arc::clone(index);
         }
         let (kinds, now) = self.pools.kinds().snapshot();
+        // Off the request path, and only when what the index is made of
+        // changes: a key another build encoded as another type.
+        let mut undecoded = |key: &gdl::PropertyKey, pool: &gdl::PropertyPool, why: String| {
+            tracing::debug!(
+                class,
+                pool = pool.pool(),
+                kind = key.kind(),
+                key = %key.key(),
+                why,
+                "a property's key does not decode as its kind's type: it is left out"
+            );
+        };
         let index = Arc::new(PropertyIndexes::decode(
             &now,
             self.followed.listed,
             &self.followed.listed(class),
+            &mut undecoded,
         ));
         self.indexes.insert(
             class.to_string(),

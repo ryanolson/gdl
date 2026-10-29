@@ -181,7 +181,7 @@ Until the hub's watch of the directory has read its first snapshot of every clas
 
 ### Registering a kind
 
-The chooser decodes only the kinds that the segment reads. A kind is a `gdl::PropertyKind<T>`: a name, and a key type `T` that serde encodes and decodes, and that `Ord` sorts. A node registers a kind in its build, with `FollowedPools::register`. A pool policy registers the kinds it reads in `PoolPolicy::properties`, which the runtime calls once before the chooser reads the class's pools. One name has one type: a second type under a registered name is refused, and the segment does not start.
+The chooser decodes only the kinds that the segment reads. A kind is a `gdl::PropertyKind<T>`: a name, and a key type `T` that serde encodes and decodes, and that `Ord` sorts. A node registers a kind in its build, with `FollowedPools::register`. A pool policy registers the kinds it reads in `PoolPolicy::properties`, which the runtime calls once before the chooser reads the class's pools. One name has one type: a second type under a registered name is refused, and the segment does not start. The runtime also holds the registrations to the graph's declarations: a kind the graph does not declare, or one registered with another type than the declared one, is refused. A pool policy may register only the kinds its `NEEDS` names.
 
 ```rust,ignore
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -204,7 +204,7 @@ followed.register(&SHARD)?;
 
 The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. When a missing pool's listing arrives, the chooser dates its silence back by the age, once, to an instant on its own clock. For each class it builds a `gdl::PropertyIndexes` from the listings and its own follows: for each registered kind, a `gdl::PropertyIndex<T>` of every key some pool lists, decoded to `T`. Each entry is a key and a `gdl::PropertyPool`: the key's state in that pool, the pool's condition, since when a missing pool has been silent, and whether the chooser offers the pool work. The entries are sorted by `T`'s order, then by pool name. The chooser builds the indexes again only when a listing, a follow's offered state, or the registered kinds change. A pool's load summary arrives each period, and does not rebuild them. A registered kind that no pool lists has an empty index.
 
-A key that does not decode to `T` is left out of the index and counted in `PropertyIndex::undecoded`. A build that adds a field to `T` that an older type refuses, or another application's type under the same kind name, shows there.
+A key that does not decode to `T` is left out of the index and counted in `PropertyIndex::undecoded`, and the chooser logs it at debug with the class, the pool, the kind, the key, and serde's reason. A key that a pool's settings declare with a field the type does not have, or that a build of another type encoded, shows there.
 
 ```rust,ignore
 // Per request, in a gate: one load of the class's table.

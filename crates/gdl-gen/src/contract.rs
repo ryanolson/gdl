@@ -79,6 +79,13 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
         lit(&graph.name.value()),
         graph.schema.base10_digits()
     );
+    for property in &graph.properties {
+        text.push_str(&format!(
+            "property {}: {};\n",
+            property.kind,
+            type_name(&property.ty, path)
+        ));
+    }
     for node in &graph.nodes {
         if node.binding.is_none() {
             let builtin = match &node.sig {
@@ -101,10 +108,11 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
             }
         }
         text.push_str(&format!(
-            "{:<8} {}: {};\n",
+            "{:<8} {}: {}{};\n",
             node.role().name(),
             node.ident,
-            signature(&node.sig, path)
+            signature(&node.sig, path),
+            clauses(node)
         ));
     }
     for (index, root) in graph
@@ -182,6 +190,25 @@ fn hop(graph: &Graph, index: usize) -> String {
     }
     parts.extend(hop.backward.iter().map(ToString::to_string));
     parts.join(" => ")
+}
+
+/// What a node provides and needs, as the syntax writes it after its
+/// signature: empty for a node that does neither.
+fn clauses(node: &gdl_syntax::Node) -> String {
+    let mut text = String::new();
+    if !node.provides.is_empty() {
+        let kinds: Vec<String> = node.provides.iter().map(ToString::to_string).collect();
+        text.push_str(&format!(" provides {}", kinds.join(", ")));
+    }
+    if !node.needs.is_empty() {
+        let needs: Vec<String> = node
+            .needs
+            .iter()
+            .map(|(kind, class)| format!("{kind} from {class}"))
+            .collect();
+        text.push_str(&format!(" needs {}", needs.join(", ")));
+    }
+    text
 }
 
 /// A Rust string literal holding `text`.

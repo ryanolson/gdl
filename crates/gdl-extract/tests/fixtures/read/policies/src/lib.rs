@@ -3,11 +3,12 @@
 use gdl::{Pool, PoolPolicy, PoolRequest, Encoded, Projected};
 use read_protocols::Words;
 
-/// Reads the head whole.
+/// Reads the head whole, and two property kinds.
 pub struct Whole;
 
 impl PoolPolicy for Whole {
     type Head = Words;
+    const NEEDS: &'static [&'static str] = &["model", "region"];
 
     fn choose(&self, _: PoolRequest<'_, Words>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
         Err(gdl::NoPool::new())
@@ -306,3 +307,30 @@ pub mod selectors {
 
 pub use selectors::local::Pretender;
 pub use selectors::{AnySelector, Both, ByPart, ByWords};
+
+/// The kinds a policy could name through a constant.
+const KINDS: &[&str] = &["model"];
+
+/// Names its kinds through a constant, which the reader does not follow.
+pub struct Computed;
+
+impl PoolPolicy for Computed {
+    type Head = Encoded;
+    const NEEDS: &'static [&'static str] = KINDS;
+
+    fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
+    }
+}
+
+/// Names one kind twice.
+pub struct Twice;
+
+impl PoolPolicy for Twice {
+    type Head = Encoded;
+    const NEEDS: &'static [&'static str] = &["model", "model"];
+
+    fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
+    }
+}

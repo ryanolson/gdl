@@ -2,7 +2,9 @@
 //! contract's `graph!` would emit, given where each message name resolved
 //! and whether it is a wire type.
 
-use gdl_model::{Encoding, HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
+use gdl_model::{
+    Encoding, HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo,
+};
 use syn::Type;
 
 use crate::model::{Graph, identifier, message_name};
@@ -79,6 +81,30 @@ impl Graph {
                     .collect::<Result<_, _>>()?,
             });
         }
+        let mut properties = Vec::with_capacity(self.properties.len());
+        for property in &self.properties {
+            let kind = property.kind.to_string();
+            let name = match message_name(&property.ty) {
+                Ok(Some(name)) => name,
+                Ok(None) => {
+                    return Err(format!(
+                        "property `{kind}`: its type is a message, not `()`"
+                    ));
+                }
+                Err(()) => {
+                    return Err(format!(
+                        "property `{kind}`: a graph file names a message as its type"
+                    ));
+                }
+            };
+            let ty = one(&property.ty)?;
+            if !ty.wire {
+                return Err(format!(
+                    "property `{kind}`: `{name}` is not a wire type; a property's keys are carried encoded, so its type implements `Serialize` and `Deserialize`"
+                ));
+            }
+            properties.push(self.property(&property.kind, ty));
+        }
         Ok(Manifest {
             name: self.name.value(),
             schema: self
@@ -87,6 +113,36 @@ impl Graph {
                 .map_err(|e| format!("the schema: {e}"))?,
             nodes,
             hops,
+            properties,
         })
+    }
+
+    /// The declaration of `kind`, whose type is `ty`, with the nodes that
+    /// provide and need it, in declaration order: what both a graph file's
+    /// manifest and `graph!`'s carry.
+    pub fn property(&self, kind: &syn::Ident, ty: TypeInfo) -> PropertyInfo {
+        PropertyInfo {
+            kind: kind.to_string(),
+            ty,
+            providers: self
+                .nodes
+                .iter()
+                .filter(|node| node.provides.contains(kind))
+                .map(|node| node.ident.to_string())
+                .collect(),
+            needs: self
+                .nodes
+                .iter()
+                .flat_map(|node| {
+                    node.needs
+                        .iter()
+                        .filter(|(needed, _)| needed == kind)
+                        .map(|(_, class)| PropertyNeed {
+                            node: node.ident.to_string(),
+                            class: class.to_string(),
+                        })
+                })
+                .collect(),
+        }
     }
 }

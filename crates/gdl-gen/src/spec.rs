@@ -93,6 +93,9 @@ pub struct Spec {
     /// through a crossing whose `[routing]` router names it build and
     /// register.
     pub(crate) selectors: BTreeMap<String, Bind>,
+    /// The property kinds each bound pool policy reads, as its `NEEDS`
+    /// names them: known once its crate is read, and empty before.
+    pub(crate) policy_needs: BTreeMap<String, Vec<String>>,
     /// The global allocator of each generated segment binary.
     pub(crate) allocator: Allocator,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -769,6 +772,7 @@ impl Spec {
             bind,
             pool_policies,
             selectors,
+            policy_needs: BTreeMap::new(),
             allocator: raw
                 .binary
                 .and_then(|binary| binary.allocator)

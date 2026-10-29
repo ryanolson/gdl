@@ -80,11 +80,31 @@ pub(crate) fn unbound(
             problems.push(format!("[deployment.segment.{name}]: {why}"));
         }
     }
+    for (name, entry) in &spec.entry {
+        let mut nested = entry.nested.as_deref();
+        while let Some(hop) = nested {
+            if !hop.needs.is_empty() {
+                problems.push(format!(
+                    "[entry.{name}]: `needs` goes in the entry's own table, not in a nested hop's"
+                ));
+            }
+            nested = hop.nested.as_deref();
+        }
+    }
     let mut layouts = Layouts::new();
     let mut placed: Vec<gdl_model::Problem> = Vec::new();
     for laid in spec.layouts() {
         let layout = match gdl_model::layout(manifest, laid.placement) {
-            Ok(layout) => Some(layout),
+            Ok(layout) => {
+                let consumers = consumers(spec, manifest, &layout);
+                for problem in gdl_model::property_supply(manifest, &layout, &consumers) {
+                    let problem = laid.named(problem);
+                    if !problems.contains(&problem) {
+                        problems.push(problem);
+                    }
+                }
+                Some(layout)
+            }
             Err(errors) => {
                 for problem in laid.problems(&errors) {
                     if !placed.contains(&problem) {
@@ -101,6 +121,57 @@ pub(crate) fn unbound(
         .chain(problems.into_iter().map(Into::into))
         .collect();
     (layouts, found)
+}
+
+/// The readers of property kinds that the graph does not draw, in
+/// `layout`: each entry's adapters, which run beside the source that hosts
+/// the service, and each bound pool policy, for each class it chooses for.
+/// A policy whose crate is not read yet reads nothing here.
+fn consumers(
+    spec: &Spec,
+    manifest: &gdl_model::Manifest,
+    layout: &gdl_model::Layout,
+) -> Vec<gdl_model::PropertyConsumer> {
+    let host = manifest
+        .nodes
+        .iter()
+        .filter(|node| node.role == gdl_model::Role::Source)
+        .find(|node| spec.bind.contains_key(&node.name))
+        .and_then(|node| layout.segment_of(&node.name));
+    let entries = spec.entry.iter().flat_map(|(name, entry)| {
+        entry
+            .needs
+            .iter()
+            .map(move |(kind, class)| gdl_model::PropertyConsumer {
+                consumer: format!("entry `{name}`"),
+                kind: kind.clone(),
+                class: class.clone(),
+                segment: host.map(str::to_string),
+            })
+    });
+    let classes: BTreeSet<&str> = layout
+        .boundaries()
+        .iter()
+        .map(|b| b.into.as_str())
+        .collect();
+    let policies = spec.policy_needs.iter().flat_map(|(name, needs)| {
+        classes
+            .iter()
+            .filter(move |class| {
+                layout
+                    .pool_policy(class)
+                    .is_some_and(|policy| policy.policy == *name)
+            })
+            .flat_map(move |class| {
+                needs.iter().map(move |kind| gdl_model::PropertyConsumer {
+                    consumer: format!("pool policy `{name}`"),
+                    kind: kind.clone(),
+                    class: class.to_string(),
+                    segment: None,
+                })
+            })
+    });
+    entries.chain(policies).collect()
 }
 
 /// Check each layout's placement, and the bindings, against the manifest,

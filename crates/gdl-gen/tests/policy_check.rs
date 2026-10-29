@@ -1387,3 +1387,77 @@ topology: Front => Stamp => Model;
         "the compiled policy fits the crossing, but check and generate refuse it:\ncheck: {checked:?}\ngenerate: {generated:?}"
     );
 }
+
+/// A pool policy's `NEEDS`, read from its source, holds the class it
+/// chooses for to a supply of each kind, as a graph node's need does: a
+/// class whose pools nothing supplies the kind to is refused, naming the
+/// kind, the policy, and the class, and `[pools.<class>] provides` meets
+/// it. The crate compiles with the const as written.
+#[test]
+fn check_holds_a_policys_needs_to_its_classs_supply() {
+    let router = router(
+        r#"
+pub struct ByModel;
+
+impl gdl::PoolPolicy for ByModel {
+    type Head = gdl::Encoded;
+    const NEEDS: &'static [&'static str] = &["model"];
+
+    fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
+    }
+}
+
+impl gdl::Build for ByModel {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+"#,
+    );
+    let declared = |provides: &[&str]| {
+        let mut text: toml::Table = std::fs::read_to_string(fixture().join("gdl.toml"))
+            .expect("spec")
+            .parse()
+            .expect("spec table");
+        text["pool_policy"]["by_model"]["path"] =
+            toml::Value::String(router.path().display().to_string());
+        if !provides.is_empty() {
+            let kinds = provides
+                .iter()
+                .map(|kind| toml::Value::from(*kind))
+                .collect();
+            text["pools"]["model"]
+                .as_table_mut()
+                .expect("the model class's table")
+                .insert("provides".into(), toml::Value::Array(kinds));
+        }
+        let text = toml::to_string(&text).expect("spec text");
+        let graph = std::fs::read_to_string(fixture().join("policy.gdl"))
+            .expect("graph")
+            .replace("schema = 1;", "schema = 1;\nproperty model: Ask;");
+        gdl_gen::Spec::from_text(&text, &graph, &fixture()).expect("spec")
+    };
+    let Err(error) = gdl_gen::check(
+        &declared(&[]),
+        &target("gdl-gen-tests"),
+        gdl_gen::Offers::Read,
+    ) else {
+        panic!("accepted a class that nothing supplies `model` to");
+    };
+    assert!(
+        error.to_string().contains(
+            "pool policy `by_model` needs property `model` from class `model`, but no entry segment of class `model` (`model`) hosts a node that provides it, and `[pools.model] provides` does not name it"
+        ),
+        "{error}"
+    );
+    gdl_gen::check(
+        &declared(&["model"]),
+        &target("gdl-gen-tests"),
+        gdl_gen::Offers::Read,
+    )
+    .expect("the pools' settings provide it");
+}

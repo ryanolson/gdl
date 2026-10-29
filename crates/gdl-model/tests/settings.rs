@@ -34,6 +34,7 @@ fn manifest() -> Manifest {
             node("D", Role::Sink),
         ],
         hops: vec![hop("S", "F"), hop("F", "D")],
+        properties: Vec::new(),
     }
 }
 
@@ -309,6 +310,11 @@ fn a_hub_address_is_host_and_port() {
 #[test]
 fn a_pools_hub_checks_its_settings_against_the_class() {
     settings(MODEL).check_hub(&classed()).expect("a model pool");
+    settings(&format!("{MODEL}[properties]\ntest = [{{ name = 'x' }}]\n"))
+        .check_hub(&laid(&format!(
+            "{SEGMENTS}{CLASSES}[pools.model_x]\nprovides = ['test']\n"
+        )))
+        .expect("a pool that serves what its class provides");
     let cases = [
         (
             laid(SEGMENTS),
@@ -330,6 +336,13 @@ fn a_pools_hub_checks_its_settings_against_the_class() {
             classed(),
             "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/s'\nproperties = { test = [{ name = 'x' }] }\n",
             "[pool] properties: no class sends to class `global`, so its pool serves no properties to another",
+        ),
+        (
+            laid(&format!(
+                "{SEGMENTS}{CLASSES}[pools.model_x]\nprovides = ['test']\n"
+            )),
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\ndirectory = 'memory'\nproperties = { test = [{ name = 'x' }], other = [{ name = 'y' }] }\n",
+            "[pool] properties.other: `[pools.model_x] provides` does not name property kind `other`, so the pool cannot serve it from its settings",
         ),
     ];
     for (layout, text, expected) in cases {

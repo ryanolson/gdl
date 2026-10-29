@@ -123,6 +123,7 @@ impl Fleet {
             Fabric::new(chooser, None, None, Duration::from_secs(30)),
             layout_under(gdl_model::PoolPolicy {
                 policy: "keeping".into(),
+                provides: Vec::new(),
             }),
             "a".into(),
             &roster,
@@ -236,6 +237,7 @@ impl Fleet {
         policies.add("keeping", policy).expect("registered");
         let layout = layout_under(gdl_model::PoolPolicy {
             policy: "keeping".into(),
+            provides: Vec::new(),
         });
         let mut targets = targets(
             &layout,
