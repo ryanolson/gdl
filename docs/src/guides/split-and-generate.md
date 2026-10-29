@@ -103,7 +103,7 @@ Use `generate` when you want the crates in your own tree, to read them, or to bu
 cargo gdl generate --spec examples/chat/gdl.toml --out chat-segments
 ```
 
-The output has `contract/` (for a graph file), one directory per segment, and `crossings.txt`. With several layouts, the segments go in `<out>/<layout>/<segment>`. Never edit a generated file. [Code generation](../concepts/generation.md) lists what each crate holds.
+The output has `contract/` (for a graph file), one directory per segment, and `crossings.txt`. With several layouts, the segments go in `<out>/<layout>/<segment>`. A segment's `lib.rs` is one `gdl_runtime::segment!` call: its placement, its crossings, its nodes, and what its binary serves. A message that is not a wire type fails the build at its crossing's line in the call. Never edit a generated file. [Code generation](../concepts/generation.md) lists what each crate holds.
 
 `generate --check` regenerates in memory and fails if the files in `--out` differ from the output. Run it in CI to catch a spec change whose output was not committed.
 

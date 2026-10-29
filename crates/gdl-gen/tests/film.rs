@@ -445,65 +445,28 @@ fn metric(scrape: &str, name: &str, node: &str, component: &str, expected: u64) 
     assert!(line.ends_with(&format!(" {expected}")), "{line}");
 }
 
+/// The graph configuration and the hosted nodes that a generated library's
+/// `segment!` call carries.
 fn generated_contract(source: &str) -> (toml::Value, Vec<String>) {
-    let syntax = syn::parse_file(source).expect("generated Rust");
-    let config = syntax
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(implementation) => Some(implementation),
-            _ => None,
-        })
-        .flat_map(|implementation| &implementation.items)
-        .find_map(|item| {
-            let syn::ImplItem::Const(constant) = item else {
-                return None;
-            };
-            if constant.ident != "GRAPH_CONFIG" {
-                return None;
-            }
-            let syn::Expr::Lit(literal) = &constant.expr else {
-                panic!("graph config literal")
-            };
-            let syn::Lit::Str(text) = &literal.lit else {
-                panic!("graph config string")
-            };
-            Some(toml::from_str(&text.value()).expect("graph config TOML"))
-        })
-        .expect("compiled graph config");
-    let settings = syntax
-        .items
-        .iter()
-        .find_map(|item| {
-            if let syn::Item::Struct(item) = item
-                && item.ident == "NodeSettings"
-            {
-                Some(item)
-            } else {
-                None
-            }
-        })
-        .expect("node settings");
-    let hosts = settings
-        .fields
-        .iter()
-        .map(|field| {
-            let mut name = None;
-            for attr in field
-                .attrs
-                .iter()
-                .filter(|attr| attr.path().is_ident("serde"))
-            {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename") {
-                        name = Some(meta.value()?.parse::<syn::LitStr>()?.value());
-                    }
-                    Ok(())
-                })
-                .expect("field attributes");
-            }
-            name.expect("node name")
-        })
-        .collect();
+    let line = |key: &str| {
+        source
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("    {key}: ")))
+            .unwrap_or_else(|| panic!("`{key}` in:\n{source}"))
+    };
+    let config = line("graph_config").trim_end_matches(';');
+    let config: syn::LitStr = syn::parse_str(config).expect("graph config string");
+    let config = toml::from_str(&config.value()).expect("graph config TOML");
+    let hosts = match line("nodes") {
+        "[];" => Vec::new(),
+        _ => source
+            .lines()
+            .skip_while(|line| !line.starts_with("    nodes: ["))
+            .skip(1)
+            .take_while(|line| line.starts_with("        "))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect(),
+    };
     (config, hosts)
 }

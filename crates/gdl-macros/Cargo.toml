@@ -1,6 +1,6 @@
 [package]
 name = "gdl-macros"
-description = "The graph! macro for gdl"
+description = "The graph! and segment! macros and the derives for gdl"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

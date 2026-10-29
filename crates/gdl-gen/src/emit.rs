@@ -139,12 +139,12 @@ pub(crate) fn files(
             if let Some(req) = hop.forward_types.first()
                 && !crossed(&req.name)
             {
-                unit.fed.push("reads_json::<contract::SourceReq>");
+                unit.fed.push("reads_json");
             }
             if let Some(item) = hop.backward_types.last()
                 && !crossed(&item.name)
             {
-                unit.fed.push("writes_json::<contract::SourceItem>");
+                unit.fed.push("writes_json");
             }
         }
         let path = dir.join(segment);
@@ -228,7 +228,7 @@ fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<
                 (false, Role::Source) => ("SourceDecl", "Item"),
                 (false, _) => ("OperatorDecl", "DownItem"),
             };
-            let port = format!("<contract::nodes::{receiver} as gdl_runtime::{decl}>::{port}");
+            let port = format!("{receiver} {decl} {port}");
             let name = format!("{sender}_to_{receiver}");
             // A response an anchor carries inside one segment is told
             // apart, so that its error does not say that it crosses.
@@ -240,11 +240,18 @@ fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<
             match &ty.stream {
                 None => add(&ty.name, name, port, check),
                 Some(item) => {
-                    let part = |part: &str| {
-                        format!("<{port} as gdl_runtime::gdl::__private::Parts>::{part}")
-                    };
-                    add(&ty.name, format!("{name}_head"), part("Head"), check);
-                    add(&item.name, format!("{name}_item"), part("Item"), check);
+                    add(
+                        &ty.name,
+                        format!("{name}_head"),
+                        format!("{port} head"),
+                        check,
+                    );
+                    add(
+                        &item.name,
+                        format!("{name}_item"),
+                        format!("{port} item"),
+                        check,
+                    );
                 }
             }
         }
@@ -393,7 +400,7 @@ struct Unit<'a> {
     /// The messages it sends or receives across a cut: [`crossings`].
     crossings: Vec<Crossing>,
     /// The source's types its binary reads or writes as JSON lines, and no
-    /// crossing asserts: each `gdl_runtime` function that asserts one.
+    /// crossing asserts: `reads_json`, `writes_json`, or both.
     fed: Vec<&'static str>,
     /// The bound cell policies it builds and registers, by name: those of
     /// the classes it chooses cells of.
@@ -405,7 +412,9 @@ struct Unit<'a> {
 }
 
 /// A message a segment asserts is a wire type: the alias named for the
-/// crossing that carries it, and the port type the alias stands for.
+/// crossing that carries it, and the port the alias stands for, as the
+/// `segment!` call writes it: the receiving node, its declaration trait,
+/// the port, and `head` or `item` for one part of a streamed port.
 #[derive(Debug)]
 struct Crossing {
     alias: String,
@@ -601,8 +610,10 @@ impl Unit<'_> {
         text
     }
 
+    /// The library: its header and docs, and one `segment!` call that holds
+    /// what the generator computed for the segment. The macro writes the
+    /// code; see `crates/gdl-macros/src/segment.rs`.
     fn lib_rs(&self) -> String {
-        let hosted = self.hosted();
         let mut text = String::new();
         let _ = writeln!(text, "// {MARKER}.");
         let _ = writeln!(text, "// Regenerate with: {}", self.regenerate);
@@ -622,109 +633,24 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "//! its own, through [`Binary`].");
         let _ = writeln!(text);
+        let _ = writeln!(text, "gdl_runtime::segment! {{");
         // Paths from the crate root (`::`), here and for every
         // implementation: a hosted crate called `contract` must not be
-        // shadowed by this alias.
+        // shadowed by the library's `contract` alias.
         let _ = writeln!(
             text,
-            "pub use ::{} as contract;",
+            "    contract: ::{};",
             self.contract.module.trim().trim_start_matches("::")
         );
-        let _ = writeln!(text);
-        let _ = writeln!(text, "/// This segment's name in the placement.");
-        let _ = writeln!(text, "pub const SEGMENT: &str = \"{}\";", self.segment);
-        let _ = writeln!(text);
-        let _ = writeln!(
-            text,
-            "/// Every segment of the placement. An instance waits for all of them,"
-        );
-        let _ = writeln!(text, "/// or, in a cell, only for those of its class.");
-        let quoted: Vec<String> = self.segments.iter().map(|s| format!("\"{s}\"")).collect();
-        let _ = writeln!(
-            text,
-            "pub const SEGMENTS: &[&str] = &[{}];",
-            quoted.join(", ")
-        );
-        let _ = writeln!(text);
-        let _ = writeln!(text, "/// The placement this crate was generated for.");
+        let _ = writeln!(text, "    package: {:?};", self.package());
+        let _ = writeln!(text, "    segment: {:?};", self.segment);
+        let quoted: Vec<String> = self.segments.iter().map(|s| format!("{s:?}")).collect();
+        let _ = writeln!(text, "    segments: [{}];", quoted.join(", "));
         let placement = toml::to_string(self.placement).unwrap_or_default();
-        let _ = writeln!(
-            text,
-            "pub const PLACEMENT: &str = {};",
-            raw_string(&placement)
-        );
-        let _ = writeln!(text);
-        if !self.crossings.is_empty() {
-            let _ = writeln!(
-                text,
-                "// Each message this segment sends or receives across a cut, or that"
-            );
-            let _ = writeln!(
-                text,
-                "// returns through an anchor in it, is a wire type: an edge that carries"
-            );
-            let _ = writeln!(
-                text,
-                "// one that is not fails to build here, naming the message and the edge."
-            );
-            let _ = writeln!(text, "// Compile time only.");
-            for Crossing {
-                alias: name,
-                port,
-                check,
-                ..
-            } in &self.crossings
-            {
-                let _ = writeln!(text, "#[allow(non_camel_case_types)]");
-                let _ = writeln!(text, "type {name} = {port};");
-                let _ = writeln!(
-                    text,
-                    "const _: () = gdl_runtime::gdl::__private::{check}::<{name}>();"
-                );
-            }
-            let _ = writeln!(text);
-        }
-        if !self.fed.is_empty() {
-            let _ = writeln!(
-                text,
-                "// The source's types the binary reads or writes as JSON lines: a type"
-            );
-            let _ = writeln!(
-                text,
-                "// the binary cannot read or write fails to build here. Compile time only."
-            );
-            for assertion in &self.fed {
-                let _ = writeln!(text, "const _: () = gdl_runtime::{assertion}();");
-            }
-            let _ = writeln!(text);
-        }
-        let _ = writeln!(
-            text,
-            "/// The implementations of the nodes this segment hosts."
-        );
-        if hosted.is_empty() {
-            let _ = writeln!(text, "pub struct Nodes {{}}");
-        } else {
-            let _ = writeln!(text, "pub struct Nodes {{");
-            for node in &hosted {
-                let _ = writeln!(text, "    /// Node `{}`.", node.name);
-                let _ = writeln!(text, "    pub {}: ::{},", node.binding, node.ty);
-            }
-            let _ = writeln!(text, "}}");
-        }
-        let _ = writeln!(text);
-        let _ = writeln!(
-            text,
-            "/// Deploy this segment on `node`. Every segment's instances must be in"
-        );
-        let _ = writeln!(text, "/// `roster`.");
-        let _ = writeln!(text, "pub fn start(");
-        let _ = writeln!(text, "    node: gdl_runtime::velo::Velo,");
-        let _ = writeln!(text, "    roster: &gdl_runtime::Roster,");
-        let _ = writeln!(text, "    config: gdl_runtime::RuntimeConfig,");
-        let _ = writeln!(text, "    nodes: Nodes,");
-        let _ = writeln!(text, ") -> gdl_runtime::gdl::Result<");
-        let roots: Vec<_> = self
+        let _ = writeln!(text, "    placement: {};", raw_string(&placement));
+        let graph_config = toml::to_string(&self.spec.config).expect("graph config tables");
+        let _ = writeln!(text, "    graph_config: {graph_config:?};");
+        let roots: Vec<&str> = self
             .manifest
             .hops
             .iter()
@@ -733,48 +659,45 @@ impl Unit<'_> {
                     .node(&h.outer)
                     .is_some_and(|n| n.role == Role::Source)
             })
+            .map(|h| h.outer.as_str())
             .collect();
-        let root_type = |root: &gdl_model::HopInfo| {
-            format!(
-                "impl gdl_runtime::gdl::Next<<contract::nodes::{} as gdl_runtime::SourceDecl>::Req, <contract::nodes::{} as gdl_runtime::SourceDecl>::Item> + gdl_runtime::Register + use<>",
-                root.outer, root.outer
-            )
-        };
-        let root = if roots.len() == 1 {
-            root_type(roots[0])
-        } else {
-            roots.iter().rev().fold("()".into(), |tail, root| {
-                format!("({}, {tail})", root_type(root))
-            })
-        };
-        let _ = writeln!(text, "    gdl_runtime::Segment<{root}>,");
-        let _ = writeln!(text, "> {{");
-        let _ = writeln!(
-            text,
-            "    let placement = gdl_runtime::Placement::from_toml(PLACEMENT)?;"
-        );
-        let _ = writeln!(text, "    let manifest = contract::manifest();");
-        let _ = writeln!(
-            text,
-            "    let deployment = gdl_runtime::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;"
-        );
-        let mut bindings = String::from("contract::Bindings::new()");
-        for node in &hosted {
-            let _ = write!(bindings, ".{0}(nodes.{0})", node.binding);
-        }
-        if hosted.is_empty() {
-            let _ = writeln!(text, "    let Nodes {{}} = nodes;");
-        }
-        let _ = writeln!(
-            text,
-            "    let root = contract::assemble(&deployment, {bindings})?;"
-        );
-        let _ = writeln!(text, "    deployment.start(root)");
+        let _ = writeln!(text, "    roots: [{}];", roots.join(", "));
+        let crossings: Vec<String> = self
+            .crossings
+            .iter()
+            .map(|c| format!("{} {} = {};", c.check, c.alias, c.port))
+            .collect();
+        block(&mut text, "crossings", &crossings);
+        let _ = writeln!(text, "    feeds: [{}];", self.fed.join(", "));
+        let nodes: Vec<String> = self
+            .hosted()
+            .iter()
+            .map(|n| format!("{} {} = ::{};", n.name, n.binding, n.ty))
+            .collect();
+        block(&mut text, "nodes", &nodes);
+        let policies: Vec<String> = self
+            .policies
+            .iter()
+            .map(|(name, bind)| format!("{name:?} = ::{};", binary::rooted(&bind.ty)))
+            .collect();
+        block(&mut text, "policies", &policies);
+        text.push_str(&self.serve());
         let _ = writeln!(text, "}}");
-        let _ = writeln!(text);
-        text.push_str(&self.binary_rs());
         text
     }
+}
+
+/// A list of the call, `key: [...];`, one item to a line.
+fn block(text: &mut String, key: &str, items: &[String]) {
+    if items.is_empty() {
+        let _ = writeln!(text, "    {key}: [];");
+        return;
+    }
+    let _ = writeln!(text, "    {key}: [");
+    for item in items {
+        let _ = writeln!(text, "        {item}");
+    }
+    let _ = writeln!(text, "    ];");
 }
 
 /// The source that the binary of its segment serves over JSON lines on

@@ -115,10 +115,7 @@ fn succeeded(output: &Output) {
 /// The placement a generated segment crate embeds.
 fn embedded(lib_rs: &Path) -> gdl_model::Placement {
     let text = std::fs::read_to_string(lib_rs).expect("a generated library");
-    let start = text
-        .find("pub const PLACEMENT: &str = r")
-        .expect("the placement")
-        + "pub const PLACEMENT: &str = r".len();
+    let start = text.find("    placement: r").expect("the placement") + "    placement: r".len();
     let hashes = text[start..].chars().take_while(|c| *c == '#').count();
     let open = start + hashes + 1;
     let close = format!("\"{}", "#".repeat(hashes));

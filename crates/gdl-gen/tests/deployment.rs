@@ -695,7 +695,7 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
     assert_eq!(deployment.placement.hash(), expected);
     let mut embedded = 0;
     for (path, text) in &files {
-        let Some((_, rest)) = text.split_once("pub const PLACEMENT: &str = r#\"") else {
+        let Some((_, rest)) = text.split_once("    placement: r#\"") else {
             continue;
         };
         let (placement, _) = rest.split_once("\"#;").expect("a raw string");
@@ -747,6 +747,11 @@ fn a_bundle_without_classes_is_pinned() {
     )
     .expect("the pinned bundle");
     let found = pinned(&mirror, &files);
+    if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
+        let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt");
+        std::fs::write(pin, &found).expect("the pinned bundle");
+        return;
+    }
     for (found, expected) in found.lines().zip(expected.lines()) {
         assert_eq!(found, expected, "the bundle differs from the pin");
     }

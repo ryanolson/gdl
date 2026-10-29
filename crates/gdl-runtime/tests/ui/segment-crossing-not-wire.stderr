@@ -1,0 +1,17 @@
+error[E0277]: `Opaque` crosses between segments but is not a wire type
+  --> tests/ui/segment-crossing-not-wire.rs:31:17
+   |
+31 |         crosses A_to_B = B SinkDecl Req;
+   |                 ^^^^^^ this crossing carries `Opaque`
+   |
+help: the trait `gdl_runtime::gdl::__private::Crossing` is not implemented for `Opaque`
+  --> tests/ui/segment-crossing-not-wire.rs:8:1
+   |
+ 8 | pub struct Opaque;
+   | ^^^^^^^^^^^^^^^^^
+   = note: a message that crosses between segments must implement `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place both ends of the crossing in one segment
+note: required by a bound in `crosses`
+  --> $WORKSPACE/crates/gdl/src/lib.rs
+   |
+   |     pub const fn crosses<T: Crossing>() {}
+   |                             ^^^^^^^^ required by this bound in `crosses`

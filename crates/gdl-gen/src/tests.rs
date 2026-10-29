@@ -454,12 +454,10 @@ fn generated_code_names_implementations_from_the_crate_root() {
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let files = rendered(&spec, &manifest(), Path::new("/work/segments")).expect("render");
     let lib = &files[&PathBuf::from("engine/src/lib.rs")];
-    assert!(lib.contains("pub d: ::tiny_nodes::D"), "{lib}");
-    assert!(
-        lib.contains("pub use ::tiny_contract as contract;"),
-        "{lib}"
-    );
-    assert!(lib.contains(".build::<::tiny_nodes::D>("), "{lib}");
+    // `segment!` writes each path as the call gives it: the expansion
+    // tests of `gdl-macros` hold the code it writes from these.
+    assert!(lib.contains("        D d = ::tiny_nodes::D;\n"), "{lib}");
+    assert!(lib.contains("    contract: ::tiny_contract;\n"), "{lib}");
 }
 
 /// A node crate listed by version is a dependency on exactly that
@@ -806,12 +804,12 @@ fn only_the_source_segment_serves_json_lines() {
     let files = rendered(&spec, &manifest(), out).expect("render");
     let front = &files[&PathBuf::from("front/src/lib.rs")];
     let engine = &files[&PathBuf::from("engine/src/lib.rs")];
-    assert!(front.contains("gdl_runtime::serve_json_lines("));
+    assert!(front.contains("    serve: json_lines;\n"), "{front}");
     // The lifecycle is the runtime's: each binary only names its segment.
     let main = &files[&PathBuf::from("engine/src/main.rs")];
     assert!(main.contains("gdl_runtime::segment_main::<"), "{main}");
     assert!(!main.contains("async fn"), "{main}");
-    assert!(!engine.contains("serve_json_lines"));
+    assert!(engine.contains("    serve: none;\n"), "{engine}");
     assert!(files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
     assert!(!files[&PathBuf::from("engine/Cargo.toml")].contains("json-lines"));
     assert!(
@@ -1194,14 +1192,12 @@ fn only_the_chooser_registers_a_bound_policy() {
         file("front/Cargo.toml")
     );
     let front = file("front/src/lib.rs");
-    for line in [
-        "const KEYS: &'static [&'static str] = &[\"node\", \"cell_policy\"];",
-        ".build_cell_policy::<::tiny_router::ByModel>(\"by_model\", cell_policy.remove(\"by_model\"))",
-    ] {
-        assert!(front.contains(line), "{line} in:\n{front}");
-    }
-    // The builder keeps the policy's readiness: `build` does not wait for it.
-    assert!(!front.contains("Build::ready(&policy)"), "{front}");
+    // `segment!` takes the policy's settings table and registers it; the
+    // builder keeps its readiness, so `build` does not wait for it.
+    assert!(
+        front.contains("    policies: [\n        \"by_model\" = ::tiny_router::ByModel;\n    ];\n"),
+        "{front}"
+    );
     assert!(file("front/src/main.rs").contains("[cell_policy.by_model]"));
     for path in [
         "engine/Cargo.toml",
@@ -1222,8 +1218,7 @@ fn an_unbound_policy_generates_no_registration() {
         let spec = spec(classed(policy), &[("D", "tiny_nodes::Engine")]);
         let files = rendered(&spec, &manifest(), Path::new("/out")).expect("rendered");
         let front = &files[Path::new("front/src/lib.rs")];
-        assert!(!front.contains("cell_policy"), "{policy}:\n{front}");
-        assert!(front.contains("_builder: &gdl_runtime::Builder"), "{front}");
+        assert!(front.contains("    policies: [];\n"), "{policy}:\n{front}");
     }
 }
 
@@ -1268,7 +1263,7 @@ fn a_policy_two_classes_share_is_registered_once() {
     let front = &files[Path::new("front/src/lib.rs")];
     assert_eq!(
         front
-            .matches(".build_cell_policy::<::tiny_router::ByModel>(\"by_model\",")
+            .matches("\"by_model\" = ::tiny_router::ByModel;")
             .count(),
         1,
         "{front}"

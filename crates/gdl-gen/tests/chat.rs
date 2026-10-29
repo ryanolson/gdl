@@ -599,7 +599,7 @@ fn a_response_an_anchor_carries_is_asserted() {
         .map(|(_, text)| text)
         .expect("the core segment");
     assert!(
-        lib.contains("type Engine_to_Detokenize = <contract::nodes::Detokenize as gdl_runtime::BackwardDecl>::In;"),
+        lib.contains("        anchors Engine_to_Detokenize = Detokenize BackwardDecl In;\n"),
         "{lib}"
     );
 }

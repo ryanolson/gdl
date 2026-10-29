@@ -4,7 +4,9 @@
 //! Also the markers that offer a crate's messages and nodes to graphs:
 //! `derive(Message)` and `#[export]`, each reached through `gdl_message` or
 //! through `gdl`, and `derive(Node)`, reached through `gdl`. Also
-//! `derive(Projection)`, reached through `gdl`.
+//! `derive(Projection)`, reached through `gdl`. Also `segment!`, reached
+//! through `gdl_runtime::segment!`: the library of a segment crate that
+//! `gdl-gen` generates, from the data it computes for the segment.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
@@ -17,6 +19,7 @@ mod message;
 mod metrics;
 mod node;
 mod projection;
+mod segment;
 
 /// The expansion behind `gdl_runtime::graph!`, which calls it as
 /// `graph! { $crate; <graph> }`. The leading path is how the expansion names
@@ -35,6 +38,26 @@ pub fn graph(input: TokenStream) -> TokenStream {
     };
     match gdl_syntax::Graph::parse(body) {
         Ok(graph) => expand::expand(&graph, &krate).into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// The expansion behind `gdl_runtime::segment!`, which calls it as
+/// `segment! { $crate; <segment> }`: one generated segment crate's library,
+/// from the data the generator computes for it.
+#[doc(hidden)]
+#[proc_macro]
+pub fn segment(input: TokenStream) -> TokenStream {
+    let Some((krate, body)) = split_crate(input.into()) else {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "expected `<path to gdl_runtime>;` before the segment; use `gdl_runtime::segment!`",
+        )
+        .to_compile_error()
+        .into();
+    };
+    match syn::parse2::<segment::Segment>(body) {
+        Ok(input) => segment::expand(&input, &krate).into(),
         Err(error) => error.to_compile_error().into(),
     }
 }

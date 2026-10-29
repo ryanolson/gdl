@@ -112,9 +112,23 @@ macro_rules! graph {
     };
 }
 
+/// The library of one generated segment crate: its placement, the checks
+/// that each message it sends across a cut is a wire type, `start`, and the
+/// `Binary` its `main` runs. `gdl-gen` writes the call, from what it
+/// computes for the segment; the input is not a stable interface, since
+/// the generator and the runtime come from one revision of gdl. A message
+/// that is not a wire type fails to build at its crossing's line in the
+/// call. See `docs/src/concepts/generation.md`.
+#[macro_export]
+macro_rules! segment {
+    ($($segment:tt)*) => {
+        $crate::__private::segment! { $crate; $($segment)* }
+    };
+}
+
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
-    pub use gdl_macros::graph;
+    pub use gdl_macros::{graph, segment};
 }

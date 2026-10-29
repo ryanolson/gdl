@@ -608,7 +608,7 @@ fn a_misread_response_an_anchor_carries_fails_to_build_by_name() {
     );
     assert!(!stderr.contains("crosses between segments"), "{stderr}");
     assert!(
-        stderr.contains("anchors::<Take_to_Front>()"),
+        stderr.contains("anchors Take_to_Front = "),
         "the edge is named:\n{stderr}"
     );
 }
@@ -657,7 +657,7 @@ fn a_crossing_the_reader_misreads_fails_to_build_by_name() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("crosses::<Front_to_Take>()"),
+        stderr.contains("crosses Front_to_Take = "),
         "the crossing is named:\n{stderr}"
     );
 }
@@ -682,7 +682,7 @@ fn a_misread_request_no_cut_carries_fails_to_build_by_name() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("reads_json::<contract::SourceReq>()"),
+        stderr.contains("feeds: [reads_json"),
         "the assertion is named:\n{stderr}"
     );
 }
@@ -706,7 +706,7 @@ fn a_misread_item_no_cut_carries_fails_to_build_by_name() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("writes_json::<contract::SourceItem>()"),
+        stderr.contains("feeds: [") && stderr.contains("writes_json"),
         "the assertion is named:\n{stderr}"
     );
 }

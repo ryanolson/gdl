@@ -46,29 +46,61 @@ The generated contract writes each message by a rooted public path through a lis
 
 For each segment the generator writes a crate named `<graph>-<segment>`. Its dependencies are the gdl runtime, the contract, and the implementation crates of the nodes it hosts, and nothing else of the graph's.
 
-- A library. It holds the segment's name, every segment's name, and the placement it was generated for as TOML. `start(node, roster, config, nodes)` deploys the segment inside a program. `Nodes` holds the hosted implementations. `Binary` implements `gdl_runtime::SegmentBinary` with what differs between segments: the settings tables, how the hosted implementations are built, their readiness, and what the segment serves.
+- A library. Its `lib.rs` is one `gdl_runtime::segment!` call, which holds what the generator computed for the segment, and the macro writes the code. It holds the segment's name, every segment's name, and the placement it was generated for as TOML. `start(node, roster, config, nodes)` deploys the segment inside a program. `Nodes` holds the hosted implementations. `Binary` implements `gdl_runtime::SegmentBinary` with what differs between segments: the settings tables, how the hosted implementations are built, their readiness, and what the segment serves.
 - A binary. Its `main` is `gdl_runtime::segment_main::<Binary>()`. The lifecycle every segment shares is the runtime's function, so it is compiled and tested once, and not emitted into each crate. [Segment lifecycle](lifecycle.md) describes it. A segment binary takes its settings from TOML files and `GDL_` variables: [Segment settings](../operations/configuration.md). The binary also installs a log subscriber that writes to stderr at the level `RUST_LOG` sets, `warn` by default: [Logs](../operations/observability.md#logs). It sets the global allocator the spec's `[binary] allocator` chooses, or none for the system's: [Binary](../appendix/spec-reference.md#binary).
 - A source segment with a pinned `Frontend` builds and runs that service. Without a pin, its binary reads one JSON request per line on stdin and writes the items as JSON lines, if the source's request and item types both implement `Serialize` and `Deserialize` and the request is not streamed. Otherwise the binary serves until it is stopped, and the user's own program calls the graph through the generated library. [Hosted frontends](../guides/frontends.md) covers the frontend.
 - A hub client. The crate asks gdl-runtime for its `hub` feature only when the spec has a `[deployment]` table or the command is `compose`. An export without one carries no hub client.
 - A `crossings.txt` for each layout: [the crossing report](placement.md#runs-hops-and-the-crossing-report).
 
-Each crate depends on gdl by `path`, `version`, or `git` with `rev`, as `[gdl]` says. A `path` must name the package `gdl-runtime`, and not the definitions crate `gdl` beside it.
+Each crate depends on gdl by `path`, `version`, or `git` with `rev`, as `[gdl]` says. A `path` must name the package `gdl-runtime`, and not the definitions crate `gdl` beside it. The revision must be one with the `segment!` the generator writes for: its input is not a stable interface, so the generator and the runtime come from one revision of gdl.
+
+```rust
+gdl_runtime::segment! {
+    contract: ::chat_contract;
+    package: "chat-front";
+    segment: "front";
+    segments: ["engine", "front", "post"];
+    placement: r#"..."#;
+    graph_config: "...";
+    roots: [Frontend];
+    crossings: [
+        crosses Truncate_to_Engine = Engine SinkDecl Req;
+        crosses Format_to_Preprocess = Preprocess OperatorDecl DownItem;
+    ];
+    feeds: [reads_json, writes_json];
+    nodes: [
+        Preprocess preprocess = ::chat_front_nodes::Preprocess;
+        Truncate truncate = ::chat_front_nodes::Truncate;
+        Number number = ::chat_front_nodes::Number;
+    ];
+    policies: [];
+    serve: json_lines;
+}
+```
+
+`serve` is `json_lines`, `none`, `frontend <Node> = <type>` for a pinned frontend, or `service { ... }` for one with typed entries.
 
 ### The crossing assertions
 
-The generator decides a message is a wire type from what the source reader found. A reader that is wrong must not reach a running graph. Each generated segment therefore asserts, at compile time, that every message it sends or receives across a cut is a wire type. The assertion is a constant over a type alias named for the crossing, `Truncate_to_Engine`, so that the error points at the crossing:
+The generator decides a message is a wire type from what the source reader found. A reader that is wrong must not reach a running graph. Each generated segment therefore asserts, at compile time, that every message it sends or receives across a cut is a wire type. Each crossing in the `segment!` call names a type alias for the crossing, `Truncate_to_Engine`, and the macro checks the alias with the span of that name, so that the error points at the crossing's line in the call:
 
 ```text
 error[E0277]: `T` crosses between segments but is not a wire type
+  --> front/src/lib.rs:26:17
+   |
+26 |         crosses Truncate_to_Engine = Engine SinkDecl Req;
+   |                 ^^^^^^^^^^^^^^^^^^ this crossing carries `T`
 ```
 
-A response that returns through an anchor inside one segment, because its hop leaves the segment and comes back, is asserted the same way. Its error says `returns through an anchor`. Both assertions read the same list of edges as the placement check, so the two cannot disagree. The source's segment also asserts the request and item types its binary reads and writes as JSON lines, unless a crossing already asserts them.
+A streamed port crosses as its head and its item, `Gateway_to_Resample_head` and `_item`, each checked apart.
+
+A response that returns through an anchor inside one segment, because its hop leaves the segment and comes back, is asserted the same way. Its error says `returns through an anchor`. Both assertions read the same list of edges as the placement check, so the two cannot disagree. The source's segment also asserts the request and item types its binary reads and writes as JSON lines, unless a crossing already asserts them. Their errors point at `reads_json` or `writes_json` in the call's `feeds`.
 
 A wrong "wire" from the reader fails the segment's build with one error that names the message and the crossing. A wrong "local" makes the generator refuse a cut that would work. `cargo gdl extract --verify` finds both.
 
 ## The output directory belongs to the generator
 
-Every generated file starts with a do-not-edit marker and the command that regenerates it. Rust files are formatted by rustfmt with the generator's own config, so the output does not depend on where the generator runs.
+Every generated file starts with a do-not-edit marker and the command that regenerates it. Rust files are formatted by rustfmt with the generator's own config, so the output does not depend on where the generator runs. rustfmt leaves the body of a `segment!` call alone, so the generator lays the call out itself, one item to a line.
 
 - `generate` replaces generated files and removes marked files it no longer produces. It refuses to run over a file in a segment crate that it did not write.
 - `generate --check` writes nothing. It fails if a generated file is missing, changed, or stale (marked, but no longer produced), or if a segment crate holds a file the generator did not write. A Cargo build directory is recognized by its `CACHEDIR.TAG` and is not drift.

@@ -31,7 +31,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-model` | Tools | The manifest, placement, layout, diagrams, and the fleet file, without the runtime. Builds for wasm |
 | `gdl-syntax` | The macro and the generator | The graph parser and checked model |
 | `gdl-message` | Authors of messages | `derive(Message)` and the message catalogue, without the runtime |
-| `gdl-macros` | Internal | `graph!` and the derives |
+| `gdl-macros` | Internal | `graph!`, the generated segments' `segment!`, and the derives |
 | `gdl-extract` | Tools | The source reader and the working catalogue |
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |

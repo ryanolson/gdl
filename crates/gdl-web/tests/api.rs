@@ -1014,22 +1014,15 @@ async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
             let mut text = String::new();
             file.read_to_string(&mut text).expect("source");
             if path.contains("/front/") {
+                // The segment's `segment!` call builds the frontend and
+                // serves it; the macro's expansion tests hold the code.
                 assert!(
-                    text.contains(".build::<::http_frontend::HttpFrontend>(\"Http\", frontend)"),
+                    text.contains("    serve: frontend Http = ::http_frontend::HttpFrontend;\n"),
                     "{text}"
                 );
-                // rustfmt wraps the call; compare without whitespace.
-                let flat: String = text.split_whitespace().collect();
-                assert!(
-                    flat.contains(
-                        "gdl_runtime::gdl::Frontend::serve(frontend,segment.client(|root|root.clone()),"
-                    ),
-                    "{text}"
-                );
-                assert!(!text.contains("serve_json_lines"));
                 frontend_main = true;
             } else {
-                assert!(!text.contains("Frontend::serve"));
+                assert!(text.contains("    serve: none;\n"), "{text}");
             }
         }
     }
@@ -1114,8 +1107,16 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
         if file.path().expect("path").ends_with("front/src/lib.rs") {
             let mut text = String::new();
             file.read_to_string(&mut text).expect("read");
-            assert!(text.contains("roots.0.clone()"), "{text}");
-            assert!(text.contains("roots.1.0.clone()"), "{text}");
+            // Each entry's client takes its own root, by index.
+            let pipelines: Vec<&str> = text
+                .lines()
+                .skip_while(|line| *line != "        pipelines: [")
+                .skip(1)
+                .take_while(|line| line.starts_with("            "))
+                .collect();
+            assert_eq!(pipelines.len(), 2, "{text}");
+            assert!(pipelines[0].ends_with(" = 0;"), "{text}");
+            assert!(pipelines[1].ends_with(" = 1;"), "{text}");
             found = true;
         }
     }
@@ -1233,20 +1234,13 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
         if path.ends_with("front/src/lib.rs") {
             let mut text = String::new();
             file.read_to_string(&mut text).expect("test result");
-            assert!(text.contains("gdl_runtime::gdl::Service::serve"), "{text}");
-            // rustfmt wraps the calls; compare without whitespace.
-            let flat: String = text.split_whitespace().collect();
-            // One segment, shared through the runtime with every entry.
-            assert_eq!(
-                flat.matches("Serving::new(segment,|segment,shutdown|")
-                    .count(),
-                1,
-                "{text}"
-            );
-            assert!(!text.contains("Arc::new(segment)"), "{text}");
-            assert!(text.contains("responses: None"));
-            assert!(text.contains("anthropic: None"));
-            assert!(text.contains("builder: &gdl_runtime::Builder"), "{text}");
+            // One `segment!` call serves the service, whose entries share
+            // one segment through the runtime; the macro's expansion tests
+            // hold the code.
+            assert!(text.contains("    serve: service {\n"), "{text}");
+            assert_eq!(text.matches("gdl_runtime::segment! {").count(), 1, "{text}");
+            assert!(text.contains("            responses;\n"), "{text}");
+            assert!(text.contains("            anthropic;\n"), "{text}");
             checked = true;
         }
     }
@@ -1405,18 +1399,19 @@ async fn endpoint_nodes_export_as_four_independent_segments() {
         let text =
             std::fs::read_to_string(generated.join("ports").join(segment).join("src/lib.rs"))
                 .expect("segment main");
+        // A node, an entry adapter, or the frontend the segment builds.
         assert!(
-            text.contains(&format!("build::<::api_frontend::{node}>")),
+            text.contains(&format!(" = ::api_frontend::{node};\n")),
             "{segment}: {text}"
         );
         if segment != "s1" {
-            assert!(!text.contains("build::<::api_frontend::ApiFrontend>"));
+            assert!(!text.contains("::api_frontend::ApiFrontend;"));
         }
     }
     let front =
         std::fs::read_to_string(generated.join("ports/s1/src/lib.rs")).expect("frontend library");
-    assert!(!front.contains("build::<::api_frontend::ExtractChat>"));
-    assert!(!front.contains("build::<::api_frontend::ResponsesAdapter>"));
+    assert!(!front.contains("::api_frontend::ExtractChat;"));
+    assert!(!front.contains("::api_frontend::ResponsesAdapter;"));
     eprintln!("endpoint segments: {}", generated.join("ports").display());
 }
 
