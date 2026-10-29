@@ -7,12 +7,12 @@ async fn a_late_drains_stalled_source_query_keeps_the_avoidance_exit() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &global, global.public_addr().port()).await;
     let (m1, proxy) = model_fronted(
         &spec,
         &directory,
-        cell(M1, "m1-hub:1337", 1),
+        pool(M1, "m1-hub:1337", 1),
         "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
         &|deployment| reference_graph(deployment, &events),
     )
@@ -26,8 +26,8 @@ async fn a_late_drains_stalled_source_query_keeps_the_avoidance_exit() {
     entry.process.stop();
     tokio::time::timeout(BOUND + WAIT, proxy.holding())
         .await
-        .expect("the entry reached its avoidance query before the cell drain");
-    m1.readiness.drain().await.expect("the cell drains");
+        .expect("the entry reached its avoidance query before the pool drain");
+    m1.readiness.drain().await.expect("the pool drains");
     tokio::time::timeout(BOUND + WAIT, async {
         while !entry.segment.declines_offers() {
             tokio::time::sleep(Duration::from_millis(10)).await;

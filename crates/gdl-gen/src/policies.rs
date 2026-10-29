@@ -1,7 +1,7 @@
-//! Cell policies from crates of their own: a spec's `[cell_policy.<name>]`
+//! Pool policies from crates of their own: a spec's `[pool_policy.<name>]`
 //! tables, checked, resolved against what each crate offers, and the
-//! policies each segment registers. A segment that chooses cells of a class
-//! whose `[cells.<class>] policy` a table binds builds that policy from its
+//! policies each segment registers. A segment that chooses pools of a class
+//! whose `[pools.<class>] policy` a table binds builds that policy from its
 //! settings and registers it; no other segment depends on the crate.
 
 use gdl_extract::{Offer, Origin, PolicyEntry, PolicyHead};
@@ -11,7 +11,7 @@ use crate::spec::{Bind, ListedCrate, Spec};
 use crate::validate::type_crate;
 
 /// The bound policies segment `segment` registers under `layout`, each once,
-/// by name: those of the classes it chooses cells of.
+/// by name: those of the classes it chooses pools of.
 pub(crate) fn registered<'s>(
     spec: &'s Spec,
     layout: &gdl_model::Layout,
@@ -20,17 +20,17 @@ pub(crate) fn registered<'s>(
     let names: std::collections::BTreeSet<&str> = layout
         .chosen_classes(segment)
         .into_iter()
-        .filter_map(|class| layout.cell_policy(class))
+        .filter_map(|class| layout.pool_policy(class))
         .map(|policy| policy.policy.as_str())
         .collect();
-    spec.cell_policies
+    spec.pool_policies
         .iter()
         .filter(|(name, _)| names.contains(name.as_str()))
         .map(|(name, bind)| (name.as_str(), bind))
         .collect()
 }
 
-/// What is wrong with the spec's `[cell_policy.<name>]` tables that needs
+/// What is wrong with the spec's `[pool_policy.<name>]` tables that needs
 /// none of their crates read: a name a placement cannot use or a node
 /// already has, a type that is not in the table's crate, and a table no
 /// layout's placement names.
@@ -40,9 +40,9 @@ pub(crate) fn problems(
     layouts: &crate::validate::Layouts,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    for (name, bind) in &spec.cell_policies {
-        let at = format!("[cell_policy.{name}]");
-        if let Err(why) = gdl_model::check_cell_policy_name(name) {
+    for (name, bind) in &spec.pool_policies {
+        let at = format!("[pool_policy.{name}]");
+        if let Err(why) = gdl_model::check_pool_policy_name(name) {
             problems.push(format!("{at}: {why}"));
         }
         if ["home_first", "round_robin"].contains(&name.as_str()) {
@@ -78,21 +78,21 @@ pub(crate) fn problems(
                 layout
                     .boundaries()
                     .iter()
-                    .filter_map(|boundary| layout.cell_policy(&boundary.into))
+                    .filter_map(|boundary| layout.pool_policy(&boundary.into))
                     .any(|policy| policy.policy == *name)
             })
         });
         if !named {
             problems.push(format!(
-                "{at}: no `[cells.<class>] policy` names `{name}`, so no segment registers it"
+                "{at}: no `[pools.<class>] policy` names `{name}`, so no segment registers it"
             ));
         }
     }
     problems
 }
 
-/// What is wrong with each `[cell_policy.<name>]` table whose crate the
-/// reader can reach: a crate it cannot read, a type that is not a cell
+/// What is wrong with each `[pool_policy.<name>]` table whose crate the
+/// reader can reach: a crate it cannot read, a type that is not a pool
 /// policy the crate offers, and a policy whose `Head` does not fit a
 /// request that crosses into a class that names it. Offers come from
 /// `from`, as a node crate's do. The heads are checked only where
@@ -105,8 +105,8 @@ pub(crate) fn resolve(
     resolution: Option<&crate::Resolution>,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    for (name, bind) in &spec.cell_policies {
-        let at = format!("[cell_policy.{name}]");
+    for (name, bind) in &spec.pool_policies {
+        let at = format!("[pool_policy.{name}]");
         // A crate whose manifest could not be read was reported when the
         // spec was loaded.
         if spec
@@ -149,7 +149,7 @@ pub(crate) fn resolve(
     problems
 }
 
-/// The cell policy `offer` holds for `bind`'s type, or why it holds none.
+/// The pool policy `offer` holds for `bind`'s type, or why it holds none.
 /// The reader offers a policy only where the crate root reaches it by its
 /// name, so the type must be written as that path: the crate, then the
 /// name.
@@ -167,7 +167,7 @@ fn offered<'o>(offer: &'o Offer, bind: &Bind) -> Result<&'o PolicyEntry, String>
     }
     if offer.policies.iter().any(|policy| policy.name == name) {
         return Err(format!(
-            "crate `{}` offers cell policy `{name}` at `{}`; write that path",
+            "crate `{}` offers pool policy `{name}` at `{}`; write that path",
             offer.package,
             at_root(&name)
         ));
@@ -184,7 +184,7 @@ fn offered<'o>(offer: &'o Offer, bind: &Bind) -> Result<&'o PolicyEntry, String>
         .map(|policy| format!("`{}`", policy.name))
         .collect();
     Err(format!(
-        "crate `{}` implements no cell policy `{name}`; {}",
+        "crate `{}` implements no pool policy `{name}`; {}",
         offer.package,
         match offered.as_slice() {
             [] => "it implements none".to_string(),
@@ -213,7 +213,7 @@ fn misfits(
     {
         for boundary in layout.boundaries() {
             if layout
-                .cell_policy(&boundary.into)
+                .pool_policy(&boundary.into)
                 .is_none_or(|policy| policy.policy != name)
             {
                 continue;
@@ -225,7 +225,7 @@ fn misfits(
                 continue;
             };
             let problem = format!(
-                "cell policy `{name}` of class `{}` {problem}",
+                "pool policy `{name}` of class `{}` {problem}",
                 boundary.into
             );
             if !problems.contains(&problem) {

@@ -1,26 +1,26 @@
-//! A cell's drain at its hub: `POST /v1/ext/gdl-cell/drain` on the control
-//! listener makes the cell `draining` whatever its quorum, on its health
+//! A pool's drain at its hub: `POST /v1/ext/gdl-pool/drain` on the control
+//! listener makes the pool `draining` whatever its quorum, on its health
 //! endpoint, its record, and its watch at once; once the last of its
-//! instances has left the hub, the hub withdraws the cell's record and ends
+//! instances has left the hub, the hub withdraws the pool's record and ends
 //! its watches. Every hub runs in process on OS-assigned ports, and every
 //! wait is for something observed.
 
 mod common;
 
 use common::{
-    CELL, GLOBAL, Gated, Instance, Records, WAIT, cell_hub, get, global_default, health, hub_of,
-    meet_the_quorum, timing, usable,
+    GLOBAL, Gated, Instance, POOL, Records, WAIT, get, global_default, health, hub_of,
+    meet_the_quorum, pool_hub, timing, usable,
 };
 use futures::{FutureExt, StreamExt};
-use gdl_cells::{CellDirectory, CellEvent, CellState, MemoryDirectory, MemoryWatch};
-use gdl_hub::{CellHealth, CellWatch};
-use gdl_watch::CellWatchEvent;
+use gdl_hub::{PoolHealth, PoolWatch};
+use gdl_pools::{MemoryDirectory, MemoryWatch, PoolDirectory, PoolEvent, PoolState};
+use gdl_watch::PoolWatchEvent;
 use velo_hub::Hub;
 
-/// Ask the hub to drain its cell: the status and the body.
+/// Ask the hub to drain its pool: the status and the body.
 async fn drain(hub: &Hub) -> (u16, String) {
     let url = format!(
-        "http://127.0.0.1:{}/v1/ext/gdl-cell/drain",
+        "http://127.0.0.1:{}/v1/ext/gdl-pool/drain",
         hub.control_addr().port()
     );
     let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).send())
@@ -31,60 +31,60 @@ async fn drain(hub: &Hub) -> (u16, String) {
     (status, response.text().await.expect("a body"))
 }
 
-/// A ready cell that is drained is `draining` on its health endpoint
+/// A ready pool that is drained is `draining` on its health endpoint
 /// (503), its watch, and its record by the time the drain is answered;
 /// a second drain changes nothing, and a quorum that changes afterwards
 /// leaves it `draining`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_cell_is_draining_at_once_whatever_its_quorum() {
+async fn a_drained_pool_is_draining_at_once_whatever_its_quorum() {
     let directory = MemoryDirectory::new();
     let mut records = Records::new(&directory);
-    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    let (hub, pool) = pool_hub(directory.clone(), timing()).await;
     let (mut instances, _) = meet_the_quorum(&hub).await;
-    records.until(CellState::Ready).await;
-    let mut watch = cell.watch().await.expect("the watch begins");
+    records.until(PoolState::Ready).await;
+    let mut watch = pool.watch().await.expect("the watch begins");
     loop {
         let event = tokio::time::timeout(WAIT, watch.next())
             .await
             .expect("the snapshot in time")
             .expect("the watch goes on");
-        if event == CellWatchEvent::Synced {
+        if event == PoolWatchEvent::Synced {
             break;
         }
     }
 
     let (status, body) = drain(&hub).await;
     assert_eq!(status, 202, "{body}");
-    let answered: CellHealth = serde_json::from_str(&body).expect("the cell's health");
-    assert_eq!(answered.state, CellState::Draining);
-    let (status, body) = get(&hub, "/v1/ext/gdl-cell/health").await;
+    let answered: PoolHealth = serde_json::from_str(&body).expect("the pool's health");
+    assert_eq!(answered.state, PoolState::Draining);
+    let (status, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(
         watch.next().now_or_never(),
-        Some(Some(CellWatchEvent::State {
-            state: CellState::Draining,
+        Some(Some(PoolWatchEvent::State {
+            state: PoolState::Draining,
             unfollowed: false,
         })),
         "the watch did not say draining by the time the drain was answered"
     );
-    // No cell follows this one, so it says so with the drain.
+    // No pool follows this one, so it says so with the drain.
     assert_eq!(
         watch.next().now_or_never(),
-        Some(Some(CellWatchEvent::State {
-            state: CellState::Draining,
+        Some(Some(PoolWatchEvent::State {
+            state: PoolState::Draining,
             unfollowed: true,
         }))
     );
-    let (record, _) = records.until(CellState::Draining).await;
+    let (record, _) = records.until(PoolState::Draining).await;
 
     let (status, body) = drain(&hub).await;
     assert_eq!(status, 202, "a second drain: {body}");
     let instance = instances.pop().expect("an instance of d");
     instance.leave().await;
-    let counted = health(&cell, "d at 1", |health| usable(health, "d") == 1).await;
+    let counted = health(&pool, "d at 1", |health| usable(health, "d") == 1).await;
     assert_eq!(
         counted.state,
-        CellState::Draining,
+        PoolState::Draining,
         "the quorum ended the drain"
     );
     assert_eq!(
@@ -99,34 +99,34 @@ async fn a_drained_cell_is_draining_at_once_whatever_its_quorum() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A cell whose class no hop enters, a global cell, cannot be drained as
-/// a cell yet: the drain is refused, and the cell's state is left alone.
+/// A pool whose class no hop enters, a global pool, cannot be drained as
+/// a pool yet: the drain is refused, and the pool's state is left alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_whose_class_no_hop_enters_is_not_drained() {
+async fn a_pool_whose_class_no_hop_enters_is_not_drained() {
     let directory = MemoryDirectory::new();
     let mut records = Records::of(&directory, "global", GLOBAL);
-    let (hub, cell) = hub_of(global_default(), directory.clone(), timing()).await;
+    let (hub, pool) = hub_of(global_default(), directory.clone(), timing()).await;
     let mut instance = Instance::join(&hub, "a").await;
     instance.announce(gdl_model::SegmentPhase::Ready).await;
-    records.until(CellState::Ready).await;
+    records.until(PoolState::Ready).await;
 
     let (status, body) = drain(&hub).await;
     assert_eq!(status, 409, "{body}");
-    assert_eq!(cell.health().borrow().state, CellState::Ready);
+    assert_eq!(pool.health().borrow().state, PoolState::Ready);
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// The next event of the model cell `CELL` in `watch`, a directory watch
+/// The next event of the model pool `POOL` in `watch`, a directory watch
 /// of its class: a record, or its withdrawal.
-async fn next_of_cell(watch: &mut MemoryWatch) -> CellEvent {
+async fn next_of_pool(watch: &mut MemoryWatch) -> PoolEvent {
     let next = async {
         loop {
             match watch.next().await {
                 Some(Ok(
-                    event @ (CellEvent::Current(_)
-                    | CellEvent::Put { .. }
-                    | CellEvent::Withdrawn { .. }),
-                )) if named(&event) == CELL => return event,
+                    event @ (PoolEvent::Current(_)
+                    | PoolEvent::Put { .. }
+                    | PoolEvent::Withdrawn { .. }),
+                )) if named(&event) == POOL => return event,
                 Some(Ok(_)) => {}
                 other => panic!("the directory's watch ended: {other:?}"),
             }
@@ -134,46 +134,46 @@ async fn next_of_cell(watch: &mut MemoryWatch) -> CellEvent {
     };
     tokio::time::timeout(WAIT, next)
         .await
-        .expect("timed out waiting for the cell in the directory")
+        .expect("timed out waiting for the pool in the directory")
 }
 
-fn named(event: &CellEvent) -> &str {
+fn named(event: &PoolEvent) -> &str {
     match event {
-        CellEvent::Current(record) | CellEvent::Put { record, .. } => &record.name,
-        CellEvent::Withdrawn { withdrawal, .. } => &withdrawal.cell,
+        PoolEvent::Current(record) | PoolEvent::Put { record, .. } => &record.name,
+        PoolEvent::Withdrawn { withdrawal, .. } => &withdrawal.pool,
         _ => "",
     }
 }
 
 /// The watch's next event, within [`WAIT`]: `None` once it has ended.
-async fn after(watch: &mut CellWatch) -> Option<CellWatchEvent> {
+async fn after(watch: &mut PoolWatch) -> Option<PoolWatchEvent> {
     tokio::time::timeout(WAIT, watch.next())
         .await
         .expect("the watch moves on in time")
 }
 
-/// A draining cell's record stays while any of its instances is a member
+/// A draining pool's record stays while any of its instances is a member
 /// of the hub, and is withdrawn, after the last write of it, once the last
 /// one leaves; its watches end then, and a new one is refused. The health
-/// endpoint still says the cell is draining.
+/// endpoint still says the pool is draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_cell_is_withdrawn_once_its_last_instance_leaves() {
+async fn a_drained_pool_is_withdrawn_once_its_last_instance_leaves() {
     let directory = MemoryDirectory::new();
     let mut directory_watch = directory.watch("model_x", None);
-    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    let (hub, pool) = pool_hub(directory.clone(), timing()).await;
     let (mut instances, _) = meet_the_quorum(&hub).await;
-    let mut watch = cell.watch().await.expect("the watch begins");
-    while after(&mut watch).await != Some(CellWatchEvent::Synced) {}
+    let mut watch = pool.watch().await.expect("the watch begins");
+    while after(&mut watch).await != Some(PoolWatchEvent::Synced) {}
 
-    cell.drain().await.expect("the cell drains");
+    pool.drain().await.expect("the pool drains");
     let draining = loop {
-        match next_of_cell(&mut directory_watch).await {
-            CellEvent::Current(record) | CellEvent::Put { record, .. }
-                if record.state == CellState::Draining =>
+        match next_of_pool(&mut directory_watch).await {
+            PoolEvent::Current(record) | PoolEvent::Put { record, .. }
+                if record.state == PoolState::Draining =>
             {
                 break record;
             }
-            CellEvent::Withdrawn { .. } => panic!("withdrawn while its instances are members"),
+            PoolEvent::Withdrawn { .. } => panic!("withdrawn while its instances are members"),
             _ => {}
         }
     };
@@ -187,8 +187,8 @@ async fn a_drained_cell_is_withdrawn_once_its_last_instance_leaves() {
     );
 
     last.leave().await;
-    match next_of_cell(&mut directory_watch).await {
-        CellEvent::Withdrawn { withdrawal, .. } => {
+    match next_of_pool(&mut directory_watch).await {
+        PoolEvent::Withdrawn { withdrawal, .. } => {
             assert_eq!(withdrawal.epoch, draining.epoch);
             assert!(
                 withdrawal.seq > draining.seq,
@@ -200,59 +200,59 @@ async fn a_drained_cell_is_withdrawn_once_its_last_instance_leaves() {
     loop {
         match after(&mut watch).await {
             None => break,
-            Some(CellWatchEvent::Left { .. } | CellWatchEvent::Load { .. }) => {}
+            Some(PoolWatchEvent::Left { .. } | PoolWatchEvent::Load { .. }) => {}
             Some(other) => panic!("the watch went on with {other:?}"),
         }
     }
     assert!(
-        cell.watch().await.is_err(),
-        "a watch of a withdrawn cell began"
+        pool.watch().await.is_err(),
+        "a watch of a withdrawn pool began"
     );
-    let (status, body) = get(&hub, "/v1/ext/gdl-cell/health").await;
+    let (status, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
     assert_eq!(status, 503, "{body}");
     assert!(body.contains("draining"), "{body}");
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// Once a drained cell's record is withdrawn, its hub refuses an instance
-/// that asks to join: the cell's watch, from which an instance learns of
-/// the drain, is gone, and nothing publishes the cell for it to serve.
+/// Once a drained pool's record is withdrawn, its hub refuses an instance
+/// that asks to join: the pool's watch, from which an instance learns of
+/// the drain, is gone, and nothing publishes the pool for it to serve.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_cell_refuses_an_instance_once_it_is_withdrawn() {
+async fn a_drained_pool_refuses_an_instance_once_it_is_withdrawn() {
     let directory = MemoryDirectory::new();
     let mut directory_watch = directory.watch("model_x", None);
-    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
-    cell.drain().await.expect("the cell drains");
+    let (hub, pool) = pool_hub(directory.clone(), timing()).await;
+    pool.drain().await.expect("the pool drains");
     while !matches!(
-        next_of_cell(&mut directory_watch).await,
-        CellEvent::Withdrawn { .. }
+        next_of_pool(&mut directory_watch).await,
+        PoolEvent::Withdrawn { .. }
     ) {}
 
     let joined = Instance::try_join(&hub, &common::spec(), "f").await;
     assert!(
         joined.is_err(),
-        "a drained, withdrawn cell admitted an instance"
+        "a drained, withdrawn pool admitted an instance"
     );
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A cell drained with no instance at its hub is withdrawn at once, after
+/// A pool drained with no instance at its hub is withdrawn at once, after
 /// its record has said it is draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_cell_with_no_instance_is_withdrawn_at_once() {
+async fn a_drained_pool_with_no_instance_is_withdrawn_at_once() {
     let directory = MemoryDirectory::new();
     let mut directory_watch = directory.watch("model_x", None);
-    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    let (hub, pool) = pool_hub(directory.clone(), timing()).await;
     let mut records = Records::new(&directory);
-    records.until(CellState::Unavailable).await;
+    records.until(PoolState::Unavailable).await;
 
-    cell.drain().await.expect("the cell drains");
+    pool.drain().await.expect("the pool drains");
     let mut seen = Vec::new();
     loop {
-        let event = next_of_cell(&mut directory_watch).await;
-        let withdrawn = matches!(event, CellEvent::Withdrawn { .. });
+        let event = next_of_pool(&mut directory_watch).await;
+        let withdrawn = matches!(event, PoolEvent::Withdrawn { .. });
         seen.push(match event {
-            CellEvent::Current(record) | CellEvent::Put { record, .. } => Some(record.state),
+            PoolEvent::Current(record) | PoolEvent::Put { record, .. } => Some(record.state),
             _ => None,
         });
         if withdrawn {
@@ -261,21 +261,21 @@ async fn a_drained_cell_with_no_instance_is_withdrawn_at_once() {
     }
     assert_eq!(
         seen.iter().rev().nth(1),
-        Some(&Some(CellState::Draining)),
+        Some(&Some(PoolState::Draining)),
         "not draining before it was withdrawn: {seen:?}"
     );
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// The record the directory holds for the model cell now, if any.
-async fn held(directory: &MemoryDirectory) -> Option<gdl_cells::CellRecord> {
+/// The record the directory holds for the model pool now, if any.
+async fn held(directory: &MemoryDirectory) -> Option<gdl_pools::PoolRecord> {
     let mut watch = directory.watch("model_x", None);
     let mut record = None;
     let read = async {
         while let Some(Ok(event)) = watch.next().await {
             match event {
-                CellEvent::Current(current) if current.name == CELL => record = Some(current),
-                CellEvent::Synced { .. } => return,
+                PoolEvent::Current(current) if current.name == POOL => record = Some(current),
+                PoolEvent::Synced { .. } => return,
                 _ => {}
             }
         }
@@ -287,20 +287,20 @@ async fn held(directory: &MemoryDirectory) -> Option<gdl_cells::CellRecord> {
 }
 
 /// A drain is answered only once the directory has stored the record
-/// that says the cell is draining: while the directory holds the write,
+/// that says the pool is draining: while the directory holds the write,
 /// the drain waits for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drain_is_answered_once_the_draining_record_is_stored() {
     let directory = Gated::new();
     let mut records = Records::new(&directory.inner);
-    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    let (hub, pool) = pool_hub(directory.clone(), timing()).await;
     let (_instances, _) = meet_the_quorum(&hub).await;
-    records.until(CellState::Ready).await;
+    records.until(PoolState::Ready).await;
 
     directory.close();
     let inner = directory.inner.clone();
     let draining = tokio::spawn(async move {
-        cell.drain().await.expect("the cell drains");
+        pool.drain().await.expect("the pool drains");
         held(&inner).await.map(|record| record.state)
     });
     directory.holding().await;
@@ -311,7 +311,7 @@ async fn a_drain_is_answered_once_the_draining_record_is_stored() {
         .expect("the drain's task");
     assert_eq!(
         stored,
-        Some(CellState::Draining),
+        Some(PoolState::Draining),
         "the drain was answered before its record was stored"
     );
     hub.shutdown().await.expect("the hub stops");

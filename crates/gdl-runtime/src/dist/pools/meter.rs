@@ -1,19 +1,19 @@
-//! What a chooser records of its offers to cells: for each cell of each
+//! What a chooser records of its offers to pools: for each pool of each
 //! class it sends to, how its offers ended, and how many of them were
-//! failovers. The counts are kept by the cell's name, not by its follow,
-//! so that a new generation of the cell, and an older one that still
+//! failovers. The counts are kept by the pool's name, not by its follow,
+//! so that a new generation of the pool, and an older one that still
 //! answers offers made under it, count into the same series.
 //!
-//! Each cell's counts are sharded by thread, as the runtime's figures are
+//! Each pool's counts are sharded by thread, as the runtime's figures are
 //! (`gdl::__runtime::Meters`), and summed when the registry is scraped. A
 //! request's path adds to its thread's shard once, with a relaxed add,
 //! and takes no lock and allocates nothing: the counts are reached through
-//! the lease on the cell's follow that the offer already holds.
+//! the lease on the pool's follow that the offer already holds.
 //!
-//! A cell's series stay once it is first followed, for the life of the
+//! A pool's series stay once it is first followed, for the life of the
 //! process, also after its follow is dropped: an answer to an offer made
 //! before the drop still counts, and no scrape misses the last counts.
-//! The cells a chooser's hub ever followed bound them.
+//! The pools a chooser's hub ever followed bound them.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
@@ -26,28 +26,28 @@ use prometheus::proto::{self, MetricFamily, MetricType};
 
 use crate::dist::offers::{Answer, Decline, Missed};
 
-/// The most shards a cell's counts are split into.
+/// The most shards a pool's counts are split into.
 const SHARD_LIMIT: usize = 64;
 
 /// The family of the offers' outcomes, and its help.
-pub(crate) const OFFERS: &str = "cell_offers_total";
-const OFFERS_HELP: &str = "Offers this chooser made to the cell, by how each ended.";
-/// The family of the offers made after another cell missed the request.
-pub(crate) const FAILOVERS: &str = "cell_failovers_total";
+pub(crate) const OFFERS: &str = "pool_offers_total";
+const OFFERS_HELP: &str = "Offers this chooser made to the pool, by how each ended.";
+/// The family of the offers made after another pool missed the request.
+pub(crate) const FAILOVERS: &str = "pool_failovers_total";
 const FAILOVERS_HELP: &str =
-    "Offers this chooser made to the cell after another offer of the request missed.";
+    "Offers this chooser made to the pool after another offer of the request missed.";
 
-/// How an offer to a cell ended, as the chooser read its answer.
+/// How an offer to a pool ended, as the chooser read its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// The cell's entry took the request.
+    /// The pool's entry took the request.
     Accepted,
-    /// The entry declined it, saying its cell is full.
+    /// The entry declined it, saying its pool is full.
     DeclinedFull,
-    /// The entry declined it, saying its cell is gone.
+    /// The entry declined it, saying its pool is gone.
     DeclinedGone,
     /// The entry declined it, saying that it cannot serve it and another
-    /// entry instance of its cell may.
+    /// entry instance of its pool may.
     DeclinedInstance,
     /// velo refused to send it: no entry said anything.
     Unsent,
@@ -98,22 +98,22 @@ impl Outcome {
     }
 }
 
-/// The cells' counts by class and cell, shared by the follower, which adds
-/// a cell's as it first follows it, and the scrape. Cheap to clone.
+/// The pools' counts by class and pool, shared by the follower, which adds
+/// a pool's as it first follows it, and the scrape. Cheap to clone.
 #[derive(Clone)]
-pub(crate) struct CellMeters {
-    cells: ByCell,
+pub(crate) struct PoolMeters {
+    pools: ByPool,
     shards: usize,
 }
 
-/// Each cell's counts by class and cell.
-type ByCell = Arc<Mutex<BTreeMap<(String, String), &'static CellFigures>>>;
+/// Each pool's counts by class and pool.
+type ByPool = Arc<Mutex<BTreeMap<(String, String), &'static PoolFigures>>>;
 
-impl CellMeters {
-    /// Register the cells' families in `registry`, with no cell yet.
+impl PoolMeters {
+    /// Register the pools' families in `registry`, with no pool yet.
     pub(crate) fn register(registry: &Registry) -> Result<Self> {
         let meters = Self::unregistered();
-        let scrape = Scrape::new(Arc::clone(&meters.cells))?;
+        let scrape = Scrape::new(Arc::clone(&meters.pools))?;
         registry.register(Box::new(scrape)).map_err(failed)?;
         Ok(meters)
     }
@@ -125,24 +125,24 @@ impl CellMeters {
             .next_power_of_two()
             .min(SHARD_LIMIT);
         Self {
-            cells: ByCell::default(),
+            pools: ByPool::default(),
             shards,
         }
     }
 
-    /// The counts of the cell `cell` of `class`, the same for every follow
+    /// The counts of the pool `pool` of `class`, the same for every follow
     /// of it; made, and its series shown at zero, the first time. Taken off
     /// a request's path, as a follow is made.
     ///
     /// The counts are leaked: a scrape reads them for as long as the
     /// process serves, and a `&'static` reference costs an offer nothing,
     /// where an `Arc` would be one more atomic that every thread touches.
-    pub(crate) fn figures(&self, class: &str, cell: &str) -> &'static CellFigures {
-        let mut cells = self.cells.lock().unwrap_or_else(PoisonError::into_inner);
-        cells
-            .entry((class.to_string(), cell.to_string()))
+    pub(crate) fn figures(&self, class: &str, pool: &str) -> &'static PoolFigures {
+        let mut pools = self.pools.lock().unwrap_or_else(PoisonError::into_inner);
+        pools
+            .entry((class.to_string(), pool.to_string()))
             .or_insert_with(|| {
-                Box::leak(Box::new(CellFigures {
+                Box::leak(Box::new(PoolFigures {
                     shards: (0..self.shards).map(|_| Shard::default()).collect(),
                 }))
             })
@@ -152,23 +152,23 @@ impl CellMeters {
 fn failed(error: prometheus::Error) -> Error {
     Error::new(
         ErrorKind::Placement,
-        format!("registering the chooser's cell metrics: {error}"),
+        format!("registering the chooser's pool metrics: {error}"),
     )
 }
 
-/// One cell's counts, one shard per thread up to `SHARD_LIMIT`.
-pub(crate) struct CellFigures {
+/// One pool's counts, one shard per thread up to `SHARD_LIMIT`.
+pub(crate) struct PoolFigures {
     shards: Box<[Shard]>,
 }
 
-impl CellFigures {
+impl PoolFigures {
     /// Count one offer that ended with `outcome`: one relaxed add.
     #[inline]
     pub(crate) fn offered(&self, outcome: Outcome) {
         self.shard().offers[outcome as usize].fetch_add(1, Relaxed);
     }
 
-    /// Count one offer made after another cell missed the request.
+    /// Count one offer made after another pool missed the request.
     pub(crate) fn failover(&self) {
         self.shard().failovers.fetch_add(1, Relaxed);
     }
@@ -203,13 +203,13 @@ impl CellFigures {
     }
 }
 
-impl std::fmt::Debug for CellFigures {
+impl std::fmt::Debug for PoolFigures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CellFigures").finish_non_exhaustive()
+        f.debug_struct("PoolFigures").finish_non_exhaustive()
     }
 }
 
-/// One thread's share of a cell's counts, on cache lines of its own.
+/// One thread's share of a pool's counts, on cache lines of its own.
 #[derive(Default)]
 #[repr(align(128))]
 struct Shard {
@@ -217,15 +217,15 @@ struct Shard {
     failovers: AtomicU64,
 }
 
-/// The two families, summed over each cell's shards when the registry is
+/// The two families, summed over each pool's shards when the registry is
 /// scraped.
 struct Scrape {
-    cells: ByCell,
+    pools: ByPool,
     descs: [Desc; 2],
 }
 
 impl Scrape {
-    fn new(cells: ByCell) -> Result<Self> {
+    fn new(pools: ByPool) -> Result<Self> {
         let desc = |name: &str, help: &str, labels: &[&str]| {
             Desc::new(
                 name.to_string(),
@@ -236,10 +236,10 @@ impl Scrape {
             .map_err(failed)
         };
         Ok(Self {
-            cells,
+            pools,
             descs: [
-                desc(OFFERS, OFFERS_HELP, &["class", "cell", "outcome"])?,
-                desc(FAILOVERS, FAILOVERS_HELP, &["class", "cell"])?,
+                desc(OFFERS, OFFERS_HELP, &["class", "pool", "outcome"])?,
+                desc(FAILOVERS, FAILOVERS_HELP, &["class", "pool"])?,
             ],
         })
     }
@@ -275,23 +275,23 @@ impl Collector for Scrape {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        let cells = self
-            .cells
+        let pools = self
+            .pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let mut offers = Vec::with_capacity(cells.len() * Outcome::ALL.len());
-        let mut failovers = Vec::with_capacity(cells.len());
-        for ((class, cell), figures) in &cells {
+        let mut offers = Vec::with_capacity(pools.len() * Outcome::ALL.len());
+        let mut failovers = Vec::with_capacity(pools.len());
+        for ((class, pool), figures) in &pools {
             for outcome in Outcome::ALL {
                 let labels = vec![
                     label("class", class),
-                    label("cell", cell),
+                    label("pool", pool),
                     label("outcome", outcome.label()),
                 ];
                 offers.push(counter(labels, figures.offers(outcome)));
             }
-            let labels = vec![label("class", class), label("cell", cell)];
+            let labels = vec![label("class", class), label("pool", pool)];
             failovers.push(counter(labels, figures.failovers()));
         }
         vec![
@@ -330,12 +330,12 @@ pub(crate) mod tests {
             .map(|metric| metric.get_counter().value())
     }
 
-    /// The offers to `cell` of `model_x` that ended with `outcome`.
-    pub(crate) fn offers(registry: &Registry, cell: &str, outcome: &str) -> Option<f64> {
+    /// The offers to `pool` of `model_x` that ended with `outcome`.
+    pub(crate) fn offers(registry: &Registry, pool: &str, outcome: &str) -> Option<f64> {
         scraped(
             registry,
             OFFERS,
-            &[("class", "model_x"), ("cell", cell), ("outcome", outcome)],
+            &[("class", "model_x"), ("pool", pool), ("outcome", outcome)],
         )
     }
 
@@ -392,13 +392,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A cell's series appear at zero once it is first followed, its
+    /// A pool's series appear at zero once it is first followed, its
     /// counts are summed over the threads that added to them, and a second
-    /// call for the same cell gives the same counts.
+    /// call for the same pool gives the same counts.
     #[test]
-    fn a_cells_counts_are_summed_over_threads() {
+    fn a_pools_counts_are_summed_over_threads() {
         let registry = Registry::new();
-        let meters = CellMeters::register(&registry).expect("registered");
+        let meters = PoolMeters::register(&registry).expect("registered");
         assert_eq!(offers(&registry, "m1", "accepted"), None);
         let figures = meters.figures("model_x", "m1");
         assert!(std::ptr::eq(figures, meters.figures("model_x", "m1")));
@@ -423,7 +423,7 @@ pub(crate) mod tests {
             scraped(
                 &registry,
                 FAILOVERS,
-                &[("class", "model_x"), ("cell", "m1")]
+                &[("class", "model_x"), ("pool", "m1")]
             ),
             Some(4.0)
         );

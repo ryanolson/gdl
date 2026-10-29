@@ -1,6 +1,6 @@
-//! The cell's drain, as its hub keeps it: once started, the cell is
+//! The pool's drain, as its hub keeps it: once started, the pool is
 //! `draining` whatever its quorum, for the life of the hub process, and
-//! it ends once no instance of the cell's class is a member of the hub. A
+//! it ends once no instance of the pool's class is a member of the hub. A
 //! drain cannot be cancelled: the instances that learned of it are already
 //! on their way out, and nothing would bring them back.
 //!
@@ -9,9 +9,9 @@
 //! removal in reverse start order, so this extension hears of one before
 //! the admission it requires has dropped the member.
 //!
-//! Once the drain has ended, every registration is refused: the cell's
+//! Once the drain has ended, every registration is refused: the pool's
 //! record is withdrawn and its watch, from which an instance learns of the
-//! drain, is closed, so an instance that joined would serve a cell nothing
+//! drain, is closed, so an instance that joined would serve a pool nothing
 //! publishes and never learn why. A registration the hub has prepared but
 //! not committed counts as a member until it is committed or aborted, so
 //! that the drain never ends between the two.
@@ -25,7 +25,7 @@ use velo_hub::velo::InstanceId;
 
 pub(super) struct Drain {
     started: watch::Sender<bool>,
-    /// The segments of the cell's class.
+    /// The segments of the pool's class.
     segments: HashSet<String>,
     members: Mutex<Members>,
     /// How many members and registrations under way there are.
@@ -63,7 +63,7 @@ impl Drop for Joining {
 }
 
 impl Drain {
-    /// The drain of a cell whose class has `segments`.
+    /// The drain of a pool whose class has `segments`.
     pub(super) fn new(segments: impl IntoIterator<Item = String>) -> Self {
         Self {
             started: watch::Sender::new(false),
@@ -94,7 +94,7 @@ impl Drain {
         let mut members = self.lock();
         if members.ended {
             return Err(
-                "the cell has drained and its record is withdrawn: its hub serves it no more",
+                "the pool has drained and its record is withdrawn: its hub serves it no more",
             );
         }
         members.joining += 1;
@@ -127,7 +127,7 @@ impl Drain {
         }
     }
 
-    /// Resolves once the drain has started and no instance of the cell's
+    /// Resolves once the drain has started and no instance of the pool's
     /// class is a member of the hub or joining it; from then every
     /// registration is refused.
     pub(super) async fn ended(&self) {

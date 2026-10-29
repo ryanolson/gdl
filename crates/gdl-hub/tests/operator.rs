@@ -1,4 +1,4 @@
-//! An operator's commands for a child cell whose hub is gone, given on its
+//! An operator's commands for a child pool whose hub is gone, given on its
 //! parent's hub, which reads the child's records: withdraw the child, or
 //! say that it was scaled to 0. Each is written at an epoch past the
 //! child's last record, so that a late record of the old epoch cannot undo
@@ -15,28 +15,28 @@ use std::time::{Duration, Instant};
 
 use common::{GLOBAL, Records, WAIT, address, config, global_default, hub_of, spec, timing};
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellView, DirectoryError, MemoryDirectory, Presence,
+use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
+use gdl_model::{ModelKey, PoolSettings};
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolView, Presence,
 };
-use gdl_hub::{CellReadiness, CellTiming, GraphAdmission, HubDirectory};
-use gdl_model::{CellSettings, ModelKey};
-use gdl_watch::{CellWatcher, Report};
+use gdl_watch::{PoolWatcher, Report};
 use velo_hub::Hub;
 
 const CHILD: &str = "model-x-02-us-east-1";
 
-/// The child cell, which declares llama-70b, reporting to `parent_hub`
+/// The child pool, which declares llama-70b, reporting to `parent_hub`
 /// under `relay`, or publishing to the shared directory without one.
-fn child(parent_hub: Option<&str>) -> CellSettings {
+fn child(parent_hub: Option<&str>) -> PoolSettings {
     let directory = parent_hub.map_or("directory = 'memory'\n".to_string(), |parent| {
         format!("parent_hub = '{parent}'\n")
     });
-    let settings: CellSettings = toml::from_str(&format!(
+    let settings: PoolSettings = toml::from_str(&format!(
         "name = '{CHILD}'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = '{GLOBAL}'\n\
          hub = 'model-x-02-hub:1337'\n{directory}[ready]\nd = 2\n"
     ))
     .expect("valid test fixture");
-    CellSettings {
+    PoolSettings {
         models: vec![ModelKey::new("llama-70b")],
         ..settings
     }
@@ -45,7 +45,7 @@ fn child(parent_hub: Option<&str>) -> CellSettings {
 /// Give the command at `path` on `hub`'s control listener: the status.
 async fn command(hub: &Hub, path: &str) -> u16 {
     let url = format!(
-        "http://127.0.0.1:{}/v1/ext/gdl-cell{path}",
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{path}",
         hub.control_addr().port()
     );
     let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).send())
@@ -55,25 +55,25 @@ async fn command(hub: &Hub, path: &str) -> u16 {
     response.status().as_u16()
 }
 
-fn withdraw(cell: &str) -> String {
-    gdl_watch::child_withdraw_path("model_x", cell)
+fn withdraw(pool: &str) -> String {
+    gdl_watch::child_withdraw_path("model_x", pool)
 }
 
-fn scale_to_zero(cell: &str) -> String {
-    gdl_watch::child_scale_to_zero_path("model_x", cell)
+fn scale_to_zero(pool: &str) -> String {
+    gdl_watch::child_scale_to_zero_path("model_x", pool)
 }
 
 /// The class's records as a reader sees them, from a new watch's snapshot.
-async fn view(directory: &impl CellDirectory, now: Instant) -> CellView {
+async fn view(directory: &impl PoolDirectory, now: Instant) -> PoolView {
     let mut watch = std::pin::pin!(directory.watch("model_x", None));
-    let mut view = CellView::new();
+    let mut view = PoolView::new();
     loop {
         let event = tokio::time::timeout(WAIT, watch.next())
             .await
             .expect("the watch answers in time")
             .expect("the watch goes on")
             .expect("the watch has no error");
-        let synced = matches!(event, CellEvent::Synced { .. });
+        let synced = matches!(event, PoolEvent::Synced { .. });
         view.apply(event, now);
         if synced {
             return view;
@@ -82,7 +82,7 @@ async fn view(directory: &impl CellDirectory, now: Instant) -> CellView {
 }
 
 /// A child's hub that published its record and stopped: its last record.
-async fn gone_child(directory: &MemoryDirectory) -> CellRecord {
+async fn gone_child(directory: &MemoryDirectory) -> PoolRecord {
     let mut records = Records::of(directory, "model_x", CHILD);
     let (hub, _child) = hub_of(child(None), directory.clone(), timing()).await;
     let last = records.next().await;
@@ -108,7 +108,7 @@ async fn a_parent_withdraws_a_child_whose_hub_is_gone() {
         seen.records(now).all(|record| record.models.is_empty()),
         "no record lists llama-70b"
     );
-    let late = CellRecord {
+    let late = PoolRecord {
         seq: last.seq + 100,
         ..last
     };
@@ -135,7 +135,7 @@ async fn a_parent_says_a_child_whose_hub_is_gone_was_scaled_to_zero() {
     let last = gone_child(&directory).await;
 
     assert_eq!(command(&parent, &scale_to_zero(CHILD)).await, 204);
-    let late = CellRecord {
+    let late = PoolRecord {
         seq: last.seq + 100,
         ..last.clone()
     };
@@ -148,22 +148,22 @@ async fn a_parent_says_a_child_whose_hub_is_gone_was_scaled_to_zero() {
     let seen = view(&directory, now).await;
     let scaled = seen
         .get(CHILD, now + last.lease * 10)
-        .expect("a cell scaled to 0 never lapses");
+        .expect("a pool scaled to 0 never lapses");
     assert_eq!(scaled.presence, Presence::ScaledToZero);
     assert!(scaled.version() > last.version());
     assert_eq!(scaled.models, last.models);
     parent.shutdown().await.expect("the parent's hub stops");
 }
 
-/// The parent commands only its own children: a cell it holds no record
-/// of, and a cell whose parent is another cell, are not found, and
+/// The parent commands only its own children: a pool it holds no record
+/// of, and a pool whose parent is another pool, are not found, and
 /// nothing is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_commands_only_its_own_children() {
     let directory = MemoryDirectory::new();
     let (parent, _readiness) = hub_of(global_default(), directory.clone(), timing()).await;
     let last = gone_child(&directory).await;
-    let other = CellRecord {
+    let other = PoolRecord {
         name: "model-x-09-us-east-1".into(),
         home: Some("global-02-us-west-2".into()),
         ..last
@@ -192,40 +192,40 @@ async fn a_parent_commands_only_its_own_children() {
     parent.shutdown().await.expect("the parent's hub stops");
 }
 
-/// A cell's hub under the `relay` backend, its own name resolved once it
+/// A pool's hub under the `relay` backend, its own name resolved once it
 /// serves.
-struct RelayCell {
+struct RelayPool {
     hub: Hub,
     directory: HubDirectory,
     /// Where a parent keeps its children's records.
     _state: Option<tempfile::TempDir>,
 }
 
-/// The hub of `cell`; a parent, which sends to `model_x`, keeps its
+/// The hub of `pool`; a parent, which sends to `model_x`, keeps its
 /// children's records in a temporary state directory.
-async fn relay_cell(cell: CellSettings, timing: CellTiming) -> RelayCell {
-    let gdl_model::DirectoryBackend::Relay { parent_hub, .. } = cell.directory.clone() else {
-        panic!("a relay cell: {:?}", cell.directory);
+async fn relay_pool(pool: PoolSettings, timing: PoolTiming) -> RelayPool {
+    let gdl_model::DirectoryBackend::Relay { parent_hub, .. } = pool.directory.clone() else {
+        panic!("a relay pool: {:?}", pool.directory);
     };
-    let state = (cell.class == "global").then(|| {
+    let state = (pool.class == "global").then(|| {
         tempfile::Builder::new()
             .prefix("gdl-operator-")
             .tempdir()
             .expect("a state directory")
     });
     let state_dir = state.as_ref().map(|state| state.path().to_owned());
-    let cell = CellSettings {
+    let pool = PoolSettings {
         directory: gdl_model::DirectoryBackend::Relay {
             parent_hub: parent_hub.clone(),
             state_dir: state_dir.clone(),
         },
-        ..cell
+        ..pool
     };
     let directory = HubDirectory::new(parent_hub, state_dir).expect("a relay directory");
     let named = common::Named::new(directory.clone());
-    let name = cell.hub.clone().expect("a hub name");
+    let name = pool.hub.clone().expect("a hub name");
     let readiness = std::sync::Arc::new(
-        CellReadiness::new(&spec(), cell, named.clone(), timing)
+        PoolReadiness::new(&spec(), pool, named.clone(), timing)
             .expect("valid test fixture")
             .with_reports(&directory)
             .expect("a lease its reports cover"),
@@ -237,15 +237,15 @@ async fn relay_cell(cell: CellSettings, timing: CellTiming) -> RelayCell {
         .await
         .expect("the hub serves");
     named.resolve(&name, &hub);
-    RelayCell {
+    RelayPool {
         hub,
         directory,
         _state: state,
     }
 }
 
-/// The global cell under `relay`: it reports nowhere.
-fn relay_global() -> CellSettings {
+/// The global pool under `relay`: it reports nowhere.
+fn relay_global() -> PoolSettings {
     toml::from_str(&format!(
         "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-hub:1337'\n"
     ))
@@ -254,11 +254,11 @@ fn relay_global() -> CellSettings {
 
 /// Under `relay`, a child whose hub is gone: the parent's hub, and the
 /// child's last record it holds.
-async fn gone_relay_child() -> (RelayCell, CellRecord) {
-    let parent = relay_cell(relay_global(), timing()).await;
-    let watcher = CellWatcher::new().expect("a client");
+async fn gone_relay_child() -> (RelayPool, PoolRecord) {
+    let parent = relay_pool(relay_global(), timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
     let at = address(&parent.hub);
-    let child = relay_cell(child(Some(&at)), timing()).await;
+    let child = relay_pool(child(Some(&at)), timing()).await;
     let reported = tokio::time::timeout(WAIT, async {
         loop {
             if let Ok(Some(record)) = watcher.held(&at, "model_x", CHILD).await {
@@ -286,11 +286,11 @@ async fn gone_relay_child() -> (RelayCell, CellRecord) {
 async fn under_relay_a_parent_withdraws_a_gone_child() {
     let (parent, last) = gone_relay_child().await;
     let at = address(&parent.hub);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
 
     assert_eq!(command(&parent.hub, &withdraw(CHILD)).await, 204);
     assert_eq!(watcher.held(&at, "model_x", CHILD).await, Ok(None));
-    let late = Report::Record(CellRecord {
+    let late = Report::Record(PoolRecord {
         seq: last.seq + 100,
         ..last
     });
@@ -309,10 +309,10 @@ async fn under_relay_a_parent_withdraws_a_gone_child() {
 async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
     let (parent, last) = gone_relay_child().await;
     let at = address(&parent.hub);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
 
     assert_eq!(command(&parent.hub, &scale_to_zero(CHILD)).await, 204);
-    let late = Report::Record(CellRecord {
+    let late = Report::Record(PoolRecord {
         seq: last.seq + 100,
         ..last.clone()
     });
@@ -321,7 +321,7 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
     let seen = view(&parent.directory, now).await;
     let scaled = seen
         .get(CHILD, now + last.lease * 10)
-        .expect("a cell scaled to 0 never lapses");
+        .expect("a pool scaled to 0 never lapses");
     assert_eq!(scaled.presence, Presence::ScaledToZero);
     assert!(scaled.version() > last.version());
     parent.hub.shutdown().await.expect("the parent's hub stops");
@@ -329,13 +329,13 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
 
 /// A child the parent followed, whose hub is gone, and which the operator
 /// then withdraws on the parent: the parent's relay says the child
-/// withdrew, as for a drained cell, so a node that reads the followed cells
+/// withdrew, as for a drained pool, so a node that reads the followed pools
 /// holds it withdrawn, and a gate answers 404 for a model no other set
 /// serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     let directory = common::Resolving::new();
-    let (parent, readiness) = common::serve_cell(global_default(), &directory, timing()).await;
+    let (parent, readiness) = common::serve_pool(global_default(), &directory, timing()).await;
     // A watch begun before the hub has read the directory takes its
     // snapshot when it is first read, and one whose snapshot says the
     // listings are not whole ends once they are: read the snapshot now,
@@ -355,7 +355,7 @@ async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     })
     .await
     .expect("the relay's snapshot, its listings whole, in time");
-    let (child, _readiness) = common::serve_cell(
+    let (child, _readiness) = common::serve_pool(
         common::model(CHILD, "us-east-1", "model-x-02-hub:1337"),
         &directory,
         timing(),
@@ -376,7 +376,7 @@ async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     assert_eq!(command(&parent, &withdraw(CHILD)).await, 204);
     let withdrawn = tokio::time::timeout(WAIT, async {
         while let Some(event) = relay.next().await {
-            if matches!(&event, gdl_watch::FollowEvent::Withdrawn { cell, .. } if cell == CHILD) {
+            if matches!(&event, gdl_watch::FollowEvent::Withdrawn { pool, .. } if pool == CHILD) {
                 return true;
             }
         }
@@ -405,13 +405,13 @@ async fn a_hub_none_of_whose_writes_was_answered_moves_past_a_command() {
         first: Arc<AtomicBool>,
         arrived: Arc<Notify>,
         release: Arc<Notify>,
-        attempts: mpsc::UnboundedSender<(gdl_cells::Version, bool)>,
+        attempts: mpsc::UnboundedSender<(gdl_pools::Version, bool)>,
     }
 
-    impl CellDirectory for LostAnswer {
-        type Watch = gdl_cells::MemoryWatch;
+    impl PoolDirectory for LostAnswer {
+        type Watch = gdl_pools::MemoryWatch;
 
-        async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
             let version = record.version();
             let result = self.records.publish(record).await;
             if self.first.swap(false, Ordering::SeqCst) {
@@ -430,19 +430,19 @@ async fn a_hub_none_of_whose_writes_was_answered_moves_past_a_command() {
             result
         }
 
-        async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
             self.records.withdraw(withdrawal).await
         }
 
-        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+        fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> Self::Watch {
             self.records.watch(class, from)
         }
     }
 
     let mut undone = Vec::new();
     for operator in [
-        gdl_cells::CellCommand::Withdraw,
-        gdl_cells::CellCommand::ScaleToZero,
+        gdl_pools::PoolCommand::Withdraw,
+        gdl_pools::PoolCommand::ScaleToZero,
     ] {
         let records = MemoryDirectory::new();
         let (attempts, mut attempted) = mpsc::unbounded_channel();
@@ -453,12 +453,12 @@ async fn a_hub_none_of_whose_writes_was_answered_moves_past_a_command() {
             release: Arc::new(Notify::new()),
             attempts,
         };
-        let (parent, parent_cell) = hub_of(global_default(), records.clone(), timing()).await;
+        let (parent, parent_pool) = hub_of(global_default(), records.clone(), timing()).await;
         let (hub, readiness) = hub_of(child(None), directory.clone(), timing()).await;
         tokio::time::timeout(WAIT, directory.arrived.notified())
             .await
             .expect("the child's first record is stored, with no answer yet");
-        let command = parent_cell
+        let command = parent_pool
             .command_child("model_x", CHILD, operator)
             .await
             .expect("the operator's command is stored")
@@ -490,7 +490,7 @@ async fn a_hub_none_of_whose_writes_was_answered_moves_past_a_command() {
     );
 }
 
-async fn recover_withdrawn_cell(disconnected: bool) {
+async fn recover_withdrawn_pool(disconnected: bool) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::SystemTime;
@@ -500,13 +500,13 @@ async fn recover_withdrawn_cell(disconnected: bool) {
     struct Disconnected {
         records: MemoryDirectory,
         first: Arc<AtomicBool>,
-        attempts: mpsc::UnboundedSender<(gdl_cells::Version, bool)>,
+        attempts: mpsc::UnboundedSender<(gdl_pools::Version, bool)>,
     }
 
-    impl CellDirectory for Disconnected {
-        type Watch = gdl_cells::MemoryWatch;
+    impl PoolDirectory for Disconnected {
+        type Watch = gdl_pools::MemoryWatch;
 
-        async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
             let version = record.version();
             let result = if self.first.swap(false, Ordering::SeqCst) {
                 Err(DirectoryError::Unavailable(
@@ -521,18 +521,18 @@ async fn recover_withdrawn_cell(disconnected: bool) {
             result
         }
 
-        async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
             self.records.withdraw(withdrawal).await
         }
 
-        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+        fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> Self::Watch {
             self.records.watch(class, from)
         }
     }
 
     let records = MemoryDirectory::new();
     let last = gone_child(&records).await;
-    let withdrawal = gdl_cells::CellCommand::Withdraw
+    let withdrawal = gdl_pools::PoolCommand::Withdraw
         .write(&last, SystemTime::now() + Duration::from_secs(3600));
     let command = withdrawal.version();
     withdrawal
@@ -547,7 +547,7 @@ async fn recover_withdrawn_cell(disconnected: bool) {
         first: Arc::new(AtomicBool::new(disconnected)),
         attempts,
     };
-    let timing = CellTiming {
+    let timing = PoolTiming {
         heartbeat: Duration::from_millis(20),
         ..timing()
     };
@@ -576,12 +576,12 @@ async fn recover_withdrawn_cell(disconnected: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_hub_recovers_a_withdrawal_when_the_directory_answers() {
-    recover_withdrawn_cell(false).await;
+    recover_withdrawn_pool(false).await;
 }
 
-/// A withdrawn cell can restart behind the operator's clock, even when
+/// A withdrawn pool can restart behind the operator's clock, even when
 /// its first write fails before reaching the directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_hub_recovers_a_withdrawal_after_an_unstored_first_write() {
-    recover_withdrawn_cell(true).await;
+    recover_withdrawn_pool(true).await;
 }

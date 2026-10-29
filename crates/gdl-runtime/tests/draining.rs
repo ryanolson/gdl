@@ -1,16 +1,16 @@
-//! A model cell drains as a whole: its hub says it is `draining`, and the
+//! A model pool drains as a whole: its hub says it is `draining`, and the
 //! choosers that follow it stop choosing it; its entry instances take the
 //! offers that reach them for a bound, then decline new ones, finish what
 //! they took, and announce that they have drained; its interior instances
 //! serve until every entry instance has drained or left, then drain; and
-//! once every instance has left, the hub withdraws the cell's record. An
+//! once every instance has left, the hub withdraws the pool's record. An
 //! entry instance can also decline offers by its own policy, with no drain:
-//! for its cell, or as its own, which leaves the request in its cell.
+//! for its pool, or as its own, which leaves the request in its pool.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
 //! sharing one directory; every wait is bounded and for something
 //! observed. A test that watches an entry instance stop taking work runs
-//! for at least its bound, 3 s at the shortest settings a cell allows (a
+//! for at least its bound, 3 s at the shortest settings a pool allows (a
 //! summary period of 1 s), so these tests take several seconds each.
 
 mod common;
@@ -19,21 +19,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model_configured, model_of, model_proxied, placement,
+    Model, ModelPool, RUNTIME, Running, ask, model_configured, model_of, model_proxied, placement,
     run_graph, spec_of,
 };
-use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
+use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
 use common::proxy::Mode;
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use futures::StreamExt;
-use gdl::{Cx, ErrorKind, FollowedCells, Next, Selectors};
-use gdl_cells::{CellDirectory, CellEvent, CellRecord};
-use gdl_hub::CellReadiness;
+use gdl::{Cx, ErrorKind, FollowedPools, Next, Selectors};
+use gdl_hub::PoolReadiness;
 use gdl_model::{SegmentPhase, segment_service};
+use gdl_pools::{PoolDirectory, PoolEvent, PoolRecord};
 use gdl_runtime::{
-    CellState, Cells, Decline, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
+    Decline, Deployment, DeploymentSpec, PoolState, Pools, Register, RequestRouter, RuntimeConfig,
 };
-use gdl_watch::CellWatchEvent;
+use gdl_watch::PoolWatchEvent;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
 use velo::discovery::{ServiceDiscovery, ServiceEvent};
@@ -43,7 +43,7 @@ use velo_hub::client::HubClient;
 const M1: &str = "model-x-01-us-east-1";
 const M2: &str = "model-x-02-us-east-1";
 
-/// A `ready` cell: one entry instance makes its quorum.
+/// A `ready` pool: one entry instance makes its quorum.
 fn ready(name: &'static str, hub: &'static str) -> Model<'static> {
     Model {
         name,
@@ -53,8 +53,8 @@ fn ready(name: &'static str, hub: &'static str) -> Model<'static> {
     }
 }
 
-/// A `degraded` cell: two entry instances make its quorum; it has one.
-/// A chooser offers to it only when no ready cell takes the request.
+/// A `degraded` pool: two entry instances make its quorum; it has one.
+/// A chooser offers to it only when no ready pool takes the request.
 fn degraded(name: &'static str, hub: &'static str) -> Model<'static> {
     Model {
         name,
@@ -64,26 +64,26 @@ fn degraded(name: &'static str, hub: &'static str) -> Model<'static> {
     }
 }
 
-/// The global cell's hub.
+/// The global pool's hub.
 async fn global_hub_of(spec: &DeploymentSpec, directory: &Resolving) -> Hub {
-    cell_hub_of(spec, global_hub(), directory).await.0
+    pool_hub_of(spec, global_hub(), directory).await.0
 }
 
-/// A chooser, an instance of `a` in the global cell at `hub`.
+/// A chooser, an instance of `a` in the global pool at `hub`.
 async fn chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
-    reading_chooser(spec, hub, &FollowedCells::new()).await
+    reading_chooser(spec, hub, &FollowedPools::new()).await
 }
 
-/// A chooser whose nodes read the cells it follows through `followed`.
+/// A chooser whose nodes read the pools it follows through `followed`.
 async fn reading_chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
-    followed: &FollowedCells,
+    followed: &FollowedPools,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
-    let extra = format!("{}{RUNTIME}", global_cell());
+    let extra = format!("{}{RUNTIME}", global_pool());
     let mut config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
@@ -103,70 +103,70 @@ async fn reading_chooser(
     .expect("the chooser serves")
 }
 
-/// A model cell of the reference graph whose nodes log to `events`.
-async fn cell(
+/// A model pool of the reference graph whose nodes log to `events`.
+async fn pool(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    model_of(spec, directory, cell, &|runtime| runtime, &|deployment| {
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    model_of(spec, directory, pool, &|runtime| runtime, &|deployment| {
         reference_graph(deployment, events)
     })
     .await
 }
 
 /// The chooser's tables.
-fn tables<H>(chooser: &Running<H>) -> Cells {
+fn tables<H>(chooser: &Running<H>) -> Pools {
     chooser
-        .cells
+        .pools
         .clone()
-        .expect("a global instance in a cell chooses")
+        .expect("a global instance in a pool chooses")
 }
 
-/// Wait until the chooser follows each of `cells` in its state, with one
+/// Wait until the chooser follows each of `pools` in its state, with one
 /// entry instance and a load summary.
-async fn following(cells: &Cells, expected: &[(&str, CellState)]) {
-    until(cells, "the model cells followed", |cells| {
-        expected.iter().all(|(cell, state)| {
-            followed(cells, "f", cell)
+async fn following(pools: &Pools, expected: &[(&str, PoolState)]) {
+    until(pools, "the model pools followed", |pools| {
+        expected.iter().all(|(pool, state)| {
+            followed(pools, "f", pool)
                 .is_some_and(|m| m.state == *state && m.eligible.len() == 1 && m.load.is_some())
         })
     })
     .await;
 }
 
-/// Wait until the chooser no longer has `cell` to choose: it follows it
+/// Wait until the chooser no longer has `pool` to choose: it follows it
 /// `draining`, or no longer follows it.
-async fn unchosen(cells: &Cells, cell: &str) {
-    until(cells, "the cell drained", |cells| {
-        followed(cells, "f", cell).is_none_or(|m| m.state == CellState::Draining)
+async fn unchosen(pools: &Pools, pool: &str) {
+    until(pools, "the pool drained", |pools| {
+        followed(pools, "f", pool).is_none_or(|m| m.state == PoolState::Draining)
     })
     .await;
 }
 
-/// The forward hand-offs that reached each of `cells`, taken or refused.
-fn offered<H>(cells: &[&ModelCell<H>]) -> Vec<usize> {
-    cells
+/// The forward hand-offs that reached each of `pools`, taken or refused.
+fn offered<H>(pools: &[&ModelPool<H>]) -> Vec<usize> {
+    pools
         .iter()
-        .map(|cell| cell.entries.iter().map(Running::offered).sum())
+        .map(|pool| pool.entries.iter().map(Running::offered).sum())
         .collect()
 }
 
-/// The forward hand-offs that reached `cell`, taken or refused.
-fn offers<H>(cell: &ModelCell<H>) -> usize {
-    cell.entries.iter().map(Running::offered).sum()
+/// The forward hand-offs that reached `pool`, taken or refused.
+fn offers<H>(pool: &ModelPool<H>) -> usize {
+    pool.entries.iter().map(Running::offered).sum()
 }
 
-/// The record `directory` holds for the model cell `cell`, if any.
-async fn record(directory: &Resolving, cell: &str) -> Option<CellRecord> {
+/// The record `directory` holds for the model pool `pool`, if any.
+async fn record(directory: &Resolving, pool: &str) -> Option<PoolRecord> {
     let mut watch = std::pin::pin!(directory.watch("model_x", None));
     let mut held = None;
     let read = async {
         while let Some(Ok(event)) = watch.next().await {
             match event {
-                CellEvent::Current(record) if record.name == cell => held = Some(record),
-                CellEvent::Synced { .. } => return,
+                PoolEvent::Current(record) if record.name == pool => held = Some(record),
+                PoolEvent::Synced { .. } => return,
                 _ => {}
             }
         }
@@ -177,40 +177,40 @@ async fn record(directory: &Resolving, cell: &str) -> Option<CellRecord> {
     held
 }
 
-/// A drained cell says it is `draining` on its health endpoint, its
+/// A drained pool says it is `draining` on its health endpoint, its
 /// record, and its watch by the time the drain is answered; a chooser
-/// stops choosing it, and the other cell takes the requests. With every
-/// cell draining, a request fails at once with `Routing`.
+/// stops choosing it, and the other pool takes the requests. With every
+/// pool draining, a request fails at once with `Routing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_draining_cell_is_not_chosen() {
+async fn a_draining_pool_is_not_chosen() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
     ask(&chooser.segment).await.expect("answered");
     assert_eq!(
         (m1.forwards(), m2.forwards()),
         (1, 0),
-        "the ready cell first"
+        "the ready pool first"
     );
 
-    let health = m1.readiness.drain().await.expect("the cell drains");
-    assert_eq!(health.state, CellState::Draining);
-    assert!(!health.healthy(), "a draining cell's health answers 503");
-    let mut watch = m1.readiness.watch().await.expect("the cell's watch");
+    let health = m1.readiness.drain().await.expect("the pool drains");
+    assert_eq!(health.state, PoolState::Draining);
+    assert!(!health.healthy(), "a draining pool's health answers 503");
+    let mut watch = m1.readiness.watch().await.expect("the pool's watch");
     let first = tokio::time::timeout(WAIT, watch.next())
         .await
         .expect("the snapshot in time");
     assert!(
         matches!(
             first,
-            Some(CellWatchEvent::Cell {
-                state: CellState::Draining,
+            Some(PoolWatchEvent::Pool {
+                state: PoolState::Draining,
                 ..
             })
         ),
@@ -219,7 +219,7 @@ async fn a_draining_cell_is_not_chosen() {
     let published = tokio::time::timeout(WAIT, async {
         loop {
             let held = record(&directory, M1).await;
-            if held.as_ref().is_none_or(|r| r.state == CellState::Draining) {
+            if held.as_ref().is_none_or(|r| r.state == PoolState::Draining) {
                 return held;
             }
             tokio::task::yield_now().await;
@@ -229,29 +229,29 @@ async fn a_draining_cell_is_not_chosen() {
     .expect("the record says draining in time");
     assert!(published.is_some(), "the record was withdrawn at once");
 
-    unchosen(&cells, M1).await;
+    unchosen(&pools, M1).await;
     let before = offered(&[&m1, &m2]);
     ask(&chooser.segment)
         .await
-        .expect("the other cell answered");
+        .expect("the other pool answered");
     assert_eq!(
         offered(&[&m1, &m2])[0],
         before[0],
-        "the draining cell was offered a request"
+        "the draining pool was offered a request"
     );
     assert_eq!(m2.forwards(), 1);
 
-    m2.readiness.drain().await.expect("the cell drains");
-    unchosen(&cells, M2).await;
-    let error = ask(&chooser.segment).await.expect_err("no cell takes work");
+    m2.readiness.drain().await.expect("the pool drains");
+    unchosen(&pools, M2).await;
+    let error = ask(&chooser.segment).await.expect_err("no pool takes work");
     assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
 
-/// How long an entry instance of these cells takes new work after its
-/// cell's drain reaches it: the setup timeout of [`RUNTIME`] and twice
+/// How long an entry instance of these pools takes new work after its
+/// pool's drain reaches it: the setup timeout of [`RUNTIME`] and twice
 /// the load summary period, [`SUMMARY`].
 const BOUND: Duration = Duration::from_secs(3);
 
@@ -259,9 +259,9 @@ const BOUND: Duration = Duration::from_secs(3);
 /// usual wait for what comes after it.
 const PAST_BOUND: Duration = Duration::from_secs(3 + 5);
 
-/// Send a request whose C waits, in the model cell, until the test
+/// Send a request whose C waits, in the model pool, until the test
 /// releases it, and return the request's answer once that C has it: the
-/// request is admitted at the cell's entry, and has yet to reach `d`.
+/// request is admitted at the pool's entry, and has yet to reach `d`.
 async fn gated<H: Next<Prompt, Chunk> + Send + Sync + 'static>(
     chooser: &Running<H>,
     events: &Arc<Events>,
@@ -293,7 +293,7 @@ fn release(events: &Events, text: &str) {
 }
 
 /// Wait until `instance`, an entry instance, declines offers: its bound
-/// has passed since it learned of its cell's drain.
+/// has passed since it learned of its pool's drain.
 async fn declining<H>(instance: &Running<H>) {
     tokio::time::timeout(PAST_BOUND, async {
         while !instance.segment.declines_offers() {
@@ -397,7 +397,7 @@ fn id<H>(instance: &Running<H>) -> InstanceId {
     instance.node.instance_id()
 }
 
-/// The proxy that hides a cell's drain from the hub that follows it hides
+/// The proxy that hides a pool's drain from the hub that follows it hides
 /// one its hub sends just after the test turns it on, even when the relay
 /// next runs with the change and the hub's bytes both ready, as a busy
 /// host leaves it. A current-thread runtime, stepped by hand, makes that
@@ -481,12 +481,12 @@ fn the_proxy_hides_a_drain_ready_as_its_mode_changes() {
     }
 }
 
-/// A chooser whose view of a cell is stale offers to it after the cell
-/// began to drain: the cell's entry takes the offer until the bound has
+/// A chooser whose view of a pool is stale offers to it after the pool
+/// began to drain: the pool's entry takes the offer until the bound has
 /// passed since it learned of the drain, and declines it after, and the
-/// chooser offers the request to another cell. The chooser follows the
-/// draining cell through a proxy that hides the drain from its hub but
-/// passes on the cell's load summaries, as a follow link that lags would
+/// chooser offers the request to another pool. The chooser follows the
+/// draining pool through a proxy that hides the drain from its hub but
+/// passes on the pool's load summaries, as a follow link that lags would
 /// for a while.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
@@ -503,9 +503,9 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
         &|deployment| reference_graph(deployment, &e1),
     )
     .await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
     proxy.set(Mode::Undrained);
     // Held at the entry, so that the entry is still there once it stops
     // taking work. Taken before the drain, so that the only offer that
@@ -513,10 +513,10 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
     let held = gated(&chooser, &e1, "held").await;
 
     let started = Instant::now();
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     ask(&chooser.segment)
         .await
-        .expect("the draining cell answered");
+        .expect("the draining pool answered");
     assert_eq!(
         (m1.forwards(), m2.forwards()),
         (2, 0),
@@ -529,19 +529,19 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
         started.elapsed()
     );
     assert!(
-        followed(&cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 1),
-        "the chooser's view of the cell is not stale"
+        followed(&pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 1),
+        "the chooser's view of the pool is not stale"
     );
 
     let before = (offers(&m1), offers(&m2));
     ask(&chooser.segment)
         .await
-        .expect("the other cell answered");
+        .expect("the other pool answered");
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (before.0 + 1, before.1 + 1),
-        "not offered to the draining cell, then the other"
+        "not offered to the draining pool, then the other"
     );
     assert_eq!(
         (m1.forwards(), m2.forwards()),
@@ -559,14 +559,14 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
     }
 }
 
-/// A draining cell's decline tells a stale chooser that the cell is gone,
+/// A draining pool's decline tells a stale chooser that the pool is gone,
 /// not full: the chooser offers it none of the requests after it, also
-/// once a damping window has passed, while its view of the cell is still
+/// once a damping window has passed, while its view of the pool is still
 /// the stale one. The proxy hides the drain from the chooser's hub, as a
 /// follow link that lags would. Besides the bound, it waits out the first
 /// damping window (1 s), which is what it proves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
+async fn a_draining_pools_decline_keeps_a_stale_chooser_away() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let (e1, quiet) = (Events::new(), Events::quiet());
@@ -580,12 +580,12 @@ async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
         &|deployment| reference_graph(deployment, &e1),
     )
     .await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
     proxy.set(Mode::Undrained);
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     // Held at the entry, so that the entry is still there once it stops
     // taking work.
     let held = gated(&chooser, &e1, "held").await;
@@ -593,29 +593,29 @@ async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
     let before = (offers(&m1), offers(&m2));
     ask(&chooser.segment)
         .await
-        .expect("the other cell answered");
+        .expect("the other pool answered");
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (before.0 + 1, before.1 + 1),
-        "declined by the draining cell, then taken by the other"
+        "declined by the draining pool, then taken by the other"
     );
 
-    // Past the first damping window, which a full cell's decline opens.
+    // Past the first damping window, which a full pool's decline opens.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let stale =
-        |m: &gdl_runtime::FollowedCell| m.state == CellState::Ready && m.eligible.len() == 1;
-    let m = followed(&cells, "f", M1).expect("followed");
-    assert!(stale(&m), "the chooser's view of the cell is not stale");
+        |m: &gdl_runtime::FollowedPool| m.state == PoolState::Ready && m.eligible.len() == 1;
+    let m = followed(&pools, "f", M1).expect("followed");
+    assert!(stale(&m), "the chooser's view of the pool is not stale");
     assert!(m.gone && m.damped.is_none(), "{m:?}");
     for _ in 0..4 {
         ask(&chooser.segment)
             .await
-            .expect("the other cell answered");
+            .expect("the other pool answered");
     }
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (before.0 + 1, before.1 + 5),
-        "the draining cell was offered requests again"
+        "the draining pool was offered requests again"
     );
     release(&e1, "held");
     tokio::time::timeout(WAIT, held)
@@ -629,9 +629,9 @@ async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
 }
 
 /// An entry instance declines offers by its segment's own policy, as gone
-/// or as full, with no drain, and counts each as a refusal in its load. A chooser passes a gone cell over, also once
+/// or as full, with no drain, and counts each as a refusal in its load. A chooser passes a gone pool over, also once
 /// the entry takes offers again, since its follow has not changed. It
-/// damps a full cell, and a lone full cell takes the request again once
+/// damps a full pool, and a lone full pool takes the request again once
 /// the entry takes offers again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
@@ -640,15 +640,15 @@ async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
 
     m1.entries[0].segment.decline_offers_as(Decline::Gone);
     ask(&chooser.segment)
         .await
-        .expect("the other cell answered");
+        .expect("the other pool answered");
     assert_eq!((offers(&m1), offers(&m2)), (1, 1));
     assert_eq!((m1.forwards(), m2.forwards()), (0, 1));
     assert_eq!(
@@ -656,44 +656,44 @@ async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
         1,
         "a refusal to report"
     );
-    let m = followed(&cells, "f", M1).expect("followed");
-    assert!(m.gone && m.state == CellState::Ready, "{m:?}");
+    let m = followed(&pools, "f", M1).expect("followed");
+    assert!(m.gone && m.state == PoolState::Ready, "{m:?}");
     m1.entries[0].segment.take_offers();
     for _ in 0..3 {
         ask(&chooser.segment)
             .await
-            .expect("the other cell answered");
+            .expect("the other pool answered");
     }
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (1, 4),
-        "a gone cell was offered work with its follow unchanged"
+        "a gone pool was offered work with its follow unchanged"
     );
 
     m2.entries[0].segment.decline_offers_as(Decline::Full);
     let error = ask(&chooser.segment)
         .await
-        .expect_err("no cell took the request");
+        .expect_err("no pool took the request");
     assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
     assert_eq!(offers(&m2), 5);
-    let m = followed(&cells, "f", M2).expect("followed");
+    let m = followed(&pools, "f", M2).expect("followed");
     assert!(!m.gone && m.damped.is_some(), "{m:?}");
     m2.entries[0].segment.take_offers();
     ask(&chooser.segment)
         .await
-        .expect("the lone full cell answered");
+        .expect("the lone full pool answered");
     assert_eq!((m1.forwards(), m2.forwards()), (0, 5));
-    assert_eq!(followed(&cells, "f", M2).expect("followed").damped, None);
+    assert_eq!(followed(&pools, "f", M2).expect("followed").damped, None);
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
 
-/// A request whose only cells are gone fails with `Routing`, also the one
+/// A request whose only pools are gone fails with `Routing`, also the one
 /// that hears the last gone decline, as every request after it does. A
-/// request that a cell declined as full, the control, fails with
-/// `Overloaded`, also when the cell it was offered next declined as gone:
-/// the full cell takes the next request once it has room.
+/// request that a pool declined as full, the control, fails with
+/// `Overloaded`, also when the pool it was offered next declined as gone:
+/// the full pool takes the next request once it has room.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_request_that_hears_the_last_gone_decline_fails_with_routing() {
     let spec = spec_of(placement());
@@ -701,38 +701,38 @@ async fn the_request_that_hears_the_last_gone_decline_fails_with_routing() {
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
 
     m1.entries[0].segment.decline_offers_as(Decline::Full);
     m2.entries[0].segment.decline_offers_as(Decline::Gone);
     let full = ask(&chooser.segment)
         .await
-        .expect_err("no cell took the request");
+        .expect_err("no pool took the request");
     assert_eq!((offers(&m1), offers(&m2)), (1, 1));
     let shown = (
-        followed(&cells, "f", M1).expect("followed"),
-        followed(&cells, "f", M2).expect("followed"),
+        followed(&pools, "f", M1).expect("followed"),
+        followed(&pools, "f", M2).expect("followed"),
     );
     assert!(shown.0.damped.is_some() && shown.1.gone, "{shown:?}");
     m1.entries[0].segment.take_offers();
     ask(&chooser.segment)
         .await
-        .expect("the lone full cell answered");
+        .expect("the lone full pool answered");
 
     m1.entries[0].segment.decline_offers_as(Decline::Gone);
     let first = ask(&chooser.segment)
         .await
-        .expect_err("the last cell declined as gone");
+        .expect_err("the last pool declined as gone");
     assert_eq!((offers(&m1), offers(&m2)), (3, 1));
-    assert!(followed(&cells, "f", M1).expect("followed").gone);
-    let next = ask(&chooser.segment).await.expect_err("every cell is gone");
+    assert!(followed(&pools, "f", M1).expect("followed").gone);
+    let next = ask(&chooser.segment).await.expect_err("every pool is gone");
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (3, 1),
-        "a gone cell was offered"
+        "a gone pool was offered"
     );
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
@@ -749,26 +749,26 @@ async fn the_request_that_hears_the_last_gone_decline_fails_with_routing() {
 }
 
 /// The last gone refusal must also produce Routing when it uses the
-/// final permitted failover: the next request already sees every cell gone.
+/// final permitted failover: the next request already sees every pool gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_last_gone_decline_at_the_failover_limit_is_routing() {
     const M3: &str = "model-x-03-us-east-1";
-    assert_eq!(RuntimeConfig::default().cell_failovers, 2);
+    assert_eq!(RuntimeConfig::default().pool_failovers, 2);
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let m2 = cell(&spec, &directory, ready(M2, "m2-hub:1337"), &quiet).await;
-    let m3 = cell(&spec, &directory, ready(M3, "m3-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = pool(&spec, &directory, ready(M2, "m2-hub:1337"), &quiet).await;
+    let m3 = pool(&spec, &directory, ready(M3, "m3-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
     following(
-        &cells,
+        &pools,
         &[
-            (M1, CellState::Ready),
-            (M2, CellState::Ready),
-            (M3, CellState::Ready),
+            (M1, PoolState::Ready),
+            (M2, PoolState::Ready),
+            (M3, PoolState::Ready),
         ],
     )
     .await;
@@ -777,14 +777,14 @@ async fn the_last_gone_decline_at_the_failover_limit_is_routing() {
     }
     let first = ask(&chooser.segment)
         .await
-        .expect_err("all three cells declined as gone");
+        .expect_err("all three pools declined as gone");
     assert_eq!(offered(&[&m1, &m2, &m3]), [1, 1, 1]);
     for name in [M1, M2, M3] {
-        assert!(followed(&cells, "f", name).expect("followed").gone);
+        assert!(followed(&pools, "f", name).expect("followed").gone);
     }
     let next = ask(&chooser.segment)
         .await
-        .expect_err("the next request has no cell");
+        .expect_err("the next request has no pool");
     assert_eq!(next.kind(), ErrorKind::Routing, "the control: {next}");
     assert_eq!(offered(&[&m1, &m2, &m3]), [1, 1, 1]);
     for hub in [hub, m1.hub, m2.hub, m3.hub] {
@@ -797,48 +797,48 @@ async fn the_last_gone_decline_at_the_failover_limit_is_routing() {
     );
 }
 
-/// A node in the global cell reads a cell its chooser holds gone as gone,
+/// A node in the global pool reads a pool its chooser holds gone as gone,
 /// while its state is `ready`, its entry instance is eligible, and fresh
 /// load summaries arrive: the chooser passes it over, so a gate in front
-/// of it answers it as not ready. A cell the chooser does not hold gone
+/// of it answers it as not ready. A pool the chooser does not hold gone
 /// reads as not gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_reads_a_cell_gone_by_its_own_policy_as_gone() {
+async fn a_node_reads_a_pool_gone_by_its_own_policy_as_gone() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
-    let node = FollowedCells::new();
+    let node = FollowedPools::new();
     let chooser = reading_chooser(&spec, &hub, &node).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready)]).await;
     let gone = || {
-        node.read("model_x", |cells| cells.is_gone(M1))
+        node.read("model_x", |pools| pools.is_gone(M1))
             .expect("the chooser sends to model_x")
     };
     ask(&chooser.segment).await.expect("answered");
-    assert!(!gone(), "a cell that takes work read gone");
+    assert!(!gone(), "a pool that takes work read gone");
 
     m1.entries[0].segment.decline_offers_as(Decline::Gone);
     ask(&chooser.segment)
         .await
-        .expect_err("the only cell declined as gone");
+        .expect_err("the only pool declined as gone");
     let marked = Instant::now();
-    until(&cells, "a load summary made after the mark", |cells| {
-        followed(cells, "f", M1)
+    until(&pools, "a load summary made after the mark", |pools| {
+        followed(pools, "f", M1)
             .and_then(|m| m.load_age)
             .is_some_and(|age| age < marked.elapsed())
     })
     .await;
-    let m = followed(&cells, "f", M1).expect("followed");
+    let m = followed(&pools, "f", M1).expect("followed");
     assert!(
-        m.gone && m.state == CellState::Ready && m.eligible.len() == 1,
+        m.gone && m.state == PoolState::Ready && m.eligible.len() == 1,
         "{m:?}"
     );
     assert!(
         gone(),
-        "the node reads a cell the chooser passes over as not gone"
+        "the node reads a pool the chooser passes over as not gone"
     );
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
@@ -847,19 +847,19 @@ async fn a_node_reads_a_cell_gone_by_its_own_policy_as_gone() {
 
 /// An entry instance declines offers as its own, by its segment's own
 /// policy: each request it is offered goes to the other entry instance of
-/// its cell, which takes it, and never to the other cell. Its cell is
+/// its pool, which takes it, and never to the other pool. Its pool is
 /// neither damped nor held gone, and the instance's load report counts no
-/// refusal, which would read as a saturated cell under `home_first`. Once
+/// refusal, which would read as a saturated pool under `home_first`. Once
 /// the instance takes offers again, round robin offers it requests again,
 /// and it takes them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_cell() {
+async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_pool() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         Model {
@@ -869,12 +869,12 @@ async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_cell() {
         &quiet,
     )
     .await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    until(&cells, "the model cells followed", |cells| {
-        followed(cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 2)
-            && followed(cells, "f", M2).is_some_and(|m| m.state == CellState::Degraded)
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    until(&pools, "the model pools followed", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 2)
+            && followed(pools, "f", M2).is_some_and(|m| m.state == PoolState::Degraded)
     })
     .await;
 
@@ -891,18 +891,18 @@ async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_cell() {
         2,
         "round robin offers the declining instance every other request first"
     );
-    assert_eq!(offers(&m2), 0, "the other cell was offered a request");
-    let m = followed(&cells, "f", M1).expect("followed");
+    assert_eq!(offers(&m2), 0, "the other pool was offered a request");
+    let m = followed(&pools, "f", M1).expect("followed");
     assert!(!m.gone && m.damped.is_none(), "{m:?}");
     assert_eq!(
         own.segment.load().declined,
         0,
-        "the instance's own declines count as its cell's refusals in its load report"
+        "the instance's own declines count as its pool's refusals in its load report"
     );
 
     own.segment.take_offers();
     for _ in 0..4 {
-        ask(&chooser.segment).await.expect("the cell answered");
+        ask(&chooser.segment).await.expect("the pool answered");
     }
     assert_eq!((own.forwards(), other.forwards(), m2.forwards()), (2, 6, 0));
     for hub in [hub, m1.hub, m2.hub] {
@@ -912,7 +912,7 @@ async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_cell() {
 
 /// An entry instance stops taking new work at its bound even when its
 /// serving body is slow to finish once told to stop: the offer of a stale
-/// chooser after the bound is declined, and the other cell answers it.
+/// chooser after the bound is declined, and the other pool answers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
     let spec = spec_of(placement());
@@ -930,17 +930,17 @@ async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
         &|deployment| reference_graph(deployment, &e1),
     )
     .await;
-    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
     proxy.set(Mode::Undrained);
     let entry = &m1.entries[0];
     entry.body.send_replace(true);
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     ask(&chooser.segment)
         .await
-        .expect("the draining cell answered");
+        .expect("the draining pool answered");
     assert_eq!(
         (m1.forwards(), m2.forwards()),
         (1, 0),
@@ -950,11 +950,11 @@ async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
     let before = (offers(&m1), offers(&m2));
     ask(&chooser.segment)
         .await
-        .expect("the other cell answered");
+        .expect("the other pool answered");
     assert_eq!(
         (offers(&m1), offers(&m2)),
         (before.0 + 1, before.1 + 1),
-        "not offered to the draining cell, then the other"
+        "not offered to the draining pool, then the other"
     );
     assert_eq!(
         (m1.forwards(), m2.forwards()),
@@ -967,7 +967,7 @@ async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
     }
 }
 
-/// The entry and C, cut apart inside the model cell: `f` runs B, D, E,
+/// The entry and C, cut apart inside the model pool: `f` runs B, D, E,
 /// and F, and `d` runs C, so a request the entry took crosses to `d` and
 /// back into `f` for D.
 fn through_the_interior() -> gdl_runtime::Placement {
@@ -980,7 +980,7 @@ fn through_the_interior() -> gdl_runtime::Placement {
 }
 
 /// An entry instance that stops taking offers at its bound still takes
-/// the hand-offs inside its cell that a request it took makes: a request
+/// the hand-offs inside its pool that a request it took makes: a request
 /// held at C, in `d`, past the bound, comes back into `f` for D and is
 /// answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -990,12 +990,12 @@ async fn an_entry_takes_the_continuations_of_its_requests_past_its_bound() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
-    following(&tables(&chooser), &[(M1, CellState::Ready)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+    following(&tables(&chooser), &[(M1, PoolState::Ready)]).await;
     ask(&chooser.segment).await.expect("answered");
     let held = gated(&chooser, &events, "held").await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let entry = &m1.entries[0];
     declining(entry).await;
     assert_eq!(entry.segment.admitted(), 1, "the request is admitted");
@@ -1041,8 +1041,8 @@ impl gdl::Selector for Elsewhere {
 
 /// An entry instance that took no request of its own still takes, past
 /// its bound and once it has announced that it drained, the hand-offs
-/// inside its cell that a request another entry instance took makes: the
-/// cell's entry instances are its drain sources too. Here `d` hands D to
+/// inside its pool that a request another entry instance took makes: the
+/// pool's entry instances are its drain sources too. Here `d` hands D to
 /// the entry instance that did not take the request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_takes_the_continuations_of_another_entrys_requests() {
@@ -1077,7 +1077,7 @@ async fn an_entry_takes_the_continuations_of_another_entrys_requests() {
     until(
         &tables(&chooser),
         "both entry instances followed",
-        |cells| followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 2 && m.load.is_some()),
+        |pools| followed(pools, "f", M1).is_some_and(|m| m.eligible.len() == 2 && m.load.is_some()),
     )
     .await;
     let held = gated(&chooser, &events, "held").await;
@@ -1088,7 +1088,7 @@ async fn an_entry_takes_the_continuations_of_another_entrys_requests() {
     *elsewhere.avoid.lock().expect("lock") = Some(id(taker).as_u128());
     let mut drained = phase(&m1.hub, "f", SegmentPhase::Drained).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     shown(&mut drained, id(other)).await;
     // An entry instance that closed once it had drained itself would close
     // within a question to the hub; nothing shows that one that waits for
@@ -1113,7 +1113,7 @@ async fn an_entry_takes_the_continuations_of_another_entrys_requests() {
     }
 }
 
-/// A request the entry took before its cell drained is answered after the
+/// A request the entry took before its pool drained is answered after the
 /// entry stopped taking work, and the entry announces that it has drained
 /// only once it holds no request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1123,12 +1123,12 @@ async fn an_entry_announces_drained_once_its_requests_are_answered() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
-    following(&tables(&chooser), &[(M1, CellState::Ready)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+    following(&tables(&chooser), &[(M1, PoolState::Ready)]).await;
     let held = gated(&chooser, &events, "held").await;
     let mut drained = phase(&m1.hub, "f", SegmentPhase::Drained).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let entry = &m1.entries[0];
     declining(entry).await;
     assert_eq!(entry.segment.admitted(), 1, "the request admitted before");
@@ -1148,10 +1148,10 @@ async fn an_entry_announces_drained_once_its_requests_are_answered() {
     }
 }
 
-/// An interior instance of a draining cell serves while an entry instance
+/// An interior instance of a draining pool serves while an entry instance
 /// still holds a request that will call it, even once the entry stopped
 /// taking work, and drains only after the entry has drained: on its own,
-/// or when it is stopped while the cell drains, since the cell's entry
+/// or when it is stopped while the pool drains, since the pool's entry
 /// instances are its drain sources then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
@@ -1161,12 +1161,12 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
     let chooser = chooser(&spec, &hub).await;
     for stopped in [false, true] {
         let events = Events::new();
-        let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
-        following(&tables(&chooser), &[(M1, CellState::Ready)]).await;
+        let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+        following(&tables(&chooser), &[(M1, PoolState::Ready)]).await;
         let held = gated(&chooser, &events, "held").await;
         let mut retired = phase(&m1.hub, "d", SegmentPhase::Retired).await;
 
-        m1.readiness.drain().await.expect("the cell drains");
+        m1.readiness.drain().await.expect("the pool drains");
         declining(&m1.entries[0]).await;
         let sink = &m1.sink;
         assert!(!sink.segment.is_closed(), "the interior instance closed");
@@ -1179,7 +1179,7 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
             // entry did three seconds before.
             sink.process.stop();
             shown(&mut retired, id(sink)).await;
-            // An instance that counted the sources outside its cell would
+            // An instance that counted the sources outside its pool would
             // close within a question to the hub of retiring; nothing
             // shows that one which counts the entry instances will not,
             // so it is given several of its own questions' time.
@@ -1213,7 +1213,7 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
                     .contains(&entry),
             "the interior instance closed before the entry instance drained or left"
         );
-        let ModelCell {
+        let ModelPool {
             hub: model_hub,
             entries,
             sink,
@@ -1226,33 +1226,33 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
             .await
             .expect("the interior instance drained");
         model_hub.shutdown().await.expect("valid test fixture");
-        until(&tables(&chooser), "the drained cell dropped", |cells| {
-            followed(cells, "f", M1).is_none()
+        until(&tables(&chooser), "the drained pool dropped", |pools| {
+            followed(pools, "f", M1).is_none()
         })
         .await;
     }
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// Once every instance of a draining cell has drained and left, on its
-/// own, the cell's hub withdraws its record, and the global cell's hub
+/// Once every instance of a draining pool has drained and left, on its
+/// own, the pool's hub withdraws its record, and the global pool's hub
 /// that followed it drops it from its relay, so that its choosers no
 /// longer follow it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_drained_cell_is_withdrawn_once_its_instances_have_left() {
+async fn a_drained_pool_is_withdrawn_once_its_instances_have_left() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, global): (Hub, Arc<CellReadiness<Resolving>>) =
-        cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, global): (Hub, Arc<PoolReadiness<Resolving>>) =
+        pool_hub_of(&spec, global_hub(), &directory).await;
     let chooser = chooser(&spec, &hub).await;
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready)]).await;
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready)]).await;
     ask(&chooser.segment).await.expect("answered");
 
-    m1.readiness.drain().await.expect("the cell drains");
-    let ModelCell {
+    m1.readiness.drain().await.expect("the pool drains");
+    let ModelPool {
         hub: model_hub,
         entries,
         sink,
@@ -1272,18 +1272,18 @@ async fn a_drained_cell_is_withdrawn_once_its_instances_have_left() {
     .await;
     assert!(
         withdrawn.is_ok(),
-        "the drained cell's record was not withdrawn"
+        "the drained pool's record was not withdrawn"
     );
     let mut following = global.following();
     tokio::time::timeout(
         WAIT,
-        following.wait_for(|cells| !cells.keys().any(|(_, cell)| cell == M1)),
+        following.wait_for(|pools| !pools.keys().any(|(_, pool)| pool == M1)),
     )
     .await
-    .expect("the global hub dropped the drained cell in time")
+    .expect("the global hub dropped the drained pool in time")
     .expect("the extension runs");
-    until(&cells, "the chooser no longer follows the cell", |cells| {
-        followed(cells, "f", M1).is_none()
+    until(&pools, "the chooser no longer follows the pool", |pools| {
+        followed(pools, "f", M1).is_none()
     })
     .await;
     for hub in [hub, model_hub] {
@@ -1291,54 +1291,54 @@ async fn a_drained_cell_is_withdrawn_once_its_instances_have_left() {
     }
 }
 
-/// What a node in the global cell reads of the model cell `cell`: its
+/// What a node in the global pool reads of the model pool `pool`: its
 /// state, if its chooser follows it, and whether it is withdrawn.
-fn read(followed: &FollowedCells, cell: &str) -> (Option<CellState>, bool) {
+fn read(followed: &FollowedPools, pool: &str) -> (Option<PoolState>, bool) {
     followed
-        .read("model_x", |cells| {
+        .read("model_x", |pools| {
             (
-                cells.cell(cell).map(gdl::Cell::state),
-                cells.is_withdrawn(cell),
+                pools.pool(pool).map(gdl::Pool::state),
+                pools.is_withdrawn(pool),
             )
         })
         .expect("the chooser sends to model_x")
 }
 
-/// A node in the global cell reads each model cell as its chooser holds
-/// it. A cell that drains reads `ready`, then `draining` while a request
+/// A node in the global pool reads each model pool as its chooser holds
+/// it. A pool that drains reads `ready`, then `draining` while a request
 /// the chooser sent it holds its follow, then withdrawn once its
-/// instances have left and its hub has withdrawn its record. A cell whose
+/// instances have left and its hub has withdrawn its record. A pool whose
 /// hub stops without a drain reads as neither followed nor withdrawn: its
 /// lease runs out, and silence is never a decommission. A chooser that
-/// starts after the withdrawal never saw the cell, and reads it so too:
+/// starts after the withdrawal never saw the pool, and reads it so too:
 /// a gate answers it as not available (503), not as removed (404). The
 /// drain waits out the entry's bound, so this test takes several seconds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_reads_a_drained_cell_as_withdrawn_and_a_stopped_one_as_not() {
+async fn a_node_reads_a_drained_pool_as_withdrawn_and_a_stopped_one_as_not() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, _global): (Hub, Arc<CellReadiness<Resolving>>) =
-        cell_hub_of(&spec, global_hub(), &directory).await;
-    let node = FollowedCells::new();
+    let (hub, _global): (Hub, Arc<PoolReadiness<Resolving>>) =
+        pool_hub_of(&spec, global_hub(), &directory).await;
+    let node = FollowedPools::new();
     let chooser = reading_chooser(&spec, &hub, &node).await;
     assert!(node.is_bound(), "the launch binds the handle");
-    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
-    let cells = tables(&chooser);
-    following(&cells, &[(M1, CellState::Ready)]).await;
-    assert_eq!(read(&node, M1), (Some(CellState::Ready), false));
+    let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready)]).await;
+    assert_eq!(read(&node, M1), (Some(PoolState::Ready), false));
 
     let held = gated(&chooser, &events, "held").await;
-    m1.readiness.drain().await.expect("the cell drains");
-    until(&cells, "the node reads the cell draining", |_| {
-        read(&node, M1) == (Some(CellState::Draining), false)
+    m1.readiness.drain().await.expect("the pool drains");
+    until(&pools, "the node reads the pool draining", |_| {
+        read(&node, M1) == (Some(PoolState::Draining), false)
     })
     .await;
     release(&events, "held");
     held.await
         .expect("the request ran")
         .expect("the request was answered");
-    let ModelCell {
+    let ModelPool {
         hub: m1_hub,
         entries,
         sink,
@@ -1350,24 +1350,24 @@ async fn a_node_reads_a_drained_cell_as_withdrawn_and_a_stopped_one_as_not() {
     sink.ended(WAIT)
         .await
         .expect("the interior instance drained");
-    until(&cells, "the node reads the cell withdrawn", |_| {
+    until(&pools, "the node reads the pool withdrawn", |_| {
         read(&node, M1) == (None, true)
     })
     .await;
 
-    let m2 = cell(&spec, &directory, ready(M2, "m2-hub:1337"), &events).await;
-    following(&cells, &[(M2, CellState::Ready)]).await;
-    assert_eq!(read(&node, M2), (Some(CellState::Ready), false));
-    // Once it follows the cell that came after, the late chooser has read
+    let m2 = pool(&spec, &directory, ready(M2, "m2-hub:1337"), &events).await;
+    following(&pools, &[(M2, PoolState::Ready)]).await;
+    assert_eq!(read(&node, M2), (Some(PoolState::Ready), false));
+    // Once it follows the pool that came after, the late chooser has read
     // its hub's relay, and the withdrawal is not in it.
-    let late = FollowedCells::new();
+    let late = FollowedPools::new();
     let later = reading_chooser(&spec, &hub, &late).await;
-    following(&tables(&later), &[(M2, CellState::Ready)]).await;
+    following(&tables(&later), &[(M2, PoolState::Ready)]).await;
     assert_eq!(read(&late, M1), (None, false), "never seen");
 
     m2.hub.shutdown().await.expect("valid test fixture");
-    until(&cells, "the stopped cell dropped", |cells| {
-        followed(cells, "f", M2).is_none()
+    until(&pools, "the stopped pool dropped", |pools| {
+        followed(pools, "f", M2).is_none()
     })
     .await;
     assert_eq!(read(&node, M2), (None, false), "a stop is not a withdrawal");

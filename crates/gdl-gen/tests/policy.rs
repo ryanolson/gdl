@@ -1,8 +1,8 @@
-//! A cell policy from a crate of its own, end to end: a spec binds the
+//! A pool policy from a crate of its own, end to end: a spec binds the
 //! policy `by_model` to its crate and type, the generated chooser builds it
 //! from its settings and registers it, and every request reaches the model
-//! cell the policy names for its model. Each cell's hub is the `gdl-hub`
-//! binary, publishing to a `dir` cell directory in a scratch directory, and
+//! pool the policy names for its model. Each pool's hub is the `gdl-hub`
+//! binary, publishing to a `dir` pool directory in a scratch directory, and
 //! every instance runs on loopback.
 //!
 //! The test builds the generated segments and the hub binary in nested
@@ -61,7 +61,7 @@ fn build(out: &Path) -> PathBuf {
     target("examples").join("debug")
 }
 
-/// A port the OS had free a moment ago. A cell's hub must know the address
+/// A port the OS had free a moment ago. A pool's hub must know the address
 /// it publishes before it serves, so its ports are chosen first.
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -70,8 +70,8 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// One cell: its settings as `GDL_CELL__*` variables, and its hub's ports.
-struct Cell {
+/// One pool: its settings as `GDL_POOL__*` variables, and its hub's ports.
+struct Pool {
     name: &'static str,
     class: &'static str,
     home: Option<&'static str>,
@@ -79,7 +79,7 @@ struct Cell {
     control: u16,
 }
 
-impl Cell {
+impl Pool {
     fn new(name: &'static str, class: &'static str, home: Option<&'static str>) -> Self {
         Self {
             name,
@@ -90,37 +90,37 @@ impl Cell {
         }
     }
 
-    /// What the cell's hub and its instances both read, as a Compose
-    /// bundle gives it, publishing to `cells`.
-    fn variables(&self, cells: &Path) -> Vec<(String, String)> {
+    /// What the pool's hub and its instances both read, as a Compose
+    /// bundle gives it, publishing to `pools`.
+    fn variables(&self, pools: &Path) -> Vec<(String, String)> {
         let mut variables = vec![
-            ("GDL_CELL__NAME".into(), self.name.into()),
-            ("GDL_CELL__CLASS".into(), self.class.into()),
-            ("GDL_CELL__REGION".into(), REGION.into()),
-            ("GDL_CELL__DIRECTORY".into(), "dir".into()),
-            ("GDL_CELL__DIR".into(), cells.display().to_string()),
-            ("GDL_CELL__HUB".into(), format!("127.0.0.1:{}", self.public)),
-            ("GDL_CELL__SUMMARY_MS".into(), "1000".into()),
+            ("GDL_POOL__NAME".into(), self.name.into()),
+            ("GDL_POOL__CLASS".into(), self.class.into()),
+            ("GDL_POOL__REGION".into(), REGION.into()),
+            ("GDL_POOL__DIRECTORY".into(), "dir".into()),
+            ("GDL_POOL__DIR".into(), pools.display().to_string()),
+            ("GDL_POOL__HUB".into(), format!("127.0.0.1:{}", self.public)),
+            ("GDL_POOL__SUMMARY_MS".into(), "1000".into()),
             ("GDL_HUB__PUBLIC_PORT".into(), self.public.to_string()),
             ("GDL_HUB__CONTROL_PORT".into(), self.control.to_string()),
         ];
         if let Some(home) = self.home {
-            variables.push(("GDL_CELL__HOME".into(), home.into()));
+            variables.push(("GDL_POOL__HOME".into(), home.into()));
         }
         variables
     }
 
-    /// Start the cell's hub, once it says that it serves: the hub, and its
+    /// Start the pool's hub, once it says that it serves: the hub, and its
     /// stderr, read for as long as it runs. Its ports were free when they
     /// were chosen, but another process can bind one before the hub does:
     /// then the hub starts again on ports chosen afresh, a few times.
-    fn hub(&mut self, bin: &Path, deployment: &Path, cells: &Path) -> (Running, Lines) {
+    fn hub(&mut self, bin: &Path, deployment: &Path, pools: &Path) -> (Running, Lines) {
         let mut said = Vec::new();
         for _ in 0..5 {
             let mut hub = Running(
                 Command::new(bin.join("gdl-hub"))
                     .arg(deployment)
-                    .envs(self.variables(cells))
+                    .envs(self.variables(pools))
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
@@ -147,17 +147,17 @@ impl Cell {
         panic!("hub {} does not serve: {said:?}", self.name);
     }
 
-    /// Start an instance of `segment` in this cell, with `extra` in its
+    /// Start an instance of `segment` in this pool, with `extra` in its
     /// settings file and `RUST_LOG` set to `log` when it names a filter:
     /// the instance, with its stdin piped, and its stdout and stderr, each
     /// read as it writes them. `name` tells apart the instances of one
-    /// segment in one cell.
+    /// segment in one pool.
     #[allow(clippy::too_many_arguments)]
     fn instance(
         &self,
         bin: &Path,
         dir: &Path,
-        cells: &Path,
+        pools: &Path,
         segment: &str,
         name: &str,
         extra: &str,
@@ -176,7 +176,7 @@ impl Cell {
         let mut running = Running(
             command
                 .arg(&config)
-                .envs(self.variables(cells))
+                .envs(self.variables(pools))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -206,35 +206,35 @@ impl Instance {
     }
 }
 
-/// Ask the source for `model`: the cell of the answer's one item, or the
+/// Ask the source for `model`: the pool of the answer's one item, or the
 /// line that ended it otherwise.
 fn ask(front: &mut Instance, model: &str) -> Result<String, String> {
     let stdin = front.running.0.stdin.as_mut().expect("piped stdin");
     if let Err(error) = writeln!(stdin, r#"{{"model": "{model}", "text": "hi"}}"#) {
         return Err(format!("{error}; stderr: {:?}", front.errors()));
     }
-    let mut cell = None;
+    let mut pool = None;
     loop {
         let Some(line) = front.stdout.try_next(Duration::from_secs(10)) else {
             return Err(format!("no answer; stderr: {:?}", front.errors()));
         };
         let value: serde_json::Value = serde_json::from_str(&line).expect("a JSON line");
         if let Some(item) = value.get("item") {
-            cell = item["cell"].as_str().map(str::to_string);
+            pool = item["pool"].as_str().map(str::to_string);
         } else if value.get("done").is_some() {
-            return cell.ok_or_else(|| format!("no item: {line}"));
+            return pool.ok_or_else(|| format!("no item: {line}"));
         } else {
             return Err(line);
         }
     }
 }
 
-/// The policy the spec binds is what chooses: each request reaches the cell
+/// The policy the spec binds is what chooses: each request reaches the pool
 /// its settings name for the request's model, which no gdl policy would
 /// do. Without the binding the chooser refuses to launch, since nothing
 /// registers `by_model`.
 #[test]
-fn a_bound_policy_chooses_the_cell_of_each_request() {
+fn a_bound_policy_chooses_the_pool_of_each_request() {
     let spec_file = fixture().join("gdl.toml");
     let problems = gdl_gen::check_files(&spec_file, None, &target("gdl-gen-tests"));
     assert!(problems.is_empty(), "{:?}", problems.0);
@@ -266,13 +266,13 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         .expect("JSON"),
     )
     .expect("deployment");
-    let cells = temp.path().join("cells");
-    std::fs::create_dir_all(&cells).expect("cell directory");
+    let pools = temp.path().join("pools");
+    std::fs::create_dir_all(&pools).expect("pool directory");
 
-    let mut global = Cell::new(GLOBAL, "global", None);
+    let mut global = Pool::new(GLOBAL, "global", None);
     let mut models = [
-        Cell::new(LLAMA, "model", Some(GLOBAL)),
-        Cell::new(QWEN, "model", Some(GLOBAL)),
+        Pool::new(LLAMA, "model", Some(GLOBAL)),
+        Pool::new(QWEN, "model", Some(GLOBAL)),
     ];
     // Another process holds the global hub's public port, as one can take
     // a chosen port on a busy host: the hub starts on others. The port is
@@ -281,23 +281,23 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
     global.public = taken.local_addr().expect("its address").port();
     let _hubs: Vec<(Running, Lines)> = std::iter::once(&mut global)
         .chain(&mut models)
-        .map(|cell| cell.hub(&bin, &deployment, &cells))
+        .map(|pool| pool.hub(&bin, &deployment, &pools))
         .collect();
     let _models: Vec<Instance> = models
         .iter()
-        .map(|cell| {
-            let settings = format!("[node.Model]\ncell = \"{}\"\n", cell.name);
-            cell.instance(&bin, temp.path(), &cells, "model", "model", &settings, None)
+        .map(|pool| {
+            let settings = format!("[node.Model]\npool = \"{}\"\n", pool.name);
+            pool.instance(&bin, temp.path(), &pools, "model", "model", &settings, None)
         })
         .collect();
-    // The policy's settings: `mistral` names no cell, so no cell may take it.
+    // The policy's settings: `mistral` names no pool, so no pool may take it.
     let settings = format!(
-        "[cell_policy.by_model.models]\nllama = \"{LLAMA}\"\nqwen = \"{QWEN}\"\nmistral = \"none\"\n"
+        "[pool_policy.by_model.models]\nllama = \"{LLAMA}\"\nqwen = \"{QWEN}\"\nmistral = \"none\"\n"
     );
-    let mut front = global.instance(&bin, temp.path(), &cells, "front", "front", &settings, None);
+    let mut front = global.instance(&bin, temp.path(), &pools, "front", "front", &settings, None);
 
-    // Until the global hub follows both model cells, a request may find no
-    // cell: ask until each model's cell answers.
+    // Until the global hub follows both model pools, a request may find no
+    // pool: ask until each model's pool answers.
     let deadline = Instant::now() + Duration::from_secs(30);
     for model in ["llama", "qwen"] {
         let mut errors = Vec::new();
@@ -305,7 +305,7 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
             errors.push(error);
             assert!(
                 Instant::now() < deadline,
-                "{model} found no cell within 30 s: {:?}",
+                "{model} found no pool within 30 s: {:?}",
                 errors.first()
             );
             std::thread::sleep(Duration::from_millis(100));
@@ -315,7 +315,7 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         let expected = if model == "llama" { LLAMA } else { QWEN };
         assert_eq!(ask(&mut front, model).as_deref(), Ok(expected), "{model}");
     }
-    let refused = ask(&mut front, "mistral").expect_err("no cell serves mistral");
+    let refused = ask(&mut front, "mistral").expect_err("no pool serves mistral");
     assert!(refused.contains("error"), "{refused}");
 
     // The policy says why on stderr, at `warn`, the binary's default
@@ -328,9 +328,9 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         let left = deadline.saturating_duration_since(Instant::now());
         match front.stderr.try_next(left) {
             // While the hubs followed each other, other models found no
-            // cell too.
+            // pool too.
             Some(line)
-                if line.contains("no cell serves the model")
+                if line.contains("no pool serves the model")
                     && line.contains(r#"model="mistral""#) =>
             {
                 break line;
@@ -344,7 +344,7 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         "{warned}"
     );
     assert!(
-        !before.iter().any(|line| line.contains("chose a cell")),
+        !before.iter().any(|line| line.contains("chose a pool")),
         "info under the default level: {before:?}"
     );
 
@@ -353,7 +353,7 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
     let mut verbose = global.instance(
         &bin,
         temp.path(),
-        &cells,
+        &pools,
         "front",
         "front-verbose",
         &settings,
@@ -365,18 +365,18 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         errors.push(error);
         assert!(
             Instant::now() < deadline,
-            "llama found no cell within 30 s: {:?}",
+            "llama found no pool within 30 s: {:?}",
             errors.first()
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let chose = verbose.stderr.find("chose a cell", Duration::from_secs(10));
+    let chose = verbose.stderr.find("chose a pool", Duration::from_secs(10));
     assert!(chose.contains(" INFO policy_router: "), "{chose}");
-    assert!(chose.contains(&format!(r#"cell="{LLAMA}""#)), "{chose}");
+    assert!(chose.contains(&format!(r#"pool="{LLAMA}""#)), "{chose}");
 }
 
 /// `cargo gdl check` reads each policy's crate as it reads a node crate,
-/// and refuses a crate it cannot read and a type that is not a cell policy
+/// and refuses a crate it cannot read and a type that is not a pool policy
 /// the crate offers, naming the table.
 #[test]
 fn check_refuses_a_policy_it_cannot_resolve() {
@@ -391,13 +391,13 @@ fn check_refuses_a_policy_it_cannot_resolve() {
     let error = refused(&text.replace("policy_router::ByModel", "policy_router::ByName"));
     assert!(
         error.contains(
-            "[cell_policy.by_model]: crate `policy-router` implements no cell policy `ByName`; it implements `ByModel`"
+            "[pool_policy.by_model]: crate `policy-router` implements no pool policy `ByName`; it implements `ByModel`"
         ),
         "{error}"
     );
     let error = refused(&text.replace("path = \"router\"", "path = \"nowhere\""));
     assert!(
-        error.contains("[cell_policy.by_model]: reading ") && error.contains("nowhere"),
+        error.contains("[pool_policy.by_model]: reading ") && error.contains("nowhere"),
         "{error}"
     );
 }
@@ -416,7 +416,7 @@ fn two_bound_policy_names_can_share_one_crate() {
     let text = format!(
         "{text}\n[segment.another]\nnodes = [\"Another\"]\n\
          [class.another]\nsegments = [\"another\"]\n\
-         [cells.another]\npolicy = \"by_kind\"\n"
+         [pools.another]\npolicy = \"by_kind\"\n"
     );
     let graph = "name = \"policy\", schema = 1;\n\
         source Front: Ask -> stream Answer;\n\
@@ -429,7 +429,7 @@ fn two_bound_policy_names_can_share_one_crate() {
         .expect("the placement works with one bound policy and one registered in code");
 
     let text = format!(
-        "{text}\n[cell_policy.by_kind]\ncrate = \"policy-router\"\n\
+        "{text}\n[pool_policy.by_kind]\ncrate = \"policy-router\"\n\
          path = \"router\"\ntype = \"policy_router::ByModel\"\n"
     );
     let spec = gdl_gen::Spec::from_text(&text, graph, &fixture()).expect("spec");
@@ -498,8 +498,8 @@ fn a_policy_library_name_is_preserved_when_loading_spec_text() {
     text["graph"]["path"] = string(fixture().join("policy.gdl"));
     text["messages"]["crates"] = vec![string(fixture().join("messages"))].into();
     text["nodes"]["crates"] = vec![string(fixture().join("nodes"))].into();
-    text["cell_policy"]["by_model"]["path"] = string(router);
-    text["cell_policy"]["by_model"]["type"] = "router_library::ByModel".into();
+    text["pool_policy"]["by_model"]["path"] = string(router);
+    text["pool_policy"]["by_model"]["type"] = "router_library::ByModel".into();
     let text = toml::to_string(&text).expect("spec text");
     let file = temp.path().join("gdl.toml");
     std::fs::write(&file, &text).expect("spec file");
@@ -594,7 +594,7 @@ int close(int fd) {
     let result = Command::new(std::env::current_exe().expect("policy test binary"))
         .args([
             "--exact",
-            "a_bound_policy_chooses_the_cell_of_each_request",
+            "a_bound_policy_chooses_the_pool_of_each_request",
             "--nocapture",
         ])
         .env("LD_PRELOAD", &library)

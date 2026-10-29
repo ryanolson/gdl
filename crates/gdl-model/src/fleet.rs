@@ -2,31 +2,31 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell::{check_cell_name, check_region_name};
+use crate::pool::{check_pool_name, check_region_name};
 use crate::{
-    CellSettings, DirectoryBackend, Layout, Problem, Problems, check_layout_name, read_toml,
+    DirectoryBackend, Layout, PoolSettings, Problem, Problems, check_layout_name, read_toml,
 };
 
 mod errors;
 
 pub use errors::{FleetError, FleetErrors, FleetTable};
 
-/// A deployment's cells: `fleet.toml`. Not part of the placement's
-/// identity: cells are runtime topology, like replicas. It says what each
-/// class's cells need by default, and which cells there are, with their
+/// A deployment's pools: `fleet.toml`. Not part of the placement's
+/// identity: pools are runtime topology, like replicas. It says what each
+/// class's pools need by default, and which pools there are, with their
 /// layout, class, region, home, and quorum overrides; a bundle generator writes
-/// each cell's own settings from it ([`Fleet::cell`]).
+/// each pool's own settings from it ([`Fleet::pool`]).
 ///
 /// ```toml
 /// [class.global]
-/// ready = { a = 2, b = 2, c = 2 }   # default quorum of a cell of this class, per segment
+/// ready = { a = 2, b = 2, c = 2 }   # default quorum of a pool of this class, per segment
 /// requires = { model_x = 1 }         # optional: ready children of each class it sends to its health needs; 1 of each when unsaid
 ///
-/// [cell.model-x-01-us-east-1]
+/// [pool.model-x-01-us-east-1]
 /// layout = "regional"                # the spec's layout it runs: required when the spec has several
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"          # the parent cell, required when another class sends to this one: whose hub follows it
+/// home = "global-us-east-1"          # the parent pool, required when another class sends to this one: whose hub follows it
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,11 +34,11 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 pub struct Fleet {
     #[serde(rename = "class", default, skip_serializing_if = "BTreeMap::is_empty")]
     classes: BTreeMap<String, ClassDefaults>,
-    #[serde(rename = "cell", default, skip_serializing_if = "BTreeMap::is_empty")]
-    cells: BTreeMap<String, CellSpec>,
+    #[serde(rename = "pool", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pools: BTreeMap<String, PoolSpec>,
 }
 
-/// What every cell of a class needs unless it says otherwise.
+/// What every pool of a class needs unless it says otherwise.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassDefaults {
@@ -48,17 +48,17 @@ struct ClassDefaults {
     requires: BTreeMap<String, u32>,
 }
 
-/// One cell, as the fleet file lists it.
+/// One pool, as the fleet file lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CellSpec {
-    /// The layout the cell runs: required when the spec has more than one.
+struct PoolSpec {
+    /// The layout the pool runs: required when the spec has more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<String>,
     class: String,
     region: String,
-    /// The parent cell: the cell of a class that sends to this one that
-    /// follows this cell and offers it work. Required for a cell of a
+    /// The parent pool: the pool of a class that sends to this one that
+    /// follows this pool and offers it work. Required for a pool of a
     /// class that another class sends to, and refused for one of a class
     /// that nothing sends to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,12 +67,12 @@ struct CellSpec {
     ready: BTreeMap<String, u32>,
 }
 
-impl CellSpec {
-    /// Whether this cell can be `child`'s parent in their layout, whose
+impl PoolSpec {
+    /// Whether this pool can be `child`'s parent in their layout, whose
     /// classes send as `sends` says: its class sends to the child's. The
     /// layouts themselves are compared first ([`Fleet::home_problem`]):
-    /// cells of different layouts never follow or offer to each other.
-    fn sends_to(&self, child: &CellSpec, sends: &Names<'_>) -> bool {
+    /// pools of different layouts never follow or offer to each other.
+    fn sends_to(&self, child: &PoolSpec, sends: &Names<'_>) -> bool {
         sends
             .get(self.class.as_str())
             .is_some_and(|into| into.contains(child.class.as_str()))
@@ -122,23 +122,23 @@ impl Fleet {
     /// its name with its [`Layout`] when its placement fits the graph,
     /// reporting every problem.
     ///
-    /// Each cell runs the layout its `layout` names, which must be one of
-    /// the spec's; a cell of a spec of one layout may leave it unsaid. Its
+    /// Each pool runs the layout its `layout` names, which must be one of
+    /// the spec's; a pool of a spec of one layout may leave it unsaid. Its
     /// class, its quorum, and its home are judged against that layout: a
-    /// home is a cell of the same layout, whose class sends to the cell's
-    /// there. Every cell whose class sends to another class is a parent,
-    /// and has at least one child of each class its class sends to: a cell
+    /// home is a pool of the same layout, whose class sends to the pool's
+    /// there. Every pool whose class sends to another class is a parent,
+    /// and has at least one child of each class its class sends to: a pool
     /// of that class and of its layout whose home it is; each class it
     /// lacks is a problem at the parent's table. A class's defaults apply
-    /// to its cells in every layout with the class, and are judged against
-    /// each. A cell whose layout or class is unknown is reported once: its
+    /// to its pools in every layout with the class, and are judged against
+    /// each. A pool whose layout or class is unknown is reported once: its
     /// quorum, its home, and its children are not judged against them.
     /// What needs a layout's classes is not judged for a layout given
     /// without its [`Layout`], and without any layouts (the spec did not
-    /// read) only what needs none is: the cells' names, regions, and layout
-    /// names, that each home is a cell of the fleet in the layout its cell
+    /// read) only what needs none is: the pools' names, regions, and layout
+    /// names, that each home is a pool of the fleet in the layout its pool
     /// names, and that no count is 0. [`Fleet::children_unchecked`] says
-    /// when that left a cell's children unjudged.
+    /// when that left a pool's children unjudged.
     pub fn check(
         &self,
         layouts: Option<&BTreeMap<String, Option<Layout>>>,
@@ -161,30 +161,30 @@ impl Fleet {
             self.check_class(class, defaults, laid.as_ref(), &mut errors);
         }
         // Each child by its home, its layout, and its class: a parent's
-        // children are the cells that name it in its own layout.
+        // children are the pools that name it in its own layout.
         let children: BTreeSet<(&str, &str, &str)> = self
-            .cells
+            .pools
             .iter()
-            .filter_map(|(name, cell)| {
-                let runs = self.layout_of(name, cell, laid.as_ref()).ok()??;
-                Some((cell.home.as_deref()?, runs, cell.class.as_str()))
+            .filter_map(|(name, pool)| {
+                let runs = self.layout_of(name, pool, laid.as_ref()).ok()??;
+                Some((pool.home.as_deref()?, runs, pool.class.as_str()))
             })
             .collect();
-        for (name, cell) in &self.cells {
-            let table = || FleetTable::Cell(name.clone());
-            if let Err(reason) = check_cell_name(name) {
-                errors.push(FleetError::InvalidCellName {
-                    cell: name.clone(),
+        for (name, pool) in &self.pools {
+            let table = || FleetTable::Pool(name.clone());
+            if let Err(reason) = check_pool_name(name) {
+                errors.push(FleetError::InvalidPoolName {
+                    pool: name.clone(),
                     reason,
                 });
             }
-            if let Err(reason) = check_region_name(&cell.region) {
+            if let Err(reason) = check_region_name(&pool.region) {
                 errors.push(FleetError::InvalidRegion {
-                    cell: name.clone(),
+                    pool: name.clone(),
                     reason,
                 });
             }
-            let runs = match self.layout_of(name, cell, laid.as_ref()) {
+            let runs = match self.layout_of(name, pool, laid.as_ref()) {
                 Ok(runs) => runs,
                 Err(error) => {
                     errors.push(error);
@@ -192,21 +192,21 @@ impl Fleet {
                 }
             };
             match runs.and_then(|runs| Some((runs, laid.as_ref()?.get(runs)?.as_ref()?))) {
-                None => zero_ready(table, &cell.ready, &mut errors),
-                Some((runs, classes)) => match classes.segments.get(cell.class.as_str()) {
+                None => zero_ready(table, &pool.ready, &mut errors),
+                Some((runs, classes)) => match classes.segments.get(pool.class.as_str()) {
                     Some(members) => {
                         check_ready(
                             table,
-                            &cell.class,
+                            &pool.class,
                             members,
-                            &cell.ready,
+                            &pool.ready,
                             classes.named,
                             &mut errors,
                         );
-                        for &into in classes.sends.get(cell.class.as_str()).into_iter().flatten() {
+                        for &into in classes.sends.get(pool.class.as_str()).into_iter().flatten() {
                             if !children.contains(&(name.as_str(), runs, into)) {
                                 errors.push(FleetError::MissingChild {
-                                    cell: name.clone(),
+                                    pool: name.clone(),
                                     layout: runs.to_string(),
                                     class: into.to_string(),
                                 });
@@ -215,12 +215,12 @@ impl Fleet {
                     }
                     None => errors.push(FleetError::UnknownClass {
                         table: table(),
-                        class: cell.class.clone(),
+                        class: pool.class.clone(),
                         layout: classes.named.map(str::to_string),
                     }),
                 },
             }
-            errors.extend(self.home_problem(name, cell, laid.as_ref()));
+            errors.extend(self.home_problem(name, pool, laid.as_ref()));
         }
         // A class's table is judged in each layout with the class, and
         // what is wrong in all of them alike is one problem.
@@ -310,72 +310,72 @@ impl Fleet {
         }
     }
 
-    /// The layout `cell` runs: the one its `layout` names, or, when it
+    /// The layout `pool` runs: the one its `layout` names, or, when it
     /// names none, the spec's only one. `None` when it cannot be told:
-    /// without the spec's layouts, a cell that names none runs whichever
-    /// the spec has. A name that is not a layout's is the cell's problem.
+    /// without the spec's layouts, a pool that names none runs whichever
+    /// the spec has. A name that is not a layout's is the pool's problem.
     fn layout_of<'a>(
         &'a self,
         name: &str,
-        cell: &'a CellSpec,
+        pool: &'a PoolSpec,
         laid: Option<&Laid<'a>>,
     ) -> Result<Option<&'a str>, FleetError> {
-        if let Some(layout) = &cell.layout
+        if let Some(layout) = &pool.layout
             && let Err(reason) = check_layout_name(layout)
         {
             return Err(FleetError::InvalidLayout {
-                cell: name.into(),
+                pool: name.into(),
                 reason,
             });
         }
         let Some(laid) = laid else {
-            return Ok(cell.layout.as_deref());
+            return Ok(pool.layout.as_deref());
         };
         let names = || laid.keys().map(|name| name.to_string()).collect();
-        match &cell.layout {
+        match &pool.layout {
             Some(layout) if laid.contains_key(layout.as_str()) => Ok(Some(layout)),
             Some(layout) => Err(FleetError::UnknownLayout {
-                cell: name.into(),
+                pool: name.into(),
                 layout: layout.clone(),
                 layouts: names(),
             }),
             None if laid.len() == 1 => Ok(laid.keys().next().copied()),
             None => Err(FleetError::MissingLayout {
-                cell: name.into(),
+                pool: name.into(),
                 layouts: names(),
             }),
         }
     }
 
-    /// What is wrong with `cell`'s home, if anything. Whether it names a
-    /// cell of the fleet needs no layout, and whether that cell runs the
-    /// same layout needs only the layouts' names; whether a cell needs a
-    /// home, and whether it names a parent, need the classes, and a cell of
+    /// What is wrong with `pool`'s home, if anything. Whether it names a
+    /// pool of the fleet needs no layout, and whether that pool runs the
+    /// same layout needs only the layouts' names; whether a pool needs a
+    /// home, and whether it names a parent, need the classes, and a pool of
     /// a layout or a class the spec does not have is reported as that
-    /// cell's problem.
+    /// pool's problem.
     fn home_problem(
         &self,
         name: &str,
-        cell: &CellSpec,
+        pool: &PoolSpec,
         laid: Option<&Laid<'_>>,
     ) -> Option<FleetError> {
-        if let Some(home) = &cell.home
-            && !self.cells.contains_key(home)
+        if let Some(home) = &pool.home
+            && !self.pools.contains_key(home)
         {
             return Some(FleetError::UnknownHome {
-                cell: name.into(),
+                pool: name.into(),
                 home: home.clone(),
             });
         }
-        let runs = self.layout_of(name, cell, laid).ok().flatten();
-        if let Some(home) = &cell.home {
-            let parent = &self.cells[home];
+        let runs = self.layout_of(name, pool, laid).ok().flatten();
+        if let Some(home) = &pool.home {
+            let parent = &self.pools[home];
             let parent_runs = self.layout_of(home, parent, laid).ok().flatten();
             if let (Some(runs), Some(parent_runs)) = (runs, parent_runs)
                 && runs != parent_runs
             {
                 return Some(FleetError::HomeInOtherLayout {
-                    cell: name.into(),
+                    pool: name.into(),
                     home: home.clone(),
                     home_layout: parent_runs.to_string(),
                     layout: runs.to_string(),
@@ -385,55 +385,55 @@ impl Fleet {
         let Classes {
             segments, sends, ..
         } = laid?.get(runs?)?.as_ref()?;
-        if !segments.contains_key(cell.class.as_str()) {
+        if !segments.contains_key(pool.class.as_str()) {
             return None;
         }
         let parents: Vec<String> = sends
             .iter()
-            .filter(|(_, into)| into.contains(cell.class.as_str()))
+            .filter(|(_, into)| into.contains(pool.class.as_str()))
             .map(|(from, _)| from.to_string())
             .collect();
-        match &cell.home {
+        match &pool.home {
             None if parents.is_empty() => None,
             None => Some(FleetError::MissingHome {
-                cell: name.into(),
-                class: cell.class.clone(),
+                pool: name.into(),
+                class: pool.class.clone(),
                 parents,
             }),
             Some(_) if parents.is_empty() => Some(FleetError::HomeOfTopClass {
-                cell: name.into(),
-                class: cell.class.clone(),
+                pool: name.into(),
+                class: pool.class.clone(),
             }),
             Some(home) => {
-                let parent = &self.cells[home];
-                (segments.contains_key(parent.class.as_str()) && !parent.sends_to(cell, sends))
+                let parent = &self.pools[home];
+                (segments.contains_key(parent.class.as_str()) && !parent.sends_to(pool, sends))
                     .then(|| FleetError::HomeNotParent {
-                        cell: name.into(),
+                        pool: name.into(),
                         home: home.clone(),
                         home_class: parent.class.clone(),
-                        class: cell.class.clone(),
+                        class: pool.class.clone(),
                     })
             }
         }
     }
 
     /// A note that the rule [`Fleet::check`] judges with a layout's
-    /// classes, that every parent cell has a child of each class its class
-    /// sends to, was not judged for some cell: the layouts are not known,
-    /// or a layout a cell runs has problems that leave its classes unknown. `None` when every
-    /// cell's layout is known. It is in no table: one note for the file.
+    /// classes, that every parent pool has a child of each class its class
+    /// sends to, was not judged for some pool: the layouts are not known,
+    /// or a layout a pool runs has problems that leave its classes unknown. `None` when every
+    /// pool's layout is known. It is in no table: one note for the file.
     pub fn children_unchecked(
         &self,
         layouts: Option<&BTreeMap<String, Option<Layout>>>,
     ) -> Option<Problem> {
         let because = "which class sends to which is a layout's";
         let Some(layouts) = layouts else {
-            return (!self.cells.is_empty()).then(|| {
+            return (!self.pools.is_empty()).then(|| {
                 Problem::at(
                     None,
                     None,
                     format!(
-                        "the cells' children are not checked: {because}, and the spec's layouts did not read"
+                        "the pools' children are not checked: {because}, and the spec's layouts did not read"
                     ),
                 )
             });
@@ -443,63 +443,63 @@ impl Fleet {
             .map(|(name, layout)| (name.as_str(), layout.as_ref().map(|l| Classes::of(l, None))))
             .collect();
         let unfit: BTreeSet<&str> = self
-            .cells
+            .pools
             .iter()
-            .filter_map(|(name, cell)| self.layout_of(name, cell, Some(&laid)).ok()?)
+            .filter_map(|(name, pool)| self.layout_of(name, pool, Some(&laid)).ok()?)
             .filter(|runs| laid.get(runs).is_some_and(Option::is_none))
             .collect();
         let quoted: Vec<String> = unfit.iter().map(|name| format!("`{name}`")).collect();
         let message = match quoted.as_slice() {
             [] => return None,
             [one] => format!(
-                "the cells' children are not checked in layout {one}: {because}, and the layout has problems"
+                "the pools' children are not checked in layout {one}: {because}, and the layout has problems"
             ),
             many => format!(
-                "the cells' children are not checked in layouts {}: {because}, and the layouts have problems",
+                "the pools' children are not checked in layouts {}: {because}, and the layouts have problems",
                 many.join(", ")
             ),
         };
         Some(Problem::at(None, None, message))
     }
 
-    /// The settings of the cell `name`, with its quorum resolved: for each
-    /// segment, the cell's own `ready` if it sets that segment, else its
+    /// The settings of the pool `name`, with its quorum resolved: for each
+    /// segment, the pool's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's, and
+    /// [`PoolSettings::quorum`]'s fallback. Its `requires` is its class's, and
     /// unsaid when that is, which requires one ready child of each class its
-    /// class sends to ([`CellSettings::requirements`]). The directory, hub
+    /// class sends to ([`PoolSettings::requirements`]). The directory, hub
     /// address, summary period, and hub timing are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
-    /// the cell's class.
-    pub fn cell(&self, name: &str) -> Option<CellSettings> {
-        let cell = self.cells.get(name)?;
-        let defaults = self.classes.get(&cell.class);
+    /// the pool's class.
+    pub fn pool(&self, name: &str) -> Option<PoolSettings> {
+        let pool = self.pools.get(name)?;
+        let defaults = self.classes.get(&pool.class);
         let mut ready = defaults
             .map(|class| class.ready.clone())
             .unwrap_or_default();
-        ready.extend(cell.ready.iter().map(|(s, n)| (s.clone(), *n)));
-        Some(CellSettings {
+        ready.extend(pool.ready.iter().map(|(s, n)| (s.clone(), *n)));
+        Some(PoolSettings {
             models: Vec::new(),
             name: name.to_string(),
-            layout: cell.layout.clone(),
-            class: cell.class.clone(),
-            region: cell.region.clone(),
-            home: cell.home.clone(),
+            layout: pool.layout.clone(),
+            class: pool.class.clone(),
+            region: pool.region.clone(),
+            home: pool.home.clone(),
             directory: DirectoryBackend::default(),
             ready,
             requires: defaults
                 .map(|class| class.requires.clone())
                 .unwrap_or_default(),
             hub: None,
-            summary: CellSettings::DEFAULT_SUMMARY,
+            summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
         })
     }
 
-    /// Every cell's settings, as [`Fleet::cell`] gives them, in name order:
+    /// Every pool's settings, as [`Fleet::pool`] gives them, in name order:
     /// what a bundle generator deploys.
-    pub fn cells(&self) -> impl Iterator<Item = CellSettings> + '_ {
-        self.cells.keys().filter_map(|name| self.cell(name))
+    pub fn pools(&self) -> impl Iterator<Item = PoolSettings> + '_ {
+        self.pools.keys().filter_map(|name| self.pool(name))
     }
 }
 

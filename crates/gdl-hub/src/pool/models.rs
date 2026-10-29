@@ -1,11 +1,11 @@
-//! The models a cell serves, each with a state its hub computes from what
+//! The models a pool serves, each with a state its hub computes from what
 //! its usable entry instances say, and that keeps its history: a model
 //! that served once never reads as one that never did, and only a drain
 //! removes one. Silence is not a removal: a crash would look like one.
 //!
 //! The table is computed once a summary period and on each report that
 //! changes what an instance says, never per request, and only after the
-//! hub has read its cell's last record, since a restarted hub keeps the
+//! hub has read its pool's last record, since a restarted hub keeps the
 //! history that record holds.
 //!
 //! An operator can revoke a model: it leaves the list at once, with its
@@ -15,10 +15,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gdl_cells::{CellRecord, ModelEntry, ModelState};
 use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
+use gdl_pools::{ModelEntry, ModelState, PoolRecord};
 
-/// The cell's model entries, and the version of their list.
+/// The pool's model entries, and the version of their list.
 pub(super) struct Models {
     entries: BTreeMap<ModelKey, Tracked>,
     /// The list's version: raised on every change, never lowered.
@@ -27,7 +27,7 @@ pub(super) struct Models {
     /// writes, so that a hub that could not read its last record still
     /// counts above every version a hub before it published.
     floor: u64,
-    /// The models the cell's settings declare, which every instance that
+    /// The models the pool's settings declare, which every instance that
     /// reports no list of its own serves.
     declared: Vec<ModelKey>,
     /// The models an operator revoked: never in `entries`.
@@ -47,7 +47,7 @@ pub(super) struct Models {
 }
 
 impl Models {
-    /// The table of a cell whose settings declare `declared`.
+    /// The table of a pool whose settings declare `declared`.
     pub(super) fn new(declared: Vec<ModelKey>) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -62,7 +62,7 @@ impl Models {
         }
     }
 
-    /// Take the cell's last record's models, `held` with their version
+    /// Take the pool's last record's models, `held` with their version
     /// and the revoked models, or none, and count each later change from
     /// at least `floor`. A restart keeps each entry's history: `starting`
     /// and `drained` stay, `draining` goes on, and `ready` and
@@ -342,7 +342,7 @@ pub(super) enum Offer<'a> {
 
 pub(super) use gdl_watch::ModelList;
 
-/// What the cell's last record holds of its models: the entries, the
+/// What the pool's last record holds of its models: the entries, the
 /// list's version, and the revoked models.
 pub(super) type Held<'a> = (&'a [ModelEntry], u64, &'a [ModelKey]);
 
@@ -397,7 +397,7 @@ fn strongest(a: InstanceModelState, b: InstanceModelState) -> InstanceModelState
     if rank(b) > rank(a) { b } else { a }
 }
 
-/// Keep at most [`CellRecord::MAX_DRAINED`] drained entries, dropping the
+/// Keep at most [`PoolRecord::MAX_DRAINED`] drained entries, dropping the
 /// oldest first.
 fn drop_oldest_drained(entries: &mut BTreeMap<ModelKey, Tracked>) {
     let mut drained: Vec<(u64, ModelKey)> = entries
@@ -405,7 +405,7 @@ fn drop_oldest_drained(entries: &mut BTreeMap<ModelKey, Tracked>) {
         .filter(|(_, tracked)| tracked.state == ModelState::Drained)
         .map(|(key, tracked)| (tracked.since, key.clone()))
         .collect();
-    let Some(over) = drained.len().checked_sub(CellRecord::MAX_DRAINED) else {
+    let Some(over) = drained.len().checked_sub(PoolRecord::MAX_DRAINED) else {
         return;
     };
     drained.sort_unstable();

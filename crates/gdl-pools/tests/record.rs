@@ -1,23 +1,23 @@
-//! The cell record: what it carries, how it is stored, and which records
+//! The pool record: what it carries, how it is stored, and which records
 //! can be published at all.
 
 use std::time::Duration;
 
-use gdl_cells::{
-    CellRecord, CellState, DirectoryError, LoadSummary, ModelEntry, ModelState, Presence, Version,
+use gdl_pools::{
+    DirectoryError, LoadSummary, ModelEntry, ModelState, PoolRecord, PoolState, Presence, Version,
     Withdrawal,
 };
 use serde::Deserialize;
 
-fn record() -> CellRecord {
-    CellRecord {
+fn record() -> PoolRecord {
+    PoolRecord {
         name: "model-x-01-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some("global-01-us-east-1".into()),
         contract: 0xdead_beef_0000_0001,
         placement: u64::MAX,
-        state: CellState::Degraded,
+        state: PoolState::Degraded,
         epoch: 3,
         seq: 41,
         hub: "hub-m1:1337".into(),
@@ -53,7 +53,7 @@ fn record() -> CellRecord {
 fn a_record_round_trips_through_json() {
     let text = serde_json::to_string(&record()).expect("json");
     assert_eq!(
-        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         record(),
         "{text}"
     );
@@ -63,32 +63,32 @@ fn a_record_round_trips_through_json() {
     assert_eq!(value["state"], "degraded", "{text}");
     assert_eq!(value["home"], "global-01-us-east-1", "{text}");
 
-    let bare = CellRecord {
+    let bare = PoolRecord {
         load: None,
         home: None,
-        state: CellState::Draining,
+        state: PoolState::Draining,
         ..record()
     };
     let text = serde_json::to_string(&bare).expect("json");
     assert!(!text.contains("load"), "{text}");
     assert!(!text.contains("home"), "{text}");
     assert_eq!(
-        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         bare
     );
 }
 
 /// A record without a parent, as a build from before the record named one
-/// writes it, reads as a cell with none.
+/// writes it, reads as a pool with none.
 #[test]
 fn a_record_without_a_home_reads_as_having_none() {
     let mut value = serde_json::to_value(record()).expect("json");
     value.as_object_mut().expect("an object").remove("home");
-    let read: CellRecord = serde_json::from_value(value).expect("a record");
+    let read: PoolRecord = serde_json::from_value(value).expect("a record");
     assert_eq!(read.home, None);
     assert_eq!(
         read,
-        CellRecord {
+        PoolRecord {
             home: None,
             ..record()
         }
@@ -103,9 +103,9 @@ fn a_record_reads_with_a_default_lease_and_unknown_fields() {
     let fields = value.as_object_mut().expect("an object");
     fields.remove("lease_ms");
     fields.insert("added_later".into(), serde_json::json!(true));
-    let read: CellRecord = serde_json::from_value(value).expect("a record");
-    assert_eq!(read.lease, CellRecord::DEFAULT_LEASE);
-    assert_eq!(CellRecord::DEFAULT_LEASE, Duration::from_secs(30));
+    let read: PoolRecord = serde_json::from_value(value).expect("a record");
+    assert_eq!(read.lease, PoolRecord::DEFAULT_LEASE);
+    assert_eq!(PoolRecord::DEFAULT_LEASE, Duration::from_secs(30));
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn a_well_formed_record_passes() {
     record().check().expect("a well-formed record");
     Withdrawal {
         class: "model_x".into(),
-        cell: "model-x-01-us-east-1".into(),
+        pool: "model-x-01-us-east-1".into(),
         epoch: 1,
         seq: 2,
     }
@@ -125,42 +125,42 @@ fn a_well_formed_record_passes() {
 fn a_malformed_name_or_a_zero_lease_is_refused() {
     let cases = [
         (
-            CellRecord {
+            PoolRecord {
                 name: "Model_X".into(),
                 ..record()
             },
-            "cell name `Model_X`",
+            "pool name `Model_X`",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 name: "".into(),
                 ..record()
             },
-            "cell name ``",
+            "pool name ``",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 region: "us-east-".into(),
                 ..record()
             },
             "region name `us-east-`",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 class: "model-x".into(),
                 ..record()
             },
             "class name `model-x`",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 home: Some("Global".into()),
                 ..record()
             },
-            "cell name `Global`",
+            "pool name `Global`",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 lease: Duration::ZERO,
                 ..record()
             },
@@ -168,14 +168,14 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
         ),
         // Stored as milliseconds, it would read back as zero, or as 1 ms.
         (
-            CellRecord {
+            PoolRecord {
                 lease: Duration::from_micros(1_500),
                 ..record()
             },
             "the lease must be a whole number of milliseconds",
         ),
         (
-            CellRecord {
+            PoolRecord {
                 lease: Duration::from_micros(999),
                 ..record()
             },
@@ -189,7 +189,7 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
         assert!(why.contains(expected), "{why}");
     }
     // Every problem at once.
-    let Err(DirectoryError::Malformed(why)) = CellRecord {
+    let Err(DirectoryError::Malformed(why)) = PoolRecord {
         name: "A".into(),
         class: "B".into(),
         region: "C".into(),
@@ -200,17 +200,17 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
         panic!("accepted");
     };
     for expected in [
-        "cell name `A`",
+        "pool name `A`",
         "class name `B`",
         "region name `C`",
         "lease",
     ] {
         assert!(why.contains(expected), "{why}");
     }
-    for (class, cell) in [("model-x", "m1"), ("model_x", "M1")] {
+    for (class, pool) in [("model-x", "m1"), ("model_x", "M1")] {
         let withdrawal = Withdrawal {
             class: class.into(),
-            cell: cell.into(),
+            pool: pool.into(),
             epoch: 1,
             seq: 1,
         };
@@ -243,14 +243,14 @@ fn a_publishable_record_keeps_its_lease_through_json() {
         Duration::MAX,
         Duration::from_millis(1),
         Duration::from_millis(2_500),
-        CellRecord::DEFAULT_LEASE,
+        PoolRecord::DEFAULT_LEASE,
     ] {
-        let published = CellRecord { lease, ..record() };
+        let published = PoolRecord { lease, ..record() };
         if published.check().is_err() {
             continue;
         }
         let text = serde_json::to_string(&published).expect("json");
-        let read: CellRecord = serde_json::from_str(&text).expect("a record");
+        let read: PoolRecord = serde_json::from_str(&text).expect("a record");
         assert_eq!(read.lease, lease, "{text}");
     }
 }
@@ -271,7 +271,7 @@ fn a_record_carries_its_presence_and_models() {
         ]),
         "{text}"
     );
-    let scaled = CellRecord {
+    let scaled = PoolRecord {
         presence: Presence::ScaledToZero,
         models: Vec::new(),
         models_version: 0,
@@ -281,7 +281,7 @@ fn a_record_carries_its_presence_and_models() {
     assert!(text.contains(r#""presence":"scaled_to_zero""#), "{text}");
     assert!(!text.contains("models"), "{text}");
     assert_eq!(
-        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         scaled
     );
     for state in [
@@ -304,7 +304,7 @@ fn a_record_carries_its_presence_and_models() {
 /// before revocation reads as revoking none.
 #[test]
 fn a_record_carries_the_models_an_operator_revoked() {
-    let revoked = CellRecord {
+    let revoked = PoolRecord {
         revoked: vec![
             gdl_model::ModelKey::new("acme-legal"),
             gdl_model::ModelKey {
@@ -325,19 +325,19 @@ fn a_record_carries_the_models_an_operator_revoked() {
         "{text}"
     );
     assert_eq!(
-        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         revoked
     );
     let text = serde_json::to_string(&record()).expect("json");
     assert!(!text.contains("revoked"), "{text}");
     assert_eq!(
-        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         record()
     );
 }
 
 /// A record as a build from before presence and models writes it reads
-/// as a serving cell with no models.
+/// as a serving pool with no models.
 #[test]
 fn a_record_without_presence_or_models_reads_as_serving_with_none() {
     let mut value = serde_json::to_value(record()).expect("json");
@@ -345,10 +345,10 @@ fn a_record_without_presence_or_models_reads_as_serving_with_none() {
     for field in ["presence", "models", "models_version"] {
         fields.remove(field);
     }
-    let read: CellRecord = serde_json::from_value(value).expect("a record");
+    let read: PoolRecord = serde_json::from_value(value).expect("a record");
     assert_eq!(
         read,
-        CellRecord {
+        PoolRecord {
             presence: Presence::Serving,
             models: Vec::new(),
             models_version: 0,
@@ -369,7 +369,7 @@ struct EarlierRecord {
     home: Option<String>,
     contract: u64,
     placement: u64,
-    state: CellState,
+    state: PoolState,
     epoch: u64,
     seq: u64,
     hub: String,
@@ -379,10 +379,10 @@ struct EarlierRecord {
 }
 
 /// A hub of the earlier build reads a record with presence and models,
-/// whatever they hold, as the record it was: builds roll cell by cell.
+/// whatever they hold, as the record it was: builds roll pool by pool.
 #[test]
 fn an_earlier_reader_reads_a_record_with_presence_and_models() {
-    let published = CellRecord {
+    let published = PoolRecord {
         presence: Presence::ScaledToZero,
         revoked: vec![gdl_model::ModelKey::new("acme-legal")],
         ..record()
@@ -403,7 +403,7 @@ fn an_earlier_reader_reads_a_record_with_presence_and_models() {
         lease_ms,
         load,
     } = read;
-    let earlier = CellRecord {
+    let earlier = PoolRecord {
         name,
         class,
         region,
@@ -421,13 +421,13 @@ fn an_earlier_reader_reads_a_record_with_presence_and_models() {
     assert_eq!(earlier, published, "{text}");
 }
 
-/// The lease is a heartbeat's: a cell scaled to 0 on purpose sends none,
+/// The lease is a heartbeat's: a pool scaled to 0 on purpose sends none,
 /// so its record never lapses on a reader's clock.
 #[test]
 fn only_a_serving_record_has_a_lease() {
     assert!(record().leased());
     assert!(
-        !CellRecord {
+        !PoolRecord {
             presence: Presence::ScaledToZero,
             ..record()
         }
@@ -436,10 +436,10 @@ fn only_a_serving_record_has_a_lease() {
 }
 
 /// The models are not checked with the record: a parent that refused a
-/// record for one malformed model would drop the whole cell.
+/// record for one malformed model would drop the whole pool.
 #[test]
 fn a_record_is_not_refused_for_its_models() {
-    CellRecord {
+    PoolRecord {
         models: vec![ModelEntry {
             model: String::new(),
             routing_key: Some(String::new()),

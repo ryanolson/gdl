@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// A model a cell serves, as a client names it: the model's name, and the
+/// A model a pool serves, as a client names it: the model's name, and the
 /// serving partition it is in, if any. A LoRA is a model of its own name.
 /// `routing_key` is a partition of the workers that serve the model, not
 /// access by key. A declared model's settings name no other field.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelKey {
     /// The name a client sends.
     pub model: String,
-    /// The serving partition, when the cell has more than one.
+    /// The serving partition, when the pool has more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_key: Option<String>,
 }
@@ -36,14 +36,14 @@ impl ModelKey {
     }
 }
 
-/// What an entry instance tells its cell's hub of one model it has. A
+/// What an entry instance tells its pool's hub of one model it has. A
 /// field a later build adds is ignored, so builds roll one instance at a
 /// time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InstanceModel {
     /// The name a client sends.
     pub model: String,
-    /// The serving partition, when the cell has more than one.
+    /// The serving partition, when the pool has more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_key: Option<String>,
     /// Whether the instance can serve it now.

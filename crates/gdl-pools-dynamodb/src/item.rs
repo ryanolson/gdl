@@ -1,10 +1,10 @@
-//! The items of the two tables, and how a cell's write and its model list
+//! The items of the two tables, and how a pool's write and its model list
 //! become them. Pure: nothing here calls DynamoDB.
 //!
-//! The records table holds one item per cell, keyed by `class` and
-//! `cell`: the record without its model list, or a withdrawal's
+//! The records table holds one item per pool, keyed by `class` and
+//! `pool`: the record without its model list, or a withdrawal's
 //! tombstone. The lists table holds each model list a record names, keyed
-//! by `owner` (`<class>/<cell>`) and `list`: the record's `models_version`,
+//! by `owner` (`<class>/<pool>`) and `list`: the record's `models_version`,
 //! a digest of the list, and the token of the put that made it. Each put
 //! makes an item of its own, so no put replaces another's and an expiry
 //! names one put's item; a reader that checks the digest never joins a
@@ -17,31 +17,31 @@ use std::{
 };
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use gdl_cells::{
-    CellEvent, CellRecord, DirectoryError, ModelEntry, ResumeToken, Version, Withdrawal,
+use gdl_pools::{
+    DirectoryError, ModelEntry, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal,
 };
 use serde::{Deserialize, Serialize};
 
 /// An item of either table, as the SDK holds it.
 pub(crate) type Item = HashMap<String, AttributeValue>;
 
-/// The records table's partition key: the cell's class.
+/// The records table's partition key: the pool's class.
 pub(crate) const CLASS: &str = "class";
-/// The records table's sort key: the cell's name.
-pub(crate) const CELL: &str = "cell";
+/// The records table's sort key: the pool's name.
+pub(crate) const POOL: &str = "pool";
 const EPOCH: &str = "epoch";
 const SEQ: &str = "seq";
 const ORDER: &str = "order";
 const KIND: &str = "kind";
 const BODY: &str = "body";
 const LIST: &str = "list";
-/// The lists table's partition key: `<class>/<cell>`.
+/// The lists table's partition key: `<class>/<pool>`.
 pub(crate) const OWNER: &str = "owner";
 /// The lists table's sort key.
 pub(crate) const LIST_KEY: &str = LIST;
 /// The records table's attribute that holds the key of the record's list.
 pub(crate) const NAMES: &str = LIST;
-/// The lists table's TTL attribute: set only on a list its cell has moved
+/// The lists table's TTL attribute: set only on a list its pool has moved
 /// past, never on one a record names.
 pub(crate) const EXPIRES_AT: &str = "expires_at";
 
@@ -52,9 +52,9 @@ const WITHDRAWN: &str = "withdrawn";
 /// attributes.
 const ITEM_LIMIT: usize = 400 * 1024;
 
-/// The condition of every write of a cell's item: newer than what the
+/// The condition of every write of a pool's item: newer than what the
 /// table holds, by epoch, then by `seq`. An item without an epoch holds
-/// no cell's write, and is written over.
+/// no pool's write, and is written over.
 pub(crate) const NEWER: &str =
     "attribute_not_exists(#epoch) OR #epoch < :epoch OR (#epoch = :epoch AND #seq < :seq)";
 
@@ -120,7 +120,7 @@ pub(crate) struct List {
     pub(crate) revoked: Vec<gdl_model::ModelKey>,
 }
 
-/// A cell's write, as the two tables hold it.
+/// A pool's write, as the two tables hold it.
 #[derive(Debug, Clone)]
 pub(crate) struct Encoded {
     /// The records table's item.
@@ -134,7 +134,7 @@ pub(crate) struct Encoded {
 /// The items of `record`, written at `order`, with a new token for its
 /// list. A record whose list or whose own item would pass DynamoDB's item
 /// limit is refused.
-pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, DirectoryError> {
+pub(crate) fn record(record: &PoolRecord, order: u64) -> Result<Encoded, DirectoryError> {
     let list = (!record.models.is_empty() || !record.revoked.is_empty()).then(|| List {
         models: record.models.clone(),
         revoked: record.revoked.clone(),
@@ -160,7 +160,7 @@ pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, Directo
             Some((key, item))
         }
     };
-    let bare = CellRecord {
+    let bare = PoolRecord {
         models: Vec::new(),
         revoked: Vec::new(),
         ..record.clone()
@@ -182,7 +182,7 @@ pub(crate) fn record(record: &CellRecord, order: u64) -> Result<Encoded, Directo
 pub(crate) fn withdrawal(withdrawal: &Withdrawal, order: u64) -> Item {
     let mut item = keyed(
         &withdrawal.class,
-        &withdrawal.cell,
+        &withdrawal.pool,
         withdrawal.version(),
         order,
     );
@@ -190,19 +190,19 @@ pub(crate) fn withdrawal(withdrawal: &Withdrawal, order: u64) -> Item {
     item
 }
 
-/// The lists table's key of `key`'s list of `cell` of `class`.
-pub(crate) fn list_key(class: &str, cell: &str, key: ListKey) -> Item {
+/// The lists table's key of `key`'s list of `pool` of `class`.
+pub(crate) fn list_key(class: &str, pool: &str, key: ListKey) -> Item {
     Item::from([
-        (OWNER.into(), AttributeValue::S(owner(class, cell))),
+        (OWNER.into(), AttributeValue::S(owner(class, pool))),
         (LIST_KEY.into(), AttributeValue::S(key.sort_key())),
     ])
 }
 
-/// A cell's item as a scan reads it: the record without its list, and the
+/// A pool's item as a scan reads it: the record without its list, and the
 /// key of the list it names, or a tombstone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Stored {
-    pub(crate) cell: String,
+    pub(crate) pool: String,
     pub(crate) version: Version,
     pub(crate) order: u64,
     pub(crate) held: StoredHeld,
@@ -211,28 +211,28 @@ pub(crate) struct Stored {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StoredHeld {
     Record {
-        record: Box<CellRecord>,
+        record: Box<PoolRecord>,
         list: Option<ListKey>,
     },
     Withdrawn,
 }
 
-/// The cell's write `item` holds, if it is one of `class`: a record a
-/// publish would take, of the cell the item is keyed by, at the item's
+/// The pool's write `item` holds, if it is one of `class`: a record a
+/// publish would take, of the pool the item is keyed by, at the item's
 /// version, or a tombstone. None for anything else, which a scan passes
 /// over.
 pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
     if text(item, CLASS)? != class {
         return None;
     }
-    let cell = text(item, CELL)?;
+    let pool = text(item, POOL)?;
     let version = version(item)?;
     let order = count(item, ORDER)?;
     let held = match text(item, KIND)? {
         WITHDRAWN => StoredHeld::Withdrawn,
         RECORD => {
-            let record: CellRecord = serde_json::from_str(text(item, BODY)?).ok()?;
-            let belongs = record.name == cell
+            let record: PoolRecord = serde_json::from_str(text(item, BODY)?).ok()?;
+            let belongs = record.name == pool
                 && record.class == class
                 && record.version() == version
                 && record.models.is_empty()
@@ -257,7 +257,7 @@ pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
         _ => return None,
     };
     Some(Stored {
-        cell: cell.to_owned(),
+        pool: pool.to_owned(),
         version,
         order,
         held,
@@ -275,7 +275,7 @@ pub(crate) fn decode_list(key: ListKey, item: &Item) -> Option<List> {
     serde_json::from_str(body).ok()
 }
 
-/// The version of the cell's write a records-table item holds, if it
+/// The version of the pool's write a records-table item holds, if it
 /// holds one.
 pub(crate) fn version(item: &Item) -> Option<Version> {
     Some(Version {
@@ -304,7 +304,7 @@ fn new_token() -> u64 {
     RandomState::new().hash_one(next_order())
 }
 
-/// A cell's write, whole, as a scan installs it: a record with its list
+/// A pool's write, whole, as a scan installs it: a record with its list
 /// joined, or a withdrawal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
@@ -316,7 +316,7 @@ pub(crate) struct Entry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Held {
-    Record(Box<CellRecord>),
+    Record(Box<PoolRecord>),
     Withdrawn(Withdrawal),
 }
 
@@ -328,7 +328,7 @@ impl Entry {
             StoredHeld::Withdrawn => (
                 Held::Withdrawn(Withdrawal {
                     class: class.to_owned(),
-                    cell: stored.cell,
+                    pool: stored.pool,
                     epoch: stored.version.epoch,
                     seq: stored.version.seq,
                 }),
@@ -353,7 +353,7 @@ impl Entry {
         }
     }
 
-    pub(crate) fn record(&self) -> Option<&CellRecord> {
+    pub(crate) fn record(&self) -> Option<&PoolRecord> {
         match &self.held {
             Held::Record(record) => Some(record),
             Held::Withdrawn(_) => None,
@@ -361,13 +361,13 @@ impl Entry {
     }
 
     /// The change this entry makes, as a watch reports it at `token`.
-    pub(crate) fn event(&self, token: ResumeToken) -> CellEvent {
+    pub(crate) fn event(&self, token: ResumeToken) -> PoolEvent {
         match &self.held {
-            Held::Record(record) => CellEvent::Put {
-                record: CellRecord::clone(record),
+            Held::Record(record) => PoolEvent::Put {
+                record: PoolRecord::clone(record),
                 token,
             },
-            Held::Withdrawn(withdrawal) => CellEvent::Withdrawn {
+            Held::Withdrawn(withdrawal) => PoolEvent::Withdrawn {
                 withdrawal: withdrawal.clone(),
                 token,
             },
@@ -399,18 +399,18 @@ pub(crate) fn number(value: u64) -> AttributeValue {
     AttributeValue::N(value.to_string())
 }
 
-fn keyed(class: &str, cell: &str, version: Version, order: u64) -> Item {
+fn keyed(class: &str, pool: &str, version: Version, order: u64) -> Item {
     Item::from([
         (CLASS.into(), AttributeValue::S(class.into())),
-        (CELL.into(), AttributeValue::S(cell.into())),
+        (POOL.into(), AttributeValue::S(pool.into())),
         (EPOCH.into(), number(version.epoch)),
         (SEQ.into(), number(version.seq)),
         (ORDER.into(), number(order)),
     ])
 }
 
-fn owner(class: &str, cell: &str) -> String {
-    format!("{class}/{cell}")
+fn owner(class: &str, pool: &str) -> String {
+    format!("{class}/{pool}")
 }
 
 fn text<'a>(item: &'a Item, name: &str) -> Option<&'a str> {
@@ -429,7 +429,7 @@ fn count(item: &Item, name: &str) -> Option<u64> {
 
 /// Refuse `item` when it is past DynamoDB's item limit, which would fail
 /// the write anyway, and fail it the same way on every attempt.
-fn fits(item: &Item, cell: &str, what: &str) -> Result<(), DirectoryError> {
+fn fits(item: &Item, pool: &str, what: &str) -> Result<(), DirectoryError> {
     let size: usize = item
         .iter()
         .map(|(name, value)| {
@@ -442,7 +442,7 @@ fn fits(item: &Item, cell: &str, what: &str) -> Result<(), DirectoryError> {
         .sum();
     if size > ITEM_LIMIT {
         return Err(DirectoryError::Refused(format!(
-            "cell `{cell}`: its {what} is {size} bytes in DynamoDB, over the item limit of {ITEM_LIMIT}"
+            "pool `{pool}`: its {what} is {size} bytes in DynamoDB, over the item limit of {ITEM_LIMIT}"
         )));
     }
     Ok(())

@@ -4,7 +4,7 @@ A selector chooses the instance a request goes to when it crosses into another s
 
 ## 1. Implement `gdl::Selector`
 
-Pick the `Head` type. Use the head type of the edge that crosses (`H` for a streamed edge `Streamed<H, T>`) to read the head as a value. Use `gdl::Projected<P>` to read only some of its fields ([Write a cell policy](write-a-cell-policy.md#1-read-only-what-you-route-by)). Use `gdl::Encoded` to read only its bytes, with no decode, on any edge.
+Pick the `Head` type. Use the head type of the edge that crosses (`H` for a streamed edge `Streamed<H, T>`) to read the head as a value. Use `gdl::Projected<P>` to read only some of its fields ([Write a pool policy](write-a-pool-policy.md#1-read-only-what-you-route-by)). Use `gdl::Encoded` to read only its bytes, with no decode, on any edge.
 
 ```rust
 use gdl::{Choice, Instances, Request, Result, Selector};

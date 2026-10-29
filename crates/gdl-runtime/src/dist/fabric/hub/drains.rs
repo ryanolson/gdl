@@ -1,19 +1,19 @@
 //! The two owners of a peer's velo registration, driven together: the
 //! instance's membership follower, as it runs, and a chooser's follower of
-//! other cells, on an explicit clock.
+//! other pools, on an explicit clock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl_cells::CellState;
 use gdl_model::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
+use gdl_pools::PoolState;
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 
 use super::HubSession;
 use crate::Roster;
-use crate::dist::cells::{Cells, Damping, Follows};
+use crate::dist::pools::{Damping, Follows, Pools};
 
 const DRAIN: Duration = Duration::from_millis(300);
 
@@ -70,7 +70,7 @@ async fn pings(from: &velo::Velo, to: velo::InstanceId) -> bool {
     )
 }
 
-/// A peer leaves a followed cell's table, and then this instance's own
+/// A peer leaves a followed pool's table, and then this instance's own
 /// membership: the chooser's drain ends first and leaves the peer
 /// registered, and the membership's, which began later, unregisters it.
 /// The two followers are the ones the runtime runs; the membership's is
@@ -99,10 +99,10 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     .await
     .expect("registered");
     let live = Arc::clone(Roster::new().live());
-    let cells = Cells::new("r", [("model_x", "sink")], Damping::default());
+    let pools = Pools::new("r", [("model_x", "sink")], Damping::default());
     let wanted = BTreeMap::from([("model_x".to_string(), BTreeSet::from(["sink".to_string()]))]);
     let mut chooser = Follows::new(
-        cells.clone(),
+        pools.clone(),
         front.clone(),
         Arc::clone(&live),
         DRAIN,
@@ -116,10 +116,10 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
         &["front", "sink"],
         &["sink"],
         DRAIN,
-        Some(cells.clone()),
+        Some(pools.clone()),
     );
 
-    // The peer is an entry of a followed cell, and a member this instance
+    // The peer is an entry of a followed pool, and a member this instance
     // routes to.
     let peer = answering().await;
     let id = peer.instance_id();
@@ -128,16 +128,16 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
         FollowEvent::Follow {
             listing: None,
             class: "model_x".into(),
-            cell: "m1".into(),
+            pool: "m1".into(),
             generation: 1,
             region: "r".into(),
-            state: CellState::Ready,
+            state: PoolState::Ready,
             load: None,
             load_age_ms: None,
         },
         FollowEvent::Exposed {
             class: "model_x".into(),
-            cell: "m1".into(),
+            pool: "m1".into(),
             generation: 1,
             segment: "sink".into(),
             peer: peer.peer_info(),
@@ -148,11 +148,11 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     live.join("sink", id);
     assert!(pings(&front, id).await);
 
-    // It leaves the cell's table, then the membership.
+    // It leaves the pool's table, then the membership.
     chooser.apply(
         FollowEvent::Left {
             class: "model_x".into(),
-            cell: "m1".into(),
+            pool: "m1".into(),
             generation: 1,
             segment: "sink".into(),
             instance: id,
@@ -162,7 +162,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     membership.left("sink", id);
     let left = Instant::now();
     chooser.forget(start + DRAIN);
-    assert!(!cells.is_registered(id), "the chooser kept what it gave up");
+    assert!(!pools.is_registered(id), "the chooser kept what it gave up");
     assert!(
         pings(&front, id).await,
         "the chooser's drain cut the membership's short"

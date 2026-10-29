@@ -12,7 +12,7 @@ use std::{
 use futures::Stream;
 use tokio::sync::{mpsc, oneshot};
 
-use gdl_cells::{CellEvent, DirectoryError, ResumeToken};
+use gdl_pools::{DirectoryError, PoolEvent, ResumeToken};
 
 use super::{Answer, Registered};
 use crate::directory::Shared;
@@ -30,8 +30,8 @@ pub struct DynamoWatch {
     answer: Option<oneshot::Receiver<Answer>>,
     // The answer, kept here rather than in the channel so that a large
     // class does not count against the buffer.
-    pending: VecDeque<Result<CellEvent, DirectoryError>>,
-    receiver: Option<mpsc::Receiver<Result<CellEvent, DirectoryError>>>,
+    pending: VecDeque<Result<PoolEvent, DirectoryError>>,
+    receiver: Option<mpsc::Receiver<Result<PoolEvent, DirectoryError>>>,
     lagged: Arc<AtomicBool>,
     registration: Option<Registration>,
 }
@@ -64,7 +64,7 @@ impl DynamoWatch {
             lagged,
         }) = self.shared.register(&self.class, from)
         else {
-            self.pending.push_back(Ok(CellEvent::Resnapshot));
+            self.pending.push_back(Ok(PoolEvent::Resnapshot));
             return;
         };
         self.answer = Some(answer);
@@ -85,7 +85,7 @@ impl DynamoWatch {
 }
 
 impl Stream for DynamoWatch {
-    type Item = Result<CellEvent, DirectoryError>;
+    type Item = Result<PoolEvent, DirectoryError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -100,7 +100,7 @@ impl Stream for DynamoWatch {
             this.answer = None;
             match answered {
                 Ok(Ok(events)) => {
-                    if events.back() == Some(&CellEvent::Resnapshot) {
+                    if events.back() == Some(&PoolEvent::Resnapshot) {
                         this.end();
                     }
                     this.pending = events.into_iter().map(Ok).collect();
@@ -116,7 +116,7 @@ impl Stream for DynamoWatch {
                 // missed is unknown.
                 Err(_) => {
                     this.end();
-                    return Poll::Ready(Some(Ok(CellEvent::Resnapshot)));
+                    return Poll::Ready(Some(Ok(PoolEvent::Resnapshot)));
                 }
             }
         }
@@ -127,7 +127,7 @@ impl Stream for DynamoWatch {
         // it must take again, so it is told at once.
         if this.lagged.load(Ordering::Acquire) {
             this.end();
-            return Poll::Ready(Some(Ok(CellEvent::Resnapshot)));
+            return Poll::Ready(Some(Ok(PoolEvent::Resnapshot)));
         }
         match receiver.poll_recv(cx) {
             Poll::Ready(Some(Ok(event))) => Poll::Ready(Some(Ok(event))),
@@ -138,7 +138,7 @@ impl Stream for DynamoWatch {
             Poll::Ready(None) => {
                 this.end();
                 let lagged = this.lagged.load(Ordering::Acquire);
-                Poll::Ready(lagged.then_some(Ok(CellEvent::Resnapshot)))
+                Poll::Ready(lagged.then_some(Ok(PoolEvent::Resnapshot)))
             }
             Poll::Pending => Poll::Pending,
         }

@@ -26,7 +26,7 @@ pub const SEGMENT_NAME_LIMIT: usize = 58;
 /// to work; `serving`, once its handlers are installed; `ready`, once it
 /// routes; `drained`, once a source has finished its requests; `retired`,
 /// once it has been stopped; and `detach`, once an instance of a draining
-/// cell will send no more work into the cell.
+/// pool will send no more work into the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentPhase {
     /// The instance's nodes are ready to work.
@@ -39,8 +39,8 @@ pub enum SegmentPhase {
     Drained,
     /// The instance has been stopped.
     Retired,
-    /// An instance of a draining cell takes no more work from outside the
-    /// cell, and no request it holds will send work into the cell again.
+    /// An instance of a draining pool takes no more work from outside the
+    /// pool, and no request it holds will send work into the pool again.
     Detached,
 }
 
@@ -145,7 +145,7 @@ pub struct SegmentRegistration {
     pub segment: String,
     /// Hash of the typed graph contract.
     pub contract: u64,
-    /// Hash of node assignments, routing policies, classes, and cell
+    /// Hash of node assignments, routing policies, classes, and pool
     /// policies.
     pub placement: u64,
 }

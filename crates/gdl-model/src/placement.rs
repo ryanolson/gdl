@@ -8,18 +8,18 @@ use crate::manifest::{HopInfo, Manifest, TypeInfo};
 use crate::{Problem, Problems, read_toml};
 
 mod boundary;
-mod cells;
 mod classes;
 mod errors;
 mod layouts;
+mod pools;
 mod report;
 mod spelled;
 
 use boundary::bound;
-pub use cells::CellPolicy;
 use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use layouts::{Placements, check_layout_name};
+pub use pools::PoolPolicy;
 pub use report::CrossingReport;
 use report::hop_lines;
 use spelled::Spelled;
@@ -28,8 +28,8 @@ use spelled::Spelled;
 ///
 /// A placement file contains `[segment.<name>]` tables, optional `[routing]`
 /// policies, optional `[class.<name>]` tables that group the segments into
-/// classes that deploy together, and optional `[cells.<class>]` tables that
-/// say how a chooser picks a cell of a class it sends to. Other deployment
+/// classes that deploy together, and optional `[pools.<class>]` tables that
+/// say how a chooser picks a pool of a class it sends to. Other deployment
 /// tables are ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
@@ -46,9 +46,9 @@ pub struct Placement {
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
-        deserialize_with = "cells::recorded"
+        deserialize_with = "pools::recorded"
     )]
-    cells: BTreeMap<String, CellPolicy>,
+    pools: BTreeMap<String, PoolPolicy>,
     #[serde(skip)]
     spelled: Spelled,
 }
@@ -59,8 +59,8 @@ struct SegmentSpec {
     nodes: Vec<String>,
 }
 
-// Unknown keys are refused: a cell policy written here by mistake, rather
-// than under `[cells.<class>]`, would otherwise be dropped without a word.
+// Unknown keys are refused: a pool policy written here by mistake, rather
+// than under `[pools.<class>]`, would otherwise be dropped without a word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassSpec {
@@ -189,10 +189,10 @@ pub fn check_selector_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `name` can name a cell policy in `[cells.<class>] policy`: a
+/// Whether `name` can name a pool policy in `[pools.<class>] policy`: a
 /// name of the same shape as a selector's, so that a registered policy is
 /// named as a selector is.
-pub fn check_cell_policy_name(name: &str) -> Result<(), String> {
+pub fn check_pool_policy_name(name: &str) -> Result<(), String> {
     check_name_shape("policy", name)
 }
 
@@ -257,23 +257,23 @@ impl Placement {
         self
     }
 
-    /// Set how a chooser picks a cell of `class`. Defaults are not
+    /// Set how a chooser picks a pool of `class`. Defaults are not
     /// recorded, as a default router is not: a value equal to its default
     /// is the same placement as one that leaves it unsaid, and setting the
     /// default policy removes the class's.
-    pub fn cell_policy(mut self, class: impl Into<String>, policy: CellPolicy) -> Self {
+    pub fn pool_policy(mut self, class: impl Into<String>, policy: PoolPolicy) -> Self {
         let class = class.into();
-        if policy == CellPolicy::default() {
-            self.cells.remove(&class);
-            self.spelled.cells.insert(class);
+        if policy == PoolPolicy::default() {
+            self.pools.remove(&class);
+            self.spelled.pools.insert(class);
         } else {
-            self.spelled.cells.remove(&class);
-            self.cells.insert(class, policy);
+            self.spelled.pools.remove(&class);
+            self.pools.insert(class, policy);
         }
         self
     }
 
-    /// Parse segment placement, request routing, classes, and cell policies
+    /// Parse segment placement, request routing, classes, and pool policies
     /// from a deployment file. Every problem with the names is reported,
     /// each where it is; a file that does not parse is one problem.
     pub fn from_toml(text: &str) -> Result<Self, Problems> {
@@ -289,7 +289,7 @@ impl Placement {
         placement
             .routing
             .retain(|_, router| *router != RequestRouter::default());
-        placement.spelled = Spelled::read(written, &placement.routing, &placement.cells);
+        placement.spelled = Spelled::read(written, &placement.routing, &placement.pools);
         let mut problems = Vec::new();
         for (node, router) in &placement.routing {
             if let RequestRouter::Selector(name) = router
@@ -303,10 +303,10 @@ impl Placement {
                 problems.push(Problem::at(Some(format!("class.{name}")), None, why));
             }
         }
-        for (class, policy) in &placement.cells {
-            if let Err(why) = cells::check_policy_name(policy) {
+        for (class, policy) in &placement.pools {
+            if let Err(why) = pools::check_policy_name(policy) {
                 problems.push(Problem::at(
-                    Some(format!("cells.{class}")),
+                    Some(format!("pools.{class}")),
                     Some("policy".into()),
                     why,
                 ));
@@ -334,7 +334,7 @@ impl Placement {
     }
 
     /// The placement hash changes with node placement, segment names,
-    /// request routing policies, classes, and each class's effective cell
+    /// request routing policies, classes, and each class's effective pool
     /// policy, a default one included. Node order inside a segment, and
     /// segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
@@ -368,7 +368,7 @@ impl Placement {
                 h.strs(&segments.into_iter().collect::<Vec<_>>());
             }
         }
-        cells::hash(&mut h, self.classes.keys(), &self.cells);
+        pools::hash(&mut h, self.classes.keys(), &self.pools);
         h.finish()
     }
 }
@@ -382,7 +382,7 @@ pub struct Layout {
     segment_of: BTreeMap<String, String>,
     class_of: BTreeMap<String, String>,
     boundaries: Vec<ClassBoundary>,
-    cell_policies: BTreeMap<String, CellPolicy>,
+    pool_policies: BTreeMap<String, PoolPolicy>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
 }
@@ -613,10 +613,10 @@ impl Layout {
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
     }
 
-    /// How a chooser picks a cell of `class`, defaults applied: `None`
+    /// How a chooser picks a pool of `class`, defaults applied: `None`
     /// unless a class boundary enters `class`.
-    pub fn cell_policy(&self, class: &str) -> Option<&CellPolicy> {
-        self.cell_policies.get(class)
+    pub fn pool_policy(&self, class: &str) -> Option<&PoolPolicy> {
+        self.pool_policies.get(class)
     }
 
     /// The hops that cross from one class into another, in hop order:
@@ -637,8 +637,8 @@ impl Layout {
             .collect()
     }
 
-    /// The classes `segment` chooses cells of: those a hop crosses into
-    /// whose outer end `segment` holds. Each needs its cell policy where
+    /// The classes `segment` chooses pools of: those a hop crosses into
+    /// whose outer end `segment` holds. Each needs its pool policy where
     /// `segment` runs. Empty for a segment that is not a chooser, and for a
     /// placement without classes.
     pub fn chosen_classes(&self, segment: &str) -> BTreeSet<&str> {
@@ -656,7 +656,7 @@ impl Layout {
 
     /// Crossings and anchors for one request through each root and, when
     /// the placement has classes, the WAN round trips each class boundary
-    /// adds when the request spills to a cell in another region.
+    /// adds when the request spills to a pool in another region.
     pub fn report(&self) -> CrossingReport {
         CrossingReport {
             roots: self.roots,
@@ -679,7 +679,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     // with whatever they find.
     let mut class_errors = Vec::new();
     let class_of = classify(placement, &mut class_errors);
-    cells::judge(placement, &mut class_errors);
+    pools::judge(placement, &mut class_errors);
     let mut errors = check_manifest(manifest);
     if !errors.is_empty() {
         errors.append(&mut class_errors);
@@ -693,8 +693,8 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     } else {
         bound(manifest, &segment_of, &class_of, &mut class_errors)
     };
-    let undecided = cells::Undecided::new(manifest, &segment_of, &class_of);
-    let cell_policies = cells::entered(placement, &boundaries, &undecided, &mut class_errors);
+    let undecided = pools::Undecided::new(manifest, &segment_of, &class_of);
+    let pool_policies = pools::entered(placement, &boundaries, &undecided, &mut class_errors);
     if !errors.is_empty() {
         errors.append(&mut class_errors);
         return Err(PlacementErrors(errors));
@@ -703,7 +703,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
         Ok(layout) if class_errors.is_empty() => Ok(Layout {
             class_of,
             boundaries,
-            cell_policies,
+            pool_policies,
             ..layout
         }),
         Ok(_) => Err(PlacementErrors(class_errors)),
@@ -824,7 +824,7 @@ fn place(
         segment_of,
         class_of: BTreeMap::new(),
         boundaries: Vec::new(),
-        cell_policies: BTreeMap::new(),
+        pool_policies: BTreeMap::new(),
         hops,
     })
 }

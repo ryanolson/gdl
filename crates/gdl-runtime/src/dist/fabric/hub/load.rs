@@ -1,4 +1,4 @@
-//! An entry instance's load reports to its own cell's hub: once a summary
+//! An entry instance's load reports to its own pool's hub: once a summary
 //! period, what its admission holds, through velo-hub's extension client
 //! with the instance's own credential, with the models its nodes say it
 //! has; and at once when those change. A report reads counters the
@@ -113,7 +113,7 @@ async fn report<F, Fut>(
         // stacks reports.
         let answer = match tokio::time::timeout(period, send(report)).await {
             Ok(answer) => answer,
-            Err(_) => Err("the cell's hub did not answer in time".to_string()),
+            Err(_) => Err("the pool's hub did not answer in time".to_string()),
         };
         match answer {
             Ok(()) => {
@@ -122,7 +122,7 @@ async fn report<F, Fut>(
                     models.taken(carried);
                 }
                 if refused.take().is_some() {
-                    tracing::info!("the cell's hub takes this instance's load reports again");
+                    tracing::info!("the pool's hub takes this instance's load reports again");
                 }
             }
             Err(error) => {

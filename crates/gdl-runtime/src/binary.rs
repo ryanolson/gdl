@@ -22,7 +22,7 @@ use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
 use gdl::{
-    Affinity, CellPolicies, CellPolicy, FollowedCells, HubRecords, InstanceModels, LeastLoaded,
+    Affinity, FollowedPools, HubRecords, InstanceModels, LeastLoaded, PoolPolicies, PoolPolicy,
     Selector, Selectors,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
@@ -39,7 +39,7 @@ pub trait SegmentBinary {
     /// This segment's name in the placement.
     const SEGMENT: &'static str;
     /// Every segment of the placement. An instance waits for all of them,
-    /// or, in a cell, only for those of its class.
+    /// or, in a pool, only for those of its class.
     const SEGMENTS: &'static [&'static str];
     /// The graph's own config values, as TOML: a table per node, by the
     /// node's name. A node's settings table may restate them but not
@@ -146,12 +146,12 @@ pub async fn run_segment<B: SegmentBinary>(
     }
     // Before the launch: a chooser checks the policies its placement
     // names against these before it registers.
-    config.runtime.cell_policies = builder.cell_policies();
+    config.runtime.pool_policies = builder.pool_policies();
     config.runtime.followed = builder.followed.clone();
     config.runtime.models = builder.models.clone();
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
-    // the launch, where a chooser's follower registers the cells' figures.
+    // the launch, where a chooser's follower registers the pools' figures.
     config.runtime.metrics = process.system_address().map(|_| registry);
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
@@ -212,15 +212,15 @@ pub struct Builder {
     tables: BTreeMap<String, toml::Table>,
     /// The routing selectors built so far.
     selectors: Mutex<Selectors>,
-    /// The cell policies registered so far.
-    cell_policies: Mutex<CellPolicies>,
-    /// How to wait for each selector and cell policy it built to be ready.
+    /// The pool policies registered so far.
+    pool_policies: Mutex<PoolPolicies>,
+    /// How to wait for each selector and pool policy it built to be ready.
     readiness: Mutex<Vec<Readiness>>,
-    /// What every node and selector it builds reads the chooser's cells
-    /// through ([`FollowedCells::current`]), bound at the launch.
-    followed: FollowedCells,
-    /// What every node and selector it builds takes its cell hub's record
-    /// tables from ([`gdl::CellRecords::current`]): the runtime's own,
+    /// What every node and selector it builds reads the chooser's pools
+    /// through ([`FollowedPools::current`]), bound at the launch.
+    followed: FollowedPools,
+    /// What every node and selector it builds takes its pool hub's record
+    /// tables from ([`gdl::PoolRecords::current`]): the runtime's own,
     /// bound at the launch.
     records: HubRecords,
     /// What every node it builds says the instance's models are through
@@ -228,7 +228,7 @@ pub struct Builder {
     models: InstanceModels,
 }
 
-/// One built selector's or cell policy's [`Build::ready`].
+/// One built selector's or pool policy's [`Build::ready`].
 type Readiness = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Send>;
 
 impl Builder {
@@ -244,45 +244,45 @@ impl Builder {
             defined: Mutex::new(BTreeMap::new()),
             tables,
             selectors: Mutex::new(Selectors::new()),
-            cell_policies: Mutex::new(CellPolicies::new()),
+            pool_policies: Mutex::new(PoolPolicies::new()),
             readiness: Mutex::new(Vec::new()),
-            followed: FollowedCells::new(),
+            followed: FollowedPools::new(),
             records,
             models: InstanceModels::new(),
         })
     }
 
-    /// Choose the cells of each class whose `[cells.<class>] policy` is
+    /// Choose the pools of each class whose `[pools.<class>] policy` is
     /// `name` by `policy`. Refuses a name a placement cannot use, gdl's
     /// own policies' names, and a name registered twice.
-    pub fn cell_policy<P: CellPolicy>(
+    pub fn pool_policy<P: PoolPolicy>(
         &self,
         name: &str,
         policy: P,
     ) -> std::result::Result<(), Failure> {
-        self.cell_policies
+        self.pool_policies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .add(name, policy)
-            .map_err(|e| format!("registering cell policy {name}: {e}").into())
+            .map_err(|e| format!("registering pool policy {name}: {e}").into())
     }
 
-    /// Build `P`, the cell policy named `name` in the placement, from its
+    /// Build `P`, the pool policy named `name` in the placement, from its
     /// settings table `table`, with its metrics registered under `name`,
-    /// and choose the cells of each class whose `[cells.<class>] policy` is
+    /// and choose the pools of each class whose `[pools.<class>] policy` is
     /// `name` by it. The instance announces itself as loaded only once `P`
     /// is ready, as for a selector; it registers with its hub before.
-    pub async fn build_cell_policy<P: Build + CellPolicy>(
+    pub async fn build_pool_policy<P: Build + PoolPolicy>(
         &self,
         name: &str,
         table: Option<toml::Table>,
     ) -> std::result::Result<(), Failure> {
         let built = Arc::new(self.build::<P>(name, table).await?);
-        self.cell_policies
+        self.pool_policies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .add_shared(name, Arc::clone(&built))
-            .map_err(|e| format!("registering cell policy {name}: {e}"))?;
+            .map_err(|e| format!("registering pool policy {name}: {e}"))?;
         self.waits_for(built);
         Ok(())
     }
@@ -298,9 +298,9 @@ impl Builder {
             }));
     }
 
-    /// The registered cell policies, for the launch and the runtime.
-    fn cell_policies(&self) -> CellPolicies {
-        self.cell_policies
+    /// The registered pool policies, for the launch and the runtime.
+    fn pool_policies(&self) -> PoolPolicies {
+        self.pool_policies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -347,7 +347,7 @@ impl Builder {
         selectors.contains(name)
     }
 
-    /// Resolve once every selector and cell policy it built is ready.
+    /// Resolve once every selector and pool policy it built is ready.
     async fn ready(&self) -> Result<()> {
         let waits: Vec<_> = {
             let readiness = self.readiness.lock().unwrap_or_else(|e| e.into_inner());

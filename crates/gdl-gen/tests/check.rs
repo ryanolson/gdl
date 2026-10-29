@@ -31,8 +31,8 @@ fn spec(extra: &str) -> String {
 
 const FLEET: &str = "[class.global]\nready = { front = 2 }\nrequires = { model_x = 1 }\n\
     [class.model_x]\nready = { engine = 1 }\n\
-    [cell.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n\
-    [cell.model-x-01-us-east-1]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us-east-1\"\n";
+    [pool.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [pool.model-x-01-us-east-1]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us-east-1\"\n";
 
 /// The two files, written to a directory of their own.
 struct Files {
@@ -131,8 +131,8 @@ fn a_clean_spec_and_fleet_check_clean() {
 #[test]
 fn a_spec_that_does_not_parse_leaves_the_fleet_checked() {
     let spec = spec("").replacen("nodes = [\"Engine\"]", "node = [\"Engine\"]", 1);
-    let fleet = "[cell.Global]\nclass = \"global\"\nregion = \"US\"\n\
-                 [cell.m]\nclass = \"model_x\"\nregion = \"r\"\nhome = \"nope\"\n";
+    let fleet = "[pool.Global]\nclass = \"global\"\nregion = \"US\"\n\
+                 [pool.m]\nclass = \"model_x\"\nregion = \"r\"\nhome = \"nope\"\n";
     let files = Files::new(&spec, fleet);
     let (s, f) = (
         files.spec().display().to_string(),
@@ -145,13 +145,13 @@ fn a_spec_that_does_not_parse_leaves_the_fleet_checked() {
                 "{s}:{}: [segment.engine] node: unknown field `node`",
                 line_of(&spec, "node = [")
             ),
-            format!("{f}: [cell.Global]: cell name `Global` must be"),
-            format!("{f}: [cell.Global] region: region name `US` must be"),
-            format!("{f}: [cell.m] home: the fleet has no cell `nope`"),
+            format!("{f}: [pool.Global]: pool name `Global` must be"),
+            format!("{f}: [pool.Global] region: region name `US` must be"),
+            format!("{f}: [pool.m] home: the fleet has no pool `nope`"),
             // Which class sends to which is the layout's, so no parent's
             // children are judged, and the check says so once.
             format!(
-                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+                "{f}: the pools' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
             ),
         ],
     );
@@ -161,7 +161,7 @@ fn a_spec_that_does_not_parse_leaves_the_fleet_checked() {
 /// the spec is still reported.
 #[test]
 fn a_fleet_that_does_not_parse_leaves_the_spec_checked() {
-    let spec = spec("[cells.zz]\npolicy = 'home_first'\n[config.Nobody]\nx = 1\n").replacen(
+    let spec = spec("[pools.zz]\npolicy = 'home_first'\n[config.Nobody]\nx = 1\n").replacen(
         "\"Engine\"]",
         "\"Engine\", \"Ghost\"]",
         1,
@@ -176,10 +176,10 @@ fn a_fleet_that_does_not_parse_leaves_the_spec_checked() {
         &problems(&files.check()),
         &[
             format!("{s}: [segment.engine] nodes: segment `engine` lists unknown node `Ghost`"),
-            format!("{s}: [cells.zz]: cell policy `[cells.zz]`: the placement has no class `zz`"),
+            format!("{s}: [pools.zz]: pool policy `[pools.zz]`: the placement has no class `zz`"),
             format!("{s}: [config.Nobody]: the graph has no bound node `Nobody`"),
             format!(
-                "{f}:{}: [cell.model-x-01-us-east-1] zone: unknown field `zone`",
+                "{f}:{}: [pool.model-x-01-us-east-1] zone: unknown field `zone`",
                 line_of(&fleet, "zone")
             ),
         ],
@@ -192,7 +192,7 @@ fn a_fleet_that_does_not_parse_leaves_the_spec_checked() {
 fn every_problem_of_both_files_is_reported() {
     let spec = spec("[pipeline_names]\nGhost = \"ghost\"\n[config.Nobody]\nx = 1\n");
     let fleet = format!(
-        "{}[cell.model-x-02-us-east-1]\nclass = \"model_x\"\nregion = \"us-east-1\"\n",
+        "{}[pool.model-x-02-us-east-1]\nclass = \"model_x\"\nregion = \"us-east-1\"\n",
         FLEET
             .replacen(
                 "ready = { engine = 1 }",
@@ -215,7 +215,7 @@ fn every_problem_of_both_files_is_reported() {
         format!("{s}: [config.Nobody]: the graph has no bound node `Nobody`"),
         format!("{f}: [class.global] requires.global: not a class that `global` sends to"),
         format!("{f}: [class.model_x] ready.front: not a segment of class `model_x`"),
-        format!("{f}: [cell.model-x-02-us-east-1] home: missing"),
+        format!("{f}: [pool.model-x-02-us-east-1] home: missing"),
     ];
     assert_problems(&problems(&files.check()), &expected);
     // `compose` runs the same check, and writes nothing.
@@ -225,18 +225,18 @@ fn every_problem_of_both_files_is_reported() {
     assert!(!out.exists(), "compose wrote a bundle");
 }
 
-/// A parent cell without a child of a class its class sends to is one
+/// A parent pool without a child of a class its class sends to is one
 /// problem among the others, at the parent's table: `check` reports every
 /// one and fails, and `compose` refuses the same fleet.
 #[test]
 fn a_missing_child_is_reported_with_every_other_problem() {
     let fleet = "[class.model_x]\nready = { front = 1 }\n\
-                 [cell.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n";
+                 [pool.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n";
     let files = Files::new(&spec(""), fleet);
     let f = files.fleet().display().to_string();
     let expected = [
         format!("{f}: [class.model_x] ready.front: not a segment of class `model_x`"),
-        format!("{f}: [cell.global-us-east-1]: no child of class `model_x` in layout `default`; "),
+        format!("{f}: [pool.global-us-east-1]: no child of class `model_x` in layout `default`; "),
     ];
     let check = files.check();
     assert_eq!(check.status.code(), Some(1), "{check:?}");
@@ -253,7 +253,7 @@ fn a_missing_child_is_reported_with_every_other_problem() {
 #[test]
 fn a_default_for_a_name_the_spec_lacks_is_refused() {
     // A placement's problem leaves its layout's classes unknown, so the
-    // check notes that the cells' children went unjudged; a deployment's
+    // check notes that the pools' children went unjudged; a deployment's
     // does not.
     for (extra, expected, unlaid) in [
         (
@@ -262,8 +262,8 @@ fn a_default_for_a_name_the_spec_lacks_is_refused() {
             true,
         ),
         (
-            "[cells.ghost]\npolicy = \"home_first\"\n",
-            "[cells.ghost]: cell policy `[cells.ghost]`: the placement has no class `ghost`",
+            "[pools.ghost]\npolicy = \"home_first\"\n",
+            "[pools.ghost]: pool policy `[pools.ghost]`: the placement has no class `ghost`",
             true,
         ),
         (
@@ -280,7 +280,7 @@ fn a_default_for_a_name_the_spec_lacks_is_refused() {
         let mut lines = vec![format!("{s}: {expected}")];
         if unlaid {
             lines.push(format!(
-                "{f}: the cells' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
+                "{f}: the pools' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
             ));
         }
         assert_problems(&problems(&files.check()), &lines);
@@ -310,7 +310,7 @@ fn a_bad_runtime_path_hides_no_other_problem() {
             format!("{s}: [segment.engine] nodes: segment `engine` lists unknown node `Ghost`"),
             format!("{s}: [pipeline_names] Ghost: the graph has no source `Ghost`"),
             format!(
-                "{f}: the cells' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
+                "{f}: the pools' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
             ),
         ],
     );
@@ -322,7 +322,7 @@ fn a_bad_runtime_path_hides_no_other_problem() {
 fn a_fleet_without_a_layout_still_has_its_counts_checked() {
     let spec = spec("").replacen("nodes = [\"Engine\"]", "node = [\"Engine\"]", 1);
     let fleet = "[class.global]\nready = { front = 0 }\nrequires = { model_x = 0 }\n\
-                 [cell.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\nready = { front = 0 }\n";
+                 [pool.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\nready = { front = 0 }\n";
     let files = Files::new(&spec, fleet);
     let (s, f) = (
         files.spec().display().to_string(),
@@ -337,9 +337,9 @@ fn a_fleet_without_a_layout_still_has_its_counts_checked() {
             ),
             format!("{f}: [class.global] ready.front: is 0; a quorum is at least 1"),
             format!("{f}: [class.global] requires.model_x: is 0; a requirement is at least 1"),
-            format!("{f}: [cell.global-us-east-1] ready.front: is 0; a quorum is at least 1"),
+            format!("{f}: [pool.global-us-east-1] ready.front: is 0; a quorum is at least 1"),
             format!(
-                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+                "{f}: the pools' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
             ),
         ],
     );
@@ -423,7 +423,7 @@ fn generate_names_the_spec_in_a_problem_of_its_own() {
 #[test]
 fn a_spec_with_text_that_is_not_ascii_is_checked_whole() {
     let spec = spec("[config.Frontend]\nnote = \"café\"\nlimit = 3 x\n");
-    let fleet = "[cell.Global]\nclass = \"global\"\nregion = \"r\"\n";
+    let fleet = "[pool.Global]\nclass = \"global\"\nregion = \"r\"\n";
     let files = Files::new(&spec, fleet);
     let output = files.check();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -438,9 +438,9 @@ fn a_spec_with_text_that_is_not_ascii_is_checked_whole() {
                 "{s}:{}: [config.Frontend] limit: ",
                 line_of(&spec, "limit = 3 x")
             ),
-            format!("{f}: [cell.Global]: cell name `Global` must be"),
+            format!("{f}: [pool.Global]: pool name `Global` must be"),
             format!(
-                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+                "{f}: the pools' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
             ),
         ],
     );
@@ -524,7 +524,7 @@ fn check_refuses_a_positional_message_that_omits_a_field() {
     // The fleet's children wait on a layout without problems.
     let refused: Vec<&String> = found
         .iter()
-        .filter(|line| !line.contains("the cells' children are not checked"))
+        .filter(|line| !line.contains("the pools' children are not checked"))
         .collect();
     assert_eq!(refused.len(), 3, "{}", found.join("\n"));
     for (message, field, key) in [

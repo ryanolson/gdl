@@ -1,6 +1,6 @@
 use super::*;
 
-/// Losing a lease gives a sink the same grace after an early cell stop.
+/// Losing a lease gives a sink the same grace after an early pool stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sink_losing_its_lease_after_detachment_keeps_its_drain_grace() {
     response_after_lease_loss(false).await;
@@ -25,7 +25,7 @@ async fn response_after_lease_loss(withhold: bool) {
             config.runtime.faults.withhold_detached = withhold;
         }
     };
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 1),
@@ -43,7 +43,7 @@ async fn response_after_lease_loss(withhold: bool) {
     events.wait_for("D:held:c(lease-bound)#0", WAIT).await;
     let sink = &m1.interior[0];
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     if !withhold {
         assert!(closes(sink, WAIT).await, "the detached sink began its stop");

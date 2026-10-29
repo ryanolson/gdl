@@ -154,8 +154,8 @@ impl Unit<'_> {
         }
         for (name, _) in &self.policies {
             rows.push((
-                format!("[cell_policy.{name}]"),
-                format!("optional: cell policy {name}'s Build::Config"),
+                format!("[pool_policy.{name}]"),
+                format!("optional: pool policy {name}'s Build::Config"),
             ));
         }
         if frontend.is_some() {

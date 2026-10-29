@@ -1,15 +1,15 @@
-//! The cell's record, published on each change of the judged state, of
+//! The pool's record, published on each change of the judged state, of
 //! its presence, and of its models, and on the heartbeat, with the load
-//! summary as it is when it is written, and withdrawn once the cell's
+//! summary as it is when it is written, and withdrawn once the pool's
 //! drain has ended. Under the `relay` backend the heartbeat is the cadence
 //! the parent last answered with. Before its first write, the hub reads
-//! the cell's last record, whose models keep their history.
+//! the pool's last record, whose models keep their history.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gdl_cells::{
-    CellDirectory, CellRecord, CellState, DirectoryError, LoadSummary, Presence, Withdrawal,
+use gdl_pools::{
+    DirectoryError, LoadSummary, PoolDirectory, PoolRecord, PoolState, Presence, Withdrawal,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -19,17 +19,17 @@ use super::feed::Feed;
 use super::models::ModelList;
 use crate::HubDirectory;
 
-/// The longest one read of the cell's last record may take before the
+/// The longest one read of the pool's last record may take before the
 /// publisher starts: a read that fails or takes longer is made again.
 const SNAPSHOT: Duration = Duration::from_secs(2);
 
-/// How long the publisher waits before it reads the cell's last record
+/// How long the publisher waits before it reads the pool's last record
 /// again, after a read that failed.
 const REREAD: Duration = Duration::from_secs(1);
 
 pub(super) struct Publisher<D> {
     pub(super) directory: Arc<D>,
-    pub(super) record: CellRecord,
+    pub(super) record: PoolRecord,
     pub(super) heartbeat: Duration,
     /// The cadence a parent asks the record to be written at, once it has
     /// answered: it replaces `heartbeat` from then.
@@ -37,18 +37,18 @@ pub(super) struct Publisher<D> {
     /// Told the epoch once a write is stored under it, and closed once
     /// the record is withdrawn.
     pub(super) feed: Arc<Feed>,
-    /// The cell's drain, whose end withdraws the record.
+    /// The pool's drain, whose end withdraws the record.
     pub(super) drain: Arc<Drain>,
     /// The state and presence of the record last stored, for a drain or
     /// a change of presence to be answered once its record is.
     pub(super) stored: watch::Sender<Option<Stored>>,
-    /// Under the `relay` backend, where the cell's last record is read:
+    /// Under the `relay` backend, where the pool's last record is read:
     /// its parent's hub, since the hub's own directory holds its
     /// children's records, not its own.
     pub(super) parent: Option<HubDirectory>,
 }
 
-impl<D: CellDirectory> Publisher<D> {
+impl<D: PoolDirectory> Publisher<D> {
     /// Publish the judged state, the presence, and the model entries,
     /// with the summary `loads` holds when each record is written, until
     /// `cancel`, or until the judgment ends. A change of the summary is
@@ -66,16 +66,16 @@ impl<D: CellDirectory> Publisher<D> {
     /// changes, on every heartbeat. A change while a write is in flight
     /// is written once that write ends; one replaced meanwhile by a later
     /// change is not written at all, since a reader keeps only the newest
-    /// record. The first write waits for the cell's last record to be read,
-    /// bounded, so that its models keep their history. Once the cell's drain has ended, the
+    /// record. The first write waits for the pool's last record to be read,
+    /// bounded, so that its models keep their history. Once the pool's drain has ended, the
     /// record is withdrawn, after a last write that says it is `draining`
     /// if the last did not, and nothing is written again: a heartbeat
-    /// after the withdrawal would bring the record back. The cell's
-    /// watches end then, so that the hubs that follow the cell drop it.
+    /// after the withdrawal would bring the record back. The pool's
+    /// watches end then, so that the hubs that follow the pool drop it.
     async fn publish_until(&self, sources: &mut Sources) {
         let directory = &*self.directory;
         // A record written before the last one is read would lose the
-        // history of the cell's models, so the hub writes none until it
+        // history of the pool's models, so the hub writes none until it
         // has read it. Under the `relay` backend, a write could not land
         // while the parent cannot be read either.
         let (mut writer, held) = loop {
@@ -83,7 +83,7 @@ impl<D: CellDirectory> Publisher<D> {
             match Writer::start(directory, parent, &self.record, self.heartbeat).await {
                 (writer, Ok(held)) => break (writer, held),
                 (_, Err(error)) => {
-                    tracing::warn!(%error, "the cell's last record was not read");
+                    tracing::warn!(%error, "the pool's last record was not read");
                     tokio::time::sleep(REREAD).await;
                 }
             }
@@ -131,9 +131,9 @@ impl<D: CellDirectory> Publisher<D> {
                 .publish(directory, (feed, stored), &self.record, &written)
                 .await;
         }
-        if state != CellState::Draining {
+        if state != PoolState::Draining {
             let last = Written {
-                state: CellState::Draining,
+                state: PoolState::Draining,
                 ..sources.take()
             };
             writer
@@ -145,11 +145,11 @@ impl<D: CellDirectory> Publisher<D> {
     }
 }
 
-/// What the record last stored says of the cell's state, presence, and
+/// What the record last stored says of the pool's state, presence, and
 /// models, and the latest request for a presence that it carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Stored {
-    pub(super) state: CellState,
+    pub(super) state: PoolState,
     pub(super) presence: Presence,
     pub(super) request: u64,
     pub(super) models: Arc<ModelList>,
@@ -167,7 +167,7 @@ pub(super) struct Asked {
 /// What a write of the record says, beyond the record the hub was made
 /// with.
 struct Written {
-    state: CellState,
+    state: PoolState,
     presence: Asked,
     load: Option<LoadSummary>,
     models: Arc<ModelList>,
@@ -176,7 +176,7 @@ struct Written {
 /// The sources of what each write says: the judged state, the presence
 /// the hub was told, the load summary, and the model entries.
 pub(super) struct Sources {
-    pub(super) states: watch::Receiver<CellState>,
+    pub(super) states: watch::Receiver<PoolState>,
     pub(super) presence: watch::Receiver<Asked>,
     pub(super) loads: watch::Receiver<Option<LoadSummary>>,
     pub(super) models: watch::Receiver<Arc<ModelList>>,
@@ -214,7 +214,7 @@ async fn answered(cadence: &mut Option<watch::Receiver<Option<Duration>>>) -> Du
     std::future::pending().await
 }
 
-/// The version of the cell's writes.
+/// The version of the pool's writes.
 struct Writer {
     epoch: u64,
     seq: u64,
@@ -228,17 +228,17 @@ struct Writer {
 
 impl Writer {
     /// The writer of a hub that starts now, with the record the directory
-    /// holds for the cell, if it read one in time: its epoch is the time
+    /// holds for the pool, if it read one in time: its epoch is the time
     /// in milliseconds, raised past the held record's, so that a restart
     /// orders after its predecessor even when the predecessor's clock ran
     /// ahead. Under the `relay` backend, the record is read from the
     /// parent. A read that fails or does not end in time is an error.
     async fn start(
-        directory: &impl CellDirectory,
+        directory: &impl PoolDirectory,
         parent: Option<&HubDirectory>,
-        record: &CellRecord,
+        record: &PoolRecord,
         bound: Duration,
-    ) -> (Self, Result<Option<CellRecord>, DirectoryError>) {
+    ) -> (Self, Result<Option<PoolRecord>, DirectoryError>) {
         let now = u64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -249,14 +249,14 @@ impl Writer {
         let read = async {
             match parent {
                 Some(parent) => parent.held(&record.class, &record.name).await,
-                None => gdl_cells::last_record(directory, &record.class, &record.name).await,
+                None => gdl_pools::last_record(directory, &record.class, &record.name).await,
             }
         };
         let held = tokio::time::timeout(SNAPSHOT, read)
             .await
             .unwrap_or_else(|_| {
                 Err(DirectoryError::Unavailable(format!(
-                    "the cell's last record was not read within {SNAPSHOT:?}"
+                    "the pool's last record was not read within {SNAPSHOT:?}"
                 )))
             });
         let epoch = held
@@ -275,9 +275,9 @@ impl Writer {
 
     async fn publish(
         &mut self,
-        directory: &impl CellDirectory,
+        directory: &impl PoolDirectory,
         (feed, stored): (&Feed, &watch::Sender<Option<Stored>>),
-        record: &CellRecord,
+        record: &PoolRecord,
         written: &Written,
     ) {
         self.seq += 1;
@@ -287,7 +287,7 @@ impl Writer {
             load,
             ref models,
         } = *written;
-        let record = CellRecord {
+        let record = PoolRecord {
             state,
             load,
             presence: presence.presence,
@@ -299,7 +299,7 @@ impl Writer {
             ..record.clone()
         };
         let Ok(written) = tokio::time::timeout(self.bound, directory.publish(record)).await else {
-            tracing::warn!(bound = ?self.bound, "the cell's record was not published in time");
+            tracing::warn!(bound = ?self.bound, "the pool's record was not published in time");
             return;
         };
         match written {
@@ -316,7 +316,7 @@ impl Writer {
                 self.stored = true;
             }
             Err(DirectoryError::NotNewer { held, offered, .. }) => {
-                tracing::warn!(%held, %offered, "the directory refused the cell's record as not newer");
+                tracing::warn!(%held, %offered, "the directory refused the pool's record as not newer");
                 if held.epoch == self.epoch && self.stored {
                     self.seq = held.seq;
                 } else if held.epoch >= self.epoch && !self.stored {
@@ -334,11 +334,11 @@ impl Writer {
                 } else {
                     tracing::error!(
                         %held,
-                        "another hub publishes this cell with a later epoch"
+                        "another hub publishes this pool with a later epoch"
                     );
                 }
             }
-            Err(error) => tracing::warn!(%error, "the cell's record was not published"),
+            Err(error) => tracing::warn!(%error, "the pool's record was not published"),
         }
     }
 }
@@ -346,12 +346,12 @@ impl Writer {
 impl Writer {
     /// Withdraw the record, after every write before it, retried once a
     /// heartbeat until the directory takes it.
-    async fn withdraw(&mut self, directory: &impl CellDirectory, record: &CellRecord) {
+    async fn withdraw(&mut self, directory: &impl PoolDirectory, record: &PoolRecord) {
         loop {
             self.seq += 1;
             let withdrawal = Withdrawal {
                 class: record.class.clone(),
-                cell: record.name.clone(),
+                pool: record.name.clone(),
                 epoch: self.epoch,
                 seq: self.seq,
             };
@@ -361,17 +361,17 @@ impl Writer {
                     self.seq = held.seq;
                     continue;
                 }
-                // A later hub of the cell holds its record now: it is that
+                // A later hub of the pool holds its record now: it is that
                 // hub's to withdraw.
                 Ok(Err(DirectoryError::NotNewer { held, .. })) if held.epoch > self.epoch => {
-                    tracing::warn!(%held, "another hub publishes this cell with a later epoch");
+                    tracing::warn!(%held, "another hub publishes this pool with a later epoch");
                     return;
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, "the drained cell's record was not withdrawn");
+                    tracing::warn!(%error, "the drained pool's record was not withdrawn");
                 }
                 Err(_) => {
-                    tracing::warn!(bound = ?self.bound, "the drained cell's record was not withdrawn in time");
+                    tracing::warn!(bound = ?self.bound, "the drained pool's record was not withdrawn in time");
                 }
             }
             tokio::time::sleep(self.bound).await;

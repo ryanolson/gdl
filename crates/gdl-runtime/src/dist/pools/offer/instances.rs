@@ -1,17 +1,17 @@
 //! An entry instance that declines an offer as its own
 //! ([`Decline::Instance`]): the chooser offers the request to each other
-//! entry instance of the cell once, before it leaves the cell for another.
+//! entry instance of the pool once, before it leaves the pool for another.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gdl::__runtime::Typed;
-use gdl::{Cx, Error, ErrorKind, NoCell, Result};
-use gdl_cells::CellState;
+use gdl::{Cx, Error, ErrorKind, NoPool, Result};
+use gdl_pools::PoolState;
 use velo::Velo;
 
-use super::super::{CellTable, Cells, EntryTable, cell_id, targets};
+use super::super::{EntryTable, PoolTable, Pools, pool_id, targets};
 use super::tests::{layout, layout_under};
 use crate::dist::envelope::{Accepted, Forward, VERSION, WireCx, decode, encode};
 use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
@@ -19,9 +19,9 @@ use crate::dist::offers::{Decline, refusal};
 use crate::dist::roster::{Policy, Roster, selector_id};
 use crate::dist::runtime::{Router, Runtime, RuntimeConfig, Within};
 
-/// Full refusals stay Overloaded while at least one offered cell is not
+/// Full refusals stay Overloaded while at least one offered pool is not
 /// gone. Concurrent acceptances and gone refusals can move the mark between
-/// cells, but the marks here never coexist.
+/// pools, but the marks here never coexist.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routing() {
     let fleet = Fleet::new(
@@ -34,7 +34,7 @@ async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routin
     .await;
     let router = fleet.router(
         "round_robin",
-        &gdl::CellPolicies::new(),
+        &gdl::PoolPolicies::new(),
         Within::Policy(Policy::RoundRobin),
     );
     let control = fleet
@@ -48,7 +48,7 @@ async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routin
     );
     assert_eq!(fleet.taken(), [vec![1], vec![1]]);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let changing = fleet.cells.clone();
+    let changing = fleet.pools.clone();
     let stopped = Arc::clone(&done);
     let changes = std::thread::spawn(move || {
         let table = changing.table("d").expect("followed");
@@ -71,7 +71,7 @@ async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routin
             .await
             .expect_err("both entries refuse");
         let offered = fleet.taken();
-        if error.kind() == ErrorKind::Routing && offered.iter().all(|cell| cell == &[1]) {
+        if error.kind() == ErrorKind::Routing && offered.iter().all(|pool| pool == &[1]) {
             routing = Some((turn, offered, error));
             break;
         }
@@ -80,28 +80,28 @@ async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routin
     changes.join().expect("mark changes completed");
     assert!(
         routing.is_none(),
-        "Routing while at most one cell was ever gone: {routing:?}"
+        "Routing while at most one pool was ever gone: {routing:?}"
     );
 }
 
-/// With no failover, a request whose one cell declines as gone fails with
-/// `Routing` when no other cell may take it, as the next request does, and
-/// with the refusal when another cell may.
+/// With no failover, a request whose one pool declines as gone fails with
+/// `Routing` when no other pool may take it, as the next request does, and
+/// with the refusal when another pool may.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn with_no_failover_a_lone_gone_cell_fails_with_routing() {
+async fn with_no_failover_a_lone_gone_pool_fails_with_routing() {
     let config = || RuntimeConfig {
-        cell_failovers: 0,
+        pool_failovers: 0,
         ..RuntimeConfig::default()
     };
     let fleet = Fleet::new(&[("m1", &[Serves::None(Decline::Gone)])], config()).await;
     let router = fleet.router(
         "round_robin",
-        &gdl::CellPolicies::new(),
+        &gdl::PoolPolicies::new(),
         Within::Policy(Policy::RoundRobin),
     );
     let first = fleet.send(&router, "model").await.expect_err("gone");
-    let next = fleet.send(&router, "model").await.expect_err("no cell");
-    assert_eq!(fleet.taken(), [vec![1]], "a gone cell was offered again");
+    let next = fleet.send(&router, "model").await.expect_err("no pool");
+    assert_eq!(fleet.taken(), [vec![1]], "a gone pool was offered again");
     assert_eq!(next.kind(), ErrorKind::Routing, "the control: {next}");
     assert_eq!(first.kind(), ErrorKind::Routing, "{first}");
 
@@ -115,7 +115,7 @@ async fn with_no_failover_a_lone_gone_cell_fails_with_routing() {
     .await;
     let router = fleet.router(
         "round_robin",
-        &gdl::CellPolicies::new(),
+        &gdl::PoolPolicies::new(),
         Within::Policy(Policy::RoundRobin),
     );
     let error = fleet.send(&router, "model").await.expect_err("gone");
@@ -123,7 +123,7 @@ async fn with_no_failover_a_lone_gone_cell_fails_with_routing() {
     assert_eq!(
         error.kind(),
         ErrorKind::Overloaded,
-        "another cell may take it: {error}"
+        "another pool may take it: {error}"
     );
     fleet.send(&router, "model").await.expect("m2 took it");
 }
@@ -143,27 +143,27 @@ enum Serves {
     Not(&'static str),
 }
 
-/// A chooser in `global` and the entry instances of the `model_x` cells
+/// A chooser in `global` and the entry instances of the `model_x` pools
 /// it follows, each answering as it serves: the chooser's runtime, its
-/// tables, and the offers each entry got, cell by cell, in the order of
-/// the cell's entries.
+/// tables, and the offers each entry got, pool by pool, in the order of
+/// the pool's entries.
 struct Fleet {
     rt: Runtime,
-    cells: Cells,
+    pools: Pools,
     offers: Vec<Vec<Arc<AtomicUsize>>>,
     _entries: Vec<Velo>,
 }
 
 impl Fleet {
-    /// The fleet of `cells`, each a name and how each of its entry
+    /// The fleet of `pools`, each a name and how each of its entry
     /// instances serves, with the chooser's runtime under `config`.
-    async fn new(cells: &[(&str, &[Serves])], config: RuntimeConfig) -> Self {
+    async fn new(pools: &[(&str, &[Serves])], config: RuntimeConfig) -> Self {
         let chooser = bind_node(([127, 0, 0, 1], 0).into())
             .await
             .expect("a velo node");
         let mut roster = Roster::new();
         let mut entries = Vec::new();
-        for (_, serves) in cells {
+        for (_, serves) in pools {
             for _ in serves.iter() {
                 let entry = bind_node(([127, 0, 0, 1], 0).into())
                     .await
@@ -181,7 +181,7 @@ impl Fleet {
             None,
         )
         .expect("a runtime");
-        let tables = Cells::new(
+        let tables = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -189,7 +189,7 @@ impl Fleet {
         let mut offers = Vec::new();
         let mut each = entries.iter();
         let mut followed = Vec::new();
-        for (name, serves) in cells {
+        for (name, serves) in pools {
             let mut counts = Vec::new();
             let mut ids = Vec::new();
             for serves in serves.iter().copied() {
@@ -206,13 +206,13 @@ impl Fleet {
                     .expect("a handler");
             }
             offers.push(counts);
-            followed.push(Arc::new(CellTable {
+            followed.push(Arc::new(PoolTable {
                 class: "model_x".into(),
-                cell: (*name).into(),
-                id: cell_id("model_x", name),
+                pool: (*name).into(),
+                id: pool_id("model_x", name),
                 generation: 1,
                 region: "home".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: super::super::tests::idle(),
                 eligible: ids.clone().into(),
                 offered: ids.iter().copied().map(selector_id).collect(),
@@ -228,29 +228,29 @@ impl Fleet {
         tables.store("d", EntryTable::new(followed.into()));
         Self {
             rt,
-            cells: tables,
+            pools: tables,
             offers,
             _entries: entries,
         }
     }
 
-    /// The crossing into `model_x`, choosing the cell by `policy`, of
+    /// The crossing into `model_x`, choosing the pool by `policy`, of
     /// those `policies` registers, and the instance within it as `within`
     /// says.
-    fn router(&self, policy: &str, policies: &gdl::CellPolicies, within: Within) -> Router {
-        let layout = layout_under(gdl_model::CellPolicy {
+    fn router(&self, policy: &str, policies: &gdl::PoolPolicies, within: Within) -> Router {
+        let layout = layout_under(gdl_model::PoolPolicy {
             policy: policy.into(),
         });
         let mut targets = targets(
             &layout,
             "a",
-            &self.cells,
+            &self.pools,
             policies,
             gdl::HomeFirstAt::DEFAULT,
         )
         .expect("targets");
         let target = targets.remove(&(0, 1)).expect("the class cut");
-        Router::Cells(Arc::new(super::super::Crossing::new(
+        Router::Pools(Arc::new(super::super::Crossing::new(
             target,
             within,
             Default::default(),
@@ -278,25 +278,25 @@ impl Fleet {
         .map(drop)
     }
 
-    /// The offers each entry got, cell by cell, since the last call.
+    /// The offers each entry got, pool by pool, since the last call.
     fn taken(&self) -> Vec<Vec<usize>> {
         self.offers
             .iter()
-            .map(|cell| {
-                cell.iter()
+            .map(|pool| {
+                pool.iter()
                     .map(|count| count.swap(0, Ordering::SeqCst))
                     .collect()
             })
             .collect()
     }
 
-    /// Whether the cell `name` is damped, or held gone.
+    /// Whether the pool `name` is damped, or held gone.
     fn damped(&self, name: &str) -> (bool, bool) {
         let shown = self
-            .cells
+            .pools
             .followed("d")
             .into_iter()
-            .find(|cell| cell.cell == name)
+            .find(|pool| pool.pool == name)
             .expect("followed");
         (shown.damped.is_some(), shown.gone)
     }
@@ -345,7 +345,7 @@ impl gdl::Selector for First {
     }
 }
 
-/// How the instance within a cell is chosen: `round_robin`, or a
+/// How the instance within a pool is chosen: `round_robin`, or a
 /// selector that takes the first instance it is given, with its count of
 /// choices.
 fn withins() -> [(Within, Option<Arc<AtomicUsize>>); 2] {
@@ -363,14 +363,14 @@ fn withins() -> [(Within, Option<Arc<AtomicUsize>>); 2] {
     ]
 }
 
-/// A cell whose entry instances A and B each serve one key of the model:
+/// A pool whose entry instances A and B each serve one key of the model:
 /// a request for B's key is offered to A first, A declines it as its own,
-/// and B serves it, in the same cell. The cell is not damped, and the
-/// other cell gets nothing. Under `round_robin` the next request, for A's
+/// and B serves it, in the same pool. The pool is not damped, and the
+/// other pool gets nothing. Under `round_robin` the next request, for A's
 /// key, is offered to B first; a selector that takes the first instance
 /// offers it to A, which takes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_cell() {
+async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_pool() {
     for (within, chosen) in withins() {
         let fleet = Fleet::new(
             &[
@@ -381,7 +381,7 @@ async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_cell() {
         )
         .await;
         let selector = chosen.is_some();
-        let router = fleet.router("round_robin", &gdl::CellPolicies::new(), within);
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
         fleet.send(&router, "key-b").await.expect("B took it");
         assert_eq!(
             fleet.taken(),
@@ -392,10 +392,10 @@ async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_cell() {
         if let Some(chosen) = &chosen {
             assert_eq!(chosen.load(Ordering::SeqCst), 2, "a choice per offer");
         }
-        // A new crossing, so that the cell policy's turn is m1's again.
+        // A new crossing, so that the pool policy's turn is m1's again.
         let router = fleet.router(
             "round_robin",
-            &gdl::CellPolicies::new(),
+            &gdl::PoolPolicies::new(),
             withins_again(&chosen),
         );
         fleet.send(&router, "key-a").await.expect("A took it");
@@ -421,13 +421,13 @@ fn withins_again(chosen: &Option<Arc<AtomicUsize>>) -> Within {
     }
 }
 
-/// When every entry instance of a cell declines as its own, each is
-/// offered the request once, the cell is neither damped nor held gone,
-/// and the next cell takes it. Those offers use none of
-/// `cell_failovers`: with none, the cell's instances are each still
+/// When every entry instance of a pool declines as its own, each is
+/// offered the request once, the pool is neither damped nor held gone,
+/// and the next pool takes it. Those offers use none of
+/// `pool_failovers`: with none, the pool's instances are each still
 /// offered it, and the request then fails with the last refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_whose_every_instance_declines_is_left_for_another() {
+async fn a_pool_whose_every_instance_declines_is_left_for_another() {
     let declines = Serves::None(Decline::Instance);
     for (within, _) in withins() {
         let fleet = Fleet::new(
@@ -435,7 +435,7 @@ async fn a_cell_whose_every_instance_declines_is_left_for_another() {
             RuntimeConfig::default(),
         )
         .await;
-        let router = fleet.router("round_robin", &gdl::CellPolicies::new(), within);
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
         fleet.send(&router, "key").await.expect("m2 took it");
         assert_eq!(fleet.taken(), [vec![1, 1, 1], vec![1]]);
         assert_eq!(fleet.damped("m1"), (false, false));
@@ -444,13 +444,13 @@ async fn a_cell_whose_every_instance_declines_is_left_for_another() {
         let fleet = Fleet::new(
             &[("m1", &[declines; 3]), ("m2", &[Serves::All])],
             RuntimeConfig {
-                cell_failovers: 0,
+                pool_failovers: 0,
                 ..RuntimeConfig::default()
             },
         )
         .await;
-        let router = fleet.router("round_robin", &gdl::CellPolicies::new(), within);
-        let error = fleet.send(&router, "key").await.expect_err("no cell left");
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
+        let error = fleet.send(&router, "key").await.expect_err("no pool left");
         assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
         assert_eq!(fleet.taken(), [vec![1, 1, 1], vec![0]]);
     }
@@ -471,7 +471,7 @@ async fn a_model_one_set_cannot_serve_leaves_its_other_models_there() {
             RuntimeConfig::default(),
         )
         .await;
-        let router = fleet.router("round_robin", &gdl::CellPolicies::new(), within);
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
         fleet.send(&router, "acme-legal").await.expect("m2 took it");
         assert_eq!(fleet.taken(), [vec![1, 1], vec![1]]);
         assert_eq!(fleet.damped("m1"), (false, false));
@@ -488,11 +488,11 @@ async fn a_model_one_set_cannot_serve_leaves_its_other_models_there() {
     }
 }
 
-/// A full or a gone decline from one entry instance is about its cell, as
-/// before: the chooser damps the cell or holds it gone, and offers the
-/// request to another cell, never to the cell's other instance.
+/// A full or a gone decline from one entry instance is about its pool, as
+/// before: the chooser damps the pool or holds it gone, and offers the
+/// request to another pool, never to the pool's other instance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_full_or_gone_instance_still_leaves_its_cell() {
+async fn a_full_or_gone_instance_still_leaves_its_pool() {
     for (decline, damped) in [
         (Decline::Full, (true, false)),
         (Decline::Gone, (false, true)),
@@ -506,7 +506,7 @@ async fn a_full_or_gone_instance_still_leaves_its_cell() {
                 RuntimeConfig::default(),
             )
             .await;
-            let router = fleet.router("round_robin", &gdl::CellPolicies::new(), within);
+            let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
             fleet.send(&router, "key").await.expect("m2 took it");
             assert_eq!(fleet.taken(), [vec![1, 0], vec![1]], "{decline:?}");
             assert_eq!(fleet.damped("m1"), damped, "{decline:?}");
@@ -514,7 +514,7 @@ async fn a_full_or_gone_instance_still_leaves_its_cell() {
     }
 }
 
-/// A cell policy's lease that counts its acceptances and its drops.
+/// A pool policy's lease that counts its acceptances and its drops.
 struct Counting {
     accepted: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
@@ -541,32 +541,32 @@ struct Leasing {
     dropped: Arc<AtomicUsize>,
 }
 
-impl gdl::CellPolicy for Leasing {
+impl gdl::PoolPolicy for Leasing {
     type Head = gdl::Encoded;
 
     fn choose(
         &self,
-        request: gdl::CellRequest<'_, gdl::Encoded>,
-        cells: &[gdl::Cell],
-    ) -> std::result::Result<gdl::CellChoice, NoCell> {
+        request: gdl::PoolRequest<'_, gdl::Encoded>,
+        pools: &[gdl::Pool],
+    ) -> std::result::Result<gdl::PoolChoice, NoPool> {
         let at = gdl::RoundRobin
-            .choose_where(request, cells, |_| true)
-            .ok_or_else(NoCell::new)?;
+            .choose_where(request, pools, |_| true)
+            .ok_or_else(NoPool::new)?;
         self.chosen.fetch_add(1, Ordering::SeqCst);
-        Ok(gdl::CellChoice::new(at).with_lease(Counting {
+        Ok(gdl::PoolChoice::new(at).with_lease(Counting {
             accepted: Arc::clone(&self.accepted),
             dropped: Arc::clone(&self.dropped),
         }))
     }
 }
 
-/// An instance's decline is not its cell's: the cell policy is not asked
-/// again, and its lease on the choice learns that the cell took the
+/// An instance's decline is not its pool's: the pool policy is not asked
+/// again, and its lease on the choice learns that the pool took the
 /// request when another of its instances did. When every instance of the
-/// cell declines, the policy's lease on it ends untold, and the next
-/// cell's choice has its own.
+/// pool declines, the policy's lease on it ends untold, and the next
+/// pool's choice has its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_cell_policys_lease_learns_that_another_instance_took_it() {
+async fn the_pool_policys_lease_learns_that_another_instance_took_it() {
     for (within, _) in withins() {
         let fleet = Fleet::new(
             &[
@@ -577,7 +577,7 @@ async fn the_cell_policys_lease_learns_that_another_instance_took_it() {
         )
         .await;
         let leasing = Leasing::default();
-        let mut policies = gdl::CellPolicies::new();
+        let mut policies = gdl::PoolPolicies::new();
         policies
             .add("leasing", leasing.clone())
             .expect("registered");
@@ -601,7 +601,7 @@ async fn the_cell_policys_lease_learns_that_another_instance_took_it() {
         )
         .await;
         let leasing = Leasing::default();
-        let mut policies = gdl::CellPolicies::new();
+        let mut policies = gdl::PoolPolicies::new();
         policies
             .add("leasing", leasing.clone())
             .expect("registered");

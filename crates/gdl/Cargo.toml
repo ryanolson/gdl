@@ -12,7 +12,7 @@ publish.workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 futures = { workspace = true }
-gdl-cells = { path = "../gdl-cells" }
+gdl-pools = { path = "../gdl-pools" }
 gdl-macros = { path = "../gdl-macros" }
 gdl-message = { path = "../gdl-message" }
 gdl-model = { path = "../gdl-model" }

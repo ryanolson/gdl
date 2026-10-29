@@ -1,22 +1,22 @@
-//! A cell policy that sends each request to the cell its settings name
+//! A pool policy that sends each request to the pool its settings name
 //! for the request's model.
 
 use std::collections::BTreeMap;
 
-use gdl::{Build, Cell, CellChoice, CellPolicy, CellRequest, Result};
+use gdl::{Build, Pool, PoolChoice, PoolPolicy, PoolRequest, Result};
 use policy_messages::Ask;
 use serde::Deserialize;
 
-/// The policy's settings: the cell that serves each model.
+/// The policy's settings: the pool that serves each model.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ByModelSettings {
-    /// Model name to cell name.
+    /// Model name to pool name.
     pub models: BTreeMap<String, String>,
 }
 
-/// Chooses the cell that its settings name for the request's model, and
-/// no cell for a model they do not name.
+/// Chooses the pool that its settings name for the request's model, and
+/// no pool for a model they do not name.
 pub struct ByModel {
     models: BTreeMap<String, String>,
 }
@@ -32,28 +32,28 @@ impl Build for ByModel {
     }
 }
 
-impl CellPolicy for ByModel {
+impl PoolPolicy for ByModel {
     type Head = Ask;
 
     fn choose(
         &self,
-        request: CellRequest<'_, Ask>,
-        cells: &[Cell],
-    ) -> std::result::Result<CellChoice, gdl::NoCell> {
+        request: PoolRequest<'_, Ask>,
+        pools: &[Pool],
+    ) -> std::result::Result<PoolChoice, gdl::NoPool> {
         let model = &request.head().model;
-        let Some(cell) = self.models.get(model) else {
-            tracing::warn!(model, "no cell serves the model");
-            return Err(gdl::NoCell::because(format!("no cell serves model `{model}`")));
+        let Some(pool) = self.models.get(model) else {
+            tracing::warn!(model, "no pool serves the model");
+            return Err(gdl::NoPool::because(format!("no pool serves model `{model}`")));
         };
-        let chosen = cells
+        let chosen = pools
             .iter()
-            .position(|c| c.name() == cell.as_str() && c.takes_work() && !request.is_excluded(c));
+            .position(|c| c.name() == pool.as_str() && c.takes_work() && !request.is_excluded(c));
         // The reason reaches only the log, as a set router's does: the
         // binary's tests read it there.
         match chosen {
-            Some(index) => tracing::info!(model, cell = cells[index].name(), "chose a cell"),
-            None => tracing::warn!(model, "no cell serves the model"),
+            Some(index) => tracing::info!(model, pool = pools[index].name(), "chose a pool"),
+            None => tracing::warn!(model, "no pool serves the model"),
         }
-        chosen.map(CellChoice::new).ok_or_else(gdl::NoCell::new)
+        chosen.map(PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }

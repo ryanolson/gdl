@@ -80,7 +80,7 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 |---|---|
 | `Forward` | envelope version, deployment identity (contract hash and placement hash), hop, the position of the first stage to run, the context's wire part (id, metadata, wall-clock deadline), reply-to, and the payload |
 | its acknowledgement | nothing, or for a streamed request the reply-to of the input anchor that the receiver minted |
-| its refusal | the error, then, when an entry declines an offer from another cell as gone, the string `gone` as a second value, which a build without it does not read ([A cell that is gone](cell-routing.md#a-cell-that-is-gone)) |
+| its refusal | the error, then, when an entry declines an offer from another pool as gone, the string `gone` as a second value, which a build without it does not read ([A pool that is gone](pool-routing.md#a-pool-that-is-gone)) |
 | `Open` | envelope version, deployment identity, hop, the position of the run's first stage, the context's wire part, and reply-to |
 
 A request's head crosses in the buffer it was encoded into. The edge codec writes the head behind 256 bytes of room, and the first offer writes the rest of the `Forward` envelope into that room. The envelope is then one byte string that holds the head where the codec wrote it, so the head is not copied. The bytes are the same as `rmp_serde` gives for the whole envelope, and a receiver reads them as before. With no metadata, the rest of the envelope takes about 100 bytes, which leaves about 150 bytes for metadata. An envelope whose metadata does not fit, and each offer after the first, as a failover makes, copies the head after its own header.

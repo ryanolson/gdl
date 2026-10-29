@@ -25,7 +25,7 @@ async fn body_at_bound(withhold: bool) {
             config.runtime.faults.withhold_detached = withhold;
         }
     };
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 1),
@@ -44,7 +44,7 @@ async fn body_at_bound(withhold: bool) {
     let sink = &m1.interior[0];
     sink.body.send_replace(true);
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     assert_eq!(m1.entries[0].segment.admitted(), 1);
     assert_eq!(m1.entries[0].segment.senders(), 0);

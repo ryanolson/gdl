@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::{CellPolicy, ClassSpec, Placement, PlacementError, PlacementErrors, RequestRouter};
-use super::{SegmentSpec, cells, check_name_shape};
+use super::{ClassSpec, Placement, PlacementError, PlacementErrors, PoolPolicy, RequestRouter};
+use super::{SegmentSpec, check_name_shape, pools};
 use crate::{Problem, Problems, read_toml};
 
 /// A spec's layouts: one graph placed in one or more ways, each placement
@@ -11,7 +11,7 @@ use crate::{Problem, Problems, read_toml};
 ///
 /// A spec without `[layout]` tables has one layout, [`Placements::DEFAULT`],
 /// whose placement is its top-level `[segment]`, `[routing]`, `[class]`,
-/// and `[cells]` tables, read as [`Placement::from_toml`] reads them. A
+/// and `[pools]` tables, read as [`Placement::from_toml`] reads them. A
 /// spec with `[layout.<name>]` tables has one layout for each, holding
 /// those four tables, and none at the top level:
 ///
@@ -46,8 +46,8 @@ struct Tables {
     routing: BTreeMap<String, RequestRouter>,
     #[serde(rename = "class", default)]
     classes: BTreeMap<String, ClassSpec>,
-    #[serde(default, deserialize_with = "cells::recorded")]
-    cells: BTreeMap<String, CellPolicy>,
+    #[serde(default, deserialize_with = "pools::recorded")]
+    pools: BTreeMap<String, PoolPolicy>,
 }
 
 /// The `[layout]` table of a spec, the one key this reader needs.
@@ -59,11 +59,11 @@ struct Written {
 
 /// The tables of a placement, which a spec with `[layout]` tables holds in
 /// them rather than at its top level.
-const PLACEMENT_TABLES: [&str; 4] = ["segment", "routing", "class", "cells"];
+const PLACEMENT_TABLES: [&str; 4] = ["segment", "routing", "class", "pools"];
 
 impl Placements {
     /// The name of the one layout of a spec without `[layout]` tables, by
-    /// which a cell's settings and the fleet file may name it.
+    /// which a pool's settings and the fleet file may name it.
     pub const DEFAULT: &'static str = "default";
 
     /// Read the layouts of a spec, `text`. Every problem with the names and
@@ -108,7 +108,7 @@ impl Placements {
                 segments: tables.segments,
                 routing: tables.routing,
                 classes: tables.classes,
-                cells: tables.cells,
+                pools: tables.pools,
                 spelled: Default::default(),
             };
             match placement.finish(&own) {
@@ -200,8 +200,8 @@ fn within(name: &str, mut problem: Problem) -> Problem {
     problem
 }
 
-/// Whether `name` can name a layout. A cell's settings name the layout the
-/// cell runs, in a file or in the environment (`GDL_CELL__LAYOUT`), and a
+/// Whether `name` can name a layout. A pool's settings name the layout the
+/// pool runs, in a file or in the environment (`GDL_POOL__LAYOUT`), and a
 /// spec names it as a TOML key, so it has a settings key's shape.
 pub fn check_layout_name(name: &str) -> Result<(), String> {
     check_name_shape("layout", name)

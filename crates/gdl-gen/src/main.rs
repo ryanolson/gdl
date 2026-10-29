@@ -37,8 +37,8 @@
 //! file, table, and key, and fails if there is any. `diagram` prints the
 //! placed graph. `export` and `diagram` take a spec of one layout.
 //! `compose` writes a Docker Compose bundle; a spec with classes or several
-//! layouts it deploys only by cell, with `--fleet`: one hub per cell, and
-//! each cell's segments. With `--fleet` it runs the same check as `check`
+//! layouts it deploys only by pool, with `--fleet`: one hub per pool, and
+//! each pool's segments. With `--fleet` it runs the same check as `check`
 //! first, and writes nothing if it fails. With `--local` its images build
 //! the crates the spec names by path, and gdl and its hub from `[gdl]
 //! path`, from a build context that holds them and the bundle, so the

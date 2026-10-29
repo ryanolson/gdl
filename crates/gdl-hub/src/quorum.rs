@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use gdl_cells::CellState;
+use gdl_pools::PoolState;
 
-/// Whether a cell can take work, from the usable instances of each segment
-/// of its class and the cell's quorum of each: the rule a cell's hub
+/// Whether a pool can take work, from the usable instances of each segment
+/// of its class and the pool's quorum of each: the rule a pool's hub
 /// publishes by. The caller passes the time, so the rule is tested at
 /// chosen instants and never waits.
 ///
@@ -12,8 +12,8 @@ use gdl_cells::CellState;
 ///   segment has one;
 /// - `ready` once every segment has met its quorum without a break for
 ///   `hold`. A drop below quorum during the hold restarts it, so that an
-///   instance that flaps does not flap the cell into `ready`. During the
-///   hold the cell is `degraded`: every segment has a usable instance,
+///   instance that flaps does not flap the pool into `ready`. During the
+///   hold the pool is `degraded`: every segment has a usable instance,
 ///   which is what `degraded` promises a chooser, and `ready` it is not
 ///   yet.
 ///
@@ -27,7 +27,7 @@ pub struct Quorum {
     hold: Duration,
     /// Since when every segment has met its quorum, without a break.
     met: Option<Instant>,
-    state: CellState,
+    state: PoolState,
 }
 
 impl Quorum {
@@ -50,7 +50,7 @@ impl Quorum {
                 .collect(),
             hold,
             met: None,
-            state: CellState::Unavailable,
+            state: PoolState::Unavailable,
         }
     }
 
@@ -70,24 +70,24 @@ impl Quorum {
         }
     }
 
-    /// The cell's state at `now`, from the counts set so far. Each call is
+    /// The pool's state at `now`, from the counts set so far. Each call is
     /// a judgment: a segment below its quorum here ends the hold, even if
     /// a later count restores it.
-    pub fn state(&mut self, now: Instant) -> CellState {
+    pub fn state(&mut self, now: Instant) -> PoolState {
         let present = self.segments.iter().all(|s| s.usable > 0);
         let met = self.segments.iter().all(|s| s.usable >= s.quorum);
         self.state = if !present {
             self.met = None;
-            CellState::Unavailable
+            PoolState::Unavailable
         } else if !met {
             self.met = None;
-            CellState::Degraded
+            PoolState::Degraded
         } else {
             let since = *self.met.get_or_insert(now);
             if now.saturating_duration_since(since) >= self.hold {
-                CellState::Ready
+                PoolState::Ready
             } else {
-                CellState::Degraded
+                PoolState::Degraded
             }
         };
         self.state
@@ -97,7 +97,7 @@ impl Quorum {
     /// while one runs.
     pub fn next_change(&self) -> Option<Instant> {
         match (self.state, self.met) {
-            (CellState::Ready, _) | (_, None) => None,
+            (PoolState::Ready, _) | (_, None) => None,
             (_, Some(since)) => Some(since + self.hold),
         }
     }

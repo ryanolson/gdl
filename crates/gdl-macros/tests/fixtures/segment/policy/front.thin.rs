@@ -21,7 +21,7 @@ segments = ["front"]
 [class.model]
 segments = ["model"]
 
-[cells.model]
+[pools.model]
 policy = "by_model"
 "#;
     graph_config: "[Model]\n";

@@ -1,27 +1,27 @@
-//! Cell policies of each kind of head, and impls the reader leaves out.
+//! Pool policies of each kind of head, and impls the reader leaves out.
 
-use gdl::{Cell, CellPolicy, CellRequest, Encoded, Projected};
+use gdl::{Pool, PoolPolicy, PoolRequest, Encoded, Projected};
 use read_protocols::Words;
 
 /// Reads the head whole.
 pub struct Whole;
 
-impl CellPolicy for Whole {
+impl PoolPolicy for Whole {
     type Head = Words;
 
-    fn choose(&self, _: CellRequest<'_, Words>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        Err(gdl::NoCell::new())
+    fn choose(&self, _: PoolRequest<'_, Words>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
     }
 }
 
 /// Reads the head's bytes.
 pub struct Bytes;
 
-impl CellPolicy for Bytes {
+impl PoolPolicy for Bytes {
     type Head = Encoded;
 
-    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        Err(gdl::NoCell::new())
+    fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
     }
 }
 
@@ -33,11 +33,11 @@ pub struct Part {}
 /// Reads no head: the request is `()`.
 pub struct Unit;
 
-impl CellPolicy for Unit {
+impl PoolPolicy for Unit {
     type Head = ();
 
-    fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        Err(gdl::NoCell::new())
+    fn choose(&self, _: PoolRequest<'_, ()>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
     }
 }
 
@@ -47,11 +47,11 @@ pub mod globbed {
     /// Names the trait through a glob of gdl.
     pub struct Globbed;
 
-    impl CellPolicy for Globbed {
+    impl PoolPolicy for Globbed {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 }
@@ -60,14 +60,14 @@ pub use globbed::Globbed;
 
 pub mod local {
     /// A trait of gdl's name that is not gdl's.
-    pub trait CellPolicy {
+    pub trait PoolPolicy {
         type Head;
     }
 
     /// Implements only the local trait.
     pub struct Imposter;
 
-    impl CellPolicy for Imposter {
+    impl PoolPolicy for Imposter {
         type Head = gdl::Encoded;
     }
 }
@@ -80,11 +80,11 @@ pub mod nested {
     /// Reads a part of the head; reached from the root by a `use`.
     pub struct Parted;
 
-    impl CellPolicy for Parted {
+    impl PoolPolicy for Parted {
         type Head = Projected<Part>;
 
-        fn choose(&self, _: CellRequest<'_, Projected<Part>>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: PoolRequest<'_, Projected<Part>>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 }
@@ -97,11 +97,11 @@ mod hidden {
     /// Not reached from the crate root, so no segment could name it.
     pub struct Hidden;
 
-    impl CellPolicy for Hidden {
+    impl PoolPolicy for Hidden {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 }
@@ -109,25 +109,25 @@ mod hidden {
 /// Generic: no one type to name.
 pub struct Generic<T>(T);
 
-impl<T: Send + Sync + 'static> CellPolicy for Generic<T> {
+impl<T: Send + Sync + 'static> PoolPolicy for Generic<T> {
     type Head = Encoded;
 
-    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        Err(gdl::NoCell::new())
+    fn choose(&self, _: PoolRequest<'_, Encoded>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
     }
 }
 
 pub mod parent {
-    use super::{Cell, CellPolicy, CellRequest};
+    use super::{Pool, PoolPolicy, PoolRequest};
 
     /// Names the trait through its parent's `use` of it.
     pub struct FromParent;
 
-    impl CellPolicy for FromParent {
+    impl PoolPolicy for FromParent {
         type Head = ();
 
-        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: PoolRequest<'_, ()>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 }
@@ -137,7 +137,7 @@ pub use parent::FromParent;
 pub mod shadow {
     /// A module of the crate's own that is named `gdl`.
     pub mod gdl {
-        pub trait CellPolicy {
+        pub trait PoolPolicy {
             type Head;
         }
     }
@@ -147,7 +147,7 @@ pub mod shadow {
     /// Implements the trait of the local `gdl` module, not gdl's.
     pub struct Shadowed;
 
-    impl CellPolicy for Shadowed {
+    impl PoolPolicy for Shadowed {
         type Head = ();
     }
 }
@@ -155,7 +155,7 @@ pub mod shadow {
 pub use shadow::Shadowed;
 
 pub mod aliased {
-    use gdl::CellPolicy as Routing;
+    use gdl::PoolPolicy as Routing;
 
     pub mod inner {
         use super::Routing;
@@ -166,8 +166,8 @@ pub mod aliased {
         impl Routing for Renamed {
             type Head = gdl::Encoded;
 
-            fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-                Err(gdl::NoCell::new())
+            fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+                Err(gdl::NoPool::new())
             }
         }
     }
@@ -176,16 +176,16 @@ pub mod aliased {
 pub use aliased::inner::Renamed;
 
 pub mod crate_import {
-    use gdl::{self, Cell, CellRequest};
+    use gdl::{self, Pool, PoolRequest};
 
     /// Names the trait through an explicit import of the gdl crate.
     pub struct ThroughCrate;
 
-    impl gdl::CellPolicy for ThroughCrate {
+    impl gdl::PoolPolicy for ThroughCrate {
         type Head = ();
 
-        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: PoolRequest<'_, ()>, _: &[Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 }
@@ -195,7 +195,7 @@ pub use crate_import::ThroughCrate;
 pub mod globbed_facade {
     pub mod facade {
         pub mod gdl {
-            pub trait CellPolicy {
+            pub trait PoolPolicy {
                 type Head;
             }
         }
@@ -208,7 +208,7 @@ pub mod globbed_facade {
     /// after a glob of gdl itself.
     pub struct Faked;
 
-    impl gdl::CellPolicy for Faked {
+    impl gdl::PoolPolicy for Faked {
         type Head = ();
     }
 }

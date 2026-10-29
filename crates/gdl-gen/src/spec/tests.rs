@@ -330,11 +330,11 @@ fn every_bad_binding_is_found() {
     );
 }
 
-/// A `[cell_policy.<name>]` table names a policy's crate and type, as a
+/// A `[pool_policy.<name>]` table names a policy's crate and type, as a
 /// `[bind.<node>]` table names a node's, in a contract spec and in a graph
 /// spec; its crate must be the package the table names.
 #[test]
-fn a_spec_binds_a_cell_policy_to_its_crate() {
+fn a_spec_binds_a_pool_policy_to_its_crate() {
     let temp = contract_dir("policy");
     let dir = temp.path();
     for (path, package) in [("router", "policy-router"), ("other", "other-router")] {
@@ -345,7 +345,7 @@ fn a_spec_binds_a_cell_policy_to_its_crate() {
         )
         .expect("write");
     }
-    let table = "[cell_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
+    let table = "[pool_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
     for head in [
         "[contract]\npath = \"contract\"\n",
         "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n",
@@ -354,7 +354,7 @@ fn a_spec_binds_a_cell_policy_to_its_crate() {
         std::fs::write(&file, format!("{head}[gdl]\nversion = \"0.1\"\n{table}")).expect("write");
         let spec = Spec::load(&file).expect("spec");
         assert!(spec.problems.is_empty(), "{:?}", spec.problems);
-        let policy = &spec.cell_policies["by_model"];
+        let policy = &spec.pool_policies["by_model"];
         assert_eq!(policy.package, "policy-router");
         assert_eq!(policy.lib, "router", "the library its manifest names");
         assert_eq!(policy.source, CrateSource::Path(dir.join("router")));
@@ -372,27 +372,27 @@ fn a_spec_binds_a_cell_policy_to_its_crate() {
     let spec = Spec::load(&file).expect("the spec itself parses");
     assert_eq!(spec.problems.len(), 1, "{:?}", spec.problems);
     assert!(
-        spec.problems[0].starts_with("[cell_policy.by_model]: ")
+        spec.problems[0].starts_with("[pool_policy.by_model]: ")
             && spec.problems[0].ends_with("holds package `other-router`, not `policy-router`"),
         "{}",
         spec.problems[0]
     );
 }
 
-/// A `[cell_policy.<name>]` table names its crate as `[nodes] crates`
+/// A `[pool_policy.<name>]` table names its crate as `[nodes] crates`
 /// can: by a directory, an exact version, or a Git revision with an
 /// optional library name. A version names the library for the package.
 #[test]
-fn a_cell_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
+fn a_pool_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
     let temp = contract_dir("policy-sources");
     let dir = temp.path();
     let head = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n";
     let policy = |source: &str| {
         let text = format!(
-            "{head}[cell_policy.by_model]\ncrate = \"policy-router\"\n{source}type = \"policy_router::ByModel\"\n"
+            "{head}[pool_policy.by_model]\ncrate = \"policy-router\"\n{source}type = \"policy_router::ByModel\"\n"
         );
         Spec::parse(&text, &dir.join("gdl.toml"), dir)
-            .map(|spec| spec.cell_policies["by_model"].clone())
+            .map(|spec| spec.pool_policies["by_model"].clone())
     };
     let versioned = policy("version = \"0.3.1\"\n").expect("a version");
     assert_eq!(versioned.source, CrateSource::Version("0.3.1".into()));
@@ -427,7 +427,7 @@ fn a_cell_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
         };
         let error = error.to_string();
         assert!(
-            error.contains("[cell_policy.by_model]"),
+            error.contains("[pool_policy.by_model]"),
             "{source:?}: {error}"
         );
     }
@@ -436,8 +436,8 @@ fn a_cell_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
 /// A table that names its crate by a directory is written back as it was
 /// read.
 #[test]
-fn a_cell_policy_table_by_path_is_written_back_as_read() {
-    let text = "[graph]\npath = \"chat.gdl\"\n\n[messages]\ncrates = [\"p@1.0.0\"]\n\n[gdl]\nversion = \"0.1\"\n\n[cell_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"policy_router::ByModel\"\n";
+fn a_pool_policy_table_by_path_is_written_back_as_read() {
+    let text = "[graph]\npath = \"chat.gdl\"\n\n[messages]\ncrates = [\"p@1.0.0\"]\n\n[gdl]\nversion = \"0.1\"\n\n[pool_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"policy_router::ByModel\"\n";
     let raw: Raw = toml::from_str(text).expect("a spec");
     assert_eq!(toml::to_string(&raw).expect("written"), text);
 }
@@ -571,17 +571,17 @@ fn a_bad_class_table_is_the_class_tables_error() {
     }
 }
 
-/// A spec's cell policies are the placement's, as its classes are.
+/// A spec's pool policies are the placement's, as its classes are.
 #[test]
-fn a_spec_sets_a_cell_policy() {
-    let temp = contract_dir("cells");
+fn a_spec_sets_a_pool_policy() {
+    let temp = contract_dir("pools");
     let dir = temp.path();
-    let text = format!("{CLASSED}    [cells.model_x]\n    policy = 'home_first'\n");
+    let text = format!("{CLASSED}    [pools.model_x]\n    policy = 'home_first'\n");
     let spec = Spec::parse(&text, &dir.join("gdl.toml"), dir).expect("spec");
     let direct = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = ['A', 'B']\n[segment.engine]\nnodes = ['E']\n\
          [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n\
-         [cells.model_x]\npolicy = 'home_first'\n",
+         [pools.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     assert_eq!(*spec.placement(), direct);
@@ -594,19 +594,19 @@ fn a_spec_sets_a_cell_policy() {
     );
 }
 
-/// An error in a cells table is the cells table's.
+/// An error in a pools table is the pools table's.
 #[test]
-fn a_bad_cells_table_is_the_cells_tables_error() {
-    let temp = contract_dir("bad-cells");
+fn a_bad_pools_table_is_the_pools_tables_error() {
+    let temp = contract_dir("bad-pools");
     let dir = temp.path();
     for (bad, table) in [
         (
-            "    [cells.model_x]\n    spill = 3\n",
-            "[cells.model_x] spill: ",
+            "    [pools.model_x]\n    spill = 3\n",
+            "[pools.model_x] spill: ",
         ),
         (
-            "    [cells.model_x]\n    policy = \"Home\"\n",
-            "[cells.model_x] policy: ",
+            "    [pools.model_x]\n    policy = \"Home\"\n",
+            "[pools.model_x] policy: ",
         ),
     ] {
         let text = format!("{CLASSED}{bad}");
@@ -736,9 +736,9 @@ fn every_spec_table_refuses_an_unknown_key_where_it_is() {
             "[class.model_x] segment",
         ),
         (
-            format!("{CONTRACT}[cells.model_x]\nspill = 3\n"),
+            format!("{CONTRACT}[pools.model_x]\nspill = 3\n"),
             "spill",
-            "[cells.model_x] spill",
+            "[pools.model_x] spill",
         ),
         (
             format!("{CONTRACT}[routing]\nE = {{ selector = \"affinity\", key = \"k\" }}\n"),
@@ -833,7 +833,7 @@ fn a_spec_reads_back_what_it_writes() {
         [segment.front]\nnodes = [\"A\", \"B\"]\n[segment.engine]\nnodes = [\"E\"]\n\
         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
         [routing]\nE = { selector = \"affinity\" }\nB = \"random\"\n\
-        [cells.model_x]\npolicy = \"nearest\"\n\
+        [pools.model_x]\npolicy = \"nearest\"\n\
         [deployment]\nbase_image = \"debian:trixie-slim\"\nbuild_image = \"rust:1.93\"\nhub_image = \"hub:1\"\n\
         [deployment.segment.engine]\nbase_image = \"cuda:12\"\nports = [\"9000:9000\"]\n\
         [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n\
@@ -844,7 +844,7 @@ fn a_spec_reads_back_what_it_writes() {
     let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
         [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
         [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n\
-        [cell_policy.by_model]\ncrate = \"router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
+        [pool_policy.by_model]\ncrate = \"router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
     // The graph spec's placement as two layouts' tables.
     let layouts = {
         let (head, tail) = graph.split_at(graph.find("[segment.front]").expect("segments"));
@@ -894,7 +894,7 @@ fn a_spec_reads_back_what_it_writes() {
         "pipeline_names",
         "pin",
         "bind",
-        "cell_policy",
+        "pool_policy",
         "nodes",
         "contract",
         "binary",

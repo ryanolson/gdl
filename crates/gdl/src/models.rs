@@ -1,5 +1,5 @@
 //! What a node in an entry segment says of the models its instance has,
-//! for its cell's hub to publish in the cell's record. A dynamo node reads
+//! for its pool's hub to publish in the pool's record. A dynamo node reads
 //! each model's card, a Stargate adapter its model list; the runtime sends
 //! what the node said to the hub with the instance's load reports, and as
 //! soon as it changes, never on a request's path.
@@ -27,8 +27,8 @@ tokio::task_local! {
 /// what it has changes: a model loads, becomes ready, or is removed on
 /// purpose (`draining`, then left out of the list once it is gone). An
 /// instance whose nodes never call it reports no list, and serves the
-/// models its cell's settings declare. The runtime reports the list for an
-/// entry instance in a cell, and for no other.
+/// models its pool's settings declare. The runtime reports the list for an
+/// entry instance in a pool, and for no other.
 ///
 /// A model that a node drops from its list while its drain has not been
 /// reported yet stays in the list as `draining` until a report that

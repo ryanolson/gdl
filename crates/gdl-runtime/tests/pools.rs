@@ -1,28 +1,28 @@
-//! An instance in a cell: its launch stops at its class's boundary, and
-//! only a chooser follows other cells.
+//! An instance in a pool: its launch stops at its class's boundary, and
+//! only a chooser follows other pools.
 
 mod common;
 
-use common::cells::{
-    Instance, Resolving, admission_hub, cell_hub, global_cell, global_hub, hub_config, launch,
-    model_cell, settings,
+use common::pools::{
+    Instance, Resolving, admission_hub, global_hub, global_pool, hub_config, launch, model_pool,
+    pool_hub, settings,
 };
 use common::{Idle, WAIT};
 use gdl_model::SegmentPhase;
 use gdl_runtime::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
 
-/// A global instance in a cell launches and serves with no model cell
+/// A global instance in a pool launches and serves with no model pool
 /// running at all: it waits for no instance of another class, at its
 /// rendezvous or at its routing barrier.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_global_instance_in_a_cell_serves_with_no_model_cell() {
+async fn a_global_instance_in_a_pool_serves_with_no_model_pool() {
     let hub = admission_hub().await;
     let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
-    let config = settings(public, control, 2_000, &global_cell());
+    let config = settings(public, control, 2_000, &global_pool());
     let (_process, launched) = tokio::time::timeout(WAIT, launch(&config, "a"))
         .await
         .expect("the launch ended within the wait")
-        .expect("a global instance in a cell launched without a model cell");
+        .expect("a global instance in a pool launched without a model pool");
     tokio::time::timeout(WAIT, launched.serve(Idle, |_, _| async { Ok(()) }))
         .await
         .expect("the barrier passed within the wait")
@@ -30,10 +30,10 @@ async fn a_global_instance_in_a_cell_serves_with_no_model_cell() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// A model cell's instances launch and serve with no global instance
+/// A model pool's instances launch and serve with no global instance
 /// running: they wait for each other, the segments of their own class.
 /// Their bodies end at once, and the entry instance's stop waits for the
-/// cells that follow its cell, which this hub, without the cell's
+/// pools that follow its pool, which this hub, without the pool's
 /// extension, never says avoid it: so up to its bound, the setup timeout
 /// and twice the summary period, here 200 ms and 1 s, then the setup
 /// timeout.
@@ -44,12 +44,12 @@ async fn a_global_instance_in_a_cell_serves_with_no_model_cell() {
 /// at once: it leaves within a poll of its body's end. An entry still at
 /// its barrier then finds no instance of `d` left, and fails, as it should.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_model_cell_serves_with_no_global_instance() {
+async fn a_model_pool_serves_with_no_global_instance() {
     let hub = admission_hub().await;
     let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
     let extra = format!(
         "{}summary_ms = 1000\n[runtime]\nsetup_timeout_ms = 200\n",
-        model_cell("model-x-01-us-east-1")
+        model_pool("model-x-01-us-east-1")
     );
     let config = settings(public, control, 2_000, &extra);
     let (entry, interior) = tokio::time::timeout(WAIT, async {
@@ -60,8 +60,8 @@ async fn a_model_cell_serves_with_no_global_instance() {
     let (_entry_process, entry) = entry.expect("the entry launched without a global instance");
     let (_interior_process, interior) = interior.expect("the interior launched");
     assert!(
-        entry.cells().is_none() && interior.cells().is_none(),
-        "a model cell's instance sends into no other class, and follows nothing"
+        entry.pools().is_none() && interior.pools().is_none(),
+        "a model pool's instance sends into no other class, and follows nothing"
     );
     assert_eq!(
         entry.roster().instances("d").len(),
@@ -90,10 +90,10 @@ async fn a_model_cell_serves_with_no_global_instance() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// An instance without a cell waits, as it always has, for an instance of
+/// An instance without a pool waits, as it always has, for an instance of
 /// every segment, whatever its class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_instance_without_a_cell_waits_for_every_segment() {
+async fn an_instance_without_a_pool_waits_for_every_segment() {
     let hub = admission_hub().await;
     let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
     let config = settings(public, control, 500, "");
@@ -101,7 +101,7 @@ async fn an_instance_without_a_cell_waits_for_every_segment() {
         .await
         .expect("the launch ended within the wait")
     else {
-        panic!("an instance without a cell launched with no model instance");
+        panic!("an instance without a pool launched with no model instance");
     };
     let error = error.to_string();
     assert!(
@@ -111,14 +111,14 @@ async fn an_instance_without_a_cell_waits_for_every_segment() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// With a cell, `[min_replicas]` names only the segments of the cell's
+/// With a pool, `[min_replicas]` names only the segments of the pool's
 /// class: an instance waits for no other, so a count for one would be
 /// ignored, and is refused instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_refuses_a_count_of_another_class() {
+async fn a_pool_refuses_a_count_of_another_class() {
     let hub = admission_hub().await;
     let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
-    let extra = format!("{}[min_replicas]\nf = 2\n", global_cell());
+    let extra = format!("{}[min_replicas]\nf = 2\n", global_pool());
     let config = settings(public, control, 500, &extra);
     let Err(error) = tokio::time::timeout(WAIT, launch(&config, "a"))
         .await
@@ -134,15 +134,15 @@ async fn a_cell_refuses_a_count_of_another_class() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// Without a cell, an instance of a classed placement follows nothing: it
+/// Without a pool, an instance of a classed placement follows nothing: it
 /// keeps no tables and opens no watch of its hub's relay, which a chooser
 /// on the same hub does open, as the control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_instance_without_a_cell_follows_nothing() {
+async fn an_instance_without_a_pool_follows_nothing() {
     let directory = Resolving::new();
-    let (global, relay) = cell_hub(global_hub(), &directory).await;
+    let (global, relay) = pool_hub(global_hub(), &directory).await;
     let (public, control) = (global.public_addr().port(), global.control_addr().port());
-    // An instance without a cell waits for one of every segment.
+    // An instance without a pool waits for one of every segment.
     let mut others = Vec::new();
     for segment in ["f", "d"] {
         let mut other = Instance::join(&global, segment).await;
@@ -151,23 +151,23 @@ async fn an_instance_without_a_cell_follows_nothing() {
     }
     let (_plain_process, plain) = launch(&settings(public, control, 5_000, ""), "a")
         .await
-        .expect("launched without a cell");
+        .expect("launched without a pool");
     assert!(
-        plain.cells().is_none(),
-        "an instance without a cell keeps tables"
+        plain.pools().is_none(),
+        "an instance without a pool keeps tables"
     );
     let mut watchers = relay.follows_watchers();
     assert_eq!(
         *watchers.borrow(),
         0,
-        "an instance without a cell watches the relay"
+        "an instance without a pool watches the relay"
     );
 
     let (_chooser_process, chooser) =
-        launch(&settings(public, control, 5_000, &global_cell()), "a")
+        launch(&settings(public, control, 5_000, &global_pool()), "a")
             .await
             .expect("the chooser launched");
-    assert!(chooser.cells().is_some());
+    assert!(chooser.pools().is_some());
     tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching >= 1))
         .await
         .expect("the chooser watched the relay within the wait")
@@ -175,7 +175,7 @@ async fn an_instance_without_a_cell_follows_nothing() {
     assert_eq!(
         *watchers.borrow(),
         1,
-        "one watch per chooser, and none without a cell"
+        "one watch per chooser, and none without a pool"
     );
     drop(chooser);
     tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 0))
@@ -187,7 +187,7 @@ async fn an_instance_without_a_cell_follows_nothing() {
 }
 
 /// An instance of a placement without classes keeps no tables: it is in
-/// no cell and crosses into no class.
+/// no pool and crosses into no class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_placement_without_classes_follows_nothing() {
     let node = |name: &str, role| NodeInfo {
@@ -236,7 +236,7 @@ async fn a_placement_without_classes_follows_nothing() {
         }
     };
     let ((_a, source), (_d, sink)) = tokio::join!(start("a"), start("d"));
-    assert!(source.cells().is_none() && sink.cells().is_none());
+    assert!(source.pools().is_none() && sink.pools().is_none());
     hub.shutdown().await.expect("valid test fixture");
 }
 
@@ -245,10 +245,10 @@ async fn a_placement_without_classes_follows_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_launch_ends_its_chooser() {
     let directory = Resolving::new();
-    let (global, relay) = cell_hub(global_hub(), &directory).await;
+    let (global, relay) = pool_hub(global_hub(), &directory).await;
     let (public, control) = (global.public_addr().port(), global.control_addr().port());
     // Two instances of `a` are required, and only one comes.
-    let extra = format!("{}[min_replicas]\na = 2\n", global_cell());
+    let extra = format!("{}[min_replicas]\na = 2\n", global_pool());
     let config = settings(public, control, 1_500, &extra);
     let launching = tokio::spawn(async move { launch(&config, "a").await.map(|_| ()) });
     let mut watchers = relay.follows_watchers();

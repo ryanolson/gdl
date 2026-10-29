@@ -1,13 +1,13 @@
 //! A global offers work only to its children, by round robin: its hub
-//! follows the model cells whose record names the global's cell as their
+//! follows the model pools whose record names the global's pool as their
 //! parent (`home`), with its contract and placement hashes, whatever their
 //! region, and its chooser gives each request the next of them that may
-//! take it, `ready` before `degraded`, under the default cell policy,
+//! take it, `ready` before `degraded`, under the default pool policy,
 //! `round_robin`, which reads no load summary.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
-//! sharing one directory. The model cells' load summary period is the
-//! default, 10 s, which no test here waits out, so no cell has a summary.
+//! sharing one directory. The model pools' load summary period is the
+//! default, 10 s, which no test here waits out, so no pool has a summary.
 
 mod common;
 
@@ -16,15 +16,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model_changed, placement, run, spec_of,
+    Model, ModelPool, RUNTIME, Running, ask, model_changed, placement, run, spec_of,
 };
-use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
+use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
 use common::{Chunk, Events, Plan, Prompt, WAIT, prompt};
 use futures::StreamExt;
 use gdl::{Cx, ErrorKind, Next, Selectors};
-use gdl_cells::{CellDirectory, CellEvent};
-use gdl_hub::CellReadiness;
-use gdl_runtime::{CellState, Cells, DeploymentSpec, Register, RequestRouter, RuntimeConfig};
+use gdl_hub::PoolReadiness;
+use gdl_pools::{PoolDirectory, PoolEvent};
+use gdl_runtime::{DeploymentSpec, PoolState, Pools, Register, RequestRouter, RuntimeConfig};
 use velo_hub::Hub;
 
 const M1: &str = "model-x-01-us-east-1";
@@ -52,7 +52,7 @@ fn degraded(name: &'static str, hub: &'static str) -> Model<'static> {
     }
 }
 
-/// The global cell's hub, its cell's extension, and its chooser, an
+/// The global pool's hub, its pool's extension, and its chooser, an
 /// instance of `a` whose entry instances take `runtime`.
 async fn global(
     spec: &DeploymentSpec,
@@ -60,11 +60,11 @@ async fn global(
     events: &Arc<Events>,
 ) -> (
     Hub,
-    Arc<CellReadiness<Resolving>>,
+    Arc<PoolReadiness<Resolving>>,
     Running<impl Next<Prompt, Chunk> + Register + use<>>,
 ) {
-    let (hub, readiness) = cell_hub_of(spec, global_hub(), directory).await;
-    let extra = format!("{}{RUNTIME}", global_cell());
+    let (hub, readiness) = pool_hub_of(spec, global_hub(), directory).await;
+    let extra = format!("{}{RUNTIME}", global_pool());
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
@@ -81,30 +81,30 @@ async fn global(
     (hub, readiness, chooser)
 }
 
-/// The child `cell` of the global, of `spec`, with no load summary.
+/// The child `pool` of the global, of `spec`, with no load summary.
 async fn child(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    model_changed(spec, directory, cell, &|hub| hub, events).await
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    model_changed(spec, directory, pool, &|hub| hub, events).await
 }
 
 /// The chooser's tables.
-fn tables<H>(chooser: &Running<H>) -> Cells {
+fn tables<H>(chooser: &Running<H>) -> Pools {
     chooser
-        .cells
+        .pools
         .clone()
-        .expect("a global instance in a cell chooses")
+        .expect("a global instance in a pool chooses")
 }
 
 /// Wait until the chooser follows each of `expected` in its state, with
 /// one eligible entry instance, and no load summary.
-async fn following(cells: &Cells, expected: &[(&str, CellState)]) {
-    until(cells, "the children followed", |cells| {
-        expected.iter().all(|(cell, state)| {
-            followed(cells, "f", cell)
+async fn following(pools: &Pools, expected: &[(&str, PoolState)]) {
+    until(pools, "the children followed", |pools| {
+        expected.iter().all(|(pool, state)| {
+            followed(pools, "f", pool)
                 .is_some_and(|m| m.state == *state && m.eligible.len() == 1 && m.load.is_none())
         })
     })
@@ -113,29 +113,29 @@ async fn following(cells: &Cells, expected: &[(&str, CellState)]) {
 
 /// The request failed with `Routing`, naming the class.
 fn unplaced(result: gdl::Result<()>) {
-    let error = result.expect_err("no cell can take the request");
+    let error = result.expect_err("no pool can take the request");
     assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
     assert!(error.to_string().contains("model_x"), "{error}");
 }
 
 /// Send `n` requests one after the other, and return, for each, the
-/// index in `cells` of the cell that took it.
+/// index in `pools` of the pool that took it.
 async fn order<H: Next<Prompt, Chunk>, M>(
     chooser: &Running<H>,
-    cells: &[&ModelCell<M>],
+    pools: &[&ModelPool<M>],
     n: usize,
 ) -> Vec<usize> {
     let mut order = Vec::with_capacity(n);
     for i in 0..n {
-        let before: Vec<usize> = cells.iter().map(|cell| cell.forwards()).collect();
+        let before: Vec<usize> = pools.iter().map(|pool| pool.forwards()).collect();
         if let Err(error) = ask(&chooser.segment).await {
             panic!("request {i} failed: {error}");
         }
-        let took: Vec<usize> = cells
+        let took: Vec<usize> = pools
             .iter()
             .zip(&before)
             .enumerate()
-            .filter(|(_, (cell, before))| cell.forwards() > **before)
+            .filter(|(_, (pool, before))| pool.forwards() > **before)
             .map(|(at, _)| at)
             .collect();
         assert_eq!(took.len(), 1, "request {i} was taken by {took:?}");
@@ -144,32 +144,32 @@ async fn order<H: Next<Prompt, Chunk>, M>(
     order
 }
 
-/// How many requests each of `count` cells took in `order`.
+/// How many requests each of `count` pools took in `order`.
 fn tally(order: &[usize], count: usize) -> Vec<usize> {
     (0..count)
         .map(|at| order.iter().filter(|took| **took == at).count())
         .collect()
 }
 
-/// The forward hand-offs that reached each of `cells`, taken or refused.
-fn offered<H>(cells: &[&ModelCell<H>]) -> Vec<usize> {
-    cells.iter().map(|cell| offers(cell)).collect()
+/// The forward hand-offs that reached each of `pools`, taken or refused.
+fn offered<H>(pools: &[&ModelPool<H>]) -> Vec<usize> {
+    pools.iter().map(|pool| offers(pool)).collect()
 }
 
-/// The forward hand-offs that reached `cell`, taken or refused.
-fn offers<H>(cell: &ModelCell<H>) -> usize {
-    cell.entries.iter().map(Running::offered).sum()
+/// The forward hand-offs that reached `pool`, taken or refused.
+fn offers<H>(pool: &ModelPool<H>) -> usize {
+    pool.entries.iter().map(Running::offered).sum()
 }
 
-/// Wait until the directory holds a `ready` record of each of `cells`.
-async fn published_ready(directory: &Resolving, cells: &[&str]) {
+/// Wait until the directory holds a `ready` record of each of `pools`.
+async fn published_ready(directory: &Resolving, pools: &[&str]) {
     let mut watch = directory.watch("model_x", None);
     let mut ready = BTreeSet::new();
     let waited = tokio::time::timeout(WAIT, async {
-        while !cells.iter().all(|cell| ready.contains(*cell)) {
+        while !pools.iter().all(|pool| ready.contains(*pool)) {
             match watch.next().await {
-                Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. })) => {
-                    if record.state == CellState::Ready {
+                Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. })) => {
+                    if record.state == PoolState::Ready {
                         ready.insert(record.name);
                     } else {
                         ready.remove(&record.name);
@@ -181,31 +181,31 @@ async fn published_ready(directory: &Resolving, cells: &[&str]) {
         }
     })
     .await;
-    assert!(waited.is_ok(), "timed out waiting for {cells:?}: {ready:?}");
+    assert!(waited.is_ok(), "timed out waiting for {pools:?}: {ready:?}");
 }
 
-/// The model cells the global's hub follows, by name.
+/// The model pools the global's hub follows, by name.
 async fn hub_follows(
-    global: &CellReadiness<Resolving>,
+    global: &PoolReadiness<Resolving>,
     done: impl Fn(&BTreeSet<String>) -> bool,
 ) -> BTreeSet<String> {
-    let names = |cells: &BTreeMap<(String, String), u64>| -> BTreeSet<String> {
-        cells
+    let names = |pools: &BTreeMap<(String, String), u64>| -> BTreeSet<String> {
+        pools
             .keys()
             .filter(|(class, _)| class == "model_x")
-            .map(|(_, cell)| cell.clone())
+            .map(|(_, pool)| pool.clone())
             .collect()
     };
     let mut following = global.following();
     let waited = tokio::time::timeout(WAIT, async {
         following
-            .wait_for(|cells| done(&names(cells)))
+            .wait_for(|pools| done(&names(pools)))
             .await
-            .map(|cells| names(&cells))
+            .map(|pools| names(&pools))
     })
     .await;
     match waited {
-        Ok(cells) => cells.expect("the extension runs"),
+        Ok(pools) => pools.expect("the extension runs"),
         Err(_) => panic!(
             "timed out waiting for the hub's follows: {:?}",
             *following.borrow()
@@ -230,13 +230,13 @@ async fn ready_children_take_turns() {
     let m1 = child(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
     let m2 = child(&spec, &directory, ready(M2, "m2-hub:1337"), &events).await;
     let m3 = child(&spec, &directory, ready(M3, "m3-hub:1337"), &events).await;
-    let cells = tables(&chooser);
+    let pools = tables(&chooser);
     following(
-        &cells,
+        &pools,
         &[
-            (M1, CellState::Ready),
-            (M2, CellState::Ready),
-            (M3, CellState::Ready),
+            (M1, PoolState::Ready),
+            (M2, PoolState::Ready),
+            (M3, PoolState::Ready),
         ],
     )
     .await;
@@ -253,14 +253,14 @@ async fn ready_children_take_turns() {
         "not in turn: {order:?}"
     );
     assert!(
-        cells.followed("f").iter().all(|m| m.load.is_none()),
+        pools.followed("f").iter().all(|m| m.load.is_none()),
         "a summary arrived: {:?}",
-        cells.followed("f")
+        pools.followed("f")
     );
     shut([hub, m1.hub, m2.hub, m3.hub]).await;
 }
 
-/// Only children are followed and chosen. A cell of the global's region
+/// Only children are followed and chosen. A pool of the global's region
 /// and deployment whose parent is another global, one with no parent, and
 /// a child of another placement are never followed by the global's hub,
 /// and never offered a request: with only them, a request fails with
@@ -279,7 +279,7 @@ async fn only_children_are_followed_and_chosen() {
         &spec,
         &directory,
         ready("model-x-04-us-east-1", "m4-hub:1337"),
-        &|hub| gdl_model::CellSettings {
+        &|hub| gdl_model::PoolSettings {
             home: Some("global-02-us-east-1".into()),
             ..hub
         },
@@ -290,7 +290,7 @@ async fn only_children_are_followed_and_chosen() {
         &spec,
         &directory,
         ready("model-x-05-us-east-1", "m5-hub:1337"),
-        &|hub| gdl_model::CellSettings { home: None, ..hub },
+        &|hub| gdl_model::PoolSettings { home: None, ..hub },
         &events,
     )
     .await;
@@ -329,7 +329,7 @@ async fn only_children_are_followed_and_chosen() {
         &spec,
         &directory,
         ready("model-x-01-us-west-2", "w1-hub:1337"),
-        &|hub| gdl_model::CellSettings {
+        &|hub| gdl_model::PoolSettings {
             region: "us-west-2".into(),
             ..hub
         },
@@ -340,22 +340,22 @@ async fn only_children_are_followed_and_chosen() {
         .into_iter()
         .map(String::from)
         .collect();
-    let follows = hub_follows(&readiness, |cells| children.is_subset(cells)).await;
+    let follows = hub_follows(&readiness, |pools| children.is_subset(pools)).await;
     assert_eq!(
         follows, children,
-        "the hub followed a cell that is no child"
+        "the hub followed a pool that is no child"
     );
-    let cells = tables(&chooser);
+    let pools = tables(&chooser);
     following(
-        &cells,
+        &pools,
         &[
-            (M1, CellState::Ready),
-            ("model-x-01-us-west-2", CellState::Ready),
+            (M1, PoolState::Ready),
+            ("model-x-01-us-west-2", PoolState::Ready),
         ],
     )
     .await;
     assert_eq!(
-        followed(&cells, "f", "model-x-01-us-west-2").map(|m| m.region),
+        followed(&pools, "f", "model-x-01-us-west-2").map(|m| m.region),
         Some("us-west-2".to_string())
     );
 
@@ -364,12 +364,12 @@ async fn only_children_are_followed_and_chosen() {
     assert_eq!(
         offered(&[&cousin, &orphan, &other]),
         [0, 0, 0],
-        "a cell that is no child was offered a request"
+        "a pool that is no child was offered a request"
     );
     assert!(
-        cells.followed("f").len() == 2,
-        "the chooser holds a cell that is no child: {:?}",
-        cells.followed("f")
+        pools.followed("f").len() == 2,
+        "the chooser holds a pool that is no child: {:?}",
+        pools.followed("f")
     );
     shut([hub, cousin.hub, orphan.hub, other.hub, near.hub, far.hub]).await;
 }
@@ -388,34 +388,34 @@ async fn a_degraded_child_only_while_no_child_is_ready() {
     let m1 = child(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
     let m2 = child(&spec, &directory, degraded(M2, "m2-hub:1337"), &events).await;
     let m3 = child(&spec, &directory, ready(M3, "m3-hub:1337"), &events).await;
-    let cells = tables(&chooser);
+    let pools = tables(&chooser);
     following(
-        &cells,
+        &pools,
         &[
-            (M1, CellState::Ready),
-            (M2, CellState::Degraded),
-            (M3, CellState::Ready),
+            (M1, PoolState::Ready),
+            (M2, PoolState::Degraded),
+            (M3, PoolState::Ready),
         ],
     )
     .await;
     let order1 = order(&chooser, &[&m1, &m2, &m3], 10).await;
     assert_eq!(tally(&order1, 3), [5, 0, 5], "{order1:?}");
 
-    m1.readiness.drain().await.expect("the cell drains");
-    until(&cells, "M1 draining and not offered", |cells| {
-        followed(cells, "f", M1).is_none_or(|m| !m.offered)
+    m1.readiness.drain().await.expect("the pool drains");
+    until(&pools, "M1 draining and not offered", |pools| {
+        followed(pools, "f", M1).is_none_or(|m| !m.offered)
     })
     .await;
     let order2 = order(&chooser, &[&m1, &m2, &m3], 4).await;
     assert_eq!(tally(&order2, 3), [0, 0, 4], "{order2:?}");
 
     // Without its `d`, M3 has a role with no instance.
-    let ModelCell {
+    let ModelPool {
         hub: m3_hub, sink, ..
     } = m3;
     sink.stop().await;
-    until(&cells, "M3 unavailable and not offered", |cells| {
-        followed(cells, "f", M3).is_none_or(|m| m.state == CellState::Unavailable && !m.offered)
+    until(&pools, "M3 unavailable and not offered", |pools| {
+        followed(pools, "f", M3).is_none_or(|m| m.state == PoolState::Unavailable && !m.offered)
     })
     .await;
     let before = m2.forwards();
@@ -460,11 +460,11 @@ async fn a_declining_child_is_damped_and_skipped() {
     .await;
     let m2 = child(&spec, &directory, ready(M2, "m2-hub:1337"), &quiet).await;
     let m3 = child(&spec, &directory, ready(M3, "m3-hub:1337"), &quiet).await;
-    let cells = tables(&chooser);
-    until(&cells, "three ready children", |cells| {
-        [M1, M2, M3].iter().all(|cell| {
-            followed(cells, "f", cell)
-                .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 1)
+    let pools = tables(&chooser);
+    until(&pools, "three ready children", |pools| {
+        [M1, M2, M3].iter().all(|pool| {
+            followed(pools, "f", pool)
+                .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 1)
         })
     })
     .await;
@@ -491,12 +491,12 @@ async fn a_declining_child_is_damped_and_skipped() {
     assert_eq!(offers(&m1), 2, "M1 was not offered its turn");
     assert_eq!(m1.forwards(), 1, "M1 took a request it had no room for");
     assert_eq!(order1.len(), 3);
-    let damped = followed(&cells, "f", M1).and_then(|m| m.damped);
+    let damped = followed(&pools, "f", M1).and_then(|m| m.damped);
     assert!(damped.is_some(), "M1 is not damped");
 
     let before = offers(&m1);
     order(&chooser, &[&m2, &m3], 4).await;
-    let left = followed(&cells, "f", M1).and_then(|m| m.damped);
+    let left = followed(&pools, "f", M1).and_then(|m| m.damped);
     assert!(
         left.is_some_and(|left| left > Duration::ZERO),
         "the window passed before the test was done: {left:?}"

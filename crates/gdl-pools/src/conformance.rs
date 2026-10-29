@@ -1,4 +1,4 @@
-//! The directory conformance suite: the behavior every [`CellDirectory`]
+//! The directory conformance suite: the behavior every [`PoolDirectory`]
 //! backend owes its readers, run by [`run`] against a [`Backend`] that
 //! makes fresh directories.
 //!
@@ -18,28 +18,28 @@ use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, time::Duration};
 use futures::{FutureExt, Stream, StreamExt};
 
 use crate::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary, ResumeToken,
+    DirectoryError, LoadSummary, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken,
     Version, Withdrawal,
 };
 
 /// The smallest [`Backend::buffer`] the suite takes.
 pub const MIN_BUFFER: usize = 3;
 
-/// A rule of the directory contract ([`CellDirectory`]).
+/// A rule of the directory contract ([`PoolDirectory`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Rule {
-    /// A published record stays until its cell withdraws it, across the
+    /// A published record stays until its pool withdraws it, across the
     /// backend's own restart. Nothing deletes it by time.
     Kept,
     /// A watch of a class yields every record of the class, whatever its
     /// region, parent, or hashes.
     EveryRecord,
     /// A watch gives a snapshot, then the changes after it (several
-    /// writes of one cell may fold into the latest), and resumes from a
-    /// token or says [`CellEvent::Resnapshot`]. Every backend keeps it:
+    /// writes of one pool may fold into the latest), and resumes from a
+    /// token or says [`PoolEvent::Resnapshot`]. Every backend keeps it:
     /// one that cannot resume says `Resnapshot`.
     ///
-    /// The suite takes a fold of several publishes of one cell, but not
+    /// The suite takes a fold of several publishes of one pool, but not
     /// of a publish into the withdrawal after it on a resumed watch: the
     /// resume case expects each of those changes.
     Changes,
@@ -51,21 +51,21 @@ pub enum Rule {
 /// A directory backend under test.
 pub trait Backend: Sync {
     /// The backend's directory handle.
-    type Directory: CellDirectory;
+    type Directory: PoolDirectory;
 
     /// `N` handles to one new, empty directory, connected as the hubs of
-    /// `N` cells would be: a write through one is seen through every other.
+    /// `N` pools would be: a write through one is seen through every other.
     fn fresh<const N: usize>(&self) -> impl Future<Output = [Self::Directory; N]> + Send;
 
     /// How many changes a watcher may fall behind by: one more, and it is
-    /// cut off with [`CellEvent::Resnapshot`]. The suite makes up to
+    /// cut off with [`PoolEvent::Resnapshot`]. The suite makes up to
     /// [`MIN_BUFFER`] changes before a watcher reads them, so it takes no
     /// smaller buffer.
     fn buffer(&self) -> usize;
 
     /// How many of a class's latest changes a resume token is served
     /// across: a token followed by more changes than this yields
-    /// [`CellEvent::Resnapshot`]. 0 for a backend that never resumes, and
+    /// [`PoolEvent::Resnapshot`]. 0 for a backend that never resumes, and
     /// says `Resnapshot` for every token.
     fn history(&self) -> usize;
 
@@ -181,45 +181,45 @@ const WAIT: Duration = Duration::from_secs(5);
 const MODEL: &str = "model_x";
 const GLOBAL: &str = "global";
 
-type Watch<D> = Pin<Box<<D as CellDirectory>::Watch>>;
+type Watch<D> = Pin<Box<<D as PoolDirectory>::Watch>>;
 
 /// What the helpers read from: a watch, pinned.
-trait Events: Stream<Item = Result<CellEvent, DirectoryError>> + Unpin {}
+trait Events: Stream<Item = Result<PoolEvent, DirectoryError>> + Unpin {}
 
-impl<S: Stream<Item = Result<CellEvent, DirectoryError>> + Unpin> Events for S {}
+impl<S: Stream<Item = Result<PoolEvent, DirectoryError>> + Unpin> Events for S {}
 
 /// A record with a model, so that a backend is held to keeping a record
 /// whole, its models with it.
-fn record(class: &str, cell: &str, epoch: u64, seq: u64) -> CellRecord {
-    CellRecord {
+fn record(class: &str, pool: &str, epoch: u64, seq: u64) -> PoolRecord {
+    PoolRecord {
         presence: crate::Presence::Serving,
         models: vec![crate::ModelEntry {
-            model: format!("{cell}-model"),
+            model: format!("{pool}-model"),
             routing_key: Some("a".into()),
             state: crate::ModelState::Ready,
             since: seq,
         }],
         models_version: seq,
         revoked: Vec::new(),
-        name: cell.into(),
+        name: pool.into(),
         class: class.into(),
         region: "us-east-1".into(),
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch,
         seq,
-        hub: format!("{cell}:1337"),
-        lease: CellRecord::DEFAULT_LEASE,
+        hub: format!("{pool}:1337"),
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     }
 }
 
-fn withdrawal(class: &str, cell: &str, epoch: u64, seq: u64) -> Withdrawal {
+fn withdrawal(class: &str, pool: &str, epoch: u64, seq: u64) -> Withdrawal {
     Withdrawal {
         class: class.into(),
-        cell: cell.into(),
+        pool: pool.into(),
         epoch,
         seq,
     }
@@ -231,22 +231,22 @@ async fn within<F: Future>(what: &str, future: F) -> F::Output {
         .unwrap_or_else(|_| panic!("{what}: nothing within {WAIT:?}"))
 }
 
-async fn publish<D: CellDirectory>(
+async fn publish<D: PoolDirectory>(
     directory: &D,
-    record: CellRecord,
+    record: PoolRecord,
 ) -> Result<(), DirectoryError> {
     within("publish", directory.publish(record)).await
 }
 
-async fn withdraw<D: CellDirectory>(directory: &D, w: Withdrawal) -> Result<(), DirectoryError> {
+async fn withdraw<D: PoolDirectory>(directory: &D, w: Withdrawal) -> Result<(), DirectoryError> {
     within("withdraw", directory.withdraw(w)).await
 }
 
-fn watch<D: CellDirectory>(directory: &D, class: &str, from: Option<ResumeToken>) -> Watch<D> {
+fn watch<D: PoolDirectory>(directory: &D, class: &str, from: Option<ResumeToken>) -> Watch<D> {
     Box::pin(directory.watch(class, from))
 }
 
-async fn next(watch: &mut impl Events, what: &str) -> CellEvent {
+async fn next(watch: &mut impl Events, what: &str) -> PoolEvent {
     match within(what, watch.next()).await {
         Some(Ok(event)) => event,
         Some(Err(error)) => panic!("{what}: the watch failed: {error}"),
@@ -262,11 +262,11 @@ async fn ends(watch: &mut impl Events, what: &str) {
 
 /// The next event is `Resnapshot`, and then the watch ends.
 async fn resnapshot(watch: &mut impl Events, what: &str) {
-    assert_eq!(next(watch, what).await, CellEvent::Resnapshot, "{what}");
+    assert_eq!(next(watch, what).await, PoolEvent::Resnapshot, "{what}");
     ends(watch, what).await;
 }
 
-/// The records of a snapshot, by cell name, and its `Synced` token.
+/// The records of a snapshot, by pool name, and its `Synced` token.
 async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeToken) {
     let (records, token) = snapshot_records(watch).await;
     let records = records
@@ -276,10 +276,10 @@ async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeTok
     (records, token)
 }
 
-/// The whole records of a snapshot, sorted by cell name, and its `Synced`
+/// The whole records of a snapshot, sorted by pool name, and its `Synced`
 /// token. The whole snapshot is bounded, not only each of its events, so
 /// a snapshot that never ends fails the case.
-async fn snapshot_records(watch: &mut impl Events) -> (Vec<CellRecord>, ResumeToken) {
+async fn snapshot_records(watch: &mut impl Events) -> (Vec<PoolRecord>, ResumeToken) {
     within("the whole snapshot", async {
         let mut records = Vec::new();
         loop {
@@ -288,8 +288,8 @@ async fn snapshot_records(watch: &mut impl Events) -> (Vec<CellRecord>, ResumeTo
             // the task's budget, so that the loop yields once it is spent.
             tokio::task::consume_budget().await;
             match next(watch, "the snapshot").await {
-                CellEvent::Current(record) => records.push(record),
-                CellEvent::Synced {
+                PoolEvent::Current(record) => records.push(record),
+                PoolEvent::Synced {
                     token,
                     snapshot: true,
                 } => {
@@ -304,36 +304,36 @@ async fn snapshot_records(watch: &mut impl Events) -> (Vec<CellRecord>, ResumeTo
 }
 
 /// What the directory holds for `class`, read through a new watch's
-/// snapshot: each cell's name and version.
-async fn held<D: CellDirectory>(directory: &D, class: &str) -> Vec<(String, Version)> {
+/// snapshot: each pool's name and version.
+async fn held<D: PoolDirectory>(directory: &D, class: &str) -> Vec<(String, Version)> {
     snapshot(&mut watch(directory, class, None)).await.0
 }
 
-fn at(cell: &str, epoch: u64, seq: u64) -> (String, Version) {
-    (cell.to_owned(), Version { epoch, seq })
+fn at(pool: &str, epoch: u64, seq: u64) -> (String, Version) {
+    (pool.to_owned(), Version { epoch, seq })
 }
 
-/// The next event is a put of `cell` at `version`; its token.
-async fn put(watch: &mut impl Events, cell: &str, epoch: u64, seq: u64) -> ResumeToken {
-    match next(watch, &format!("the put of {cell}")).await {
-        CellEvent::Put { record, token }
-            if record.name == cell && record.version() == (Version { epoch, seq }) =>
+/// The next event is a put of `pool` at `version`; its token.
+async fn put(watch: &mut impl Events, pool: &str, epoch: u64, seq: u64) -> ResumeToken {
+    match next(watch, &format!("the put of {pool}")).await {
+        PoolEvent::Put { record, token }
+            if record.name == pool && record.version() == (Version { epoch, seq }) =>
         {
             token
         }
-        other => panic!("expected the put of {cell} at ({epoch}, {seq}), got {other:?}"),
+        other => panic!("expected the put of {pool} at ({epoch}, {seq}), got {other:?}"),
     }
 }
 
-/// The next event is the withdrawal of `cell` at `version`; its token.
-async fn withdrawn(watch: &mut impl Events, cell: &str, epoch: u64, seq: u64) -> ResumeToken {
-    match next(watch, &format!("the withdrawal of {cell}")).await {
-        CellEvent::Withdrawn { withdrawal, token }
-            if withdrawal.cell == cell && withdrawal.version() == (Version { epoch, seq }) =>
+/// The next event is the withdrawal of `pool` at `version`; its token.
+async fn withdrawn(watch: &mut impl Events, pool: &str, epoch: u64, seq: u64) -> ResumeToken {
+    match next(watch, &format!("the withdrawal of {pool}")).await {
+        PoolEvent::Withdrawn { withdrawal, token }
+            if withdrawal.pool == pool && withdrawal.version() == (Version { epoch, seq }) =>
         {
             token
         }
-        other => panic!("expected the withdrawal of {cell} at ({epoch}, {seq}), got {other:?}"),
+        other => panic!("expected the withdrawal of {pool} at ({epoch}, {seq}), got {other:?}"),
     }
 }
 
@@ -354,23 +354,23 @@ async fn malformed_writes_are_refused<B: Backend>(backend: &B) {
     let mut watch = watch(&reader, MODEL, None);
     snapshot(&mut watch).await;
     let bad = [
-        CellRecord {
+        PoolRecord {
             name: "M1".into(),
             ..record(MODEL, "m1", 1, 1)
         },
-        CellRecord {
+        PoolRecord {
             region: "-east".into(),
             ..record(MODEL, "m1", 1, 1)
         },
-        CellRecord {
+        PoolRecord {
             class: "model-x".into(),
             ..record(MODEL, "m1", 1, 1)
         },
-        CellRecord {
+        PoolRecord {
             lease: Duration::ZERO,
             ..record(MODEL, "m1", 1, 1)
         },
-        CellRecord {
+        PoolRecord {
             lease: Duration::from_micros(1_500),
             ..record(MODEL, "m1", 1, 1)
         },
@@ -459,7 +459,7 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         .expect("a newer epoch");
     put(&mut watch, "m1", 3, 0).await;
 
-    // Withdrawing a cell never held leaves a tombstone all the same.
+    // Withdrawing a pool never held leaves a tombstone all the same.
     withdraw(&writer, withdrawal(MODEL, "m9", 1, 5))
         .await
         .expect("a withdrawal of nothing");
@@ -475,7 +475,7 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         .expect("newer than the tombstone");
     put(&mut watch, "m9", 1, 6).await;
 
-    // The directory holds each cell's newest write, through any handle.
+    // The directory holds each pool's newest write, through any handle.
     assert_eq!(held(&writer, MODEL).await, [at("m1", 3, 0), at("m9", 1, 6)]);
 }
 
@@ -488,14 +488,14 @@ async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
     );
     drop(empty);
 
-    for cell in ["m2", "m1"] {
-        publish(&writer, record(MODEL, cell, 1, 1))
+    for pool in ["m2", "m1"] {
+        publish(&writer, record(MODEL, pool, 1, 1))
             .await
-            .expect("a model cell");
+            .expect("a model pool");
     }
     publish(&writer, record(GLOBAL, "g1", 1, 1))
         .await
-        .expect("a global cell");
+        .expect("a global pool");
     let mut first = watch(&reader, MODEL, None);
     let mut second = watch(&other, MODEL, None);
     for watch in [&mut first, &mut second] {
@@ -508,10 +508,10 @@ async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
     // of another class.
     publish(&writer, record(GLOBAL, "g2", 1, 1))
         .await
-        .expect("a global cell");
+        .expect("a global pool");
     publish(&writer, record(MODEL, "m3", 1, 1))
         .await
-        .expect("a model cell");
+        .expect("a model pool");
     withdraw(&writer, withdrawal(MODEL, "m1", 1, 2))
         .await
         .expect("a withdrawal");
@@ -542,7 +542,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     for seq in 1..=3 {
         publish(&writer, record(GLOBAL, "g1", 1, seq))
             .await
-            .expect("a global cell");
+            .expect("a global pool");
     }
     let mut live = watch(&reader, MODEL, None);
     let (_, start) = snapshot(&mut live).await;
@@ -571,7 +571,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     let replayed = served(2);
     if replayed {
         match next(&mut resumed, "the resumed watch's start").await {
-            CellEvent::Synced {
+            PoolEvent::Synced {
                 token,
                 snapshot: false,
             } => assert_eq!(token, after_m1),
@@ -596,7 +596,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     if served(4) {
         assert!(matches!(
             next(&mut resumed, "the start").await,
-            CellEvent::Synced {
+            PoolEvent::Synced {
                 snapshot: false,
                 ..
             }
@@ -615,7 +615,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     let mut elsewhere = watch(&reader, GLOBAL, Some(last));
     assert_eq!(
         next(&mut elsewhere, "another class's token").await,
-        CellEvent::Resnapshot
+        PoolEvent::Resnapshot
     );
     ends(&mut elsewhere, "another class's token").await;
 
@@ -628,7 +628,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     let mut stale = watch(&reader, MODEL, Some(after_m1));
     assert_eq!(
         next(&mut stale, "a stale token").await,
-        CellEvent::Resnapshot
+        PoolEvent::Resnapshot
     );
     ends(&mut stale, "a stale token").await;
 }
@@ -655,7 +655,7 @@ async fn a_lagging_watcher_is_cut_off<B: Backend>(backend: &B) {
     let mut expected = 1;
     loop {
         match next(&mut lagging, "the lagging watcher").await {
-            CellEvent::Put { record, .. } => {
+            PoolEvent::Put { record, .. } => {
                 // No more changes were made than this, so the loop ends.
                 assert!(expected <= changes, "a change never made: {record:?}");
                 assert_eq!(
@@ -668,7 +668,7 @@ async fn a_lagging_watcher_is_cut_off<B: Backend>(backend: &B) {
                 );
                 expected += 1;
             }
-            CellEvent::Resnapshot => break,
+            PoolEvent::Resnapshot => break,
             other => panic!("the lagging watcher: {other:?}"),
         }
     }
@@ -701,7 +701,7 @@ async fn a_dropped_watch_is_released<B: Backend>(backend: &B) {
     let mut stale = watch(&directory, MODEL, Some(ResumeToken::new(MODEL, u64::MAX)));
     assert_eq!(
         next(&mut stale, "a token from the future").await,
-        CellEvent::Resnapshot
+        PoolEvent::Resnapshot
     );
     assert_eq!(backend.watchers(&directory, MODEL), 0);
 }
@@ -713,11 +713,11 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
     let lease = Duration::from_millis(20);
     // Fields away from their defaults, so that a backend that keeps only
     // some of them fails.
-    let m1 = CellRecord {
+    let m1 = PoolRecord {
         home: Some("global-us".into()),
         contract: 7,
         placement: 8,
-        state: CellState::Degraded,
+        state: PoolState::Degraded,
         hub: "m1-kept:4242".into(),
         lease,
         load: Some(LoadSummary {
@@ -762,7 +762,7 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
         );
     }
     // A withdrawal is kept too, at its own version, or a late write of a
-    // withdrawn cell would bring it back.
+    // withdrawn pool would bring it back.
     match publish(&restarted, record(MODEL, "m2", 1, 2)).await {
         Err(DirectoryError::NotNewer {
             held: Version { epoch: 1, seq: 2 },
@@ -784,18 +784,18 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
 
 /// Rule [`Rule::EveryRecord`]: every watch of a class, through any
 /// handle, sees every record of the class, in every region, of every
-/// parent, and of any hashes: which cells to follow is the reader's
+/// parent, and of any hashes: which pools to follow is the reader's
 /// choice.
 async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
     let directories: [B::Directory; 3] = within("a fresh directory", backend.fresh()).await;
     let records = [
         record(MODEL, "m1", 1, 1),
-        CellRecord {
+        PoolRecord {
             region: "eu-west-1".into(),
             home: Some("global-eu".into()),
             ..record(MODEL, "m2", 1, 1)
         },
-        CellRecord {
+        PoolRecord {
             home: Some("global-us".into()),
             contract: 9,
             placement: 8,
@@ -803,7 +803,7 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
         },
     ];
     for (directory, record) in directories.iter().zip(records.clone()) {
-        publish(directory, record).await.expect("a model cell");
+        publish(directory, record).await.expect("a model pool");
     }
     let mut watches = Vec::new();
     for (handle, directory) in directories.iter().enumerate() {
@@ -821,20 +821,20 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
         watches.push(watch);
     }
 
-    let m4 = CellRecord {
+    let m4 = PoolRecord {
         region: "ap-south-1".into(),
         home: Some("global-ap".into()),
         ..record(MODEL, "m4", 1, 1)
     };
     publish(&directories[2], m4.clone())
         .await
-        .expect("a cell in a third region");
+        .expect("a pool in a third region");
     for (handle, watch) in watches.iter_mut().enumerate() {
         // Only a put that never comes, or another change in its place,
         // breaks the rule; a watch that fails or ends is a failure of its
         // own.
         match tokio::time::timeout(WAIT, watch.next()).await {
-            Ok(Some(Ok(CellEvent::Put { record, .. }))) if record == m4 => {}
+            Ok(Some(Ok(PoolEvent::Put { record, .. }))) if record == m4 => {}
             Err(_) => broke(
                 Rule::EveryRecord,
                 format_args!("the watch through handle {handle} never got the put of m4"),
@@ -852,8 +852,8 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
 /// A record with every field set, at `seq`: each field but the name,
 /// class, and epoch differs between two seqs, so that a part of one
 /// version with the rest of another equals neither.
-fn whole(seq: u64) -> CellRecord {
-    CellRecord {
+fn whole(seq: u64) -> PoolRecord {
+    PoolRecord {
         presence: crate::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
@@ -865,9 +865,9 @@ fn whole(seq: u64) -> CellRecord {
         contract: 100 + seq,
         placement: 200 + seq,
         state: if seq.is_multiple_of(2) {
-            CellState::Ready
+            PoolState::Ready
         } else {
-            CellState::Degraded
+            PoolState::Degraded
         },
         epoch: 1,
         seq,
@@ -884,19 +884,19 @@ fn whole(seq: u64) -> CellRecord {
 }
 
 /// The next changes of `watch` are the puts of `first` and then `second`,
-/// two versions of one cell, each whole; or only the put of `second`,
+/// two versions of one pool, each whole; or only the put of `second`,
 /// which rule 3 lets a backend fold `first` into.
 async fn whole_changes(
     watch: &mut impl Events,
-    first: &CellRecord,
-    second: &CellRecord,
+    first: &PoolRecord,
+    second: &PoolRecord,
     what: &str,
 ) {
     let mut expected = [first, second].into_iter();
     while let Some(published) = expected.next() {
         match next(watch, what).await {
-            CellEvent::Put { record, .. } if record == *published => {}
-            CellEvent::Put { record, .. }
+            PoolEvent::Put { record, .. } if record == *published => {}
+            PoolEvent::Put { record, .. }
                 if published == first && record.version() == second.version() =>
             {
                 if record != *second {
@@ -907,7 +907,7 @@ async fn whole_changes(
                 }
                 expected.next();
             }
-            CellEvent::Put { record, .. } => broke(
+            PoolEvent::Put { record, .. } => broke(
                 Rule::Whole,
                 format_args!("published {published:?}, and {what} is {record:?}"),
             ),
@@ -945,12 +945,12 @@ async fn a_record_arrives_whole<B: Backend>(backend: &B) {
     // A resumed watch replays both versions, each whole.
     let mut resumed = watch(&reader, MODEL, Some(start));
     match next(&mut resumed, "the resumed watch's start").await {
-        CellEvent::Synced {
+        PoolEvent::Synced {
             snapshot: false, ..
         } => whole_changes(&mut resumed, &first, &second, "a resumed watch's change").await,
         // A backend whose history does not cover both says so: there is
         // no replay.
-        CellEvent::Resnapshot => {}
+        PoolEvent::Resnapshot => {}
         other => panic!("the resumed watch's start: {other:?}"),
     }
     let (held, _) = snapshot_records(&mut watch(&reader, MODEL, None)).await;

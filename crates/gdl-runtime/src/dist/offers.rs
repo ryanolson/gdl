@@ -10,17 +10,17 @@
 //! what a failover keeps (the instances that declined, the last miss) is
 //! made only once an offer missed, in a call boxed on that path alone
 //! ([`Runtime::offer_again`]). A chooser's hand-off into another class
-//! fails over between cells instead (`cells::offer`), with the same
+//! fails over between pools instead (`pools::offer`), with the same
 //! reading of an answer.
 //!
 //! An entry that declines says why, as a chooser in another class reads
-//! it ([`Decline`]): its cell is full, its cell is gone, or this instance
-//! cannot serve the request and another of its cell may. The reason
+//! it ([`Decline`]): its pool is full, its pool is gone, or this instance
+//! cannot serve the request and another of its pool may. The reason
 //! follows the refusal in the reply, where a build that does not know it
 //! never reads it ([`refusal`]).
 //!
 //! This module also says which of a segment's hops bring it offers from
-//! another class, which a draining cell's entry instance declines.
+//! another class, which a draining pool's entry instance declines.
 
 use futures::future::BoxFuture;
 use gdl::{Cx, Error, ErrorKind, Result};
@@ -88,25 +88,25 @@ pub(crate) fn declines(error: &Error) -> bool {
 }
 
 /// Why an entry declined an offer, for a chooser that sent it from
-/// another class: whether to damp only this cell, to pass it over until
-/// its follow changes, or to offer the request to the cell's other entry
+/// another class: whether to damp only this pool, to pass it over until
+/// its follow changes, or to offer the request to the pool's other entry
 /// instances. A segment declines offers by its own policy with
 /// [`Segment::decline_offers_as`](super::Segment::decline_offers_as).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Decline {
-    /// The cell has no room now, or this instance retired: the chooser
-    /// damps the cell, and offers it requests again after the window.
+    /// The pool has no room now, or this instance retired: the chooser
+    /// damps the pool, and offers it requests again after the window.
     #[default]
     Full,
-    /// The cell takes no work from other cells until its state changes,
-    /// as a draining cell does: the chooser passes it over until its
+    /// The pool takes no work from other pools until its state changes,
+    /// as a draining pool does: the chooser passes it over until its
     /// follow changes.
     Gone,
     /// This instance cannot serve the request, and another entry instance
-    /// of its cell may: for example, it does not have the request's model.
+    /// of its pool may: for example, it does not have the request's model.
     /// The chooser offers the request to each other entry instance of the
-    /// cell once, and to another cell only when every one declined. It
-    /// damps nothing, since the decline says nothing of the cell's room.
+    /// pool once, and to another pool only when every one declined. It
+    /// damps nothing, since the decline says nothing of the pool's room.
     Instance,
 }
 
@@ -118,9 +118,9 @@ const INSTANCE: &str = "instance";
 /// encoded as every build reads it, then, for any reason but
 /// [`Decline::Full`], the reason. A build that does not know the reason
 /// reads the refusal and stops there, as `rmp_serde` reads one value and
-/// leaves the bytes after it, so it takes the refusal as a full cell's:
-/// a chooser before [`Decline::Instance`] damps the cell for one window
-/// and offers the request to another cell.
+/// leaves the bytes after it, so it takes the refusal as a full pool's:
+/// a chooser before [`Decline::Instance`] damps the pool for one window
+/// and offers the request to another pool.
 pub(crate) fn refusal(error: &Error, decline: Decline) -> Result<Vec<u8>> {
     let mut reply = envelope::encode(&Err::<Accepted, &Error>(error))?;
     match decline {
@@ -190,7 +190,7 @@ pub(crate) struct Refused {
 
 /// Why an entry refused a forward hand-off before it admitted anything,
 /// with the reason a chooser in another class reads: [`Decline::Full`]
-/// for every refusal but a gone cell's.
+/// for every refusal but a gone pool's.
 pub(crate) struct Refusal {
     pub(crate) error: Error,
     pub(crate) decline: Decline,
@@ -498,10 +498,10 @@ mod tests {
 
     /// A refusal as gone, or as the instance's, carries its reason after
     /// the refusal. A build before the reason reads the refusal alone, as
-    /// the full cell's it always read, and so does this build when no
+    /// the full pool's it always read, and so does this build when no
     /// reason follows, or one it does not know, or bytes it cannot read. A
     /// build that knows gone but not the instance's reason reads the
-    /// latter as full. A full cell's refusal is sent byte for byte as
+    /// latter as full. A full pool's refusal is sent byte for byte as
     /// before the reason.
     #[test]
     fn a_reason_after_a_refusal_is_read_here_and_skipped_by_an_older_build() {
@@ -510,7 +510,7 @@ mod tests {
         let full = refusal(&error, Decline::Full).expect("encode");
         let gone = refusal(&error, Decline::Gone).expect("encode");
         let instance = refusal(&error, Decline::Instance).expect("encode");
-        assert_eq!(full, before, "a full cell's refusal changed on the wire");
+        assert_eq!(full, before, "a full pool's refusal changed on the wire");
         assert!(gone.starts_with(&before) && gone.len() > before.len());
         assert!(instance.starts_with(&before) && instance.len() > before.len());
         // How every build before the reason reads a reply.
@@ -519,7 +519,7 @@ mod tests {
             assert_eq!(older.expect_err("a refusal"), error);
         }
         // How a build that knows gone, and not the instance's reason,
-        // reads each: an unknown reason is a full cell's.
+        // reads each: an unknown reason is a full pool's.
         let known = |reply: &[u8]| {
             let mut after = reply;
             rmp_serde::decode::from_read::<_, serde::de::IgnoredAny>(&mut after)

@@ -1,23 +1,23 @@
-//! An instance's watch of its cell for its drain, read by the watch
+//! An instance's watch of its pool for its drain, read by the watch
 //! client within a short bound set for the test, from a server that sends
 //! a snapshot's first events and then only keep-alives: nothing the
-//! partial snapshot says is learned, and the cell is watched again.
+//! partial snapshot says is learned, and the pool is watched again.
 
 use std::time::Duration;
 
-use gdl_cells::CellState;
-use gdl_watch::{CellWatchEvent, CellWatcher, WatchLimits};
+use gdl_pools::PoolState;
+use gdl_watch::{PoolWatchEvent, PoolWatcher, WatchLimits};
 use tokio::sync::watch;
 use velo::InstanceId;
 
 use super::{Learned, run};
-use crate::dist::cells::served::Server;
-use crate::dist::cells::{REWATCH, REWATCH_CAP};
+use crate::dist::pools::served::Server;
+use crate::dist::pools::{REWATCH, REWATCH_CAP};
 
 const WITHIN: Duration = Duration::from_millis(300);
 
-fn cell(state: CellState) -> CellWatchEvent {
-    CellWatchEvent::Cell {
+fn pool(state: PoolState) -> PoolWatchEvent {
+    PoolWatchEvent::Pool {
         models: None,
         name: "m".into(),
         class: "model_x".into(),
@@ -27,15 +27,15 @@ fn cell(state: CellState) -> CellWatchEvent {
     }
 }
 
-/// A snapshot that says the cell drains, that the instance's retirement
-/// is acknowledged, and that no cell follows the cell, then only
+/// A snapshot that says the pool drains, that the instance's retirement
+/// is acknowledged, and that no pool follows the pool, then only
 /// keep-alives, teaches the instance none of it: the watch ends at the
-/// bound and the cell is watched again. A complete snapshot then teaches
+/// bound and the pool is watched again. A complete snapshot then teaches
 /// it all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     let mut server = Server::new().await;
-    let watcher = CellWatcher::with_limits(WatchLimits {
+    let watcher = PoolWatcher::with_limits(WatchLimits {
         synced_within: WITHIN,
         ..WatchLimits::default()
     })
@@ -46,14 +46,14 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     let began = tokio::time::Instant::now();
     let task = tokio::spawn(run(watcher, server.address.clone(), Some(me), learns));
     let snapshot = [
-        cell(CellState::Draining),
-        CellWatchEvent::Retired {
+        pool(PoolState::Draining),
+        PoolWatchEvent::Retired {
             segment: "f".into(),
             instance: me,
             acknowledged: true,
         },
-        CellWatchEvent::State {
-            state: CellState::Draining,
+        PoolWatchEvent::State {
+            state: PoolState::Draining,
             unfollowed: true,
         },
     ];
@@ -80,7 +80,7 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     for event in &snapshot {
         second.send(event).await;
     }
-    second.send(&CellWatchEvent::Synced).await;
+    second.send(&PoolWatchEvent::Synced).await;
     let now = *tokio::time::timeout(
         Duration::from_secs(5),
         learned.wait_for(|learned| learned.unfollowed),
@@ -91,11 +91,11 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     assert!(now.drain.is_some() && now.acknowledged, "{now:?}");
     tokio::time::timeout(Duration::from_secs(5), task)
         .await
-        .expect("the watch ends once the cell is unfollowed")
+        .expect("the watch ends once the pool is unfollowed")
         .expect("the watch does not panic");
 }
 
-/// An entry instance learned that its cell drains, then retired, and its
+/// An entry instance learned that its pool drains, then retired, and its
 /// hub then closes every watch, so that the instance waits between them at
 /// its cap: its drain's bound and its retirement's bound still pass on
 /// time, since neither waits on the watch. On the real clock, since the
@@ -109,8 +109,8 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     let mut server = Server::new().await;
     let me = InstanceId::new_v4();
     let (learns, learned) = watch::channel(Learned::default());
-    let watcher = CellWatcher::new().expect("a client");
-    let mut drain = super::CellDrain {
+    let watcher = PoolWatcher::new().expect("a client");
+    let mut drain = super::PoolDrain {
         learned,
         role: super::Role::Entry { bound: BOUND },
         entries: vec!["f".into()],
@@ -129,8 +129,8 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     }
     let mut first = server.next().await;
     first.answer().await;
-    first.send(&cell(CellState::Draining)).await;
-    first.send(&CellWatchEvent::Synced).await;
+    first.send(&pool(PoolState::Draining)).await;
+    first.send(&PoolWatchEvent::Synced).await;
     let mut heard = drain.learned.clone();
     let drained = tokio::time::timeout(
         Duration::from_secs(5),
@@ -147,7 +147,7 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
 
     let declining = drain
         .declining()
-        .expect("an entry instance of a draining cell");
+        .expect("an entry instance of a draining pool");
     tokio::time::timeout(BOUND + LATE, declining)
         .await
         .expect("the drain's bound passed in time");

@@ -148,7 +148,7 @@ impl Error {
 ///
 /// A kind is sent by its name. A peer of a build that does not know a
 /// kind reads it as `Transport`, keeping its name ([`Error::unknown_kind`]),
-/// so that a kind added later rolls out one cell at a time; a build from
+/// so that a kind added later rolls out one pool at a time; a build from
 /// before `OutcomeUnknown` refuses an unknown kind, and with it the stream
 /// item that carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -592,7 +592,7 @@ mod tests {
     }
 
     /// A peer of the previous build refuses the kind: this build cannot
-    /// roll cell by cell from it.
+    /// roll pool by pool from it.
     #[test]
     fn the_previous_build_refuses_an_unknown_outcome() {
         let error = Error::new(ErrorKind::OutcomeUnknown, "no answer");

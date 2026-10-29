@@ -15,7 +15,7 @@ use tokio::{
     task::AbortHandle,
 };
 
-use crate::{CellDirectory, CellEvent, CellRecord, DirectoryError, ResumeToken, Withdrawal};
+use crate::{DirectoryError, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Withdrawal};
 
 pub(crate) mod file;
 mod watch;
@@ -23,32 +23,32 @@ mod watch;
 use file::{Files, Held};
 pub use watch::DirWatch;
 
-/// A cell directory in files, for the hubs on one host: one file per cell,
-/// `<root>/<class>/<cell>.json`, under a directory every hub shares (a
+/// A pool directory in files, for the hubs on one host: one file per pool,
+/// `<root>/<class>/<pool>.json`, under a directory every hub shares (a
 /// volume, under Compose).
 ///
-/// A write reads the cell's file and refuses a write that is not newer, as
+/// A write reads the pool's file and refuses a write that is not newer, as
 /// every backend does, then writes a temporary file beside it and renames
-/// it over the cell's, so that a reader in any process finds a whole file.
-/// A withdrawal leaves a tombstone in the cell's file, which refuses a late
+/// it over the pool's, so that a reader in any process finds a whole file.
+/// A withdrawal leaves a tombstone in the pool's file, which refuses a late
 /// write from any process.
 ///
 /// A watch is polled: every 50 ms, while a class has watches in this
 /// process, one task lists the class's directory and reads each file that
 /// may have changed, and the differences are the watch's changes. Two
-/// writes of one cell between two polls are one change, the later; a
-/// reader keeps a cell's newest record, so it misses no state. A file that
-/// does not parse is skipped; a cell's file that cannot be read ends every
+/// writes of one pool between two polls are one change, the later; a
+/// reader keeps a pool's newest record, so it misses no state. A file that
+/// does not parse is skipped; a pool's file that cannot be read ends every
 /// watch of its class with [`DirectoryError::Unavailable`], except a
 /// watch whose buffer is full, which is lagged and reads
-/// [`CellEvent::Resnapshot`] instead. Every file
+/// [`PoolEvent::Resnapshot`] instead. Every file
 /// operation runs on a blocking thread.
 ///
 /// A resume token is a place in what this process watched, shared by its
 /// clones: a token from another process, from before a restart, or from
 /// before a spell in which the class went unwatched and its files changed,
 /// a record going missing or bad among them, yields
-/// [`CellEvent::Resnapshot`].
+/// [`PoolEvent::Resnapshot`].
 #[derive(Debug, Clone)]
 pub struct DirDirectory {
     shared: Arc<Shared>,
@@ -58,7 +58,7 @@ pub struct DirDirectory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirLimits {
     /// The changes a watcher may have unread before it is cut off with
-    /// [`CellEvent::Resnapshot`].
+    /// [`PoolEvent::Resnapshot`].
     pub buffer: usize,
     /// The latest changes of each class kept for watches that resume.
     pub history: usize,
@@ -102,7 +102,7 @@ struct Class {
     // The position of the class's latest change, as in `memory`.
     head: u64,
     // The latest changes, at positions `head - history.len() + 1 ..= head`.
-    history: VecDeque<CellEvent>,
+    history: VecDeque<PoolEvent>,
     watchers: HashMap<u64, Watcher>,
     // Running while the class has watchers, and only then.
     poller: Option<Poller>,
@@ -119,11 +119,11 @@ struct Poller {
     scanned: bool,
 }
 
-type Answer = Result<VecDeque<CellEvent>, DirectoryError>;
+type Answer = Result<VecDeque<PoolEvent>, DirectoryError>;
 
 #[derive(Debug)]
 struct Watcher {
-    events: mpsc::Sender<Result<CellEvent, DirectoryError>>,
+    events: mpsc::Sender<Result<PoolEvent, DirectoryError>>,
     lagged: Arc<AtomicBool>,
     // Until the first scan that began after the watch answers it, with its
     // snapshot or its replay.
@@ -132,7 +132,7 @@ struct Watcher {
 
 impl DirDirectory {
     /// The directory under `root`, with the default limits. Nothing is
-    /// read or made until it is used; a missing `root` holds no cells.
+    /// read or made until it is used; a missing `root` holds no pools.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self::with_limits(root, DirLimits::default())
     }
@@ -164,33 +164,33 @@ impl DirDirectory {
             .map_or(0, |class| class.watchers.len())
     }
 
-    async fn write(&self, class: String, cell: String, held: Held) -> Result<(), DirectoryError> {
+    async fn write(&self, class: String, pool: String, held: Held) -> Result<(), DirectoryError> {
         let io = Arc::clone(&self.shared.lock().class(&class, self.shared.base).io);
         let dir = self.shared.root.join(&class);
         tokio::task::spawn_blocking(move || {
             let _io = io.lock().unwrap_or_else(PoisonError::into_inner);
-            file::write(&dir, &class, &cell, held)
+            file::write(&dir, &class, &pool, held)
         })
         .await
         .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
     }
 }
 
-impl CellDirectory for DirDirectory {
+impl PoolDirectory for DirDirectory {
     type Watch = DirWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         // Before any path is made of its names.
         record.check()?;
-        let (class, cell) = (record.class.clone(), record.name.clone());
-        self.write(class, cell, Held::Record(Box::new(record)))
+        let (class, pool) = (record.class.clone(), record.name.clone());
+        self.write(class, pool, Held::Record(Box::new(record)))
             .await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
-        let (class, cell) = (withdrawal.class.clone(), withdrawal.cell.clone());
-        self.write(class, cell, Held::tombstone(withdrawal)).await
+        let (class, pool) = (withdrawal.class.clone(), withdrawal.pool.clone());
+        self.write(class, pool, Held::tombstone(withdrawal)).await
     }
 
     /// The watch begins when it is first polled, which must be inside a
@@ -342,10 +342,10 @@ impl Class {
     fn apply(&mut self, name: &str, files: Files, first: bool, history: usize) {
         let mut changed: Vec<_> = files
             .iter()
-            .filter_map(|(cell, seen)| {
+            .filter_map(|(pool, seen)| {
                 let entry = seen.entry.as_ref()?;
-                let before = self.files.get(cell).and_then(|seen| seen.entry.as_ref());
-                (before != Some(entry)).then(|| (entry.order(), cell, Arc::clone(entry)))
+                let before = self.files.get(pool).and_then(|seen| seen.entry.as_ref());
+                (before != Some(entry)).then(|| (entry.order(), pool, Arc::clone(entry)))
             })
             .collect();
         changed.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
@@ -353,8 +353,8 @@ impl Class {
         if first {
             // A record that went missing or bad is no change a watch can
             // report, but it is one of the files all the same.
-            let lost = self.files.iter().any(|(cell, seen)| {
-                seen.entry.is_some() && files.get(cell).is_none_or(|now| now.entry.is_none())
+            let lost = self.files.iter().any(|(pool, seen)| {
+                seen.entry.is_some() && files.get(pool).is_none_or(|now| now.entry.is_none())
             });
             self.files = Arc::new(files);
             // The files changed while nothing in this process watched them:
@@ -404,7 +404,7 @@ impl Class {
             let events = match from {
                 None => snapshot(files, name, *head),
                 Some(token) => match after(history, *head, token.position()) {
-                    Some(replay) => [CellEvent::Synced {
+                    Some(replay) => [PoolEvent::Synced {
                         token,
                         snapshot: false,
                     }]
@@ -413,7 +413,7 @@ impl Class {
                     .collect(),
                     None => {
                         ended.push(id);
-                        VecDeque::from([CellEvent::Resnapshot])
+                        VecDeque::from([PoolEvent::Resnapshot])
                     }
                 },
             };
@@ -461,7 +461,7 @@ impl Class {
 impl Watcher {
     /// Hand `event` to the watcher without waiting; false when it is gone
     /// or lagged, and is to be dropped.
-    fn offer(&self, event: &CellEvent) -> bool {
+    fn offer(&self, event: &PoolEvent) -> bool {
         match self.events.try_send(Ok(event.clone())) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -499,17 +499,17 @@ async fn poll(shared: Arc<Shared>, name: String, generation: u64, kick: Arc<Noti
     }
 }
 
-/// The records `files` holds, by cell name, then the snapshot's end.
-fn snapshot(files: &Files, name: &str, head: u64) -> VecDeque<CellEvent> {
-    let mut records: Vec<&CellRecord> = files
+/// The records `files` holds, by pool name, then the snapshot's end.
+fn snapshot(files: &Files, name: &str, head: u64) -> VecDeque<PoolEvent> {
+    let mut records: Vec<&PoolRecord> = files
         .values()
         .filter_map(|seen| seen.entry.as_ref()?.record())
         .collect();
     records.sort_by(|a, b| a.name.cmp(&b.name));
     records
         .into_iter()
-        .map(|record| CellEvent::Current(record.clone()))
-        .chain([CellEvent::Synced {
+        .map(|record| PoolEvent::Current(record.clone()))
+        .chain([PoolEvent::Synced {
             token: ResumeToken::new(name, head),
             snapshot: true,
         }])
@@ -519,10 +519,10 @@ fn snapshot(files: &Files, name: &str, head: u64) -> VecDeque<CellEvent> {
 /// The changes after `position`, if `history`, ending at `head`, still
 /// holds all of them.
 fn after(
-    history: &VecDeque<CellEvent>,
+    history: &VecDeque<PoolEvent>,
     head: u64,
     position: u64,
-) -> Option<impl Iterator<Item = CellEvent> + '_> {
+) -> Option<impl Iterator<Item = PoolEvent> + '_> {
     let oldest = head - history.len() as u64;
     let skip = position.checked_sub(oldest).filter(|_| position <= head)?;
     Some(history.iter().skip(skip as usize).cloned())

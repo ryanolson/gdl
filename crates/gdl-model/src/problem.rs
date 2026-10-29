@@ -3,13 +3,13 @@ use std::fmt;
 use serde::de::DeserializeOwned;
 
 /// One thing wrong with a deployment's settings, and where it is. Every
-/// reader of the spec, the fleet file, and a cell's settings reports in
+/// reader of the spec, the fleet file, and a pool's settings reports in
 /// this shape, so that a problem reads the same from every command:
 ///
 /// ```text
-/// fleet.toml:12: [cell.model-x-01] zone: unknown field `zone`, expected one of `class`, `region`, `home`, `ready`
-/// gdl.toml: [cells.model_x]: cell policy `[cells.model_x]`: the placement has no class `model_x`
-/// GDL_CELL__SUMMARY_MS: is 500; the period is at least 1000 ms
+/// fleet.toml:12: [pool.model-x-01] zone: unknown field `zone`, expected one of `class`, `region`, `home`, `ready`
+/// gdl.toml: [pools.model_x]: pool policy `[pools.model_x]`: the placement has no class `model_x`
+/// GDL_POOL__SUMMARY_MS: is 500; the period is at least 1000 ms
 /// ```
 ///
 /// A file's problem names the file, the line when the parser gives one
@@ -26,7 +26,7 @@ pub struct Problem {
     /// line: a graph file's parser does, TOML's reader is given none.
     pub column: Option<usize>,
     /// The table, as a dotted path without its brackets
-    /// (`cell.model-x-01`); `None` for the file's top level.
+    /// (`pool.model-x-01`); `None` for the file's top level.
     pub table: Option<String>,
     /// The key in the table; `None` when the problem is the table's own.
     pub key: Option<String>,
@@ -56,7 +56,7 @@ impl Problem {
         }
     }
 
-    /// The key's whole dotted path, its table's included (`cell.ready.e`):
+    /// The key's whole dotted path, its table's included (`pool.ready.e`):
     /// `None` for a problem of a table or of no key.
     pub fn path(&self) -> Option<String> {
         let key = self.key.as_deref()?;

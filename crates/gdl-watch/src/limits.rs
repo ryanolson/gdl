@@ -24,8 +24,8 @@ pub struct WatchLimits {
 impl WatchLimits {
     /// The default limit on one event: 4 MiB.
     ///
-    /// The largest event a cell's hub sends is an instance's: `ready` on a
-    /// cell's watch, `exposed` on the relay. Each carries the instance's
+    /// The largest event a pool's hub sends is an instance's: `ready` on a
+    /// pool's watch, `exposed` on the relay. Each carries the instance's
     /// peer as it registered with the hub, whose worker address is bytes
     /// the hub does not bound, written in JSON as an array of numbers. The
     /// hub takes a registration as a JSON body, with that same encoding of
@@ -33,10 +33,10 @@ impl WatchLimits {
     /// velo-hub keeps), so no instance a hub admits has an event over 2
     /// MiB and the few names around the peer. A velo node with one TCP
     /// transport has a `ready` event of 995 bytes. Every other event names
-    /// only cells, classes, regions, and segments, each at most 63 or 64
+    /// only pools, classes, regions, and segments, each at most 63 or 64
     /// characters, and numbers: with every name at its longest and every
     /// number at its largest, a snapshot's `follow` event is 463 bytes, its
-    /// `cell` event 381, and a `load` event 182 on a cell's watch and 364
+    /// `pool` event 381, and a `load` event 182 on a pool's watch and 364
     /// on the relay. So 4 MiB refuses nothing a hub sends, with room for a
     /// larger address, and holds a watch's buffer to 4 MiB and one chunk.
     pub const EVENT: usize = 4 << 20;
@@ -44,10 +44,10 @@ impl WatchLimits {
     /// The default limit on a snapshot's bytes: 64 MiB.
     ///
     /// A snapshot holds an event for each instance it shows, and a few for
-    /// each cell: a cell's watch its entry instances, the relay every
-    /// entry instance of every cell its hub follows. An instance's event
+    /// each pool: a pool's watch its entry instances, the relay every
+    /// entry instance of every pool its hub follows. An instance's event
     /// is about 1 KiB with one TCP transport: a real hub's snapshot of a
-    /// cell of 64 entry instances is 64,468 bytes, and its follower's
+    /// pool of 64 entry instances is 64,468 bytes, and its follower's
     /// relay of it 68,644. So 64 MiB holds a snapshot of some 60,000
     /// instances, more entry instances than one hub follows, and bounds
     /// what a reader holds of a snapshot that is not complete.
@@ -56,10 +56,10 @@ impl WatchLimits {
     /// The default bound on a snapshot's time: 30 s from when the watch
     /// is asked for.
     ///
-    /// It covers the connection (at most 5 s), a cell's hub's wait for its
+    /// It covers the connection (at most 5 s), a pool's hub's wait for its
     /// first record before it answers a watch (at most 5 s), and the
     /// snapshot itself, which a hub sends from what it holds in memory: a
-    /// real hub's snapshot of a cell of 64 entry instances completes in 8
+    /// real hub's snapshot of a pool of 64 entry instances completes in 8
     /// ms over loopback, and its follower's relay of it in 14 ms, and the
     /// 20 s left carry a snapshot at the limit at 3.2 MB/s. It is also the idle timeout, so a hub that
     /// stalls is told the same way before and after its snapshot. A watch

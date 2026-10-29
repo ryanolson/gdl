@@ -43,7 +43,7 @@ pub use compose::{
 };
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
-pub use followed::{ClassCells, FollowedCells, ModelIndex, ModelSet};
+pub use followed::{ClassPools, FollowedPools, ModelIndex, ModelSet};
 pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{
     ConfigField, ConfigSchema, ConfigValue, Encoding, InstanceModel, InstanceModelState,
@@ -54,15 +54,15 @@ pub use items::{Items, items};
 pub use metrics::Metrics;
 pub use models::InstanceModels;
 pub use policy::{
-    Cell, CellChoice, CellCondition, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease,
-    Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, ModelState, NoCell, RoundRobin,
+    ChoiceLease, Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, ModelState, NoPool, Pool,
+    PoolChoice, PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime
 /// registers and serves.
 pub use prometheus;
 pub use records::{
-    CellRecords, Checked, Expected, HubRecords, Record, RecordsUnavailable, Written,
+    Checked, Expected, HubRecords, PoolRecords, Record, RecordsUnavailable, Written,
 };
 #[doc(hidden)]
 pub use records::{RecordAnswer, RecordLink, RecordOp, RecordReply};
@@ -141,12 +141,12 @@ pub use gdl_macros::Projection;
 pub mod __runtime {
     pub use crate::codec::{decoder, encoder, encoder_into, encoder_sized};
     pub use crate::cx::wall_now_nanos;
-    pub use crate::followed::CellSource;
+    pub use crate::followed::PoolSource;
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
     };
-    pub use crate::policy::{ChoiceHeld, ErasedPolicy, TypedPolicy, Window, cell_id};
+    pub use crate::policy::{ChoiceHeld, ErasedPolicy, TypedPolicy, Window, pool_id};
     pub use crate::select::{Erased, Lease, Picked, Typed};
 }
 

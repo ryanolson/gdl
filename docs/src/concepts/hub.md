@@ -31,7 +31,7 @@ gdl-hub --healthcheck            # exit 0 if the local hub answers GET /v1/healt
 
 `deployment.json` holds the graph's manifest and the placement (`gdl_model::DeploymentSpec`). `cargo gdl compose` writes it ([Deploy with Docker Compose](../guides/compose-deploy.md)). The binary reads no settings file. It serves on `gdl_model::HUB_PUBLIC_PORT` (1337) and `HUB_CONTROL_PORT` (8337), unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. A segment reads the same variables for where its hub is. Port 0 lets the OS choose. Once it serves, the binary prints the addresses it bound on stderr (`gdl-hub: serving, public ..., control ...`).
 
-The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, and the hub is the first process of its container. The kernel ignores a signal that such a process does not handle. So a hub that handled only SIGINT ran until Docker killed it, 10 s later. A cell's hub takes its cell's settings from `GDL_CELL__*` variables ([Classes and cells](cells.md)).
+The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, and the hub is the first process of its container. The kernel ignores a signal that such a process does not handle. So a hub that handled only SIGINT ran until Docker killed it, 10 s later. A pool's hub takes its pool's settings from `GDL_POOL__*` variables ([Classes and pools](pools.md)).
 
 ### Admission
 
@@ -66,6 +66,6 @@ Under a hub, the instance's velo node resolves an unknown peer through the hub. 
 
 Under a hub, an unspecified `listen` address such as `0.0.0.0:9000` advertises the address that the container's `HOSTNAME` resolves to, on the same port. Binding to `0.0.0.0` would advertise `0.0.0.0` to peers. The launch fails if `HOSTNAME` is not set or has no IPv4 address. A concrete `listen` address is bound and advertised as given.
 
-## A cell's hub
+## A pool's hub
 
-In a deployment with cells, each cell has its own hub, and an instance's lifecycle is scoped to its cell's hub. The cell's hub also counts the cell's quorum, serves the cell's health and watch, and follows other cells. [Classes and cells](cells.md) and [Following and choosing cells](cell-routing.md) describe it. [Cell hub routes and watch events](../appendix/hub-api.md) lists its routes.
+In a deployment with pools, each pool has its own hub, and an instance's lifecycle is scoped to its pool's hub. The pool's hub also counts the pool's quorum, serves the pool's health and watch, and follows other pools. [Classes and pools](pools.md) and [Following and choosing pools](pool-routing.md) describe it. [Pool hub routes and watch events](../appendix/hub-api.md) lists its routes.

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{WAIT, config, millis_now, spec};
-use gdl_cells::{CellRecord, ModelEntry, ModelState, Presence};
-use gdl_hub::{CellReadiness, CellTiming, GraphAdmission, HubDirectory};
-use gdl_model::{CellSettings, DirectoryBackend};
+use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
+use gdl_model::{DirectoryBackend, PoolSettings};
+use gdl_pools::{ModelEntry, ModelState, PoolRecord, Presence};
 use gdl_watch::{Report, ReportRefusal, ReportReply};
 use tokio::sync::mpsc;
 use velo_hub::Hub;
@@ -21,14 +21,14 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let epoch = millis_now() + 60_000;
-    let previous = CellRecord {
-        name: common::CELL.into(),
+    let previous = PoolRecord {
+        name: common::POOL.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some(common::GLOBAL.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
-        state: gdl_cells::CellState::Unavailable,
+        state: gdl_pools::PoolState::Unavailable,
         epoch,
         seq: 10,
         hub: "model-x-01-hub:1337".into(),
@@ -47,9 +47,9 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
 
     for readable in [true, false] {
         let held = previous.clone();
-        let (sent, mut accepted) = mpsc::unbounded_channel::<CellRecord>();
+        let (sent, mut accepted) = mpsc::unbounded_channel::<PoolRecord>();
         let mut app = Router::new().route(
-            "/v1/ext/gdl-cell/report",
+            "/v1/ext/gdl-pool/report",
             post(move |Json(report): Json<Report>| {
                 let held = held.clone();
                 let sent = sent.clone();
@@ -75,7 +75,7 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
         if readable {
             let held = previous.clone();
             app = app.route(
-                "/v1/ext/gdl-cell/report/{class}/{cell}",
+                "/v1/ext/gdl-pool/report/{class}/{pool}",
                 velo_hub::axum::routing::get(move || {
                     let held = held.clone();
                     async move { Json(held) }
@@ -91,30 +91,30 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
             .to_string();
         let server = tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
         let directory = HubDirectory::new(Some(parent.clone()), None).expect("a relay directory");
-        let settings = CellSettings {
+        let settings = PoolSettings {
             directory: DirectoryBackend::Relay {
                 parent_hub: Some(parent),
                 state_dir: None,
             },
             ..common::settings()
         };
-        let cell = Arc::new(
-            CellReadiness::new(
+        let pool = Arc::new(
+            PoolReadiness::new(
                 &spec,
                 settings,
                 directory.clone(),
-                CellTiming {
+                PoolTiming {
                     heartbeat: Duration::from_millis(100),
-                    ..CellTiming::default()
+                    ..PoolTiming::default()
                 },
             )
-            .expect("valid cell settings")
+            .expect("valid pool settings")
             .with_reports(&directory)
-            .expect("a relay cell"),
+            .expect("a relay pool"),
         );
         let hub = Hub::builder(config())
             .extension(GraphAdmission::new(spec.clone()))
-            .extension(cell)
+            .extension(pool)
             .serve()
             .await
             .expect("the child serves");
@@ -152,10 +152,10 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
     for equal in [false, true] {
-        let held = Arc::new(std::sync::Mutex::new(None::<CellRecord>));
+        let held = Arc::new(std::sync::Mutex::new(None::<PoolRecord>));
         let (sent, mut accepted) = mpsc::unbounded_channel();
         let app = Router::new().route(
-            "/v1/ext/gdl-cell/report",
+            "/v1/ext/gdl-pool/report",
             post(move |Json(report): Json<Report>| {
                 let held = Arc::clone(&held);
                 let sent = sent.clone();
@@ -169,7 +169,7 @@ async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
                         // equal-epoch case needs no wall-clock race.
                         let epoch = record.epoch + if equal { 0 } else { 60_000 };
                         let version = epoch * (1 << 20) + 1;
-                        CellRecord {
+                        PoolRecord {
                             epoch,
                             seq: 10,
                             models: vec![ModelEntry {
@@ -207,10 +207,10 @@ async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
             .to_string();
         let server = tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
         let directory = HubDirectory::new(Some(parent.clone()), None).expect("a relay directory");
-        let cell = Arc::new(
-            CellReadiness::new(
+        let pool = Arc::new(
+            PoolReadiness::new(
                 &spec(),
-                CellSettings {
+                PoolSettings {
                     directory: DirectoryBackend::Relay {
                         parent_hub: Some(parent),
                         state_dir: None,
@@ -218,18 +218,18 @@ async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
                     ..common::settings()
                 },
                 directory.clone(),
-                CellTiming {
+                PoolTiming {
                     heartbeat: Duration::from_millis(100),
-                    ..CellTiming::default()
+                    ..PoolTiming::default()
                 },
             )
-            .expect("valid cell settings")
+            .expect("valid pool settings")
             .with_reports(&directory)
-            .expect("a relay cell"),
+            .expect("a relay pool"),
         );
         let hub = Hub::builder(config())
             .extension(GraphAdmission::new(spec()))
-            .extension(cell)
+            .extension(pool)
             .serve()
             .await
             .expect("the child serves");

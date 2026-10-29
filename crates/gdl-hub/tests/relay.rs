@@ -1,6 +1,6 @@
-//! The `relay` directory backend: a child cell's hub reports its record
-//! to its parent cell's hub, which holds its children's records in a
-//! directory of its own and follows them from there. A cell in the middle
+//! The `relay` directory backend: a child pool's hub reports its record
+//! to its parent pool's hub, which holds its children's records in a
+//! directory of its own and follows them from there. A pool in the middle
 //! of a chain does both. The parent takes only what it can verify, takes
 //! reports while its own health waits for them, and answers each with the
 //! cadence at which it expects the next.
@@ -18,57 +18,57 @@ use common::{
     GLOBAL, Instance, Named, WAIT, address, config, health, spec, timing as quiet_timing,
 };
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, Withdrawal};
-use gdl_hub::{CellReadiness, CellTiming, GraphAdmission, HubDirectory};
+use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
 use gdl_model::{
-    CellSettings, DeploymentSpec, DirectoryBackend, HopInfo, Manifest, NodeInfo, Placement, Role,
+    DeploymentSpec, DirectoryBackend, HopInfo, Manifest, NodeInfo, Placement, PoolSettings, Role,
     SegmentPhase, TypeInfo,
 };
-use gdl_watch::{CellWatcher, Report, ReportReply};
+use gdl_pools::{DirectoryError, PoolDirectory, PoolEvent, PoolRecord, PoolState, Withdrawal};
+use gdl_watch::{PoolWatcher, Report, ReportReply};
 use tokio::sync::watch;
 use velo_hub::Hub;
 use velo_hub::axum::{Json, Router, routing::post};
 
-/// A cell's hub under the `relay` backend: its directory reports its
+/// A pool's hub under the `relay` backend: its directory reports its
 /// record to its parent's hub, if its settings name one, and holds the
 /// records its children report.
-struct RelayCell {
+struct RelayPool {
     hub: Hub,
-    readiness: Arc<CellReadiness<Named<HubDirectory>>>,
+    readiness: Arc<PoolReadiness<Named<HubDirectory>>>,
     directory: HubDirectory,
     /// The state directory made for a parent whose settings name none.
     _state: Option<tempfile::TempDir>,
 }
 
-/// The hub of `cell` of `spec`, its own name resolved once it serves. A
+/// The hub of `pool` of `spec`, its own name resolved once it serves. A
 /// parent whose settings name no state directory gets a temporary one.
-async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTiming) -> RelayCell {
+async fn relay_pool(spec: &DeploymentSpec, pool: PoolSettings, timing: PoolTiming) -> RelayPool {
     let DirectoryBackend::Relay {
         parent_hub,
         state_dir,
-    } = cell.directory.clone()
+    } = pool.directory.clone()
     else {
-        panic!("a relay cell: {:?}", cell.directory);
+        panic!("a relay pool: {:?}", pool.directory);
     };
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let parent = layout
         .boundaries()
         .iter()
-        .any(|boundary| boundary.from == cell.class);
+        .any(|boundary| boundary.from == pool.class);
     let made = (parent && state_dir.is_none()).then(state);
     let state_dir = state_dir.or_else(|| made.as_ref().map(|made| made.path().to_owned()));
-    let cell = CellSettings {
+    let pool = PoolSettings {
         directory: DirectoryBackend::Relay {
             parent_hub: parent_hub.clone(),
             state_dir: state_dir.clone(),
         },
-        ..cell
+        ..pool
     };
     let directory = HubDirectory::new(parent_hub, state_dir).expect("a relay directory");
     let named = Named::new(directory.clone());
-    let name = cell.hub.clone().expect("a hub name");
+    let name = pool.hub.clone().expect("a hub name");
     let readiness = Arc::new(
-        CellReadiness::new(spec, cell, named.clone(), timing)
+        PoolReadiness::new(spec, pool, named.clone(), timing)
             .expect("valid test fixture")
             .with_reports(&directory)
             .expect("a lease its reports cover"),
@@ -80,7 +80,7 @@ async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTimin
         .await
         .expect("the hub serves");
     named.resolve(&name, &hub);
-    RelayCell {
+    RelayPool {
         hub,
         readiness,
         directory,
@@ -88,18 +88,18 @@ async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTimin
     }
 }
 
-/// The global cell's settings under `relay`: it reports nowhere.
-fn global() -> CellSettings {
+/// The global pool's settings under `relay`: it reports nowhere.
+fn global() -> PoolSettings {
     toml::from_str(&format!(
         "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-hub:1337'\n"
     ))
     .expect("valid test fixture")
 }
 
-/// The global cell's settings under `relay`, keeping its children's
+/// The global pool's settings under `relay`, keeping its children's
 /// records in `state`.
-fn global_keeping(state: &std::path::Path) -> CellSettings {
-    CellSettings {
+fn global_keeping(state: &std::path::Path) -> PoolSettings {
+    PoolSettings {
         directory: DirectoryBackend::Relay {
             parent_hub: None,
             state_dir: Some(state.to_owned()),
@@ -116,9 +116,9 @@ fn state() -> tempfile::TempDir {
         .expect("a temporary directory")
 }
 
-/// A model cell `name`, a child of [`GLOBAL`], reporting to `parent`:
+/// A model pool `name`, a child of [`GLOBAL`], reporting to `parent`:
 /// `f` and `d` each need one usable instance.
-fn model(name: &str, parent: &str) -> CellSettings {
+fn model(name: &str, parent: &str) -> PoolSettings {
     toml::from_str(&format!(
         "name = '{name}'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = '{GLOBAL}'\n\
          hub = '{name}-hub:1337'\nparent_hub = '{parent}'\n[ready]\nf = 1\nd = 1\n"
@@ -127,17 +127,17 @@ fn model(name: &str, parent: &str) -> CellSettings {
 }
 
 /// What `directory` holds for `class`, read through a new watch's
-/// snapshot, by cell name.
-async fn held(directory: &HubDirectory, class: &str) -> BTreeMap<String, CellRecord> {
+/// snapshot, by pool name.
+async fn held(directory: &HubDirectory, class: &str) -> BTreeMap<String, PoolRecord> {
     let mut watch = std::pin::pin!(directory.watch(class, None));
     let mut records = BTreeMap::new();
     let read = async {
         loop {
             match watch.next().await {
-                Some(Ok(CellEvent::Current(record))) => {
+                Some(Ok(PoolEvent::Current(record))) => {
                     records.insert(record.name.clone(), record);
                 }
-                Some(Ok(CellEvent::Synced { .. })) => return,
+                Some(Ok(PoolEvent::Synced { .. })) => return,
                 other => panic!("the snapshot: {other:?}"),
             }
         }
@@ -153,8 +153,8 @@ async fn holds(
     directory: &HubDirectory,
     class: &str,
     what: &str,
-    mut done: impl FnMut(&BTreeMap<String, CellRecord>) -> bool,
-) -> BTreeMap<String, CellRecord> {
+    mut done: impl FnMut(&BTreeMap<String, PoolRecord>) -> bool,
+) -> BTreeMap<String, PoolRecord> {
     let deadline = Instant::now() + WAIT;
     loop {
         let records = held(directory, class).await;
@@ -166,9 +166,9 @@ async fn holds(
     }
 }
 
-/// Wait until the cells `readiness`'s hub follows satisfy `done`.
-async fn following<D: CellDirectory>(
-    readiness: &CellReadiness<D>,
+/// Wait until the pools `readiness`'s hub follows satisfy `done`.
+async fn following<D: PoolDirectory>(
+    readiness: &PoolReadiness<D>,
     what: &str,
     done: impl FnMut(&BTreeMap<(String, String), u64>) -> bool,
 ) {
@@ -182,8 +182,8 @@ async fn following<D: CellDirectory>(
     }
 }
 
-fn key(class: &str, cell: &str) -> (String, String) {
-    (class.to_string(), cell.to_string())
+fn key(class: &str, pool: &str) -> (String, String) {
+    (class.to_string(), pool.to_string())
 }
 
 /// Join `segments` to `hub` as ready instances of `spec`.
@@ -236,9 +236,9 @@ fn chain() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-/// A cell of [`chain`]: `name` of `class`, a child of `parent` reporting
-/// to `parent_hub` unless it is the global cell.
-fn link(name: &str, class: &str, parent: Option<(&str, &str)>) -> CellSettings {
+/// A pool of [`chain`]: `name` of `class`, a child of `parent` reporting
+/// to `parent_hub` unless it is the global pool.
+fn link(name: &str, class: &str, parent: Option<(&str, &str)>) -> PoolSettings {
     let parent = parent.map_or(String::new(), |(home, hub)| {
         format!("home = '{home}'\nparent_hub = '{hub}'\n")
     });
@@ -248,7 +248,7 @@ fn link(name: &str, class: &str, parent: Option<(&str, &str)>) -> CellSettings {
     .expect("valid test fixture")
 }
 
-/// A chain: the middle cell reports to the top and holds the bottom's
+/// A chain: the middle pool reports to the top and holds the bottom's
 /// records, and each parent follows its children. A record goes one hop
 /// up, never further: the top holds no record of the bottom's class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -257,14 +257,14 @@ async fn the_middle_of_a_chain_reports_up_and_holds_its_childrens_records() {
     const MIDDLE: &str = "model-x-01";
     const BOTTOM: &str = "model-y-01";
     let spec = chain();
-    let top = relay_cell(&spec, link(TOP, "global", None), quiet_timing()).await;
-    let middle = relay_cell(
+    let top = relay_pool(&spec, link(TOP, "global", None), quiet_timing()).await;
+    let middle = relay_pool(
         &spec,
         link(MIDDLE, "model_x", Some((TOP, &address(&top.hub)))),
         quiet_timing(),
     )
     .await;
-    let bottom = relay_cell(
+    let bottom = relay_pool(
         &spec,
         link(BOTTOM, "model_y", Some((MIDDLE, &address(&middle.hub)))),
         quiet_timing(),
@@ -274,14 +274,14 @@ async fn the_middle_of_a_chain_reports_up_and_holds_its_childrens_records() {
     let _middle_instances = ready(&middle.hub, &spec, &["f", "t"]).await;
     let _bottom_instances = ready(&bottom.hub, &spec, &["g"]).await;
 
-    following(&top.readiness, "the top follows the middle", |cells| {
-        cells.contains_key(&key("model_x", MIDDLE))
+    following(&top.readiness, "the top follows the middle", |pools| {
+        pools.contains_key(&key("model_x", MIDDLE))
     })
     .await;
     following(
         &middle.readiness,
         "the middle follows the bottom",
-        |cells| cells.contains_key(&key("model_y", BOTTOM)),
+        |pools| pools.contains_key(&key("model_y", BOTTOM)),
     )
     .await;
     health(&top.readiness, "the top's child is ready", |h| h.healthy()).await;
@@ -304,23 +304,23 @@ async fn the_middle_of_a_chain_reports_up_and_holds_its_childrens_records() {
     assert!(held(&top.directory, "global").await.is_empty());
 }
 
-/// A record of the model cell `cell`, a child of [`GLOBAL`] in [`spec`]'s
+/// A record of the model pool `pool`, a child of [`GLOBAL`] in [`spec`]'s
 /// layout, as a child's hub would report it, whose hub is at `hub`.
-fn child_record(cell: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration) -> CellRecord {
+fn child_record(pool: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration) -> PoolRecord {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
-        name: cell.into(),
+        name: pool.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some(GLOBAL.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch,
         seq,
         hub: hub.into(),
@@ -343,9 +343,9 @@ fn nowhere() -> String {
 /// withdrawal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_that_stops_reporting_is_dropped_once_its_lease_passes() {
-    let parent = relay_cell(&spec(), global(), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global(), quiet_timing()).await;
     let lease = Duration::from_millis(800);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let sent = Instant::now();
     watcher
         .report(
@@ -354,12 +354,12 @@ async fn a_child_that_stops_reporting_is_dropped_once_its_lease_passes() {
         )
         .await
         .expect("the parent takes the report");
-    following(&parent.readiness, "the child is followed", |cells| {
-        cells.contains_key(&key("model_x", "model-x-09"))
+    following(&parent.readiness, "the child is followed", |pools| {
+        pools.contains_key(&key("model_x", "model-x-09"))
     })
     .await;
-    following(&parent.readiness, "the child is dropped", |cells| {
-        !cells.contains_key(&key("model_x", "model-x-09"))
+    following(&parent.readiness, "the child is dropped", |pools| {
+        !pools.contains_key(&key("model_x", "model-x-09"))
     })
     .await;
     assert!(
@@ -385,29 +385,29 @@ async fn a_child_that_stops_reporting_is_dropped_once_its_lease_passes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_parent_still_holds_a_silent_childs_record() {
     let state = state();
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     let lease = Duration::from_millis(800);
     let record = child_record("model-x-09", &nowhere(), (1, 1), lease);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     watcher
         .report(&address(&parent.hub), &Report::Record(record.clone()))
         .await
         .expect("the parent takes the report");
     parent.hub.shutdown().await.expect("the parent stops");
 
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     assert_eq!(
         held(&parent.directory, "model_x").await,
         BTreeMap::from([("model-x-09".to_string(), record.clone())]),
         "the restarted parent holds the silent child's record"
     );
     let restarted = Instant::now();
-    following(&parent.readiness, "the child is followed", |cells| {
-        cells.contains_key(&key("model_x", "model-x-09"))
+    following(&parent.readiness, "the child is followed", |pools| {
+        pools.contains_key(&key("model_x", "model-x-09"))
     })
     .await;
-    following(&parent.readiness, "the child is dropped", |cells| {
-        !cells.contains_key(&key("model_x", "model-x-09"))
+    following(&parent.readiness, "the child is dropped", |pools| {
+        !pools.contains_key(&key("model_x", "model-x-09"))
     })
     .await;
     assert!(
@@ -431,21 +431,21 @@ async fn a_restarted_parent_still_holds_a_silent_childs_record() {
     parent.hub.shutdown().await.expect("the parent stops");
 }
 
-/// A parent cell's hub under `relay` keeps its children's records: one
+/// A parent pool's hub under `relay` keeps its children's records: one
 /// whose directory has no state directory is refused, as a child's with
 /// no parent's hub is, rather than run with its children's records only
 /// in memory.
 #[test]
 fn a_parent_whose_directory_keeps_nothing_is_refused() {
     let directory = HubDirectory::new(None, None).expect("a relay directory");
-    let Err(error) = CellReadiness::new(&spec(), global(), directory.clone(), quiet_timing())
+    let Err(error) = PoolReadiness::new(&spec(), global(), directory.clone(), quiet_timing())
         .expect("valid test fixture")
         .with_reports(&directory)
     else {
         panic!("a parent with nowhere to keep its children's records");
     };
     assert!(
-        error.to_string().starts_with("[cell] state_dir: missing"),
+        error.to_string().starts_with("[pool] state_dir: missing"),
         "{error}"
     );
 }
@@ -456,19 +456,19 @@ fn a_parent_whose_directory_keeps_nothing_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_reads_back_its_record_after_its_parent_restarts() {
     let state = state();
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
-    let record = CellRecord {
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let record = PoolRecord {
         models: vec![
-            gdl_cells::ModelEntry {
+            gdl_pools::ModelEntry {
                 model: "llama-70b".into(),
                 routing_key: None,
-                state: gdl_cells::ModelState::Ready,
+                state: gdl_pools::ModelState::Ready,
                 since: 2,
             },
-            gdl_cells::ModelEntry {
+            gdl_pools::ModelEntry {
                 model: "qwen-32b".into(),
                 routing_key: None,
-                state: gdl_cells::ModelState::Drained,
+                state: gdl_pools::ModelState::Drained,
                 since: 3,
             },
         ],
@@ -476,14 +476,14 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
         revoked: Vec::new(),
         ..child_record("model-x-01", &nowhere(), (4, 9), Duration::from_secs(30))
     };
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     watcher
         .report(&address(&parent.hub), &Report::Record(record.clone()))
         .await
         .expect("the parent takes the report");
     parent.hub.shutdown().await.expect("the parent stops");
 
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     let read = watcher
         .held(&address(&parent.hub), "model_x", "model-x-01")
         .await
@@ -495,14 +495,14 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
 /// A child's withdrawal removes its record from a parent that keeps its
 /// state, and it stays removed when the parent restarts: its version is
 /// held, so a late report of the withdrawn record is refused, and only a
-/// newer epoch, a restarted child, brings the cell back.
+/// newer epoch, a restarted child, brings the pool back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
     let state = state();
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     let hub = nowhere();
     let lease = Duration::from_secs(30);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let at = address(&parent.hub);
     watcher
         .report(
@@ -516,7 +516,7 @@ async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
             &at,
             &Report::Withdrawal(Withdrawal {
                 class: "model_x".into(),
-                cell: "model-x-01".into(),
+                pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 2,
             }),
@@ -526,7 +526,7 @@ async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
     assert!(held(&parent.directory, "model_x").await.is_empty());
     parent.hub.shutdown().await.expect("the parent stops");
 
-    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     let at = address(&parent.hub);
     assert!(
         held(&parent.directory, "model_x").await.is_empty(),
@@ -561,16 +561,16 @@ async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_parent_never_asks_for_more_than_the_records_lease_covers() {
     let heartbeat = Duration::from_secs(600);
-    let parent = relay_cell(
+    let parent = relay_pool(
         &spec(),
         global(),
-        CellTiming {
+        PoolTiming {
             heartbeat,
             ..quiet_timing()
         },
     )
     .await;
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     for (seq, lease, expected) in [
         (1, Duration::from_millis(900), Duration::from_millis(300)),
         (2, Duration::from_secs(30), Duration::from_secs(10)),
@@ -681,7 +681,7 @@ async fn a_child_reports_at_the_cadence_its_parent_answers() {
     let fast = Duration::from_millis(250);
     let slow = Duration::from_millis(1_500);
     let mut parent = Scripted::serve(fast).await;
-    let _child = relay_cell(
+    let _child = relay_pool(
         &spec(),
         model("model-x-01", &parent.address),
         quiet_timing(),
@@ -732,19 +732,19 @@ async fn a_child_reports_at_the_cadence_its_parent_answers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parent_that_waits_for_its_child_takes_its_reports() {
     let spec = spec();
-    let parent = relay_cell(&spec, global(), quiet_timing()).await;
+    let parent = relay_pool(&spec, global(), quiet_timing()).await;
     let _front = ready(&parent.hub, &spec, &["a"]).await;
     let waiting = health(&parent.readiness, "the parent's own quorum", |h| {
-        h.state == CellState::Ready
+        h.state == PoolState::Ready
     })
     .await;
     assert!(!waiting.healthy(), "{waiting:?}");
     assert_eq!(
-        common::get(&parent.hub, "/v1/ext/gdl-cell/health").await.0,
+        common::get(&parent.hub, "/v1/ext/gdl-pool/health").await.0,
         503
     );
 
-    let child = relay_cell(
+    let child = relay_pool(
         &spec,
         model("model-x-01", &address(&parent.hub)),
         quiet_timing(),
@@ -755,10 +755,10 @@ async fn a_parent_that_waits_for_its_child_takes_its_reports() {
         &parent.directory,
         "model_x",
         "the child's first report",
-        |cells| cells.contains_key("model-x-01"),
+        |pools| pools.contains_key("model-x-01"),
     )
     .await;
-    assert_eq!(first["model-x-01"].state, CellState::Unavailable);
+    assert_eq!(first["model-x-01"].state, PoolState::Unavailable);
     assert!(!parent.readiness.health().borrow().healthy());
 
     let _instances = ready(&child.hub, &spec, &["f", "d"]).await;
@@ -767,7 +767,7 @@ async fn a_parent_that_waits_for_its_child_takes_its_reports() {
     })
     .await;
     assert_eq!(
-        common::get(&parent.hub, "/v1/ext/gdl-cell/health").await.0,
+        common::get(&parent.hub, "/v1/ext/gdl-pool/health").await.0,
         200
     );
 }
@@ -775,13 +775,13 @@ async fn a_parent_that_waits_for_its_child_takes_its_reports() {
 /// The parent writes a report into its directory only once it has
 /// verified it: a record of another parent, of other hashes, or not newer
 /// than what it holds is refused, and the directory is as it was. A
-/// withdrawal of a cell it holds no record of writes nothing, so that
+/// withdrawal of a pool it holds no record of writes nothing, so that
 /// nothing can stop a child's records before it reports.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_parent_refuses_what_it_cannot_verify() {
-    let parent = relay_cell(&spec(), global(), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global(), quiet_timing()).await;
     let at = address(&parent.hub);
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let lease = Duration::from_secs(30);
     // The parent follows a child it holds: let it fail at once.
     let hub = nowhere();
@@ -794,22 +794,22 @@ async fn the_parent_refuses_what_it_cannot_verify() {
     assert_eq!(before.values().collect::<Vec<_>>(), [&good]);
 
     let refused = [
-        CellRecord {
+        PoolRecord {
             home: Some("global-02-us-east-1".into()),
             seq: 3,
             ..good.clone()
         },
-        CellRecord {
+        PoolRecord {
             home: None,
             seq: 3,
             ..good.clone()
         },
-        CellRecord {
+        PoolRecord {
             contract: good.contract ^ 1,
             seq: 3,
             ..good.clone()
         },
-        CellRecord {
+        PoolRecord {
             placement: good.placement ^ 1,
             seq: 3,
             ..good.clone()
@@ -831,7 +831,7 @@ async fn the_parent_refuses_what_it_cannot_verify() {
             other => panic!("{version:?}: {other:?}"),
         }
     }
-    let malformed = CellRecord {
+    let malformed = PoolRecord {
         name: "Model-X-01".into(),
         seq: 3,
         ..good.clone()
@@ -845,14 +845,14 @@ async fn the_parent_refuses_what_it_cannot_verify() {
         "{refusal:?}"
     );
 
-    // A withdrawal of a cell never reported writes nothing: a record of it
+    // A withdrawal of a pool never reported writes nothing: a record of it
     // at any version is taken after it.
     watcher
         .report(
             &at,
             &Report::Withdrawal(Withdrawal {
                 class: "model_x".into(),
-                cell: "model-x-02".into(),
+                pool: "model-x-02".into(),
                 epoch: u64::MAX,
                 seq: u64::MAX,
             }),
@@ -872,7 +872,7 @@ async fn the_parent_refuses_what_it_cannot_verify() {
             &at,
             &Report::Withdrawal(Withdrawal {
                 class: "model_x".into(),
-                cell: "model-x-01".into(),
+                pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 3,
             }),
@@ -893,10 +893,10 @@ async fn a_stalled_report_does_not_block_renewal_at_the_parents_cadence() {
 
     let cadence = Duration::from_millis(100);
     let lease = Duration::from_millis(900);
-    let parent = relay_cell(
+    let parent = relay_pool(
         &spec(),
         global(),
-        CellTiming {
+        PoolTiming {
             heartbeat: cadence,
             ..quiet_timing()
         },
@@ -909,11 +909,11 @@ async fn a_stalled_report_does_not_block_renewal_at_the_parents_cadence() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let (arrivals, mut arrived) = watch::channel(0);
         let arrivals = Arc::new(arrivals);
-        let client = CellWatcher::new().expect("a report client");
+        let client = PoolWatcher::new().expect("a report client");
         let at = address(&parent.hub);
         let counted = Arc::clone(&attempts);
         let app = Router::new().route(
-            "/v1/ext/gdl-cell/report",
+            "/v1/ext/gdl-pool/report",
             post(move |Json(report): Json<Report>| {
                 let attempt = counted.fetch_add(1, Ordering::SeqCst) + 1;
                 arrivals.send_replace(attempt);
@@ -943,10 +943,10 @@ async fn a_stalled_report_does_not_block_renewal_at_the_parents_cadence() {
         } else {
             "model-x-01"
         };
-        let child = relay_cell(
+        let child = relay_pool(
             &spec(),
             model(name, &at),
-            CellTiming {
+            PoolTiming {
                 heartbeat: Duration::from_secs(10),
                 lease,
                 ..quiet_timing()
@@ -958,7 +958,7 @@ async fn a_stalled_report_does_not_block_renewal_at_the_parents_cadence() {
             &parent.directory,
             "model_x",
             "the first report is stored",
-            |cells| cells.contains_key(name),
+            |pools| pools.contains_key(name),
         )
         .await;
         tokio::time::timeout(WAIT, arrived.wait_for(|count| *count >= 2))
@@ -986,13 +986,13 @@ async fn a_stalled_report_does_not_block_renewal_at_the_parents_cadence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 
 async fn a_withdrawal_after_a_visible_publish_removes_the_record() {
-    let parent = relay_cell(&spec(), global(), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global(), quiet_timing()).await;
     let mut watches = Vec::new();
     for _ in 0..48 {
         let mut watch = parent.directory.watch("model_x", None);
         assert!(matches!(
             watch.next().await,
-            Some(Ok(CellEvent::Synced { .. }))
+            Some(Ok(PoolEvent::Synced { .. }))
         ));
         watches.push(watch);
     }
@@ -1005,24 +1005,24 @@ async fn a_withdrawal_after_a_visible_publish_removes_the_record() {
         (5, 1),
         Duration::from_secs(30),
     );
-    let client = CellWatcher::new().expect("a report client");
+    let client = PoolWatcher::new().expect("a report client");
     let at = address(&parent.hub);
     let publishing = tokio::spawn(async move { client.report(&at, &Report::Record(record)).await });
     tokio::time::timeout(WAIT, async {
         assert!(matches!(
             changes.next().await,
-            Some(Ok(CellEvent::Put { .. }))
+            Some(Ok(PoolEvent::Put { .. }))
         ));
     })
     .await
     .expect("the publish is visible before the withdrawal starts");
-    let withdrawal = CellWatcher::new()
+    let withdrawal = PoolWatcher::new()
         .expect("a report client")
         .report(
             &address(&parent.hub),
             &Report::Withdrawal(Withdrawal {
                 class: "model_x".into(),
-                cell: "model-x-01".into(),
+                pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 2,
             }),
@@ -1049,7 +1049,7 @@ async fn a_withdrawal_after_a_visible_publish_removes_the_record() {
 /// An accepted relay timing must allow renewal before the record expires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
-    let parent = relay_cell(&spec(), global(), quiet_timing()).await;
+    let parent = relay_pool(&spec(), global(), quiet_timing()).await;
     for (name, lease) in [
         ("model-x-01", Duration::from_millis(600)),
         ("model-x-02", Duration::from_millis(30)),
@@ -1058,12 +1058,12 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
         let directory = HubDirectory::new(Some(address(&parent.hub)), None).expect("a directory");
         let named = Named::new(directory.clone());
         let hub_name = settings.hub.clone().expect("a hub name");
-        let timing = CellTiming {
+        let timing = PoolTiming {
             heartbeat: Duration::from_millis(10),
             lease,
             ..quiet_timing()
         };
-        let readiness = match CellReadiness::new(&spec(), settings, named.clone(), timing)
+        let readiness = match PoolReadiness::new(&spec(), settings, named.clone(), timing)
             .and_then(|readiness| readiness.with_reports(&directory))
         {
             Ok(readiness) => Arc::new(readiness),
@@ -1074,7 +1074,7 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
             }
         };
         let mut changes = parent.directory.watch("model_x", None);
-        while !matches!(changes.next().await, Some(Ok(CellEvent::Synced { .. }))) {}
+        while !matches!(changes.next().await, Some(Ok(PoolEvent::Synced { .. }))) {}
         let child = Hub::builder(config())
             .extension(GraphAdmission::new(spec()))
             .extension(Arc::clone(&readiness))
@@ -1084,7 +1084,7 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
         named.resolve(&hub_name, &child);
         tokio::time::timeout(WAIT, async {
             while let Some(Ok(event)) = changes.next().await {
-                if matches!(event, CellEvent::Put { record, .. } if record.name == name) {
+                if matches!(event, PoolEvent::Put { record, .. } if record.name == name) {
                     return;
                 }
             }
@@ -1110,33 +1110,33 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
     parent.hub.shutdown().await.expect("the parent stops");
 }
 
-/// A child's hub that restarts reads its cell's last record from its
+/// A child's hub that restarts reads its pool's last record from its
 /// parent's hub before its first report, so its models keep their
 /// history: a model that was `ready` is `unavailable` until an instance
 /// reports, never `starting`. The parent answers what it holds for a
-/// child, and nothing for a cell it holds no record of.
+/// child, and nothing for a pool it holds no record of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restarted_child_reads_its_last_record_from_its_parent() {
     let spec = spec();
-    let parent = relay_cell(&spec, global(), quiet_timing()).await;
-    let watcher = CellWatcher::new().expect("a client");
+    let parent = relay_pool(&spec, global(), quiet_timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
     let at = address(&parent.hub);
     assert_eq!(
         watcher.held(&at, "model_x", "model-x-01").await,
         Ok(None),
-        "a cell the parent holds no record of"
+        "a pool the parent holds no record of"
     );
-    let settings = CellSettings {
+    let settings = PoolSettings {
         summary: Duration::from_secs(1),
         ..model("model-x-01", &at)
     };
-    let child = relay_cell(&spec, settings.clone(), quiet_timing()).await;
+    let child = relay_pool(&spec, settings.clone(), quiet_timing()).await;
     let mut watch = child.readiness.watch().await.expect("the watch begins");
     let entry = ready(&child.hub, &spec, &["f"]).await;
     let usable = tokio::time::timeout(WAIT, async {
         while !matches!(
             watch.next().await,
-            Some(gdl_watch::CellWatchEvent::Ready { .. })
+            Some(gdl_watch::PoolWatchEvent::Ready { .. })
         ) {}
     })
     .await;
@@ -1152,7 +1152,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
         }]),
     };
     entry[0].report(report).await.expect("the hub takes it");
-    let state = |records: &BTreeMap<String, CellRecord>| {
+    let state = |records: &BTreeMap<String, PoolRecord>| {
         records.get("model-x-01").map(|record| {
             (
                 record.epoch,
@@ -1161,7 +1161,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
         })
     };
     let before = holds(&parent.directory, "model_x", "the model ready", |records| {
-        state(records).is_some_and(|(_, states)| states == [gdl_cells::ModelState::Ready])
+        state(records).is_some_and(|(_, states)| states == [gdl_pools::ModelState::Ready])
     })
     .await;
     let (epoch, _) = state(&before).expect("held");
@@ -1175,7 +1175,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
     drop(entry);
     child.hub.shutdown().await.expect("the child's hub stops");
 
-    let child = relay_cell(&spec, settings, quiet_timing()).await;
+    let child = relay_pool(&spec, settings, quiet_timing()).await;
     let after = holds(
         &parent.directory,
         "model_x",
@@ -1185,7 +1185,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
     .await;
     assert_eq!(
         state(&after).map(|(_, states)| states),
-        Some(vec![gdl_cells::ModelState::Unavailable])
+        Some(vec![gdl_pools::ModelState::Unavailable])
     );
     assert!(after["model-x-01"].models_version > before["model-x-01"].models_version);
     child.hub.shutdown().await.expect("the child's hub stops");
@@ -1193,7 +1193,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
 }
 
 /// A child's hub that cannot read its last record from its parent, which
-/// answers 503 the first time, does not take that for a cell with no
+/// answers 503 the first time, does not take that for a pool with no
 /// record: it reads again before it reports, and its first report keeps
 /// the models' history. A model that was `ready` is `unavailable`, not
 /// gone.
@@ -1205,15 +1205,15 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
         (5, 9),
         Duration::from_secs(30),
     );
-    held.models = vec![gdl_cells::ModelEntry {
+    held.models = vec![gdl_pools::ModelEntry {
         model: "m".into(),
         routing_key: None,
-        state: gdl_cells::ModelState::Ready,
+        state: gdl_pools::ModelState::Ready,
         since: 3,
     }];
     held.models_version = 3;
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let (arrivals, mut arrived) = watch::channel(Vec::<CellRecord>::new());
+    let (arrivals, mut arrived) = watch::channel(Vec::<PoolRecord>::new());
     let arrivals = Arc::new(Mutex::new(arrivals));
     let counted = Arc::clone(&reads);
     let app = Router::new()
@@ -1258,7 +1258,7 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
     let address = listener.local_addr().expect("an address").to_string();
     tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
 
-    let child = relay_cell(&spec(), model("model-x-01", &address), quiet_timing()).await;
+    let child = relay_pool(&spec(), model("model-x-01", &address), quiet_timing()).await;
     let first = tokio::time::timeout(WAIT, arrived.wait_for(|arrived| !arrived.is_empty()))
         .await
         .expect("a report in time")
@@ -1272,7 +1272,7 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
             .iter()
             .map(|m| (m.model.as_str(), m.state))
             .collect::<Vec<_>>(),
-        [("m", gdl_cells::ModelState::Unavailable)]
+        [("m", gdl_pools::ModelState::Unavailable)]
     );
     assert!(first.models_version > 3);
     child.hub.shutdown().await.expect("the child's hub stops");
@@ -1280,15 +1280,15 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
 
 /// Under `relay`, a parent's hub lists its children's models for its
 /// choosers' model index, from the records they report, and only theirs:
-/// it holds no other cell's record, so a cell of another parent, which
+/// it holds no other pool's record, so a pool of another parent, which
 /// reports elsewhere, is never listed here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_parent_lists_its_childrens_models_and_no_other_cells() {
+async fn a_parent_lists_its_childrens_models_and_no_other_pools() {
     let spec = spec();
-    let parent = relay_cell(&spec, global(), quiet_timing()).await;
-    let elsewhere = relay_cell(
+    let parent = relay_pool(&spec, global(), quiet_timing()).await;
+    let elsewhere = relay_pool(
         &spec,
-        CellSettings {
+        PoolSettings {
             name: "global-02".into(),
             hub: Some("global-02-hub:1337".into()),
             ..global()
@@ -1297,18 +1297,18 @@ async fn a_parent_lists_its_childrens_models_and_no_other_cells() {
     )
     .await;
     let declared = |model: &str| gdl_model::ModelKey::new(model);
-    let _child = relay_cell(
+    let _child = relay_pool(
         &spec,
-        CellSettings {
+        PoolSettings {
             models: vec![declared("qwen-32b")],
             ..model("model-x-01", &address(&parent.hub))
         },
         quiet_timing(),
     )
     .await;
-    let _other = relay_cell(
+    let _other = relay_pool(
         &spec,
-        CellSettings {
+        PoolSettings {
             models: vec![declared("mistral-24b")],
             home: Some("global-02".into()),
             ..model("model-x-02", &address(&elsewhere.hub))
@@ -1320,27 +1320,27 @@ async fn a_parent_lists_its_childrens_models_and_no_other_cells() {
         &elsewhere.directory,
         "model_x",
         "the other parent's child",
-        |cells| cells.contains_key("model-x-02"),
+        |pools| pools.contains_key("model-x-02"),
     )
     .await;
 
     let listed = tokio::time::timeout(WAIT, async {
         loop {
             let mut watch = parent.readiness.follows();
-            let mut cells = Vec::new();
+            let mut pools = Vec::new();
             loop {
                 match watch.next().await.expect("the watch goes on") {
                     gdl_watch::FollowEvent::Listed {
-                        cell,
+                        pool,
                         listing: Some(listing),
                         ..
-                    } => cells.push((cell, listing)),
+                    } => pools.push((pool, listing)),
                     gdl_watch::FollowEvent::Synced { .. } => break,
                     _ => {}
                 }
             }
-            if !cells.is_empty() {
-                return cells;
+            if !pools.is_empty() {
+                return pools;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1348,8 +1348,8 @@ async fn a_parent_lists_its_childrens_models_and_no_other_cells() {
     .await
     .expect("the child listed in time");
     assert_eq!(listed.len(), 1, "{listed:?}");
-    let (cell, listing) = &listed[0];
-    assert_eq!(cell, "model-x-01");
+    let (pool, listing) = &listed[0];
+    assert_eq!(pool, "model-x-01");
     let models: Vec<&str> = listing
         .models
         .entries

@@ -1,16 +1,16 @@
-//! What a node reads of the cells its segment's choosers follow: the same
-//! table a cell policy chooses from, the cells the chooser holds gone, and
-//! the cells whose records were withdrawn after a drain. A node in a
+//! What a node reads of the pools its segment's choosers follow: the same
+//! table a pool policy chooses from, the pools the chooser holds gone, and
+//! the pools whose records were withdrawn after a drain. A node in a
 //! segment that sends into another class (a model gate in front of a set
-//! router, say) reads it to tell a class that has no cell taking work
-//! (503) from one whose cells were all drained on purpose (404), from the
+//! router, say) reads it to tell a class that has no pool taking work
+//! (503) from one whose pools were all drained on purpose (404), from the
 //! state the chooser routes by.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use crate::policy::{Cell, Damped};
+use crate::policy::{Damped, Pool};
 
 mod index;
 
@@ -19,24 +19,24 @@ pub use index::{ModelIndex, ModelSet};
 
 tokio::task_local! {
     /// The handle of the segment whose nodes are being built.
-    static BUILDING: FollowedCells;
+    static BUILDING: FollowedPools;
 }
 
-/// A handle on the cells a segment's choosers follow, for a node in the
+/// A handle on the pools a segment's choosers follow, for a node in the
 /// segment to read. Cheap to clone; every clone reads the same tables.
 ///
 /// A node takes it once, in [`Build::build`](crate::Build::build), with
-/// [`FollowedCells::current`], and reads it per request with
-/// [`FollowedCells::read`]. The runtime binds it when the segment's
+/// [`FollowedPools::current`], and reads it per request with
+/// [`FollowedPools::read`]. The runtime binds it when the segment's
 /// chooser launches, after the node is built: until then, and for a
 /// segment that sends into no other class or runs without a hub, it is
 /// not bound, and a read gives `None`.
 #[derive(Clone, Default)]
-pub struct FollowedCells {
-    source: Arc<OnceLock<Arc<dyn CellSource>>>,
+pub struct FollowedPools {
+    source: Arc<OnceLock<Arc<dyn PoolSource>>>,
 }
 
-impl FollowedCells {
+impl FollowedPools {
     /// A handle that is not bound: a read gives `None` until the runtime
     /// binds it.
     pub fn new() -> Self {
@@ -50,29 +50,29 @@ impl FollowedCells {
         BUILDING.try_with(Self::clone).unwrap_or_default()
     }
 
-    /// A handle bound to fixed tables, for a node's tests: `cells`, by
-    /// their class, and the cells named by class and name in `withdrawn`.
+    /// A handle bound to fixed tables, for a node's tests: `pools`, by
+    /// their class, and the pools named by class and name in `withdrawn`.
     /// A class named by neither is not followed. Each class has one table,
-    /// which [`FollowedCells::read_entry`] gives for any entry. No cell is
-    /// gone ([`FollowedCells::fixed_with_gone`]).
+    /// which [`FollowedPools::read_entry`] gives for any entry. No pool is
+    /// gone ([`FollowedPools::fixed_with_gone`]).
     pub fn fixed<C, N>(
-        cells: impl IntoIterator<Item = Cell>,
+        pools: impl IntoIterator<Item = Pool>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
     ) -> Self
     where
         C: Into<String>,
         N: Into<String>,
     {
-        Self::fixed_with_gone(cells, withdrawn, std::iter::empty::<(String, String)>())
+        Self::fixed_with_gone(pools, withdrawn, std::iter::empty::<(String, String)>())
     }
 
-    /// [`FollowedCells::fixed`], with the cells named by class and name in
-    /// `gone` held gone ([`ClassCells::is_gone`]), as a chooser holds a
-    /// cell that declined its offer as gone. A name in `gone` that is not
-    /// among `cells` is not gone: a chooser holds only followed cells
+    /// [`FollowedPools::fixed`], with the pools named by class and name in
+    /// `gone` held gone ([`ClassPools::is_gone`]), as a chooser holds a
+    /// pool that declined its offer as gone. A name in `gone` that is not
+    /// among `pools` is not gone: a chooser holds only followed pools
     /// gone.
     pub fn fixed_with_gone<C, N, G, M>(
-        cells: impl IntoIterator<Item = Cell>,
+        pools: impl IntoIterator<Item = Pool>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
         gone: impl IntoIterator<Item = (G, M)>,
     ) -> Self
@@ -83,18 +83,18 @@ impl FollowedCells {
         M: Into<String>,
     {
         Self::fixed_with_models(
-            cells,
+            pools,
             withdrawn,
             gone,
             std::iter::empty::<(String, ModelIndex)>(),
         )
     }
 
-    /// [`FollowedCells::fixed_with_gone`], with each class's model index
-    /// ([`ClassCells::models`]) from `models`. A class given no index has
+    /// [`FollowedPools::fixed_with_gone`], with each class's model index
+    /// ([`ClassPools::models`]) from `models`. A class given no index has
     /// [`ModelIndex::NONE`]: no model, not synced.
     pub fn fixed_with_models<C, N, G, M, K>(
-        cells: impl IntoIterator<Item = Cell>,
+        pools: impl IntoIterator<Item = Pool>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
         gone: impl IntoIterator<Item = (G, M)>,
         models: impl IntoIterator<Item = (K, ModelIndex)>,
@@ -106,13 +106,13 @@ impl FollowedCells {
         M: Into<String>,
         K: Into<String>,
     {
-        let mut classes: BTreeMap<String, (Vec<Cell>, Vec<Box<str>>)> = BTreeMap::new();
-        for cell in cells {
+        let mut classes: BTreeMap<String, (Vec<Pool>, Vec<Box<str>>)> = BTreeMap::new();
+        for pool in pools {
             classes
-                .entry(cell.class().to_string())
+                .entry(pool.class().to_string())
                 .or_default()
                 .0
-                .push(cell);
+                .push(pool);
         }
         for (class, name) in withdrawn {
             let name: String = name.into();
@@ -136,16 +136,16 @@ impl FollowedCells {
         let fixed = Fixed(
             classes
                 .into_iter()
-                .map(|(class, (mut cells, mut withdrawn))| {
-                    cells.sort_by(|a, b| a.name().cmp(b.name()));
+                .map(|(class, (mut pools, mut withdrawn))| {
+                    pools.sort_by(|a, b| a.name().cmp(b.name()));
                     withdrawn.sort();
                     withdrawn.dedup();
-                    let damped = cells
+                    let damped = pools
                         .iter()
-                        .filter(|cell| gone.iter().any(|(c, n)| *c == class && n == cell.name()))
-                        .fold(Damped::EMPTY, |damped, cell| damped.with_gone(cell));
+                        .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
+                        .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
                     let index = models.remove(&class).unwrap_or_default();
-                    (class, (cells.into(), withdrawn.into(), damped, index))
+                    (class, (pools.into(), withdrawn.into(), damped, index))
                 })
                 .collect(),
         );
@@ -159,29 +159,29 @@ impl FollowedCells {
         self.source.get().is_some()
     }
 
-    /// Read the cells of `class` as the chooser holds them now, with
+    /// Read the pools of `class` as the chooser holds them now, with
     /// `read`: `None` when the handle is not bound, the segment sends into
     /// no class `class`, or it enters `class` at more than one entry
-    /// segment, whose tables can differ ([`FollowedCells::read_entry`]).
-    /// One load of the table the chooser routes by and one of the cells it
+    /// segment, whose tables can differ ([`FollowedPools::read_entry`]).
+    /// One load of the table the chooser routes by and one of the pools it
     /// holds gone, with no lock and no allocation: a mark the chooser
     /// writes shows in the next read. `read` runs while both are held, so
     /// keep it short: copy out what outlives it.
-    pub fn read<R>(&self, class: &str, read: impl FnOnce(ClassCells<'_>) -> R) -> Option<R> {
+    pub fn read<R>(&self, class: &str, read: impl FnOnce(ClassPools<'_>) -> R) -> Option<R> {
         self.load(class, None, read)
     }
 
-    /// [`FollowedCells::read`] of the table of `class` that a hop entering
+    /// [`FollowedPools::read`] of the table of `class` that a hop entering
     /// it at the segment `entry` chooses from. A class's entry segments
-    /// list the same cells, but each counts its own entry instances, so
-    /// whether a cell [takes work](Cell::takes_work) can differ between
+    /// list the same pools, but each counts its own entry instances, so
+    /// whether a pool [takes work](Pool::takes_work) can differ between
     /// them. `None` also when the segment does not enter `class` at
     /// `entry`.
     pub fn read_entry<R>(
         &self,
         class: &str,
         entry: &str,
-        read: impl FnOnce(ClassCells<'_>) -> R,
+        read: impl FnOnce(ClassPools<'_>) -> R,
     ) -> Option<R> {
         self.load(class, Some(entry), read)
     }
@@ -190,14 +190,14 @@ impl FollowedCells {
         &self,
         class: &str,
         entry: Option<&str>,
-        read: impl FnOnce(ClassCells<'_>) -> R,
+        read: impl FnOnce(ClassPools<'_>) -> R,
     ) -> Option<R> {
         let source = self.source.get()?;
         let mut read = Some(read);
         let mut out = None;
-        source.read(class, entry, &mut |cells| {
+        source.read(class, entry, &mut |pools| {
             if let Some(read) = read.take() {
-                out = Some(read(cells));
+                out = Some(read(pools));
             }
         });
         out
@@ -206,11 +206,11 @@ impl FollowedCells {
     /// Bind the handle to `source`, unless it is bound already: whether
     /// this call bound it.
     #[doc(hidden)]
-    pub fn bind(&self, source: Arc<dyn CellSource>) -> bool {
+    pub fn bind(&self, source: Arc<dyn PoolSource>) -> bool {
         self.source.set(source).is_ok()
     }
 
-    /// Run `build` with this handle as the one [`FollowedCells::current`]
+    /// Run `build` with this handle as the one [`FollowedPools::current`]
     /// gives.
     #[doc(hidden)]
     pub async fn scope<F: Future>(&self, build: F) -> F::Output {
@@ -218,28 +218,28 @@ impl FollowedCells {
     }
 }
 
-impl fmt::Debug for FollowedCells {
+impl fmt::Debug for FollowedPools {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FollowedCells")
+        f.debug_struct("FollowedPools")
             .field("bound", &self.is_bound())
             .finish()
     }
 }
 
-/// Where a [`FollowedCells`] reads from: the runtime's chooser tables, or
+/// Where a [`FollowedPools`] reads from: the runtime's chooser tables, or
 /// fixed ones.
 #[doc(hidden)]
-pub trait CellSource: Send + Sync + 'static {
-    /// Call `read` once with the cells of `class` as the entry segment
+pub trait PoolSource: Send + Sync + 'static {
+    /// Call `read` once with the pools of `class` as the entry segment
     /// `entry` holds them, or as its one entry segment holds them when
     /// `entry` is `None`; or not at all when there is no such table.
-    fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(ClassCells<'_>));
+    fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>));
 }
 
-/// The cells of one class that a chooser follows, as one moment's table.
+/// The pools of one class that a chooser follows, as one moment's table.
 #[derive(Debug, Clone, Copy)]
-pub struct ClassCells<'a> {
-    cells: &'a [Cell],
+pub struct ClassPools<'a> {
+    pools: &'a [Pool],
     withdrawn: &'a [Box<str>],
     damped: &'a Damped,
     models: &'a ModelIndex,
@@ -248,42 +248,42 @@ pub struct ClassCells<'a> {
 /// What a view holds gone when its source says nothing of it.
 static NONE_GONE: Damped = Damped::EMPTY;
 
-impl<'a> ClassCells<'a> {
-    /// The view of `cells`, sorted by name, and `withdrawn`, sorted, with
-    /// no cell gone.
+impl<'a> ClassPools<'a> {
+    /// The view of `pools`, sorted by name, and `withdrawn`, sorted, with
+    /// no pool gone.
     #[doc(hidden)]
-    pub fn new(cells: &'a [Cell], withdrawn: &'a [Box<str>]) -> Self {
+    pub fn new(pools: &'a [Pool], withdrawn: &'a [Box<str>]) -> Self {
         Self {
-            cells,
+            pools,
             withdrawn,
             damped: &NONE_GONE,
             models: &NO_MODELS,
         }
     }
 
-    /// The view with the cells `damped` holds gone: the chooser's damping
-    /// as its cell policy reads it.
+    /// The view with the pools `damped` holds gone: the chooser's damping
+    /// as its pool policy reads it.
     #[doc(hidden)]
     pub fn with_damped(self, damped: &'a Damped) -> Self {
         Self { damped, ..self }
     }
 
     /// The view with the class's model index, from the same table as its
-    /// cells.
+    /// pools.
     #[doc(hidden)]
     pub fn with_models(self, models: &'a ModelIndex) -> Self {
         Self { models, ..self }
     }
 
-    /// The class's model index: for each model, every cell of the class
+    /// The class's model index: for each model, every pool of the class
     /// whose record lists it, followed or not, from the same table as
-    /// [`ClassCells::cells`]. A model gate reads it to tell a model no cell
-    /// lists (404) from one whose cells cannot take work now (503):
+    /// [`ClassPools::pools`]. A model gate reads it to tell a model no pool
+    /// lists (404) from one whose pools cannot take work now (503):
     ///
     /// ```
-    /// # use gdl::{CellCondition, ClassCells, ModelState};
-    /// fn answer(cells: ClassCells<'_>, model: &str) -> u16 {
-    ///     let index = cells.models();
+    /// # use gdl::{PoolCondition, ClassPools, ModelState};
+    /// fn answer(pools: ClassPools<'_>, model: &str) -> u16 {
+    ///     let index = pools.models();
     ///     let Some(sets) = index.sets(model, None) else {
     ///         // Not listed: unknown once the directory was read.
     ///         return if index.is_synced() { 404 } else { 503 };
@@ -291,36 +291,36 @@ impl<'a> ClassCells<'a> {
     ///     let routed = sets.iter().any(|set| {
     ///         set.state() == ModelState::Ready
     ///             && set.is_offered()
-    ///             && cells.cell(set.cell()).is_some_and(gdl::Cell::takes_work)
+    ///             && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
     ///     });
     ///     if routed { 200 } else { 503 }
     /// }
-    /// # let _ = (answer, CellCondition::Live);
+    /// # let _ = (answer, PoolCondition::Live);
     /// ```
     #[inline]
     pub fn models(&self) -> &'a ModelIndex {
         self.models
     }
 
-    /// The followed cells, by name: what the class's cell policy chooses
-    /// from. A cell whose follow ended is not here, whether it was
+    /// The followed pools, by name: what the class's pool policy chooses
+    /// from. A pool whose follow ended is not here, whether it was
     /// withdrawn or went silent.
     #[inline]
-    pub fn cells(&self) -> &'a [Cell] {
-        self.cells
+    pub fn pools(&self) -> &'a [Pool] {
+        self.pools
     }
 
-    /// The followed cell named `name`, if it is followed.
-    pub fn cell(&self, name: &str) -> Option<&'a Cell> {
-        self.cells
-            .binary_search_by(|cell| cell.name().cmp(name))
+    /// The followed pool named `name`, if it is followed.
+    pub fn pool(&self, name: &str) -> Option<&'a Pool> {
+        self.pools
+            .binary_search_by(|pool| pool.name().cmp(name))
             .ok()
-            .map(|index| &self.cells[index])
+            .map(|index| &self.pools[index])
     }
 
-    /// Whether the cell named `name` withdrew its record after its drain
-    /// ended, as the chooser's hub saw it in the cell directory: a cell
-    /// drained on purpose. A cell whose lease expired, whose link failed,
+    /// Whether the pool named `name` withdrew its record after its drain
+    /// ended, as the chooser's hub saw it in the pool directory: a pool
+    /// drained on purpose. A pool whose lease expired, whose link failed,
     /// or that this chooser never saw is not withdrawn.
     pub fn is_withdrawn(&self, name: &str) -> bool {
         self.withdrawn
@@ -328,35 +328,35 @@ impl<'a> ClassCells<'a> {
             .is_ok()
     }
 
-    /// The names of the withdrawn cells, sorted.
+    /// The names of the withdrawn pools, sorted.
     pub fn withdrawn(&self) -> impl Iterator<Item = &'a str> + 'a {
         self.withdrawn.iter().map(|name| &**name)
     }
 
-    /// Whether the chooser holds the followed cell named `name` gone: the
-    /// cell declined its offer as gone, as a draining cell or a segment
+    /// Whether the chooser holds the followed pool named `name` gone: the
+    /// pool declined its offer as gone, as a draining pool or a segment
     /// that declines by its own policy does, and the relay has changed
     /// nothing of its follow since, nor has it accepted an offer. The
-    /// chooser's cell policies pass such a cell over, whatever its state
-    /// and entries say ([`Damped::is_gone`]). A cell that is not followed
+    /// chooser's pool policies pass such a pool over, whatever its state
+    /// and entries say ([`Damped::is_gone`]). A pool that is not followed
     /// is not gone.
     pub fn is_gone(&self, name: &str) -> bool {
-        self.cell(name)
-            .is_some_and(|cell| self.damped.is_gone(cell))
+        self.pool(name)
+            .is_some_and(|pool| self.damped.is_gone(pool))
     }
 }
 
-/// Fixed tables: per class, its cells by name, its withdrawn cells, its
-/// gone cells, and its model index.
-type Tables = BTreeMap<String, (Box<[Cell]>, Box<[Box<str>]>, Damped, ModelIndex)>;
+/// Fixed tables: per class, its pools by name, its withdrawn pools, its
+/// gone pools, and its model index.
+type Tables = BTreeMap<String, (Box<[Pool]>, Box<[Box<str>]>, Damped, ModelIndex)>;
 
 struct Fixed(Tables);
 
-impl CellSource for Fixed {
-    fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassCells<'_>)) {
-        if let Some((cells, withdrawn, damped, models)) = self.0.get(class) {
+impl PoolSource for Fixed {
+    fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>)) {
+        if let Some((pools, withdrawn, damped, models)) = self.0.get(class) {
             read(
-                ClassCells::new(cells, withdrawn)
+                ClassPools::new(pools, withdrawn)
                     .with_damped(damped)
                     .with_models(models),
             );
@@ -367,83 +367,83 @@ impl CellSource for Fixed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CellState;
+    use crate::PoolState;
 
     /// A handle outside a build is never bound; inside one, it is the
     /// handle the build runs with, so a bind of that one reaches it.
     #[tokio::test]
     async fn current_is_the_building_segments_handle() {
-        assert!(!FollowedCells::current().is_bound());
-        let segment = FollowedCells::new();
-        let taken = segment.scope(async { FollowedCells::current() }).await;
+        assert!(!FollowedPools::current().is_bound());
+        let segment = FollowedPools::new();
+        let taken = segment.scope(async { FollowedPools::current() }).await;
         assert!(!taken.is_bound());
         assert!(segment.bind(Arc::new(Fixed(Tables::new()))));
         assert!(taken.is_bound(), "another handle");
         assert!(!segment.bind(Arc::new(Fixed(Tables::new()))), "bound twice");
     }
 
-    /// Fixed tables read by class: each class's cells by name, and its
-    /// withdrawn cells; a class named nowhere is not followed.
+    /// Fixed tables read by class: each class's pools by name, and its
+    /// withdrawn pools; a class named nowhere is not followed.
     #[test]
     fn fixed_tables_read_by_class() {
-        let followed = FollowedCells::fixed(
+        let followed = FollowedPools::fixed(
             [
-                Cell::new("model_x", "m2", "r", CellState::Draining),
-                Cell::new("model_x", "m1", "r", CellState::Ready).with_entries(1),
-                Cell::new("model_y", "y1", "r", CellState::Ready),
+                Pool::new("model_x", "m2", "r", PoolState::Draining),
+                Pool::new("model_x", "m1", "r", PoolState::Ready).with_entries(1),
+                Pool::new("model_y", "y1", "r", PoolState::Ready),
             ],
             [("model_x", "m3"), ("model_z", "z1")],
         );
         let x = followed
-            .read("model_x", |cells| {
-                let names: Vec<&str> = cells.cells().iter().map(Cell::name).collect();
+            .read("model_x", |pools| {
+                let names: Vec<&str> = pools.pools().iter().map(Pool::name).collect();
                 assert_eq!(names, ["m1", "m2"]);
-                assert!(cells.cell("m1").is_some_and(Cell::takes_work));
-                assert!(cells.cell("m3").is_none());
+                assert!(pools.pool("m1").is_some_and(Pool::takes_work));
+                assert!(pools.pool("m3").is_none());
                 (
-                    cells.is_withdrawn("m3"),
-                    cells.is_withdrawn("m1"),
-                    cells.withdrawn().collect::<Vec<_>>().join(","),
+                    pools.is_withdrawn("m3"),
+                    pools.is_withdrawn("m1"),
+                    pools.withdrawn().collect::<Vec<_>>().join(","),
                 )
             })
             .expect("model_x");
         assert_eq!(x, (true, false, "m3".to_string()));
         assert_eq!(
-            followed.read("model_z", |cells| (
-                cells.cells().len(),
-                cells.is_withdrawn("z1")
+            followed.read("model_z", |pools| (
+                pools.pools().len(),
+                pools.is_withdrawn("z1")
             )),
             Some((0, true))
         );
         assert!(followed.read("model_w", |_| ()).is_none());
         assert_eq!(
-            followed.read_entry("model_x", "any", |cells| cells.cells().len()),
+            followed.read_entry("model_x", "any", |pools| pools.pools().len()),
             Some(2)
         );
         assert_eq!(
-            followed.read("model_x", |cells| cells.is_gone("m1")),
+            followed.read("model_x", |pools| pools.is_gone("m1")),
             Some(false),
-            "fixed tables hold no cell gone"
+            "fixed tables hold no pool gone"
         );
     }
 
     /// Fixed tables give each class the model index they were given, from
-    /// the same read as its cells; a class given none reads `NONE`, and a
-    /// class given only an index is read as followed with no cell.
+    /// the same read as its pools; a class given none reads `NONE`, and a
+    /// class given only an index is read as followed with no pool.
     #[test]
     fn fixed_tables_read_each_classs_model_index() {
-        use gdl_cells::{CellCondition, ModelState};
+        use gdl_pools::{ModelState, PoolCondition};
         let index = ModelIndex::new(
             true,
             [(
                 gdl_model::ModelKey::new("qwen"),
-                ModelSet::new("m2", "eu-west", ModelState::Ready, CellCondition::Missing),
+                ModelSet::new("m2", "eu-west", ModelState::Ready, PoolCondition::Missing),
             )],
         );
-        let followed = FollowedCells::fixed_with_models(
+        let followed = FollowedPools::fixed_with_models(
             [
-                Cell::new("model_x", "m1", "r", CellState::Ready).with_entries(1),
-                Cell::new("model_y", "y1", "r", CellState::Ready),
+                Pool::new("model_x", "m1", "r", PoolState::Ready).with_entries(1),
+                Pool::new("model_y", "y1", "r", PoolState::Ready),
             ],
             std::iter::empty::<(String, String)>(),
             std::iter::empty::<(String, String)>(),
@@ -453,65 +453,65 @@ mod tests {
             ],
         );
         let x = followed
-            .read("model_x", |cells| {
-                let sets = cells.models().sets("qwen", None).expect("listed");
+            .read("model_x", |pools| {
+                let sets = pools.models().sets("qwen", None).expect("listed");
                 (
-                    cells.cells().len(),
-                    sets[0].cell().to_string(),
+                    pools.pools().len(),
+                    sets[0].pool().to_string(),
                     sets[0].condition(),
-                    cells.cell(sets[0].cell()).is_some(),
+                    pools.pool(sets[0].pool()).is_some(),
                 )
             })
             .expect("model_x");
-        assert_eq!(x, (1, "m2".to_string(), CellCondition::Missing, false));
+        assert_eq!(x, (1, "m2".to_string(), PoolCondition::Missing, false));
         assert_eq!(
-            followed.read("model_y", |cells| cells.models().is_synced()),
+            followed.read("model_y", |pools| pools.models().is_synced()),
             Some(false),
             "no index given"
         );
         assert_eq!(
-            followed.read("model_z", |cells| (
-                cells.cells().len(),
-                cells.models().is_synced()
+            followed.read("model_z", |pools| (
+                pools.pools().len(),
+                pools.models().is_synced()
             )),
             Some((0, true))
         );
         assert_eq!(
-            FollowedCells::fixed(std::iter::empty::<Cell>(), [("model_x", "m3")])
-                .read("model_x", |cells| *cells.models() == ModelIndex::NONE),
+            FollowedPools::fixed(std::iter::empty::<Pool>(), [("model_x", "m3")])
+                .read("model_x", |pools| *pools.models() == ModelIndex::NONE),
             Some(true)
         );
     }
 
-    /// Fixed tables hold gone the followed cells named so, as a chooser
+    /// Fixed tables hold gone the followed pools named so, as a chooser
     /// does: whatever their state and entries say, and in their class
     /// alone. A gone name that is not followed is not gone.
     #[test]
-    fn fixed_tables_hold_the_named_cells_gone() {
-        let followed = FollowedCells::fixed_with_gone(
+    fn fixed_tables_hold_the_named_pools_gone() {
+        let followed = FollowedPools::fixed_with_gone(
             [
-                Cell::new("model_x", "m1", "r", CellState::Ready).with_entries(1),
-                Cell::new("model_x", "m2", "r", CellState::Ready).with_entries(1),
-                Cell::new("model_y", "m1", "r", CellState::Ready).with_entries(1),
+                Pool::new("model_x", "m1", "r", PoolState::Ready).with_entries(1),
+                Pool::new("model_x", "m2", "r", PoolState::Ready).with_entries(1),
+                Pool::new("model_y", "m1", "r", PoolState::Ready).with_entries(1),
             ],
             [("model_x", "m3")],
             [("model_x", "m1"), ("model_x", "m3")],
         );
         let x = followed
-            .read("model_x", |cells| {
+            .read("model_x", |pools| {
                 (
-                    cells.cell("m1").is_some_and(Cell::takes_work),
-                    cells.is_gone("m1"),
-                    cells.is_gone("m2"),
-                    cells.is_gone("m3"),
+                    pools.pool("m1").is_some_and(Pool::takes_work),
+                    pools.is_gone("m1"),
+                    pools.is_gone("m2"),
+                    pools.is_gone("m3"),
                 )
             })
             .expect("model_x");
         assert_eq!(x, (true, true, false, false));
         assert_eq!(
-            followed.read("model_y", |cells| cells.is_gone("m1")),
+            followed.read("model_y", |pools| pools.is_gone("m1")),
             Some(false),
-            "another class's cell of the same name"
+            "another class's pool of the same name"
         );
     }
 }

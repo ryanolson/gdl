@@ -1,6 +1,6 @@
-//! A node's handle on its cell hub's records (`gdl::CellRecords`): taken
+//! A node's handle on its pool hub's records (`gdl::PoolRecords`): taken
 //! while the nodes are built, bound when the instance registers with its
-//! cell's hub, and shared by every instance of the cell through the hub.
+//! pool's hub, and shared by every instance of the pool through the hub.
 //!
 //! The hub and the instances run in this process on OS-assigned ports;
 //! every wait is bounded.
@@ -8,17 +8,17 @@
 mod common;
 
 use common::WAIT;
-use common::cells::{Resolving, SEGMENTS, cell_hub_of, global_cell, global_hub, settings, spec};
-use gdl::{CellRecords, Expected, Record, RecordsUnavailable, Written};
+use common::pools::{Resolving, SEGMENTS, global_hub, global_pool, pool_hub_of, settings, spec};
+use gdl::{Expected, PoolRecords, Record, RecordsUnavailable, Written};
 use gdl_runtime::{Launch, Process};
 use tokio::sync::mpsc;
 use velo_hub::Hub;
 
-/// An instance of `a` in the global cell at `hub`, launched, with the
+/// An instance of `a` in the global pool at `hub`, launched, with the
 /// handle on the table `fingerprints` that its nodes took while they were
 /// built, and the answers to the handle's writes.
 struct Instance {
-    records: CellRecords,
+    records: PoolRecords,
     answers: mpsc::UnboundedReceiver<(Vec<u8>, Option<u64>, Option<Record>)>,
     launch: Launch,
     _process: Process,
@@ -29,18 +29,18 @@ async fn instance(hub: &Hub) -> Instance {
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     assert!(
         config.runtime.records.is_under_hub(),
-        "a `[hub]` and a `[cell]`"
+        "a `[hub]` and a `[pool]`"
     );
     let records = config
         .runtime
         .records
-        .scope(async { CellRecords::current("fingerprints") })
+        .scope(async { PoolRecords::current("fingerprints") })
         .await
-        .expect("a table under a cell's hub");
+        .expect("a table under a pool's hub");
     let (sent, answers) = mpsc::unbounded_channel();
     records.on_answer(move |key, written| {
         let answer = match written {
@@ -74,13 +74,13 @@ async fn answer(instance: &mut Instance) -> (Vec<u8>, Option<u64>, Option<Record
         .expect("the answers go on")
 }
 
-/// Two instances of one segment under one cell's hub share its records: a
+/// Two instances of one segment under one pool's hub share its records: a
 /// write from one is read by the other, and a write from the other that
 /// expects no record is refused with the first one's record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_from_one_instance_is_read_by_another() {
     let directory = Resolving::new();
-    let (hub, _) = cell_hub_of(&spec(), global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec(), global_hub(), &directory).await;
     let (mut one, mut two) = tokio::join!(instance(&hub), instance(&hub));
     assert_ne!(
         one.launch.node().instance_id(),
@@ -114,20 +114,20 @@ async fn a_write_from_one_instance_is_read_by_another() {
     );
 }
 
-/// Without a cell's hub there is no table: an instance with a hub but no
-/// `[cell]`, whose hub has no record service, and outside a build.
+/// Without a pool's hub there is no table: an instance with a hub but no
+/// `[pool]`, whose hub has no record service, and outside a build.
 #[tokio::test]
-async fn without_a_cell_hub_the_handle_is_not_bound() {
+async fn without_a_pool_hub_the_handle_is_not_bound() {
     let config = settings(1, 2, 5_000, "");
     assert!(!config.runtime.records.is_under_hub());
     let taken = config
         .runtime
         .records
-        .scope(async { CellRecords::current("fingerprints") })
+        .scope(async { PoolRecords::current("fingerprints") })
         .await;
     assert_eq!(taken.expect_err("no table"), RecordsUnavailable::Unbound);
     assert_eq!(
-        CellRecords::current("fingerprints").expect_err("no table"),
+        PoolRecords::current("fingerprints").expect_err("no table"),
         RecordsUnavailable::Unbound
     );
 }
@@ -140,13 +140,13 @@ async fn without_a_cell_hub_the_handle_is_not_bound() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_timed_out_batch_cannot_overwrite_a_later_batch() {
     let directory = Resolving::new();
-    let (hub, _) = cell_hub_of(&spec(), global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec(), global_hub(), &directory).await;
     let control = common::proxy::Proxy::new(hub.control_addr()).await;
     let config = settings(
         hub.public_addr().port(),
         control.port,
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     let records = config
         .runtime

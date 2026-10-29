@@ -1,7 +1,7 @@
 //! A chooser's hand-off into another class is an offer, as every routed
-//! hand-off is ([`crate::dist::offers`]): the cell chosen for it may
-//! decline it, and then another cell is chosen inside the same call. An
-//! entry instance that declines as its own leaves it in its cell, whose
+//! hand-off is ([`crate::dist::offers`]): the pool chosen for it may
+//! decline it, and then another pool is chosen inside the same call. An
+//! entry instance that declines as its own leaves it in its pool, whose
 //! other entry instances are offered it first. Only
 //! a proven refusal moves the request on. Anything else after the send
 //! may have run the request there, so it is the request's error, and is
@@ -9,46 +9,46 @@
 //!
 //! The first offer is made where any hand-off is
 //! (`Runtime::send_forward`), and costs what a hand-off to an instance
-//! does: the cells already offered the request, and the failover's own
-//! state, are made only once a cell declined it ([`Runtime::fail_over`]).
+//! does: the pools already offered the request, and the failover's own
+//! state, are made only once a pool declined it ([`Runtime::fail_over`]).
 //! They are locals of that call: never on the wire, never kept per
 //! request, and gone when it returns. What outlives the request is the
-//! chooser's damping of a cell that declined ([`super::damping`]), written
-//! only when a cell declines, or when a damped cell accepts.
+//! chooser's damping of a pool that declined ([`super::damping`]), written
+//! only when a pool declines, or when a damped pool accepts.
 
 use gdl::__runtime::ChoiceHeld;
-use gdl::{Cx, NoCell, Result};
+use gdl::{Cx, NoPool, Result};
 use velo::InstanceId;
 
 use super::crossing::Walk;
 use super::meter::Outcome;
-use super::{CellLease, Crossing};
+use super::{Crossing, PoolLease};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
 use crate::dist::offers::{Answer, Decline, Missed, delivered};
 use crate::dist::runtime::{Handed, Held, Runtime, Within};
 
-/// What became of an offer, as `crossing` sent it to the cell `cell`
-/// with `held`. A cell that declined it is damped, or passed over until
-/// its follow changes when it said it is gone, and a damped cell that
-/// accepted it is no longer; an acceptance is told to the cell policy's
+/// What became of an offer, as `crossing` sent it to the pool `pool`
+/// with `held`. A pool that declined it is damped, or passed over until
+/// its follow changes when it said it is gone, and a damped pool that
+/// accepted it is no longer; an acceptance is told to the pool policy's
 /// lease in `held`, if it gave one. A hand-off that never left says
-/// nothing of the cell, and changes nothing. An unknown outcome names the
-/// class, since it is not offered to another cell. Every answer counts
-/// under the cell and how it ended, when the chooser records its offers:
-/// one relaxed add to the counts the lease on the cell's follow reaches.
-pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64, held: &mut Held) -> Answer {
+/// nothing of the pool, and changes nothing. An unknown outcome names the
+/// class, since it is not offered to another pool. Every answer counts
+/// under the pool and how it ended, when the chooser records its offers:
+/// one relaxed add to the counts the lease on the pool's follow reaches.
+pub(crate) fn answer(offered: Offered, crossing: &Crossing, pool: u64, held: &mut Held) -> Answer {
     let answer = delivered(offered, Some(crossing.class()));
-    if let Some(figures) = held.cell_lease().and_then(CellLease::figures) {
+    if let Some(figures) = held.pool_lease().and_then(PoolLease::figures) {
         figures.offered(Outcome::of(&answer));
     }
     match &answer {
         Answer::Accepted(_) => {
-            crossing.accepted(cell);
+            crossing.accepted(pool);
             held.accepted();
         }
         Answer::Missed(Missed::Declined(_, decline)) => {
-            crossing.declined(cell, *decline, held.cell_lease());
+            crossing.declined(pool, *decline, held.pool_lease());
         }
         Answer::Missed(Missed::Unsent(_)) | Answer::Failed(_) => {}
     }
@@ -56,57 +56,57 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64, held: &mu
 }
 
 impl Runtime {
-    /// Choose, for `envelope`, a cell of the class `crossing` enters that
-    /// is not in `offered`, by the class's cell policy, then an instance
-    /// of it by the hop's router: the instance, the cell's
-    /// [`id`](super::CellTable::id), and what the offer holds while the
-    /// request is held, a selector's lease and the lease on the cell's
-    /// follow, with the selector's meta added to `envelope`. [`NoCell`]
-    /// when no such cell may take it.
-    pub(crate) async fn choose_cell(
+    /// Choose, for `envelope`, a pool of the class `crossing` enters that
+    /// is not in `offered`, by the class's pool policy, then an instance
+    /// of it by the hop's router: the instance, the pool's
+    /// [`id`](super::PoolTable::id), and what the offer holds while the
+    /// request is held, a selector's lease and the lease on the pool's
+    /// follow, with the selector's meta added to `envelope`. [`NoPool`]
+    /// when no such pool may take it.
+    pub(crate) async fn choose_pool(
         &self,
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
         offered: &[u64],
-    ) -> Result<Result<(InstanceId, u64, Held), NoCell>> {
+    ) -> Result<Result<(InstanceId, u64, Held), NoPool>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
                 .pick(cx, &envelope.payload, *policy, self.random(), offered)?
-                .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
+                .map(|(instance, pool, lease)| (instance, pool, Held::pool(None, lease)))),
             Within::Selector {
                 selector, encoding, ..
             } => {
                 let chosen = crossing
                     .choose(&**selector, cx, &envelope.payload, *encoding, offered)
                     .await?;
-                Ok(chosen.map(|(instance, cell, picked, lease)| {
+                Ok(chosen.map(|(instance, pool, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
-                    (instance, cell, Held::cell(picked.lease, lease))
+                    (instance, pool, Held::pool(picked.lease, lease))
                 }))
             }
         }
     }
 
     /// After the first offer of `envelope` missed (`declined`), offer it
-    /// again, as the first was chosen, until a cell takes it, the request
-    /// fails, or `cell_failovers` more cells were offered it. An entry
+    /// again, as the first was chosen, until a pool takes it, the request
+    /// fails, or `pool_failovers` more pools were offered it. An entry
     /// instance that declined it as its own ([`Decline::Instance`]) leaves
-    /// the request in its cell: each other entry instance of the cell is
+    /// the request in its pool: each other entry instance of the pool is
     /// offered it once ([`Crossing::walk`]), before the chooser offers it
-    /// to another cell, and those offers use none of `cell_failovers`.
-    /// The cell policy's lease on the choice of that cell passes to each
+    /// to another pool, and those offers use none of `pool_failovers`.
+    /// The pool policy's lease on the choice of that pool passes to each
     /// of those offers, so that it learns of an acceptance by any of them.
-    /// Any other miss leaves the cell at once. When no cell may take it
+    /// Any other miss leaves the pool at once. When no pool may take it
     /// any more, or no failover is left, the request fails with the last
-    /// refusal, or, when no cell refused it, with the last hand-off that
-    /// never left. When the chooser holds every cell it left gone and its
-    /// cell policy chooses no other, it fails with `Routing`, as the
-    /// requests after it do, which find those cells gone before any
+    /// refusal, or, when no pool refused it, with the last hand-off that
+    /// never left. When the chooser holds every pool it left gone and its
+    /// pool policy chooses no other, it fails with `Routing`, as the
+    /// requests after it do, which find those pools gone before any
     /// offer ([`Crossing::gone_only`]). Each choice starts from the request's own context,
     /// `cx`, which `envelope`'s was made from, so a declined selector's
     /// meta is not sent to the next instance; a declined choice's leases,
-    /// its selector's and its cell's, end before the next choice. It
+    /// its selector's and its pool's, end before the next choice. It
     /// borrows the envelope from `send_forward`'s future.
     ///
     /// A chooser never chooses itself: the entry segment is in another
@@ -120,7 +120,7 @@ impl Runtime {
         declined: Declined,
     ) -> Result<Handed> {
         let Declined {
-            mut cell,
+            mut pool,
             mut instance,
             mut choice,
             mut missed,
@@ -135,7 +135,7 @@ impl Runtime {
             let mut next = None;
             if last == Some(Decline::Instance) {
                 if walk.is_none() {
-                    walk = crossing.walk(cell, instance);
+                    walk = crossing.walk(pool, instance);
                 }
                 if let Some(walk) = &mut walk {
                     next = self
@@ -146,15 +146,15 @@ impl Runtime {
             let (to, at, mut held) = match next {
                 Some(chosen) => chosen,
                 None => {
-                    // The request leaves the cell, and the cell policy's
+                    // The request leaves the pool, and the pool policy's
                     // lease on it ends before the next choice.
                     walk = None;
                     drop(choice.take());
-                    offered.push(cell);
-                    if offered.len() > self.config.cell_failovers {
+                    offered.push(pool);
+                    if offered.len() > self.config.pool_failovers {
                         break;
                     }
-                    let Ok(chosen) = self.choose_cell(crossing, cx, envelope, &offered).await?
+                    let Ok(chosen) = self.choose_pool(crossing, cx, envelope, &offered).await?
                     else {
                         break;
                     };
@@ -165,7 +165,7 @@ impl Runtime {
             let answer = answer(offering.await, crossing, at, &mut held);
             // Counted with the answer, so that an offer whose answer is
             // never read counts nothing.
-            if let Some(figures) = held.cell_lease().and_then(CellLease::figures) {
+            if let Some(figures) = held.pool_lease().and_then(PoolLease::figures) {
                 figures.failover();
             }
             match answer {
@@ -181,24 +181,24 @@ impl Runtime {
                     last = reason(&then);
                     choice = held.take_choice();
                     drop(held);
-                    (cell, instance) = (at, to);
+                    (pool, instance) = (at, to);
                     missed = missed.then(then);
                 }
             }
         }
-        // A refusal by a cell that may take work again says more about
-        // this request than the policy's reason for no cell. When every
-        // cell it left is gone, the requests after it meet the policy's
+        // A refusal by a pool that may take work again says more about
+        // this request than the policy's reason for no pool. When every
+        // pool it left is gone, the requests after it meet the policy's
         // `Routing`, and so does this one.
         if let Some(no) = crossing.gone_only(cx, &envelope.payload, &offered)? {
-            return Err(crossing.no_cell(no));
+            return Err(crossing.no_pool(no));
         }
         Err(missed.into_error())
     }
 
     /// The next instance of `walk`, chosen as the first offer's was, with
-    /// the cell's id and what the offer holds, `choice` among it; `None`
-    /// once the walk has offered every instance of its cell.
+    /// the pool's id and what the offer holds, `choice` among it; `None`
+    /// once the walk has offered every instance of its pool.
     async fn choose_in(
         &self,
         crossing: &Crossing,
@@ -210,16 +210,16 @@ impl Runtime {
         match crossing.within() {
             Within::Policy(_) => Ok(crossing
                 .pick_in(walk, choice)
-                .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
+                .map(|(instance, pool, lease)| (instance, pool, Held::pool(None, lease)))),
             Within::Selector {
                 selector, encoding, ..
             } => {
                 let chosen = crossing
                     .choose_in(walk, &**selector, cx, &envelope.payload, *encoding, choice)
                     .await?;
-                Ok(chosen.map(|(instance, cell, picked, lease)| {
+                Ok(chosen.map(|(instance, pool, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
-                    (instance, cell, Held::cell(picked.lease, lease))
+                    (instance, pool, Held::pool(picked.lease, lease))
                 }))
             }
         }
@@ -227,17 +227,17 @@ impl Runtime {
 }
 
 /// What a chooser's first offer into another class came to, when it
-/// missed: the cell and the instance it went to, the cell policy's lease
-/// on the choice of that cell, if it gave one, and the miss.
+/// missed: the pool and the instance it went to, the pool policy's lease
+/// on the choice of that pool, if it gave one, and the miss.
 pub(crate) struct Declined {
-    pub(crate) cell: u64,
+    pub(crate) pool: u64,
     pub(crate) instance: InstanceId,
     pub(crate) choice: Option<ChoiceHeld>,
     pub(crate) missed: Missed,
 }
 
 /// Why `missed`'s entry declined, or `None` for a hand-off that never
-/// left: [`Decline::Instance`] leaves the request in its cell.
+/// left: [`Decline::Instance`] leaves the request in its pool.
 fn reason(missed: &Missed) -> Option<Decline> {
     match missed {
         Missed::Declined(_, decline) => Some(*decline),
@@ -257,9 +257,9 @@ mod tests {
     use std::time::Duration;
 
     use gdl::__runtime::Typed;
-    use gdl_cells::CellState;
+    use gdl_pools::PoolState;
 
-    use super::super::{CellTable, Cells, EntryTable, cell_id, targets};
+    use super::super::{EntryTable, PoolTable, Pools, pool_id, targets};
     use super::*;
     use crate::dist::counting::{Counted, counted, counting};
     use crate::dist::envelope::{Accepted, VERSION, WireCx};
@@ -286,13 +286,13 @@ mod tests {
 
     /// `S => D`, with `S` in `a` of `global` and `D` in `d` of `model_x`.
     pub(super) fn layout() -> gdl_model::Layout {
-        layout_under(gdl_model::CellPolicy::default())
+        layout_under(gdl_model::PoolPolicy::default())
     }
 
-    /// [`layout`], choosing a cell of `model_x` by `policy`.
-    pub(super) fn layout_under(policy: gdl_model::CellPolicy) -> gdl_model::Layout {
+    /// [`layout`], choosing a pool of `model_x` by `policy`.
+    pub(super) fn layout_under(policy: gdl_model::PoolPolicy) -> gdl_model::Layout {
         let manifest = gdl_model::Manifest {
-            name: "cells".into(),
+            name: "pools".into(),
             schema: 1,
             nodes: vec![
                 gdl_model::NodeInfo {
@@ -320,7 +320,7 @@ mod tests {
             .segment("d", ["D"])
             .class("global", ["a"])
             .class("model_x", ["d"])
-            .cell_policy("model_x", policy);
+            .pool_policy("model_x", policy);
         gdl_model::layout(&manifest, &placement).expect("valid test fixture")
     }
 
@@ -359,7 +359,7 @@ mod tests {
     /// A chooser's first offer, accepted, allocates what the same hand-off
     /// routed by the roster does, with a policy and with a selector that
     /// replaces the request's own meta: nothing for a failover is made
-    /// before a cell declines, and counting the offer's outcome allocates
+    /// before a pool declines, and counting the offer's outcome allocates
     /// nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accepted_first_offer_allocates_what_a_roster_hand_off_does() {
@@ -391,22 +391,22 @@ mod tests {
             .expect("a handler");
 
         let registry = prometheus::Registry::new();
-        let meters = super::super::CellMeters::register(&registry).expect("registered");
-        let cells = Cells::new(
+        let meters = super::super::PoolMeters::register(&registry).expect("registered");
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
         );
         let id = entry.instance_id();
-        cells.store(
+        pools.store(
             "d",
-            EntryTable::new(Box::new([Arc::new(CellTable {
+            EntryTable::new(Box::new([Arc::new(PoolTable {
                 class: "model_x".into(),
-                cell: "m1".into(),
-                id: cell_id("model_x", "m1"),
+                pool: "m1".into(),
+                id: pool_id("model_x", "m1"),
                 generation: 1,
                 region: "home".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: super::super::tests::idle(),
                 eligible: Box::new([id]),
                 offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -425,13 +425,13 @@ mod tests {
             let mut targets = targets(
                 &layout,
                 "a",
-                &cells,
-                &gdl::CellPolicies::new(),
+                &pools,
+                &gdl::PoolPolicies::new(),
                 gdl::HomeFirstAt::DEFAULT,
             )
             .expect("targets");
             let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
-            Router::Cells(Arc::new(Crossing::new(target, within, Default::default())))
+            Router::Pools(Arc::new(Crossing::new(target, within, Default::default())))
         };
         let policy = Within::Policy(Policy::RoundRobin);
         let selector = Within::Selector {
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(
             super::super::damping::WRITES.with(Cell::get),
             writes,
-            "an accepted offer to an undamped cell wrote damping state"
+            "an accepted offer to an undamped pool wrote damping state"
         );
         // Each crossing sent 31 hand-offs, every one counted.
         assert_eq!(
@@ -484,9 +484,9 @@ mod tests {
         }
     }
 
-    /// A failover chooses the next cell's instance with the selector as
+    /// A failover chooses the next pool's instance with the selector as
     /// the first offer did, reading the head in the edge's encoding: the
-    /// first offer, to either cell, is declined, and the other cell's
+    /// first offer, to either pool, is declined, and the other pool's
     /// entry takes the request.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failover_reads_the_head_in_the_edges_encoding() {
@@ -535,7 +535,7 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new(
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -545,13 +545,13 @@ mod tests {
             .zip(["m1", "m2"])
             .map(|(entry, name)| {
                 let id = entry.instance_id();
-                Arc::new(CellTable {
+                Arc::new(PoolTable {
                     class: "model_x".into(),
-                    cell: name.into(),
-                    id: cell_id("model_x", name),
+                    pool: name.into(),
+                    id: pool_id("model_x", name),
                     generation: 1,
                     region: "home".into(),
-                    state: CellState::Ready,
+                    state: PoolState::Ready,
                     load: super::super::tests::idle(),
                     eligible: Box::new([id]),
                     offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -565,18 +565,18 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
         let mut targets = targets(
             &layout,
             "a",
-            &cells,
-            &gdl::CellPolicies::new(),
+            &pools,
+            &gdl::PoolPolicies::new(),
             gdl::HomeFirstAt::DEFAULT,
         )
         .expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         let reading = Arc::new(Reading(AtomicUsize::new(0)));
-        let router = Router::Cells(Arc::new(Crossing::new(
+        let router = Router::Pools(Arc::new(Crossing::new(
             target,
             Within::Selector {
                 name: Arc::from("reading"),
@@ -605,22 +605,22 @@ mod tests {
         )
         .await
         .expect("answered in time")
-        .expect("the second cell took it");
+        .expect("the second pool took it");
         assert_eq!(offers.load(Ordering::SeqCst), 2, "one decline, one take");
-        assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per cell");
+        assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per pool");
     }
 
-    /// Every offer counts under its cell and how it ended, and each one
+    /// Every offer counts under its pool and how it ended, and each one
     /// after the request's first counts as a failover: `m0` has no entry
     /// velo can reach, so its offers never leave; `m1`'s entry declines
     /// as full, `m2`'s as gone, and `m3`'s accepts. Each request ends at
     /// `m3`, so the outcomes add up to the offers made, and the failovers
     /// to the offers less the requests.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn each_offer_counts_under_its_cell_and_outcome() {
+    async fn each_offer_counts_under_its_pool_and_outcome() {
         use super::super::lease::Leases;
         use super::super::meter::tests::{offers, scraped};
-        use super::super::meter::{CellMeters, FAILOVERS};
+        use super::super::meter::{FAILOVERS, PoolMeters};
         const REQUESTS: usize = 20;
         let layout = layout();
         let chooser = bind_node(([127, 0, 0, 1], 0).into())
@@ -642,7 +642,7 @@ mod tests {
             "a".into(),
             &roster,
             RuntimeConfig {
-                cell_failovers: 3,
+                pool_failovers: 3,
                 ..RuntimeConfig::default()
             },
             None,
@@ -666,8 +666,8 @@ mod tests {
                 .expect("a handler");
         }
         let registry = prometheus::Registry::new();
-        let meters = CellMeters::register(&registry).expect("registered");
-        let cells = Cells::new(
+        let meters = PoolMeters::register(&registry).expect("registered");
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -678,13 +678,13 @@ mod tests {
         let tables = ids
             .zip(["m0", "m1", "m2", "m3"])
             .map(|(id, name)| {
-                Arc::new(CellTable {
+                Arc::new(PoolTable {
                     class: "model_x".into(),
-                    cell: name.into(),
-                    id: cell_id("model_x", name),
+                    pool: name.into(),
+                    id: pool_id("model_x", name),
                     generation: 1,
                     region: "home".into(),
-                    state: CellState::Ready,
+                    state: PoolState::Ready,
                     load: super::super::tests::idle(),
                     eligible: Box::new([id]),
                     offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -698,17 +698,17 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
         let mut targets = targets(
             &layout,
             "a",
-            &cells,
-            &gdl::CellPolicies::new(),
+            &pools,
+            &gdl::PoolPolicies::new(),
             gdl::HomeFirstAt::DEFAULT,
         )
         .expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
-        let router = Router::Cells(Arc::new(Crossing::new(
+        let router = Router::Pools(Arc::new(Crossing::new(
             target,
             Within::Policy(Policy::RoundRobin),
             Default::default(),
@@ -732,9 +732,9 @@ mod tests {
             .expect("answered in time")
             .expect("m3 took it");
         }
-        let count = |cell: &str, outcome: &str| {
-            offers(&registry, cell, outcome)
-                .unwrap_or_else(|| panic!("no series for {cell} {outcome}")) as usize
+        let count = |pool: &str, outcome: &str| {
+            offers(&registry, pool, outcome)
+                .unwrap_or_else(|| panic!("no series for {pool} {outcome}")) as usize
         };
         let answered: Vec<usize> = answered.iter().map(|n| n.load(Ordering::SeqCst)).collect();
         assert_eq!(count("m1", "declined_full"), answered[0]);
@@ -751,9 +751,9 @@ mod tests {
             "failed",
         ];
         let (mut offered, mut failovers) = (0, 0);
-        for cell in ["m0", "m1", "m2", "m3"] {
-            offered += outcomes.iter().map(|o| count(cell, o)).sum::<usize>();
-            let labels = [("class", "model_x"), ("cell", cell)];
+        for pool in ["m0", "m1", "m2", "m3"] {
+            offered += outcomes.iter().map(|o| count(pool, o)).sum::<usize>();
+            let labels = [("class", "model_x"), ("pool", pool)];
             failovers += scraped(&registry, FAILOVERS, &labels).expect("a series") as usize;
         }
         assert_eq!(
@@ -771,7 +771,7 @@ mod tests {
     async fn a_dropped_failover_counts_no_offer_without_an_answer() {
         use super::super::lease::Leases;
         use super::super::meter::tests::{offers, scraped};
-        use super::super::meter::{CellMeters, FAILOVERS};
+        use super::super::meter::{FAILOVERS, PoolMeters};
 
         let layout = layout();
         let chooser = bind_node(([127, 0, 0, 1], 0).into())
@@ -812,8 +812,8 @@ mod tests {
             })
             .expect("a handler");
         let registry = prometheus::Registry::new();
-        let meters = CellMeters::register(&registry).expect("registered");
-        let cells = Cells::new(
+        let meters = PoolMeters::register(&registry).expect("registered");
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -824,13 +824,13 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, id)| {
-            Arc::new(CellTable {
+            Arc::new(PoolTable {
                 class: "model_x".into(),
-                cell: name.into(),
-                id: cell_id("model_x", name),
+                pool: name.into(),
+                id: pool_id("model_x", name),
                 generation: 1,
                 region: "home".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: super::super::tests::idle(),
                 eligible: Box::new([id]),
                 offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -844,16 +844,16 @@ mod tests {
             })
         })
         .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
         let mut targets = targets(
             &layout,
             "a",
-            &cells,
-            &gdl::CellPolicies::new(),
+            &pools,
+            &gdl::PoolPolicies::new(),
             gdl::HomeFirstAt::DEFAULT,
         )
         .expect("targets");
-        let router = Router::Cells(Arc::new(Crossing::new(
+        let router = Router::Pools(Arc::new(Crossing::new(
             targets.remove(&(0, 1)).expect("the class cut"),
             Within::Policy(Policy::RoundRobin),
             Default::default(),
@@ -893,48 +893,48 @@ mod tests {
             scraped(
                 &registry,
                 FAILOVERS,
-                &[("class", "model_x"), ("cell", "m1")],
+                &[("class", "model_x"), ("pool", "m1")],
             ),
             Some(0.0),
             "a dropped unanswered offer must not leave a failover count"
         );
     }
 
-    /// Sends a prompt to the cell whose name is its text, and says why
-    /// when there is none or that cell declined.
+    /// Sends a prompt to the pool whose name is its text, and says why
+    /// when there is none or that pool declined.
     struct ByText;
 
-    impl gdl::CellPolicy for ByText {
+    impl gdl::PoolPolicy for ByText {
         type Head = Prompt;
 
         fn choose(
             &self,
-            request: gdl::CellRequest<'_, Prompt>,
-            cells: &[gdl::Cell],
-        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            request: gdl::PoolRequest<'_, Prompt>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
             let text = &request.head().text;
-            let at = cells
+            let at = pools
                 .iter()
-                .position(|cell| cell.name() == text)
-                .ok_or_else(|| NoCell::because(format!("no cell is named `{text}`")))?;
-            if request.is_excluded(&cells[at]) {
-                return Err(NoCell::because(format!("cell `{text}` declined")));
+                .position(|pool| pool.name() == text)
+                .ok_or_else(|| NoPool::because(format!("no pool is named `{text}`")))?;
+            if request.is_excluded(&pools[at]) {
+                return Err(NoPool::because(format!("pool `{text}` declined")));
             }
-            Ok(gdl::CellChoice::new(at))
+            Ok(gdl::PoolChoice::new(at))
         }
     }
 
-    /// A registered cell policy reads the head, in the edge's encoding,
-    /// and chooses the cell: two requests that differ only in the field
-    /// it reads are offered to different cells, each to the one it names,
+    /// A registered pool policy reads the head, in the edge's encoding,
+    /// and chooses the pool: two requests that differ only in the field
+    /// it reads are offered to different pools, each to the one it names,
     /// over velo. A head it cannot read fails the request with `Codec`,
-    /// and offers it to no cell. A head that names no cell fails with
-    /// `Routing` and the policy's reason. A cell that declines leaves the
+    /// and offers it to no pool. A head that names no pool fails with
+    /// `Routing` and the policy's reason. A pool that declines leaves the
     /// request its refusal, not the reason the policy gives for choosing
-    /// no other cell.
+    /// no other pool.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_registered_policy_chooses_the_cell_by_the_head() {
-        let layout = layout_under(gdl_model::CellPolicy {
+    async fn a_registered_policy_chooses_the_pool_by_the_head() {
+        let layout = layout_under(gdl_model::PoolPolicy {
             policy: "by_text".into(),
         });
         let chooser = bind_node(([127, 0, 0, 1], 0).into())
@@ -949,7 +949,7 @@ mod tests {
             roster.add("d", entry.peer_info());
             entries.push(entry);
         }
-        let mut policies = gdl::CellPolicies::new();
+        let mut policies = gdl::PoolPolicies::new();
         policies.add("by_text", ByText).expect("registered");
         let fabric = Fabric::new(chooser, None, None, Duration::from_secs(30));
         let rt = Runtime::new(
@@ -958,7 +958,7 @@ mod tests {
             "a".into(),
             &roster,
             RuntimeConfig {
-                cell_policies: policies.clone(),
+                pool_policies: policies.clone(),
                 ..RuntimeConfig::default()
             },
             None,
@@ -988,7 +988,7 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new(
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -998,13 +998,13 @@ mod tests {
             .zip(["m1", "m2"])
             .map(|(entry, name)| {
                 let id = entry.instance_id();
-                Arc::new(CellTable {
+                Arc::new(PoolTable {
                     class: "model_x".into(),
-                    cell: name.into(),
-                    id: cell_id("model_x", name),
+                    pool: name.into(),
+                    id: pool_id("model_x", name),
                     generation: 1,
                     region: "home".into(),
-                    state: CellState::Ready,
+                    state: PoolState::Ready,
                     load: super::super::tests::idle(),
                     eligible: Box::new([id]),
                     offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -1018,11 +1018,11 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
         let mut targets =
-            targets(&layout, "a", &cells, &policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
+            targets(&layout, "a", &pools, &policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
-        let router = Router::Cells(Arc::new(Crossing::new(
+        let router = Router::Pools(Arc::new(Crossing::new(
             target,
             Within::Policy(Policy::RoundRobin),
             gdl_model::Encoding::Json,
@@ -1064,17 +1064,17 @@ mod tests {
         assert_eq!(offered(), [1, 1]);
         send(prompt("m2")).await.expect("m2 took it");
         assert_eq!(offered(), [1, 2]);
-        let error = send(prompt("m3")).await.expect_err("no cell is m3");
+        let error = send(prompt("m3")).await.expect_err("no pool is m3");
         assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
         assert!(
-            error.to_string().contains("no cell is named `m3`"),
+            error.to_string().contains("no pool is named `m3`"),
             "{error}"
         );
         let error = send(b"not json".to_vec())
             .await
             .expect_err("no head to read");
         assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
-        assert_eq!(offered(), [1, 2], "a request no cell may take was offered");
+        assert_eq!(offered(), [1, 2], "a request no pool may take was offered");
         full.store(true, Ordering::SeqCst);
         let error = send(prompt("m1")).await.expect_err("m1 declined");
         assert_eq!(offered(), [2, 2], "m1 was offered it once");
@@ -1085,29 +1085,29 @@ mod tests {
         );
     }
 
-    /// The crossing into `model_x` of [`layout`], over `cells`, each with
+    /// The crossing into `model_x` of [`layout`], over `pools`, each with
     /// one entry instance and an idle summary.
     fn crossing_over(names: &[&str]) -> Crossing {
         followed_over(names).0
     }
 
     /// [`crossing_over`], with the tables it chooses from.
-    fn followed_over(names: &[&str]) -> (Crossing, Cells) {
+    fn followed_over(names: &[&str]) -> (Crossing, Pools) {
         followed_under(&layout(), names)
     }
 
     /// [`followed_over`], for the crossing of `layout`.
-    fn followed_under(layout: &gdl_model::Layout, names: &[&str]) -> (Crossing, Cells) {
-        followed_with(layout, names, &gdl::CellPolicies::new())
+    fn followed_under(layout: &gdl_model::Layout, names: &[&str]) -> (Crossing, Pools) {
+        followed_with(layout, names, &gdl::PoolPolicies::new())
     }
 
     /// [`followed_under`], with `policies` registered.
     fn followed_with(
         layout: &gdl_model::Layout,
         names: &[&str],
-        policies: &gdl::CellPolicies,
-    ) -> (Crossing, Cells) {
-        let cells = Cells::new(
+        policies: &gdl::PoolPolicies,
+    ) -> (Crossing, Pools) {
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
@@ -1116,13 +1116,13 @@ mod tests {
             .iter()
             .map(|name| {
                 let id = velo::InstanceId::new_v4();
-                Arc::new(CellTable {
+                Arc::new(PoolTable {
                     class: "model_x".into(),
-                    cell: (*name).into(),
-                    id: cell_id("model_x", name),
+                    pool: (*name).into(),
+                    id: pool_id("model_x", name),
                     generation: 1,
                     region: "home".into(),
-                    state: CellState::Ready,
+                    state: PoolState::Ready,
                     load: super::super::tests::idle(),
                     eligible: Box::new([id]),
                     offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -1136,9 +1136,9 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
         let mut targets =
-            targets(layout, "a", &cells, policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
+            targets(layout, "a", &pools, policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         (
             Crossing::new(
@@ -1146,27 +1146,27 @@ mod tests {
                 Within::Policy(Policy::RoundRobin),
                 Default::default(),
             ),
-            cells,
+            pools,
         )
     }
 
-    /// An acceptance ends the damping the cell has when it accepts, not
+    /// An acceptance ends the damping the pool has when it accepts, not
     /// the one it had when its offer was chosen: an offer chosen before a
-    /// decline damped the cell ends that damping, and of two offers chosen
+    /// decline damped the pool ends that damping, and of two offers chosen
     /// while it was damped, only the first acceptance writes.
     #[test]
-    fn an_acceptance_ends_the_damping_the_cell_has_when_it_accepts() {
+    fn an_acceptance_ends_the_damping_the_pool_has_when_it_accepts() {
         let cx = Cx::new();
         let writes = || super::super::damping::WRITES.with(Cell::get);
         let random = std::hash::RandomState::new();
-        let (lone, cells) = followed_over(&["m1"]);
+        let (lone, pools) = followed_over(&["m1"]);
         let pick = || {
             lone.pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
-                .expect("a lone cell is always chosen")
+                .expect("a lone pool is always chosen")
                 .1
         };
-        let damped = || cells.followed("d")[0].damped.is_some();
+        let damped = || pools.followed("d")[0].damped.is_some();
         let (first, second) = (pick(), pick());
         lone.declined(second, Decline::Full, None);
         assert!(damped());
@@ -1182,83 +1182,83 @@ mod tests {
         lone.accepted(first);
         lone.accepted(second);
         assert!(!damped());
-        assert_eq!(writes() - wrote, 1, "an undamped cell's acceptance wrote");
+        assert_eq!(writes() - wrote, 1, "an undamped pool's acceptance wrote");
     }
 
-    /// `cells`' table of `name` replaced by the one `change` makes of it,
+    /// `pools`' table of `name` replaced by the one `change` makes of it,
     /// as the follower makes a new table for each change the relay sends;
-    /// the other cells' tables stay as they are.
-    fn changed(cells: &Cells, name: &str, change: impl FnOnce(&mut CellTable)) {
-        let table = cells.table("d").expect("a table");
+    /// the other pools' tables stay as they are.
+    fn changed(pools: &Pools, name: &str, change: impl FnOnce(&mut PoolTable)) {
+        let table = pools.table("d").expect("a table");
         let mut change = Some(change);
         let tables = table
-            .cells
+            .pools
             .iter()
-            .map(|cell| {
-                if cell.cell != name {
-                    return Arc::clone(cell);
+            .map(|pool| {
+                if pool.pool != name {
+                    return Arc::clone(pool);
                 }
-                let mut next = CellTable {
-                    class: cell.class.clone(),
-                    cell: cell.cell.clone(),
-                    id: cell.id,
-                    generation: cell.generation,
-                    region: cell.region.clone(),
-                    state: cell.state,
-                    load: cell.load,
-                    eligible: cell.eligible.clone(),
-                    offered: cell.offered.clone(),
-                    retired: cell.retired.clone(),
-                    unread: cell.unread,
-                    turn: Arc::clone(&cell.turn),
-                    offering: cell.offering,
-                    revision: cell.revision,
-                    changes: cell.changes,
-                    leases: Arc::clone(&cell.leases),
+                let mut next = PoolTable {
+                    class: pool.class.clone(),
+                    pool: pool.pool.clone(),
+                    id: pool.id,
+                    generation: pool.generation,
+                    region: pool.region.clone(),
+                    state: pool.state,
+                    load: pool.load,
+                    eligible: pool.eligible.clone(),
+                    offered: pool.offered.clone(),
+                    retired: pool.retired.clone(),
+                    unread: pool.unread,
+                    turn: Arc::clone(&pool.turn),
+                    offering: pool.offering,
+                    revision: pool.revision,
+                    changes: pool.changes,
+                    leases: Arc::clone(&pool.leases),
                 };
-                change.take().expect("one cell of the name")(&mut next);
+                change.take().expect("one pool of the name")(&mut next);
                 Arc::new(next)
             })
             .collect();
-        cells.store("d", EntryTable::new(tables));
+        pools.store("d", EntryTable::new(tables));
     }
 
-    /// A cell that declines an offer as gone, as a draining cell's entry
+    /// A pool that declines an offer as gone, as a draining pool's entry
     /// does, is passed over until the relay changes its follow, however
-    /// long that takes; a new load summary is no change. A full cell's
-    /// decline, the control, damps the cell, which is chosen again once
+    /// long that takes; a new load summary is no change. A full pool's
+    /// decline, the control, damps the pool, which is chosen again once
     /// its window has passed. An acceptance ends a mark as gone. A gone
     /// decline of an offer made under an earlier generation damps the newer
-    /// one instead. A lone gone cell is not chosen: the cap on damping
+    /// one instead. A lone gone pool is not chosen: the cap on damping
     /// does not hold it in the choice.
     #[tokio::test(start_paused = true)]
-    async fn a_cell_that_declined_as_gone_is_passed_over_until_its_follow_changes() {
-        const FIRST_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_CELL_DAMPING_FIRST;
-        const MAX_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_CELL_DAMPING_MAX;
+    async fn a_pool_that_declined_as_gone_is_passed_over_until_its_follow_changes() {
+        const FIRST_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_POOL_DAMPING_FIRST;
+        const MAX_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_POOL_DAMPING_MAX;
 
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        let (crossing, cells) = followed_over(&["m1", "m2", "m3"]);
-        let m1 = cell_id("model_x", "m1");
+        let (crossing, pools) = followed_over(&["m1", "m2", "m3"]);
+        let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
-                .expect("a cell")
+                .expect("a pool")
         };
         // An offer to `m1`, with its lease.
         let offer = || loop {
-            let (_, cell, lease) = pick();
-            if cell == m1 {
+            let (_, pool, lease) = pick();
+            if pool == m1 {
                 return lease;
             }
         };
         let chosen = || (0..12).any(|_| pick().1 == m1);
         let shown = || {
-            cells
+            pools
                 .followed("d")
                 .into_iter()
-                .find(|cell| cell.cell == "m1")
+                .find(|pool| pool.pool == "m1")
                 .expect("followed")
         };
 
@@ -1269,7 +1269,7 @@ mod tests {
         tokio::time::advance(FIRST_WINDOW).await;
         assert!(
             chosen(),
-            "a full cell was not chosen once its window passed"
+            "a full pool was not chosen once its window passed"
         );
 
         let lease = offer();
@@ -1279,9 +1279,9 @@ mod tests {
         assert!(m.gone && m.damped.is_none(), "{m:?}");
         tokio::time::advance(MAX_WINDOW * 2).await;
         assert!(!chosen(), "chosen again while its follow is unchanged");
-        changed(&cells, "m1", |cell| cell.load = super::super::tests::idle());
+        changed(&pools, "m1", |pool| pool.load = super::super::tests::idle());
         assert!(!chosen(), "a new load summary ended it");
-        changed(&cells, "m1", |cell| cell.changes += 1);
+        changed(&pools, "m1", |pool| pool.changes += 1);
         assert!(chosen(), "not chosen once the relay changed its state");
         assert!(!shown().gone);
 
@@ -1293,9 +1293,9 @@ mod tests {
         assert!(chosen(), "not chosen once it accepted an offer");
 
         let lease = offer();
-        changed(&cells, "m1", |cell| {
-            cell.generation += 1;
-            cell.leases = Arc::default();
+        changed(&pools, "m1", |pool| {
+            pool.generation += 1;
+            pool.leases = Arc::default();
         });
         crossing.declined(m1, Decline::Gone, Some(&lease));
         drop(lease);
@@ -1303,79 +1303,79 @@ mod tests {
         assert!(!m.gone && m.damped.is_some(), "{m:?}");
         crossing.accepted(m1);
 
-        let (lone, _cells) = followed_over(&["m1"]);
-        let (_, cell, lease) = lone
+        let (lone, _pools) = followed_over(&["m1"]);
+        let (_, pool, lease) = lone
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
-            .expect("a lone cell");
-        lone.declined(cell, Decline::Gone, Some(&lease));
+            .expect("a lone pool");
+        lone.declined(pool, Decline::Gone, Some(&lease));
         drop(lease);
         let no = lone
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
-            .expect_err("a lone gone cell was chosen");
-        assert_eq!(no, NoCell::new());
+            .expect_err("a lone gone pool was chosen");
+        assert_eq!(no, NoPool::new());
     }
 
     /// Replies to offers already in flight can arrive in either order.
-    /// A full reply gives no evidence that a gone cell takes work again.
+    /// A full reply gives no evidence that a gone pool takes work again.
     #[tokio::test(start_paused = true)]
-    async fn a_late_full_reply_preserves_a_gone_cell() {
+    async fn a_late_full_reply_preserves_a_gone_pool() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        let (crossing, cells) = followed_over(&["m1"]);
+        let (crossing, pools) = followed_over(&["m1"]);
         let pick = || {
             crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
         };
-        let (_, cell, first) = pick().expect("the first offer");
+        let (_, pool, first) = pick().expect("the first offer");
         let (_, same, second) = pick().expect("the second offer");
-        assert_eq!(cell, same);
-        crossing.declined(cell, Decline::Gone, Some(&first));
+        assert_eq!(pool, same);
+        crossing.declined(pool, Decline::Gone, Some(&first));
         drop(first);
-        assert!(cells.followed("d")[0].gone);
-        assert!(pick().is_err(), "the gone cell was chosen");
+        assert!(pools.followed("d")[0].gone);
+        assert!(pick().is_err(), "the gone pool was chosen");
 
-        crossing.declined(cell, Decline::Full, Some(&second));
+        crossing.declined(pool, Decline::Full, Some(&second));
         drop(second);
-        tokio::time::advance(crate::RuntimeConfig::DEFAULT_CELL_DAMPING_MAX * 2).await;
-        let shown = &cells.followed("d")[0];
+        tokio::time::advance(crate::RuntimeConfig::DEFAULT_POOL_DAMPING_MAX * 2).await;
+        let shown = &pools.followed("d")[0];
         assert!(
             shown.gone && pick().is_err(),
-            "a full reply revived a gone cell without a follow change: {shown:?}"
+            "a full reply revived a gone pool without a follow change: {shown:?}"
         );
     }
 
-    /// A node that reads the chooser's tables holds a cell gone exactly
+    /// A node that reads the chooser's tables holds a pool gone exactly
     /// while the chooser's choice passes it over: from its gone decline,
     /// across a new load summary, until the relay changes its follow or it
-    /// accepts an offer. A full decline, the control, damps the cell and
+    /// accepts an offer. A full decline, the control, damps the pool and
     /// is not gone.
     #[tokio::test(start_paused = true)]
-    async fn a_node_reads_a_cell_gone_while_the_choice_passes_it_over() {
+    async fn a_node_reads_a_pool_gone_while_the_choice_passes_it_over() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        let (crossing, cells) = followed_over(&["m1", "m2"]);
-        let node = gdl::FollowedCells::new();
-        assert!(node.bind(Arc::new(cells.clone())));
-        let m1 = cell_id("model_x", "m1");
+        let (crossing, pools) = followed_over(&["m1", "m2"]);
+        let node = gdl::FollowedPools::new();
+        assert!(node.bind(Arc::new(pools.clone())));
+        let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
-                .expect("a cell")
+                .expect("a pool")
         };
         let offer = || loop {
-            let (_, cell, lease) = pick();
-            if cell == m1 {
+            let (_, pool, lease) = pick();
+            if pool == m1 {
                 return lease;
             }
         };
         let chosen = || (0..12).any(|_| pick().1 == m1);
         let read = || {
-            node.read("model_x", |cells| {
-                (cells.is_gone("m1"), cells.is_gone("m2"))
+            node.read("model_x", |pools| {
+                (pools.is_gone("m1"), pools.is_gone("m2"))
             })
             .expect("the chooser sends to model_x")
         };
@@ -1384,7 +1384,7 @@ mod tests {
         let lease = offer();
         crossing.declined(m1, Decline::Full, Some(&lease));
         drop(lease);
-        assert_eq!(read(), (false, false), "a full cell read gone");
+        assert_eq!(read(), (false, false), "a full pool read gone");
         crossing.accepted(m1);
 
         let lease = offer();
@@ -1392,10 +1392,10 @@ mod tests {
         drop(lease);
         assert!(!chosen());
         assert_eq!(read(), (true, false), "the chooser passes m1 over");
-        changed(&cells, "m1", |cell| cell.load = super::super::tests::idle());
+        changed(&pools, "m1", |pool| pool.load = super::super::tests::idle());
         assert!(!chosen());
         assert_eq!(read(), (true, false), "a new load summary ended it");
-        changed(&cells, "m1", |cell| cell.changes += 1);
+        changed(&pools, "m1", |pool| pool.changes += 1);
         assert!(chosen());
         assert_eq!(read(), (false, false), "the follow changed");
 
@@ -1407,10 +1407,10 @@ mod tests {
         assert_eq!(read(), (false, false), "m1 accepted an offer");
     }
 
-    /// A pick whose cell accepts allocates nothing and, while the cell is
+    /// A pick whose pool accepts allocates nothing and, while the pool is
     /// not damped, writes no damping state: an acceptance by an undamped
-    /// cell costs a branch. A decline writes, and so does the acceptance
-    /// that ends a cell's damping, once.
+    /// pool costs a branch. A decline writes, and so does the acceptance
+    /// that ends a pool's damping, once.
     #[test]
     fn an_accepted_pick_allocates_nothing_and_writes_no_damping() {
         let cx = Cx::new();
@@ -1423,7 +1423,7 @@ mod tests {
             let (_, chosen, _) = crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
-                .expect("a cell");
+                .expect("a pool");
             crossing.accepted(chosen);
         }
         counting(false);
@@ -1434,42 +1434,42 @@ mod tests {
         let (_, chosen, _) = lone
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
-            .expect("a cell");
+            .expect("a pool");
         lone.declined(chosen, Decline::Full, None);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
-        // A lone cell is never damped out of the choice.
+        // A lone pool is never damped out of the choice.
         let (_, chosen, _) = lone
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
-            .expect("a cell");
+            .expect("a pool");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
         let (_, chosen, _) = lone
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
-            .expect("a cell");
+            .expect("a pool");
         lone.accepted(chosen);
-        assert_eq!(writes() - wrote, 2, "an undamped cell's acceptance wrote");
+        assert_eq!(writes() - wrote, 2, "an undamped pool's acceptance wrote");
     }
 
-    /// What a cell choice and an accepted first offer cost, in time, for
+    /// What a pool choice and an accepted first offer cost, in time, for
     /// the record in the book: a pick under each policy the runtime
-    /// provides, over four idle cells, the count of an offer's outcome,
+    /// provides, over four idle pools, the count of an offer's outcome,
     /// and one accepted offer over loopback, its outcome counted, against
     /// the same hand-off routed by the roster. Ignored: it times,
     /// and asserts nothing. Run it in release:
     /// `cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "a timing, not a check"]
-    async fn cost_of_a_cell_choice_and_an_offer() {
+    async fn cost_of_a_pool_choice_and_an_offer() {
         const PICKS: u32 = 2_000_000;
         let random = std::hash::RandomState::new();
         let cx = Cx::new();
         for name in ["round_robin", "home_first"] {
-            let layout = layout_under(gdl_model::CellPolicy {
+            let layout = layout_under(gdl_model::PoolPolicy {
                 policy: name.into(),
             });
-            let (crossing, _cells) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
+            let (crossing, _pools) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
             let mut best = Duration::MAX;
             for _ in 0..5 {
                 let start = std::time::Instant::now();
@@ -1487,8 +1487,8 @@ mod tests {
                 best.as_nanos() as f64 / f64::from(PICKS)
             );
         }
-        // What an offer adds to count its outcome under its cell.
-        let meters = super::super::CellMeters::unregistered();
+        // What an offer adds to count its outcome under its pool.
+        let meters = super::super::PoolMeters::unregistered();
         let figures = meters.figures("model_x", "m1");
         let mut best = Duration::MAX;
         for _ in 0..5 {
@@ -1530,21 +1530,21 @@ mod tests {
                 Box::pin(async move { accepted })
             })
             .expect("a handler");
-        let cells = Cells::new(
+        let pools = Pools::new(
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
         );
         let id = entry.instance_id();
-        cells.store(
+        pools.store(
             "d",
-            EntryTable::new(Box::new([Arc::new(CellTable {
+            EntryTable::new(Box::new([Arc::new(PoolTable {
                 class: "model_x".into(),
-                cell: "m1".into(),
-                id: cell_id("model_x", "m1"),
+                pool: "m1".into(),
+                id: pool_id("model_x", "m1"),
                 generation: 1,
                 region: "home".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: super::super::tests::idle(),
                 eligible: Box::new([id]),
                 offered: Box::new([crate::dist::roster::selector_id(id)]),
@@ -1561,8 +1561,8 @@ mod tests {
         let mut targets = targets(
             &layout,
             "a",
-            &cells,
-            &gdl::CellPolicies::new(),
+            &pools,
+            &gdl::PoolPolicies::new(),
             gdl::HomeFirstAt::DEFAULT,
         )
         .expect("targets");
@@ -1571,8 +1571,8 @@ mod tests {
         let routers = [
             ("roster", Router::Roster(policy.clone())),
             (
-                "cells",
-                Router::Cells(Arc::new(Crossing::new(target, policy, Default::default()))),
+                "pools",
+                Router::Pools(Arc::new(Crossing::new(target, policy, Default::default()))),
             ),
         ];
         for (name, router) in &routers {
@@ -1603,41 +1603,41 @@ mod tests {
         }
     }
 
-    /// Chooses as `home_first` or `round_robin` among every cell but `m2`,
+    /// Chooses as `home_first` or `round_robin` among every pool but `m2`,
     /// and builds a reason when none is left.
     struct KeptBut(bool);
 
-    impl gdl::CellPolicy for KeptBut {
+    impl gdl::PoolPolicy for KeptBut {
         type Head = gdl::Encoded;
 
         fn choose(
             &self,
-            request: gdl::CellRequest<'_, gdl::Encoded>,
-            cells: &[gdl::Cell],
-        ) -> std::result::Result<gdl::CellChoice, NoCell> {
-            let keep = |cell: &gdl::Cell| cell.name() != "m2";
+            request: gdl::PoolRequest<'_, gdl::Encoded>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
+            let keep = |pool: &gdl::Pool| pool.name() != "m2";
             let at = if self.0 {
-                gdl::HomeFirst.choose_where(request, cells, keep)
+                gdl::HomeFirst.choose_where(request, pools, keep)
             } else {
-                gdl::RoundRobin.choose_where(request, cells, keep)
+                gdl::RoundRobin.choose_where(request, pools, keep)
             };
-            at.map(gdl::CellChoice::new)
-                .ok_or_else(|| NoCell::because(format!("none of {} cells is kept", cells.len())))
+            at.map(gdl::PoolChoice::new)
+                .ok_or_else(|| NoPool::because(format!("none of {} pools is kept", pools.len())))
         }
     }
 
     /// A pick allocates nothing under either policy the runtime provides,
-    /// nor under a registered one that runs either over the cells it
-    /// keeps, also while a cell's damping window lasts, which takes the
-    /// pass that sets which damped cells are passed over, with a cell
-    /// excluded, and with a cell gone, which is never chosen. The
-    /// registered ones build a reason when they choose no cell, which
+    /// nor under a registered one that runs either over the pools it
+    /// keeps, also while a pool's damping window lasts, which takes the
+    /// pass that sets which damped pools are passed over, with a pool
+    /// excluded, and with a pool gone, which is never chosen. The
+    /// registered ones build a reason when they choose no pool, which
     /// allocates then and only then.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        let mut policies = gdl::CellPolicies::new();
+        let mut policies = gdl::PoolPolicies::new();
         policies
             .add("kept_home_first", KeptBut(true))
             .expect("registered");
@@ -1650,18 +1650,18 @@ mod tests {
             "kept_home_first",
             "kept_round_robin",
         ] {
-            let layout = layout_under(gdl_model::CellPolicy {
+            let layout = layout_under(gdl_model::PoolPolicy {
                 policy: name.into(),
             });
-            let (crossing, cells) =
+            let (crossing, pools) =
                 followed_with(&layout, &["m1", "m2", "m3", "m4", "m5"], &policies);
-            let excluded = [cell_id("model_x", "m4")];
-            crossing.declined(cell_id("model_x", "m1"), Decline::Full, None);
-            crossing.declined(cell_id("model_x", "m2"), Decline::Full, None);
-            cells
+            let excluded = [pool_id("model_x", "m4")];
+            crossing.declined(pool_id("model_x", "m1"), Decline::Full, None);
+            crossing.declined(pool_id("model_x", "m2"), Decline::Full, None);
+            pools
                 .damping()
-                .gone(&cells.table("d").expect("a table").views[4]);
-            let damped = cells.followed("d");
+                .gone(&pools.table("d").expect("a table").views[4]);
+            let damped = pools.followed("d");
             assert!(damped[0].damped.is_some() && damped[1].damped.is_some());
             assert!(damped[4].gone);
             let before = counted();
@@ -1670,36 +1670,36 @@ mod tests {
             let mut chosen = Vec::with_capacity(1000);
             counting(true);
             for _ in 0..1000 {
-                let (_, cell, _) = crossing
+                let (_, pool, _) = crossing
                     .pick(&cx, &[], Policy::RoundRobin, &random, &excluded)
                     .expect("a pick")
-                    .expect("a cell");
-                chosen.push(cell);
+                    .expect("a pool");
+                chosen.push(pool);
             }
             counting(false);
             let chosen: std::collections::BTreeSet<u64> = chosen.into_iter().collect();
             assert_eq!(counted() - before, 0, "a {name} pick allocated");
-            // The undamped cell is chosen, and the excluded one never.
-            assert!(chosen.contains(&cell_id("model_x", "m3")), "{name}");
+            // The undamped pool is chosen, and the excluded one never.
+            assert!(chosen.contains(&pool_id("model_x", "m3")), "{name}");
             assert!(!chosen.contains(&excluded[0]), "{name}");
-            assert!(!chosen.contains(&cell_id("model_x", "m5")), "{name}");
+            assert!(!chosen.contains(&pool_id("model_x", "m5")), "{name}");
             if name.starts_with("kept") {
-                assert!(!chosen.contains(&cell_id("model_x", "m2")), "{name}");
+                assert!(!chosen.contains(&pool_id("model_x", "m2")), "{name}");
             }
-            let every = ["m1", "m2", "m3", "m4"].map(|cell| cell_id("model_x", cell));
+            let every = ["m1", "m2", "m3", "m4"].map(|pool| pool_id("model_x", pool));
             let before = counted();
             counting(true);
             let no = crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &every)
                 .expect("a pick")
-                .expect_err("no cell");
+                .expect_err("no pool");
             counting(false);
             let built = counted() - before;
             if name.starts_with("kept") {
-                assert_eq!(no.reason(), Some("none of 5 cells is kept"));
+                assert_eq!(no.reason(), Some("none of 5 pools is kept"));
                 assert!(built > 0, "a {name} reason was built");
             } else {
-                assert_eq!((no, built), (NoCell::new(), 0), "{name}");
+                assert_eq!((no, built), (NoPool::new(), 0), "{name}");
             }
         }
     }
@@ -1714,18 +1714,18 @@ mod tests {
         fn accepted(&mut self) {}
     }
 
-    impl gdl::CellPolicy for Leasing {
+    impl gdl::PoolPolicy for Leasing {
         type Head = gdl::Encoded;
 
         fn choose(
             &self,
-            request: gdl::CellRequest<'_, gdl::Encoded>,
-            cells: &[gdl::Cell],
-        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            request: gdl::PoolRequest<'_, gdl::Encoded>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
             let at = gdl::RoundRobin
-                .choose_where(request, cells, |_| true)
-                .ok_or_else(NoCell::new)?;
-            Ok(gdl::CellChoice::new(at).with_lease(Idle(0)))
+                .choose_where(request, pools, |_| true)
+                .ok_or_else(NoPool::new)?;
+            Ok(gdl::PoolChoice::new(at).with_lease(Idle(0)))
         }
     }
 
@@ -1735,20 +1735,20 @@ mod tests {
     fn a_choice_with_a_lease_allocates_twice() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        let mut policies = gdl::CellPolicies::new();
+        let mut policies = gdl::PoolPolicies::new();
         policies.add("leasing", Leasing).expect("registered");
-        let layout = layout_under(gdl_model::CellPolicy {
+        let layout = layout_under(gdl_model::PoolPolicy {
             policy: "leasing".into(),
         });
-        let (crossing, _cells) = followed_with(&layout, &["m1", "m2"], &policies);
+        let (crossing, _pools) = followed_with(&layout, &["m1", "m2"], &policies);
         let before = counted();
         counting(true);
         for _ in 0..1000 {
-            let (_, cell, lease) = crossing
+            let (_, pool, lease) = crossing
                 .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                 .expect("a pick")
-                .expect("a cell");
-            crossing.accepted(cell);
+                .expect("a pool");
+            crossing.accepted(pool);
             drop(lease);
         }
         counting(false);

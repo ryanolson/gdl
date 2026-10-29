@@ -2,7 +2,7 @@
 //! specs that between them hold every form a segment takes: JSON lines, no
 //! serving, a pinned frontend, a service with every entry on and with two
 //! off, a streamed source, an anchor, two roots, two roots and a service,
-//! cell policies, an allocator, and several layouts. The calls are pinned in
+//! pool policies, an allocator, and several layouts. The calls are pinned in
 //! `crates/gdl-macros/tests/fixtures/segment`, where `gdl-macros` expands
 //! each and compares it with the code the generator wrote before the
 //! macro held it. Run with `GDL_UPDATE_FIXTURES=1` to write them again.

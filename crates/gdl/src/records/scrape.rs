@@ -1,4 +1,4 @@
-//! `cell_record_writes_total`: each table's writes by how they ended,
+//! `pool_record_writes_total`: each table's writes by how they ended,
 //! read from its counts when the registry is scraped.
 
 use std::collections::BTreeMap;
@@ -10,8 +10,8 @@ use prometheus::proto::{self, MetricFamily, MetricType};
 
 use super::Binding;
 
-const WRITES: &str = "cell_record_writes_total";
-const WRITES_HELP: &str = "Writes to a table of the cell hub's records, by how each ended.";
+const WRITES: &str = "pool_record_writes_total";
+const WRITES_HELP: &str = "Writes to a table of the pool hub's records, by how each ended.";
 
 /// The outcomes, by their label.
 const OUTCOMES: [&str; 4] = ["applied", "refused", "dropped", "unanswered"];

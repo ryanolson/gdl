@@ -10,7 +10,7 @@ pub use ::policy_contract as contract;
 pub const SEGMENT: &str = "model";
 
 /// Every segment of the placement. An instance waits for all of them,
-/// or, in a cell, only for those of its class.
+/// or, in a pool, only for those of its class.
 pub const SEGMENTS: &[&str] = &["front", "model"];
 
 /// The placement this crate was generated for.
@@ -26,7 +26,7 @@ segments = ["front"]
 [class.model]
 segments = ["model"]
 
-[cells.model]
+[pools.model]
 policy = "by_model"
 "#;
 

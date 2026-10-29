@@ -5,9 +5,9 @@ use std::{
 };
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary, MemoryDirectory,
-    MemoryLimits, ResumeToken, Withdrawal,
+use gdl_pools::{
+    DirectoryError, LoadSummary, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent,
+    PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{Backend, Rule},
 };
 use tokio::time::Instant;
@@ -27,7 +27,7 @@ enum Fault {
     /// Leaves a record whose lease has passed out of a new watch's
     /// snapshot, though it says it keeps records until they withdraw.
     HidesExpired,
-    /// Hides the cells of the regions it does not serve, `eu-west-1`
+    /// Hides the pools of the regions it does not serve, `eu-west-1`
     /// and `ap-south-1`, from its watches.
     OneRegion,
     /// Replaces every record's region with the reader's region.
@@ -35,11 +35,11 @@ enum Fault {
     /// Its watch becomes unavailable, while it disowns only EveryRecord.
     FailsWatch,
     /// Stores the load summary apart from the record, and installs a
-    /// record with the summary of its cell's write before.
+    /// record with the summary of its pool's write before.
     LoadApart,
-    /// Joins queued records to the cell's latest summary, regardless of version.
+    /// Joins queued records to the pool's latest summary, regardless of version.
     LatestPart,
-    /// Joins replayed records to the cell's latest summary, regardless of version.
+    /// Joins replayed records to the pool's latest summary, regardless of version.
     ReplayPart,
     /// Restores a record's version but loses its hub address on restart.
     RestartPart,
@@ -56,7 +56,7 @@ struct Faulty {
     inner: MemoryDirectory,
     fault: Fault,
     restarted: bool,
-    /// Each cell's latest write: its load summary, its lease, and when.
+    /// Each pool's latest write: its load summary, its lease, and when.
     written: Arc<Mutex<HashMap<(String, String), Written>>>,
 }
 
@@ -67,10 +67,10 @@ struct Written {
     at: Instant,
 }
 
-impl CellDirectory for Faulty {
+impl PoolDirectory for Faulty {
     type Watch = Events;
 
-    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
         let key = (record.class.clone(), record.name.clone());
         let written = Written {
             load: record.load,
@@ -96,7 +96,7 @@ impl CellDirectory for Faulty {
         let (fault, written, restarted) = (self.fault, Arc::clone(&self.written), self.restarted);
         let replaying = from.is_some();
         let parts = Arc::clone(&written);
-        let shown = move |record: &CellRecord| match fault {
+        let shown = move |record: &PoolRecord| match fault {
             Fault::OneRegion => !["eu-west-1", "ap-south-1"].contains(&record.region.as_str()),
             Fault::HidesExpired => written
                 .lock()
@@ -110,8 +110,8 @@ impl CellDirectory for Faulty {
             .watch(class, from)
             .filter(move |event| {
                 let shown = match event {
-                    Ok(CellEvent::Current(record)) => shown(record),
-                    Ok(CellEvent::Put { record, .. }) => fault != Fault::OneRegion || shown(record),
+                    Ok(PoolEvent::Current(record)) => shown(record),
+                    Ok(PoolEvent::Put { record, .. }) => fault != Fault::OneRegion || shown(record),
                     _ => true,
                 };
                 std::future::ready(shown)
@@ -119,20 +119,20 @@ impl CellDirectory for Faulty {
             .map(move |mut event| {
                 if fault == Fault::RestartPart
                     && restarted
-                    && let Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }) =
+                    && let Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }) =
                         &mut event
                 {
                     record.hub = "restored:1337".into();
                 }
                 if fault == Fault::RestartLoad
                     && restarted
-                    && let Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }) =
+                    && let Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }) =
                         &mut event
                 {
                     record.load = None;
                 }
                 if (fault == Fault::LatestPart || (fault == Fault::ReplayPart && replaying))
-                    && let Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }) =
+                    && let Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }) =
                         &mut event
                 {
                     record.load = parts
@@ -143,7 +143,7 @@ impl CellDirectory for Faulty {
                 }
                 if let (
                     Fault::RewritesRegion,
-                    Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }),
+                    Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }),
                 ) = (fault, &mut event)
                 {
                     record.region = "us-east-1".into();
@@ -155,7 +155,7 @@ impl CellDirectory for Faulty {
             return Box::pin(futures::stream::unfold(Some(events), |events| async move {
                 let mut events = events?;
                 let event = events.next().await?;
-                if matches!(&event, Ok(CellEvent::Put { record, .. }) if record.name == "m4") {
+                if matches!(&event, Ok(PoolEvent::Put { record, .. }) if record.name == "m4") {
                     return Some((
                         Err(DirectoryError::Unavailable("the watch disconnected".into())),
                         None,
@@ -234,7 +234,7 @@ async fn a_backend_that_hides_an_expired_record_fails() {
     );
 }
 
-/// A backend whose watch gives one region's cells fails the case of
+/// A backend whose watch gives one region's pools fails the case of
 /// [`Rule::EveryRecord`].
 #[tokio::test]
 async fn a_backend_that_watches_one_region_fails() {
@@ -277,10 +277,10 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
     let mut watch = reader.watch("model_x", None);
     assert!(matches!(
         watch.next().await,
-        Some(Ok(CellEvent::Synced { snapshot: true, .. }))
+        Some(Ok(PoolEvent::Synced { snapshot: true, .. }))
     ));
-    let record = |seq| CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    let record = |seq| PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -290,11 +290,11 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq,
         hub: "m1:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: Some(LoadSummary {
             admitted: seq,
             limit: 64,
@@ -313,7 +313,7 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
         .publish(second.clone())
         .await
         .expect("the second write");
-    let Some(Ok(CellEvent::Put { record: torn, .. })) = watch.next().await else {
+    let Some(Ok(PoolEvent::Put { record: torn, .. })) = watch.next().await else {
         panic!("the first change is queued");
     };
     assert_eq!(torn.version(), first.version());
@@ -330,11 +330,11 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
 async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
     let [writer, reader] = Fault::ReplayPart.fresh().await;
     let mut live = reader.watch("model_x", None);
-    let Some(Ok(CellEvent::Synced { token, .. })) = live.next().await else {
+    let Some(Ok(PoolEvent::Synced { token, .. })) = live.next().await else {
         panic!("the empty snapshot ends");
     };
-    let record = |seq| CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    let record = |seq| PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -344,11 +344,11 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq,
         hub: "m1:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: Some(LoadSummary {
             admitted: seq,
             limit: 64,
@@ -369,7 +369,7 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
         .expect("the second write");
 
     for expected in [&first, &second] {
-        let Some(Ok(CellEvent::Put { record, .. })) = live.next().await else {
+        let Some(Ok(PoolEvent::Put { record, .. })) = live.next().await else {
             panic!("the live change is queued");
         };
         assert_eq!(&record, expected, "the live stream preserves the record");
@@ -377,12 +377,12 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
     let mut replay = reader.watch("model_x", Some(token));
     assert!(matches!(
         replay.next().await,
-        Some(Ok(CellEvent::Synced {
+        Some(Ok(PoolEvent::Synced {
             snapshot: false,
             ..
         }))
     ));
-    let Some(Ok(CellEvent::Put { record: torn, .. })) = replay.next().await else {
+    let Some(Ok(PoolEvent::Put { record: torn, .. })) = replay.next().await else {
         panic!("the first change is replayed");
     };
     assert_eq!(torn.version(), first.version());
@@ -412,8 +412,8 @@ async fn a_backend_that_keeps_a_rule_it_disowns_fails() {
 #[tokio::test(start_paused = true)]
 async fn a_backend_that_loses_a_record_part_on_restart_fails() {
     let [directory] = Fault::RestartPart.fresh().await;
-    let published = CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    let published = PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -423,11 +423,11 @@ async fn a_backend_that_loses_a_record_part_on_restart_fails() {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub: "m1:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     };
     directory
@@ -435,7 +435,7 @@ async fn a_backend_that_loses_a_record_part_on_restart_fails() {
         .await
         .expect("the record is stored");
     let restarted = Fault::RestartPart.restart(directory).await;
-    let Some(Ok(CellEvent::Current(restored))) = restarted.watch("model_x", None).next().await
+    let Some(Ok(PoolEvent::Current(restored))) = restarted.watch("model_x", None).next().await
     else {
         panic!("the restarted backend still holds the record");
     };
@@ -451,8 +451,8 @@ async fn a_backend_that_loses_a_record_part_on_restart_fails() {
 #[tokio::test(start_paused = true)]
 async fn a_backend_that_loses_its_load_on_restart_fails() {
     let [directory] = Fault::RestartLoad.fresh().await;
-    let published = CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    let published = PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -462,11 +462,11 @@ async fn a_backend_that_loses_its_load_on_restart_fails() {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub: "m1:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: Some(LoadSummary {
             admitted: 3,
             limit: 64,
@@ -480,7 +480,7 @@ async fn a_backend_that_loses_its_load_on_restart_fails() {
         .await
         .expect("the record is stored");
     let restarted = Fault::RestartLoad.restart(directory).await;
-    let Some(Ok(CellEvent::Current(restored))) = restarted.watch("model_x", None).next().await
+    let Some(Ok(PoolEvent::Current(restored))) = restarted.watch("model_x", None).next().await
     else {
         panic!("the restarted backend still holds the record");
     };

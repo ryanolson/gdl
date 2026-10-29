@@ -1,6 +1,6 @@
-//! A deployment of two classes for the cell tests, and its instances'
+//! A deployment of two classes for the pool tests, and its instances'
 //! settings: `global` runs `a` (S, the chooser), and `model_x` runs `f`
-//! (F, the cell entry) and `d` (D). The boundary is the inner end of S's
+//! (F, the pool entry) and `d` (D). The boundary is the inner end of S's
 //! hop.
 
 use std::collections::{BTreeMap, HashMap};
@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use figment::providers::Format as _;
-use gdl_cells::{
-    CellDirectory, CellRecord, DirectoryError, MemoryDirectory, MemoryWatch, ResumeToken,
+use gdl_hub::{GraphAdmission, PoolReadiness, PoolTiming};
+use gdl_model::{PoolSettings, SegmentPhase, segment_service};
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryWatch, PoolDirectory, PoolRecord, ResumeToken,
 };
-use gdl_hub::{CellReadiness, CellTiming, GraphAdmission};
-use gdl_model::{CellSettings, SegmentPhase, segment_service};
 use gdl_runtime::velo::{InstanceId, Velo};
 use gdl_runtime::{
-    Cells, DeploymentSpec, FollowedCell, HopInfo, Hosted, Launch, Manifest, NodeInfo, Placement,
+    DeploymentSpec, FollowedPool, HopInfo, Hosted, Launch, Manifest, NodeInfo, Placement, Pools,
     Process, ProcessConfig, Role, TypeInfo,
 };
 use serde::Deserialize;
@@ -28,10 +28,10 @@ use super::WAIT;
 /// Every segment of [`spec`].
 pub const SEGMENTS: &[&str] = &["a", "f", "d"];
 
-/// The region every cell of these tests runs in.
+/// The region every pool of these tests runs in.
 pub const REGION: &str = "us-east-1";
 
-/// The global cell: the parent of every model cell here unless a test
+/// The global pool: the parent of every model pool here unless a test
 /// says otherwise, since a global's hub follows only its children.
 pub const GLOBAL: &str = "global-01-us-east-1";
 
@@ -51,7 +51,7 @@ pub fn spec() -> DeploymentSpec {
         backward_types: vec![TypeInfo::new("T", true, Default::default())],
     };
     let graph = Manifest {
-        name: "cells".into(),
+        name: "pools".into(),
         schema: 1,
         nodes: vec![
             node("S", Role::Source),
@@ -69,23 +69,23 @@ pub fn spec() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-/// The `[cell]` table of an instance of the global cell.
-pub fn global_cell() -> String {
+/// The `[pool]` table of an instance of the global pool.
+pub fn global_pool() -> String {
     format!(
-        "[cell]\nname = '{GLOBAL}'\nclass = 'global'\nregion = '{REGION}'\ndirectory = 'memory'\n"
+        "[pool]\nname = '{GLOBAL}'\nclass = 'global'\nregion = '{REGION}'\ndirectory = 'memory'\n"
     )
 }
 
-/// The `[cell]` table of an instance of the model cell `name`.
-pub fn model_cell(name: &str) -> String {
+/// The `[pool]` table of an instance of the model pool `name`.
+pub fn model_pool(name: &str) -> String {
     format!(
-        "[cell]\nname = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\ndirectory = 'memory'\n"
+        "[pool]\nname = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\ndirectory = 'memory'\n"
     )
 }
 
 /// The settings of an instance at the hub on these ports, heartbeating
 /// every 200 ms, waiting for its peers for `rendezvous_ms`, with `extra`
-/// appended (a `[cell]` table, `[min_replicas]`, `[runtime]`).
+/// appended (a `[pool]` table, `[min_replicas]`, `[runtime]`).
 pub fn settings(
     public: u16,
     control: u16,
@@ -102,7 +102,7 @@ pub fn settings(
 }
 
 /// A hub that admits [`spec`]'s segments, on OS-assigned ports, without a
-/// cell's extension.
+/// pool's extension.
 pub async fn admission_hub() -> velo_hub::Hub {
     velo_hub::Hub::builder(hub_config())
         .extension(gdl_hub::GraphAdmission::new(spec()))
@@ -140,10 +140,10 @@ impl Hosted for Nothing {
     const NAMES: &'static [&'static str] = &[];
 }
 
-/// The settings of the hub of the model cell `name`, a child of
+/// The settings of the hub of the model pool `name`, a child of
 /// [`GLOBAL`], which its peers' hubs reach under the name `hub`: `f` and
 /// `d` each need one usable instance.
-pub fn model_hub(name: &str, hub: &str) -> CellSettings {
+pub fn model_hub(name: &str, hub: &str) -> PoolSettings {
     toml::from_str(&format!(
         "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
          hub = '{hub}'\ndirectory = 'memory'\n[ready]\nf = 1\nd = 1\n"
@@ -151,8 +151,8 @@ pub fn model_hub(name: &str, hub: &str) -> CellSettings {
     .expect("valid test fixture")
 }
 
-/// The settings of the global cell's hub, reached under `global-hub:1337`.
-pub fn global_hub() -> CellSettings {
+/// The settings of the global pool's hub, reached under `global-hub:1337`.
+pub fn global_hub() -> PoolSettings {
     toml::from_str(&format!(
         "name = '{GLOBAL}'\nclass = 'global'\nregion = '{REGION}'\nhub = 'global-hub:1337'\n\
          directory = 'memory'\n"
@@ -162,81 +162,81 @@ pub fn global_hub() -> CellSettings {
 
 /// A hold long enough to be a hold and short enough to wait out, and no
 /// heartbeat within a test.
-pub fn timing() -> CellTiming {
-    CellTiming {
+pub fn timing() -> PoolTiming {
+    PoolTiming {
         hold: Duration::from_millis(300),
         heartbeat: Duration::from_secs(600),
         lease: Duration::from_secs(30),
-        ..CellTiming::default()
+        ..PoolTiming::default()
     }
 }
 
-/// A cell's hub of [`spec`]: admission and the cell's extension, its hub
+/// A pool's hub of [`spec`]: admission and the pool's extension, its hub
 /// name resolved in `directory` once it serves.
-pub async fn cell_hub(
-    cell: CellSettings,
+pub async fn pool_hub(
+    pool: PoolSettings,
     directory: &Resolving,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    cell_hub_of(&spec(), cell, directory).await
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
+    pool_hub_of(&spec(), pool, directory).await
 }
 
-/// [`cell_hub`] for the deployment `spec`.
-pub async fn cell_hub_of(
+/// [`pool_hub`] for the deployment `spec`.
+pub async fn pool_hub_of(
     spec: &DeploymentSpec,
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: &Resolving,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    cell_hub_timed(spec, cell, directory, timing()).await
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
+    pool_hub_timed(spec, pool, directory, timing()).await
 }
 
-/// [`cell_hub_of`] paced by `timing`.
-pub async fn cell_hub_timed(
+/// [`pool_hub_of`] paced by `timing`.
+pub async fn pool_hub_timed(
     spec: &DeploymentSpec,
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: &Resolving,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    let name = cell.hub.clone().expect("a cell's hub has a name");
-    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory, timing).await;
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
+    let name = pool.hub.clone().expect("a pool's hub has a name");
+    let (hub, readiness) = unresolved_pool_hub_of(spec, pool, directory, timing).await;
     directory.resolve(&name, &format!("127.0.0.1:{}", hub.public_addr().port()));
     (hub, readiness)
 }
 
-/// [`cell_hub_timed`], whose name resolves to a proxy in front of its
-/// public listener: the hubs that follow the cell reach it through the
+/// [`pool_hub_timed`], whose name resolves to a proxy in front of its
+/// public listener: the hubs that follow the pool reach it through the
 /// proxy, and its own instances, which are given its ports, do not.
-pub async fn cell_hub_proxied(
+pub async fn pool_hub_proxied(
     spec: &DeploymentSpec,
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: &Resolving,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<Resolving>>, super::proxy::Proxy) {
-    let name = cell.hub.clone().expect("a cell's hub has a name");
-    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory, timing).await;
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<Resolving>>, super::proxy::Proxy) {
+    let name = pool.hub.clone().expect("a pool's hub has a name");
+    let (hub, readiness) = unresolved_pool_hub_of(spec, pool, directory, timing).await;
     let proxy = super::proxy::Proxy::new(hub.public_addr()).await;
     directory.resolve(&name, &format!("127.0.0.1:{}", proxy.port));
     (hub, readiness, proxy)
 }
 
-/// [`cell_hub`], with its name left for the test to resolve: its record
+/// [`pool_hub`], with its name left for the test to resolve: its record
 /// is published only once the test has.
-pub async fn unresolved_cell_hub(
-    cell: CellSettings,
+pub async fn unresolved_pool_hub(
+    pool: PoolSettings,
     directory: &Resolving,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    unresolved_cell_hub_of(&spec(), cell, directory, timing()).await
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
+    unresolved_pool_hub_of(&spec(), pool, directory, timing()).await
 }
 
-async fn unresolved_cell_hub_of(
+async fn unresolved_pool_hub_of(
     spec: &DeploymentSpec,
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: &Resolving,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
     let readiness = Arc::new(
-        CellReadiness::new(spec, cell, directory.clone(), timing).expect("valid test fixture"),
+        PoolReadiness::new(spec, pool, directory.clone(), timing).expect("valid test fixture"),
     );
-    // A cell's hub runs the record service too, as `hub_builder` mounts it.
+    // A pool's hub runs the record service too, as `hub_builder` mounts it.
     let hub = Hub::builder(hub_config())
         .extension(GraphAdmission::new(spec.clone()))
         .extension(Arc::clone(&readiness))
@@ -247,7 +247,7 @@ async fn unresolved_cell_hub_of(
     (hub, readiness)
 }
 
-/// A directory that names each cell's hub as DNS would: a record's `hub`
+/// A directory that names each pool's hub as DNS would: a record's `hub`
 /// is a name, which a test resolves to the address the hub serves at once
 /// it serves, since a hub's port is assigned only then. A publish waits
 /// until its hub's name is resolved, then stores the record with the
@@ -274,10 +274,10 @@ impl Resolving {
     }
 }
 
-impl CellDirectory for Resolving {
+impl PoolDirectory for Resolving {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
         let mut names = self.names.subscribe();
         let address = names
             .wait_for(|names| names.contains_key(&record.hub))
@@ -288,7 +288,7 @@ impl CellDirectory for Resolving {
         self.inner.publish(record).await
     }
 
-    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+    async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
     }
 
@@ -394,22 +394,22 @@ pub async fn pings(from: &Velo, instance: InstanceId) -> bool {
     matches!(tokio::time::timeout(WAIT, call).await, Ok(Ok(_)))
 }
 
-/// The followed cell `cell` of `segment`, if its table holds it.
-pub fn followed(cells: &Cells, segment: &str, cell: &str) -> Option<FollowedCell> {
-    cells
+/// The followed pool `pool` of `segment`, if its table holds it.
+pub fn followed(pools: &Pools, segment: &str, pool: &str) -> Option<FollowedPool> {
+    pools
         .followed(segment)
         .into_iter()
-        .find(|followed| followed.cell == cell)
+        .find(|followed| followed.pool == pool)
 }
 
-/// Wait until `done` holds of `cells`, checking at each change, and fail
+/// Wait until `done` holds of `pools`, checking at each change, and fail
 /// with `what` and the tables after [`WAIT`].
-pub async fn until(cells: &Cells, what: &str, mut done: impl FnMut(&Cells) -> bool) {
-    let mut changes = cells.changes();
+pub async fn until(pools: &Pools, what: &str, mut done: impl FnMut(&Pools) -> bool) {
+    let mut changes = pools.changes();
     let waited = tokio::time::timeout(WAIT, async {
         loop {
             changes.borrow_and_update();
-            if done(cells) {
+            if done(pools) {
                 return;
             }
             changes.changed().await.expect("the tables live");
@@ -417,7 +417,7 @@ pub async fn until(cells: &Cells, what: &str, mut done: impl FnMut(&Cells) -> bo
     })
     .await;
     if waited.is_err() {
-        panic!("timed out waiting for {what}: {:?}", cells.followed("f"));
+        panic!("timed out waiting for {what}: {:?}", pools.followed("f"));
     }
 }
 

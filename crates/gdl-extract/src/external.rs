@@ -1,6 +1,6 @@
 //! Which item of a crate the reader does not read a path names: serde's
 //! traits, the standard library's traits and types, and gdl's export
-//! marker, role traits, `Streamed`, and `CellPolicy`. One table holds each
+//! marker, role traits, `Streamed`, and `PoolPolicy`. One table holds each
 //! item with its name, the crates a path to it may start from, and whether
 //! the prelude brings it. One resolver reads a path in its module, through
 //! the `use` that binds a single name, and compares it with the table.
@@ -36,8 +36,8 @@ pub(crate) enum Item {
     Export,
     /// gdl's `Streamed`.
     Streamed,
-    /// gdl's `CellPolicy`.
-    CellPolicy,
+    /// gdl's `PoolPolicy`.
+    PoolPolicy,
     /// A role trait of gdl's.
     Role(Role),
 }
@@ -157,7 +157,7 @@ const TABLE: &[Row] = &[
     row(Item::Std(Std::BTreeMap), "BTreeMap", STD_TYPES),
     row(Item::Export, "export", MARKER),
     row(Item::Streamed, "Streamed", GDL),
-    row(Item::CellPolicy, "CellPolicy", GDL),
+    row(Item::PoolPolicy, "PoolPolicy", GDL),
     row(Item::Role(Role::Source), "Frontend", GDL),
     row(Item::Role(Role::Source), "Service", GDL),
     row(Item::Role(Role::Sink), "Sink", GDL),

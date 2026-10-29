@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The names of the `[routing]` entries and `[cells.<class>]` tables that
+/// The names of the `[routing]` entries and `[pools.<class>]` tables that
 /// a placement was given with default values only. A default is not
 /// recorded, so that a placement that spells one out is the placement, and
 /// has the hash, of one that leaves it unsaid; but the name it was given
@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Spelled {
     /// Nodes given the default router.
     pub(super) routing: BTreeSet<String>,
-    /// Classes given a cell policy of defaults.
-    pub(super) cells: BTreeSet<String>,
+    /// Classes given a pool policy of defaults.
+    pub(super) pools: BTreeSet<String>,
 }
 
 impl PartialEq for Spelled {
@@ -28,11 +28,11 @@ impl Eq for Spelled {}
 
 impl Spelled {
     /// The names `written`, the table a placement was read from, gives in
-    /// `[routing]` and `[cells]`, less those recorded with a value.
+    /// `[routing]` and `[pools]`, less those recorded with a value.
     pub(super) fn read(
         written: &toml::Table,
         routing: &BTreeMap<String, super::RequestRouter>,
-        cells: &BTreeMap<String, super::CellPolicy>,
+        pools: &BTreeMap<String, super::PoolPolicy>,
     ) -> Self {
         let keys = |table: &str| -> Vec<String> {
             written
@@ -46,9 +46,9 @@ impl Spelled {
                 .into_iter()
                 .filter(|node| !routing.contains_key(node))
                 .collect(),
-            cells: keys("cells")
+            pools: keys("pools")
                 .into_iter()
-                .filter(|class| !cells.contains_key(class))
+                .filter(|class| !pools.contains_key(class))
                 .collect(),
         }
     }

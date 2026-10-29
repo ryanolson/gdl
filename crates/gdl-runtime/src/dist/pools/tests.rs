@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gdl_cells::{CellState, LoadSummary};
+use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
@@ -23,7 +23,7 @@ use velo::{InstanceId, PeerInfo, WorkerAddress};
 use super::damping::Damping;
 use super::follow::Follows;
 use super::task::run;
-use super::{Cells, FollowedCell};
+use super::{FollowedPool, Pools};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Roster;
 use scripted::Scripted;
@@ -47,17 +47,17 @@ enum Call {
 /// instance registered before it is routable.
 #[derive(Clone)]
 struct Recorded {
-    cells: Cells,
+    pools: Pools,
     calls: Arc<Mutex<Vec<Call>>>,
 }
 
 impl Registry for Recorded {
     fn register(&self, peer: PeerInfo) -> gdl::Result<()> {
         let id = peer.instance_id();
-        for segment in self.cells.segments() {
-            for cell in self.cells.followed(segment) {
+        for segment in self.pools.segments() {
+            for pool in self.pools.followed(segment) {
                 assert!(
-                    !cell.eligible.contains(&id) && !cell.retired.contains(&id),
+                    !pool.eligible.contains(&id) && !pool.retired.contains(&id),
                     "{id} was in a table before it was registered"
                 );
             }
@@ -84,45 +84,45 @@ impl Recorded {
 /// asks velo for.
 fn follower() -> (
     Follows<Recorded>,
-    Cells,
+    Pools,
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
     follower_fresh_for(gdl::Load::FRESH_PERIODS)
 }
 
-/// [`follower`], whose cells' summaries are fresh for `fresh_periods` of
+/// [`follower`], whose pools' summaries are fresh for `fresh_periods` of
 /// their periods.
 fn follower_fresh_for(
     fresh_periods: u32,
 ) -> (
     Follows<Recorded>,
-    Cells,
+    Pools,
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
     follower_counted(fresh_periods, None)
 }
 
-/// [`follower_fresh_for`], counting each cell's offers in `meters`.
+/// [`follower_fresh_for`], counting each pool's offers in `meters`.
 fn follower_counted(
     fresh_periods: u32,
-    meters: Option<super::CellMeters>,
+    meters: Option<super::PoolMeters>,
 ) -> (
     Follows<Recorded>,
-    Cells,
+    Pools,
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
-    let cells = Cells::new("r", [("model_x", "f")], Damping::default());
+    let pools = Pools::new("r", [("model_x", "f")], Damping::default());
     let recorded = Recorded {
-        cells: cells.clone(),
+        pools: pools.clone(),
         calls: Arc::default(),
     };
     let live = Arc::clone(Roster::new().live());
     let wanted = BTreeMap::from([("model_x".to_string(), BTreeSet::from(["f".to_string()]))]);
     let follows = Follows::new(
-        cells.clone(),
+        pools.clone(),
         recorded.clone(),
         Arc::clone(&live),
         DRAIN,
@@ -130,7 +130,7 @@ fn follower_counted(
         fresh_periods,
         meters,
     );
-    (follows, cells, recorded, live)
+    (follows, pools, recorded, live)
 }
 
 fn peer() -> PeerInfo {
@@ -140,11 +140,11 @@ fn peer() -> PeerInfo {
     )
 }
 
-fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
+fn follow(pool: &str, generation: u64, state: PoolState) -> FollowEvent {
     FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         region: "r".into(),
         state,
@@ -153,55 +153,55 @@ fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
     }
 }
 
-fn exposed(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+fn exposed(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
     FollowEvent::Exposed {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         segment: "f".into(),
         peer: peer.clone(),
     }
 }
 
-fn retired(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+fn retired(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
     FollowEvent::Retired {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         segment: "f".into(),
         instance: peer.instance_id(),
     }
 }
 
-fn left(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+fn left(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
     FollowEvent::Left {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         segment: "f".into(),
         instance: peer.instance_id(),
     }
 }
 
-fn state(cell: &str, generation: u64, state: CellState) -> FollowEvent {
+fn state(pool: &str, generation: u64, state: PoolState) -> FollowEvent {
     FollowEvent::State {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         state,
     }
 }
 
-fn dropped(cell: &str, generation: u64) -> FollowEvent {
+fn dropped(pool: &str, generation: u64) -> FollowEvent {
     FollowEvent::Dropped {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
     }
 }
 
-fn table(cells: &Cells, cell: &str) -> Option<FollowedCell> {
-    cells.followed("f").into_iter().find(|t| t.cell == cell)
+fn table(pools: &Pools, pool: &str) -> Option<FollowedPool> {
+    pools.followed("f").into_iter().find(|t| t.pool == pool)
 }
 
 fn sorted(peers: &[&PeerInfo]) -> Vec<InstanceId> {
@@ -223,134 +223,134 @@ fn live(
 
 #[test]
 fn an_entry_is_registered_before_a_table_holds_it() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let x = peer();
-    live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
-    let installed = table(&cells, M1).expect("a table from the follow");
+    live(&mut follows, now, [follow(M1, 1, PoolState::Ready)]);
+    let installed = table(&pools, M1).expect("a table from the follow");
     assert_eq!(
         (installed.generation, installed.state),
-        (1, CellState::Ready)
+        (1, PoolState::Ready)
     );
     assert!(installed.eligible.is_empty());
     live(&mut follows, now, [exposed(M1, 1, &x)]);
     assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
-    assert_eq!(table(&cells, M1).expect("held").eligible, [x.instance_id()]);
-    assert!(cells.is_registered(x.instance_id()));
+    assert_eq!(table(&pools, M1).expect("held").eligible, [x.instance_id()]);
+    assert!(pools.is_registered(x.instance_id()));
 }
 
-/// Every table one follow of a cell makes takes its turns from one
-/// counter, so that a round robin within the cell goes on across events;
+/// Every table one follow of a pool makes takes its turns from one
+/// counter, so that a round robin within the pool goes on across events;
 /// a new generation starts its own. Each table offers a selector its
 /// eligible instances, index for index.
 #[test]
-fn a_cells_tables_keep_its_turn_until_it_is_followed_again() {
-    let (mut follows, cells, _, _) = follower();
+fn a_pools_tables_keep_its_turn_until_it_is_followed_again() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
-    let turn = |cells: &Cells| {
-        let table = cells.table("f").expect("kept");
-        Arc::clone(&table.cells[0].turn)
+    let turn = |pools: &Pools| {
+        let table = pools.table("f").expect("kept");
+        Arc::clone(&table.pools[0].turn)
     };
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
-    let first = turn(&cells);
+    let first = turn(&pools);
     live(&mut follows, now, [exposed(M1, 1, &y)]);
     assert!(
-        Arc::ptr_eq(&first, &turn(&cells)),
+        Arc::ptr_eq(&first, &turn(&pools)),
         "an event reset the turn"
     );
-    let table = cells.table("f").expect("kept");
-    let offered: Vec<u128> = table.cells[0]
+    let table = pools.table("f").expect("kept");
+    let offered: Vec<u128> = table.pools[0]
         .offered
         .iter()
         .map(|id| id.as_u128())
         .collect();
-    let eligible: Vec<u128> = table.cells[0]
+    let eligible: Vec<u128> = table.pools[0]
         .eligible
         .iter()
         .map(|id| id.as_u128())
         .collect();
     assert_eq!(offered, eligible);
-    live(&mut follows, now, [follow(M1, 2, CellState::Ready)]);
+    live(&mut follows, now, [follow(M1, 2, PoolState::Ready)]);
     assert!(
-        !Arc::ptr_eq(&first, &turn(&cells)),
+        !Arc::ptr_eq(&first, &turn(&pools)),
         "a refollow kept the turn"
     );
 }
 
-/// A watch's new snapshot that shows a cell's follow again in the same
-/// generation keeps the cell's turn: a round robin goes on where it was,
+/// A watch's new snapshot that shows a pool's follow again in the same
+/// generation keeps the pool's turn: a round robin goes on where it was,
 /// rather than starting at the first instance after every rewatch, which
 /// would starve the others of a chooser whose watch keeps ending.
 #[test]
 fn a_snapshot_of_the_same_follow_keeps_its_turn() {
     use std::sync::atomic::Ordering;
 
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     let events = || {
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             exposed(M1, 1, &y),
         ]
     };
     live(&mut follows, now, events());
-    let turn = |cells: &Cells| {
-        let table = cells.table("f").expect("kept");
-        Arc::clone(&table.cells[0].turn)
+    let turn = |pools: &Pools| {
+        let table = pools.table("f").expect("kept");
+        Arc::clone(&table.pools[0].turn)
     };
     // One request took the first turn.
-    turn(&cells).fetch_add(1, Ordering::Relaxed);
+    turn(&pools).fetch_add(1, Ordering::Relaxed);
     let mut snapshot = follows.snapshot();
     for event in events() {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
     assert_eq!(
-        turn(&cells).load(Ordering::Relaxed),
+        turn(&pools).load(Ordering::Relaxed),
         1,
-        "the snapshot started the cell's turns again"
+        "the snapshot started the pool's turns again"
     );
     // A snapshot of a newer generation is a new follow, with turns of its
     // own.
     let mut snapshot = follows.snapshot();
-    for event in [follow(M1, 2, CellState::Ready), exposed(M1, 2, &x)] {
+    for event in [follow(M1, 2, PoolState::Ready), exposed(M1, 2, &x)] {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    assert_eq!(turn(&cells).load(Ordering::Relaxed), 0);
+    assert_eq!(turn(&pools).load(Ordering::Relaxed), 0);
 }
 
 #[test]
 fn a_removed_entry_is_unregistered_after_the_drain() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let start = Instant::now();
     let x = peer();
     live(
         &mut follows,
         start,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
     recorded.take();
     let gone = start + Duration::from_secs(1);
     live(&mut follows, gone, [left(M1, 1, &x)]);
     assert!(
-        table(&cells, M1).expect("held").eligible.is_empty(),
+        table(&pools, M1).expect("held").eligible.is_empty(),
         "left, not removed"
     );
     assert_eq!(follows.next_due(), Some(gone + DRAIN));
     follows.forget(gone + DRAIN - Duration::from_millis(1));
     assert_eq!(recorded.take(), [], "unregistered before the drain");
-    assert!(cells.is_registered(x.instance_id()));
+    assert!(pools.is_registered(x.instance_id()));
     follows.forget(gone + DRAIN);
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
-    assert!(!cells.is_registered(x.instance_id()));
+    assert!(!pools.is_registered(x.instance_id()));
     assert_eq!(follows.next_due(), None);
 }
 
@@ -359,28 +359,28 @@ fn a_removed_entry_is_unregistered_after_the_drain() {
 /// registered twice.
 #[test]
 fn a_newer_generation_keeps_what_it_holds() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let start = Instant::now();
     let x = peer();
     live(
         &mut follows,
         start,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
     recorded.take();
     live(&mut follows, start, [dropped(M1, 1)]);
     assert!(
-        table(&cells, M1).is_none(),
+        table(&pools, M1).is_none(),
         "a dropped follow's table stayed"
     );
     let again = start + Duration::from_secs(1);
     live(
         &mut follows,
         again,
-        [follow(M1, 2, CellState::Ready), exposed(M1, 2, &x)],
+        [follow(M1, 2, PoolState::Ready), exposed(M1, 2, &x)],
     );
     assert_eq!(recorded.take(), [], "registered again");
-    let held = table(&cells, M1).expect("the new generation");
+    let held = table(&pools, M1).expect("the new generation");
     assert_eq!((held.generation, held.eligible), (2, vec![x.instance_id()]));
     follows.forget(start + DRAIN);
     assert_eq!(
@@ -398,17 +398,17 @@ fn a_newer_generation_keeps_what_it_holds() {
 /// older one's events, its follow included, change nothing after it.
 #[test]
 fn an_older_generation_is_ignored() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
-    live(&mut follows, now, [follow(M1, 2, CellState::Degraded)]);
-    let held = table(&cells, M1).expect("the new generation");
-    assert_eq!((held.generation, held.state), (2, CellState::Degraded));
+    live(&mut follows, now, [follow(M1, 2, PoolState::Degraded)]);
+    let held = table(&pools, M1).expect("the new generation");
+    assert_eq!((held.generation, held.state), (2, PoolState::Degraded));
     assert!(
         held.eligible.is_empty(),
         "an instance of generation 1 was kept"
@@ -419,12 +419,12 @@ fn an_older_generation_is_ignored() {
         now,
         [
             exposed(M1, 1, &y),
-            state(M1, 1, CellState::Unavailable),
-            follow(M1, 1, CellState::Ready),
+            state(M1, 1, PoolState::Unavailable),
+            follow(M1, 1, PoolState::Ready),
             dropped(M1, 1),
         ],
     );
-    assert_eq!(table(&cells, M1).expect("still held"), held);
+    assert_eq!(table(&pools, M1).expect("still held"), held);
     assert_eq!(recorded.take(), []);
     follows.forget(now + DRAIN);
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
@@ -432,21 +432,21 @@ fn an_older_generation_is_ignored() {
 
 #[test]
 fn a_retired_entry_is_marked_and_never_eligible_again() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             exposed(M1, 1, &y),
             retired(M1, 1, &x),
             exposed(M1, 1, &x),
         ],
     );
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(held.eligible, [y.instance_id()]);
     assert_eq!(held.retired, [x.instance_id()]);
     // Retired, it stays registered: work sent before may still be under way.
@@ -458,7 +458,7 @@ fn a_retired_entry_is_marked_and_never_eligible_again() {
             .all(|call| matches!(call, Call::Register(_)))
     );
     live(&mut follows, now + DRAIN, [left(M1, 1, &x)]);
-    assert!(table(&cells, M1).expect("held").retired.is_empty());
+    assert!(table(&pools, M1).expect("held").retired.is_empty());
     follows.forget(now + DRAIN * 2);
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
@@ -469,22 +469,22 @@ fn a_retired_entry_is_marked_and_never_eligible_again() {
 /// was offered to it may still be under way.
 #[test]
 fn a_state_that_exposes_nothing_empties_the_table() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             exposed(M1, 1, &y),
             retired(M1, 1, &y),
-            state(M1, 1, CellState::Unavailable),
+            state(M1, 1, PoolState::Unavailable),
         ],
     );
-    let hidden = table(&cells, M1).expect("held");
-    assert_eq!(hidden.state, CellState::Unavailable);
+    let hidden = table(&pools, M1).expect("held");
+    assert_eq!(hidden.state, PoolState::Unavailable);
     assert!(hidden.eligible.is_empty());
     assert_eq!(hidden.retired, [y.instance_id()], "a retirement is kept");
     recorded.take();
@@ -492,14 +492,14 @@ fn a_state_that_exposes_nothing_empties_the_table() {
     live(
         &mut follows,
         back,
-        [state(M1, 1, CellState::Degraded), exposed(M1, 1, &x)],
+        [state(M1, 1, PoolState::Degraded), exposed(M1, 1, &x)],
     );
-    assert_eq!(table(&cells, M1).expect("held").eligible, [x.instance_id()]);
+    assert_eq!(table(&pools, M1).expect("held").eligible, [x.instance_id()]);
     assert_eq!(recorded.take(), [], "registered again");
     follows.forget(now + DRAIN);
     assert_eq!(recorded.take(), [], "unregistered while exposed again");
     let draining = now + DRAIN;
-    live(&mut follows, draining, [state(M1, 1, CellState::Draining)]);
+    live(&mut follows, draining, [state(M1, 1, PoolState::Draining)]);
     follows.forget(draining + DRAIN);
     assert_eq!(recorded.take(), [], "unregistered while its follow lives");
     let closed = draining + DRAIN;
@@ -515,21 +515,21 @@ fn a_state_that_exposes_nothing_empties_the_table() {
 }
 
 /// Only the entry segments of the chooser's own hops are kept: another
-/// segment's instances and another class's cells are neither tabled nor
+/// segment's instances and another class's pools are neither tabled nor
 /// registered.
 #[test]
 fn only_the_entry_segments_sent_to_are_kept() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             FollowEvent::Exposed {
                 class: "model_x".into(),
-                cell: M1.into(),
+                pool: M1.into(),
                 generation: 1,
                 segment: "d".into(),
                 peer: x.clone(),
@@ -537,38 +537,38 @@ fn only_the_entry_segments_sent_to_are_kept() {
             FollowEvent::Follow {
                 listing: None,
                 class: "model_y".into(),
-                cell: M2.into(),
+                pool: M2.into(),
                 generation: 1,
                 region: "r".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: None,
                 load_age_ms: None,
             },
             FollowEvent::Exposed {
                 class: "model_y".into(),
-                cell: M2.into(),
+                pool: M2.into(),
                 generation: 1,
                 segment: "f".into(),
                 peer: x.clone(),
             },
         ],
     );
-    assert_eq!(cells.followed("f").len(), 1);
-    assert!(table(&cells, M1).expect("held").eligible.is_empty());
+    assert_eq!(pools.followed("f").len(), 1);
+    assert!(table(&pools, M1).expect("held").eligible.is_empty());
     assert_eq!(recorded.take(), []);
 }
 
 /// A peer this instance's own membership routes to is never unregistered
-/// for a cell's table.
+/// for a pool's table.
 #[test]
 fn the_instances_own_membership_keeps_a_peer() {
-    let (mut follows, cells, recorded, live_members) = follower();
+    let (mut follows, pools, recorded, live_members) = follower();
     let now = Instant::now();
     let x = peer();
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
     live_members.join("f", x.instance_id());
     live(&mut follows, now, [left(M1, 1, &x)]);
@@ -577,27 +577,27 @@ fn the_instances_own_membership_keeps_a_peer() {
     // The membership owns the registration now, and unregisters it when it
     // leaves: the follower gives it up rather than keep it for good.
     assert!(
-        !cells.is_registered(x.instance_id()),
+        !pools.is_registered(x.instance_id()),
         "the follower kept a registration no table holds"
     );
 }
 
-/// A fresh snapshot replaces whatever was held: cells it lacks are
-/// removed, cells it has hold exactly what it says, new instances are
+/// A fresh snapshot replaces whatever was held: pools it lacks are
+/// removed, pools it has hold exactly what it says, new instances are
 /// registered first, and only what no table holds any more is
 /// unregistered.
 #[test]
 fn a_snapshot_replaces_what_was_held() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let (x, y, z) = (peer(), peer(), peer());
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
-            follow(M2, 1, CellState::Ready),
+            follow(M2, 1, PoolState::Ready),
             exposed(M2, 1, &y),
         ],
     );
@@ -605,7 +605,7 @@ fn a_snapshot_replaces_what_was_held() {
     // The relay's process is a new one: its generations start again.
     let mut snapshot = follows.snapshot();
     for event in [
-        follow(M1, 1, CellState::Degraded),
+        follow(M1, 1, PoolState::Degraded),
         retired(M1, 1, &z),
         exposed(M1, 1, &x),
         exposed(M1, 1, &z),
@@ -613,32 +613,32 @@ fn a_snapshot_replaces_what_was_held() {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(
         (held.generation, held.state, held.eligible, held.retired),
         (
             1,
-            CellState::Degraded,
+            PoolState::Degraded,
             vec![x.instance_id()],
             vec![z.instance_id()]
         )
     );
     assert!(
-        table(&cells, M2).is_none(),
-        "a cell the snapshot lacks was kept"
+        table(&pools, M2).is_none(),
+        "a pool the snapshot lacks was kept"
     );
     assert_eq!(recorded.take(), [], "a retired instance was registered");
     follows.forget(now + DRAIN);
     assert_eq!(recorded.take(), [Call::Unregister(y.instance_id())]);
     let mut snapshot = follows.snapshot();
     let w = peer();
-    for event in [follow(M2, 3, CellState::Ready), exposed(M2, 3, &w)] {
+    for event in [follow(M2, 3, PoolState::Ready), exposed(M2, 3, &w)] {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now + DRAIN);
     assert_eq!(recorded.take(), [Call::Register(w.instance_id())]);
-    assert_eq!(table(&cells, M2).expect("held").eligible, sorted(&[&w]));
-    assert!(table(&cells, M1).is_none());
+    assert_eq!(table(&pools, M2).expect("held").eligible, sorted(&[&w]));
+    assert!(table(&pools, M1).is_none());
     follows.forget(now + DRAIN * 2);
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
@@ -648,19 +648,19 @@ fn a_snapshot_replaces_what_was_held() {
 /// until a complete one replaces them.
 #[tokio::test(start_paused = true)]
 async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
-    let (follows, cells, recorded, _) = follower();
+    let (follows, pools, recorded, _) = follower();
     let (x, y) = (peer(), peer());
     let watches = VecDeque::from([
         vec![
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             FollowEvent::Synced { listed: false },
-            follow(M2, 1, CellState::Ready),
+            follow(M2, 1, PoolState::Ready),
         ],
         // A new relay process, cut before its snapshot is complete.
-        vec![follow(M1, 1, CellState::Unavailable)],
+        vec![follow(M1, 1, PoolState::Unavailable)],
         vec![
-            follow(M1, 4, CellState::Ready),
+            follow(M1, 4, PoolState::Ready),
             exposed(M1, 4, &y),
             FollowEvent::Synced { listed: false },
         ],
@@ -673,15 +673,15 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
         .wait_for(|opened| *opened >= 3)
         .await
         .expect("the task runs");
-    let tables = cells.followed("f");
+    let tables = pools.followed("f");
     assert_eq!(
         tables
             .iter()
-            .map(|t| (t.cell.as_str(), t.generation))
+            .map(|t| (t.pool.as_str(), t.generation))
             .collect::<Vec<_>>(),
         [(M1, 1), (M2, 1)]
     );
-    assert_eq!(tables[0].state, CellState::Ready);
+    assert_eq!(tables[0].state, PoolState::Ready);
     assert_eq!(tables[0].eligible, [x.instance_id()]);
     assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
     release.send_replace(4);
@@ -689,7 +689,7 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
         .wait_for(|opened| *opened >= 4)
         .await
         .expect("the task runs");
-    let tables = cells.followed("f");
+    let tables = pools.followed("f");
     assert_eq!(tables.len(), 1);
     assert_eq!(
         (tables[0].generation, tables[0].eligible.clone()),
@@ -698,39 +698,39 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
     assert_eq!(recorded.take(), [Call::Register(y.instance_id())]);
     // The unregistration falls due on the task's own clock.
     tokio::time::sleep(DRAIN).await;
-    let mut changes = cells.changes();
+    let mut changes = pools.changes();
     changes
-        .wait_for(|_| !cells.is_registered(x.instance_id()))
+        .wait_for(|_| !pools.is_registered(x.instance_id()))
         .await
         .expect("the task runs");
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
     task.abort();
 }
 
-/// An event costs its own cell's table: it reads none of another cell's
-/// instances, however many that cell has. Building the segment's table
-/// copies one pointer per followed cell, which the follow set bounds.
+/// An event costs its own pool's table: it reads none of another pool's
+/// instances, however many that pool has. Building the segment's table
+/// copies one pointer per followed pool, which the follow set bounds.
 #[test]
-fn an_event_reads_only_its_own_cells_instances() {
+fn an_event_reads_only_its_own_pools_instances() {
     let read = |others: usize| {
         let (mut follows, _, _, _) = follower();
         let now = Instant::now();
-        live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
-        live(&mut follows, now, [follow(M2, 1, CellState::Ready)]);
+        live(&mut follows, now, [follow(M1, 1, PoolState::Ready)]);
+        live(&mut follows, now, [follow(M2, 1, PoolState::Ready)]);
         let crowd: Vec<PeerInfo> = (0..others).map(|_| peer()).collect();
         live(&mut follows, now, crowd.iter().map(|p| exposed(M2, 1, p)));
         super::follow::READ.with(|read| read.set(0));
         live(
             &mut follows,
             now,
-            [state(M1, 1, CellState::Degraded), exposed(M1, 1, &peer())],
+            [state(M1, 1, PoolState::Degraded), exposed(M1, 1, &peer())],
         );
         super::follow::READ.with(std::cell::Cell::get)
     };
     assert_eq!(
         read(1),
         read(1024),
-        "an event read another cell's instances"
+        "an event read another pool's instances"
     );
     assert_eq!(
         read(1024),
@@ -744,10 +744,10 @@ fn an_event_reads_only_its_own_cells_instances() {
 /// are kept while the next watch is asked for.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_watch_holds_no_unregistration() {
-    let (follows, cells, recorded, _) = follower();
+    let (follows, pools, recorded, _) = follower();
     let x = peer();
     let watches = VecDeque::from([vec![
-        follow(M1, 1, CellState::Ready),
+        follow(M1, 1, PoolState::Ready),
         exposed(M1, 1, &x),
         FollowEvent::Synced { listed: false },
         left(M1, 1, &x),
@@ -760,11 +760,11 @@ async fn a_stalled_watch_holds_no_unregistration() {
         .wait_for(|opened| *opened >= 2)
         .await
         .expect("the task runs");
-    assert!(cells.is_registered(x.instance_id()));
-    let mut changes = cells.changes();
+    assert!(pools.is_registered(x.instance_id()));
+    let mut changes = pools.changes();
     tokio::time::timeout(
         DRAIN * 2,
-        changes.wait_for(|_| !cells.is_registered(x.instance_id())),
+        changes.wait_for(|_| !pools.is_registered(x.instance_id())),
     )
     .await
     .expect("a stalled watch held an unregistration past its drain")
@@ -779,27 +779,27 @@ async fn a_stalled_watch_holds_no_unregistration() {
     task.abort();
 }
 
-/// A peer that leaves a cell's table, then this instance's own membership,
+/// A peer that leaves a pool's table, then this instance's own membership,
 /// stays registered until the membership's own drain ends, which comes
 /// after the follower's: the follower's deadline does not cut it short.
 /// The membership's side is what its follower does when the peer leaves
 /// and when its own drain ends.
 #[test]
 fn a_later_membership_drain_keeps_its_peer() {
-    let (mut follows, cells, recorded, live_members) = follower();
+    let (mut follows, pools, recorded, live_members) = follower();
     let start = Instant::now();
     let x = peer();
     let id = x.instance_id();
     live(
         &mut follows,
         start,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
     live_members.join("f", id);
     recorded.take();
     live(&mut follows, start, [left(M1, 1, &x)]);
     // Half the drain later, the peer leaves the membership too.
-    Cells::leaving(Some(&cells), id, || live_members.leave("f", id));
+    Pools::leaving(Some(&pools), id, || live_members.leave("f", id));
     follows.forget(start + DRAIN);
     assert_eq!(
         recorded.take(),
@@ -807,25 +807,25 @@ fn a_later_membership_drain_keeps_its_peer() {
         "the follower unregistered a peer the membership is still draining"
     );
     assert!(
-        !cells.is_registered(id),
+        !pools.is_registered(id),
         "the follower kept what it gave up"
     );
     // The membership's drain ends: it unregisters the peer then.
-    Cells::drained(Some(&cells), id, || recorded.unregister(id));
+    Pools::drained(Some(&pools), id, || recorded.unregister(id));
     assert_eq!(recorded.take(), [Call::Unregister(id)]);
 }
 
-fn loaded(cell: &str, generation: u64, load: Option<LoadSummary>) -> FollowEvent {
+fn loaded(pool: &str, generation: u64, load: Option<LoadSummary>) -> FollowEvent {
     FollowEvent::Load {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         load,
     }
 }
 
-/// An idle cell's summary, arrived now, of a period long enough that it
-/// stays fresh through any test: for a table that a cell policy must be
+/// An idle pool's summary, arrived now, of a period long enough that it
+/// stays fresh through any test: for a table that a pool policy must be
 /// able to choose.
 pub(super) fn idle() -> Option<gdl::Load> {
     Some(gdl::Load::new(
@@ -850,92 +850,92 @@ fn summary(admitted: u64) -> LoadSummary {
     }
 }
 
-/// A summary the follower takes, from a cell's first event, a load event,
+/// A summary the follower takes, from a pool's first event, a load event,
 /// or a snapshot, is fresh for as many of its periods as the chooser is
 /// given.
 #[test]
-fn a_cells_summary_is_fresh_for_the_periods_the_chooser_is_given() {
-    let (mut follows, cells, _, _) = follower_fresh_for(5);
+fn a_pools_summary_is_fresh_for_the_periods_the_chooser_is_given() {
+    let (mut follows, pools, _, _) = follower_fresh_for(5);
     let start = Instant::now();
     let period = Duration::from_millis(summary(0).period_ms);
-    let fresh_until = |cells: &Cells, at: usize| {
-        let table = cells.table("f").expect("kept");
-        table.cells[at].load.and_then(|load| load.fresh_until())
+    let fresh_until = |pools: &Pools, at: usize| {
+        let table = pools.table("f").expect("kept");
+        table.pools[at].load.and_then(|load| load.fresh_until())
     };
     let first = FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
         region: "r".into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         load: Some(summary(3)),
         load_age_ms: None,
     };
     live(&mut follows, start, [first]);
-    assert_eq!(fresh_until(&cells, 0), Some(start + period * 5));
+    assert_eq!(fresh_until(&pools, 0), Some(start + period * 5));
     let later = start + Duration::from_secs(1);
     live(&mut follows, later, [loaded(M1, 1, Some(summary(4)))]);
-    assert_eq!(fresh_until(&cells, 0), Some(later + period * 5));
+    assert_eq!(fresh_until(&pools, 0), Some(later + period * 5));
     // A summary the relay held for a while is fresh for as many periods
     // from when it was made.
     let held = Duration::from_millis(400);
     let replayed = FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
         region: "r".into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         load: Some(summary(3)),
         load_age_ms: Some(400),
     };
     let mut snapshot = follows.snapshot();
     snapshot.apply(replayed, later);
     follows.resnapshot(snapshot, later);
-    assert_eq!(fresh_until(&cells, 0), Some(later - held + period * 5));
+    assert_eq!(fresh_until(&pools, 0), Some(later - held + period * 5));
     // The default: three periods.
-    let (mut follows, cells, _, _) = follower();
-    live(&mut follows, start, [follow(M1, 1, CellState::Ready)]);
+    let (mut follows, pools, _, _) = follower();
+    live(&mut follows, start, [follow(M1, 1, PoolState::Ready)]);
     live(&mut follows, start, [loaded(M1, 1, Some(summary(1)))]);
-    assert_eq!(fresh_until(&cells, 0), Some(start + period * 3));
+    assert_eq!(fresh_until(&pools, 0), Some(start + period * 3));
 }
 
-/// A cell's load summary is kept with the time it arrived on the
+/// A pool's load summary is kept with the time it arrived on the
 /// chooser's clock: from its follow's first event, from a snapshot, and
 /// from each load event of its current generation, and its age is
 /// measured from then. Another generation's summary is ignored, and one
-/// that says there is none clears it. A load event costs its own cell's
+/// that says there is none clears it. A load event costs its own pool's
 /// table alone.
 #[tokio::test(start_paused = true)]
-async fn a_cells_load_is_kept_with_the_time_it_arrived() {
-    let (mut follows, cells, _, _) = follower();
+async fn a_pools_load_is_kept_with_the_time_it_arrived() {
+    let (mut follows, pools, _, _) = follower();
     let start = Instant::now();
     let second = Duration::from_secs(1);
     let first = FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
         region: "r".into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         load: Some(summary(3)),
         load_age_ms: None,
     };
     live(
         &mut follows,
         start,
-        [first, follow(M2, 1, CellState::Ready)],
+        [first, follow(M2, 1, PoolState::Ready)],
     );
     let crowd: Vec<PeerInfo> = (0..64).map(|_| peer()).collect();
     live(&mut follows, start, crowd.iter().map(|p| exposed(M2, 1, p)));
     tokio::time::advance(second * 3).await;
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(
         (held.load, held.load_age),
         (Some(summary(3)), Some(second * 3))
     );
-    assert_eq!(table(&cells, M2).expect("held").load, None);
+    assert_eq!(table(&pools, M2).expect("held").load, None);
 
     super::follow::READ.with(|read| read.set(0));
     live(
@@ -946,10 +946,10 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
     assert_eq!(
         super::follow::READ.with(std::cell::Cell::get),
         0,
-        "a load event read another cell's instances"
+        "a load event read another pool's instances"
     );
     tokio::time::advance(second).await;
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!((held.load, held.load_age), (Some(summary(5)), Some(second)));
 
     live(
@@ -957,9 +957,9 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
         start + second * 4,
         [loaded(M1, 2, Some(summary(9)))],
     );
-    assert_eq!(table(&cells, M1).expect("held").load, Some(summary(5)));
+    assert_eq!(table(&pools, M1).expect("held").load, Some(summary(5)));
     live(&mut follows, start + second * 4, [loaded(M1, 1, None)]);
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!((held.load, held.load_age), (None, None));
 
     let mut snapshot = follows.snapshot();
@@ -967,17 +967,17 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
         FollowEvent::Follow {
             listing: None,
             class: "model_x".into(),
-            cell: M1.into(),
+            pool: M1.into(),
             generation: 1,
             region: "r".into(),
-            state: CellState::Ready,
+            state: PoolState::Ready,
             load: Some(summary(7)),
             load_age_ms: None,
         },
         start + second * 4,
     );
     follows.resnapshot(snapshot, start + second * 4);
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(
         (held.load, held.load_age),
         (Some(summary(7)), Some(Duration::ZERO))
@@ -992,20 +992,20 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
 /// from when it arrived.
 #[tokio::test(start_paused = true)]
 async fn a_relayed_summary_is_dated_back_by_its_age() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let second = Duration::from_secs(1);
     let aged = |age: Option<Duration>| FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
         region: "r".into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         load: Some(summary(3)),
         load_age_ms: age.map(|age| u64::try_from(age.as_millis()).expect("short")),
     };
     live(&mut follows, Instant::now(), [aged(Some(second * 4))]);
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(
         (held.load, held.load_age),
         (Some(summary(3)), Some(second * 4))
@@ -1015,87 +1015,87 @@ async fn a_relayed_summary_is_dated_back_by_its_age() {
     let mut snapshot = follows.snapshot();
     snapshot.apply(aged(Some(second * 5)), Instant::now());
     follows.resnapshot(snapshot, Instant::now());
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(held.load_age, Some(second * 5), "as old on a new watch");
 
     let mut snapshot = follows.snapshot();
     snapshot.apply(aged(None), Instant::now());
     follows.resnapshot(snapshot, Instant::now());
-    let held = table(&cells, M1).expect("held");
+    let held = table(&pools, M1).expect("held");
     assert_eq!(held.load_age, Some(Duration::ZERO), "no age: new");
 }
 
-/// A cell's damping is the chooser's, not its follow's, and is found by
-/// the cell's name: it outlives the tables an event makes again, a newer
-/// generation, a refollow after the cell was dropped, and a new snapshot,
-/// with or without the cell, since the follower never touches it.
+/// A pool's damping is the chooser's, not its follow's, and is found by
+/// the pool's name: it outlives the tables an event makes again, a newer
+/// generation, a refollow after the pool was dropped, and a new snapshot,
+/// with or without the pool, since the follower never touches it.
 #[tokio::test(start_paused = true)]
-async fn a_cells_damping_outlives_its_follows_and_snapshots() {
-    let (mut follows, cells, _, _) = follower();
+async fn a_pools_damping_outlives_its_follows_and_snapshots() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let window = Some(Duration::from_secs(1));
-    live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
-    assert_eq!(table(&cells, M1).expect("held").damped, None);
-    cells.damping().decline(super::cell_id("model_x", M1), now);
-    assert_eq!(table(&cells, M1).expect("held").damped, window);
+    live(&mut follows, now, [follow(M1, 1, PoolState::Ready)]);
+    assert_eq!(table(&pools, M1).expect("held").damped, None);
+    pools.damping().decline(super::pool_id("model_x", M1), now);
+    assert_eq!(table(&pools, M1).expect("held").damped, window);
 
-    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
-    assert_eq!(table(&cells, M1).expect("held").damped, window, "an event");
-    live(&mut follows, now, [follow(M1, 2, CellState::Ready)]);
+    live(&mut follows, now, [state(M1, 1, PoolState::Degraded)]);
+    assert_eq!(table(&pools, M1).expect("held").damped, window, "an event");
+    live(&mut follows, now, [follow(M1, 2, PoolState::Ready)]);
     assert_eq!(
-        table(&cells, M1).expect("held").damped,
+        table(&pools, M1).expect("held").damped,
         window,
         "a generation"
     );
     live(&mut follows, now, [dropped(M1, 2)]);
-    assert!(table(&cells, M1).is_none());
-    live(&mut follows, now, [follow(M1, 3, CellState::Ready)]);
+    assert!(table(&pools, M1).is_none());
+    live(&mut follows, now, [follow(M1, 3, PoolState::Ready)]);
     assert_eq!(
-        table(&cells, M1).expect("held").damped,
+        table(&pools, M1).expect("held").damped,
         window,
         "a refollow"
     );
     follows.resnapshot(follows.snapshot(), now);
     let mut snapshot = follows.snapshot();
-    snapshot.apply(follow(M1, 1, CellState::Ready), now);
+    snapshot.apply(follow(M1, 1, PoolState::Ready), now);
     follows.resnapshot(snapshot, now);
     assert_eq!(
-        table(&cells, M1).expect("held").damped,
+        table(&pools, M1).expect("held").damped,
         window,
-        "a snapshot, after one without the cell"
+        "a snapshot, after one without the pool"
     );
-    cells.damping().accept(super::cell_id("model_x", M1));
-    assert_eq!(table(&cells, M1).expect("held").damped, None);
+    pools.damping().accept(super::pool_id("model_x", M1));
+    assert_eq!(table(&pools, M1).expect("held").damped, None);
 }
 
-/// A cell that declined as gone stays gone through what does not change
+/// A pool that declined as gone stays gone through what does not change
 /// its follow: a load summary, and the same state again. It is no longer
 /// gone once the relay changes its state, even back to the state it
 /// declined in, or its offered state, or a newer generation is shown, or
 /// a new watch's snapshot shows it, since a snapshot cannot show what
 /// changed while no watch was open. The follower then forgets the mark, as it does once the follow is
-/// dropped, or a snapshot no longer shows the cell, so that a choice reads
+/// dropped, or a snapshot no longer shows the pool, so that a choice reads
 /// no stale mark.
 #[test]
-fn a_cell_stays_gone_until_the_relay_changes_its_follow() {
-    let (mut follows, cells, _, _) = follower();
+fn a_pool_stays_gone_until_the_relay_changes_its_follow() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let x = peer();
-    let shown = |state: CellState| [follow(M1, 1, state), exposed(M1, 1, &x)];
-    live(&mut follows, now, shown(CellState::Ready));
-    let gone = |cells: &Cells| {
-        let table = cells.table("f").expect("kept");
-        cells.damping().gone(&table.views[0]);
-        assert!(self::table(cells, M1).expect("held").gone);
+    let shown = |state: PoolState| [follow(M1, 1, state), exposed(M1, 1, &x)];
+    live(&mut follows, now, shown(PoolState::Ready));
+    let gone = |pools: &Pools| {
+        let table = pools.table("f").expect("kept");
+        pools.damping().gone(&table.views[0]);
+        assert!(self::table(pools, M1).expect("held").gone);
     };
-    // Whether the cell is gone, and whether the follower forgot the
+    // Whether the pool is gone, and whether the follower forgot the
     // marks of a follow that changed.
-    let is_gone = |cells: &Cells| {
-        let gone = table(cells, M1).expect("held").gone;
-        assert_eq!(cells.damping().view().gone_marks(), usize::from(gone));
+    let is_gone = |pools: &Pools| {
+        let gone = table(pools, M1).expect("held").gone;
+        assert_eq!(pools.damping().view().gone_marks(), usize::from(gone));
         gone
     };
-    let resnapshot = |follows: &mut Follows<Recorded>, state: CellState| {
+    let resnapshot = |follows: &mut Follows<Recorded>, state: PoolState| {
         let mut snapshot = follows.snapshot();
         for event in shown(state) {
             snapshot.apply(event, now);
@@ -1103,59 +1103,59 @@ fn a_cell_stays_gone_until_the_relay_changes_its_follow() {
         follows.resnapshot(snapshot, now);
     };
 
-    gone(&cells);
+    gone(&pools);
     live(
         &mut follows,
         now,
         [
             loaded(M1, 1, Some(summary(10))),
-            state(M1, 1, CellState::Ready),
+            state(M1, 1, PoolState::Ready),
         ],
     );
-    assert!(is_gone(&cells), "a summary, or the same state again");
-    resnapshot(&mut follows, CellState::Ready);
+    assert!(is_gone(&pools), "a summary, or the same state again");
+    resnapshot(&mut follows, PoolState::Ready);
     assert!(
-        !is_gone(&cells),
+        !is_gone(&pools),
         "a snapshot, which cannot show what it missed"
     );
 
-    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
-    assert!(!is_gone(&cells), "a new state");
-    gone(&cells);
-    live(&mut follows, now, [state(M1, 1, CellState::Ready)]);
-    assert!(!is_gone(&cells), "back to the state it declined in");
+    live(&mut follows, now, [state(M1, 1, PoolState::Degraded)]);
+    assert!(!is_gone(&pools), "a new state");
+    gone(&pools);
+    live(&mut follows, now, [state(M1, 1, PoolState::Ready)]);
+    assert!(!is_gone(&pools), "back to the state it declined in");
 
     let offering = |revision, offered| FollowEvent::Offering {
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
         revision,
         offered,
     };
-    gone(&cells);
+    gone(&pools);
     live(&mut follows, now, [offering(2, false)]);
-    assert!(!is_gone(&cells), "a new offered state");
+    assert!(!is_gone(&pools), "a new offered state");
 
     live(&mut follows, now, [offering(3, true)]);
-    gone(&cells);
-    resnapshot(&mut follows, CellState::Degraded);
-    assert!(!is_gone(&cells), "a snapshot of another state");
+    gone(&pools);
+    resnapshot(&mut follows, PoolState::Degraded);
+    assert!(!is_gone(&pools), "a snapshot of another state");
 
-    gone(&cells);
-    live(&mut follows, now, [follow(M1, 2, CellState::Ready)]);
-    assert!(!is_gone(&cells), "a newer generation");
+    gone(&pools);
+    live(&mut follows, now, [follow(M1, 2, PoolState::Ready)]);
+    assert!(!is_gone(&pools), "a newer generation");
 
-    gone(&cells);
+    gone(&pools);
     live(&mut follows, now, [dropped(M1, 2)]);
-    assert!(table(&cells, M1).is_none());
-    assert_eq!(cells.damping().view().gone_marks(), 0, "a dropped follow");
-    live(&mut follows, now, [follow(M1, 3, CellState::Ready)]);
-    gone(&cells);
+    assert!(table(&pools, M1).is_none());
+    assert_eq!(pools.damping().view().gone_marks(), 0, "a dropped follow");
+    live(&mut follows, now, [follow(M1, 3, PoolState::Ready)]);
+    gone(&pools);
     follows.resnapshot(follows.snapshot(), now);
     assert_eq!(
-        cells.damping().view().gone_marks(),
+        pools.damping().view().gone_marks(),
         0,
-        "a snapshot without the cell"
+        "a snapshot without the pool"
     );
 }
 
@@ -1163,27 +1163,27 @@ fn a_cell_stays_gone_until_the_relay_changes_its_follow() {
 /// Finishing it must not erase a later decline's mark on the current view.
 #[test]
 fn a_delayed_gone_write_preserves_a_newer_gone_mark() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
-    let before = cells.table("f").expect("the table");
-    let lease = super::lease::CellLease::take(&before.cells[0].leases).expect("offered");
+    let before = pools.table("f").expect("the table");
+    let lease = super::lease::PoolLease::take(&before.pools[0].leases).expect("offered");
 
     // The first decline pauses after Crossing::declined loads its table.
-    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
-    let current = cells.table("f").expect("the changed table");
-    assert!(lease.is_of(&before.cells[0]) && lease.is_of(&current.cells[0]));
-    cells.damping().gone(&current.views[0]);
-    assert!(table(&cells, M1).expect("held").gone);
+    live(&mut follows, now, [state(M1, 1, PoolState::Degraded)]);
+    let current = pools.table("f").expect("the changed table");
+    assert!(lease.is_of(&before.pools[0]) && lease.is_of(&current.pools[0]));
+    pools.damping().gone(&current.views[0]);
+    assert!(table(&pools, M1).expect("held").gone);
 
     // The first decline resumes with its captured view after the second.
-    cells.damping().gone(&before.views[0]);
-    let shown = table(&cells, M1).expect("held");
+    pools.damping().gone(&before.views[0]);
+    let shown = table(&pools, M1).expect("held");
     assert!(
         shown.gone,
         "a delayed gone write erased a current gone mark: {shown:?}"
@@ -1192,28 +1192,28 @@ fn a_delayed_gone_write_preserves_a_newer_gone_mark() {
 
 #[test]
 fn a_full_reply_with_an_earlier_view_preserves_a_newer_gone_mark() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
-    let before = cells.table("f").expect("the table");
-    let lease = super::lease::CellLease::take(&before.cells[0].leases).expect("offered");
+    let before = pools.table("f").expect("the table");
+    let lease = super::lease::PoolLease::take(&before.pools[0].leases).expect("offered");
 
     // A full reply pauses after Crossing::declined loads its table.
-    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
-    let current = cells.table("f").expect("the changed table");
-    assert!(lease.is_of(&before.cells[0]) && lease.is_of(&current.cells[0]));
-    cells.damping().gone(&current.views[0]);
-    cells.damping().decline_shown(&current.views[0], now);
-    assert!(table(&cells, M1).expect("held").gone, "the control");
+    live(&mut follows, now, [state(M1, 1, PoolState::Degraded)]);
+    let current = pools.table("f").expect("the changed table");
+    assert!(lease.is_of(&before.pools[0]) && lease.is_of(&current.pools[0]));
+    pools.damping().gone(&current.views[0]);
+    pools.damping().decline_shown(&current.views[0], now);
+    assert!(table(&pools, M1).expect("held").gone, "the control");
 
-    // The full reply resumes after a newer gone reply marked the cell.
-    cells.damping().decline_shown(&before.views[0], now);
-    let shown = table(&cells, M1).expect("held");
+    // The full reply resumes after a newer gone reply marked the pool.
+    pools.damping().decline_shown(&before.views[0], now);
+    let shown = table(&pools, M1).expect("held");
     assert!(
         shown.gone,
         "a full reply using an earlier view erased the current gone mark: {shown:?}"

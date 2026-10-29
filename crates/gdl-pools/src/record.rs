@@ -4,40 +4,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::DirectoryError;
 
-/// One cell's record in the cell directory, published by the cell's hub
-/// and read by every hub that may send to the cell.
+/// One pool's record in the pool directory, published by the pool's hub
+/// and read by every hub that may send to the pool.
 ///
 /// Unknown fields are kept out of the type but not refused, so that a hub
 /// of an older build still reads the record of a newer one while builds
-/// roll cell by cell.
+/// roll pool by pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CellRecord {
-    /// The cell's name, a DNS label.
+pub struct PoolRecord {
+    /// The pool's name, a DNS label.
     pub name: String,
-    /// The class the cell deploys.
+    /// The class the pool deploys.
     pub class: String,
-    /// The region the cell runs in, a DNS label.
+    /// The region the pool runs in, a DNS label.
     pub region: String,
-    /// The parent cell: the cell of the class that sends to this one whose
+    /// The parent pool: the pool of the class that sends to this one whose
     /// hub follows it, and whose choosers alone offer it work. `None` for a
-    /// cell of a class that nothing sends to. Optional on the wire, so that
+    /// pool of a class that nothing sends to. Optional on the wire, so that
     /// a reader of an earlier build ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
-    /// The contract hash of the graph the cell serves. A reader follows
-    /// only a cell whose hashes equal its own.
+    /// The contract hash of the graph the pool serves. A reader follows
+    /// only a pool whose hashes equal its own.
     pub contract: u64,
-    /// The placement hash of the deployment the cell serves.
+    /// The placement hash of the deployment the pool serves.
     pub placement: u64,
-    /// Whether the cell takes new work.
-    pub state: CellState,
+    /// Whether the pool takes new work.
+    pub state: PoolState,
     /// The writer's incarnation: a hub that restarts takes a new epoch,
     /// which orders after every `seq` of the ones before it.
     pub epoch: u64,
     /// The writer's sequence number within its epoch, raised on every
     /// write: a republish with a higher `seq` is the heartbeat.
     pub seq: u64,
-    /// The cell hub's public listener, `host:port`, that a follower
+    /// The pool hub's public listener, `host:port`, that a follower
     /// reaches.
     pub hub: String,
     /// How long a reader keeps the record without seeing its `seq`
@@ -45,35 +45,35 @@ pub struct CellRecord {
     /// so each reader measures the age on its own clock.
     #[serde(rename = "lease_ms", with = "millis", default = "default_lease")]
     pub lease: Duration,
-    /// The load of the cell's entry segments, when the hub has one: as it
+    /// The load of the pool's entry segments, when the hub has one: as it
     /// was when the record was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<LoadSummary>,
-    /// Whether the cell sends a heartbeat, or was scaled to 0 on purpose
+    /// Whether the pool sends a heartbeat, or was scaled to 0 on purpose
     /// and sends none. `serving` when a record does not say.
     #[serde(default)]
     pub presence: Presence,
-    /// The models the cell serves, each with its state. An entry stays
-    /// until the cell withdraws, unless it is `drained`: at most
-    /// [`CellRecord::MAX_DRAINED`] of those are kept, the oldest dropped
+    /// The models the pool serves, each with its state. An entry stays
+    /// until the pool withdraws, unless it is `drained`: at most
+    /// [`PoolRecord::MAX_DRAINED`] of those are kept, the oldest dropped
     /// first. Not checked with the record, so that one malformed model
-    /// never costs the cell its record.
+    /// never costs the pool its record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelEntry>,
     /// Raised on every change of `models`, and never lowered, also across
-    /// a restart of the cell's hub, which counts from its epoch in the high
+    /// a restart of the pool's hub, which counts from its epoch in the high
     /// bits: a reader that holds this version holds this list.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub models_version: u64,
-    /// The models an operator revoked on this cell: none of them is in
-    /// `models`, whatever the cell's instances say, until the operator
+    /// The models an operator revoked on this pool: none of them is in
+    /// `models`, whatever the pool's instances say, until the operator
     /// lifts the revocation. Kept in the record, so that a hub that
     /// restarts keeps them, and counted in `models_version`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<gdl_model::ModelKey>,
 }
 
-impl CellRecord {
+impl PoolRecord {
     /// The lease of a record that does not name one: a hub's default
     /// lease, three of its default heartbeats.
     pub const DEFAULT_LEASE: Duration = gdl_model::HubTiming::DEFAULT_LEASE;
@@ -89,21 +89,21 @@ impl CellRecord {
         }
     }
 
-    /// Whether a reader applies the record's lease: only to a cell that
-    /// is `serving`, since a cell scaled to 0 sends no heartbeat, and its
+    /// Whether a reader applies the record's lease: only to a pool that
+    /// is `serving`, since a pool scaled to 0 sends no heartbeat, and its
     /// record stays until it serves again or withdraws.
     pub fn leased(&self) -> bool {
         self.presence == Presence::Serving
     }
 
-    /// Whether the record can be published: its cell, parent, region, and
+    /// Whether the record can be published: its pool, parent, region, and
     /// class names have their shapes, and its lease is a whole number of
     /// milliseconds, at least one: the unit it is stored in, so that a
     /// stored record expires when the published one would. Every problem is
     /// reported.
     pub fn check(&self) -> Result<(), DirectoryError> {
         let mut problems = names(&self.class, &self.name);
-        if let Some(Err(problem)) = self.home.as_deref().map(gdl_model::check_cell_name) {
+        if let Some(Err(problem)) = self.home.as_deref().map(gdl_model::check_pool_name) {
             problems.push(problem);
         }
         if let Err(problem) = gdl_model::check_region_name(&self.region) {
@@ -113,7 +113,7 @@ impl CellRecord {
             && u64::try_from(self.lease.as_millis()).is_ok();
         if self.lease.is_zero() || !whole {
             problems.push(format!(
-                "cell `{}`: the lease must be a whole number of milliseconds, at least 1, not {:?}",
+                "pool `{}`: the lease must be a whole number of milliseconds, at least 1, not {:?}",
                 self.name, self.lease
             ));
         }
@@ -121,61 +121,61 @@ impl CellRecord {
     }
 }
 
-/// Whether a cell takes new work, as its hub judges from its quorum.
+/// Whether a pool takes new work, as its hub judges from its quorum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CellState {
+pub enum PoolState {
     /// Every segment of the class has its quorum of usable instances.
     Ready,
     /// A segment is below its quorum, or every quorum is met but has not
     /// yet held for the readiness hold, and every segment has a usable
-    /// instance: chosen only when no ready cell fits.
+    /// instance: chosen only when no ready pool fits.
     Degraded,
     /// A segment has no usable instance: never chosen.
     Unavailable,
-    /// The cell is draining: no new work.
+    /// The pool is draining: no new work.
     Draining,
 }
 
-/// Whether a cell is expected to answer: the distinction between a cell
+/// Whether a pool is expected to answer: the distinction between a pool
 /// scaled to 0 on purpose and one that is expected but silent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Presence {
-    /// The cell's hub sends a heartbeat: a reader that sees none for the
-    /// lease holds the cell missing.
+    /// The pool's hub sends a heartbeat: a reader that sees none for the
+    /// lease holds the pool missing.
     #[default]
     Serving,
-    /// The cell was scaled to 0 on purpose, and sends no heartbeat.
+    /// The pool was scaled to 0 on purpose, and sends no heartbeat.
     ScaledToZero,
 }
 
-/// Whether a cell is expected to answer, as a reader judges it from the
-/// cell's record and its follow: what a model gate tells a model whose
-/// cells are all silent (503) from one decommissioned (404) by.
+/// Whether a pool is expected to answer, as a reader judges it from the
+/// pool's record and its follow: what a model gate tells a model whose
+/// pools are all silent (503) from one decommissioned (404) by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CellCondition {
-    /// The cell is `serving`, its record is fresh, and its follow, if the
+pub enum PoolCondition {
+    /// The pool is `serving`, its record is fresh, and its follow, if the
     /// reader's hub follows it, has not been lost.
     Live,
-    /// The cell was scaled to 0 on purpose ([`Presence::ScaledToZero`]).
+    /// The pool was scaled to 0 on purpose ([`Presence::ScaledToZero`]).
     ScaledToZero,
-    /// The cell is `serving`, but its lease has passed without a new
+    /// The pool is `serving`, but its lease has passed without a new
     /// write, or its follow's link was lost and has not been read again:
     /// expected, but silent.
     Missing,
 }
 
-/// One model a cell serves, in its record.
+/// One model a pool serves, in its record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelEntry {
     /// The name a client sends.
     pub model: String,
-    /// The serving partition, when the cell has more than one.
+    /// The serving partition, when the pool has more than one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_key: Option<String>,
-    /// What the cell can do with the model, with its history.
+    /// What the pool can do with the model, with its history.
     pub state: ModelState,
     /// The record's `models_version` at which the entry took its state:
     /// it orders the `drained` entries, oldest first.
@@ -192,13 +192,13 @@ impl ModelEntry {
     }
 }
 
-/// What a cell can do with one model, as its hub computes it from its
+/// What a pool can do with one model, as its hub computes it from its
 /// entry instances: a state keeps what came before it, so that a model
 /// that served once never reads as one that never did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelState {
-    /// Registered, and never `ready` in this cell.
+    /// Registered, and never `ready` in this pool.
     Starting,
     /// A usable entry instance can serve it now.
     Ready,
@@ -211,8 +211,8 @@ pub enum ModelState {
     Drained,
 }
 
-/// The load of a cell's entry segments, as the cell's hub makes it once a
-/// summary period from the instances' reports, and sends it on the cell's
+/// The load of a pool's entry segments, as the pool's hub makes it once a
+/// summary period from the instances' reports, and sends it on the pool's
 /// watch each period, changed or not.
 ///
 /// `admitted`, `limit`, and `refusals` are sums over the reports the hub
@@ -236,23 +236,23 @@ pub struct LoadSummary {
     /// The hand-offs the instances that reported declined, each in the
     /// period before its report.
     pub refusals: u64,
-    /// The cell's summary period, in milliseconds: a reader that has had
+    /// The pool's summary period, in milliseconds: a reader that has had
     /// no summary for a few periods knows its last one is stale, without
-    /// knowing the cell's settings.
+    /// knowing the pool's settings.
     pub period_ms: u64,
 }
 
-/// A cell's withdrawal of its record: the last write of a cell that
+/// A pool's withdrawal of its record: the last write of a pool that
 /// drained, ordered with its publishes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Withdrawal {
-    /// The class of the cell.
+    /// The class of the pool.
     pub class: String,
-    /// The cell whose record is removed.
-    pub cell: String,
-    /// The writer's epoch, as in [`CellRecord::epoch`].
+    /// The pool whose record is removed.
+    pub pool: String,
+    /// The writer's epoch, as in [`PoolRecord::epoch`].
     pub epoch: u64,
-    /// The writer's sequence number, as in [`CellRecord::seq`].
+    /// The writer's sequence number, as in [`PoolRecord::seq`].
     pub seq: u64,
 }
 
@@ -265,9 +265,9 @@ impl Withdrawal {
         }
     }
 
-    /// Whether the withdrawal names a cell and class of the right shapes.
+    /// Whether the withdrawal names a pool and class of the right shapes.
     pub fn check(&self) -> Result<(), DirectoryError> {
-        refuse(names(&self.class, &self.cell))
+        refuse(names(&self.class, &self.pool))
     }
 }
 
@@ -287,9 +287,9 @@ impl fmt::Display for Version {
     }
 }
 
-fn names(class: &str, cell: &str) -> Vec<String> {
+fn names(class: &str, pool: &str) -> Vec<String> {
     [
-        gdl_model::check_cell_name(cell),
+        gdl_model::check_pool_name(pool),
         gdl_model::check_class_name(class),
     ]
     .into_iter()
@@ -310,7 +310,7 @@ fn is_zero(version: &u64) -> bool {
 }
 
 fn default_lease() -> Duration {
-    CellRecord::DEFAULT_LEASE
+    PoolRecord::DEFAULT_LEASE
 }
 
 /// A lease as whole milliseconds, the unit later backends store.

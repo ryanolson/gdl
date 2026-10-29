@@ -402,8 +402,8 @@ struct Unit<'a> {
     /// The source's types its binary reads or writes as JSON lines, and no
     /// crossing asserts: `reads_json`, `writes_json`, or both.
     fed: Vec<&'static str>,
-    /// The bound cell policies it builds and registers, by name: those of
-    /// the classes it chooses cells of.
+    /// The bound pool policies it builds and registers, by name: those of
+    /// the classes it chooses pools of.
     policies: Vec<(&'a str, &'a crate::spec::Bind)>,
     crate_dir: &'a Path,
     out: &'a Path,

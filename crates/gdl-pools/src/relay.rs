@@ -5,28 +5,28 @@ use std::{
 };
 
 use crate::{
-    CellDirectory, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch,
+    DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord,
     ResumeToken, Version, Withdrawal,
     dir::file::{self, Files, Held},
 };
 
-/// The directory of the `relay` backend: the records a parent cell's hub
+/// The directory of the `relay` backend: the records a parent pool's hub
 /// holds for its children, which its children's hubs report to it. The
 /// hub's follow watches it as it would watch any other directory.
 ///
 /// Its watches are a [`MemoryDirectory`]'s, in the hub's process. Opened
 /// over a state directory ([`RelayDirectory::open`]), it also keeps each
-/// record and withdrawal there, one file per cell,
-/// `<root>/<class>/<cell>.json`, as the `dir` backend does, and reads them
+/// record and withdrawal there, one file per pool,
+/// `<root>/<class>/<pool>.json`, as the `dir` backend does, and reads them
 /// back when it opens: so it keeps the contract's first rule
-/// ([`CellDirectory`]) across the hub's restart. A write is stored before
+/// ([`PoolDirectory`]) across the hub's restart. A write is stored before
 /// any watcher sees it, and a write that cannot be stored is refused with
 /// [`DirectoryError::Unavailable`] and holds nothing, so the state never
 /// lags what a watcher has seen. Without a state directory
 /// ([`RelayDirectory::new`]) it keeps nothing across a restart.
 ///
 /// A record whose lease has passed stays: silence is not a withdrawal, and
-/// every reader applies the lease on its own clock ([`crate::CellView`]).
+/// every reader applies the lease on its own clock ([`crate::PoolView`]).
 /// A reader that starts after a record's last write, as a restarted hub's
 /// follow does, takes it as fresh for one lease from when it reads it.
 ///
@@ -43,10 +43,10 @@ pub struct RelayDirectory {
 struct Store {
     root: PathBuf,
     /// Held from a write's check of what is held to its arrival in
-    /// [`RelayDirectory::records`], so that two writes of one cell reach
+    /// [`RelayDirectory::records`], so that two writes of one pool reach
     /// the files and the watchers in one order. Writes come from the
     /// children's reports, at their heartbeat, never from the request
-    /// path, so one lock for every cell costs nothing that matters.
+    /// path, so one lock for every pool costs nothing that matters.
     writes: Mutex<()>,
 }
 
@@ -73,10 +73,10 @@ impl RelayDirectory {
     /// # Errors
     ///
     /// [`DirectoryError::Unavailable`] when `root` cannot be made or read,
-    /// or a cell's file in it cannot be read: a directory that opened
-    /// without a record it holds would read a silent cell as gone. A file
-    /// that does not hold its cell's record or tombstone is passed over, as
-    /// the `dir` backend passes it over, and the cell's next write
+    /// or a pool's file in it cannot be read: a directory that opened
+    /// without a record it holds would read a silent pool as gone. A file
+    /// that does not hold its pool's record or tombstone is passed over, as
+    /// the `dir` backend passes it over, and the pool's next write
     /// replaces it.
     pub fn open(root: impl Into<PathBuf>, limits: MemoryLimits) -> Result<Self, DirectoryError> {
         let root = root.into();
@@ -107,9 +107,9 @@ impl RelayDirectory {
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(error) => return Err(unavailable("reading", &path, error)),
             }
-            let cells = file::scan(&path, &name, &Files::new())
+            let pools = file::scan(&path, &name, &Files::new())
                 .map_err(|error| unavailable("reading", &path, error))?;
-            for entry in cells.into_values().filter_map(|seen| seen.entry) {
+            for entry in pools.into_values().filter_map(|seen| seen.entry) {
                 match (entry.record(), entry.withdrawal(&name)) {
                     (Some(record), _) => records.put(record.clone())?,
                     (None, Some(withdrawal)) => records.remove(withdrawal)?,
@@ -137,27 +137,27 @@ impl RelayDirectory {
         self.records.watchers(class)
     }
 
-    /// The version of the latest write the directory took for `cell` of
+    /// The version of the latest write the directory took for `pool` of
     /// `class`, a record or a withdrawal, expired or not.
-    pub fn held(&self, class: &str, cell: &str) -> Option<Version> {
-        self.records.held(class, cell).map(|(version, _)| version)
+    pub fn held(&self, class: &str, pool: &str) -> Option<Version> {
+        self.records.held(class, pool).map(|(version, _)| version)
     }
 
-    /// The record the directory holds for `cell` of `class`, expired or
-    /// not: a restarted child reads its cell's history from it.
-    pub fn record(&self, class: &str, cell: &str) -> Option<CellRecord> {
-        self.records.record(class, cell)
+    /// The record the directory holds for `pool` of `class`, expired or
+    /// not: a restarted child reads its pool's history from it.
+    pub fn record(&self, class: &str, pool: &str) -> Option<PoolRecord> {
+        self.records.record(class, pool)
     }
 
-    /// Whether the latest write the directory took for `cell` of `class`
+    /// Whether the latest write the directory took for `pool` of `class`
     /// is a record, expired or not, rather than a withdrawal.
-    pub fn holds_record(&self, class: &str, cell: &str) -> bool {
+    pub fn holds_record(&self, class: &str, pool: &str) -> bool {
         self.records
-            .held(class, cell)
+            .held(class, pool)
             .is_some_and(|(_, record)| record)
     }
 
-    /// Take `write` of `cell` of `class`: store it, if the directory
+    /// Take `write` of `pool` of `class`: store it, if the directory
     /// keeps what it holds, and then hand it to the watchers, unless it is
     /// not newer than what the directory holds. It runs on a blocking
     /// thread, whole, so a caller that stops waiting cannot leave a write
@@ -169,19 +169,19 @@ impl RelayDirectory {
         let records = self.records.clone();
         tokio::task::spawn_blocking(move || {
             let _writes = store.writes.lock().unwrap_or_else(PoisonError::into_inner);
-            let (class, cell) = write.cell();
+            let (class, pool) = write.pool();
             let offered = write.version();
-            if let Some((held, _)) = records.held(class, cell)
+            if let Some((held, _)) = records.held(class, pool)
                 && offered <= held
             {
                 return Err(DirectoryError::NotNewer {
                     class: class.to_owned(),
-                    cell: cell.to_owned(),
+                    pool: pool.to_owned(),
                     held,
                     offered,
                 });
             }
-            file::write(&store.root.join(class), class, cell, write.held())?;
+            file::write(&store.root.join(class), class, pool, write.held())?;
             write.apply(&records)
         })
         .await
@@ -189,10 +189,10 @@ impl RelayDirectory {
     }
 }
 
-impl CellDirectory for RelayDirectory {
+impl PoolDirectory for RelayDirectory {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         // Before any path is made of its names.
         record.check()?;
         self.write(Write::Record(record)).await
@@ -205,26 +205,26 @@ impl CellDirectory for RelayDirectory {
 
     /// A resume token is a place in this directory's watches: a directory
     /// opened again over the same state answers an earlier one's token
-    /// with [`crate::CellEvent::Resnapshot`].
+    /// with [`crate::PoolEvent::Resnapshot`].
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
         self.records.watch(class, from)
     }
 }
 
-/// A write of one cell.
+/// A write of one pool.
 // Made once a child's report and taken at once: boxing the record would
 // add an allocation to each write for nothing.
 #[allow(clippy::large_enum_variant)]
 enum Write {
-    Record(CellRecord),
+    Record(PoolRecord),
     Withdrawal(Withdrawal),
 }
 
 impl Write {
-    fn cell(&self) -> (&str, &str) {
+    fn pool(&self) -> (&str, &str) {
         match self {
             Write::Record(record) => (&record.class, &record.name),
-            Write::Withdrawal(withdrawal) => (&withdrawal.class, &withdrawal.cell),
+            Write::Withdrawal(withdrawal) => (&withdrawal.class, &withdrawal.pool),
         }
     }
 
@@ -235,7 +235,7 @@ impl Write {
         }
     }
 
-    /// What the cell's file holds once the write is stored.
+    /// What the pool's file holds once the write is stored.
     fn held(&self) -> Held {
         match self {
             Write::Record(record) => Held::Record(Box::new(record.clone())),

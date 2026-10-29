@@ -1,14 +1,14 @@
 //! The follower's acknowledgements to its hub that it avoids a followed
-//! cell's retired entry instance: once its tables hold the instance
+//! pool's retired entry instance: once its tables hold the instance
 //! retired, this chooser never picks it again, and its hub tells the
-//! cell's hub once every chooser has said so, so that the retiree's stop
+//! pool's hub once every chooser has said so, so that the retiree's stop
 //! need not wait out its bound.
 //!
 //! An acknowledgement is queued as its retirement is published, never
 //! found by a pass over the follows: a retirement the relay sends after
 //! its snapshot, each retired instance of a snapshot that replaces what
 //! the follower held, whether or not it acknowledged it before, since its
-//! hub may have restarted, and each of a cell read from a watch of its
+//! hub may have restarted, and each of a pool read from a watch of its
 //! own. A choice made from a table loaded before the retirement is checked
 //! again when it returns ([`super::super::Crossing::choose`]), so it does
 //! not pick the instance either. It promises nothing about the hand-offs
@@ -51,7 +51,7 @@ impl<R: Registry> Follows<R> {
     /// while none is queued. Kept apart from the look for a follow not
     /// offered ([`Follows::next_poll`]), which passes over every follow:
     /// a retirement's acknowledgement is found in its queue alone.
-    pub(in crate::dist::cells) fn next_avoid(&self) -> Option<Instant> {
+    pub(in crate::dist::pools) fn next_avoid(&self) -> Option<Instant> {
         self.avoiding.next()
     }
 
@@ -61,7 +61,7 @@ impl<R: Registry> Follows<R> {
     pub(super) fn avoid(&mut self, key: &Key, generation: u64, instance: InstanceId, now: Instant) {
         let avoids = Avoids {
             class: key.0.clone(),
-            cell: key.1.clone(),
+            pool: key.1.clone(),
             generation,
             instance,
         };
@@ -69,7 +69,7 @@ impl<R: Registry> Follows<R> {
     }
 
     /// Acknowledge, from `now`, every retired instance that the follows of
-    /// `key`, or of every cell when `key` is `None`, hold, current and
+    /// `key`, or of every pool when `key` is `None`, hold, current and
     /// closing: the tables just published hold them all.
     pub(super) fn avoid_retired(&mut self, key: Option<&Key>, now: Instant) {
         let mut due = Vec::new();
@@ -97,7 +97,7 @@ impl<R: Registry> Follows<R> {
     /// The acknowledgements of a retirement due at `now`, each of a follow
     /// that still holds its instance retired: one whose instance left, or
     /// whose follow was dropped, needs none.
-    pub(in crate::dist::cells) fn avoidances(&mut self, now: Instant) -> Vec<Avoids> {
+    pub(in crate::dist::pools) fn avoidances(&mut self, now: Instant) -> Vec<Avoids> {
         let mut due = Vec::new();
         while let Some((_, avoids)) = self.avoiding.fresh.pop_front() {
             due.push(avoids);
@@ -114,14 +114,14 @@ impl<R: Registry> Follows<R> {
 
     /// The hub took `avoids`, or did not, when it is sent again after
     /// [`ACK_RETRY`] while the follow still holds the instance retired.
-    pub(in crate::dist::cells) fn avoided(&mut self, avoids: Avoids, taken: bool, now: Instant) {
+    pub(in crate::dist::pools) fn avoided(&mut self, avoids: Avoids, taken: bool, now: Instant) {
         if !taken && self.holds_retired(&avoids) {
             self.avoiding.again.push_back((now + ACK_RETRY, avoids));
         }
     }
 
     fn holds_retired(&self, avoids: &Avoids) -> bool {
-        let key = (avoids.class.clone(), avoids.cell.clone());
+        let key = (avoids.class.clone(), avoids.pool.clone());
         self.followed
             .find(&key, avoids.generation)
             .is_some_and(|follow| follow.retired.contains_key(&avoids.instance))

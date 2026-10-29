@@ -1,7 +1,7 @@
 //! A chooser routes across the class boundary: each request its source
-//! sends into `model_x` goes to a cell the class's cell policy chose from
-//! the chooser's tables, then to an entry instance of that cell chosen by
-//! the hop's own router. With no cell to choose, the request fails at once
+//! sends into `model_x` goes to a pool the class's pool policy chose from
+//! the chooser's tables, then to an entry instance of that pool chosen by
+//! the hop's own router. With no pool to choose, the request fails at once
 //! with `Routing`.
 
 mod common;
@@ -11,27 +11,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, home_first, model, model_timed, model_unsummarized,
+    Model, ModelPool, RUNTIME, Running, ask, home_first, model, model_timed, model_unsummarized,
     placement, run, spec_of,
 };
-use common::cells::{
-    Resolving, cell_hub_of, cell_hub_timed, followed, global_cell, global_hub, settings, timing,
+use common::pools::{
+    Resolving, followed, global_hub, global_pool, pool_hub_of, pool_hub_timed, settings, timing,
     until,
 };
 use common::{Events, WAIT};
 use futures::StreamExt;
 use gdl::{Choice, Encoded, ErrorKind, Instances, Request, Selector, Selectors};
-use gdl_hub::CellTiming;
-use gdl_model::CellPolicy;
+use gdl_hub::PoolTiming;
+use gdl_model::PoolPolicy;
 use gdl_model::WatchCaps;
-use gdl_runtime::{CellState, Cells, DeploymentSpec, RequestRouter, RuntimeConfig};
-use gdl_watch::CellWatcher;
+use gdl_runtime::{DeploymentSpec, PoolState, Pools, RequestRouter, RuntimeConfig};
+use gdl_watch::PoolWatcher;
 use velo_hub::Hub;
 
 const M1: &str = "model-x-01-us-east-1";
 const M2: &str = "model-x-02-us-east-1";
 
-/// The global cell's hub and its chooser, an instance of `a`, whose
+/// The global pool's hub and its chooser, an instance of `a`, whose
 /// deployment registers `selectors`.
 async fn global(
     spec: &DeploymentSpec,
@@ -42,12 +42,12 @@ async fn global(
     Hub,
     Running<impl gdl::Next<common::Prompt, common::Chunk> + gdl_runtime::Register + use<>>,
 ) {
-    let (hub, _) = cell_hub_of(spec, global_hub(), directory).await;
+    let (hub, _) = pool_hub_of(spec, global_hub(), directory).await;
     let chooser = chooser(&hub, spec, selectors, events).await;
     (hub, chooser)
 }
 
-/// The global cell's chooser at `hub`, an instance of `a`, whose
+/// The global pool's chooser at `hub`, an instance of `a`, whose
 /// deployment registers `selectors`.
 async fn chooser(
     hub: &Hub,
@@ -55,7 +55,7 @@ async fn chooser(
     selectors: Selectors,
     events: &Arc<Events>,
 ) -> Running<impl gdl::Next<common::Prompt, common::Chunk> + gdl_runtime::Register + use<>> {
-    let extra = format!("{}{RUNTIME}", global_cell());
+    let extra = format!("{}{RUNTIME}", global_pool());
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
@@ -72,25 +72,25 @@ async fn chooser(
 }
 
 /// The chooser's tables.
-fn tables<H>(chooser: &Running<H>) -> Cells {
+fn tables<H>(chooser: &Running<H>) -> Pools {
     chooser
-        .cells
+        .pools
         .clone()
-        .expect("a global instance in a cell chooses")
+        .expect("a global instance in a pool chooses")
 }
 
-/// Whether `cell` is followed in `state` with `entries` eligible. Not
+/// Whether `pool` is followed in `state` with `entries` eligible. Not
 /// whether it has a load summary: every test that waits with this routes
 /// by `round_robin`, which reads none, and a summary comes only after a
 /// chain of periods that a busy host can stretch past [`WAIT`].
-fn holds(cells: &Cells, cell: &str, state: CellState, entries: usize) -> bool {
-    followed(cells, "f", cell).is_some_and(|m| m.state == state && m.eligible.len() == entries)
+fn holds(pools: &Pools, pool: &str, state: PoolState, entries: usize) -> bool {
+    followed(pools, "f", pool).is_some_and(|m| m.state == state && m.eligible.len() == entries)
 }
 
 /// The request failed with `Routing`, naming the class it could not
 /// place.
 fn unplaced(result: gdl::Result<()>) {
-    let error = result.expect_err("no cell can take the request");
+    let error = result.expect_err("no pool can take the request");
     assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
     assert!(error.to_string().contains("model_x"), "{error}");
 }
@@ -104,50 +104,50 @@ async fn asks<H: gdl::Next<common::Prompt, common::Chunk>>(chooser: &Running<H>,
     }
 }
 
-/// The forward hand-offs each of `cells` took while `act` ran.
-async fn counted<H, F: Future<Output = ()>>(cells: &[&ModelCell<H>], act: F) -> Vec<usize> {
-    let before: Vec<usize> = cells.iter().map(|cell| cell.forwards()).collect();
+/// The forward hand-offs each of `pools` took while `act` ran.
+async fn counted<H, F: Future<Output = ()>>(pools: &[&ModelPool<H>], act: F) -> Vec<usize> {
+    let before: Vec<usize> = pools.iter().map(|pool| pool.forwards()).collect();
     act.await;
-    cells
+    pools
         .iter()
         .zip(before)
-        .map(|(cell, before)| cell.forwards() - before)
+        .map(|(pool, before)| pool.forwards() - before)
         .collect()
 }
 
-/// A global cell and two home model cells, each with its entry and its
+/// A global pool and two home model pools, each with its entry and its
 /// sink: every request through the global's source is answered by one of
-/// the model cells, and over many requests both are used.
+/// the model pools, and over many requests both are used.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_request_crosses_into_a_cell_the_chooser_follows() {
+async fn a_request_crosses_into_a_pool_the_chooser_follows() {
     let spec = spec_of(placement());
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
     let m2 = model(&spec, &directory, M2, "m2-hub:1337", 1, 1, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "both model cells ready", |cells| {
-        holds(cells, M1, CellState::Ready, 1) && holds(cells, M2, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "both model pools ready", |pools| {
+        holds(pools, M1, PoolState::Ready, 1) && holds(pools, M2, PoolState::Ready, 1)
     })
     .await;
     let used = counted(&[&m1, &m2], asks(&chooser, 40)).await;
     assert_eq!(used.iter().sum::<usize>(), 40, "{used:?}");
     assert!(
         used.iter().all(|n| *n > 0),
-        "a cell was never chosen: {used:?}"
+        "a pool was never chosen: {used:?}"
     );
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
 
-/// With one `ready` and one `degraded` cell, every request goes to the
-/// ready one; with only the degraded cell, to it; with only an
-/// `unavailable` cell, or none, a request fails at once with `Routing`,
+/// With one `ready` and one `degraded` pool, every request goes to the
+/// ready one; with only the degraded pool, to it; with only an
+/// `unavailable` pool, or none, a request fails at once with `Routing`,
 /// naming the class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
+async fn a_ready_pool_before_a_degraded_one_and_never_an_unavailable_one() {
     let spec = spec_of(placement());
     let events = Events::new();
     let directory = Resolving::new();
@@ -155,110 +155,110 @@ async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
     // Two entry instances make its quorum; it has one.
     let m2 = model(&spec, &directory, M2, "m2-hub:1337", 2, 1, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "one ready cell and one degraded", |cells| {
-        holds(cells, M1, CellState::Ready, 1) && holds(cells, M2, CellState::Degraded, 1)
+    let pools = tables(&chooser);
+    until(&pools, "one ready pool and one degraded", |pools| {
+        holds(pools, M1, PoolState::Ready, 1) && holds(pools, M2, PoolState::Degraded, 1)
     })
     .await;
     let used = counted(&[&m1, &m2], asks(&chooser, 20)).await;
-    assert_eq!(used, [20, 0], "a degraded cell was chosen over a ready one");
+    assert_eq!(used, [20, 0], "a degraded pool was chosen over a ready one");
 
     m1.hub.shutdown().await.expect("valid test fixture");
-    until(&cells, "only the degraded cell", |cells| {
-        followed(cells, "f", M1).is_none() && holds(cells, M2, CellState::Degraded, 1)
+    until(&pools, "only the degraded pool", |pools| {
+        followed(pools, "f", M1).is_none() && holds(pools, M2, PoolState::Degraded, 1)
     })
     .await;
     let used = counted(&[&m2], asks(&chooser, 5)).await;
     assert_eq!(used, [5]);
 
-    // Without its `d`, the cell has a role with no instance.
-    let ModelCell {
+    // Without its `d`, the pool has a role with no instance.
+    let ModelPool {
         hub: m2_hub,
         entries: _m2_entries,
         sink,
         ..
     } = m2;
     sink.stop().await;
-    // The global's hub lets go of a cell that takes no work, once the
+    // The global's hub lets go of a pool that takes no work, once the
     // chooser acknowledges that it holds no offer to it.
-    until(&cells, "the cell unavailable", |cells| {
-        followed(cells, "f", M2).is_none_or(|m| m.state == CellState::Unavailable)
+    until(&pools, "the pool unavailable", |pools| {
+        followed(pools, "f", M2).is_none_or(|m| m.state == PoolState::Unavailable)
     })
     .await;
     unplaced(ask(&chooser.segment).await);
 
     m2_hub.shutdown().await.expect("valid test fixture");
-    until(&cells, "no cell followed", |cells| {
-        cells.followed("f").is_empty()
+    until(&pools, "no pool followed", |pools| {
+        pools.followed("f").is_empty()
     })
     .await;
     unplaced(ask(&chooser.segment).await);
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// Under `home_first`, a ready cell whose hub has made no load summary yet
+/// Under `home_first`, a ready pool whose hub has made no load summary yet
 /// is followed, with its entry instance, but not chosen: with no other
-/// cell, a request fails at once with `Routing`. Its hub's summary period
+/// pool, a request fails at once with `Routing`. Its hub's summary period
 /// is 10 s, which the test does not wait out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cell_without_a_load_summary_is_not_chosen() {
+async fn a_pool_without_a_load_summary_is_not_chosen() {
     let spec = spec_of(home_first());
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
-    let cell = Model {
+    let pool = Model {
         name: M1,
         hub: "m1-hub:1337",
         quorum: 1,
         entries: 1,
     };
-    let m1 = model_unsummarized(&spec, &directory, cell, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "the cell ready with its entry", |cells| {
-        followed(cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 1)
+    let m1 = model_unsummarized(&spec, &directory, pool, &events).await;
+    let pools = tables(&chooser);
+    until(&pools, "the pool ready with its entry", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 1)
     })
     .await;
-    assert_eq!(followed(&cells, "f", M1).and_then(|m| m.load), None);
+    assert_eq!(followed(&pools, "f", M1).and_then(|m| m.load), None);
     unplaced(ask(&chooser.segment).await);
     assert_eq!(
         m1.entries[0].offered(),
         0,
-        "the cell was offered the request"
+        "the pool was offered the request"
     );
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
 
-/// A model cell whose hub stops is dropped from the tables, and later
-/// requests go to the other cell; with none left, `Routing`.
+/// A model pool whose hub stops is dropped from the tables, and later
+/// requests go to the other pool; with none left, `Routing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cell_that_goes_away_is_not_chosen() {
+async fn a_pool_that_goes_away_is_not_chosen() {
     let spec = spec_of(placement());
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
     let m2 = model(&spec, &directory, M2, "m2-hub:1337", 1, 1, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "both model cells ready", |cells| {
-        holds(cells, M1, CellState::Ready, 1) && holds(cells, M2, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "both model pools ready", |pools| {
+        holds(pools, M1, PoolState::Ready, 1) && holds(pools, M2, PoolState::Ready, 1)
     })
     .await;
     asks(&chooser, 4).await;
 
     m1.hub.shutdown().await.expect("valid test fixture");
-    until(&cells, "the stopped cell dropped", |cells| {
-        followed(cells, "f", M1).is_none()
+    until(&pools, "the stopped pool dropped", |pools| {
+        followed(pools, "f", M1).is_none()
     })
     .await;
     let used = counted(&[&m1, &m2], asks(&chooser, 10)).await;
-    assert_eq!(used, [0, 10], "a dropped cell was chosen");
+    assert_eq!(used, [0, 10], "a dropped pool was chosen");
 
     m2.hub.shutdown().await.expect("valid test fixture");
-    until(&cells, "no cell followed", |cells| {
-        cells.followed("f").is_empty()
+    until(&pools, "no pool followed", |pools| {
+        pools.followed("f").is_empty()
     })
     .await;
     unplaced(ask(&chooser.segment).await);
@@ -266,25 +266,25 @@ async fn a_cell_that_goes_away_is_not_chosen() {
 }
 
 /// With `[routing] B = "round_robin"` and two entry instances in the one
-/// cell, requests alternate between them. The cell's hub makes no load
-/// summary within the test: the `round_robin` cell policy reads none, so
-/// the test waits only for the cell and its entries.
+/// pool, requests alternate between them. The pool's hub makes no load
+/// summary within the test: the `round_robin` pool policy reads none, so
+/// the test waits only for the pool and its entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn round_robin_takes_turns_within_the_chosen_cell() {
+async fn round_robin_takes_turns_within_the_chosen_pool() {
     let spec = spec_of(placement().route("B", RequestRouter::RoundRobin));
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
-    let cell = Model {
+    let pool = Model {
         name: M1,
         hub: "m1-hub:1337",
         quorum: 2,
         entries: 2,
     };
-    let m1 = model_unsummarized(&spec, &directory, cell, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "the cell ready with both entries", |cells| {
-        holds(cells, M1, CellState::Ready, 2)
+    let m1 = model_unsummarized(&spec, &directory, pool, &events).await;
+    let pools = tables(&chooser);
+    until(&pools, "the pool ready with both entries", |pools| {
+        holds(pools, M1, PoolState::Ready, 2)
     })
     .await;
     let mut order = Vec::new();
@@ -340,19 +340,19 @@ impl Selector for Recording {
     }
 }
 
-/// The ids of a cell's entry instances, as a selector sees them.
-fn entry_ids<H>(cell: &ModelCell<H>) -> BTreeSet<u128> {
-    cell.entries
+/// The ids of a pool's entry instances, as a selector sees them.
+fn entry_ids<H>(pool: &ModelPool<H>) -> BTreeSet<u128> {
+    pool.entries
         .iter()
         .map(|entry| entry.segment.peer_info().instance_id().as_u128())
         .collect()
 }
 
 /// With a selector on the boundary, the selector is offered only the
-/// chosen cell's entry instances, and its lease is released when the
+/// chosen pool's entry instances, and its lease is released when the
 /// response ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_selector_sees_only_the_chosen_cells_instances() {
+async fn a_selector_sees_only_the_chosen_pools_instances() {
     let spec = spec_of(placement().route("B", RequestRouter::Selector("recording".into())));
     let events = Events::new();
     let directory = Resolving::new();
@@ -364,9 +364,9 @@ async fn a_selector_sees_only_the_chosen_cells_instances() {
     let (hub, chooser) = global(&spec, &directory, selectors, &events).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 2, 2, &events).await;
     let m2 = model(&spec, &directory, M2, "m2-hub:1337", 1, 1, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "both model cells ready", |cells| {
-        holds(cells, M1, CellState::Ready, 2) && holds(cells, M2, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "both model pools ready", |pools| {
+        holds(pools, M1, PoolState::Ready, 2) && holds(pools, M2, PoolState::Ready, 1)
     })
     .await;
     let (one, two) = (entry_ids(&m1), entry_ids(&m2));
@@ -386,7 +386,7 @@ async fn a_selector_sees_only_the_chosen_cells_instances() {
     assert_eq!(offered.len(), 20);
     assert!(
         offered.iter().all(|ids| *ids == one || *ids == two),
-        "offered instances of more than one cell: {offered:?}"
+        "offered instances of more than one pool: {offered:?}"
     );
     assert!(
         offered.contains(&one) && offered.contains(&two),
@@ -411,9 +411,9 @@ async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
         .expect("a selector");
     let (hub, chooser) = global(&spec, &directory, selectors, &events).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
-    let cells = tables(&chooser);
-    until(&cells, "the cell ready", |cells| {
-        holds(cells, M1, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "the pool ready", |pools| {
+        holds(pools, M1, PoolState::Ready, 1)
     })
     .await;
     // Three items, then the sink holds its stream open.
@@ -455,28 +455,28 @@ async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
     }
 }
 
-/// A placement whose `[cells.model_x] policy` names a policy that nothing
+/// A placement whose `[pools.model_x] policy` names a policy that nothing
 /// registers and gdl does not have is refused when a chooser launches,
 /// naming it, the class, and the policies it could name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
-    let spec = spec_of(placement().cell_policy(
+async fn a_chooser_refuses_a_pool_policy_it_does_not_have() {
+    let spec = spec_of(placement().pool_policy(
         "model_x",
-        CellPolicy {
+        PoolPolicy {
             policy: "nearest".into(),
         },
     ));
     let events = Events::new();
     let directory = Resolving::new();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     let Err(error) = run(&config, "a", &spec, config.runtime.clone(), &events).await else {
-        panic!("a chooser launched with a cell policy it does not have");
+        panic!("a chooser launched with a pool policy it does not have");
     };
     let message = error.to_string();
     assert!(
@@ -487,7 +487,7 @@ async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// A classed placement whose instances have no `[cell]` routes as a
+/// A classed placement whose instances have no `[pool]` routes as a
 /// placement without classes does: over a roster of every segment, the
 /// hand-off into `model_x` goes to the roster's instance of `f`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -511,13 +511,13 @@ async fn a_classed_placement_over_a_roster_routes_as_before() {
     assert_eq!(cluster.segment("f").served().forwards, 4);
 }
 
-/// The same under a hub, with no instance in a cell: every instance meets
-/// every segment, follows no cell, and routes by its roster.
+/// The same under a hub, with no instance in a pool: every instance meets
+/// every segment, follows no pool, and routes by its roster.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_classed_placement_without_cells_under_a_hub_routes_as_before() {
+async fn a_classed_placement_without_pools_under_a_hub_routes_as_before() {
     let spec = spec_of(placement());
     let events = Events::new();
-    let hub = Hub::builder(common::cells::hub_config())
+    let hub = Hub::builder(common::pools::hub_config())
         .extension(gdl_hub::GraphAdmission::new(spec.clone()))
         .serve()
         .await
@@ -538,8 +538,8 @@ async fn a_classed_placement_without_cells_under_a_hub_routes_as_before() {
     }))
     .await;
     assert!(
-        launched.iter().all(|running| running.cells.is_none()),
-        "an instance without a cell chose"
+        launched.iter().all(|running| running.pools.is_none()),
+        "an instance without a pool chose"
     );
     asks(&launched[0], 4).await;
     assert_eq!(launched[1].forwards(), 4);
@@ -559,7 +559,7 @@ async fn refused_twice(what: &str, refused: impl Fn() -> u64) {
         .unwrap_or_else(|_| panic!("{what} was not refused twice in time"));
 }
 
-/// The address of `hub`'s public listener, as a cell's watches take it.
+/// The address of `hub`'s public listener, as a pool's watches take it.
 fn address(hub: &Hub) -> String {
     format!("127.0.0.1:{}", hub.public_addr().port())
 }
@@ -575,23 +575,23 @@ async fn open(watching: &mut tokio::sync::watch::Receiver<usize>, n: usize) {
 /// The global's hub serves one watch of its relay, which the test holds:
 /// the chooser's own watch of it is refused, and asked for again, and a
 /// request into `model_x` fails with `Routing`, since the chooser follows
-/// no cell. Once the test lets go, the chooser's watch is served, and the
-/// model cell it now follows answers its requests.
+/// no pool. Once the test lets go, the chooser's watch is served, and the
+/// model pool it now follows answers its requests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_chooser_refused_its_relay_routes_once_there_is_room() {
     let spec = spec_of(placement());
     let events = Events::new();
     let directory = Resolving::new();
-    let capped = CellTiming {
+    let capped = PoolTiming {
         watch_caps: WatchCaps {
             relay: 1,
             ..WatchCaps::default()
         },
         ..timing()
     };
-    let (hub, relay) = cell_hub_timed(&spec, global_hub(), &directory, capped).await;
+    let (hub, relay) = pool_hub_timed(&spec, global_hub(), &directory, capped).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let mut held = tokio::time::timeout(WAIT, watcher.follows(&address(&hub), None))
         .await
         .expect("the hub answers in time")
@@ -611,51 +611,51 @@ async fn a_chooser_refused_its_relay_routes_once_there_is_room() {
     unplaced(ask(&chooser.segment).await);
 
     drop(held);
-    let cells = tables(&chooser);
-    until(&cells, "the model cell ready in the tables", |cells| {
-        holds(cells, M1, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "the model pool ready in the tables", |pools| {
+        holds(pools, M1, PoolState::Ready, 1)
     })
     .await;
     let used = counted(&[&m1], asks(&chooser, 3)).await;
-    assert_eq!(used, [3], "the followed cell did not take the requests");
+    assert_eq!(used, [3], "the followed pool did not take the requests");
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
 
-/// The model cell's hub serves as many watches of the cell as its own two
+/// The model pool's hub serves as many watches of the pool as its own two
 /// instances hold and one more, which the test holds: the global's link is
 /// refused, and asked for again, and a request into `model_x` fails with
-/// `Routing`, since the global follows no cell. Once the test lets go, the
-/// global follows the cell, and the cell answers the chooser's requests.
+/// `Routing`, since the global follows no pool. Once the test lets go, the
+/// global follows the pool, and the pool answers the chooser's requests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parent_refused_its_childs_watch_routes_to_it_once_there_is_room() {
     let spec = spec_of(placement());
     let events = Events::new();
     let directory = Resolving::new();
-    let capped = |timing| CellTiming {
+    let capped = |timing| PoolTiming {
         watch_caps: WatchCaps {
-            cell: 3,
+            pool: 3,
             ..WatchCaps::default()
         },
         ..timing
     };
-    let cell = Model {
+    let pool = Model {
         name: M1,
         hub: "m1-hub:1337",
         quorum: 1,
         entries: 1,
     };
-    let m1 = model_timed(&spec, &directory, cell, &capped, &events).await;
-    // Each of the cell's instances, its entry and its sink, watches the
-    // cell for its drain.
+    let m1 = model_timed(&spec, &directory, pool, &capped, &events).await;
+    // Each of the pool's instances, its entry and its sink, watches the
+    // pool for its drain.
     let mut watching = m1.readiness.watchers();
     open(&mut watching, 2).await;
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let mut held = tokio::time::timeout(WAIT, watcher.watch(&address(&m1.hub)))
         .await
         .expect("the hub answers in time")
-        .expect("the hub serves the cell's last watch");
+        .expect("the hub serves the pool's last watch");
     tokio::time::timeout(WAIT, held.next())
         .await
         .expect("the snapshot begins in time")
@@ -664,17 +664,17 @@ async fn a_parent_refused_its_childs_watch_routes_to_it_once_there_is_room() {
     open(&mut watching, 3).await;
 
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
-    refused_twice("the global's link", || m1.readiness.refused_watches().cell).await;
+    refused_twice("the global's link", || m1.readiness.refused_watches().pool).await;
     unplaced(ask(&chooser.segment).await);
 
     drop(held);
-    let cells = tables(&chooser);
-    until(&cells, "the model cell ready in the tables", |cells| {
-        holds(cells, M1, CellState::Ready, 1)
+    let pools = tables(&chooser);
+    until(&pools, "the model pool ready in the tables", |pools| {
+        holds(pools, M1, PoolState::Ready, 1)
     })
     .await;
     let used = counted(&[&m1], asks(&chooser, 3)).await;
-    assert_eq!(used, [3], "the followed cell did not take the requests");
+    assert_eq!(used, [3], "the followed pool did not take the requests");
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

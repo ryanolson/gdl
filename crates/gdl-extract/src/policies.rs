@@ -1,4 +1,4 @@
-//! The cell policies a crate implements: each impl of `CellPolicy` for a
+//! The pool policies a crate implements: each impl of `PoolPolicy` for a
 //! type that a generated segment can name, with the head it reads.
 
 use crate::canon::{Env, Ty, canonical};
@@ -9,8 +9,8 @@ use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
 use crate::{PolicyEntry, PolicyHead, Skipped};
 
-/// The cell policies of crate `krate`, and those it leaves out with why:
-/// the impls whose trait the resolver follows to gdl's `CellPolicy`. Only
+/// The pool policies of crate `krate`, and those it leaves out with why:
+/// the impls whose trait the resolver follows to gdl's `PoolPolicy`. Only
 /// a package that depends on gdl, itself or through others, can implement
 /// it, so a crate that does not has none, and the paths of one that does
 /// enter only such packages: a crate holds many impls of other traits, and
@@ -36,7 +36,7 @@ pub(crate) fn policies(
             .collect();
         for (index, path) in paths {
             resolver.admit = gate.take();
-            let is_policy = is_cell_policy(resolver, krate, module, &path);
+            let is_policy = is_pool_policy(resolver, krate, module, &path);
             gate = resolver.admit.take();
             if !is_policy {
                 continue;
@@ -77,11 +77,11 @@ fn reaching_gdl(graph: &Graph) -> Vec<bool> {
 }
 
 /// Whether `path`, an impl's trait written in module `module` of crate
-/// `krate`, is gdl's `CellPolicy`, by where the resolver finds it defined.
+/// `krate`, is gdl's `PoolPolicy`, by where the resolver finds it defined.
 /// A trait of that name that the crate declares, or one that a local
 /// module named `gdl` holds, is not gdl's, and its impls would not
 /// register.
-fn is_cell_policy(
+fn is_pool_policy(
     resolver: &mut Resolver<'_>,
     krate: usize,
     module: usize,
@@ -91,7 +91,7 @@ fn is_cell_policy(
     let Some(def @ Def::Trait(..)) = resolver.resolve(krate, module, &names, absolute) else {
         return false;
     };
-    gdls(resolver, def, Item::CellPolicy)
+    gdls(resolver, def, Item::PoolPolicy)
 }
 
 /// The policy impl `index` of module `module` is for, or why no segment
@@ -121,7 +121,7 @@ fn policy(
     let skip = |why: String| Skipped {
         name: written.clone(),
         path: None,
-        problem: format!("{at}cell policy `{written}` {why}"),
+        problem: format!("{at}pool policy `{written}` {why}"),
     };
     if !params.is_empty() {
         return Err(skip(

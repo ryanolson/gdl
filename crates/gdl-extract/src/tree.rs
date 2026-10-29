@@ -44,7 +44,7 @@ pub(crate) struct Module {
     /// The names of the traits and trait aliases it declares: a local
     /// `trait Default` hides the prelude's.
     others: Counted<HashSet<String>>,
-    /// The traits it declares, which a path can resolve to, as a cell
+    /// The traits it declares, which a path can resolve to, as a pool
     /// policy's trait does.
     pub(crate) traits: Counted<Vec<TraitDef>>,
     traits_named: Counted<HashMap<String, Vec<usize>>>,

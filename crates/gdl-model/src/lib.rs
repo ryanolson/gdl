@@ -1,8 +1,8 @@
 //! The gdl graph model without the runtime: a graph's [`Manifest`], a
 //! [`Placement`] of its nodes in segments, a spec's [`Placements`] (one
 //! for each of its layouts), the [`Layout`] that checks a placement against
-//! the graph, diagrams of both, and the cells that deploy a placement's
-//! classes: the [`Fleet`] file and a cell's own [`CellSettings`].
+//! the graph, diagrams of both, and the pools that deploy a placement's
+//! classes: the [`Fleet`] file and a pool's own [`PoolSettings`].
 //!
 //! The generator and the runtime check placements with these rules. The
 //! crate builds for `wasm32-unknown-unknown` so that the same rules can
@@ -10,7 +10,6 @@
 //! `gdl` re-exports the configuration and metric metadata, and
 //! `gdl-runtime` the placement types it reads; the rest is here.
 
-mod cell;
 mod config;
 mod deployment;
 mod diagram;
@@ -21,17 +20,13 @@ mod manifest;
 mod metrics;
 mod models;
 mod placement;
+mod pool;
 mod problem;
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub use cell::{
-    CellSettings, DirectoryBackend, HubTiming, WatchCaps, cell_variable, check_cell_name,
-    check_hub_address, check_hub_timing, check_region_name, check_relay_lease, check_summary,
-    missing_parent_hub, missing_state_dir,
-};
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
@@ -46,9 +41,15 @@ pub use metrics::{
 };
 pub use models::{InstanceModel, InstanceModelState, ModelKey};
 pub use placement::{
-    CellPolicy, ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
-    PlacementErrors, Placements, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge, WireReason,
-    check_cell_policy_name, check_class_name, check_layout_name, check_selector_name, layout,
+    ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
+    PlacementErrors, Placements, PoolPolicy, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge,
+    WireReason, check_class_name, check_layout_name, check_pool_policy_name, check_selector_name,
+    layout,
+};
+pub use pool::{
+    DirectoryBackend, HubTiming, PoolSettings, WatchCaps, check_hub_address, check_hub_timing,
+    check_pool_name, check_region_name, check_relay_lease, check_summary, missing_parent_hub,
+    missing_state_dir, pool_variable,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
 

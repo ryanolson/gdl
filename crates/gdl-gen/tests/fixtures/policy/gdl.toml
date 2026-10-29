@@ -1,5 +1,5 @@
 # The source in the global class and the model in a class of its own: a
-# chooser in `front` picks a model cell by the policy `by_model`, which
+# chooser in `front` picks a model pool by the policy `by_model`, which
 # the crate `policy-router` implements.
 [graph]
 path = "policy.gdl"
@@ -27,10 +27,10 @@ segments = ["front"]
 [class.model]
 segments = ["model"]
 
-[cells.model]
+[pools.model]
 policy = "by_model"
 
-[cell_policy.by_model]
+[pool_policy.by_model]
 crate = "policy-router"
 path = "router"
 type = "policy_router::ByModel"

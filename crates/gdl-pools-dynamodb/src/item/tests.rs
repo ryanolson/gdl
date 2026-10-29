@@ -1,23 +1,23 @@
 use std::time::Duration;
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use gdl_cells::{
-    CellRecord, CellState, DirectoryError, ModelEntry, ModelState, Presence, Version, Withdrawal,
+use gdl_pools::{
+    DirectoryError, ModelEntry, ModelState, PoolRecord, PoolState, Presence, Version, Withdrawal,
 };
 
 use super::{
-    BODY, CELL, Entry, Held, LIST_KEY, StoredHeld, decode, decode_list, record, withdrawal,
+    BODY, Entry, Held, LIST_KEY, POOL, StoredHeld, decode, decode_list, record, withdrawal,
 };
 
-fn cell(models: usize, models_version: u64) -> CellRecord {
-    CellRecord {
+fn pool(models: usize, models_version: u64) -> PoolRecord {
+    PoolRecord {
         name: "model-x-01".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some("global-us".into()),
         contract: 7,
         placement: 8,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 3,
         seq: 9,
         hub: "model-x-01:4000".into(),
@@ -39,9 +39,9 @@ fn cell(models: usize, models_version: u64) -> CellRecord {
 
 /// What a scan installs for `record`'s items: the record joined to its
 /// list.
-fn read_back(published: &CellRecord) -> CellRecord {
+fn read_back(published: &PoolRecord) -> PoolRecord {
     let encoded = record(published, 1).expect("encodes");
-    let stored = decode("model_x", &encoded.item).expect("a cell's item");
+    let stored = decode("model_x", &encoded.item).expect("a pool's item");
     let list = match &stored.held {
         StoredHeld::Record {
             list: Some(key), ..
@@ -61,7 +61,7 @@ fn read_back(published: &CellRecord) -> CellRecord {
 
 #[test]
 fn a_record_with_models_is_whole_once_its_list_is_joined() {
-    let published = cell(3, 12);
+    let published = pool(3, 12);
     let encoded = record(&published, 1).expect("encodes");
     let AttributeValue::S(body) = &encoded.item[BODY] else {
         panic!("a text body");
@@ -77,23 +77,23 @@ fn a_record_with_models_is_whole_once_its_list_is_joined() {
 /// `models_version`: a record at version 0 can carry models too.
 #[test]
 fn a_record_at_models_version_zero_keeps_its_models() {
-    let published = cell(1, 0);
+    let published = pool(1, 0);
     assert!(record(&published, 1).expect("encodes").list.is_some());
     assert_eq!(read_back(&published), published);
 }
 
 #[test]
 fn a_record_without_models_or_revocations_has_no_list() {
-    let published = cell(0, 4);
+    let published = pool(0, 4);
     assert!(record(&published, 1).expect("encodes").list.is_none());
     assert_eq!(read_back(&published), published);
 
-    let revoked = CellRecord {
+    let revoked = PoolRecord {
         revoked: vec![gdl_model::ModelKey {
             model: "qwen-32b".into(),
             routing_key: None,
         }],
-        ..cell(0, 5)
+        ..pool(0, 5)
     };
     assert!(record(&revoked, 1).expect("encodes").list.is_some());
     assert_eq!(read_back(&revoked), revoked);
@@ -103,8 +103,8 @@ fn a_record_without_models_or_revocations_has_no_list() {
 /// body is not the one the key's digest names is taken as not there yet.
 #[test]
 fn a_list_of_another_version_is_not_joined() {
-    let first = record(&cell(2, 12), 1).expect("encodes");
-    let second = record(&cell(3, 12), 2).expect("encodes");
+    let first = record(&pool(2, 12), 1).expect("encodes");
+    let second = record(&pool(3, 12), 2).expect("encodes");
     let (first_key, first_item) = first.list.expect("a list");
     let (second_key, _) = second.list.expect("a list");
     assert_ne!(first_key, second_key, "one models_version, two lists");
@@ -115,11 +115,11 @@ fn a_list_of_another_version_is_not_joined() {
 }
 
 #[test]
-fn an_item_that_is_not_its_cells_write_is_passed_over() {
-    let encoded = record(&cell(0, 1), 1).expect("encodes");
+fn an_item_that_is_not_its_pools_write_is_passed_over() {
+    let encoded = record(&pool(0, 1), 1).expect("encodes");
     let mut other = encoded.item.clone();
-    other.insert(CELL.into(), AttributeValue::S("model-x-02".into()));
-    assert_eq!(decode("model_x", &other), None, "keyed by another cell");
+    other.insert(POOL.into(), AttributeValue::S("model-x-02".into()));
+    assert_eq!(decode("model_x", &other), None, "keyed by another pool");
     assert_eq!(decode("global", &encoded.item), None, "another class");
     let mut at = encoded.item.clone();
     at.insert("seq".into(), AttributeValue::N("10".into()));
@@ -133,11 +133,11 @@ fn an_item_that_is_not_its_cells_write_is_passed_over() {
 fn a_withdrawal_is_a_tombstone_at_its_version() {
     let w = Withdrawal {
         class: "model_x".into(),
-        cell: "model-x-02".into(),
+        pool: "model-x-02".into(),
         epoch: 4,
         seq: 2,
     };
-    let stored = decode("model_x", &withdrawal(&w, 1)).expect("a cell's item");
+    let stored = decode("model_x", &withdrawal(&w, 1)).expect("a pool's item");
     assert_eq!(stored.version, Version { epoch: 4, seq: 2 });
     assert_eq!(stored.held, StoredHeld::Withdrawn);
     assert_eq!(Entry::new("model_x", stored, None).held, Held::Withdrawn(w));
@@ -147,22 +147,22 @@ fn a_withdrawal_is_a_tombstone_at_its_version() {
 /// it is refused before any write: 10,000 models of about 60 bytes each.
 #[test]
 fn a_list_past_the_item_limit_is_refused() {
-    let big = cell(10_000, 1);
+    let big = pool(10_000, 1);
     assert!(matches!(
         record(&big, 1),
         Err(DirectoryError::Refused(problem)) if problem.contains("model list")
     ));
-    assert!(record(&cell(1_000, 1), 1).is_ok(), "1,000 models fit");
+    assert!(record(&pool(1_000, 1), 1).is_ok(), "1,000 models fit");
 }
 
 #[test]
 fn list_keys_sort_by_models_version() {
-    let low = record(&cell(1, 9), 1)
+    let low = record(&pool(1, 9), 1)
         .expect("encodes")
         .list
         .expect("a list")
         .0;
-    let high = record(&cell(1, 10), 1)
+    let high = record(&pool(1, 10), 1)
         .expect("encodes")
         .list
         .expect("a list")
@@ -170,7 +170,7 @@ fn list_keys_sort_by_models_version() {
     assert!(low.sort_key() < high.sort_key());
 }
 
-/// What a query reads per cell is the cost of a scan, and the book's
+/// What a query reads per pool is the cost of a scan, and the book's
 /// numbers come from here: a record item, with a load summary and a model
 /// list, stays near 442 bytes, and only the list grows with the models.
 #[test]
@@ -186,15 +186,15 @@ fn a_records_item_stays_small_whatever_its_models() {
             })
             .sum()
     };
-    let loaded = |models| CellRecord {
-        load: Some(gdl_cells::LoadSummary {
+    let loaded = |models| PoolRecord {
+        load: Some(gdl_pools::LoadSummary {
             admitted: 12,
             limit: 64,
             instances: 4,
             refusals: 0,
             period_ms: 10_000,
         }),
-        ..cell(models, 4_294_967_297)
+        ..pool(models, 4_294_967_297)
     };
     let one = record(&loaded(1), u64::MAX).expect("encodes");
     let many = record(&loaded(1_000), u64::MAX).expect("encodes");

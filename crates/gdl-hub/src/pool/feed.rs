@@ -1,9 +1,9 @@
-//! The cell's watch as its hub serves it: what a watch begins with, and the
+//! The pool's watch as its hub serves it: what a watch begins with, and the
 //! changes after it, fanned out to every watcher.
 //!
 //! Three sources feed it: the hub's registration hooks say who an entry
 //! instance is and when it leaves; the counting's loopback watches say when
-//! it is ready or retires; the judgment says when the cell's state changes.
+//! it is ready or retires; the judgment says when the pool's state changes.
 //! The first two are ordered against each other by what the hub does
 //! first: it commits a registration's services before its admission, so
 //! what the loopback shows of an instance the members do not hold yet is
@@ -14,17 +14,17 @@
 //! lock, and a watch takes its snapshot and subscribes under the same
 //! lock, so that no change between the two is lost or seen twice.
 //!
-//! The feed also counts the cells that follow this one, by the watches
+//! The feed also counts the pools that follow this one, by the watches
 //! their hubs hold open ([`super::followers`]), and tells its watchers once
-//! the cell drains and none does any more, under the same lock. And it
-//! tells them once every cell that followed the cell when an entry
+//! the pool drains and none does any more, under the same lock. And it
+//! tells them once every pool that followed the pool when an entry
 //! instance retired avoids it ([`super::retiring`]), under the same lock.
 //!
 //! The feed also keeps the entry instances' load reports
 //! ([`super::load`]), under the same lock, so that a report is taken only
 //! from an instance that is usable when it arrives, and the summary made
 //! of them is sent to the watchers in order with the rest. So too what
-//! each instance says of its models, and the cell's model entries made of
+//! each instance says of its models, and the pool's model entries made of
 //! what the usable ones say ([`super::models`]): those go to the record,
 //! not to the watch.
 //!
@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_cells::{CellState, LoadSummary};
 use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
+use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
 use velo_hub::Lease;
@@ -60,22 +60,22 @@ use super::load::Reports;
 use super::models::{ModelList, Models, Offer};
 use super::retiring::Retiring;
 use crate::fanout::Watchers;
-use gdl_watch::{CellWatchError, CellWatchEvent};
+use gdl_watch::{PoolWatchError, PoolWatchEvent};
 
-/// The fan-out of one cell's watch.
+/// The fan-out of one pool's watch.
 pub(super) struct Feed {
     name: String,
     class: String,
     shared: Mutex<Shared>,
     /// The record's epoch, once a write is stored under it.
     epoch: watch::Sender<Option<u64>>,
-    /// The cell's model entries, as they change.
+    /// The pool's model entries, as they change.
     models: watch::Sender<Arc<ModelList>>,
     watchers: Watchers,
 }
 
 impl Feed {
-    /// The feed of the cell `name` of `class`, whose class has `segments`
+    /// The feed of the pool `name` of `class`, whose class has `segments`
     /// in its order, each with whether it is an entry segment, and whose
     /// load summary period is `period`. A watcher that falls more than
     /// `buffer` events behind is ended. A follower's watch closed without
@@ -94,7 +94,7 @@ impl Feed {
             name,
             class,
             shared: Mutex::new(Shared {
-                state: CellState::Unavailable,
+                state: PoolState::Unavailable,
                 segments,
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
@@ -112,7 +112,7 @@ impl Feed {
         }
     }
 
-    /// The cell's model entries, as they change: none until the cell's
+    /// The pool's model entries, as they change: none until the pool's
     /// last record has been read ([`Feed::restore`]).
     pub(super) fn models(&self) -> watch::Receiver<Arc<ModelList>> {
         self.models.subscribe()
@@ -127,7 +127,7 @@ impl Feed {
         }
     }
 
-    /// Take the model entries of the cell's last record, `held` with their
+    /// Take the model entries of the pool's last record, `held` with their
     /// version and the revoked models, or none, and count later versions
     /// from at least `floor`: from then on, what the instances say of
     /// their models makes the entries.
@@ -164,38 +164,38 @@ impl Feed {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The cell's model entries changed: for the record, and for each
-    /// cell that follows this one, under the lock that orders the watch's
+    /// The pool's model entries changed: for the record, and for each
+    /// pool that follows this one, under the lock that orders the watch's
     /// events.
     fn models_changed(&self, shared: &Shared) {
         let list = shared.models.list();
-        shared.send(CellWatchEvent::Models {
+        shared.send(PoolWatchEvent::Models {
             models: list.clone(),
         });
         self.models.send_replace(Arc::new(list));
     }
 
-    /// A watch of the cell: its snapshot, then each change. It begins once
-    /// the cell's record is stored, since the epoch is settled only then;
-    /// refused if the hub stops first, or once the drained cell's record
+    /// A watch of the pool: its snapshot, then each change. It begins once
+    /// the pool's record is stored, since the epoch is settled only then;
+    /// refused if the hub stops first, or once the drained pool's record
     /// is withdrawn. It counts among the watchers from
     /// the moment it is asked for, so that one held waiting is seen.
-    pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
-        Ok(CellWatch {
+    pub(super) async fn watch(&self) -> Result<PoolWatch, PoolWatchError> {
+        Ok(PoolWatch {
             events: self.open(None).await?,
             _following: None,
         })
     }
 
     /// [`Feed::watch`], as the watch `key` of a follower, which counts
-    /// among the cell's followers from its snapshot until it is released
+    /// among the pool's followers from its snapshot until it is released
     /// ([`super::followers`]).
     pub(super) async fn follow(
         self: &Arc<Self>,
         key: WatchKey,
-    ) -> Result<CellWatch, CellWatchError> {
+    ) -> Result<PoolWatch, PoolWatchError> {
         let events = self.open(Some(&key)).await?;
-        Ok(CellWatch {
+        Ok(PoolWatch {
             events,
             _following: Some(Following {
                 feed: Arc::clone(self),
@@ -209,7 +209,7 @@ impl Feed {
     async fn open(
         &self,
         follower: Option<&WatchKey>,
-    ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
+    ) -> Result<BoxStream<'static, PoolWatchEvent>, PoolWatchError> {
         let counted = self.watchers.count();
         let mut settled = self.epoch.subscribe();
         let epoch = tokio::select! {
@@ -218,8 +218,8 @@ impl Feed {
             epoch = settled.wait_for(Option::is_some) => epoch.ok().and_then(|epoch| *epoch),
         };
         let epoch = epoch.ok_or_else(|| {
-            CellWatchError::new(
-                "the cell's hub serves no watch: it stopped before it published the cell's record, or the cell was drained",
+            PoolWatchError::new(
+                "the pool's hub serves no watch: it stopped before it published the pool's record, or the pool was drained",
             )
         })?;
         let (snapshot, events) = {
@@ -242,8 +242,8 @@ impl Feed {
         self.lock().followers.left(key, Instant::now());
     }
 
-    /// The follower of the watch `key` let go of the cell in it: the
-    /// draining cell's watchers are told if no cell follows it any more.
+    /// The follower of the watch `key` let go of the pool in it: the
+    /// draining pool's watchers are told if no pool follows it any more.
     pub(super) fn release(&self, key: &WatchKey) {
         let mut shared = self.lock();
         let state = shared.state;
@@ -255,7 +255,7 @@ impl Feed {
         }
     }
 
-    /// The follower of the watch `key` says that its whole cell avoids the
+    /// The follower of the watch `key` says that its whole pool avoids the
     /// retired entry instance `instance`: the instance's watchers are told
     /// once every watch its retirement waited for has said so or been
     /// released. A watch it does not wait for changes nothing.
@@ -266,7 +266,7 @@ impl Feed {
         }
     }
 
-    /// The cells that follow this one, as they change.
+    /// The pools that follow this one, as they change.
     pub(super) fn followers(&self) -> watch::Receiver<BTreeSet<Key>> {
         self.lock().followers.subscribe()
     }
@@ -283,7 +283,7 @@ impl Feed {
     }
 
     /// End every watch, and refuse those asked for from now: the hub
-    /// stops, or the drained cell's record was withdrawn.
+    /// stops, or the drained pool's record was withdrawn.
     pub(super) fn close(&self) {
         self.watchers.close();
     }
@@ -298,12 +298,12 @@ impl Feed {
         });
     }
 
-    /// The judgment changed the cell's state.
-    pub(super) fn set_state(&self, state: CellState) {
+    /// The judgment changed the pool's state.
+    pub(super) fn set_state(&self, state: PoolState) {
         let mut shared = self.lock();
         if shared.state != state {
             shared.state = state;
-            shared.send(CellWatchEvent::State {
+            shared.send(PoolWatchEvent::State {
                 state,
                 unfollowed: false,
             });
@@ -389,9 +389,9 @@ impl Feed {
     /// `owner`, holding `lease`, reported `load` at `now`: taken only from
     /// a usable entry instance in the registration the lease is of, since
     /// a report of an earlier one, or of an instance that retired, would
-    /// count work the cell no longer offers. What it says of its models
+    /// count work the pool no longer offers. What it says of its models
     /// stands until it says otherwise, or is no longer usable; a model
-    /// with no name is left out. Refused before the cell's last record is
+    /// with no name is left out. Refused before the pool's last record is
     /// read, since what it says could not be kept: the instance sends it
     /// again. The reason, when refused.
     ///
@@ -408,7 +408,7 @@ impl Feed {
     ) -> Result<Taken, String> {
         let mut shared = self.lock();
         if !shared.models.restored() {
-            return Err("the cell's hub has not read its cell's last record yet".into());
+            return Err("the pool's hub has not read its pool's last record yet".into());
         }
         match shared.entries.get_mut(&owner) {
             Some(entry) if entry.epoch != lease.epoch => Err(format!(
@@ -453,7 +453,7 @@ impl Feed {
                 "instance {owner} is not usable: it is not ready, it retired, or it left"
             )),
             None => Err(format!(
-                "instance {owner} is not an entry instance of the cell"
+                "instance {owner} is not an entry instance of the pool"
             )),
         }
     }
@@ -473,7 +473,7 @@ impl Feed {
         }
     }
 
-    /// Make the cell's load summary at `now` from the reports of its usable
+    /// Make the pool's load summary at `now` from the reports of its usable
     /// entry instances, and send it to the watchers: every period while
     /// there is one, changed or not, so that a watcher's age of the last
     /// it had says how fresh it is; and once when there is none.
@@ -490,7 +490,7 @@ impl Feed {
         let changed = loads.summarize(usable, instances, now).is_some();
         let load = shared.loads.summary();
         if changed || load.is_some() {
-            shared.send(CellWatchEvent::Load { load });
+            shared.send(PoolWatchEvent::Load { load });
         }
         // An instance that is no longer usable no longer serves its
         // models: seen here, once a period, as its report is dropped.
@@ -522,16 +522,16 @@ impl Feed {
 
 /// What the feed knows, behind its lock.
 struct Shared {
-    state: CellState,
+    state: PoolState,
     /// The class's segments, in its order, each with whether it is an
     /// entry segment.
     segments: Vec<(String, bool)>,
     /// The members of the entry segments, and those that left whose `left`
     /// waits for the loopback.
     entries: HashMap<InstanceId, Entry>,
-    /// The cells that follow this one.
+    /// The pools that follow this one.
     followers: Followers,
-    /// The retirements those cells have yet to acknowledge.
+    /// The retirements those pools have yet to acknowledge.
     retiring: Retiring,
     /// Instances the loopback shows in an entry segment's services that the
     /// hub's members do not hold, with their segment: one whose services
@@ -540,10 +540,10 @@ struct Shared {
     unresolved: HashMap<InstanceId, (usize, Held)>,
     /// The entry instances' load reports.
     loads: Reports,
-    /// The cell's model entries, made of what its usable entry instances
+    /// The pool's model entries, made of what its usable entry instances
     /// say.
     models: Models,
-    events: broadcast::Sender<CellWatchEvent>,
+    events: broadcast::Sender<PoolWatchEvent>,
     #[cfg(test)]
     work: crate::fanout::Work,
 }
@@ -559,7 +559,7 @@ struct Entry {
     ready: bool,
     /// Whether it has retired.
     retired: bool,
-    /// Whether every cell that followed this one when it retired avoids
+    /// Whether every pool that followed this one when it retired avoids
     /// it.
     acknowledged: bool,
     /// Which of its services the loopback shows it in now.
@@ -654,7 +654,7 @@ impl Shared {
     }
 
     /// Subscribe a watch to the changes.
-    fn subscribe(&self) -> broadcast::Receiver<CellWatchEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<PoolWatchEvent> {
         #[cfg(test)]
         self.work.subscription();
         self.events.subscribe()
@@ -662,7 +662,7 @@ impl Shared {
 
     /// No watcher is no error: the change is in the state the next one's
     /// snapshot is taken from.
-    fn send(&self, event: CellWatchEvent) {
+    fn send(&self, event: PoolWatchEvent) {
         let _ = self.events.send(event);
     }
 
@@ -733,7 +733,7 @@ impl Shared {
                 if entry.retired {
                     return;
                 }
-                CellWatchEvent::Ready {
+                PoolWatchEvent::Ready {
                     segment,
                     peer: entry.peer.clone(),
                 }
@@ -741,7 +741,7 @@ impl Shared {
             Watched::Retired if !entry.retired => {
                 entry.retired = true;
                 entry.acknowledged = self.retiring.retire(id, self.followers.counted());
-                CellWatchEvent::Retired {
+                PoolWatchEvent::Retired {
                     segment,
                     instance: id,
                     acknowledged: entry.acknowledged,
@@ -761,7 +761,7 @@ impl Shared {
             return;
         }
         let segment = self.segments[entry.segment].0.clone();
-        self.send(CellWatchEvent::Retired {
+        self.send(PoolWatchEvent::Retired {
             segment,
             instance: id,
             acknowledged: true,
@@ -782,18 +782,18 @@ impl Shared {
         self.retiring.left(id);
         if entry.ready || entry.retired {
             let segment = self.segments[entry.segment].0.clone();
-            self.send(CellWatchEvent::Left {
+            self.send(PoolWatchEvent::Left {
                 segment,
                 instance: id,
             });
         }
     }
 
-    /// The cell, then whether no cell follows the draining cell, then
+    /// The pool, then whether no pool follows the draining pool, then
     /// every retired entry instance, then every ready one, then the
     /// marker: retirements first, so that a follower that applies the
     /// events in order never makes a retired instance routable.
-    fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<CellWatchEvent> {
+    fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<PoolWatchEvent> {
         #[cfg(test)]
         self.work.snapshot();
         let mut retired: Vec<(usize, InstanceId, bool)> = Vec::new();
@@ -808,7 +808,7 @@ impl Shared {
         retired.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
         ready.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(retired.len() + ready.len() + 2);
-        events.push(CellWatchEvent::Cell {
+        events.push(PoolWatchEvent::Pool {
             name: name.to_string(),
             class: class.to_string(),
             epoch,
@@ -821,7 +821,7 @@ impl Shared {
         }
         events.extend(
             retired.into_iter().map(
-                |(segment, instance, acknowledged)| CellWatchEvent::Retired {
+                |(segment, instance, acknowledged)| PoolWatchEvent::Retired {
                     segment: self.segments[segment].0.clone(),
                     instance,
                     acknowledged,
@@ -831,37 +831,37 @@ impl Shared {
         events.extend(
             ready
                 .into_iter()
-                .map(|(segment, _, peer)| CellWatchEvent::Ready {
+                .map(|(segment, _, peer)| PoolWatchEvent::Ready {
                     segment: self.segments[segment].0.clone(),
                     peer: peer.clone(),
                 }),
         );
-        events.push(CellWatchEvent::Synced);
+        events.push(PoolWatchEvent::Synced);
         events
     }
 }
 
-/// What the draining cell's watch says once no cell follows it: its state
+/// What the draining pool's watch says once no pool follows it: its state
 /// again, with `unfollowed`, a field an earlier reader ignores.
-pub(super) fn unfollowed() -> CellWatchEvent {
-    CellWatchEvent::State {
-        state: CellState::Draining,
+pub(super) fn unfollowed() -> PoolWatchEvent {
+    PoolWatchEvent::State {
+        state: PoolState::Draining,
         unfollowed: true,
     }
 }
 
-/// A watch of a cell, in process: its snapshot, then each change, until
+/// A watch of a pool, in process: its snapshot, then each change, until
 /// the hub stops or the watch falls more than the hub's buffer behind.
-/// The cell's hub serves the same events at `GET /v1/ext/gdl-cell/watch`.
+/// The pool's hub serves the same events at `GET /v1/ext/gdl-pool/watch`.
 /// Dropping it releases what the hub holds for it.
-pub struct CellWatch {
-    events: BoxStream<'static, CellWatchEvent>,
+pub struct PoolWatch {
+    events: BoxStream<'static, PoolWatchEvent>,
     /// The follower the watch counts for, until it is dropped.
     _following: Option<Following>,
 }
 
-impl Stream for CellWatch {
-    type Item = CellWatchEvent;
+impl Stream for PoolWatch {
+    type Item = PoolWatchEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.events.as_mut().poll_next(cx)

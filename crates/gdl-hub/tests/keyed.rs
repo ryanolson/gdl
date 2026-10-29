@@ -1,4 +1,4 @@
-//! A cell hub's keyed record service: the hub's own instances read and
+//! A pool hub's keyed record service: the hub's own instances read and
 //! write its table by request and answer, over the control listener, with
 //! their own credentials. Every hub runs in process on OS-assigned ports;
 //! every wait is for something observed.
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use common::{Instance, WAIT, config, spec};
 use gdl_hub::{GraphAdmission, KeyedRecords, hub_builder};
-use gdl_model::{CellSettings, DirectoryBackend};
+use gdl_model::{DirectoryBackend, PoolSettings};
 use gdl_watch::{Expected, KeyedAnswer, KeyedOp, KeyedRecord, KeyedReply};
 use velo_hub::Hub;
 
@@ -149,7 +149,7 @@ async fn a_stale_version_is_refused_and_a_replace_always_applies() {
 
 /// A check answers unchanged while the record is at the version asked
 /// about, the newer record once another instance wrote it, and gone once
-/// the table evicted it. The hub that `hub_builder` builds for a cell
+/// the table evicted it. The hub that `hub_builder` builds for a pool
 /// serves the table at the capacity its settings give: one record here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_check_answers_unchanged_then_the_newer_record_then_gone() {
@@ -157,13 +157,13 @@ async fn a_check_answers_unchanged_then_the_newer_record_then_gone() {
         .prefix("gdl-hub-keyed-")
         .tempdir()
         .expect("a directory");
-    let mut cell: CellSettings = common::settings();
-    cell.directory = DirectoryBackend::Dir {
+    let mut pool: PoolSettings = common::settings();
+    pool.directory = DirectoryBackend::Dir {
         path: dir.path().to_path_buf(),
     };
-    cell.timing.keyed_capacity = 1;
-    let hub = hub_builder(config(), spec(), Some(cell))
-        .expect("a cell's hub")
+    pool.timing.keyed_capacity = 1;
+    let hub = hub_builder(config(), spec(), Some(pool))
+        .expect("a pool's hub")
         .serve()
         .await
         .expect("the hub serves");
@@ -275,7 +275,7 @@ async fn a_batch_of_sets_gets_one_answer_for_each() {
 
 /// Only an instance registered with the hub reads its table: a request
 /// without the credential of the instance its path names is refused, and
-/// a hub without a cell serves no table.
+/// a hub without a pool serves no table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_the_hubs_own_instances_reach_its_table() {
     let hub = keyed_hub(16).await;
@@ -308,7 +308,7 @@ async fn only_the_hubs_own_instances_reach_its_table() {
         [KeyedAnswer::Missing]
     );
     let plain = hub_builder(config(), spec(), None)
-        .expect("no cell")
+        .expect("no pool")
         .serve()
         .await
         .expect("the hub serves");

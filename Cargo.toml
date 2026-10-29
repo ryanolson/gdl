@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gdl-hub", "crates/gdl", "crates/gdl-cells", "crates/gdl-cells-dynamodb", "crates/gdl-watch", "crates/gdl-runtime", "crates/gdl-extract", "crates/gdl-gen", "crates/gdl-macros", "crates/gdl-message", "crates/gdl-model", "crates/gdl-syntax", "crates/gdl-web"]
+members = ["crates/gdl-hub", "crates/gdl", "crates/gdl-pools", "crates/gdl-pools-dynamodb", "crates/gdl-watch", "crates/gdl-runtime", "crates/gdl-extract", "crates/gdl-gen", "crates/gdl-macros", "crates/gdl-message", "crates/gdl-model", "crates/gdl-syntax", "crates/gdl-web"]
 # The example is its own workspace, as a deployment would be: its segment
 # crates must build with only the implementations they host.
 exclude = ["examples"]

@@ -40,14 +40,14 @@ fn only_this_crate_links_the_aws_sdk() {
         .collect();
     crates.sort_unstable();
     crates.dedup();
-    assert_eq!(crates, ["gdl-cells-dynamodb"], "{dependents}");
+    assert_eq!(crates, ["gdl-pools-dynamodb"], "{dependents}");
 }
 
-/// A cell directory backend needs only the trait: no velo, as for
-/// `gdl-cells`, and no aws-lc, whose C build is the SDK's default TLS.
+/// A pool directory backend needs only the trait: no velo, as for
+/// `gdl-pools`, and no aws-lc, whose C build is the SDK's default TLS.
 #[test]
 fn the_crate_links_no_transport_and_no_tls_of_its_own() {
-    let linked = tree(&["--package", "gdl-cells-dynamodb", "--edges", "normal"]);
+    let linked = tree(&["--package", "gdl-pools-dynamodb", "--edges", "normal"]);
     let unwanted: Vec<&str> = linked
         .lines()
         .filter(|line| {
@@ -56,5 +56,5 @@ fn the_crate_links_no_transport_and_no_tls_of_its_own() {
                 .any(|name| line.starts_with(name))
         })
         .collect();
-    assert!(unwanted.is_empty(), "gdl-cells-dynamodb links {unwanted:?}");
+    assert!(unwanted.is_empty(), "gdl-pools-dynamodb links {unwanted:?}");
 }

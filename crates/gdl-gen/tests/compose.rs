@@ -2240,7 +2240,7 @@ fn every_step_that_writes_a_manifest_refuses_a_gdl_path_to_the_definitions() {
     gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
 }
 
-/// A Git repository in `dir`, committed: a cell policy crate `regpolicy`
+/// A Git repository in `dir`, committed: a pool policy crate `regpolicy`
 /// whose `ByWords` reads `regproto::Words`, beside a stand-in `gdl` that
 /// declares the trait, so that it resolves from the offline registry. The
 /// repository's `file://` URL and its commit.
@@ -2261,7 +2261,7 @@ fn policy_repository(dir: &Path) -> (String, String) {
     );
     write(
         "gdl/src/lib.rs",
-        "pub trait CellPolicy {\n    type Head;\n}\n",
+        "pub trait PoolPolicy {\n    type Head;\n}\n",
     );
     write(
         "regpolicy/Cargo.toml",
@@ -2269,7 +2269,7 @@ fn policy_repository(dir: &Path) -> (String, String) {
     );
     write(
         "regpolicy/src/lib.rs",
-        "pub struct ByWords;\n\nimpl gdl::CellPolicy for ByWords {\n    type Head = regproto::Words;\n}\n",
+        "pub struct ByWords;\n\nimpl gdl::PoolPolicy for ByWords {\n    type Head = regproto::Words;\n}\n",
     );
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -2303,11 +2303,11 @@ fn policy_repository(dir: &Path) -> (String, String) {
     (url, rev)
 }
 
-/// A spec whose cell policy crate is a Git package is fetched, so Compose
+/// A spec whose pool policy crate is a Git package is fetched, so Compose
 /// builds it without `--local`: only the chooser depends on the package,
 /// at its commit, and registers the policy.
 #[test]
-fn compose_fetches_a_cell_policy_crate_from_git() {
+fn compose_fetches_a_pool_policy_crate_from_git() {
     let temp = offline_registry("policy-git");
     let dir = temp.path();
     // Offline, cargo checks out no Git repository, not even a `file://`
@@ -2326,16 +2326,16 @@ fn compose_fetches_a_cell_policy_crate_from_git() {
         format!(
             "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n\
              [segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n\
-             [class.global]\nsegments = [\"front\"]\n[class.model]\nsegments = [\"engine\"]\n[cells.model]\npolicy = \"by_words\"\n\
-             [cell_policy.by_words]\ncrate = \"regpolicy\"\ngit = {url:?}\nrev = {rev:?}\ntype = \"regpolicy::ByWords\"\n"
+             [class.global]\nsegments = [\"front\"]\n[class.model]\nsegments = [\"engine\"]\n[pools.model]\npolicy = \"by_words\"\n\
+             [pool_policy.by_words]\ncrate = \"regpolicy\"\ngit = {url:?}\nrev = {rev:?}\ntype = \"regpolicy::ByWords\"\n"
         ),
     )
     .expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("a policy crate from Git");
     let fleet = gdl_model::Fleet::from_toml(
         "[class.global]\nready = { front = 1 }\n[class.model]\nready = { engine = 1 }\n\
-         [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
-         [cell.model-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
+         [pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+         [pool.model-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
     )
     .expect("a fleet");
     let files = gdl_gen::compose_files(

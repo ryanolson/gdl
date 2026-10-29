@@ -46,7 +46,7 @@ A run that the backward path revisits in the outer end's own segment is opened b
 
 ## Acknowledge after admission
 
-A receiver acknowledges a hand-off only after it has checked the deployment and the deadline and taken admission and egress. There is no fire-and-forget send. The acknowledgement is what moves ownership of the reply to the next stage. A sender that has an acknowledgement knows that it no longer writes the error. A sender that has a refusal still owns the request. It takes an `Overloaded` or `Placement` answer as its offer declined, and offers the request to another instance, or a chooser to another cell. Every refusal returns before the receiver starts the request's task, so a refused request has run nowhere.
+A receiver acknowledges a hand-off only after it has checked the deployment and the deadline and taken admission and egress. There is no fire-and-forget send. The acknowledgement is what moves ownership of the reply to the next stage. A sender that has an acknowledgement knows that it no longer writes the error. A sender that has a refusal still owns the request. It takes an `Overloaded` or `Placement` answer as its offer declined, and offers the request to another instance, or a chooser to another pool. Every refusal returns before the receiver starts the request's task, so a refused request has run nowhere.
 
 ## Activation on `Open`, never on data
 

@@ -95,7 +95,7 @@ fn the_order_of_segments_and_of_class_tables_does_not_change_the_hash() {
 }
 
 /// The hash of a classed placement, pinned, so that an encoding change is
-/// a decision rather than an accident. It covers each class's default cell
+/// a decision rather than an accident. It covers each class's default pool
 /// policy.
 #[test]
 fn a_classed_placement_hash_is_pinned() {

@@ -9,12 +9,12 @@ mod wrapped;
 use std::{panic::AssertUnwindSafe, pin::Pin, time::Duration};
 
 use futures::{FutureExt, Stream};
-use gdl_cells::{
-    CellEvent, DirectoryError,
+use gdl_pools::{
+    DirectoryError, PoolEvent,
     conformance::{self, Backend},
 };
 
-type Events = Pin<Box<dyn Stream<Item = Result<CellEvent, DirectoryError>> + Send>>;
+type Events = Pin<Box<dyn Stream<Item = Result<PoolEvent, DirectoryError>> + Send>>;
 /// Run the suite against `backend` and return its failure message.
 async fn failure<B: Backend>(backend: &B) -> String {
     let run = AssertUnwindSafe(conformance::run(backend)).catch_unwind();

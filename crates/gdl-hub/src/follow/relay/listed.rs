@@ -1,26 +1,26 @@
-//! What the relay lists of the cells of the classes it sends to, for its
-//! choosers' model index: every cell whose record the follower has read,
+//! What the relay lists of the pools of the classes it sends to, for its
+//! choosers' model index: every pool whose record the follower has read,
 //! followed or not, with its region, its condition, and its models, until
-//! the cell withdraws its record. Silence never removes a cell: a record
+//! the pool withdraws its record. Silence never removes a pool: a record
 //! whose lease passed, one a directory snapshot no longer holds, and a
-//! follow whose link was lost each leave the cell listed, missing.
+//! follow whose link was lost each leave the pool listed, missing.
 //!
-//! A cell's models come from its record and from its follow link,
+//! A pool's models come from its record and from its follow link,
 //! whichever has the higher version, since the two race, and the version
-//! never goes down, also across a restart of the cell's hub.
+//! never goes down, also across a restart of the pool's hub.
 //!
-//! A missing cell's listing says how long it has been silent, as an age at
+//! A missing pool's listing says how long it has been silent, as an age at
 //! the moment it is sent. The listings hold the instant on the hub's
-//! clock, and the caller passes the time, as to a `CellView`.
+//! clock, and the caller passes the time, as to a `PoolView`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use gdl_cells::{CellCondition, CellRecord, Presence};
+use gdl_pools::{PoolCondition, PoolRecord, Presence};
 use gdl_watch::{Listing, ModelList};
 use tokio_util::sync::CancellationToken;
 
-/// The relay's listings, by class, then by cell, and how far the
+/// The relay's listings, by class, then by pool, and how far the
 /// follower's watches of the directory have come.
 #[derive(Default)]
 pub(super) struct Listings {
@@ -35,19 +35,19 @@ pub(super) struct Listings {
     unsynced: CancellationToken,
 }
 
-/// One listed cell.
+/// One listed pool.
 struct Listed {
     region: String,
     presence: Presence,
     /// The record's lease passed without a new write: when the follower
     /// saw its last write.
     lapsed: Option<Instant>,
-    /// The cell's follow's link ended without the relay closing it, and
+    /// The pool's follow's link ended without the relay closing it, and
     /// no later follow has been installed: when it ended.
     lost: Option<Instant>,
     /// The newest list seen, from the record or the link.
     models: ModelList,
-    /// What the relay last sent of the cell after a snapshot, with no age,
+    /// What the relay last sent of the pool after a snapshot, with no age,
     /// and since when it was silent then.
     sent: Option<(Listing, Option<Instant>)>,
     /// Whether anything above changed since `sent`: a heartbeat or a
@@ -61,11 +61,11 @@ impl Listed {
     /// The listing, with no age.
     fn listing(&self) -> Listing {
         let condition = if self.presence == Presence::ScaledToZero {
-            CellCondition::ScaledToZero
+            PoolCondition::ScaledToZero
         } else if self.lapsed.is_some() || self.lost.is_some() {
-            CellCondition::Missing
+            PoolCondition::Missing
         } else {
-            CellCondition::Live
+            PoolCondition::Live
         };
         Listing {
             region: self.region.clone(),
@@ -75,9 +75,9 @@ impl Listed {
         }
     }
 
-    /// Since when a missing cell has been silent: the earlier of its
+    /// Since when a missing pool has been silent: the earlier of its
     /// record's last write, once its lease passed, and the loss of its
-    /// link. A cell scaled to 0 is not silent, whatever came before.
+    /// link. A pool scaled to 0 is not silent, whatever came before.
     fn silent(&self) -> Option<Instant> {
         if self.presence == Presence::ScaledToZero {
             return None;
@@ -144,9 +144,9 @@ impl Listings {
         (!self.expected.is_empty() && !self.whole()).then(|| self.unsynced.clone())
     }
 
-    /// Take `record` as what is known of its cell: `lapsed` holds when the
+    /// Take `record` as what is known of its pool: `lapsed` holds when the
     /// follower saw its last write, if its lease has passed.
-    pub(super) fn record(&mut self, record: &CellRecord, lapsed: Option<Instant>) {
+    pub(super) fn record(&mut self, record: &PoolRecord, lapsed: Option<Instant>) {
         let listed = self
             .classes
             .entry(record.class.clone())
@@ -179,57 +179,57 @@ impl Listings {
         }
     }
 
-    /// The record of the cell `cell` of `class`, last written when
+    /// The record of the pool `pool` of `class`, last written when
     /// `lapsed` says, lapsed.
-    pub(super) fn lapse(&mut self, class: &str, cell: &str, lapsed: Instant) {
-        if let Some(listed) = self.get_mut(class, cell) {
+    pub(super) fn lapse(&mut self, class: &str, pool: &str, lapsed: Instant) {
+        if let Some(listed) = self.get_mut(class, pool) {
             Listed::set(&mut listed.lapsed, Some(lapsed), &mut listed.dirty);
         }
     }
 
-    /// The cell's follow was lost at `lost`, or, with `None`, a new one
-    /// installed. A loss while the cell is already lost keeps the first.
-    pub(super) fn lose(&mut self, class: &str, cell: &str, lost: Option<Instant>) {
-        if let Some(listed) = self.get_mut(class, cell) {
+    /// The pool's follow was lost at `lost`, or, with `None`, a new one
+    /// installed. A loss while the pool is already lost keeps the first.
+    pub(super) fn lose(&mut self, class: &str, pool: &str, lost: Option<Instant>) {
+        if let Some(listed) = self.get_mut(class, pool) {
             let lost = lost.map(|at| listed.lost.unwrap_or(at));
             Listed::set(&mut listed.lost, lost, &mut listed.dirty);
         }
     }
 
-    /// The cell's follow link sent `models`.
-    pub(super) fn link_models(&mut self, class: &str, cell: &str, models: &ModelList) {
-        if let Some(listed) = self.get_mut(class, cell) {
+    /// The pool's follow link sent `models`.
+    pub(super) fn link_models(&mut self, class: &str, pool: &str, models: &ModelList) {
+        if let Some(listed) = self.get_mut(class, pool) {
             listed.take_models(models);
         }
     }
 
-    /// The cell is no longer listed: whether it was, and had been sent.
-    pub(super) fn remove(&mut self, class: &str, cell: &str) -> bool {
-        let Some(cells) = self.classes.get_mut(class) else {
+    /// The pool is no longer listed: whether it was, and had been sent.
+    pub(super) fn remove(&mut self, class: &str, pool: &str) -> bool {
+        let Some(pools) = self.classes.get_mut(class) else {
             return false;
         };
-        let sent = cells
-            .remove(cell)
+        let sent = pools
+            .remove(pool)
             .is_some_and(|listed| listed.sent.is_some());
-        if cells.is_empty() {
+        if pools.is_empty() {
             self.classes.remove(class);
         }
         sent
     }
 
-    /// The cell's listing as it is at `now`, if it is listed.
-    pub(super) fn listing(&self, class: &str, cell: &str, now: Instant) -> Option<Listing> {
+    /// The pool's listing as it is at `now`, if it is listed.
+    pub(super) fn listing(&self, class: &str, pool: &str, now: Instant) -> Option<Listing> {
         self.classes
             .get(class)
-            .and_then(|cells| cells.get(cell))
+            .and_then(|pools| pools.get(pool))
             .map(|listed| Listed::aged(listed.listing(), listed.silent(), now))
     }
 
-    /// The cell's listing at `now` if it changed since it was last sent,
+    /// The pool's listing at `now` if it changed since it was last sent,
     /// marked sent. Its silence growing older is no change; a silence that
-    /// begins earlier, as when a lost cell's lease passes, is.
-    pub(super) fn changed(&mut self, class: &str, cell: &str, now: Instant) -> Option<Listing> {
-        let listed = self.get_mut(class, cell).filter(|listed| listed.dirty)?;
+    /// begins earlier, as when a lost pool's lease passes, is.
+    pub(super) fn changed(&mut self, class: &str, pool: &str, now: Instant) -> Option<Listing> {
+        let listed = self.get_mut(class, pool).filter(|listed| listed.dirty)?;
         listed.dirty = false;
         let shown = (listed.listing(), listed.silent());
         if listed.sent.as_ref() == Some(&shown) {
@@ -240,19 +240,19 @@ impl Listings {
         Some(aged)
     }
 
-    /// Every listed cell, by class and name.
-    pub(super) fn cells(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.classes.iter().flat_map(|(class, cells)| {
-            cells
+    /// Every listed pool, by class and name.
+    pub(super) fn pools(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.classes.iter().flat_map(|(class, pools)| {
+            pools
                 .keys()
-                .map(move |cell| (class.as_str(), cell.as_str()))
+                .map(move |pool| (class.as_str(), pool.as_str()))
         })
     }
 
-    fn get_mut(&mut self, class: &str, cell: &str) -> Option<&mut Listed> {
+    fn get_mut(&mut self, class: &str, pool: &str) -> Option<&mut Listed> {
         self.classes
             .get_mut(class)
-            .and_then(|cells| cells.get_mut(cell))
+            .and_then(|pools| pools.get_mut(pool))
     }
 }
 

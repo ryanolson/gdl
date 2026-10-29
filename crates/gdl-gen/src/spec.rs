@@ -32,7 +32,7 @@
 //! [class.global]                 # optional: segments that deploy together;
 //! segments = ["front"]           # with classes, each segment is in one
 //!
-//! # Or, instead of [segment.*], [routing], [class.*], and [cells.*], one
+//! # Or, instead of [segment.*], [routing], [class.*], and [pools.*], one
 //! # [layout.<name>] table of them for each way the graph is placed:
 //! # [layout.compact.segment.front], [layout.compact.class.global], ...
 //!
@@ -41,9 +41,9 @@
 //! path = "front-nodes"           # relative to this file
 //! type = "front_nodes::Preprocess"
 //!
-//! [cell_policy.by_model]         # optional: a cell policy that a
-//! crate = "router"               # `[cells.<class>] policy` names, and the
-//! path = "router"                # segments that choose cells of that
+//! [pool_policy.by_model]         # optional: a pool policy that a
+//! crate = "router"               # `[pools.<class>] policy` names, and the
+//! path = "router"                # segments that choose pools of that
 //! type = "router::ByModel"       # class build and register; or, for
 //!                                # `path`, `version = "0.3.1"`, or `git`
 //!                                # and `rev` (with `lib` if it differs)
@@ -77,13 +77,13 @@ pub struct Spec {
     /// How generated crates depend on gdl.
     pub(crate) gdl: GdlDep,
     /// Each layout's placement: its segments, request-boundary routing
-    /// policies, classes, and cell policies.
+    /// policies, classes, and pool policies.
     pub(crate) placements: gdl_model::Placements,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
-    /// Cell policy name to implementation: what the segments that choose
-    /// cells of a class whose policy has that name build and register.
-    pub(crate) cell_policies: BTreeMap<String, Bind>,
+    /// Pool policy name to implementation: what the segments that choose
+    /// pools of a class whose policy has that name build and register.
+    pub(crate) pool_policies: BTreeMap<String, Bind>,
     /// The global allocator of each generated segment binary.
     pub(crate) allocator: Allocator,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -304,7 +304,7 @@ impl Allocator {
     }
 }
 
-/// One node's implementation, or one cell policy's.
+/// One node's implementation, or one pool policy's.
 #[derive(Debug, Clone)]
 pub(crate) struct Bind {
     /// The implementation's package name.
@@ -355,11 +355,11 @@ struct Raw {
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     class: toml::Table,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
-    cells: toml::Table,
+    pools: toml::Table,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bind: BTreeMap<String, RawBind>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    cell_policy: BTreeMap<String, RawPolicy>,
+    pool_policy: BTreeMap<String, RawPolicy>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -492,7 +492,7 @@ struct RawBind {
     ty: String,
 }
 
-/// A `[cell_policy.<name>]` table: its crate, by one of the sources a
+/// A `[pool_policy.<name>]` table: its crate, by one of the sources a
 /// `[nodes] crates` entry takes, and its type.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -538,7 +538,7 @@ impl RawPolicy {
             }
             _ => {
                 return Err(Error::new(format!(
-                    "[cell_policy.{name}] needs exactly one of `path`, `version`, and `git` with `rev`; `lib` goes only with `git`"
+                    "[pool_policy.{name}] needs exactly one of `path`, `version`, and `git` with `rev`; `lib` goes only with `git`"
                 )));
             }
         };
@@ -608,9 +608,9 @@ impl Spec {
             .iter_mut()
             .map(|(node, bind)| (format!("bind.{node}"), bind)))
         .chain(
-            self.cell_policies
+            self.pool_policies
                 .iter_mut()
-                .map(|(name, bind)| (format!("cell_policy.{name}"), bind)),
+                .map(|(name, bind)| (format!("pool_policy.{name}"), bind)),
         );
         for (table, bind) in tables {
             let CrateSource::Path(path) = &bind.source else {
@@ -722,8 +722,8 @@ impl Spec {
                 .collect()
         };
         let bind = bound(raw.bind);
-        let cell_policies = raw
-            .cell_policy
+        let pool_policies = raw
+            .pool_policy
             .into_iter()
             .map(|(name, table)| Ok((name.clone(), table.bind(&name, dir)?)))
             .collect::<Result<_, Error>>()?;
@@ -740,7 +740,7 @@ impl Spec {
             gdl,
             placements,
             bind,
-            cell_policies,
+            pool_policies,
             allocator: raw
                 .binary
                 .and_then(|binary| binary.allocator)

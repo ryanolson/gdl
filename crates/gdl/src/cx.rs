@@ -508,7 +508,7 @@ fn unix_millis() -> u64 {
 }
 
 /// 64 random bits from a per-thread SplitMix64 generator, seeded from the
-/// thread's random hash keys on first use. A thread-local cell needs no
+/// thread's random hash keys on first use. A thread-local pool needs no
 /// lock, and a `const` one no allocation or destructor. The bits need not
 /// be secret, only distinct across processes; the admission ledger also
 /// shards roots by them.

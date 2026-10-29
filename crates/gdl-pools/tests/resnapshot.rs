@@ -3,22 +3,22 @@
 use std::{panic::AssertUnwindSafe, pin::Pin};
 
 use futures::{FutureExt, Stream, StreamExt, stream};
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits,
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
     ResumeToken, Withdrawal,
     conformance::{self, Backend, Rule},
 };
 
-type Events = Pin<Box<dyn Stream<Item = Result<CellEvent, DirectoryError>> + Send>>;
+type Events = Pin<Box<dyn Stream<Item = Result<PoolEvent, DirectoryError>> + Send>>;
 
 /// A memory directory that requests a new snapshot for every resume token.
 #[derive(Clone)]
 struct NoReplay(MemoryDirectory);
 
-impl CellDirectory for NoReplay {
+impl PoolDirectory for NoReplay {
     type Watch = Events;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.0.publish(record).await
     }
 
@@ -28,7 +28,7 @@ impl CellDirectory for NoReplay {
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Events {
         match from {
-            Some(_) => Box::pin(stream::iter([Ok(CellEvent::Resnapshot)])),
+            Some(_) => Box::pin(stream::iter([Ok(PoolEvent::Resnapshot)])),
             None => Box::pin(self.0.watch(class, None)),
         }
     }
@@ -77,10 +77,10 @@ async fn a_backend_without_replay_conforms_by_saying_resnapshot() {
 #[derive(Clone)]
 struct ForeignTokens(NoReplay);
 
-impl CellDirectory for ForeignTokens {
+impl PoolDirectory for ForeignTokens {
     type Watch = Events;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.0.publish(record).await
     }
 
@@ -131,7 +131,7 @@ async fn a_backend_without_replay_must_reject_a_foreign_token() {
     let mut invalid = directory.watch("model", Some(ResumeToken::new("global", 0)));
     assert!(matches!(
         invalid.next().await,
-        Some(Ok(CellEvent::Synced { snapshot: true, .. }))
+        Some(Ok(PoolEvent::Synced { snapshot: true, .. }))
     ));
     drop((directory, invalid));
 

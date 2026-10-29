@@ -1,64 +1,64 @@
 //! Discovery hub with admission restricted to one GDL deployment.
 //!
 //! [`GraphAdmission`] admits only the segments of one deployment's graph
-//! and placement. A cell's hub runs [`CellReadiness`] beside it: the
-//! `gdl-cell` extension, which judges from the cell's usable instances and
-//! its quorum ([`Quorum`]) whether the cell can take work, answers on the
-//! cell health endpoint (`GET /v1/ext/gdl-cell/health`), publishes the
-//! cell's record through a [`gdl_cells::CellDirectory`], and serves the
-//! cell's watch (`GET /v1/ext/gdl-cell/watch`): the cell's state and epoch
-//! and its entry instances, as [`gdl_watch::CellWatchEvent`]s, which a hub
-//! that follows the cell reads with a [`gdl_watch::CellWatcher`]. Its entry
+//! and placement. A pool's hub runs [`PoolReadiness`] beside it: the
+//! `gdl-pool` extension, which judges from the pool's usable instances and
+//! its quorum ([`Quorum`]) whether the pool can take work, answers on the
+//! pool health endpoint (`GET /v1/ext/gdl-pool/health`), publishes the
+//! pool's record through a [`gdl_pools::PoolDirectory`], and serves the
+//! pool's watch (`GET /v1/ext/gdl-pool/watch`): the pool's state and epoch
+//! and its entry instances, as [`gdl_watch::PoolWatchEvent`]s, which a hub
+//! that follows the pool reads with a [`gdl_watch::PoolWatcher`]. Its entry
 //! instances report their admission to it
-//! (`POST /v1/ext/gdl-cell/instances/{id}/load` on the control listener,
-//! a [`gdl_watch::LoadReport`]), from which it makes the cell's load
-//! summary, which its record and its watch carry. It drains the cell when
-//! asked (`POST /v1/ext/gdl-cell/drain` on the control listener): the cell
-//! is then `draining` whatever its quorum. The hub of a cell whose
+//! (`POST /v1/ext/gdl-pool/instances/{id}/load` on the control listener,
+//! a [`gdl_watch::LoadReport`]), from which it makes the pool's load
+//! summary, which its record and its watch carry. It drains the pool when
+//! asked (`POST /v1/ext/gdl-pool/drain` on the control listener): the pool
+//! is then `draining` whatever its quorum. The hub of a pool whose
 //! class sends to other classes is such a follower: it finds its children,
-//! the cells of those classes whose record names its cell as their parent,
+//! the pools of those classes whose record names its pool as their parent,
 //! in the directory, follows each over its watch, and relays what it
-//! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
-//! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
+//! follows to its own instances (`GET /v1/ext/gdl-pool/follows`, as
+//! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::PoolWatcher`] reads
 //! too), and a watch of one follow of it alone, ordered as the relay is
-//! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). Each of the three
+//! (`GET /v1/ext/gdl-pool/follows/{class}/{pool}`). Each of the three
 //! watch routes serves at most its cap of watches at once
-//! ([`gdl_model::WatchCaps`], from `[cell.watch_caps]`), and refuses one beyond it with 503 before it builds
-//! anything for it. A followed cell whose
+//! ([`gdl_model::WatchCaps`], from `[pool.watch_caps]`), and refuses one beyond it with 503 before it builds
+//! anything for it. A followed pool whose
 //! watch sends an event of a kind the hub does not know is withheld: the
 //! relay shows it `unavailable`, its instances hidden, and not offered,
 //! until the hub has read it again from a new watch of it, which replaces
-//! the first. A follow whose cell takes no work, or whose link is lost, is
+//! the first. A follow whose pool takes no work, or whose link is lost, is
 //! not offered to its choosers either, and closes once each has
 //! acknowledged that it holds no offer to it
-//! (`POST /v1/ext/gdl-cell/instances/{id}/unoffered` on the control
+//! (`POST /v1/ext/gdl-pool/instances/{id}/unoffered` on the control
 //! listener, a [`gdl_watch::Unoffered`]), but for a chooser that has had no
-//! watch of the relay open for `[cell] lost_chooser_ms`, which a chooser's
+//! watch of the relay open for `[pool] lost_chooser_ms`, which a chooser's
 //! watch names it in (`?instance=<id>`, [`gdl_watch::RelayWatcher`]); a
 //! withheld follow does not close while its link reads it again. The watches' events and their client are
 //! `gdl-watch`'s, so that a segment instance reads the relay without
-//! linking the hub. Beside the cell's extension, a cell's hub runs
+//! linking the hub. Beside the pool's extension, a pool's hub runs
 //! [`KeyedRecords`], a table of keyed records that its own instances read
 //! and write by request and answer
 //! (`POST /v1/ext/gdl-keyed/instances/{id}/keyed` on the control
 //! listener, a [`gdl_watch::KeyedAsk`]).
-mod cell;
 mod fanout;
 mod follow;
 mod keyed;
+mod pool;
 mod quorum;
 mod report;
 mod setup;
 
-pub use cell::{
-    CellError, CellHealth, CellReadiness, CellTiming, CellWatch, RefusedWatches, RequiredHealth,
-    SegmentHealth,
-};
 pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
+pub use pool::{
+    PoolError, PoolHealth, PoolReadiness, PoolTiming, PoolWatch, RefusedWatches, RequiredHealth,
+    SegmentHealth,
+};
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
-pub use setup::{cell_from_env, cell_from_vars, hub_builder, hub_builder_with};
+pub use setup::{hub_builder, hub_builder_with, pool_from_env, pool_from_vars};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};

@@ -432,7 +432,7 @@ pub struct Offer {
     /// The nodes it implements, by name.
     #[serde(default)]
     pub nodes: Vec<NodeEntry>,
-    /// The cell policies it implements, by name; left out when it has
+    /// The pool policies it implements, by name; left out when it has
     /// none, so an entry written before policies were read reads and
     /// writes the same.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -443,21 +443,21 @@ pub struct Offer {
     /// told why it is not offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
-    /// The cell policies it leaves out, since no segment could name them:
+    /// The pool policies it leaves out, since no segment could name them:
     /// a generic one, or one the crate root does not reach. As with an
     /// alias, a spec that names one is told why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_policies: Vec<Skipped>,
 }
 
-/// An exported alias or a cell policy an offer leaves out, and why.
+/// An exported alias or a pool policy an offer leaves out, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skipped {
     /// The alias's name.
     pub name: String,
     /// The path the build registers the alias at: a message's alias where
     /// it is, so two of one name in two modules are two entries, and a
-    /// node's at the crate's root. None for a cell policy.
+    /// node's at the crate's root. None for a pool policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Why, with where.
@@ -649,8 +649,8 @@ pub struct NodeEntry {
     pub ports: Vec<PortEntry>,
 }
 
-/// A cell policy a crate implements: a type, reached from the crate root,
-/// that implements `gdl::CellPolicy`.
+/// A pool policy a crate implements: a type, reached from the crate root,
+/// that implements `gdl::PoolPolicy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyEntry {
     /// The policy's name: its type's name.
@@ -662,7 +662,7 @@ pub struct PolicyEntry {
     pub head: PolicyHead,
 }
 
-/// What a cell policy reads of the request's head: its `type Head`.
+/// What a pool policy reads of the request's head: its `type Head`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyHead {

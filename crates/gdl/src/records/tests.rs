@@ -121,7 +121,7 @@ impl RecordLink for Memory {
 
 /// A table named `name` of a service linked to `link`, whose answers
 /// arrive on the receiver as (key, answer).
-fn linked(link: &Arc<Memory>, name: &str) -> (CellRecords, Answers) {
+fn linked(link: &Arc<Memory>, name: &str) -> (PoolRecords, Answers) {
     let records = HubRecords::linked(Arc::clone(link) as Arc<dyn RecordLink>);
     answering(&records, name)
 }
@@ -130,7 +130,7 @@ type Answers = mpsc::UnboundedReceiver<(Vec<u8>, Written<'static>, Option<Record
 
 /// The table `name` of `records`, whose answers arrive on the receiver,
 /// a refusal's record beside it.
-fn answering(records: &HubRecords, name: &str) -> (CellRecords, Answers) {
+fn answering(records: &HubRecords, name: &str) -> (PoolRecords, Answers) {
     let table = records.table(name).expect("a table");
     let (sent, answers) = mpsc::unbounded_channel();
     assert!(table.on_answer(move |key, written| {
@@ -163,30 +163,30 @@ fn scraped(registry: &prometheus::Registry, table: &str, outcome: &str) -> Optio
         format!("outcome=\"{outcome}\""),
     );
     text.lines()
-        .filter(|line| line.starts_with("cell_record_writes_total{"))
+        .filter(|line| line.starts_with("pool_record_writes_total{"))
         .find(|line| line.contains(&table) && line.contains(&outcome))
         .and_then(|line| line.rsplit(' ').next()?.parse().ok())
 }
 
-/// Without a cell's hub there is no table to take: outside a build, in a
+/// Without a pool's hub there is no table to take: outside a build, in a
 /// build of an instance without a hub, and from a service made with
 /// `new`. Under a hub, a build takes one, before the hub is linked.
 #[tokio::test]
-async fn current_says_when_there_is_no_cell_hub() {
+async fn current_says_when_there_is_no_pool_hub() {
     assert_eq!(
-        CellRecords::current("fingerprints").expect_err("no table"),
+        PoolRecords::current("fingerprints").expect_err("no table"),
         RecordsUnavailable::Unbound
     );
     let alone = HubRecords::new();
     let taken = alone
-        .scope(async { CellRecords::current("fingerprints") })
+        .scope(async { PoolRecords::current("fingerprints") })
         .await;
     assert_eq!(taken.expect_err("no table"), RecordsUnavailable::Unbound);
     let error: Error = RecordsUnavailable::Unbound.into();
     assert_eq!(error.kind(), ErrorKind::Placement);
     let hub = HubRecords::under_hub();
     let taken = hub
-        .scope(async { CellRecords::current("fingerprints") })
+        .scope(async { PoolRecords::current("fingerprints") })
         .await
         .expect("a table under a hub");
     assert_eq!(taken.table(), "fingerprints");

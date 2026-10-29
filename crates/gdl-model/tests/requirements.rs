@@ -1,11 +1,11 @@
-//! What a cell's health requires of the classes its class sends to: by
-//! default, one ready cell of each; an explicit `requires` replaces the
+//! What a pool's health requires of the classes its class sends to: by
+//! default, one ready pool of each; an explicit `requires` replaces the
 //! default, to raise a count or to name a subset.
 
 use std::collections::BTreeMap;
 
 use gdl_model::{
-    CellSettings, HopInfo, Layout, Manifest, NodeInfo, Placement, Role, TypeInfo, layout,
+    HopInfo, Layout, Manifest, NodeInfo, Placement, PoolSettings, Role, TypeInfo, layout,
 };
 
 /// `S => F` and `T => G`, so that `global` sends to two classes.
@@ -48,8 +48,8 @@ fn two_classes() -> Layout {
     layout(&manifest(), &placement).expect("a layout")
 }
 
-fn settings(text: &str) -> CellSettings {
-    toml::from_str(text).expect("a cell's settings")
+fn settings(text: &str) -> PoolSettings {
+    toml::from_str(text).expect("a pool's settings")
 }
 
 const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/var/lib/gdl-hub'\n";
@@ -58,11 +58,11 @@ fn counts(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
     pairs.iter().map(|(c, n)| (c.to_string(), *n)).collect()
 }
 
-/// Unsaid, `requires` is one ready cell of each class the cell's class
-/// sends to, and a cell of a class that sends to none requires nothing.
+/// Unsaid, `requires` is one ready pool of each class the pool's class
+/// sends to, and a pool of a class that sends to none requires nothing.
 #[test]
 fn unsaid_requires_each_class_sent_to_once() {
-    let default = CellSettings::DEFAULT_REQUIRES;
+    let default = PoolSettings::DEFAULT_REQUIRES;
     assert_eq!(default, 1);
     assert_eq!(
         settings(GLOBAL).requirements(&two_classes()),

@@ -1,7 +1,7 @@
-//! A cell directory in DynamoDB: [`DynamoDirectory`], a
-//! [`gdl_cells::CellDirectory`] whose records live in two tables that
+//! A pool directory in DynamoDB: [`DynamoDirectory`], a
+//! [`gdl_pools::PoolDirectory`] whose records live in two tables that
 //! global tables replicate to every region a fleet runs in, so that every
-//! hub reads every cell's record, whatever its region.
+//! hub reads every pool's record, whatever its region.
 //!
 //! A hub takes it through `gdl_hub::hub_builder_with`. The crate takes a
 //! [`aws_sdk_dynamodb::Client`] that its caller builds, with the caller's

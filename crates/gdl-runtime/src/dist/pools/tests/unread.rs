@@ -1,41 +1,41 @@
-//! A cell the relay sent an event of a kind this build does not know for
+//! A pool the relay sent an event of a kind this build does not know for
 //! is unread: not chosen until the follower has read it again, from a
-//! watch of its own, while the relay's watch, and every other cell, goes
+//! watch of its own, while the relay's watch, and every other pool, goes
 //! on. From then the relay's watch is not applied to it: that watch and
-//! the cell's own are not ordered with each other.
+//! the pool's own are not ordered with each other.
 
 use std::collections::VecDeque;
 
-use gdl::{CellPolicy, HomeFirst};
-use gdl_cells::{CellState, LoadSummary};
+use gdl::{HomeFirst, PoolPolicy};
+use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::{FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
 use velo::PeerInfo;
 
-use super::super::Cells;
+use super::super::Pools;
 use super::super::follow::{Asked, Follows};
 use super::{
     Call, DRAIN, M1, M2, Recorded, Scripted, exposed, follow, follower, live, peer, retired, run,
     state, table,
 };
 
-fn unknown(cell: &str, generation: u64) -> UnknownFollowEvent {
+fn unknown(pool: &str, generation: u64) -> UnknownFollowEvent {
     UnknownFollowEvent {
         kind: "paused".into(),
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
     }
 }
 
-fn key(cell: &str) -> (String, String) {
-    ("model_x".to_string(), cell.to_string())
+fn key(pool: &str) -> (String, String) {
+    ("model_x".to_string(), pool.to_string())
 }
 
-fn loaded(cell: &str, generation: u64) -> FollowEvent {
+fn loaded(pool: &str, generation: u64) -> FollowEvent {
     FollowEvent::Load {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation,
         load: Some(LoadSummary {
             admitted: 0,
@@ -47,28 +47,28 @@ fn loaded(cell: &str, generation: u64) -> FollowEvent {
     }
 }
 
-/// A cell ready with `peers` exposed, and a summary that a policy chooses
+/// A pool ready with `peers` exposed, and a summary that a policy chooses
 /// by.
-fn ready(cell: &str, generation: u64, peers: &[&PeerInfo]) -> Vec<FollowEvent> {
+fn ready(pool: &str, generation: u64, peers: &[&PeerInfo]) -> Vec<FollowEvent> {
     let mut events = vec![
-        follow(cell, generation, CellState::Ready),
-        loaded(cell, generation),
+        follow(pool, generation, PoolState::Ready),
+        loaded(pool, generation),
     ];
-    events.extend(peers.iter().map(|peer| exposed(cell, generation, peer)));
+    events.extend(peers.iter().map(|peer| exposed(pool, generation, peer)));
     events
 }
 
-/// Whether `home_first` may choose `cell` at `now`.
-fn chosen(cells: &Cells, cell: &str, now: Instant) -> bool {
-    let table = cells.table("f").expect("a table");
+/// Whether `home_first` may choose `pool` at `now`.
+fn chosen(pools: &Pools, pool: &str, now: Instant) -> bool {
+    let table = pools.table("f").expect("a table");
     table
         .views
         .iter()
-        .find(|view| view.name() == cell)
+        .find(|view| view.name() == pool)
         .is_some_and(|view| HomeFirst.eligible(view, "r", now))
 }
 
-/// The cells and watches asked for, as `(cell, watch, paused)`.
+/// The pools and watches asked for, as `(pool, watch, paused)`.
 fn asked(follows: &mut Follows<Recorded>) -> Vec<(String, u64, bool)> {
     follows
         .asked()
@@ -77,11 +77,11 @@ fn asked(follows: &mut Follows<Recorded>) -> Vec<(String, u64, bool)> {
         .collect()
 }
 
-/// Read `events` as the items of `cell`'s own watch `watch`, then its
+/// Read `events` as the items of `pool`'s own watch `watch`, then its
 /// marker.
 fn own_snapshot(
     follows: &mut Follows<Recorded>,
-    cell: &str,
+    pool: &str,
     watch: u64,
     events: Vec<FollowEvent>,
     now: Instant,
@@ -90,46 +90,46 @@ fn own_snapshot(
         .into_iter()
         .chain([FollowEvent::Synced { listed: false }])
     {
-        follows.own(key(cell), watch, Ok(Watched::Event(event)), now);
+        follows.own(key(pool), watch, Ok(Watched::Event(event)), now);
     }
 }
 
-/// An event of a kind this build does not know leaves its cell unread at
+/// An event of a kind this build does not know leaves its pool unread at
 /// once: none of its instances is eligible, so it is not chosen, and a
-/// watch of its own is asked for, while the other cell is untouched. What
-/// the relay's watch sends of the cell from then is not applied, and what
-/// it sends of the other is. The cell's own snapshot replaces it, no longer
+/// watch of its own is asked for, while the other pool is untouched. What
+/// the relay's watch sends of the pool from then is not applied, and what
+/// it sends of the other is. The pool's own snapshot replaces it, no longer
 /// unread, and its own watch's events apply after it. The instances it
 /// held stay registered.
 #[test]
-fn an_unknown_event_leaves_its_cell_unread_until_it_is_read_from_its_own_watch() {
-    let (mut follows, cells, recorded, _) = follower();
+fn an_unknown_event_leaves_its_pool_unread_until_it_is_read_from_its_own_watch() {
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let (x, y, z, w) = (peer(), peer(), peer(), peer());
     live(&mut follows, now, ready(M1, 1, &[&x]));
     live(&mut follows, now, ready(M2, 1, &[&y]));
-    assert!(chosen(&cells, M1, now) && chosen(&cells, M2, now));
+    assert!(chosen(&pools, M1, now) && chosen(&pools, M2, now));
     recorded.take();
 
     follows.unknown(unknown(M1, 1));
-    let unread = table(&cells, M1).expect("still followed");
+    let unread = table(&pools, M1).expect("still followed");
     assert!(unread.unread && unread.eligible.is_empty());
-    assert!(!chosen(&cells, M1, now), "not chosen while unread");
-    assert!(chosen(&cells, M2, now));
+    assert!(!chosen(&pools, M1, now), "not chosen while unread");
+    assert!(chosen(&pools, M2, now));
     assert_eq!(asked(&mut follows), [(M1.to_string(), 1, false)]);
     assert_eq!(asked(&mut follows), [], "asked once");
-    assert_eq!(cells.unknown_events(), 1);
+    assert_eq!(pools.unknown_events(), 1);
 
     follows.take(exposed(M1, 1, &w), now);
-    follows.take(state(M2, 1, CellState::Degraded), now);
-    assert!(table(&cells, M1).expect("followed").eligible.is_empty());
+    follows.take(state(M2, 1, PoolState::Degraded), now);
+    assert!(table(&pools, M1).expect("followed").eligible.is_empty());
     assert_eq!(
-        table(&cells, M2).expect("followed").state,
-        CellState::Degraded
+        table(&pools, M2).expect("followed").state,
+        PoolState::Degraded
     );
     assert!(
-        chosen(&cells, M2, now),
-        "the other cell is chosen throughout"
+        chosen(&pools, M2, now),
+        "the other pool is chosen throughout"
     );
     assert_eq!(
         recorded.take(),
@@ -138,22 +138,22 @@ fn an_unknown_event_leaves_its_cell_unread_until_it_is_read_from_its_own_watch()
     );
 
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&x, &z]), now);
-    let read = table(&cells, M1).expect("followed");
+    let read = table(&pools, M1).expect("followed");
     assert!(!read.unread);
     let mut both = vec![x.instance_id(), z.instance_id()];
     both.sort_by_key(velo::InstanceId::as_u128);
     assert_eq!(read.eligible, both);
-    assert!(chosen(&cells, M1, now));
+    assert!(chosen(&pools, M1, now));
     assert_eq!(recorded.take(), [Call::Register(z.instance_id())]);
     follows.own(key(M1), 1, Ok(Watched::Event(retired(M1, 1, &x))), now);
-    let read = table(&cells, M1).expect("followed");
+    let read = table(&pools, M1).expect("followed");
     assert_eq!(
         (read.eligible.clone(), read.retired.clone()),
         (vec![z.instance_id()], vec![x.instance_id()])
     );
     follows.take(exposed(M1, 1, &w), now);
     assert_eq!(
-        table(&cells, M1).expect("followed").eligible,
+        table(&pools, M1).expect("followed").eligible,
         [z.instance_id()]
     );
     follows.forget(now + DRAIN);
@@ -161,39 +161,39 @@ fn an_unknown_event_leaves_its_cell_unread_until_it_is_read_from_its_own_watch()
 }
 
 /// What the relay's watch sends after the unknown event never undoes the
-/// cell's own snapshot: one that says the cell is draining keeps it from
+/// pool's own snapshot: one that says the pool is draining keeps it from
 /// being chosen, whatever states and instances the relay's watch sent,
 /// before the snapshot or after it.
 #[test]
-fn the_relays_watch_does_not_undo_a_cells_own_snapshot() {
-    let (mut follows, cells, _, _) = follower();
+fn the_relays_watch_does_not_undo_a_pools_own_snapshot() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(&mut follows, now, ready(M1, 1, &[&x]));
     follows.unknown(unknown(M1, 1));
     for event in [
-        state(M1, 1, CellState::Unavailable),
-        state(M1, 1, CellState::Degraded),
+        state(M1, 1, PoolState::Unavailable),
+        state(M1, 1, PoolState::Degraded),
         exposed(M1, 1, &x),
     ] {
         follows.take(event, now);
     }
-    let draining = vec![follow(M1, 1, CellState::Draining), loaded(M1, 1)];
+    let draining = vec![follow(M1, 1, PoolState::Draining), loaded(M1, 1)];
     own_snapshot(&mut follows, M1, 1, draining, now);
-    for event in [state(M1, 1, CellState::Degraded), exposed(M1, 1, &x)] {
+    for event in [state(M1, 1, PoolState::Degraded), exposed(M1, 1, &x)] {
         follows.take(event, now);
     }
-    let m1 = table(&cells, M1).expect("followed");
-    assert_eq!(m1.state, CellState::Draining);
+    let m1 = table(&pools, M1).expect("followed");
+    assert_eq!(m1.state, PoolState::Draining);
     assert!(m1.eligible.is_empty(), "{m1:?}");
-    assert!(!chosen(&cells, M1, now));
+    assert!(!chosen(&pools, M1, now));
 }
 
-/// An instance the cell's own snapshot does not have is not brought back
+/// An instance the pool's own snapshot does not have is not brought back
 /// by an exposure the relay's watch sent before it.
 #[test]
 fn an_instance_the_own_snapshot_does_not_have_is_not_brought_back() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     live(&mut follows, now, ready(M1, 1, &[&x]));
@@ -202,18 +202,18 @@ fn an_instance_the_own_snapshot_does_not_have_is_not_brought_back() {
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&x]), now);
     follows.take(exposed(M1, 1, &y), now);
     assert_eq!(
-        table(&cells, M1).expect("followed").eligible,
+        table(&pools, M1).expect("followed").eligible,
         [x.instance_id()]
     );
 }
 
-/// An event of a kind this build does not know in the cell's own snapshot
-/// keeps the cell unread: the snapshot is shown once, unread, and a new
+/// An event of a kind this build does not know in the pool's own snapshot
+/// keeps the pool unread: the snapshot is shown once, unread, and a new
 /// watch is asked for after a pause. One after the snapshot leaves the
-/// cell unread again at once, and the earlier watch is ignored from then.
+/// pool unread again at once, and the earlier watch is ignored from then.
 #[test]
-fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
-    let (mut follows, cells, _, _) = follower();
+fn an_unknown_event_of_the_pools_own_watch_leaves_it_unread() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(&mut follows, now, ready(M1, 1, &[&x]));
@@ -225,7 +225,7 @@ fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
     follows.own(key(M1), 1, Ok(Watched::Unknown(unknown(M1, 1))), now);
     // Each table published counts one change: the snapshot is published
     // once, unread, never first as read.
-    let changes = cells.changes();
+    let changes = pools.changes();
     let before = *changes.borrow();
     follows.own(
         key(M1),
@@ -234,45 +234,45 @@ fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
         now,
     );
     assert_eq!(*changes.borrow() - before, 1, "published once");
-    let m1 = table(&cells, M1).expect("followed");
+    let m1 = table(&pools, M1).expect("followed");
     assert!(m1.unread && m1.eligible.is_empty(), "{m1:?}");
     assert_eq!(asked(&mut follows), [(M1.to_string(), 2, true)]);
 
     own_snapshot(&mut follows, M1, 2, ready(M1, 1, &[&x]), now);
-    assert!(!table(&cells, M1).expect("followed").unread);
+    assert!(!table(&pools, M1).expect("followed").unread);
     follows.own(key(M1), 2, Ok(Watched::Unknown(unknown(M1, 1))), now);
-    assert!(table(&cells, M1).expect("followed").unread);
+    assert!(table(&pools, M1).expect("followed").unread);
     assert_eq!(asked(&mut follows), [(M1.to_string(), 3, false)]);
     own_snapshot(&mut follows, M1, 2, ready(M1, 1, &[&x]), now);
     assert!(
-        table(&cells, M1).expect("followed").unread,
+        table(&pools, M1).expect("followed").unread,
         "an earlier watch is ignored"
     );
-    assert_eq!(cells.unknown_events(), 3);
+    assert_eq!(pools.unknown_events(), 3);
 }
 
-/// A cell's own watch that ends, or could not begin, leaves it unread,
+/// A pool's own watch that ends, or could not begin, leaves it unread,
 /// and a new one is asked for after a pause.
 #[test]
-fn a_cells_own_watch_that_ends_leaves_it_unread() {
-    let (mut follows, cells, _, _) = follower();
+fn a_pools_own_watch_that_ends_leaves_it_unread() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     live(&mut follows, now, ready(M1, 1, &[&peer()]));
     follows.unknown(unknown(M1, 1));
     let _ = asked(&mut follows);
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&peer()]), now);
-    assert!(!table(&cells, M1).expect("followed").unread);
+    assert!(!table(&pools, M1).expect("followed").unread);
     follows.own(key(M1), 1, Err(WatchEnd::Closed), now);
-    assert!(table(&cells, M1).expect("followed").unread);
+    assert!(table(&pools, M1).expect("followed").unread);
     assert_eq!(asked(&mut follows), [(M1.to_string(), 2, true)]);
 }
 
 /// However many events, of known kinds or not, the relay's watch sends of
-/// a cell read from its own watch, the follower keeps none of them and
+/// a pool read from its own watch, the follower keeps none of them and
 /// asks for no other watch: nothing grows with them.
 #[test]
-fn the_relays_events_of_a_cell_read_from_its_own_watch_are_not_kept() {
-    let (mut follows, cells, _, _) = follower();
+fn the_relays_events_of_a_pool_read_from_its_own_watch_are_not_kept() {
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     live(&mut follows, now, ready(M1, 1, &[&peer()]));
     follows.unknown(unknown(M1, 1));
@@ -281,18 +281,18 @@ fn the_relays_events_of_a_cell_read_from_its_own_watch_are_not_kept() {
         follows.take(loaded(M1, 1), now);
     }
     assert_eq!(asked(&mut follows), [(M1.to_string(), 1, false)]);
-    assert_eq!(cells.unknown_events(), 2001);
+    assert_eq!(pools.unknown_events(), 2001);
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&peer()]), now);
-    assert!(!table(&cells, M1).expect("followed").unread);
+    assert!(!table(&pools, M1).expect("followed").unread);
 }
 
 /// An event of a kind this build does not know of an earlier generation
-/// than its cell's, or of a class the chooser does not send to, leaves
+/// than its pool's, or of a class the chooser does not send to, leaves
 /// nothing unread, as a known event of it would change nothing; each is
 /// still counted.
 #[test]
 fn an_unknown_event_of_another_generation_or_class_changes_nothing() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     live(&mut follows, now, ready(M1, 2, &[&peer()]));
     follows.unknown(unknown(M1, 1));
@@ -300,33 +300,33 @@ fn an_unknown_event_of_another_generation_or_class_changes_nothing() {
         class: "model_y".into(),
         ..unknown(M1, 2)
     });
-    assert!(!table(&cells, M1).expect("followed").unread);
+    assert!(!table(&pools, M1).expect("followed").unread);
     assert_eq!(asked(&mut follows), []);
-    assert_eq!(cells.unknown_events(), 2);
+    assert_eq!(pools.unknown_events(), 2);
 }
 
-/// A cell's own snapshot that has no follow of it ends its follow, and its
+/// A pool's own snapshot that has no follow of it ends its follow, and its
 /// instances are unregistered after the drain.
 #[test]
-fn a_cells_own_snapshot_without_its_follow_ends_it() {
-    let (mut follows, cells, recorded, _) = follower();
+fn a_pools_own_snapshot_without_its_follow_ends_it() {
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(&mut follows, now, ready(M1, 1, &[&x]));
     recorded.take();
     follows.unknown(unknown(M1, 1));
     own_snapshot(&mut follows, M1, 1, Vec::new(), now);
-    assert!(table(&cells, M1).is_none());
+    assert!(table(&pools, M1).is_none());
     follows.forget(now + DRAIN);
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
 
-/// An unknown event in the relay's snapshot leaves its cell unread once
+/// An unknown event in the relay's snapshot leaves its pool unread once
 /// the snapshot is complete, and asks for its own watch; a new snapshot
-/// of the relay ends every cell's own watch.
+/// of the relay ends every pool's own watch.
 #[test]
 fn a_snapshot_reads_from_its_own_watch_what_it_left_unread() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     let mut snapshot = follows.snapshot();
@@ -338,28 +338,28 @@ fn a_snapshot_reads_from_its_own_watch_what_it_left_unread() {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    assert!(table(&cells, M1).expect("followed").unread);
-    assert!(!table(&cells, M2).expect("followed").unread);
+    assert!(table(&pools, M1).expect("followed").unread);
+    assert!(!table(&pools, M2).expect("followed").unread);
     assert_eq!(asked(&mut follows), [(M1.to_string(), 1, false)]);
-    assert_eq!(cells.unknown_events(), 1);
+    assert_eq!(pools.unknown_events(), 1);
 
     let mut again = follows.snapshot();
     for event in ready(M1, 1, &[&y]) {
         again.apply(event, now);
     }
     follows.resnapshot(again, now);
-    assert!(!table(&cells, M1).expect("followed").unread);
+    assert!(!table(&pools, M1).expect("followed").unread);
     assert!(!follows.wants(&key(M1), 1));
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&x]), now);
     assert_eq!(
-        table(&cells, M1).expect("followed").eligible,
+        table(&pools, M1).expect("followed").eligible,
         [y.instance_id()],
         "the own watch of the ended relay watch is ignored"
     );
     follows.take(retired(M1, 1, &y), now);
     assert!(
-        table(&cells, M1).expect("followed").eligible.is_empty(),
-        "the relay's watch carries the cell again"
+        table(&pools, M1).expect("followed").eligible.is_empty(),
+        "the relay's watch carries the pool again"
     );
 }
 
@@ -370,8 +370,8 @@ fn a_snapshot_reads_from_its_own_watch_what_it_left_unread() {
 /// state it gives, and its own watch carries it. The relay's watch never
 /// ends.
 #[tokio::test(start_paused = true)]
-async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
-    let (follows, cells, _, _) = follower();
+async fn the_follower_reads_an_unread_pool_from_its_own_watch() {
+    let (follows, pools, _, _) = follower();
     let (x, y, z) = (peer(), peer(), peer());
     let mut watch: Vec<_> = ready(M1, 1, &[&x])
         .into_iter()
@@ -380,7 +380,7 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
         .map(Watched::Event)
         .collect();
     watch.push(Watched::Unknown(unknown(M1, 1)));
-    watch.push(Watched::Event(state(M2, 1, CellState::Degraded)));
+    watch.push(Watched::Event(state(M2, 1, PoolState::Degraded)));
     watch.push(Watched::Event(exposed(M1, 1, &y)));
     let (opened, watching) = tokio::sync::watch::channel(0);
     let (_release, released) = tokio::sync::watch::channel(1);
@@ -388,7 +388,7 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
     let mut scripted = Scripted::relaying(VecDeque::from([watch]), opened, released);
     scripted.answered = answered;
     *scripted.readings.lock().expect("lock") = VecDeque::from([vec![
-        Watched::Event(follow(M1, 1, CellState::Degraded)),
+        Watched::Event(follow(M1, 1, PoolState::Degraded)),
         Watched::Event(loaded(M1, 1)),
         Watched::Event(exposed(M1, 1, &z)),
         Watched::Event(FollowEvent::Synced { listed: false }),
@@ -401,45 +401,45 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
         .wait_for(|asked| !asked.is_empty())
         .await
         .expect("the task runs");
-    let mut changes = cells.changes();
+    let mut changes = pools.changes();
     changes
-        .wait_for(|_| table(&cells, M2).is_some_and(|m2| m2.state == CellState::Degraded))
+        .wait_for(|_| table(&pools, M2).is_some_and(|m2| m2.state == PoolState::Degraded))
         .await
         .expect("the task runs");
     let now = Instant::now();
-    assert!(!chosen(&cells, M1, now));
-    assert!(chosen(&cells, M2, now));
+    assert!(!chosen(&pools, M1, now));
+    assert!(chosen(&pools, M2, now));
     assert_eq!(*asked.borrow(), [key(M1)]);
 
     answer.send_replace(1);
     changes
         .wait_for(|_| {
-            table(&cells, M1).is_some_and(|m1| !m1.unread && m1.retired == [z.instance_id()])
+            table(&pools, M1).is_some_and(|m1| !m1.unread && m1.retired == [z.instance_id()])
         })
         .await
         .expect("the task runs");
-    let m1 = table(&cells, M1).expect("followed");
-    assert_eq!(m1.state, CellState::Degraded);
+    let m1 = table(&pools, M1).expect("followed");
+    assert_eq!(m1.state, PoolState::Degraded);
     assert_eq!(
         m1.eligible,
         [x.instance_id()],
         "not `y`, from the relay's watch"
     );
-    assert!(chosen(&cells, M1, Instant::now()));
+    assert!(chosen(&pools, M1, Instant::now()));
     assert_eq!(*watching.borrow(), 1, "the relay's watch never ended");
     assert_eq!(asked.borrow().len(), 1);
     task.abort();
 }
 
-/// A cell's own watch that ends, and is opened again to a hub that
-/// restarted, numbers the cell's follows from 1 again: its snapshot sets
-/// the cell's generation, whatever the ended watch had, so that the
-/// generations after it are taken. Whether that snapshot has the cell or
+/// A pool's own watch that ends, and is opened again to a hub that
+/// restarted, numbers the pool's follows from 1 again: its snapshot sets
+/// the pool's generation, whatever the ended watch had, so that the
+/// generations after it are taken. Whether that snapshot has the pool or
 /// not, a later follow of it is routable.
 #[test]
-fn a_cells_own_watch_to_a_restarted_hub_takes_its_generations() {
+fn a_pools_own_watch_to_a_restarted_hub_takes_its_generations() {
     for empty in [false, true] {
-        let (mut follows, cells, _, _) = follower();
+        let (mut follows, pools, _, _) = follower();
         let now = Instant::now();
         let (x, y, z) = (peer(), peer(), peer());
         live(&mut follows, now, ready(M1, 5, &[&x]));
@@ -459,12 +459,12 @@ fn a_cells_own_watch_to_a_restarted_hub_takes_its_generations() {
         {
             follows.own(key(M1), 2, Ok(Watched::Event(event)), now);
         }
-        let m1 = table(&cells, M1).unwrap_or_else(|| panic!("followed, empty: {empty}"));
+        let m1 = table(&pools, M1).unwrap_or_else(|| panic!("followed, empty: {empty}"));
         assert_eq!(
             (m1.generation, m1.eligible.clone()),
             (2, vec![z.instance_id()]),
             "empty: {empty}"
         );
-        assert!(chosen(&cells, M1, now), "empty: {empty}");
+        assert!(chosen(&pools, M1, now), "empty: {empty}");
     }
 }

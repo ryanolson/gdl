@@ -105,7 +105,7 @@ fn the_unpaced_direct_server_keeps_its_allocation_footprint() {
     let unpaced = rt.block_on(unpaced_pair());
     let shared = rt.block_on(setup::direct_pair());
     let items = 1;
-    // Tokio task cells are cache aligned; byte buffers are not. Count
+    // Tokio task pools are cache aligned; byte buffers are not. Count
     // those layouts separately so buffer-pool work cannot hide task growth.
     let mut measured_paths = Vec::new();
     let ask = Ask { items, size: 16 };

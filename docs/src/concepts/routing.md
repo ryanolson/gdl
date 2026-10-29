@@ -40,7 +40,7 @@ A crossing can name a selector instead: `{ selector = "<name>" }`. A selector is
 - the instances that declined this request so far (`request.declined()`);
 - the destination segment's eligible instances (`Instances`), never empty.
 
-When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode. A `gdl::Projected<P>` must name the edge's type as `P::Of`, and its edge must not be encoded as `msgpack_array`, which carries no field names. A cell policy's `Head` is checked the same way ([Choosing a cell](cell-routing.md#a-registered-policy)).
+When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode. A `gdl::Projected<P>` must name the edge's type as `P::Of`, and its edge must not be encoded as `msgpack_array`, which carries no field names. A pool policy's `Head` is checked the same way ([Choosing a pool](pool-routing.md#a-registered-policy)).
 
 A selector returns a `Choice` made from one of the `Instance`s it was given. Neither type has a public constructor, so a selector cannot name an instance outside the table. A choice can carry two things:
 
@@ -97,4 +97,4 @@ Any other answer is the request's own and is never offered again. No answer with
 
 The first offer costs what a hand-off costs: the failover's state is made only after a miss.
 
-A chooser's hand-off into another class is the exception. It offers the request to another cell, at most `[runtime] cell_failovers` times, and its selector sees nothing declined. An entry instance that declines as its own leaves the request in its cell: the cell's other entry instances are offered it first, one at a time. [Following and choosing cells](cell-routing.md) covers it.
+A chooser's hand-off into another class is the exception. It offers the request to another pool, at most `[runtime] pool_failovers` times, and its selector sees nothing declined. An entry instance that declines as its own leaves the request in its pool: the pool's other entry instances are offered it first, one at a time. [Following and choosing pools](pool-routing.md) covers it.

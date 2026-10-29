@@ -36,9 +36,9 @@ const GRAPH_CONFIG: &str = "[Add]\noffset = 10\n";
 struct Add {
     by: u32,
     metrics: AddMetrics,
-    /// The handle on the cells its segment's chooser follows, taken as it
+    /// The handle on the pools its segment's chooser follows, taken as it
     /// is built.
-    followed: gdl::FollowedCells,
+    followed: gdl::FollowedPools,
 }
 
 /// What `Add` reports.
@@ -153,7 +153,7 @@ impl gdl::Build for Add {
         Ok(Self {
             by: config.amount + config.offset,
             metrics,
-            followed: gdl::FollowedCells::current(),
+            followed: gdl::FollowedPools::current(),
         })
     }
 }
@@ -209,10 +209,10 @@ fn start_adder(
 }
 
 /// Tables with no class in them.
-struct NoCells;
+struct NoPools;
 
-impl gdl::__runtime::CellSource for NoCells {
-    fn read(&self, _class: &str, _entry: Option<&str>, _read: &mut dyn FnMut(gdl::ClassCells<'_>)) {
+impl gdl::__runtime::PoolSource for NoPools {
+    fn read(&self, _class: &str, _entry: Option<&str>, _read: &mut dyn FnMut(gdl::ClassPools<'_>)) {
     }
 }
 
@@ -251,10 +251,10 @@ impl gdl_runtime::SegmentBinary for Adder {
         runtime: RuntimeConfig,
     ) -> gdl::Result<Serving> {
         // The node holds the handle the runtime has: a segment without a
-        // hub follows no cells and leaves it unbound, and a bind of the
+        // hub follows no pools and leaves it unbound, and a bind of the
         // runtime's reaches the node.
         assert!(!add.followed.is_bound(), "bound without a chooser");
-        assert!(runtime.followed.bind(std::sync::Arc::new(NoCells)));
+        assert!(runtime.followed.bind(std::sync::Arc::new(NoPools)));
         assert!(add.followed.is_bound(), "the node holds another handle");
         let segment = start_adder(add, node, roster, runtime)?;
         Ok(Serving::new(segment, |segment, _shutdown| async move {

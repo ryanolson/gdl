@@ -1,5 +1,5 @@
-//! A global cell's hub follows its children, the model cells that name it
-//! as their parent, over their cell watches, and relays what it follows to its own instances. In the
+//! A global pool's hub follows its children, the model pools that name it
+//! as their parent, over their pool watches, and relays what it follows to its own instances. In the
 //! deployment of these tests, `global` runs `a` and sends to `model_x`,
 //! whose entry segment is `f`. Every hub runs in process on OS-assigned
 //! ports, sharing one directory whose hub names a test resolves once each
@@ -11,21 +11,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use common::{
-    CELL, GLOBAL, Instance, Records, Resolving, WAIT, global_default, health, meet_the_quorum,
-    model, serve_cell, timing, usable,
+    GLOBAL, Instance, POOL, Records, Resolving, WAIT, global_default, health, meet_the_quorum,
+    model, serve_pool, timing, usable,
 };
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
-use gdl_cells::{CellDirectory, CellRecord, CellState, Withdrawal};
-use gdl_hub::{CellReadiness, CellTiming};
+use gdl_hub::{PoolReadiness, PoolTiming};
 use gdl_model::SegmentPhase;
-use gdl_watch::{CellWatcher, FollowEvent};
+use gdl_pools::{PoolDirectory, PoolRecord, PoolState, Withdrawal};
+use gdl_watch::{FollowEvent, PoolWatcher};
 use velo_hub::Hub;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 /// The relay on `hub`, through the client.
 async fn follows(hub: &Hub) -> BoxStream<'static, FollowEvent> {
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let address = format!("127.0.0.1:{}", hub.public_addr().port());
     tokio::time::timeout(WAIT, watcher.follows(&address, None))
         .await
@@ -81,40 +81,40 @@ async fn until(
     assert!(waited.is_ok(), "timed out waiting for {what}: {relay:?}");
 }
 
-/// Wait until the cells the hub follows satisfy `done`, and return them.
-/// The cells are `model_x`'s, by name: the only class the global sends to.
+/// Wait until the pools the hub follows satisfy `done`, and return them.
+/// The pools are `model_x`'s, by name: the only class the global sends to.
 async fn following(
-    cell: &CellReadiness<Resolving>,
+    pool: &PoolReadiness<Resolving>,
     what: &str,
     mut done: impl FnMut(&BTreeMap<String, u64>) -> bool,
 ) -> BTreeMap<String, u64> {
-    let model_x = |cells: &BTreeMap<(String, String), u64>| -> BTreeMap<String, u64> {
-        cells
+    let model_x = |pools: &BTreeMap<(String, String), u64>| -> BTreeMap<String, u64> {
+        pools
             .iter()
             .filter(|((class, _), _)| class == "model_x")
-            .map(|((_, cell), generation)| (cell.clone(), *generation))
+            .map(|((_, pool), generation)| (pool.clone(), *generation))
             .collect()
     };
-    let mut following = cell.following();
+    let mut following = pool.following();
     let waited = tokio::time::timeout(WAIT, async {
         following
-            .wait_for(|cells| done(&model_x(cells)))
+            .wait_for(|pools| done(&model_x(pools)))
             .await
-            .map(|cells| model_x(&cells))
+            .map(|pools| model_x(&pools))
     })
     .await;
     match waited {
-        Ok(cells) => cells.expect("the extension runs"),
+        Ok(pools) => pools.expect("the extension runs"),
         Err(_) => panic!("timed out waiting for {what}: {:?}", *following.borrow()),
     }
 }
 
-/// The follow `generation` of [`CELL`], marked not offered at its first
+/// The follow `generation` of [`POOL`], marked not offered at its first
 /// change.
 fn unoffered(generation: u64) -> FollowEvent {
     FollowEvent::Offering {
         class: "model_x".into(),
-        cell: CELL.into(),
+        pool: POOL.into(),
         generation,
         revision: 2,
         offered: false,
@@ -135,16 +135,16 @@ async fn peer(hub: &Hub, id: InstanceId) -> PeerInfo {
 
 /// A record a test writes into the directory itself: a child of the
 /// global, of its region, deployment, and class, ready, at `hub`.
-fn written(like: &CellRecord, name: &str, hub: &str) -> CellRecord {
-    CellRecord {
+fn written(like: &PoolRecord, name: &str, hub: &str) -> PoolRecord {
+    PoolRecord {
         name: name.into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         hub: hub.into(),
         ..like.clone()
     }
 }
 
-/// A cell no hub serves: the address of a port that refuses.
+/// A pool no hub serves: the address of a port that refuses.
 fn nowhere() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let address = listener.local_addr().expect("an address");
@@ -157,7 +157,7 @@ fn nowhere() -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Relay {
     follows: BTreeMap<String, Followed>,
-    /// The cells the relay said were withdrawn, with the generation each
+    /// The pools the relay said were withdrawn, with the generation each
     /// withdrawal named.
     withdrawn: BTreeMap<String, u64>,
 }
@@ -165,7 +165,7 @@ struct Relay {
 #[derive(Debug, PartialEq, Eq)]
 struct Followed {
     generation: u64,
-    state: CellState,
+    state: PoolState,
     retired: HashSet<InstanceId>,
     exposed: HashMap<InstanceId, PeerInfo>,
     /// Instances a state hid, which a consumer keeps until they leave or
@@ -173,8 +173,8 @@ struct Followed {
     hidden: HashSet<InstanceId>,
 }
 
-fn exposes(state: CellState) -> bool {
-    matches!(state, CellState::Ready | CellState::Degraded)
+fn exposes(state: PoolState) -> bool {
+    matches!(state, PoolState::Ready | PoolState::Degraded)
 }
 
 impl Relay {
@@ -186,16 +186,16 @@ impl Relay {
         relay
     }
 
-    /// The follow `cell` of `generation`: a consumer never sees an event
+    /// The follow `pool` of `generation`: a consumer never sees an event
     /// of a generation it does not hold.
-    fn current(&mut self, cell: &str, generation: u64) -> &mut Followed {
+    fn current(&mut self, pool: &str, generation: u64) -> &mut Followed {
         let followed = self
             .follows
-            .get_mut(cell)
-            .unwrap_or_else(|| panic!("an event of {cell}, which is not followed"));
+            .get_mut(pool)
+            .unwrap_or_else(|| panic!("an event of {pool}, which is not followed"));
         assert_eq!(
             followed.generation, generation,
-            "an event of {cell}'s other generation"
+            "an event of {pool}'s other generation"
         );
         followed
     }
@@ -203,13 +203,13 @@ impl Relay {
     fn apply(&mut self, event: &FollowEvent) {
         match event {
             FollowEvent::Follow {
-                cell,
+                pool,
                 generation,
                 state,
                 ..
             } => {
                 let installed = self.follows.insert(
-                    cell.clone(),
+                    pool.clone(),
                     Followed {
                         generation: *generation,
                         state: *state,
@@ -218,24 +218,24 @@ impl Relay {
                         hidden: HashSet::new(),
                     },
                 );
-                assert!(installed.is_none(), "{cell} installed twice");
+                assert!(installed.is_none(), "{pool} installed twice");
             }
             FollowEvent::Synced { .. } | FollowEvent::Listed { .. } => {}
             FollowEvent::Load {
-                cell, generation, ..
+                pool, generation, ..
             }
             | FollowEvent::Offering {
-                cell, generation, ..
+                pool, generation, ..
             } => {
-                self.current(cell, *generation);
+                self.current(pool, *generation);
             }
             FollowEvent::State {
-                cell,
+                pool,
                 generation,
                 state,
                 ..
             } => {
-                let followed = self.current(cell, *generation);
+                let followed = self.current(pool, *generation);
                 followed.state = *state;
                 if !exposes(*state) {
                     let hidden: Vec<InstanceId> =
@@ -244,12 +244,12 @@ impl Relay {
                 }
             }
             FollowEvent::Exposed {
-                cell,
+                pool,
                 generation,
                 peer,
                 ..
             } => {
-                let followed = self.current(cell, *generation);
+                let followed = self.current(pool, *generation);
                 assert!(
                     exposes(followed.state),
                     "exposed while {:?}",
@@ -265,131 +265,131 @@ impl Relay {
                 assert!(known.is_none(), "an instance exposed twice");
             }
             FollowEvent::Retired {
-                cell,
+                pool,
                 generation,
                 instance,
                 ..
             } => {
-                let followed = self.current(cell, *generation);
+                let followed = self.current(pool, *generation);
                 followed.exposed.remove(instance);
                 followed.hidden.remove(instance);
                 assert!(followed.retired.insert(*instance), "retired twice");
             }
             FollowEvent::Left {
-                cell,
+                pool,
                 generation,
                 instance,
                 ..
             } => {
-                let followed = self.current(cell, *generation);
+                let followed = self.current(pool, *generation);
                 let known = followed.exposed.remove(instance).is_some()
                     | followed.hidden.remove(instance)
                     | followed.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
             FollowEvent::Dropped {
-                cell, generation, ..
+                pool, generation, ..
             } => {
-                self.current(cell, *generation);
-                self.follows.remove(cell);
+                self.current(pool, *generation);
+                self.follows.remove(pool);
             }
-            // It names the cell's latest follow, which may have been
+            // It names the pool's latest follow, which may have been
             // dropped already.
             FollowEvent::Withdrawn {
-                cell, generation, ..
+                pool, generation, ..
             } => {
-                if let Some(followed) = self.follows.get(cell) {
+                if let Some(followed) = self.follows.get(pool) {
                     assert_eq!(followed.generation, *generation, "not the latest follow");
                 }
-                self.withdrawn.insert(cell.clone(), *generation);
+                self.withdrawn.insert(pool.clone(), *generation);
             }
         }
     }
 
-    fn exposed(&self, cell: &str) -> HashSet<InstanceId> {
+    fn exposed(&self, pool: &str) -> HashSet<InstanceId> {
         self.follows
-            .get(cell)
+            .get(pool)
             .map(|followed| followed.exposed.keys().copied().collect())
             .unwrap_or_default()
     }
 }
 
-/// A global follows its children, the model cells whose record names it as
+/// A global follows its children, the model pools whose record names it as
 /// their parent (`home`) with its contract and placement hashes, once
 /// their record says they take work (`ready` or `degraded`), whatever
-/// their region. It does not follow a cell whose parent is another global,
+/// their region. It does not follow a pool whose parent is another global,
 /// one with no parent, one with another contract or placement hash, one
 /// that is `unavailable`, or one scaled to 0, whose record never lapses
 /// though its hub may be gone. The follower decides on each record in the
-/// order the directory gives them, so once it follows a cell whose record
+/// order the directory gives them, so once it follows a pool whose record
 /// came last, it has decided on every record before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_global_follows_its_children_that_take_work() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let published = records.next().await;
-    assert_eq!(published.state, CellState::Unavailable);
+    assert_eq!(published.state, PoolState::Unavailable);
     assert_eq!(published.home.as_deref(), Some(GLOBAL));
-    let elsewhere = CellRecord {
+    let elsewhere = PoolRecord {
         region: "us-west-2".into(),
         ..written(&published, "model-x-01-us-west-2", &nowhere())
     };
-    let cousin = CellRecord {
+    let cousin = PoolRecord {
         home: Some("global-02-us-east-1".into()),
         ..written(&published, "model-x-03-us-east-1", &nowhere())
     };
-    let orphan = CellRecord {
+    let orphan = PoolRecord {
         home: None,
         ..written(&published, "model-x-04-us-east-1", &nowhere())
     };
-    let foreign = CellRecord {
+    let foreign = PoolRecord {
         contract: published.contract ^ 1,
         ..written(&published, "model-x-02-us-east-1", &nowhere())
     };
-    let replaced = CellRecord {
+    let replaced = PoolRecord {
         placement: published.placement ^ 1,
         ..written(&published, "model-x-05-us-east-1", &nowhere())
     };
-    let scaled = CellRecord {
-        presence: gdl_cells::Presence::ScaledToZero,
+    let scaled = PoolRecord {
+        presence: gdl_pools::Presence::ScaledToZero,
         ..written(&published, "model-x-06-us-east-1", &nowhere())
     };
     for record in [elsewhere, cousin, orphan, foreign, replaced, scaled] {
         directory.inner.publish(record).await.expect("stored");
     }
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
 
     let first = written(&published, "model-x-08-us-east-1", &nowhere());
     directory.inner.publish(first).await.expect("stored");
-    let cells = following(&global_cell, "the first written cell", |cells| {
-        cells.contains_key("model-x-08-us-east-1")
+    let pools = following(&global_pool, "the first written pool", |pools| {
+        pools.contains_key("model-x-08-us-east-1")
     })
     .await;
     assert_eq!(
-        cells.keys().collect::<Vec<_>>(),
+        pools.keys().collect::<Vec<_>>(),
         ["model-x-01-us-west-2", "model-x-08-us-east-1"],
-        "another region's child, and not another global's, an orphan, another deployment's, an unavailable cell, or one scaled to 0"
+        "another region's child, and not another global's, an orphan, another deployment's, an unavailable pool, or one scaled to 0"
     );
 
     let (_instances, _) = meet_the_quorum(&model_hub).await;
-    let cells = following(&global_cell, "the model cell", |cells| {
-        cells.contains_key(CELL)
+    let pools = following(&global_pool, "the model pool", |pools| {
+        pools.contains_key(POOL)
     })
     .await;
     assert_eq!(
-        cells.keys().collect::<Vec<_>>(),
-        [CELL, "model-x-01-us-west-2", "model-x-08-us-east-1"]
+        pools.keys().collect::<Vec<_>>(),
+        [POOL, "model-x-01-us-west-2", "model-x-08-us-east-1"]
     );
-    let mut watchers = model_cell.watchers();
+    let mut watchers = model_pool.watchers();
     tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 1))
         .await
-        .expect("the global watches the model cell")
+        .expect("the global watches the model pool")
         .expect("the extension lives");
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
@@ -397,28 +397,28 @@ async fn a_global_follows_its_children_that_take_work() {
 
 /// A scale-to-zero record must also stop a follow opened while serving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_followed_cell_scaled_to_zero_is_no_longer_offered() {
+async fn a_followed_pool_scaled_to_zero_is_no_longer_offered() {
     let directory = Resolving::new();
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (_instances, _) = meet_the_quorum(&model_hub).await;
     let mut records = Records::new(&directory.inner);
-    let (ready, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    following(&global_cell, "the serving child", |cells| {
-        cells.contains_key(CELL)
+    let (ready, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    following(&global_pool, "the serving child", |pools| {
+        pools.contains_key(POOL)
     })
     .await;
-    let mut watchers = model_cell.watchers();
+    let mut watchers = model_pool.watchers();
     tokio::time::timeout(WAIT, watchers.wait_for(|count| *count == 1))
         .await
         .expect("the parent opens the child's watch")
         .expect("the child runs");
-    let mut events = global_cell.follows();
+    let mut events = global_pool.follows();
     until(
         &mut events,
         &mut Relay::default(),
@@ -426,14 +426,14 @@ async fn a_followed_cell_scaled_to_zero_is_no_longer_offered() {
         |relay| {
             relay
                 .follows
-                .get(CELL)
-                .is_some_and(|cell| !cell.exposed.is_empty())
+                .get(POOL)
+                .is_some_and(|pool| !pool.exposed.is_empty())
         },
     )
     .await;
 
-    model_cell
-        .set_presence(gdl_cells::Presence::ScaledToZero)
+    model_pool
+        .set_presence(gdl_pools::Presence::ScaledToZero)
         .await
         .expect("the scale-to-zero record is stored");
     let marker = "model-x-09-us-east-1";
@@ -444,36 +444,36 @@ async fn a_followed_cell_scaled_to_zero_is_no_longer_offered() {
         .expect("the marker follows the scale-to-zero record");
     // The directory orders records, so seeing this follow proves the
     // parent processed the scale-to-zero record first.
-    let cells = following(&global_cell, "the marker", |cells| {
-        cells.contains_key(marker)
+    let pools = following(&global_pool, "the marker", |pools| {
+        pools.contains_key(marker)
     })
     .await;
-    let events = snapshot(&mut global_cell.follows()).await;
+    let events = snapshot(&mut global_pool.follows()).await;
     let offered = events.iter().any(|event| {
-        matches!(event, FollowEvent::Follow { cell, state, .. } if cell == CELL && exposes(*state))
+        matches!(event, FollowEvent::Follow { pool, state, .. } if pool == POOL && exposes(*state))
     }) && !events.iter().any(|event| {
-        matches!(event, FollowEvent::Offering { cell, offered: false, .. } if cell == CELL)
+        matches!(event, FollowEvent::Offering { pool, offered: false, .. } if pool == POOL)
     });
     global_hub.shutdown().await.expect("the parent stops");
     model_hub.shutdown().await.expect("the child stops");
     assert!(
         !offered,
-        "the parent still offers the cell after its scale-to-zero record: follows={cells:?}, events={events:?}"
+        "the parent still offers the pool after its scale-to-zero record: follows={pools:?}, events={events:?}"
     );
 }
 
-/// Through the relay, a followed cell appears with its state before any
+/// Through the relay, a followed pool appears with its state before any
 /// of its instances, and its retired instances before its ready ones.
-/// While the cell says it is `unavailable`, none of its instances is
+/// While the pool says it is `unavailable`, none of its instances is
 /// exposed, not even one that becomes ready meanwhile; when it takes work
 /// again, they are, after the state that allows them. The follow
-/// outlives the cell's record leaving the follow set.
+/// outlives the pool's record leaving the follow set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_follow_is_its_state_first_then_retired_then_ready() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
@@ -482,31 +482,31 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     serving.announce(SegmentPhase::Ready).await;
     let mut retiring = Instance::join(&model_hub, "f").await;
     retiring.announce(SegmentPhase::Ready).await;
-    health(&model_cell, "f at 2", |h| usable(h, "f") == 2).await;
+    health(&model_pool, "f at 2", |h| usable(h, "f") == 2).await;
     retiring.announce(SegmentPhase::Retired).await;
-    health(&model_cell, "f back at 1", |h| usable(h, "f") == 1).await;
+    health(&model_pool, "f back at 1", |h| usable(h, "f") == 1).await;
     let mut inside = Vec::new();
     for _ in 0..2 {
         let mut instance = Instance::join(&model_hub, "d").await;
         instance.announce(SegmentPhase::Ready).await;
         inside.push(instance);
     }
-    records.until(CellState::Ready).await;
+    records.until(PoolState::Ready).await;
 
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    // A chooser that never acknowledges that the cell is not offered, so
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    // A chooser that never acknowledges that the pool is not offered, so
     // that the follow lives through the states that take no work.
     let _chooser = Instance::chooser(&global_hub).await;
-    let mut inner = global_cell.follows();
+    let mut inner = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut inner).await);
     until(
         &mut inner,
         &mut relay,
         "the follow's ready instance",
-        |relay| relay.exposed(CELL).contains(&serving.id()),
+        |relay| relay.exposed(POOL).contains(&serving.id()),
     )
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
     drop(inner);
     let mut watch = follows(&global_hub).await;
     let serving_peer = peer(&model_hub, serving.id()).await;
@@ -517,23 +517,23 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
             FollowEvent::Follow {
                 listing: None,
                 class: "model_x".into(),
-                cell: CELL.into(),
+                pool: POOL.into(),
                 generation,
                 region: "us-east-1".into(),
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 load: None,
                 load_age_ms: None,
             },
             FollowEvent::Retired {
                 class: "model_x".into(),
-                cell: CELL.into(),
+                pool: POOL.into(),
                 generation,
                 segment: "f".into(),
                 instance: retiring.id(),
             },
             FollowEvent::Exposed {
                 class: "model_x".into(),
-                cell: CELL.into(),
+                pool: POOL.into(),
                 generation,
                 segment: "f".into(),
                 peer: serving_peer.clone(),
@@ -545,30 +545,30 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
 
     let state = |state| FollowEvent::State {
         class: "model_x".into(),
-        cell: CELL.into(),
+        pool: POOL.into(),
         generation,
         state,
     };
     for instance in &mut inside {
         instance.withdraw(SegmentPhase::Ready).await;
     }
-    for expected in [CellState::Degraded, CellState::Unavailable] {
+    for expected in [PoolState::Degraded, PoolState::Unavailable] {
         let event = next(&mut watch).await;
         assert_eq!(event, state(expected));
         relay.apply(&event);
     }
     assert_eq!(next(&mut watch).await, unoffered(generation));
-    records.until(CellState::Unavailable).await;
+    records.until(PoolState::Unavailable).await;
 
     let mut joining = Instance::join(&model_hub, "f").await;
     joining.announce(SegmentPhase::Ready).await;
-    health(&model_cell, "f at 2", |h| usable(h, "f") == 2).await;
+    health(&model_pool, "f at 2", |h| usable(h, "f") == 2).await;
     let mut back = Instance::join(&model_hub, "d").await;
     back.announce(SegmentPhase::Ready).await;
     let event = next(&mut watch).await;
     assert_eq!(
         event,
-        state(CellState::Degraded),
+        state(PoolState::Degraded),
         "nothing exposed before it"
     );
     relay.apply(&event);
@@ -596,29 +596,29 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// Liveness is the link: stopping a followed cell's hub drops the follow
+/// Liveness is the link: stopping a followed pool's hub drops the follow
 /// at once, though its record is fresh in the directory. The global waits
-/// longer than the test before it would follow the cell again, so the
+/// longer than the test before it would follow the pool again, so the
 /// drop is the link's and not a new follow's. A new hub process for the
-/// cell, with a later epoch, is followed as a new generation once it
+/// pool, with a later epoch, is followed as a new generation once it
 /// takes work, without that wait, and nothing of the old generation
 /// arrives after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
+async fn a_pool_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (first_hub, _first_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (first_hub, _first_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (first_instances, _) = meet_the_quorum(&first_hub).await;
-    let (before, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(
+    let (before, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(
         global_default(),
         &directory,
-        CellTiming {
+        PoolTiming {
             refollow: Duration::from_secs(600),
             ..timing()
         },
@@ -630,10 +630,10 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
         &mut watch,
         &mut relay,
         "the follow's ready instance",
-        |relay| relay.exposed(CELL).contains(&first_instances[0].id()),
+        |relay| relay.exposed(POOL).contains(&first_instances[0].id()),
     )
     .await;
-    let first = relay.follows[CELL].generation;
+    let first = relay.follows[POOL].generation;
 
     first_hub.shutdown().await.expect("the hub stops");
     // Not offered at once, and, with no chooser to wait for, closed.
@@ -645,85 +645,85 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
         event,
         FollowEvent::Dropped {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation: first,
         }
     );
     relay.apply(&event);
 
-    let (second_hub, _second_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-b:1337"),
+    let (second_hub, _second_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-b:1337"),
         &directory,
         timing(),
     )
     .await;
     let (second_instances, _) = meet_the_quorum(&second_hub).await;
-    let (after, _) = records.until(CellState::Ready).await;
+    let (after, _) = records.until(PoolState::Ready).await;
     assert!(after.epoch > before.epoch);
     until(&mut watch, &mut relay, "the new follow, ready", |relay| {
-        relay.follows.get(CELL).is_some_and(|followed| {
-            followed.state == CellState::Ready
+        relay.follows.get(POOL).is_some_and(|followed| {
+            followed.state == PoolState::Ready
                 && followed.exposed.contains_key(&second_instances[0].id())
         })
     })
     .await;
-    let second = relay.follows[CELL].generation;
+    let second = relay.follows[POOL].generation;
     assert!(second > first, "{second} after {first}");
     assert!(
         relay.withdrawn.is_empty(),
         "a stopped hub is not a withdrawal"
     );
-    let cells = following(&global_cell, "the new generation", |cells| {
-        cells.get(CELL) == Some(&second)
+    let pools = following(&global_pool, "the new generation", |pools| {
+        pools.get(POOL) == Some(&second)
     })
     .await;
-    assert_eq!(cells.len(), 1);
+    assert_eq!(pools.len(), 1);
     global_hub.shutdown().await.expect("the hub stops");
     second_hub.shutdown().await.expect("the hub stops");
 }
 
-/// A hub at the address a record names that serves another cell, or the
-/// cell in another epoch than the record's, is not followed for it: the
-/// follow ends at the cell's first event, and the global follows it again
+/// A hub at the address a record names that serves another pool, or the
+/// pool in another epoch than the record's, is not followed for it: the
+/// follow ends at the pool's first event, and the global follows it again
 /// after a while, as a new generation, which is how the test knows the
 /// first was refused. A newer epoch in the directory ends the follow of
 /// the hub it replaces.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
+async fn a_hub_serving_another_pool_or_epoch_is_not_installed() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    let mut watch = global_cell.follows();
+    let (record, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
 
     let other = written(&record, "model-x-09-us-east-1", &record.hub);
     directory.inner.publish(other).await.expect("stored");
-    following(&global_cell, "a second follow of the other cell", |cells| {
-        cells.get("model-x-09-us-east-1") >= Some(&2)
+    following(&global_pool, "a second follow of the other pool", |pools| {
+        pools.get("model-x-09-us-east-1") >= Some(&2)
     })
     .await;
     let mut again = follows(&global_hub).await;
     let held = Relay::of(&snapshot(&mut again).await);
     assert_eq!(
         held.follows.keys().collect::<Vec<_>>(),
-        [CELL],
-        "the other cell is not installed"
+        [POOL],
+        "the other pool is not installed"
     );
 
-    let later = CellRecord {
+    let later = PoolRecord {
         epoch: record.epoch + 1,
         seq: 1,
         ..record.clone()
@@ -735,14 +735,14 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
         event,
         FollowEvent::Dropped {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation,
         }
     );
     following(
-        &global_cell,
+        &global_pool,
         "a second follow in the later epoch",
-        |cells| cells.get(CELL) >= Some(&(generation + 2)),
+        |pools| pools.get(POOL) >= Some(&(generation + 2)),
     )
     .await;
     let mut last = follows(&global_hub).await;
@@ -754,17 +754,17 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// Write a record of a cell no hub serves, and wait until the global
+/// Write a record of a pool no hub serves, and wait until the global
 /// follows it: it has then decided on every record before it.
 async fn written_and_followed(
     directory: &Resolving,
-    global: &CellReadiness<Resolving>,
-    like: &CellRecord,
+    global: &PoolReadiness<Resolving>,
+    like: &PoolRecord,
 ) -> BTreeMap<String, u64> {
     let marker = written(like, "model-x-09-us-east-1", &nowhere());
     directory.inner.publish(marker).await.expect("stored");
-    following(global, "the written cell", |cells| {
-        cells.contains_key("model-x-09-us-east-1")
+    following(global, "the written pool", |pools| {
+        pools.contains_key("model-x-09-us-east-1")
     })
     .await
 }
@@ -778,125 +778,125 @@ fn pending(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> Vec<FollowE
     events
 }
 
-/// A followed cell whose record is withdrawn while its link is live stays
-/// followed: the link, not the directory, says whether the cell is there.
+/// A followed pool whose record is withdrawn while its link is live stays
+/// followed: the link, not the directory, says whether the pool is there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawn_record_does_not_end_a_live_follow() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    let mut watch = global_cell.follows();
+    let (record, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
 
     directory
         .inner
         .withdraw(Withdrawal {
             class: record.class.clone(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             epoch: record.epoch,
             seq: record.seq + 1,
         })
         .await
         .expect("withdrawn");
-    let cells = written_and_followed(&directory, &global_cell, &record).await;
-    assert_eq!(cells.get(CELL), Some(&generation));
+    let pools = written_and_followed(&directory, &global_pool, &record).await;
+    assert_eq!(pools.get(POOL), Some(&generation));
     for event in pending(&mut watch) {
         relay.apply(&event);
     }
-    assert_eq!(relay.follows[CELL].generation, generation);
-    assert!(relay.exposed(CELL).contains(&instances[0].id()));
-    assert_eq!(relay.withdrawn.get(CELL), Some(&generation));
+    assert_eq!(relay.follows[POOL].generation, generation);
+    assert!(relay.exposed(POOL).contains(&instances[0].id()));
+    assert_eq!(relay.withdrawn.get(POOL), Some(&generation));
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// A followed cell that drains stays followed, exposing nothing and not
+/// A followed pool that drains stays followed, exposing nothing and not
 /// offered, while a chooser of the global has yet to acknowledge it, and
 /// while any of its instances is a member of its hub. Once the last
 /// leaves, its hub withdraws its record and ends its watch, and the global
-/// does not follow the cell again; it drops the follow once the chooser
+/// does not follow the pool again; it drops the follow once the chooser
 /// acknowledges.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
+async fn a_drained_pool_is_dropped_once_its_hub_withdraws_it() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let (record, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
     let chooser = Instance::chooser(&global_hub).await;
-    let mut watch = global_cell.follows();
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
 
-    model_cell.drain().await.expect("the cell drains");
-    until(&mut watch, &mut relay, "the cell draining", |relay| {
-        relay.follows[CELL].state == CellState::Draining
+    model_pool.drain().await.expect("the pool drains");
+    until(&mut watch, &mut relay, "the pool draining", |relay| {
+        relay.follows[POOL].state == PoolState::Draining
     })
     .await;
-    assert!(relay.exposed(CELL).is_empty());
+    assert!(relay.exposed(POOL).is_empty());
     assert_eq!(next(&mut watch).await, unoffered(generation));
     for instance in instances {
         instance.leave().await;
     }
     following(
-        &global_cell,
-        "the drained cell no longer followed",
-        |cells| !cells.contains_key(CELL),
+        &global_pool,
+        "the drained pool no longer followed",
+        |pools| !pools.contains_key(POOL),
     )
     .await;
     until(&mut watch, &mut relay, "the withdrawal", |relay| {
-        relay.withdrawn.contains_key(CELL)
+        relay.withdrawn.contains_key(POOL)
     })
     .await;
-    assert_eq!(relay.withdrawn[CELL], generation);
-    assert!(relay.follows.contains_key(CELL), "dropped unacknowledged");
+    assert_eq!(relay.withdrawn[POOL], generation);
+    assert!(relay.follows.contains_key(POOL), "dropped unacknowledged");
     chooser
         .acknowledge(&gdl_watch::Unoffered {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation,
             revision: 2,
         })
         .await
         .expect("the hub takes the acknowledgement");
     until(&mut watch, &mut relay, "the follow dropped", |relay| {
-        !relay.follows.contains_key(CELL)
+        !relay.follows.contains_key(POOL)
     })
     .await;
     // Once the directory has shown it a later write, the global has
-    // decided on every record before it, and not followed the cell again.
-    let cells = written_and_followed(&directory, &global_cell, &record).await;
-    assert!(!cells.contains_key(CELL), "followed again: {cells:?}");
+    // decided on every record before it, and not followed the pool again.
+    let pools = written_and_followed(&directory, &global_pool, &record).await;
+    assert!(!pools.contains_key(POOL), "followed again: {pools:?}");
     for event in pending(&mut watch) {
         relay.apply(&event);
     }
     assert!(
         relay
             .follows
-            .get(CELL)
+            .get(POOL)
             .is_none_or(|followed| followed.generation == generation),
         "followed again"
     );
@@ -904,49 +904,49 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// A drained cell whose follow every chooser acknowledged is dropped
+/// A drained pool whose follow every chooser acknowledged is dropped
 /// before its last instance leaves; the withdrawal of its record that
 /// follows is relayed after the drop, naming the follow that was dropped,
-/// so that a chooser that held the cell learns it was drained on purpose.
+/// so that a chooser that held the pool learns it was drained on purpose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawal_after_the_drop_is_relayed() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
     let chooser = Instance::chooser(&global_hub).await;
-    let mut watch = global_cell.follows();
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
 
-    model_cell.drain().await.expect("the cell drains");
-    until(&mut watch, &mut relay, "the cell draining", |relay| {
-        relay.follows[CELL].state == CellState::Draining
+    model_pool.drain().await.expect("the pool drains");
+    until(&mut watch, &mut relay, "the pool draining", |relay| {
+        relay.follows[POOL].state == PoolState::Draining
     })
     .await;
     assert_eq!(next(&mut watch).await, unoffered(generation));
     chooser
         .acknowledge(&gdl_watch::Unoffered {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation,
             revision: 2,
         })
         .await
         .expect("the hub takes the acknowledgement");
     until(&mut watch, &mut relay, "the follow dropped", |relay| {
-        !relay.follows.contains_key(CELL)
+        !relay.follows.contains_key(POOL)
     })
     .await;
     assert!(
@@ -961,7 +961,7 @@ async fn a_withdrawal_after_the_drop_is_relayed() {
         event,
         FollowEvent::Withdrawn {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation,
         }
     );
@@ -969,43 +969,43 @@ async fn a_withdrawal_after_the_drop_is_relayed() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// A followed cell whose record expires on the global's clock while its
+/// A followed pool whose record expires on the global's clock while its
 /// link is live stays followed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_expired_record_does_not_end_a_live_follow() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
     let lease = Duration::from_millis(500);
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
-        CellTiming { lease, ..timing() },
+        PoolTiming { lease, ..timing() },
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    let mut watch = global_cell.follows();
+    let (record, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
-    let generation = relay.follows[CELL].generation;
+    let generation = relay.follows[POOL].generation;
 
-    // The global saw the record before it followed the cell, and the
-    // cell's heartbeat is longer than the test: past this instant the
+    // The global saw the record before it followed the pool, and the
+    // pool's heartbeat is longer than the test: past this instant the
     // record is expired on the global's clock. Expiry is no event, so the
     // test waits for the instant itself.
     tokio::time::sleep_until((Instant::now() + lease + Duration::from_millis(100)).into()).await;
-    let cells = written_and_followed(&directory, &global_cell, &record).await;
-    assert_eq!(cells.get(CELL), Some(&generation));
+    let pools = written_and_followed(&directory, &global_pool, &record).await;
+    assert_eq!(pools.get(POOL), Some(&generation));
     for event in pending(&mut watch) {
         relay.apply(&event);
     }
     assert!(relay.withdrawn.is_empty(), "an expiry is not a withdrawal");
-    assert_eq!(relay.follows[CELL].generation, generation);
-    assert!(relay.exposed(CELL).contains(&instances[0].id()));
+    assert_eq!(relay.follows[POOL].generation, generation);
+    assert!(relay.exposed(POOL).contains(&instances[0].id()));
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -1017,16 +1017,16 @@ async fn an_expired_record_does_not_end_a_live_follow() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_relay_watcher_that_falls_behind_is_ended() {
     let directory = Resolving::new();
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let (global_hub, global_cell) = serve_cell(
+    let (global_hub, global_pool) = serve_pool(
         global_default(),
         &directory,
-        CellTiming {
+        PoolTiming {
             watch_buffer: 4,
             ..timing()
         },
@@ -1037,7 +1037,7 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
     // first read.
     let mut watch = follows(&global_hub).await;
     let mut relay = Relay::of(&snapshot(&mut watch).await);
-    let mut behind = global_cell.follows();
+    let mut behind = global_pool.follows();
 
     let (_quorum, _) = meet_the_quorum(&model_hub).await;
     let mut more = Vec::new();
@@ -1047,7 +1047,7 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
         more.push(instance);
     }
     until(&mut watch, &mut relay, "seven exposed instances", |relay| {
-        relay.exposed(CELL).len() == 7
+        relay.exposed(POOL).len() == 7
     })
     .await;
     let behind_events = tokio::time::timeout(
@@ -1069,8 +1069,8 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_a_relay_watch_releases_it() {
     let directory = Resolving::new();
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    let mut watchers = global_cell.follows_watchers();
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watchers = global_pool.follows_watchers();
     let mut count = async |n: usize| {
         tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == n))
             .await
@@ -1078,7 +1078,7 @@ async fn dropping_a_relay_watch_releases_it() {
             .expect("the extension lives");
     };
     count(0).await;
-    let inside = global_cell.follows();
+    let inside = global_pool.follows();
     count(1).await;
     let mut outside = follows(&global_hub).await;
     assert_eq!(
@@ -1091,7 +1091,7 @@ async fn dropping_a_relay_watch_releases_it() {
     drop(outside);
     count(0).await;
 
-    let mut last = global_cell.follows();
+    let mut last = global_pool.follows();
     assert_eq!(
         snapshot(&mut last).await,
         [FollowEvent::Synced { listed: false }]
@@ -1108,29 +1108,29 @@ async fn dropping_a_relay_watch_releases_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_hub_relays_nothing() {
     let directory = Resolving::new();
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
-    let mut watch = global_cell.follows();
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watch = global_pool.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
-        relay.exposed(CELL).contains(&instances[0].id())
+        relay.exposed(POOL).contains(&instances[0].id())
     })
     .await;
     global_hub.shutdown().await.expect("the hub stops");
-    let after = tokio::time::timeout(WAIT, global_cell.follows().collect::<Vec<_>>())
+    let after = tokio::time::timeout(WAIT, global_pool.follows().collect::<Vec<_>>())
         .await
         .expect("the watch ends in time");
     assert_eq!(after, []);
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// The relay's wire form is JSON tagged by `event`, as the cell watch's
+/// The relay's wire form is JSON tagged by `event`, as the pool watch's
 /// is, so that an instance of another build reads it.
 #[test]
 fn a_relay_event_is_json_tagged_by_its_kind() {
@@ -1138,26 +1138,26 @@ fn a_relay_event_is_json_tagged_by_its_kind() {
     assert_eq!(
         serde_json::to_value(FollowEvent::Left {
             class: "model_x".into(),
-            cell: CELL.into(),
+            pool: POOL.into(),
             generation: 3,
             segment: "f".into(),
             instance,
         })
         .expect("an event serializes"),
         serde_json::json!({
-            "event": "left", "class": "model_x", "cell": CELL, "generation": 3, "segment": "f",
+            "event": "left", "class": "model_x", "pool": POOL, "generation": 3, "segment": "f",
             "instance": instance,
         }),
     );
     assert_eq!(
         serde_json::to_value(FollowEvent::Dropped {
             class: "model_x".into(),
-            cell: GLOBAL.into(),
+            pool: GLOBAL.into(),
             generation: 1,
         })
         .expect("an event serializes"),
         serde_json::json!({
-            "event": "dropped", "class": "model_x", "cell": GLOBAL, "generation": 1,
+            "event": "dropped", "class": "model_x", "pool": GLOBAL, "generation": 1,
         }),
     );
 }

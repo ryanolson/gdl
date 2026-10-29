@@ -1,43 +1,43 @@
-//! The relay of what a cell's hub follows, as typed events.
+//! The relay of what a pool's hub follows, as typed events.
 
-use gdl_cells::{CellCondition, CellState, LoadSummary};
+use gdl_pools::{LoadSummary, PoolCondition, PoolState};
 use serde::{Deserialize, Serialize};
 use velo::{InstanceId, PeerInfo};
 
-/// One event of the relay of what a cell's hub follows,
-/// `GET /v1/ext/gdl-cell/follows` on the hub's public listener: each
+/// One event of the relay of what a pool's hub follows,
+/// `GET /v1/ext/gdl-pool/follows` on the hub's public listener: each
 /// server-sent event's data is one of these, as JSON tagged by `event`.
-/// The hub's own instances read it, to route to the cells their class
+/// The hub's own instances read it, to route to the pools their class
 /// sends to.
 ///
-/// A follow is one cell, followed over its cell watch, in one generation:
-/// the follower numbers each follow of a cell, and a new one never carries
+/// A follow is one pool, followed over its pool watch, in one generation:
+/// the follower numbers each follow of a pool, and a new one never carries
 /// anything over from an earlier one. Every event but
-/// [`FollowEvent::Synced`] names the cell, by its class and its name
-/// within the class as the cell directory names it, and the generation it
+/// [`FollowEvent::Synced`] names the pool, by its class and its name
+/// within the class as the pool directory names it, and the generation it
 /// belongs to, so a consumer applies each event to the generation it
-/// names. A cell has at most one current follow, the latest generation,
+/// names. A pool has at most one current follow, the latest generation,
 /// whose link is under way; an earlier one whose link ended, or that a
 /// later one replaced, closes only once every chooser has acknowledged
 /// that it no longer holds an offer to it, and until then it is still
 /// relayed, not offered, beside the current one. The relay never sends an
 /// event of a generation after its [`FollowEvent::Dropped`] but
 /// [`FollowEvent::Withdrawn`], and after a later generation of the same
-/// cell, only the earlier one's [`FollowEvent::Offering`] and
+/// pool, only the earlier one's [`FollowEvent::Offering`] and
 /// [`FollowEvent::Dropped`].
 ///
 /// A watch begins with a snapshot: for each follow, the earlier
 /// generations that have yet to close first, [`FollowEvent::Follow`], its
 /// [`FollowEvent::Offering`] if it is not offered, then its retired
 /// instances, then its exposed instances;
-/// then [`FollowEvent::Synced`], the relay's marker, which names no cell.
+/// then [`FollowEvent::Synced`], the relay's marker, which names no pool.
 /// After it, each change as it happens. A follow appears only once its
-/// cell watch's snapshot is complete, and with its state before any of
-/// its instances, so a consumer knows the cell's state before it may route
+/// pool watch's snapshot is complete, and with its state before any of
+/// its instances, so a consumer knows the pool's state before it may route
 /// to any of them, and knows every retirement before the instances it does
 /// not retire.
 ///
-/// An instance is exposed (routable) only while the state the cell last
+/// An instance is exposed (routable) only while the state the pool last
 /// sent is `ready` or `degraded`, and never once it retired. So a consumer
 /// routes to an instance from its [`FollowEvent::Exposed`] until its
 /// [`FollowEvent::Retired`] or [`FollowEvent::Left`], until a
@@ -47,14 +47,14 @@ use velo::{InstanceId, PeerInfo};
 /// followed by an `exposed` event for each ready instance. A consumer
 /// keeps every instance a follow has exposed reachable until the follow
 /// is dropped or the instance leaves, whatever the state, since what it
-/// offered to the cell may still be under way: an instance the relay sent
+/// offered to the pool may still be under way: an instance the relay sent
 /// as exposed is sent its [`FollowEvent::Left`] also while a state hides
 /// it. A watch begun while a state hides instances does not show them, so
 /// a consumer may be sent `left` for an instance it does not hold, and
 /// ignores it.
 ///
-/// A follow is offered (its cell may be chosen) while its link lives and
-/// its cell's state exposes its instances: [`FollowEvent::Follow`] is
+/// A follow is offered (its pool may be chosen) while its link lives and
+/// its pool's state exposes its instances: [`FollowEvent::Follow`] is
 /// offered at revision 1 unless an [`FollowEvent::Offering`] follows it,
 /// and each change between offered and not offered is an `offering` of
 /// the next revision. A consumer never offers a request to a follow it
@@ -63,37 +63,37 @@ use velo::{InstanceId, PeerInfo};
 /// ([`crate::Unoffered`]); the follow closes once every chooser of its
 /// class has acknowledged its current revision, and the relay drops it.
 ///
-/// A cell that drains withdraws its record from the cell directory once
+/// A pool that drains withdraws its record from the pool directory once
 /// its instances have left. When the hub's watch of the directory shows
 /// that withdrawal, the relay sends [`FollowEvent::Withdrawn`], naming the
-/// cell's latest follow, whether or not that follow has been dropped:
-/// the cell was drained on purpose. Nothing else is a withdrawal: a
+/// pool's latest follow, whether or not that follow has been dropped:
+/// the pool was drained on purpose. Nothing else is a withdrawal: a
 /// record that expires, a link that fails, and a directory snapshot that
 /// no longer holds the record send none. A watch's snapshot holds no
 /// withdrawal, so a consumer that begins after one never learns of it.
 ///
 /// Every event but [`FollowEvent::Synced`] names its follow by its class,
-/// cell, and generation, and an event a later build adds must too: a
-/// reader that does not know its kind fails closed for that cell until it
-/// has read it again (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`), and
+/// pool, and generation, and an event a later build adds must too: a
+/// reader that does not know its kind fails closed for that pool until it
+/// has read it again (`GET /v1/ext/gdl-pool/follows/{class}/{pool}`), and
 /// ends its watch at one that names no follow. A field a later build adds
 /// to a known event is optional, and a reader of this build ignores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum FollowEvent {
-    /// A follow is installed: its cell's snapshot is complete.
+    /// A follow is installed: its pool's snapshot is complete.
     Follow {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell's name.
-        cell: String,
+        /// The pool's name.
+        pool: String,
         /// The follow's generation.
         generation: u64,
-        /// The region the cell runs in, from its record.
+        /// The region the pool runs in, from its record.
         region: String,
-        /// The cell's state, as its hub last sent it.
-        state: CellState,
-        /// The load of the cell's entry segments, as its hub last sent it.
+        /// The pool's state, as its hub last sent it.
+        state: PoolState,
+        /// The load of the pool's entry segments, as its hub last sent it.
         load: Option<LoadSummary>,
         /// How long before this event the relay received `load`, in
         /// milliseconds: a consumer dates the summary back by it, so that
@@ -104,7 +104,7 @@ pub enum FollowEvent {
         /// the event arrives.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         load_age_ms: Option<u64>,
-        /// What the hub knows of the cell's record, in a snapshot, as a
+        /// What the hub knows of the pool's record, in a snapshot, as a
         /// [`FollowEvent::Listed`] would say it: a field of a known event,
         /// so that a reader of an earlier build reads the follow as it did.
         /// `None` after the snapshot, where a `listed` event says it, and
@@ -113,9 +113,9 @@ pub enum FollowEvent {
         listing: Option<Listing>,
     },
     /// The snapshot is complete: the events before this one are every
-    /// follow as the watch began, and every cell the hub lists.
+    /// follow as the watch began, and every pool the hub lists.
     Synced {
-        /// Whether the hub's watch of the cell directory had completed its
+        /// Whether the hub's watch of the pool directory had completed its
         /// first snapshot of every class it sends to when this watch
         /// began: until then, a model the listings do not name may still
         /// be listed by a record the hub has not read. A hub ends each
@@ -125,24 +125,24 @@ pub enum FollowEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         listed: bool,
     },
-    /// A followed cell's state changed.
+    /// A followed pool's state changed.
     State {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// The state it changed to.
-        state: CellState,
+        state: PoolState,
     },
-    /// A followed cell's load summary, as its cell watch sent it: once a
-    /// summary period while the cell has one, changed or not.
+    /// A followed pool's load summary, as its pool watch sent it: once a
+    /// summary period while the pool has one, changed or not.
     Load {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// The summary.
@@ -155,15 +155,15 @@ pub enum FollowEvent {
     /// that it applies every later change. A consumer applies each in
     /// revision order, and ignores one older than the last it applied.
     ///
-    /// A reader that does not know this kind fails closed for the cell
-    /// until a snapshot of it shows the cell without one: it keeps from a
+    /// A reader that does not know this kind fails closed for the pool
+    /// until a snapshot of it shows the pool without one: it keeps from a
     /// follow that is not offered, which is what this event says, and
-    /// takes the cell again once it is offered.
+    /// takes the pool again once it is offered.
     Offering {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// The change's revision.
@@ -171,26 +171,26 @@ pub enum FollowEvent {
         /// Whether the follow is offered.
         offered: bool,
     },
-    /// An entry instance of a followed cell is routable.
+    /// An entry instance of a followed pool is routable.
     Exposed {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// Its segment.
         segment: String,
-        /// Who it is and where it is reached, as its cell's hub names it.
+        /// Who it is and where it is reached, as its pool's hub names it.
         peer: PeerInfo,
     },
-    /// An entry instance of a followed cell retired: no new work may be
+    /// An entry instance of a followed pool retired: no new work may be
     /// sent to it.
     Retired {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// Its segment.
@@ -199,12 +199,12 @@ pub enum FollowEvent {
         instance: InstanceId,
     },
     /// An entry instance that an `exposed` or `retired` event named left
-    /// its cell's hub.
+    /// its pool's hub.
     Left {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
         /// Its segment.
@@ -216,92 +216,92 @@ pub enum FollowEvent {
     /// acknowledged its revision or left. None of its instances is
     /// routable, and a consumer lets go of them.
     Dropped {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
+        /// The pool, named within its class.
+        pool: String,
         /// The follow's generation.
         generation: u64,
     },
-    /// What the hub knows of a cell's record changed: its region, its
+    /// What the hub knows of a pool's record changed: its region, its
     /// condition, and its models, for its choosers' model index. The hub
-    /// lists every cell of a class it sends to whose record it has read
-    /// and whose hashes are its own, followed or not, until the cell
+    /// lists every pool of a class it sends to whose record it has read
+    /// and whose hashes are its own, followed or not, until the pool
     /// withdraws its record; `listing` is `None` once it has. A snapshot
-    /// sends one for each listed cell that has no follow in it, before
-    /// the marker, and gives a followed cell's on its
+    /// sends one for each listed pool that has no follow in it, before
+    /// the marker, and gives a followed pool's on its
     /// [`FollowEvent::Follow`]. A watch of one follow
-    /// (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`) never sends one,
+    /// (`GET /v1/ext/gdl-pool/follows/{class}/{pool}`) never sends one,
     /// so that a reader of an earlier build, which fails closed for the
-    /// cell at this kind and reads it again from that watch, reads it
+    /// pool at this kind and reads it again from that watch, reads it
     /// whole.
     ///
-    /// `generation` names the cell's latest follow, or 0 for a cell the
+    /// `generation` names the pool's latest follow, or 0 for a pool the
     /// hub never followed: it orders nothing, and is there for a reader
     /// that does not know this kind.
     Listed {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
-        /// The generation of the cell's latest follow, or 0.
+        /// The pool, named within its class.
+        pool: String,
+        /// The generation of the pool's latest follow, or 0.
         generation: u64,
-        /// What the hub knows, or `None` once the cell withdrew.
+        /// What the hub knows, or `None` once the pool withdrew.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         listing: Option<Listing>,
     },
-    /// The cell withdrew its record from the cell directory after its
+    /// The pool withdrew its record from the pool directory after its
     /// drain: it was drained on purpose. It may come after the follow's
-    /// [`FollowEvent::Dropped`]. A later follow of the cell, which a hub
+    /// [`FollowEvent::Dropped`]. A later follow of the pool, which a hub
     /// begins only from a newer record, ends it.
     Withdrawn {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell, named within its class.
-        cell: String,
-        /// The generation of the cell's latest follow.
+        /// The pool, named within its class.
+        pool: String,
+        /// The generation of the pool's latest follow.
         generation: u64,
     },
 }
 
 impl FollowEvent {
-    /// The class and the cell of the follow the event names; `None` for
+    /// The class and the pool of the follow the event names; `None` for
     /// the marker.
-    pub fn cell(&self) -> Option<(&str, &str)> {
+    pub fn pool(&self) -> Option<(&str, &str)> {
         match self {
-            Self::Follow { class, cell, .. }
-            | Self::State { class, cell, .. }
-            | Self::Load { class, cell, .. }
-            | Self::Exposed { class, cell, .. }
-            | Self::Retired { class, cell, .. }
-            | Self::Left { class, cell, .. }
-            | Self::Offering { class, cell, .. }
-            | Self::Dropped { class, cell, .. }
-            | Self::Withdrawn { class, cell, .. }
-            | Self::Listed { class, cell, .. } => Some((class, cell)),
+            Self::Follow { class, pool, .. }
+            | Self::State { class, pool, .. }
+            | Self::Load { class, pool, .. }
+            | Self::Exposed { class, pool, .. }
+            | Self::Retired { class, pool, .. }
+            | Self::Left { class, pool, .. }
+            | Self::Offering { class, pool, .. }
+            | Self::Dropped { class, pool, .. }
+            | Self::Withdrawn { class, pool, .. }
+            | Self::Listed { class, pool, .. } => Some((class, pool)),
             Self::Synced { .. } => None,
         }
     }
 }
 
-/// What a hub knows of one cell's record, for its choosers' model index:
-/// the cell's region and condition, and its models, from the record or
+/// What a hub knows of one pool's record, for its choosers' model index:
+/// the pool's region and condition, and its models, from the record or
 /// the follow link, whichever has the higher version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
-    /// The region the cell runs in, from its record.
+    /// The region the pool runs in, from its record.
     pub region: String,
-    /// Whether the cell is live, scaled to 0, or missing.
-    pub condition: CellCondition,
-    /// The cell's model entries, with their version.
+    /// Whether the pool is live, scaled to 0, or missing.
+    pub condition: PoolCondition,
+    /// The pool's model entries, with their version.
     #[serde(default)]
     pub models: crate::ModelList,
-    /// How long the cell had been silent when the hub sent this, in
+    /// How long the pool had been silent when the hub sent this, in
     /// milliseconds, while it is missing: since its record's last write
     /// when its lease passed, or since its follow's link was lost,
     /// whichever came first. A reader dates the silence back by it. An
     /// age, not an instant, since the hub's clock and the reader's are
-    /// not the same. Absent for a cell that is not missing, and from a hub
+    /// not the same. Absent for a pool that is not missing, and from a hub
     /// of an earlier build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_age_ms: Option<u64>,

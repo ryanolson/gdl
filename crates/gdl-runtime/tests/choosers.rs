@@ -1,34 +1,34 @@
-//! A chooser follows the cells its hub follows: one watch of its hub's
-//! relay, read into a table per entry segment and followed cell, whose
+//! A chooser follows the pools its hub follows: one watch of its hub's
+//! relay, read into a table per entry segment and followed pool, whose
 //! instances it registers with velo before they are in a table.
 
 mod common;
 
 use common::WAIT;
-use common::cells::{
-    Instance, Resolving, cell_hub, followed, global_cell, global_hub, launch, model_hub, pings,
-    settings, sorted, unresolved_cell_hub, until,
+use common::pools::{
+    Instance, Resolving, followed, global_hub, global_pool, launch, model_hub, pings, pool_hub,
+    settings, sorted, unresolved_pool_hub, until,
 };
 use common::proxy::{Mode, Proxy};
 use futures::StreamExt;
 use gdl_model::SegmentPhase;
-use gdl_runtime::CellState;
+use gdl_runtime::PoolState;
 use gdl_watch::FollowEvent;
 
 const M1: &str = "model-x-01-us-east-1";
 const M2: &str = "model-x-02-us-east-1";
 
-/// A global cell's chooser, with two home model cells ready, holds a table
-/// per cell with each cell's ready entry instances; a retired one is
-/// marked, one that leaves is removed, a cell whose hub stops is removed,
-/// and the cell's new hub process is a new generation's table with
+/// A global pool's chooser, with two home model pools ready, holds a table
+/// per pool with each pool's ready entry instances; a retired one is
+/// marked, one that leaves is removed, a pool whose hub stops is removed,
+/// and the pool's new hub process is a new generation's table with
 /// nothing of the old one in it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_tables_follow_the_relay() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
-    let (m2, _) = cell_hub(model_hub(M2, "m2-hub:1337"), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
+    let (m1, _) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (m2, _) = pool_hub(model_hub(M2, "m2-hub:1337"), &directory).await;
     let (f1, f1b, _d1) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "f").await,
@@ -42,65 +42,65 @@ async fn the_tables_follow_the_relay() {
         global.public_addr().port(),
         global.control_addr().port(),
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
-    let cells = chooser
-        .cells()
-        .expect("a global instance in a cell is a chooser");
-    assert_eq!(cells.segments().collect::<Vec<_>>(), ["f"]);
-    // A cell is followed from when its quorum is met, `degraded` until the
+    let pools = chooser
+        .pools()
+        .expect("a global instance in a pool is a chooser");
+    assert_eq!(pools.segments().collect::<Vec<_>>(), ["f"]);
+    // A pool is followed from when its quorum is met, `degraded` until the
     // quorum has held.
     until(
-        &cells,
-        "both model cells ready with their entries",
-        |cells| {
-            let ready = |cell, eligible: &[_]| {
-                followed(cells, "f", cell)
-                    .is_some_and(|m| m.state == CellState::Ready && m.eligible == eligible)
+        &pools,
+        "both model pools ready with their entries",
+        |pools| {
+            let ready = |pool, eligible: &[_]| {
+                followed(pools, "f", pool)
+                    .is_some_and(|m| m.state == PoolState::Ready && m.eligible == eligible)
             };
             ready(M1, &sorted(&[&f1, &f1b])) && ready(M2, &[f2.id()])
         },
     )
     .await;
-    let tables = cells.followed("f");
+    let tables = pools.followed("f");
     assert_eq!(
-        tables.iter().map(|m| m.cell.as_str()).collect::<Vec<_>>(),
+        tables.iter().map(|m| m.pool.as_str()).collect::<Vec<_>>(),
         [M1, M2]
     );
     for table in &tables {
         assert_eq!(table.class, "model_x");
-        assert_eq!(table.state, CellState::Ready);
+        assert_eq!(table.state, PoolState::Ready);
         assert!(table.retired.is_empty());
     }
 
     let mut f1 = f1;
     f1.announce(SegmentPhase::Retired).await;
-    until(&cells, "the retired entry marked", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.retired == [f1.id()] && m.eligible == [f1b.id()])
+    until(&pools, "the retired entry marked", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.retired == [f1.id()] && m.eligible == [f1b.id()])
     })
     .await;
     f1.leave().await;
-    until(&cells, "the entry that left removed", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.retired.is_empty() && m.eligible == [f1b.id()])
+    until(&pools, "the entry that left removed", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.retired.is_empty() && m.eligible == [f1b.id()])
     })
     .await;
 
-    let old = followed(&cells, "f", M2).expect("followed");
+    let old = followed(&pools, "f", M2).expect("followed");
     m2.shutdown().await.expect("valid test fixture");
-    until(&cells, "the stopped cell's table removed", |cells| {
-        followed(cells, "f", M2).is_none()
+    until(&pools, "the stopped pool's table removed", |pools| {
+        followed(pools, "f", M2).is_none()
     })
     .await;
-    // The cell's hub starts again: a new process, so a higher epoch, at a
+    // The pool's hub starts again: a new process, so a higher epoch, at a
     // new address, with new instances.
-    let (m2, _) = cell_hub(model_hub(M2, "m2-hub-2:1337"), &directory).await;
+    let (m2, _) = pool_hub(model_hub(M2, "m2-hub-2:1337"), &directory).await;
     let (f2b, _d2b) = (
         Instance::ready(&m2, "f").await,
         Instance::ready(&m2, "d").await,
     );
-    until(&cells, "the new process's table", |cells| {
-        let table = followed(cells, "f", M2);
+    until(&pools, "the new process's table", |pools| {
+        let table = followed(pools, "f", M2);
         assert!(
             table
                 .as_ref()
@@ -110,7 +110,7 @@ async fn the_tables_follow_the_relay() {
         table.is_some_and(|m| m.eligible == [f2b.id()])
     })
     .await;
-    let new = followed(&cells, "f", M2).expect("followed");
+    let new = followed(&pools, "f", M2).expect("followed");
     assert!(new.generation > old.generation, "{old:?} then {new:?}");
     drop(chooser);
     for hub in [global, m1, m2] {
@@ -125,13 +125,13 @@ async fn the_tables_follow_the_relay() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_is_registered_with_velo_while_a_table_holds_it() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
+    let (m1, _) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let (f1, _d1) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "d").await,
     );
-    let extra = format!("{}[runtime]\ndrain_ms = 2000\n", global_cell());
+    let extra = format!("{}[runtime]\ndrain_ms = 2000\n", global_pool());
     let config = settings(
         global.public_addr().port(),
         global.control_addr().port(),
@@ -140,29 +140,29 @@ async fn an_entry_is_registered_with_velo_while_a_table_holds_it() {
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
     let node = chooser.node();
-    let cells = chooser.cells().expect("a chooser");
-    until(&cells, "the entry in the table", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
+    let pools = chooser.pools().expect("a chooser");
+    until(&pools, "the entry in the table", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
     })
     .await;
     let id = f1.id();
-    assert!(cells.is_registered(id));
+    assert!(pools.is_registered(id));
     assert!(
         pings(&node, id).await,
         "an entry in a table is not reachable"
     );
 
     let _kept = f1.leave().await;
-    until(&cells, "the entry out of the table", |cells| {
-        followed(cells, "f", M1).is_none_or(|m| m.eligible.is_empty())
+    until(&pools, "the entry out of the table", |pools| {
+        followed(pools, "f", M1).is_none_or(|m| m.eligible.is_empty())
     })
     .await;
     assert!(
-        cells.is_registered(id),
+        pools.is_registered(id),
         "unregistered as it left the table, before the drain"
     );
-    until(&cells, "the entry unregistered", |cells| {
-        !cells.is_registered(id)
+    until(&pools, "the entry unregistered", |pools| {
+        !pools.is_registered(id)
     })
     .await;
     assert!(!pings(&node, id).await, "velo still knows the entry");
@@ -173,22 +173,22 @@ async fn an_entry_is_registered_with_velo_while_a_table_holds_it() {
 }
 
 /// One velo instance that is a member of the chooser's own hub and an
-/// entry of a followed cell has two owners of its registration: when it
+/// entry of a followed pool has two owners of its registration: when it
 /// leaves the chooser's hub, the membership's drain does not unregister
-/// what a cell's table still holds. A second instance, a member of the
+/// what a pool's table still holds. A second instance, a member of the
 /// chooser's hub alone, leaves after it, and its unregistration shows that
 /// the membership's drain of the first has run. The drain is 500 ms, and
 /// the membership looks at its drains once a second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_membership_does_not_unregister_what_a_table_holds() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
+    let (m1, _) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let (f1, _d1) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "d").await,
     );
-    let extra = format!("{}[runtime]\ndrain_ms = 500\n", global_cell());
+    let extra = format!("{}[runtime]\ndrain_ms = 500\n", global_pool());
     let config = settings(
         global.public_addr().port(),
         global.control_addr().port(),
@@ -197,10 +197,10 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
     let node = chooser.node();
-    let cells = chooser.cells().expect("a chooser");
-    until(&cells, "the entry in the table", |cells| {
-        followed(cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible == [f1.id()])
+    let pools = chooser.pools().expect("a chooser");
+    until(&pools, "the entry in the table", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible == [f1.id()])
     })
     .await;
     // The same instance joins the chooser's own hub, as does one that is
@@ -233,13 +233,13 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
-        followed(&cells, "f", M1).is_some_and(|m| m.eligible == [f1.id()]),
-        "the cell's table changed"
+        followed(&pools, "f", M1).is_some_and(|m| m.eligible == [f1.id()]),
+        "the pool's table changed"
     );
-    assert!(cells.is_registered(f1.id()));
+    assert!(pools.is_registered(f1.id()));
     assert!(
         pings(&node, f1.id()).await,
-        "the membership unregistered an entry a cell's table holds"
+        "the membership unregistered an entry a pool's table holds"
     );
     drop(chooser);
     for hub in [global, m1] {
@@ -247,7 +247,7 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
     }
 }
 
-/// End to end, through the hubs: an entry that leaves its cell's table,
+/// End to end, through the hubs: an entry that leaves its pool's table,
 /// then the chooser's own hub, is still reachable once the chooser's drain
 /// is over. The drain is 1 s, and the entry leaves the hub half a second
 /// after the table, so that the two drains end apart. It does not observe
@@ -258,13 +258,13 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_later_membership_drain_keeps_its_peer() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
+    let (m1, _) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let (f1, _d1) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "d").await,
     );
-    let extra = format!("{}[runtime]\ndrain_ms = 1000\n", global_cell());
+    let extra = format!("{}[runtime]\ndrain_ms = 1000\n", global_pool());
     let config = settings(
         global.public_addr().port(),
         global.control_addr().port(),
@@ -273,10 +273,10 @@ async fn a_later_membership_drain_keeps_its_peer() {
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
     let node = chooser.node();
-    let cells = chooser.cells().expect("a chooser");
-    until(&cells, "the entry in the table", |cells| {
-        followed(cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible == [f1.id()])
+    let pools = chooser.pools().expect("a chooser");
+    until(&pools, "the entry in the table", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible == [f1.id()])
     })
     .await;
     let id = f1.id();
@@ -284,15 +284,15 @@ async fn a_later_membership_drain_keeps_its_peer() {
     local.announce(SegmentPhase::Serving).await;
     local.announce(SegmentPhase::Ready).await;
     let _node = f1.leave().await;
-    until(&cells, "the entry out of the table", |cells| {
-        followed(cells, "f", M1).is_none_or(|m| m.eligible.is_empty())
+    until(&pools, "the entry out of the table", |pools| {
+        followed(pools, "f", M1).is_none_or(|m| m.eligible.is_empty())
     })
     .await;
     // The membership's drain begins after the chooser's.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     local.leave().await;
-    until(&cells, "the chooser's drain over", |cells| {
-        !cells.is_registered(id)
+    until(&pools, "the chooser's drain over", |pools| {
+        !pools.is_registered(id)
     })
     .await;
     assert!(
@@ -305,7 +305,7 @@ async fn a_later_membership_drain_keeps_its_peer() {
     }
 }
 
-/// When the hub's follow of a cell is cut and followed again, the new
+/// When the hub's follow of a pool is cut and followed again, the new
 /// generation holds an entry the old one held, and the drain the old one's
 /// end started does not unregister it; an entry only the old generation
 /// held is unregistered at that drain's end. The drain is 3 s, so that
@@ -313,10 +313,10 @@ async fn a_later_membership_drain_keeps_its_peer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_newer_generation_keeps_an_entry_registered() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
     // The global hub reaches M1's hub through a proxy, so that the test can
     // cut the follow; M1 counts its own instances over its own listener.
-    let (m1, _) = unresolved_cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (m1, _) = unresolved_pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let link = Proxy::new(m1.public_addr()).await;
     directory.resolve("m1-hub:1337", &format!("127.0.0.1:{}", link.port));
     let (f1, fx, _d1) = (
@@ -324,7 +324,7 @@ async fn a_newer_generation_keeps_an_entry_registered() {
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "d").await,
     );
-    let extra = format!("{}[runtime]\ndrain_ms = 3000\n", global_cell());
+    let extra = format!("{}[runtime]\ndrain_ms = 3000\n", global_pool());
     let config = settings(
         global.public_addr().port(),
         global.control_addr().port(),
@@ -333,35 +333,35 @@ async fn a_newer_generation_keeps_an_entry_registered() {
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
     let node = chooser.node();
-    let cells = chooser.cells().expect("a chooser");
-    until(&cells, "both entries", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible == sorted(&[&f1, &fx]))
+    let pools = chooser.pools().expect("a chooser");
+    until(&pools, "both entries", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.eligible == sorted(&[&f1, &fx]))
     })
     .await;
-    let first = followed(&cells, "f", M1).expect("followed").generation;
+    let first = followed(&pools, "f", M1).expect("followed").generation;
 
     link.set(Mode::Refuse);
-    until(&cells, "the cut follow dropped", |cells| {
-        followed(cells, "f", M1).is_none()
+    until(&pools, "the cut follow dropped", |pools| {
+        followed(pools, "f", M1).is_none()
     })
     .await;
     let gone = fx.id();
     let _kept = fx.leave().await;
     link.set(Mode::Forward);
-    until(&cells, "the new generation", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.generation > first && m.eligible == [f1.id()])
+    until(&pools, "the new generation", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.generation > first && m.eligible == [f1.id()])
     })
     .await;
     assert!(
-        cells.is_registered(gone),
+        pools.is_registered(gone),
         "the drain the old generation's end started was over before the refollow"
     );
-    until(&cells, "the drain's end", |cells| {
-        !cells.is_registered(gone)
+    until(&pools, "the drain's end", |pools| {
+        !pools.is_registered(gone)
     })
     .await;
     assert!(
-        cells.is_registered(f1.id()),
+        pools.is_registered(f1.id()),
         "the old generation's drain unregistered an entry the new one holds"
     );
     assert!(pings(&node, f1.id()).await);
@@ -377,9 +377,9 @@ async fn a_newer_generation_keeps_an_entry_registered() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
     let directory = Resolving::new();
-    let (global, relay) = cell_hub(global_hub(), &directory).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
-    let (m2, _) = cell_hub(model_hub(M2, "m2-hub:1337"), &directory).await;
+    let (global, relay) = pool_hub(global_hub(), &directory).await;
+    let (m1, _) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (m2, _) = pool_hub(model_hub(M2, "m2-hub:1337"), &directory).await;
     let (f1, _d1) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "d").await,
@@ -396,17 +396,17 @@ async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
         public.port,
         global.control_addr().port(),
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
-    let cells = chooser.cells().expect("a chooser");
-    until(&cells, "both cells", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
-            && followed(cells, "f", M2).is_some_and(|m| m.eligible == [f2.id()])
+    let pools = chooser.pools().expect("a chooser");
+    until(&pools, "both pools", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
+            && followed(pools, "f", M2).is_some_and(|m| m.eligible == [f2.id()])
     })
     .await;
     let mut watchers = relay.follows_watchers();
-    let before = cells.followed("f");
+    let before = pools.followed("f");
 
     public.set(Mode::Refuse);
     tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 0))
@@ -416,28 +416,28 @@ async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
     // While the watch is down, M1 gains an entry the chooser cannot hear of.
     let f1b = Instance::ready(&m1, "f").await;
     assert_eq!(
-        cells.followed("f"),
+        pools.followed("f"),
         before,
         "a cut watch changed the tables"
     );
     for table in &before {
         for id in &table.eligible {
-            assert!(cells.is_registered(*id));
+            assert!(pools.is_registered(*id));
         }
     }
 
     public.set(Mode::Forward);
-    until(&cells, "the change made while cut", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible == sorted(&[&f1, &f1b]))
+    until(&pools, "the change made while cut", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.eligible == sorted(&[&f1, &f1b]))
     })
     .await;
-    let after = cells.followed("f");
+    let after = pools.followed("f");
     assert_eq!(after, expected(&mut relay.follows()).await);
-    let m2_after = after.iter().find(|m| m.cell == M2).expect("M2 kept");
-    let m2_before = before.iter().find(|m| m.cell == M2).expect("M2 held");
+    let m2_after = after.iter().find(|m| m.pool == M2).expect("M2 kept");
+    let m2_before = before.iter().find(|m| m.pool == M2).expect("M2 held");
     assert_eq!(
         m2_after, m2_before,
-        "a refollow was made of a cell that never changed"
+        "a refollow was made of a pool that never changed"
     );
     drop(chooser);
     for hub in [global, m1, m2] {
@@ -447,8 +447,8 @@ async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
 
 /// The tables a relay watch's snapshot makes, as a chooser of `f` keeps
 /// them.
-async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::FollowedCell> {
-    let mut tables: Vec<gdl_runtime::FollowedCell> = Vec::new();
+async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::FollowedPool> {
+    let mut tables: Vec<gdl_runtime::FollowedPool> = Vec::new();
     loop {
         let event = tokio::time::timeout(WAIT, watch.next())
             .await
@@ -458,7 +458,7 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
             FollowEvent::Synced { .. } => break,
             FollowEvent::Follow {
                 class,
-                cell,
+                pool,
                 generation,
                 region,
                 state,
@@ -468,9 +468,9 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                 // No instance here reports within the 10 s summary period,
                 // so there is no summary, and no age to compare.
                 assert_eq!(load, None, "a summary within the test");
-                tables.push(gdl_runtime::FollowedCell {
+                tables.push(gdl_runtime::FollowedPool {
                     class,
-                    cell,
+                    pool,
                     generation,
                     region,
                     state,
@@ -486,18 +486,18 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                     unread: false,
                 });
             }
-            FollowEvent::Exposed { cell, peer, .. } => {
+            FollowEvent::Exposed { pool, peer, .. } => {
                 let table = tables
                     .iter_mut()
-                    .find(|m| m.cell == cell)
+                    .find(|m| m.pool == pool)
                     .expect("followed");
                 table.eligible.push(peer.instance_id());
                 table.eligible.sort_by_key(|id| id.as_u128());
             }
-            FollowEvent::Retired { cell, instance, .. } => {
+            FollowEvent::Retired { pool, instance, .. } => {
                 let table = tables
                     .iter_mut()
-                    .find(|m| m.cell == cell)
+                    .find(|m| m.pool == pool)
                     .expect("followed");
                 table.retired.push(instance);
                 table.retired.sort_by_key(|id| id.as_u128());
@@ -505,6 +505,6 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
             other => panic!("not a snapshot's event: {other:?}"),
         }
     }
-    tables.sort_by(|a, b| (&a.class, &a.cell).cmp(&(&b.class, &b.cell)));
+    tables.sort_by(|a, b| (&a.class, &a.pool).cmp(&(&b.class, &b.pool)));
     tables
 }

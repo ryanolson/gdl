@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use figment::Jail;
 use figment::providers::{Format, Toml};
 use gdl::ErrorKind;
-use gdl_runtime::{CellSettings, DirectoryBackend, Hosted, ProcessConfig};
 use gdl_runtime::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
+use gdl_runtime::{DirectoryBackend, Hosted, PoolSettings, ProcessConfig};
 use serde::Deserialize;
 
 /// What a segment hosting one node, `Truncate`, declares.
@@ -317,21 +317,21 @@ fn classed() -> DeploymentSpec {
     .expect("valid test fixture")
 }
 
-const CELL: &str =
-    "[cell]\nname = \"global-us-east-1\"\nclass = \"global\"\nregion = \"us-east-1\"\n";
+const POOL: &str =
+    "[pool]\nname = \"global-us-east-1\"\nclass = \"global\"\nregion = \"us-east-1\"\n";
 
 #[test]
-fn a_cell_table_is_read_from_a_file() {
-    assert!(load(&[BASE]).expect("no cell").cell().is_none());
+fn a_pool_table_is_read_from_a_file() {
+    assert!(load(&[BASE]).expect("no pool").pool().is_none());
     let config = load(&[
         BASE,
-        CELL,
-        "[cell]\nhome = \"g\"\n[cell.ready]\nfront = 3\n",
+        POOL,
+        "[pool]\nhome = \"g\"\n[pool.ready]\nfront = 3\n",
     ])
-    .expect("a cell");
+    .expect("a pool");
     assert_eq!(
-        config.cell(),
-        Some(&CellSettings {
+        config.pool(),
+        Some(&PoolSettings {
             models: Vec::new(),
             name: "global-us-east-1".into(),
             layout: None,
@@ -342,33 +342,33 @@ fn a_cell_table_is_read_from_a_file() {
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
             hub: None,
-            summary: CellSettings::DEFAULT_SUMMARY,
+            summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
         })
     );
-    let cell = config.cell().expect("a cell");
-    assert_eq!((cell.quorum("front"), cell.quorum("back")), (3, 1));
+    let pool = config.pool().expect("a pool");
+    assert_eq!((pool.quorum("front"), pool.quorum("back")), (3, 1));
 }
 
-/// `GDL_CELL__*` reaches `[cell]` as any other setting does, joining the
+/// `GDL_POOL__*` reaches `[pool]` as any other setting does, joining the
 /// file's table: a quorum by segment, a backend, and the load
 /// summary's period.
 #[test]
-fn a_cell_table_is_read_from_the_environment() {
+fn a_pool_table_is_read_from_the_environment() {
     Jail::expect_with(|jail| {
         jail.create_file(
             "config.toml",
-            &format!("{BASE}{CELL}[cell.ready]\nfront = 3\n"),
+            &format!("{BASE}{POOL}[pool.ready]\nfront = 3\n"),
         )?;
-        jail.set_env("GDL_CELL__REGION", "us-west-2");
-        jail.set_env("GDL_CELL__DIRECTORY", "memory");
-        jail.set_env("GDL_CELL__READY__BACK", "4");
-        jail.set_env("GDL_CELL__SUMMARY_MS", "1500");
-        jail.set_env("GDL_CELL__LAYOUT", "regional");
+        jail.set_env("GDL_POOL__REGION", "us-west-2");
+        jail.set_env("GDL_POOL__DIRECTORY", "memory");
+        jail.set_env("GDL_POOL__READY__BACK", "4");
+        jail.set_env("GDL_POOL__SUMMARY_MS", "1500");
+        jail.set_env("GDL_POOL__LAYOUT", "regional");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
-            config.cell(),
-            Some(&CellSettings {
+            config.pool(),
+            Some(&PoolSettings {
                 models: Vec::new(),
                 name: "global-us-east-1".into(),
                 layout: Some("regional".into()),
@@ -387,14 +387,14 @@ fn a_cell_table_is_read_from_the_environment() {
     });
     // The `dir` backend and its directory.
     Jail::expect_with(|jail| {
-        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
-        jail.set_env("GDL_CELL__DIRECTORY", "dir");
-        jail.set_env("GDL_CELL__DIR", "/srv/cells");
+        jail.create_file("config.toml", &format!("{BASE}{POOL}"))?;
+        jail.set_env("GDL_POOL__DIRECTORY", "dir");
+        jail.set_env("GDL_POOL__DIR", "/srv/pools");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
-            config.cell().map(|cell| &cell.directory),
+            config.pool().map(|pool| &pool.directory),
             Some(&DirectoryBackend::Dir {
-                path: "/srv/cells".into()
+                path: "/srv/pools".into()
             })
         );
         Ok(())
@@ -402,43 +402,43 @@ fn a_cell_table_is_read_from_the_environment() {
     // The whole table from the environment.
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", BASE)?;
-        jail.set_env("GDL_CELL__NAME", "model-x-01-us-east-1");
-        jail.set_env("GDL_CELL__CLASS", "model_x");
-        jail.set_env("GDL_CELL__REGION", "us-east-1");
-        jail.set_env("GDL_CELL__HOME", "global-us-east-1");
-        jail.set_env("GDL_CELL__READY__BACK", "2");
+        jail.set_env("GDL_POOL__NAME", "model-x-01-us-east-1");
+        jail.set_env("GDL_POOL__CLASS", "model_x");
+        jail.set_env("GDL_POOL__REGION", "us-east-1");
+        jail.set_env("GDL_POOL__HOME", "global-us-east-1");
+        jail.set_env("GDL_POOL__READY__BACK", "2");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
-        let cell = config.cell().expect("a cell");
-        assert_eq!(cell.name, "model-x-01-us-east-1");
-        assert_eq!(cell.home.as_deref(), Some("global-us-east-1"));
-        assert_eq!(cell.directory, DirectoryBackend::DEFAULT);
-        assert_eq!(cell.quorum("back"), 2);
+        let pool = config.pool().expect("a pool");
+        assert_eq!(pool.name, "model-x-01-us-east-1");
+        assert_eq!(pool.home.as_deref(), Some("global-us-east-1"));
+        assert_eq!(pool.directory, DirectoryBackend::DEFAULT);
+        assert_eq!(pool.quorum("back"), 2);
         Ok(())
     });
 }
 
 /// A segment of a fleet's Compose bundle: its image's settings name no
-/// hub and no cell, which every cell running the image differs in, and
-/// its cell's variables give both. The settings need a hub or a roster,
+/// hub and no pool, which every pool running the image differs in, and
+/// its pool's variables give both. The settings need a hub or a roster,
 /// so they load only with `GDL_HUB__HOST`.
 #[test]
-fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
+fn a_fleet_bundles_variables_give_a_segment_its_hub_and_pool() {
     const IMAGE: &str =
         "listen = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[system]\nport = 9090\n";
-    let cell = [
-        ("GDL_CELL__CLASS", "model_x"),
-        ("GDL_CELL__DIR", "/var/lib/gdl/cells"),
-        ("GDL_CELL__DIRECTORY", "dir"),
-        ("GDL_CELL__HOME", "global-us-east-1"),
-        ("GDL_CELL__HUB", "model-x-02-us-east-1:1337"),
-        ("GDL_CELL__NAME", "model-x-02-us-east-1"),
-        ("GDL_CELL__READY__ENGINE", "2"),
-        ("GDL_CELL__REGION", "us-east-1"),
-        ("GDL_CELL__SUMMARY_MS", "10000"),
+    let pool = [
+        ("GDL_POOL__CLASS", "model_x"),
+        ("GDL_POOL__DIR", "/var/lib/gdl/pools"),
+        ("GDL_POOL__DIRECTORY", "dir"),
+        ("GDL_POOL__HOME", "global-us-east-1"),
+        ("GDL_POOL__HUB", "model-x-02-us-east-1:1337"),
+        ("GDL_POOL__NAME", "model-x-02-us-east-1"),
+        ("GDL_POOL__READY__ENGINE", "2"),
+        ("GDL_POOL__REGION", "us-east-1"),
+        ("GDL_POOL__SUMMARY_MS", "10000"),
     ];
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", IMAGE)?;
-        for (name, value) in cell {
+        for (name, value) in pool {
             jail.set_env(name, value);
         }
         assert!(
@@ -448,8 +448,8 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
         jail.set_env("GDL_HUB__HOST", "model-x-02-us-east-1");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
-            config.cell(),
-            Some(&CellSettings {
+            config.pool(),
+            Some(&PoolSettings {
                 models: Vec::new(),
                 name: "model-x-02-us-east-1".into(),
                 layout: None,
@@ -457,12 +457,12 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
                 region: "us-east-1".into(),
                 home: Some("global-us-east-1".into()),
                 directory: DirectoryBackend::Dir {
-                    path: "/var/lib/gdl/cells".into()
+                    path: "/var/lib/gdl/pools".into()
                 },
                 ready: BTreeMap::from([("engine".into(), 2)]),
                 requires: BTreeMap::new(),
                 hub: Some("model-x-02-us-east-1:1337".into()),
-                summary: CellSettings::DEFAULT_SUMMARY,
+                summary: PoolSettings::DEFAULT_SUMMARY,
                 timing: Default::default(),
             })
         );
@@ -472,10 +472,10 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
     // a segment whose name holds `__` is one variable holding the table.
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", IMAGE)?;
-        jail.set_env("GDL_CELL__NAME", "\"true\"");
-        jail.set_env("GDL_CELL__CLASS", "global");
-        jail.set_env("GDL_CELL__REGION", "us-east-1");
-        jail.set_env("GDL_CELL__READY", "{\"front__work\"=2}");
+        jail.set_env("GDL_POOL__NAME", "\"true\"");
+        jail.set_env("GDL_POOL__CLASS", "global");
+        jail.set_env("GDL_POOL__REGION", "us-east-1");
+        jail.set_env("GDL_POOL__READY", "{\"front__work\"=2}");
         jail.set_env("GDL_HUB__HOST", "true");
         assert!(
             Config::load(["config.toml"]).is_err(),
@@ -483,31 +483,31 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
         );
         jail.set_env("GDL_HUB__HOST", "\"true\"");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
-        let cell = config.cell().expect("a cell");
-        assert_eq!(cell.name, "true");
-        assert_eq!(cell.ready, BTreeMap::from([("front__work".into(), 2)]));
+        let pool = config.pool().expect("a pool");
+        assert_eq!(pool.name, "true");
+        assert_eq!(pool.ready, BTreeMap::from([("front__work".into(), 2)]));
         Ok(())
     });
 }
 
 #[test]
-fn a_misspelled_cell_key_is_refused() {
-    let Err(error) = load(&[BASE, CELL, "[cell]\nhone = \"g\"\n"]) else {
-        panic!("a misspelled key under [cell]")
+fn a_misspelled_pool_key_is_refused() {
+    let Err(error) = load(&[BASE, POOL, "[pool]\nhone = \"g\"\n"]) else {
+        panic!("a misspelled key under [pool]")
     };
     assert!(error.to_string().contains("hone"), "{error}");
     // Nothing reads seeds: the relay mesh among global hubs is not built.
-    let Err(error) = load(&[BASE, CELL, "[cell]\nseeds = [\"hub-a:1337\"]\n"]) else {
-        panic!("seeds under [cell]")
+    let Err(error) = load(&[BASE, POOL, "[pool]\nseeds = [\"hub-a:1337\"]\n"]) else {
+        panic!("seeds under [pool]")
     };
     assert!(error.to_string().contains("seeds"), "{error}");
-    let Err(error) = load(&[BASE, CELL, "[cell]\ndirectory = \"store\"\n"]) else {
+    let Err(error) = load(&[BASE, POOL, "[pool]\ndirectory = \"store\"\n"]) else {
         panic!("an unknown directory backend")
     };
     assert!(error.to_string().contains("store"), "{error}");
     Jail::expect_with(|jail| {
-        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
-        jail.set_env("GDL_CELL__DIRECTORY", "static");
+        jail.create_file("config.toml", &format!("{BASE}{POOL}"))?;
+        jail.set_env("GDL_POOL__DIRECTORY", "static");
         let Err(error) = Config::load(["config.toml"]) else {
             return Err("a fleet file is not a directory backend".into());
         };
@@ -515,8 +515,8 @@ fn a_misspelled_cell_key_is_refused() {
         Ok(())
     });
     Jail::expect_with(|jail| {
-        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
-        jail.set_env("GDL_CELL__DIRECTORY", "dir");
+        jail.create_file("config.toml", &format!("{BASE}{POOL}"))?;
+        jail.set_env("GDL_POOL__DIRECTORY", "dir");
         let Err(error) = Config::load(["config.toml"]) else {
             return Err("the dir backend without its directory".into());
         };
@@ -524,59 +524,59 @@ fn a_misspelled_cell_key_is_refused() {
         Ok(())
     });
     Jail::expect_with(|jail| {
-        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
-        jail.set_env("GDL_CELL__HONE", "g");
+        jail.create_file("config.toml", &format!("{BASE}{POOL}"))?;
+        jail.set_env("GDL_POOL__HONE", "g");
         let Err(error) = Config::load(["config.toml"]) else {
-            return Err("a misspelled variable under [cell]".into());
+            return Err("a misspelled variable under [pool]".into());
         };
         assert!(error.to_string().contains("hone"), "{error}");
         Ok(())
     });
 }
 
-/// A `[cell]` problem names where it was read from: the file and its key,
+/// A `[pool]` problem names where it was read from: the file and its key,
 /// or the variable.
 #[tokio::test]
-async fn a_cell_problem_names_its_file_or_its_variable() {
+async fn a_pool_problem_names_its_file_or_its_variable() {
     for (file, variable, expected) in [
         (
             "hone = \"g\"\n",
             None,
-            "config.toml: [cell] hone: unknown field",
+            "config.toml: [pool] hone: unknown field",
         ),
         (
             "",
-            Some(("GDL_CELL__HONE", "g")),
-            "GDL_CELL__HONE: unknown field",
+            Some(("GDL_POOL__HONE", "g")),
+            "GDL_POOL__HONE: unknown field",
         ),
         (
             "summary_ms = 500\n",
             None,
-            "config.toml: [cell] summary_ms: is 500",
+            "config.toml: [pool] summary_ms: is 500",
         ),
         (
             "",
-            Some(("GDL_CELL__SUMMARY_MS", "500")),
-            "GDL_CELL__SUMMARY_MS: is 500",
+            Some(("GDL_POOL__SUMMARY_MS", "500")),
+            "GDL_POOL__SUMMARY_MS: is 500",
         ),
         (
             "",
-            Some(("GDL_CELL__READY__FRONT", "many")),
-            "GDL_CELL__READY__FRONT: invalid type",
+            Some(("GDL_POOL__READY__FRONT", "many")),
+            "GDL_POOL__READY__FRONT: invalid type",
         ),
         (
             "layout = \"Regional\"\n",
             None,
-            "config.toml: [cell] layout: layout name `Regional` must be",
+            "config.toml: [pool] layout: layout name `Regional` must be",
         ),
         (
             "",
-            Some(("GDL_CELL__LAYOUT", "re-gional")),
-            "GDL_CELL__LAYOUT: layout name `re-gional` must be",
+            Some(("GDL_POOL__LAYOUT", "re-gional")),
+            "GDL_POOL__LAYOUT: layout name `re-gional` must be",
         ),
     ] {
         Jail::expect_with(|jail| {
-            jail.create_file("config.toml", &format!("{BASE}{CELL}{file}"))?;
+            jail.create_file("config.toml", &format!("{BASE}{POOL}{file}"))?;
             if let Some((name, value)) = variable {
                 jail.set_env(name, value);
             }
@@ -592,36 +592,36 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
     // missing from a table set by variables is the variable's to set.
     for (file, variables, expected) in [
         (
-            CELL,
-            &[("GDL_CELL__READY", r#"{back="many"}"#)][..],
-            "GDL_CELL__READY: invalid type",
+            POOL,
+            &[("GDL_POOL__READY", r#"{back="many"}"#)][..],
+            "GDL_POOL__READY: invalid type",
         ),
         (
             "",
             &[
-                ("GDL_CELL__CLASS", "global"),
-                ("GDL_CELL__REGION", "us-east-1"),
+                ("GDL_POOL__CLASS", "global"),
+                ("GDL_POOL__REGION", "us-east-1"),
             ][..],
-            "GDL_CELL__NAME: missing field `name`",
+            "GDL_POOL__NAME: missing field `name`",
         ),
         (
-            CELL,
+            POOL,
             &[
-                ("GDL_CELL__READY__BACK", "1"),
-                ("GDL_CELL__READY", r#"{back="many"}"#),
+                ("GDL_POOL__READY__BACK", "1"),
+                ("GDL_POOL__READY", r#"{back="many"}"#),
             ][..],
-            "GDL_CELL__READY: invalid type",
+            "GDL_POOL__READY: invalid type",
         ),
         (
-            CELL,
-            &[("GDL_CELL__SUMMARY_MS__EXTRA", "1")][..],
-            "GDL_CELL__SUMMARY_MS__EXTRA: invalid type",
+            POOL,
+            &[("GDL_POOL__SUMMARY_MS__EXTRA", "1")][..],
+            "GDL_POOL__SUMMARY_MS__EXTRA: invalid type",
         ),
         // Set from a file and a variable: the file holds the table.
         (
-            "[cell]\nclass = \"global\"\n",
-            &[("GDL_CELL__REGION", "us-east-1")][..],
-            "config.toml: [cell] name: missing field `name`",
+            "[pool]\nclass = \"global\"\n",
+            &[("GDL_POOL__REGION", "us-east-1")][..],
+            "config.toml: [pool] name: missing field `name`",
         ),
     ] {
         Jail::expect_with(|jail| {
@@ -640,24 +640,24 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
     // Found when the instance launches, against its deployment.
     for (file, variable, expected) in [
         (
-            "[cell.ready]\nback = 1\n",
+            "[pool.ready]\nback = 1\n",
             None,
-            "config.toml: [cell] ready.back: not a segment of class `global`",
+            "config.toml: [pool] ready.back: not a segment of class `global`",
         ),
         (
             "",
-            Some(("GDL_CELL__READY__BACK", "1")),
-            "GDL_CELL__READY__BACK: not a segment of class `global`",
+            Some(("GDL_POOL__READY__BACK", "1")),
+            "GDL_POOL__READY__BACK: not a segment of class `global`",
         ),
         (
             "",
-            Some(("GDL_CELL__CLASS", "model_y")),
-            "GDL_CELL__CLASS: the placement has no class `model_y`",
+            Some(("GDL_POOL__CLASS", "model_y")),
+            "GDL_POOL__CLASS: the placement has no class `model_y`",
         ),
     ] {
         let mut config = None;
         Jail::expect_with(|jail| {
-            jail.create_file("config.toml", &format!("{BASE}{CELL}{file}"))?;
+            jail.create_file("config.toml", &format!("{BASE}{POOL}{file}"))?;
             if let Some((name, value)) = variable {
                 jail.set_env(name, value);
             }
@@ -666,7 +666,7 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
         });
         let config = config.expect("parses");
         // The check refuses before the roster directory is written.
-        let (launched, _) = launch_cell(&config, "front", &classed()).await;
+        let (launched, _) = launch_pool(&config, "front", &classed()).await;
         let Err(error) = launched else {
             panic!("launched with {file} {variable:?}")
         };
@@ -683,23 +683,23 @@ fn the_environment_overrides_the_files_as_a_whole() {
     Jail::expect_with(|jail| {
         jail.create_file(
             "config.toml",
-            &format!("{BASE}{CELL}ready = {{ front = 2, back = 3 }}\n"),
+            &format!("{BASE}{POOL}ready = {{ front = 2, back = 3 }}\n"),
         )?;
-        jail.set_env("GDL_CELL__READY", "[]");
-        jail.set_env("GDL_CELL__READY__FRONT", "1");
+        jail.set_env("GDL_POOL__READY", "[]");
+        jail.set_env("GDL_POOL__READY__FRONT", "1");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
-        let cell = config.cell().expect("a cell");
-        assert_eq!((cell.quorum("front"), cell.quorum("back")), (1, 3));
+        let pool = config.pool().expect("a pool");
+        assert_eq!((pool.quorum("front"), pool.quorum("back")), (1, 3));
         Ok(())
     });
 }
 
 /// Launch `config` as an instance of `segment` in `deployment`, recording
 /// whether it went on to await its nodes' readiness, which comes after the
-/// cell check. With a roster directory it comes before the rendezvous;
+/// pool check. With a roster directory it comes before the rendezvous;
 /// with a hub, after the registration, whose lease is kept while the nodes
 /// load.
-async fn launch_cell(
+async fn launch_pool(
     config: &Config,
     segment: &'static str,
     deployment: &DeploymentSpec,
@@ -720,40 +720,40 @@ async fn launch_cell(
     (launched, awaited.load(Ordering::SeqCst))
 }
 
-/// Each way a `[cell]` can misfit the deployment ends the launch with a
+/// Each way a `[pool]` can misfit the deployment ends the launch with a
 /// `Placement` error, before the instance waits for its nodes, writes to
 /// the roster directory, or reaches for a hub.
 #[tokio::test]
-async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
+async fn a_pool_that_does_not_fit_the_deployment_stops_the_launch() {
     let cases = [
         (
             deployment(),
             "front",
-            CELL.to_string(),
-            "[cell] class: the placement has no classes, and so no class `global`",
+            POOL.to_string(),
+            "[pool] class: the placement has no classes, and so no class `global`",
         ),
         (
             classed(),
             "front",
-            CELL.replace("\"global\"", "\"model_y\""),
-            "[cell] class: the placement has no class `model_y`",
+            POOL.replace("\"global\"", "\"model_y\""),
+            "[pool] class: the placement has no class `model_y`",
         ),
         (
             classed(),
             "front",
-            CELL.replace("\"global\"", "\"model_x\""),
-            "[cell] class: this instance's segment `front` is in class `global`, not `model_x`",
+            POOL.replace("\"global\"", "\"model_x\""),
+            "[pool] class: this instance's segment `front` is in class `global`, not `model_x`",
         ),
         (
             classed(),
             "front",
-            format!("{CELL}[cell.ready]\nback = 1\n"),
-            "[cell] ready.back: not a segment of class `global`",
+            format!("{POOL}[pool.ready]\nback = 1\n"),
+            "[pool] ready.back: not a segment of class `global`",
         ),
     ];
-    for (deployment, segment, cell, expected) in cases {
+    for (deployment, segment, pool, expected) in cases {
         let dir = tempfile::Builder::new()
-            .prefix("gdl-cell-")
+            .prefix("gdl-pool-")
             .tempdir()
             .expect("roster directory");
         let roster = format!(
@@ -762,18 +762,18 @@ async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
         );
         let hub = "listen = \"127.0.0.1:0\"\n[hub]\nhost = \"gdl-no-such-hub.invalid\"\n";
         for discovery in [roster.as_str(), hub] {
-            let config = load(&[discovery, &cell]).expect("parses");
-            let (launched, awaited) = launch_cell(&config, segment, &deployment).await;
+            let config = load(&[discovery, &pool]).expect("parses");
+            let (launched, awaited) = launch_pool(&config, segment, &deployment).await;
             let Err(error) = launched else {
-                panic!("launched with {cell}")
+                panic!("launched with {pool}")
             };
             assert_eq!(error.kind(), ErrorKind::Placement, "{error}");
             assert_eq!(
                 error.to_string(),
                 format!("placement error: {expected}"),
-                "{cell}"
+                "{pool}"
             );
-            assert!(!awaited, "awaited the nodes with {cell}");
+            assert!(!awaited, "awaited the nodes with {pool}");
         }
         let written: Vec<_> = std::fs::read_dir(dir.path())
             .expect("roster directory")
@@ -782,33 +782,33 @@ async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
     }
 }
 
-/// The control: a `[cell]` that fits passes the check, and the launch goes
-/// on to wait for the nodes and meet the roster. In a cell it meets only
+/// The control: a `[pool]` that fits passes the check, and the launch goes
+/// on to wait for the nodes and meet the roster. In a pool it meets only
 /// the segments of its own class, so it launches with no instance of the
-/// other class; without the cell it waits for that instance and says so.
+/// other class; without the pool it waits for that instance and says so.
 #[tokio::test]
-async fn a_cell_that_fits_the_deployment_launches() {
-    for cell in [true, false] {
+async fn a_pool_that_fits_the_deployment_launches() {
+    for pool in [true, false] {
         let dir = tempfile::Builder::new()
-            .prefix("gdl-cell-")
+            .prefix("gdl-pool-")
             .tempdir()
             .expect("roster directory");
         let roster = format!(
             "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 200\n",
             dir.path().display()
         );
-        let settings = format!("{CELL}[cell.ready]\nfront = 2\n");
-        let layers: Vec<&str> = if cell {
+        let settings = format!("{POOL}[pool.ready]\nfront = 2\n");
+        let layers: Vec<&str> = if pool {
             vec![&roster, &settings]
         } else {
             vec![&roster]
         };
         let config = load(&layers).expect("parses");
-        let (launched, awaited) = launch_cell(&config, "front", &classed()).await;
-        assert!(awaited, "the check stopped a cell that fits");
-        match (cell, launched) {
+        let (launched, awaited) = launch_pool(&config, "front", &classed()).await;
+        assert!(awaited, "the check stopped a pool that fits");
+        match (pool, launched) {
             (true, Ok(_)) => {}
-            (true, Err(error)) => panic!("a cell waited for another class: {error}"),
+            (true, Err(error)) => panic!("a pool waited for another class: {error}"),
             (false, Ok(_)) => panic!("met a roster with no `back` instance"),
             (false, Err(error)) => {
                 assert!(error.to_string().contains("back (0 of 1)"), "{error}");

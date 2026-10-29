@@ -1,12 +1,12 @@
-//! The relay without a hub: what a followed cell's watch sends, as the
+//! The relay without a hub: what a followed pool's watch sends, as the
 //! relay's watchers see it, and what each generation of a follow may
 //! write.
 
 use super::{Installed, Relay};
-use crate::{CellHealth, Quorum};
+use crate::{PoolHealth, Quorum};
 use futures::{FutureExt, StreamExt};
-use gdl_cells::{CellState, LoadSummary};
-use gdl_watch::{CellWatchEvent, FollowEvent};
+use gdl_pools::{LoadSummary, PoolState};
+use gdl_watch::{FollowEvent, PoolWatchEvent};
 use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
 fn peer() -> PeerInfo {
@@ -16,17 +16,17 @@ fn peer() -> PeerInfo {
     )
 }
 
-/// The health of a cell that requires two ready cells of `model_x`.
-fn health() -> CellHealth {
+/// The health of a pool that requires two ready pools of `model_x`.
+fn health() -> PoolHealth {
     let quorum = Quorum::new([("a", 1)], std::time::Duration::ZERO);
     let requires = [("model_x".to_string(), 2)].into();
-    CellHealth::of(&quorum, CellState::Unavailable, &requires)
+    PoolHealth::of(&quorum, PoolState::Unavailable, &requires)
 }
 
-/// The cell `cell` of `model_x`, as its watch's first event shows it.
-fn installed_cell(cell: &str, state: CellState) -> Installed {
+/// The pool `pool` of `model_x`, as its watch's first event shows it.
+fn installed_pool(pool: &str, state: PoolState) -> Installed {
     Installed::new(
-        cell.into(),
+        pool.into(),
         "model_x".into(),
         "r".into(),
         "hub:1".into(),
@@ -35,12 +35,12 @@ fn installed_cell(cell: &str, state: CellState) -> Installed {
     )
 }
 
-fn installed(state: CellState) -> Installed {
-    installed_cell("m", state)
+fn installed(state: PoolState) -> Installed {
+    installed_pool("m", state)
 }
 
 /// The events `event` sends.
-fn sent(installed: &mut Installed, event: CellWatchEvent) -> Vec<FollowEvent> {
+fn sent(installed: &mut Installed, event: PoolWatchEvent) -> Vec<FollowEvent> {
     let mut events = Vec::new();
     installed.apply(1, event, |event| events.push(event));
     events
@@ -49,22 +49,22 @@ fn sent(installed: &mut Installed, event: CellWatchEvent) -> Vec<FollowEvent> {
 fn exposed(peer: &PeerInfo) -> FollowEvent {
     FollowEvent::Exposed {
         class: "model_x".into(),
-        cell: "m".into(),
+        pool: "m".into(),
         generation: 1,
         segment: "f".into(),
         peer: peer.clone(),
     }
 }
 
-fn ready(peer: &PeerInfo) -> CellWatchEvent {
-    CellWatchEvent::Ready {
+fn ready(peer: &PeerInfo) -> PoolWatchEvent {
+    PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: peer.clone(),
     }
 }
 
-fn state(state: CellState) -> CellWatchEvent {
-    CellWatchEvent::State {
+fn state(state: PoolState) -> PoolWatchEvent {
+    PoolWatchEvent::State {
         state,
         unfollowed: false,
     }
@@ -88,8 +88,8 @@ fn load_age(events: &[FollowEvent]) -> Option<u64> {
 }
 
 /// A watch that begins is sent a follow's summary with its age: how long
-/// ago the relay received it, from the cell's snapshot, from a load
-/// event, or from a reading of the cell again, which sends the summary
+/// ago the relay received it, from the pool's snapshot, from a load
+/// event, or from a reading of the pool again, which sends the summary
 /// anew even when it has not changed. With no summary, no age.
 #[tokio::test(start_paused = true)]
 async fn a_snapshot_sends_the_summary_with_its_age() {
@@ -107,85 +107,85 @@ async fn a_snapshot_sends_the_summary_with_its_age() {
             "model_x".into(),
             "r".into(),
             "hub:1".into(),
-            CellState::Ready,
+            PoolState::Ready,
             load,
         )
     };
-    let mut cell = of(Some(load));
+    let mut pool = of(Some(load));
     tokio::time::advance(second * 4).await;
-    assert_eq!(load_age(&cell.snapshot(1, None, None)), Some(4000));
+    assert_eq!(load_age(&pool.snapshot(1, None, None)), Some(4000));
     assert_eq!(
-        load_age(&cell.snapshot(1, None, None)),
+        load_age(&pool.snapshot(1, None, None)),
         Some(4000),
         "as old again"
     );
 
-    sent(&mut cell, CellWatchEvent::Load { load: Some(load) });
+    sent(&mut pool, PoolWatchEvent::Load { load: Some(load) });
     tokio::time::advance(second).await;
-    assert_eq!(load_age(&cell.snapshot(1, None, None)), Some(1000));
+    assert_eq!(load_age(&pool.snapshot(1, None, None)), Some(1000));
 
-    cell.withhold(1, |_| {});
+    pool.withhold(1, |_| {});
     tokio::time::advance(second * 2).await;
     let fresh = of(Some(load));
     tokio::time::advance(second / 2).await;
-    cell.restore(fresh, 1, |_| {});
+    pool.restore(fresh, 1, |_| {});
     assert_eq!(
-        load_age(&cell.snapshot(1, None, None)),
+        load_age(&pool.snapshot(1, None, None)),
         Some(500),
         "as old as the reading, the same summary"
     );
 
-    sent(&mut cell, CellWatchEvent::Load { load: None });
-    assert_eq!(load_age(&cell.snapshot(1, None, None)), None);
+    sent(&mut pool, PoolWatchEvent::Load { load: None });
+    assert_eq!(load_age(&pool.snapshot(1, None, None)), None);
     assert_eq!(load_age(&of(None).snapshot(1, None, None)), None);
 }
 
-/// An instance retired is never exposed, even if its cell's watch named
+/// An instance retired is never exposed, even if its pool's watch named
 /// it ready afterwards, which the watch does not do.
 #[test]
 fn a_retired_instance_is_never_exposed() {
-    let mut cell = installed(CellState::Ready);
+    let mut pool = installed(PoolState::Ready);
     let retiree = peer();
     let id = retiree.instance_id();
     let retired = sent(
-        &mut cell,
-        CellWatchEvent::Retired {
+        &mut pool,
+        PoolWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
             acknowledged: false,
         },
     );
     assert_eq!(retired.len(), 1);
-    assert_eq!(sent(&mut cell, ready(&retiree)), []);
-    assert_eq!(sent(&mut cell, state(CellState::Unavailable)).len(), 1);
+    assert_eq!(sent(&mut pool, ready(&retiree)), []);
+    assert_eq!(sent(&mut pool, state(PoolState::Unavailable)).len(), 1);
     assert_eq!(
-        sent(&mut cell, state(CellState::Ready)),
+        sent(&mut pool, state(PoolState::Ready)),
         [FollowEvent::State {
             class: "model_x".into(),
-            cell: "m".into(),
+            pool: "m".into(),
             generation: 1,
-            state: CellState::Ready,
+            state: PoolState::Ready,
         }]
     );
 }
 
 /// A retirement sent again, acknowledged, finds the instance retired
-/// already: the relay's watchers are sent nothing, and the cell stays as
+/// already: the relay's watchers are sent nothing, and the pool stays as
 /// it was, exposing its other instances, not withheld.
 #[test]
 fn an_acknowledged_retirement_changes_nothing_for_a_follower() {
-    let mut cell = installed(CellState::Ready);
+    let mut pool = installed(PoolState::Ready);
     let (retiree, staying) = (peer(), peer());
-    assert_eq!(sent(&mut cell, ready(&staying)), [exposed(&staying)]);
-    let retired = |acknowledged| CellWatchEvent::Retired {
+    assert_eq!(sent(&mut pool, ready(&staying)), [exposed(&staying)]);
+    let retired = |acknowledged| PoolWatchEvent::Retired {
         segment: "f".into(),
         instance: retiree.instance_id(),
         acknowledged,
     };
-    assert_eq!(sent(&mut cell, retired(false)).len(), 1);
-    assert_eq!(sent(&mut cell, retired(true)), []);
-    assert!(cell.exposes() && !cell.withheld);
-    let shown = cell.snapshot(1, None, None);
+    assert_eq!(sent(&mut pool, retired(false)).len(), 1);
+    assert_eq!(sent(&mut pool, retired(true)), []);
+    assert!(pool.exposes() && !pool.withheld);
+    let shown = pool.snapshot(1, None, None);
     assert!(shown.contains(&exposed(&staying)), "{shown:?}");
 }
 
@@ -195,26 +195,26 @@ fn an_acknowledged_retirement_changes_nothing_for_a_follower() {
 /// `left`, since a consumer keeps it reachable while the follow lives.
 #[test]
 fn a_state_hides_and_exposes_the_ready_instances() {
-    let mut cell = installed(CellState::Degraded);
+    let mut pool = installed(PoolState::Degraded);
     let (first, second, gone) = (peer(), peer(), peer());
-    assert_eq!(sent(&mut cell, ready(&first)), [exposed(&first)]);
-    assert_eq!(sent(&mut cell, ready(&gone)), [exposed(&gone)]);
-    assert_eq!(sent(&mut cell, ready(&first)), [], "sent once");
-    assert_eq!(sent(&mut cell, state(CellState::Draining)).len(), 1);
-    assert_eq!(sent(&mut cell, ready(&second)), []);
-    let left = CellWatchEvent::Left {
+    assert_eq!(sent(&mut pool, ready(&first)), [exposed(&first)]);
+    assert_eq!(sent(&mut pool, ready(&gone)), [exposed(&gone)]);
+    assert_eq!(sent(&mut pool, ready(&first)), [], "sent once");
+    assert_eq!(sent(&mut pool, state(PoolState::Draining)).len(), 1);
+    assert_eq!(sent(&mut pool, ready(&second)), []);
+    let left = PoolWatchEvent::Left {
         segment: "f".into(),
         instance: gone.instance_id(),
     };
-    assert_eq!(sent(&mut cell, left).len(), 1, "its `left` was not sent");
-    let mut again = sent(&mut cell, state(CellState::Ready));
+    assert_eq!(sent(&mut pool, left).len(), 1, "its `left` was not sent");
+    let mut again = sent(&mut pool, state(PoolState::Ready));
     assert_eq!(
         again.remove(0),
         FollowEvent::State {
             class: "model_x".into(),
-            cell: "m".into(),
+            pool: "m".into(),
             generation: 1,
-            state: CellState::Ready,
+            state: PoolState::Ready,
         }
     );
     again.sort_by_key(|event| match event {
@@ -258,14 +258,14 @@ fn held() -> Relay {
 fn offering(generation: u64, revision: u64, offered: bool) -> FollowEvent {
     FollowEvent::Offering {
         class: "model_x".into(),
-        cell: "m".into(),
+        pool: "m".into(),
         generation,
         revision,
         offered,
     }
 }
 
-/// Only the current generation of a cell writes: an install, a change,
+/// Only the current generation of a pool writes: an install, a change,
 /// or an end of an earlier one is ignored, and a new generation ends
 /// the installed one first, which is then not offered, and kept until
 /// it closes. One installed in a state that takes no work is not
@@ -277,19 +277,19 @@ fn only_the_current_generation_writes() {
     assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
     let (first, _) = relay.begin("model_x", "m");
     let instance = peer();
-    relay.install(first, installed_cell("m", CellState::Ready));
+    relay.install(first, installed_pool("m", PoolState::Ready));
     relay.apply("model_x", "m", first, ready(&instance));
     let (second, _) = relay.begin("model_x", "m");
     assert!(second > first);
-    relay.install(first, installed_cell("m", CellState::Ready));
+    relay.install(first, installed_pool("m", PoolState::Ready));
     relay.apply("model_x", "m", first, ready(&peer()));
     relay.end("model_x", "m", first);
-    relay.install(second, installed_cell("m", CellState::Unavailable));
+    relay.install(second, installed_pool("m", PoolState::Unavailable));
     relay.apply("model_x", "m", second, ready(&instance));
     let follow = |generation, state| FollowEvent::Follow {
         listing: None,
         class: "model_x".into(),
-        cell: "m".into(),
+        pool: "m".into(),
         generation,
         region: "r".into(),
         state,
@@ -298,7 +298,7 @@ fn only_the_current_generation_writes() {
     };
     let first_exposed = FollowEvent::Exposed {
         class: "model_x".into(),
-        cell: "m".into(),
+        pool: "m".into(),
         generation: first,
         segment: "f".into(),
         peer: instance.clone(),
@@ -306,10 +306,10 @@ fn only_the_current_generation_writes() {
     assert_eq!(
         pending(&mut watch),
         [
-            follow(first, CellState::Ready),
+            follow(first, PoolState::Ready),
             first_exposed.clone(),
             offering(first, 2, false),
-            follow(second, CellState::Unavailable),
+            follow(second, PoolState::Unavailable),
             offering(second, 1, false),
         ]
     );
@@ -326,10 +326,10 @@ fn only_the_current_generation_writes() {
     assert_eq!(
         pending(&mut again),
         [
-            follow(first, CellState::Ready),
+            follow(first, PoolState::Ready),
             offering(first, 2, false),
             first_exposed,
-            follow(second, CellState::Unavailable),
+            follow(second, PoolState::Unavailable),
             offering(second, 1, false),
             FollowEvent::Synced { listed: false },
         ]
@@ -357,8 +357,8 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
     let mut watch = relay.watch(None);
     assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
     let (first, close) = relay.begin("model_x", "m");
-    relay.install(first, installed_cell("m", CellState::Ready));
-    relay.apply("model_x", "m", first, state(CellState::Draining));
+    relay.install(first, installed_pool("m", PoolState::Ready));
+    relay.apply("model_x", "m", first, state(PoolState::Draining));
     let events = pending(&mut watch);
     assert_eq!(
         events[events.len() - 2..],
@@ -366,7 +366,7 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
             offering(first, 2, false),
             FollowEvent::Dropped {
                 class: "model_x".into(),
-                cell: "m".into(),
+                pool: "m".into(),
                 generation: first,
             },
         ]
@@ -374,11 +374,11 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
     assert!(close.is_cancelled(), "the link was not told to close");
 }
 
-/// The count of ready, followed cells of a class follows each install,
+/// The count of ready, followed pools of a class follows each install,
 /// change of state, and drop of a current generation, and nothing of
 /// an earlier one.
 #[test]
-fn a_class_counts_its_installed_ready_cells() {
+fn a_class_counts_its_installed_ready_pools() {
     let health = tokio::sync::watch::Sender::new(health());
     let shown = health.subscribe();
     let met = || shown.borrow().requires["model_x"].met;
@@ -390,24 +390,24 @@ fn a_class_counts_its_installed_ready_cells() {
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
-    relay.install(m, installed_cell("m", CellState::Ready));
-    relay.install(n, installed_cell("n", CellState::Degraded));
+    relay.install(m, installed_pool("m", PoolState::Ready));
+    relay.install(n, installed_pool("n", PoolState::Degraded));
     assert_eq!(met(), 1);
-    relay.apply("model_x", "n", n, state(CellState::Ready));
+    relay.apply("model_x", "n", n, state(PoolState::Ready));
     assert_eq!(met(), 2);
-    relay.apply("model_x", "n", n, state(CellState::Ready));
+    relay.apply("model_x", "n", n, state(PoolState::Ready));
     assert_eq!(met(), 2, "no change of state");
-    relay.apply("model_x", "m", m, state(CellState::Unavailable));
+    relay.apply("model_x", "m", m, state(PoolState::Unavailable));
     assert_eq!(met(), 1);
     relay.end("model_x", "m", m);
     assert_eq!(met(), 1, "m was not ready");
     let (later, _) = relay.begin("model_x", "n");
     assert_eq!(met(), 0, "the new generation dropped the ready one");
-    relay.apply("model_x", "n", n, state(CellState::Ready));
+    relay.apply("model_x", "n", n, state(PoolState::Ready));
     relay.end("model_x", "n", n);
-    relay.install(later, installed_cell("n", CellState::Ready));
+    relay.install(later, installed_pool("n", PoolState::Ready));
     assert_eq!(met(), 1);
-    assert!(!shown.borrow().healthy(), "and the cell is unavailable");
+    assert!(!shown.borrow().healthy(), "and the pool is unavailable");
 }
 
 /// An instance that leaves while a state hides it is sent `left`, if the
@@ -416,24 +416,24 @@ fn a_class_counts_its_installed_ready_cells() {
 /// became ready only while hidden was never sent, and is sent nothing.
 #[test]
 fn an_instance_that_leaves_while_hidden_is_sent_left() {
-    let mut cell = installed(CellState::Ready);
+    let mut pool = installed(PoolState::Ready);
     let (shown, unseen) = (peer(), peer());
-    assert_eq!(sent(&mut cell, ready(&shown)), [exposed(&shown)]);
-    assert_eq!(sent(&mut cell, state(CellState::Unavailable)).len(), 1);
-    assert_eq!(sent(&mut cell, ready(&unseen)), []);
-    let left = |peer: &PeerInfo| CellWatchEvent::Left {
+    assert_eq!(sent(&mut pool, ready(&shown)), [exposed(&shown)]);
+    assert_eq!(sent(&mut pool, state(PoolState::Unavailable)).len(), 1);
+    assert_eq!(sent(&mut pool, ready(&unseen)), []);
+    let left = |peer: &PeerInfo| PoolWatchEvent::Left {
         segment: "f".into(),
         instance: peer.instance_id(),
     };
     assert_eq!(
-        sent(&mut cell, left(&shown)),
+        sent(&mut pool, left(&shown)),
         [FollowEvent::Left {
             class: "model_x".into(),
-            cell: "m".into(),
+            pool: "m".into(),
             generation: 1,
             segment: "f".into(),
             instance: shown.instance_id(),
         }]
     );
-    assert_eq!(sent(&mut cell, left(&unseen)), [], "never sent");
+    assert_eq!(sent(&mut pool, left(&unseen)), [], "never sent");
 }

@@ -1,28 +1,28 @@
-//! The cell's state, judged as the counts change and as the hold runs
+//! The pool's state, judged as the counts change and as the hold runs
 //! out, and shown on the health endpoint. Nothing here waits for the
 //! directory: the writer takes the latest state from a watch.
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use gdl_cells::CellState;
+use gdl_pools::PoolState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::CellHealth;
+use super::PoolHealth;
 use super::count::Count;
 use super::feed::Feed;
 use crate::Quorum;
 
 pub(super) struct Judge {
     pub(super) quorum: Quorum,
-    pub(super) health: watch::Sender<CellHealth>,
+    pub(super) health: watch::Sender<PoolHealth>,
     /// The state, for the writer: a change it has not written yet is
     /// replaced by the next, so a slow write never delays a judgment.
-    pub(super) states: watch::Sender<CellState>,
-    /// The cell's watchers, sent each change of state.
+    pub(super) states: watch::Sender<PoolState>,
+    /// The pool's watchers, sent each change of state.
     pub(super) feed: Arc<Feed>,
-    /// Whether the cell drains: from then its state is `draining`,
+    /// Whether the pool drains: from then its state is `draining`,
     /// whatever its quorum.
     pub(super) draining: watch::Receiver<bool>,
 }
@@ -68,7 +68,7 @@ impl Judge {
     }
 
     /// When the judgment must look again with no new count: when the
-    /// quorum's hold runs out, unless the cell drains. A draining cell's
+    /// quorum's hold runs out, unless the pool drains. A draining pool's
     /// state no longer follows its quorum, which is then not judged, so its
     /// hold never moves on: once run out, it would wake the judgment at
     /// once, again and again.
@@ -102,7 +102,7 @@ impl Judge {
     /// it, is answered after the watchers were sent it.
     fn judge(&mut self) {
         let state = match *self.draining.borrow_and_update() {
-            true => CellState::Draining,
+            true => PoolState::Draining,
             false => self.quorum.state(Instant::now()),
         };
         let changed = self.states.send_if_modified(|current| {
@@ -135,33 +135,33 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use gdl_cells::CellState;
+    use gdl_pools::PoolState;
     use tokio::sync::watch;
 
-    use super::super::CellHealth;
+    use super::super::PoolHealth;
     use super::super::count::Count;
     use super::super::feed::Feed;
     use super::Judge;
     use crate::Quorum;
 
-    /// A cell drained while its quorum is held, short of `ready`, has no
+    /// A pool drained while its quorum is held, short of `ready`, has no
     /// hold to wait out: its state no longer follows the quorum, so a hold
     /// that ran out would wake the judgment again and again, at once.
     #[test]
     fn a_draining_judgment_does_not_wake_for_the_hold() {
         let quorum = Quorum::new([("d", 1)], Duration::from_secs(1));
-        let health = watch::Sender::new(CellHealth::of(
+        let health = watch::Sender::new(PoolHealth::of(
             &quorum,
-            CellState::Unavailable,
+            PoolState::Unavailable,
             &Default::default(),
         ));
         let (draining, drained) = watch::channel(false);
         let mut judge = Judge {
             quorum,
             health,
-            states: watch::Sender::new(CellState::Unavailable),
+            states: watch::Sender::new(PoolState::Unavailable),
             feed: Arc::new(Feed::new(
-                "cell".into(),
+                "pool".into(),
                 "model_x".into(),
                 vec![("d".into(), false)],
                 Duration::from_secs(1),
@@ -176,7 +176,7 @@ mod tests {
         assert!(judge.wake().is_some(), "the hold is under way");
         draining.send_replace(true);
         judge.judge();
-        assert_eq!(*judge.states.borrow(), CellState::Draining);
+        assert_eq!(*judge.states.borrow(), PoolState::Draining);
         assert_eq!(judge.wake(), None, "a draining judgment waits for a hold");
     }
 }

@@ -1,5 +1,5 @@
-//! The client of a cell hub's watches: its server-sent events, parsed into
-//! [`CellWatchEvent`]s or [`FollowEvent`]s, or read as events of a kind
+//! The client of a pool hub's watches: its server-sent events, parsed into
+//! [`PoolWatchEvent`]s or [`FollowEvent`]s, or read as events of a kind
 //! this build does not know, each item `Ok` until the watch ends: with no
 //! more items when it ends cleanly, or with a [`WatchFailure`] when it
 //! does not.
@@ -13,11 +13,11 @@ use futures::{Stream, StreamExt};
 
 use super::watched::Classify;
 use super::{
-    AVOIDED_ROUTE, Avoided, CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower,
+    AVOIDED_ROUTE, Avoided, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower, PoolWatchEvent,
     RELEASE_ROUTE, REPORT_ROUTE, RelayWatcher, Report, ReportRefusal, ReportReply, UnknownEvent,
     UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
-use gdl_cells::{CellRecord, DirectoryError};
+use gdl_pools::{DirectoryError, PoolRecord};
 use serde::Serialize;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
@@ -26,42 +26,42 @@ pub type WatchItem<E, U> = Result<Watched<E, U>, WatchFailure>;
 /// A watch's items.
 pub type WatchStream<E, U> = BoxStream<'static, WatchItem<E, U>>;
 
-/// How long a connection to a cell's hub may take to open.
+/// How long a connection to a pool's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
 
 /// How long a watch may go without a byte before it ends: three of the
 /// hub's keep-alives, so that a stalled connection is told from a quiet
-/// cell.
+/// pool.
 const IDLE: Duration = Duration::from_secs(30);
 
 /// The most of a refusal's body kept for its error.
 const REFUSAL: usize = 1024;
 
-/// Watches cells' hubs, over one pool of connections: their cells, and
+/// Watches pools' hubs, over one pool of connections: their pools, and
 /// what they follow, each watch within its limits. Its clones share the
 /// pool, and the count of the events of a kind this build does not know
 /// that they have read.
 #[derive(Debug, Clone)]
-pub struct CellWatcher {
+pub struct PoolWatcher {
     http: reqwest::Client,
     unknown: Arc<AtomicU64>,
     limits: WatchLimits,
 }
 
-impl CellWatcher {
+impl PoolWatcher {
     /// A watcher with a connect timeout, an idle timeout longer than the
     /// hub's keep-alive, and the default limits.
-    pub fn new() -> Result<Self, CellWatchError> {
+    pub fn new() -> Result<Self, PoolWatchError> {
         Self::with_limits(WatchLimits::default())
     }
 
-    /// [`CellWatcher::new`], each watch within `limits`.
-    pub fn with_limits(limits: WatchLimits) -> Result<Self, CellWatchError> {
+    /// [`PoolWatcher::new`], each watch within `limits`.
+    pub fn with_limits(limits: WatchLimits) -> Result<Self, PoolWatchError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT)
             .read_timeout(IDLE)
             .build()
-            .map_err(|e| CellWatchError(format!("the cell watch's HTTP client: {e}")))?;
+            .map_err(|e| PoolWatchError(format!("the pool watch's HTTP client: {e}")))?;
         Ok(Self {
             http,
             unknown: Arc::default(),
@@ -75,9 +75,9 @@ impl CellWatcher {
         self.unknown.load(Ordering::Relaxed)
     }
 
-    /// Watch the cell whose hub is at `hub`, `host:port` as the cell's
+    /// Watch the pool whose hub is at `hub`, `host:port` as the pool's
     /// record names it. The events end, with no more items, when the hub
-    /// ends the watch (it stopped, this watcher fell behind, or the cell's
+    /// ends the watch (it stopped, this watcher fell behind, or the pool's
     /// drain ended), and with a [`WatchFailure`] as the last item when the
     /// connection fails or goes idle, at an event that is not JSON or is
     /// of a known kind whose fields do not parse, at an event past the
@@ -86,9 +86,9 @@ impl CellWatcher {
     /// a follower then watches again from a snapshot, and applies nothing
     /// of one that did not complete. An event of a kind this build does
     /// not know is read as [`Watched::Unknown`], and the watch goes on: it
-    /// concerns the watched cell, which the reader fails closed for until
-    /// it has read the cell again. A hub that has not yet published its
-    /// cell's record holds the watch until it has, since the epoch it
+    /// concerns the watched pool, which the reader fails closed for until
+    /// it has read the pool again. A hub that has not yet published its
+    /// pool's record holds the watch until it has, since the epoch it
     /// would send is not settled before, and refuses it after 5 s; a peer
     /// that does not answer within the snapshot's bound is refused too. A
     /// hub that serves as many watches of a route as its cap refuses one
@@ -97,28 +97,28 @@ impl CellWatcher {
     pub async fn watch(
         &self,
         hub: &str,
-    ) -> Result<WatchStream<CellWatchEvent, UnknownEvent>, CellWatchError> {
+    ) -> Result<WatchStream<PoolWatchEvent, UnknownEvent>, PoolWatchError> {
         self.open(hub, WATCH_ROUTE, None::<&Follower>).await
     }
 
-    /// [`CellWatcher::watch`], as `follower`: the cell's hub counts the
-    /// watch among the cell's followers until it is released
-    /// ([`CellWatcher::release`]).
+    /// [`PoolWatcher::watch`], as `follower`: the pool's hub counts the
+    /// watch among the pool's followers until it is released
+    /// ([`PoolWatcher::release`]).
     pub async fn follow(
         &self,
         hub: &str,
         follower: &Follower,
-    ) -> Result<WatchStream<CellWatchEvent, UnknownEvent>, CellWatchError> {
+    ) -> Result<WatchStream<PoolWatchEvent, UnknownEvent>, PoolWatchError> {
         self.open(hub, WATCH_ROUTE, Some(follower)).await
     }
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
-    /// [`FollowEvent`] as it is sent. The events end as a cell's watch's
+    /// [`FollowEvent`] as it is sent. The events end as a pool's watch's
     /// do, its snapshot within the same bounds, and also with
     /// [`WatchFailure::Unparsed`] at an event of a kind this build does
     /// not know that names no follow; one that names its follow is read as
-    /// [`Watched::Unknown`], for the reader to fail closed for that cell
-    /// alone until it has read it again ([`CellWatcher::follows_of`]). A
+    /// [`Watched::Unknown`], for the reader to fail closed for that pool
+    /// alone until it has read it again ([`PoolWatcher::follows_of`]). A
     /// consumer whose watch ended watches again from a snapshot. A chooser
     /// names itself, `chooser`, so that the hub knows it still watches
     /// ([`RelayWatcher`]); anything else names no one.
@@ -126,22 +126,22 @@ impl CellWatcher {
         &self,
         hub: &str,
         chooser: Option<&RelayWatcher>,
-    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
+    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, PoolWatchError> {
         self.open(hub, FOLLOWS_ROUTE, chooser).await
     }
-    /// Let go, as `follower`, of the cell whose hub is at `hub`: its watch
-    /// no longer counts among the cell's followers.
-    pub async fn release(&self, hub: &str, follower: &Follower) -> Result<(), CellWatchError> {
+    /// Let go, as `follower`, of the pool whose hub is at `hub`: its watch
+    /// no longer counts among the pool's followers.
+    pub async fn release(&self, hub: &str, follower: &Follower) -> Result<(), PoolWatchError> {
         self.post(hub, RELEASE_ROUTE, follower).await
     }
 
-    /// Tell the hub at `hub`, `host:port`, of a cell that `avoided` names
-    /// that the follower's whole cell avoids its retired entry instance.
-    pub async fn avoided(&self, hub: &str, avoided: &Avoided) -> Result<(), CellWatchError> {
+    /// Tell the hub at `hub`, `host:port`, of a pool that `avoided` names
+    /// that the follower's whole pool avoids its retired entry instance.
+    pub async fn avoided(&self, hub: &str, avoided: &Avoided) -> Result<(), PoolWatchError> {
         self.post(hub, AVOIDED_ROUTE, avoided).await
     }
 
-    /// Report to the parent cell's hub at `hub`, `host:port`, the record
+    /// Report to the parent pool's hub at `hub`, `host:port`, the record
     /// or withdrawal `report` carries ([`crate::REPORT_ROUTE`]), and return
     /// the interval at which the parent expects the next report. A refusal
     /// is the directory error the parent's directory gave; a parent that
@@ -166,27 +166,27 @@ impl CellWatcher {
                 .map(|reply| reply.interval())
                 .map_err(|e| unavailable(&e));
         }
-        let (class, cell) = report.cell();
+        let (class, pool) = report.pool();
         match serde_json::from_slice::<ReportRefusal>(&body) {
-            Ok(refusal) if status.is_client_error() => Err(refusal.into_error(class, cell)),
+            Ok(refusal) if status.is_client_error() => Err(refusal.into_error(class, pool)),
             _ => Err(unavailable(&status)),
         }
     }
 
-    /// The record the parent cell's hub at `hub`, `host:port`, holds for
-    /// the cell `cell` of `class` ([`crate::HELD_ROUTE`]): `None` when it
+    /// The record the parent pool's hub at `hub`, `host:port`, holds for
+    /// the pool `pool` of `class` ([`crate::HELD_ROUTE`]): `None` when it
     /// holds none. A parent that cannot be reached, or answers anything
     /// else, is [`DirectoryError::Unavailable`].
     pub async fn held(
         &self,
         hub: &str,
         class: &str,
-        cell: &str,
-    ) -> Result<Option<CellRecord>, DirectoryError> {
+        pool: &str,
+    ) -> Result<Option<PoolRecord>, DirectoryError> {
         gdl_model::check_hub_address(hub).map_err(DirectoryError::Unavailable)?;
         let url = format!(
             "http://{hub}/v1/ext/{EXTENSION}{}",
-            crate::held_path(class, cell)
+            crate::held_path(class, pool)
         );
         let unavailable =
             |e: &dyn std::fmt::Display| DirectoryError::Unavailable(format!("GET {url}: {e}"));
@@ -213,8 +213,8 @@ impl CellWatcher {
         hub: &str,
         route: &str,
         body: &impl serde::Serialize,
-    ) -> Result<(), CellWatchError> {
-        gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
+    ) -> Result<(), PoolWatchError> {
+        gdl_model::check_hub_address(hub).map_err(PoolWatchError)?;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let response = self
             .http
@@ -222,30 +222,30 @@ impl CellWatcher {
             .json(body)
             .send()
             .await
-            .map_err(|e| CellWatchError(format!("POST {url}: {e}")))?;
+            .map_err(|e| PoolWatchError(format!("POST {url}: {e}")))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(CellWatchError(format!("POST {url}: {status}")));
+            return Err(PoolWatchError(format!("POST {url}: {status}")));
         }
         Ok(())
     }
 
     /// Watch one follow of the relay of the hub at `hub`, `host:port`: the
-    /// follow of the cell `cell` of `class` as a watch of the relay begins
+    /// follow of the pool `pool` of `class` as a watch of the relay begins
     /// with it, then `synced`, then each event of the relay that names the
-    /// cell, as [`CellWatcher::follows`] reads them. A reader that met an
-    /// event of a kind it does not know for the cell reads the cell from
+    /// pool, as [`PoolWatcher::follows`] reads them. A reader that met an
+    /// event of a kind it does not know for the pool reads the pool from
     /// here: this watch's snapshot and the events after it are ordered as
     /// the relay's are, which a reading beside another watch is not.
     pub async fn follows_of(
         &self,
         hub: &str,
         class: &str,
-        cell: &str,
-    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
-        gdl_model::check_class_name(class).map_err(CellWatchError)?;
-        gdl_model::check_cell_name(cell).map_err(CellWatchError)?;
-        self.open(hub, &super::followed_path(class, cell), None::<&Follower>)
+        pool: &str,
+    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, PoolWatchError> {
+        gdl_model::check_class_name(class).map_err(PoolWatchError)?;
+        gdl_model::check_pool_name(pool).map_err(PoolWatchError)?;
+        self.open(hub, &super::followed_path(class, pool), None::<&Follower>)
             .await
     }
 
@@ -254,8 +254,8 @@ impl CellWatcher {
         hub: &str,
         route: &str,
         query: Option<&(impl Serialize + ?Sized)>,
-    ) -> Result<WatchStream<T, T::Unknown>, CellWatchError> {
-        gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
+    ) -> Result<WatchStream<T, T::Unknown>, PoolWatchError> {
+        gdl_model::check_hub_address(hub).map_err(PoolWatchError)?;
         // The snapshot's bound runs from here, so that a peer that answers
         // slowly, or never, is bounded as one that sends slowly is.
         let synced_by = tokio::time::Instant::now() + self.limits.synced_within;
@@ -265,7 +265,7 @@ impl CellWatcher {
             request = request.query(query);
         }
         let late = || {
-            CellWatchError(format!(
+            PoolWatchError(format!(
                 "GET {url}: {}",
                 WatchFailure::SnapshotLate {
                     within: self.limits.synced_within
@@ -275,7 +275,7 @@ impl CellWatcher {
         let mut response = tokio::time::timeout_at(synced_by, request.send())
             .await
             .map_err(|_| late())?
-            .map_err(|e| CellWatchError(format!("GET {url}: {e}")))?;
+            .map_err(|e| PoolWatchError(format!("GET {url}: {e}")))?;
         let status = response.status();
         if !status.is_success() {
             let mut body = Vec::new();
@@ -289,7 +289,7 @@ impl CellWatcher {
             // A refusal's body is only for its error: what came in time.
             let _ = tokio::time::timeout_at(synced_by, read).await;
             body.truncate(REFUSAL);
-            return Err(CellWatchError(format!(
+            return Err(PoolWatchError(format!(
                 "GET {url}: {status}: {}",
                 String::from_utf8_lossy(&body)
             )));
@@ -304,11 +304,11 @@ impl CellWatcher {
     }
 }
 
-/// Why a cell's watch could not begin.
+/// Why a pool's watch could not begin.
 #[derive(Clone, PartialEq, Eq)]
-pub struct CellWatchError(String);
+pub struct PoolWatchError(String);
 
-impl CellWatchError {
+impl PoolWatchError {
     /// The error `message`: also the hub's, for a watch it refuses in
     /// process.
     pub fn new(message: impl Into<String>) -> Self {
@@ -316,19 +316,19 @@ impl CellWatchError {
     }
 }
 
-impl std::fmt::Display for CellWatchError {
+impl std::fmt::Display for PoolWatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::fmt::Debug for CellWatchError {
+impl std::fmt::Debug for PoolWatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for CellWatchError {}
+impl std::error::Error for PoolWatchError {}
 
 /// The events in a watch's bytes, within `limits`: each `Ok` until the
 /// bytes end, then nothing more, or until the first failure, which is the
@@ -525,7 +525,7 @@ where
 /// One server-sent event: `None` for one without data (a keep-alive
 /// comment), `Err` for one whose data is no event. An event of a known
 /// kind costs the one parse; only one that does not parse is read again,
-/// for its kind and the cell it names.
+/// for its kind and the pool it names.
 fn parse<T: Classify>(raw: &[u8]) -> Result<Option<Watched<T, T::Unknown>>, ()> {
     let text = std::str::from_utf8(raw).map_err(|_| ())?;
     let mut data: Option<String> = None;
@@ -563,13 +563,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{CellWatchEvent, WatchItem, events};
+    use super::{PoolWatchEvent, WatchItem, events};
     use crate::watched::Classify;
     use crate::{
         FollowEvent, UnknownEvent, UnknownFollowEvent, WatchFailure, WatchLimits, Watched,
     };
     use futures::StreamExt;
-    use gdl_cells::CellState;
+    use gdl_pools::PoolState;
     use velo::InstanceId;
 
     /// A runtime for a watch's reader, whose snapshot deadline needs a
@@ -631,23 +631,23 @@ mod tests {
         (events, unknown)
     }
 
-    /// The events of a cell's watch, when all are of known kinds.
-    fn parsed(chunks: &[&str]) -> Vec<CellWatchEvent> {
-        read::<CellWatchEvent>(chunks)
+    /// The events of a pool's watch, when all are of known kinds.
+    fn parsed(chunks: &[&str]) -> Vec<PoolWatchEvent> {
+        read::<PoolWatchEvent>(chunks)
             .0
             .into_iter()
             .map(|item| item.event().expect("a known event"))
             .collect()
     }
 
-    fn left(instance: InstanceId) -> CellWatchEvent {
-        CellWatchEvent::Left {
+    fn left(instance: InstanceId) -> PoolWatchEvent {
+        PoolWatchEvent::Left {
             segment: "f".into(),
             instance,
         }
     }
 
-    fn sse(event: &CellWatchEvent) -> String {
+    fn sse(event: &PoolWatchEvent) -> String {
         format!(
             "data: {}\n\n",
             serde_json::to_string(event).expect("an event serializes")
@@ -664,16 +664,16 @@ mod tests {
             serde_json::json!({ "event": "left", "segment": "f", "instance": instance }),
         );
         assert_eq!(
-            serde_json::to_value(CellWatchEvent::State {
-                state: CellState::Degraded,
+            serde_json::to_value(PoolWatchEvent::State {
+                state: PoolState::Degraded,
                 unfollowed: false,
             })
             .expect("an event serializes"),
             serde_json::json!({ "event": "state", "state": "degraded" }),
         );
         assert_eq!(
-            serde_json::to_value(CellWatchEvent::Load {
-                load: Some(gdl_cells::LoadSummary {
+            serde_json::to_value(PoolWatchEvent::Load {
+                load: Some(gdl_pools::LoadSummary {
                     admitted: 3,
                     limit: 8,
                     instances: 2,
@@ -694,7 +694,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            serde_json::to_value(CellWatchEvent::Synced).expect("an event serializes"),
+            serde_json::to_value(PoolWatchEvent::Synced).expect("an event serializes"),
             serde_json::json!({ "event": "synced" }),
         );
     }
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn data_over_several_lines_is_one_event() {
         let got = parsed(&["data: {\"event\":\ndata: \"synced\"}\n\n"]);
-        assert_eq!(got, [CellWatchEvent::Synced]);
+        assert_eq!(got, [PoolWatchEvent::Synced]);
     }
 
     /// An event that is not JSON, or of a known kind whose fields do not
@@ -747,14 +747,14 @@ mod tests {
         );
         assert_eq!(parsed(&[&later]), [left(a)]);
         let relayed = format!(
-            "data: {{\"event\":\"left\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":2,\"segment\":\"f\",\"instance\":\"{a}\",\"why\":1}}\n\n"
+            "data: {{\"event\":\"left\",\"class\":\"model_x\",\"pool\":\"m\",\"generation\":2,\"segment\":\"f\",\"instance\":\"{a}\",\"why\":1}}\n\n"
         );
         let (got, unknown) = read::<FollowEvent>(&[&relayed]);
         assert_eq!(
             got,
             [Watched::Event(FollowEvent::Left {
                 class: "model_x".into(),
-                cell: "m".into(),
+                pool: "m".into(),
                 generation: 2,
                 segment: "f".into(),
                 instance: a,
@@ -772,14 +772,14 @@ mod tests {
         let follow = |load_age_ms| FollowEvent::Follow {
             listing: None,
             class: "model_x".into(),
-            cell: "m".into(),
+            pool: "m".into(),
             generation: 2,
             region: "r".into(),
-            state: CellState::Ready,
+            state: PoolState::Ready,
             load: None,
             load_age_ms,
         };
-        let earlier = "data: {\"event\":\"follow\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":2,\"region\":\"r\",\"state\":\"ready\",\"load\":null}\n\n";
+        let earlier = "data: {\"event\":\"follow\",\"class\":\"model_x\",\"pool\":\"m\",\"generation\":2,\"region\":\"r\",\"state\":\"ready\",\"load\":null}\n\n";
         let (got, unknown) = read::<FollowEvent>(&[earlier]);
         assert_eq!((got, unknown), (vec![Watched::Event(follow(None))], 0));
         let sent = |age| serde_json::to_value(follow(age)).expect("an event serializes");
@@ -789,13 +789,13 @@ mod tests {
 
     /// An event of a kind this build does not know, between two known
     /// ones, is read as unknown and counted, and the watch goes on: on a
-    /// cell's watch it concerns the watched cell, whatever it names.
+    /// pool's watch it concerns the watched pool, whatever it names.
     #[test]
-    fn an_unknown_kind_on_a_cell_watch_is_read_and_the_watch_goes_on() {
+    fn an_unknown_kind_on_a_pool_watch_is_read_and_the_watch_goes_on() {
         let (a, b) = (InstanceId::new_v4(), InstanceId::new_v4());
-        let (got, unknown) = read::<CellWatchEvent>(&[
+        let (got, unknown) = read::<PoolWatchEvent>(&[
             &sse(&left(a)),
-            "data: {\"event\":\"paused\",\"cell\":7,\"until\":{\"ms\":10}}\n\n",
+            "data: {\"event\":\"paused\",\"pool\":7,\"until\":{\"ms\":10}}\n\n",
             &sse(&left(b)),
         ]);
         assert_eq!(
@@ -811,10 +811,10 @@ mod tests {
         assert_eq!(unknown, 1);
     }
 
-    fn relay_state(cell: &str, state: CellState) -> FollowEvent {
+    fn relay_state(pool: &str, state: PoolState) -> FollowEvent {
         FollowEvent::State {
             class: "model_x".into(),
-            cell: cell.into(),
+            pool: pool.into(),
             generation: 1,
             state,
         }
@@ -829,14 +829,14 @@ mod tests {
 
     /// On the relay, an event of a kind this build does not know names the
     /// follow it concerns, and the watch goes on past it; one that names no
-    /// follow ends the watch, since no cell can be failed closed for it.
+    /// follow ends the watch, since no pool can be failed closed for it.
     #[test]
     fn an_unknown_kind_on_the_relay_names_its_follow() {
-        let before = relay_state("n", CellState::Ready);
-        let after = relay_state("n", CellState::Degraded);
+        let before = relay_state("n", PoolState::Ready);
+        let after = relay_state("n", PoolState::Degraded);
         let (got, unknown) = read::<FollowEvent>(&[
             &relay_sse(&before),
-            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":3,\"for_ms\":5}\n\n",
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"pool\":\"m\",\"generation\":3,\"for_ms\":5}\n\n",
             &relay_sse(&after),
         ]);
         assert_eq!(
@@ -846,7 +846,7 @@ mod tests {
                 Watched::Unknown(UnknownFollowEvent {
                     kind: "paused".into(),
                     class: "model_x".into(),
-                    cell: "m".into(),
+                    pool: "m".into(),
                     generation: 3,
                 }),
                 Watched::Event(after.clone()),
@@ -855,8 +855,8 @@ mod tests {
         assert_eq!(unknown, 1);
         for nameless in [
             "data: {\"event\":\"paused\"}\n\n",
-            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\"}\n\n",
-            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":\"3\"}\n\n",
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"pool\":\"m\"}\n\n",
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"pool\":\"m\",\"generation\":\"3\"}\n\n",
         ] {
             let (got, _) =
                 read::<FollowEvent>(&[&relay_sse(&before), nameless, &relay_sse(&after)]);
@@ -876,7 +876,7 @@ mod tests {
             Err("reset".to_string()),
             Ok(whole.into_bytes()),
         ];
-        let (got, failed, _) = read_within::<CellWatchEvent>(chunks, WatchLimits::default());
+        let (got, failed, _) = read_within::<PoolWatchEvent>(chunks, WatchLimits::default());
         assert_eq!(got, [Watched::Event(left(a))]);
         assert_eq!(failed, Some(WatchFailure::Connection("reset".into())));
     }
@@ -885,7 +885,7 @@ mod tests {
     /// is dialled.
     #[tokio::test]
     async fn an_address_that_is_not_host_and_port_is_refused() {
-        let watcher = super::CellWatcher::new().expect("a client");
+        let watcher = super::PoolWatcher::new().expect("a client");
         for address in ["http://hub:1337", "hub", "hub:0", "hub:1337/v1"] {
             let Err(error) = watcher.watch(address).await else {
                 panic!("watched {address}");

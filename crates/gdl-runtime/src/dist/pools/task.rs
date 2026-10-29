@@ -1,6 +1,6 @@
 //! The chooser's follower as a task: one watch of its own hub's relay, for
 //! the life of the instance, read into [`Follows`], beside it a reading
-//! of each cell left unread by an event of a kind this build does not
+//! of each pool left unread by an event of a kind this build does not
 //! know, and the acknowledgements it sends its hub of the follows it holds
 //! no offer to and of the retired entry instances it avoids.
 
@@ -13,7 +13,7 @@ use futures::{FutureExt, StreamExt};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Layout;
 use gdl_watch::{
-    Avoids, Backoff, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchEnd,
+    Avoids, Backoff, FollowEvent, PoolWatcher, UnknownFollowEvent, Unoffered, WatchEnd,
     WatchStream, Watched,
 };
 use tokio::task::{JoinHandle, JoinSet};
@@ -22,38 +22,38 @@ use velo::Velo;
 
 use super::damping::Damping;
 use super::follow::{Asked, Follows, Key};
-use super::{CellMeters, Cells};
+use super::{PoolMeters, Pools};
 use crate::RuntimeConfig;
 use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
 
 /// The first wait before an instance watches its own hub again, after a
-/// watch ended or could not begin: the relay, a cell read alone, and the
-/// cell's watch for its drain. Kept as short as it always was, so that a
+/// watch ended or could not begin: the relay, a pool read alone, and the
+/// pool's watch for its drain. Kept as short as it always was, so that a
 /// hub that restarts once is watched again as quickly.
 pub(crate) const REWATCH: Duration = Duration::from_millis(100);
 
 /// The longest an instance waits before it watches its own hub again,
 /// however often its watches failed. Short, because what those watches
-/// carry bounds how late the instance learns that its cell drains, that
+/// carry bounds how late the instance learns that its pool drains, that
 /// its retirement is acknowledged, and what its tables route to; long
 /// enough that a hub that is down is asked about once a second by each of
 /// its instances, rather than ten times.
 pub(crate) const REWATCH_CAP: Duration = Duration::from_secs(1);
 
-/// Start following the cells of the classes `segment` sends to, for an
-/// instance in a cell of `region` at the hub `host`, whose public
+/// Start following the pools of the classes `segment` sends to, for an
+/// instance in a pool of `region` at the hub `host`, whose public
 /// listener is on `public_port`: one task, which reads the hub's relay
 /// into the tables it returns and registers their instances with `node`,
 /// until the handle is aborted. `None`, and nothing started, for a
 /// segment that holds no hop into another class. Only an instance in a
-/// cell may call it: one without a cell follows nothing. `live` is the
+/// pool may call it: one without a pool follows nothing. `live` is the
 /// instance's own membership, `drain` how long an instance in no table
 /// stays registered. `chooser` tells the hub, as this instance, that it
 /// runs this follower, before the relay is first watched, of each
 /// follow it holds no offer to once the hub marked it not offered, and of
 /// each retired entry instance its tables hold. `runtime` gives the
-/// chooser's damping windows and how long a cell's summary stays fresh.
+/// chooser's damping windows and how long a pool's summary stays fresh.
 #[expect(
     clippy::too_many_arguments,
     reason = "the chooser's settings, its hub, and its membership, as the launch holds them"
@@ -69,37 +69,37 @@ pub(crate) fn follow(
     drain: Duration,
     chooser: ChooserHub,
     runtime: &RuntimeConfig,
-) -> Result<Option<(Cells, JoinHandle<()>)>> {
+) -> Result<Option<(Pools, JoinHandle<()>)>> {
     let wanted = super::entries(layout, segment);
     if wanted.is_empty() {
         return Ok(None);
     }
     let watcher =
-        CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        PoolWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
     let address = hub_address(host, public_port);
-    let cells = Cells::new(
+    let pools = Pools::new(
         region,
         wanted.iter().flat_map(|(class, segments)| {
             segments
                 .iter()
                 .map(move |segment| (class.as_str(), segment.as_str()))
         }),
-        Damping::new(runtime.cell_damping_first, runtime.cell_damping_max),
+        Damping::new(runtime.pool_damping_first, runtime.pool_damping_max),
     );
     // Registered once, as the follower starts: the process has one
-    // chooser, and its registry one set of the cells' families.
+    // chooser, and its registry one set of the pools' families.
     let meters = runtime
         .metrics
         .as_ref()
-        .map(CellMeters::register)
+        .map(PoolMeters::register)
         .transpose()?;
     let follows = Follows::new(
-        cells.clone(),
+        pools.clone(),
         node.clone(),
         Arc::clone(live),
         drain,
         wanted,
-        runtime.cell_fresh_periods,
+        runtime.pool_fresh_periods,
         meters,
     );
     let task = tokio::spawn(run(
@@ -110,11 +110,11 @@ pub(crate) fn follow(
         },
         follows,
     ));
-    Ok(Some((cells, task)))
+    Ok(Some((pools, task)))
 }
 
 /// The address of the hub at `host` whose public listener is on `port`,
-/// `host:port` as a cell's watches take it, with an IPv6 host bracketed.
+/// `host:port` as a pool's watches take it, with an IPv6 host bracketed.
 pub(crate) fn hub_address(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
@@ -139,12 +139,12 @@ pub(super) trait Source: Send + Sync + 'static {
         &self,
     ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relaying>, String>> + Send;
 
-    /// One watch of the relay's follow of the cell `cell` of `class`
+    /// One watch of the relay's follow of the pool `pool` of `class`
     /// alone: its snapshot, then each change of it, until it ends.
     fn watch_of(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
     ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relaying>, String>> + Send;
 
     /// Tell the hub that this instance runs a follower of its relay:
@@ -163,7 +163,7 @@ pub(super) trait Source: Send + Sync + 'static {
 
 /// The instance's own hub.
 struct Hub {
-    watcher: CellWatcher,
+    watcher: PoolWatcher,
     address: String,
     chooser: ChooserHub,
 }
@@ -202,10 +202,10 @@ impl Source for Hub {
     async fn watch_of(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
     ) -> std::result::Result<BoxStream<'static, Relaying>, String> {
         self.watcher
-            .follows_of(&self.address, class, cell)
+            .follows_of(&self.address, class, pool)
             .await
             .map(relayed)
             .map_err(|e| e.to_string())
@@ -227,13 +227,13 @@ pub(super) fn relayed(
 /// again after a wait from [`REWATCH`] that grows to [`REWATCH_CAP`] while
 /// watches fail ([`Backoff`]). What the tables hold stays until a new
 /// snapshot is complete. A watch refused again for the same reason is
-/// not logged again, since a hub without the cell's extension refuses
+/// not logged again, since a hub without the pool's extension refuses
 /// every one. Unregistrations and acknowledgements go on throughout, a
 /// watch's absence included. Before the first watch, the follower tells
 /// the hub that it runs, and asks again, after the same waits, until the
 /// hub takes it: from then
 /// the hub waits for this instance before it closes a follow, and nothing
-/// is offered to a cell before it, since the tables fill only from a
+/// is offered to a pool before it, since the tables fill only from a
 /// watch.
 pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<R>) {
     let mut chores = Chores {
@@ -244,7 +244,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
     };
     let mut refused: Option<String> = None;
     // The declaration opens the follower's first watch: a hub that refuses
-    // it, as one without the cell's extension refuses every one, is asked
+    // it, as one without the pool's extension refuses every one, is asked
     // as a hub that refuses the watch is.
     let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
     while let Err(error) = source.declare().await {
@@ -274,13 +274,13 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let (synced, end) = match opened {
             Ok(events) => {
                 if refused.take().is_some() {
-                    tracing::info!("the hub's relay of the cells it follows is watched again");
+                    tracing::info!("the hub's relay of the pools it follows is watched again");
                 }
                 read(&source, &mut follows, events, &mut chores).await
             }
             Err(error) => {
                 if refused.as_deref() != Some(error.as_str()) {
-                    tracing::warn!(%error, "the hub's relay of the cells it follows could not be watched");
+                    tracing::warn!(%error, "the hub's relay of the pools it follows could not be watched");
                     refused = Some(error);
                 }
                 (None, WatchEnd::Failed)
@@ -305,10 +305,10 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
 /// Read one watch of the relay into `follows` until it ends, and return
 /// when its snapshot completed, if it did, and how it ended: its snapshot
 /// apart, applied whole at its `synced`, then each change. A second
-/// `synced` in one watch is not the protocol, and ends it. A cell that an
+/// `synced` in one watch is not the protocol, and ends it. A pool that an
 /// event of a kind this build does not know names is read from a watch of
 /// its own, from `source`, beside this one, which goes on: each such watch
-/// is let go of when the cell asks for another, and all of them when this
+/// is let go of when the pool asks for another, and all of them when this
 /// one ends or its snapshot is complete.
 async fn read<S: Source, R: Registry>(
     source: &S,
@@ -373,7 +373,7 @@ async fn read<S: Source, R: Registry>(
                 Ok(stream) if follows.wants(&key, watch) => own.read(key, watch, stream),
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::debug!(class = key.0, cell = key.1, %error, "a cell could not be read again");
+                    tracing::debug!(class = key.0, pool = key.1, %error, "a pool could not be read again");
                     follows.own(key, watch, Err(WatchEnd::Failed), Instant::now());
                 }
             },
@@ -465,7 +465,7 @@ impl Chores {
                     }
                     Err(error) => {
                         if self.avoid_refused.as_deref() != Some(error.as_str()) {
-                            tracing::warn!(%error, "the hub did not take that this instance avoids a followed cell's retired entry instance");
+                            tracing::warn!(%error, "the hub did not take that this instance avoids a followed pool's retired entry instance");
                             self.avoid_refused = Some(error.clone());
                         }
                     }
@@ -481,7 +481,7 @@ impl Chores {
                     }
                     Err(error) => {
                         if self.refused.as_deref() != Some(error.as_str()) {
-                            tracing::warn!(%error, "the hub did not take an acknowledgement that a cell is no longer offered to");
+                            tracing::warn!(%error, "the hub did not take an acknowledgement that a pool is no longer offered to");
                             self.refused = Some(error.clone());
                         }
                     }
@@ -492,7 +492,7 @@ impl Chores {
     }
 }
 
-/// The cells' own watches, as the task holds them.
+/// The pools' own watches, as the task holds them.
 type Opening<'a> = futures::future::BoxFuture<
     'a,
     (
@@ -502,15 +502,15 @@ type Opening<'a> = futures::future::BoxFuture<
     ),
 >;
 
-/// One item of a cell's own watch, or its end, with how it ended.
+/// One item of a pool's own watch, or its end, with how it ended.
 type OwnItem = (Key, u64, std::result::Result<Relayed, WatchEnd>);
 
-/// The cells' own watches: those being opened, those being read, and what
+/// The pools' own watches: those being opened, those being read, and what
 /// lets go of each that is read.
 struct Own<'a> {
     opening: FuturesUnordered<Opening<'a>>,
     reading: futures::stream::SelectAll<BoxStream<'static, OwnItem>>,
-    /// Dropped to let go of the cell's watch being read.
+    /// Dropped to let go of the pool's watch being read.
     stops: std::collections::HashMap<Key, tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -525,7 +525,7 @@ impl Default for Own<'_> {
 }
 
 impl<'a> Own<'a> {
-    /// Open the watch `asked` names, letting go of the one its cell is read
+    /// Open the watch `asked` names, letting go of the one its pool is read
     /// from now.
     fn open<S: Source>(&mut self, source: &'a S, asked: Asked) {
         let Asked { key, watch, pause } = asked;
@@ -542,9 +542,9 @@ impl<'a> Own<'a> {
         );
     }
 
-    /// Read `stream`, the cell `key`'s watch `watch`, until it ends or is
+    /// Read `stream`, the pool `key`'s watch `watch`, until it ends or is
     /// let go of: its end is an item too, with how it ended, unless it was
-    /// let go of. A failure is a watch's last item, and the cell then asks
+    /// let go of. A failure is a watch's last item, and the pool then asks
     /// for a new watch, so the end that follows it names a watch the
     /// follower no longer reads, and changes nothing.
     fn read(&mut self, key: Key, watch: u64, stream: BoxStream<'static, Relaying>) {
@@ -554,7 +554,7 @@ impl<'a> Own<'a> {
         let items = stream
             .map(move |item| {
                 let item = item.map_err(|failure| {
-                    tracing::info!(class = key.0, cell = key.1, %failure, "a watch of one cell of the hub's relay failed");
+                    tracing::info!(class = key.0, pool = key.1, %failure, "a watch of one pool of the hub's relay failed");
                     WatchEnd::Failed
                 });
                 (key.clone(), watch, item)

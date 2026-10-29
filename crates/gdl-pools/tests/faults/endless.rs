@@ -1,8 +1,8 @@
 use std::{sync::mpsc, thread, time::Duration};
 
 use futures::stream;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, ResumeToken, Withdrawal,
+use gdl_pools::{
+    DirectoryError, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{self, Backend, Rule},
 };
 
@@ -17,10 +17,10 @@ struct Endless {
     disowns: Option<Rule>,
 }
 
-impl CellDirectory for Endless {
+impl PoolDirectory for Endless {
     type Watch = Events;
 
-    async fn publish(&self, _: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, _: PoolRecord) -> Result<(), DirectoryError> {
         Ok(())
     }
 
@@ -29,8 +29,8 @@ impl CellDirectory for Endless {
     }
 
     fn watch(&self, class: &str, _: Option<ResumeToken>) -> Events {
-        let record = CellRecord {
-            presence: gdl_cells::Presence::Serving,
+        let record = PoolRecord {
+            presence: gdl_pools::Presence::Serving,
             models: Vec::new(),
             models_version: 0,
             revoked: Vec::new(),
@@ -40,14 +40,14 @@ impl CellDirectory for Endless {
             home: None,
             contract: 1,
             placement: 2,
-            state: CellState::Ready,
+            state: PoolState::Ready,
             epoch: 1,
             seq: 1,
             hub: "m1:1337".into(),
-            lease: CellRecord::DEFAULT_LEASE,
+            lease: PoolRecord::DEFAULT_LEASE,
             load: None,
         };
-        let event = Ok(CellEvent::Current(record));
+        let event = Ok(PoolEvent::Current(record));
         if self.ready {
             return Box::pin(stream::repeat(event));
         }

@@ -14,31 +14,31 @@ use aws_sdk_dynamodb::{
         ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TimeToLiveSpecification,
     },
 };
-use gdl_cells::{CellDirectory, CellRecord, DirectoryError, Version, Withdrawal};
+use gdl_pools::{DirectoryError, PoolDirectory, PoolRecord, Version, Withdrawal};
 
 use crate::{
     item::{self, Item, ListKey},
     watch::{self, DynamoWatch, State},
 };
 
-/// A cell directory in two DynamoDB tables, for hubs in several regions:
+/// A pool directory in two DynamoDB tables, for hubs in several regions:
 /// global tables with multi-Region eventual consistency (MREC) replicate
 /// each write to every region, and each hub reads its own region's copy.
 ///
-/// The records table holds one item per cell: its record without the
+/// The records table holds one item per pool: its record without the
 /// model list, or the tombstone of its withdrawal. The lists table holds
 /// each model list a record names, keyed by the record's `models_version`,
 /// a digest of the list, and the token of the put that made it, so a scan
-/// reads a few hundred bytes per cell and fetches a list only when a
-/// cell's list changes. A write is a conditional put that holds only if it
-/// is newer than the cell's item, so a late write is refused with
+/// reads a few hundred bytes per pool and fetches a list only when a
+/// pool's list changes. A write is a conditional put that holds only if it
+/// is newer than the pool's item, so a late write is refused with
 /// [`DirectoryError::NotNewer`]. A list is written before the record that
 /// names it, and no put replaces another's list.
 ///
-/// Neither table expires a live item: a record stays until its cell
+/// Neither table expires a live item: a record stays until its pool
 /// withdraws it, and a reader applies the lease on its own clock
-/// ([`gdl_cells::CellView`]). The lists table's TTL removes only a list
-/// that no record of its cell names again: an hour after a write replaced
+/// ([`gdl_pools::PoolView`]). The lists table's TTL removes only a list
+/// that no record of its pool names again: an hour after a write replaced
 /// the record that named it, at a higher `models_version`.
 ///
 /// A watch is polled: while a class has watches through this handle, one
@@ -46,7 +46,7 @@ use crate::{
 /// differences are the watch's changes. Each query is billed, so the
 /// period is the cost. A record whose list has not arrived (replication
 /// does not order the two tables) is not installed: the watch keeps the
-/// cell's earlier version, and queries again sooner, backing off to the
+/// pool's earlier version, and queries again sooner, backing off to the
 /// period. A new watch's snapshot waits for every list it names, and a
 /// watch whose snapshot cannot complete within [`DynamoLimits::first_sync`]
 /// ends with [`DirectoryError::Unavailable`]. A failed query ends every
@@ -56,7 +56,7 @@ use crate::{
 /// A resume token is a place in what this handle and its clones watched:
 /// a token of another handle, or from before a spell in which the class
 /// went unwatched and its items changed, yields
-/// [`gdl_cells::CellEvent::Resnapshot`].
+/// [`gdl_pools::PoolEvent::Resnapshot`].
 #[derive(Debug, Clone)]
 pub struct DynamoDirectory {
     shared: Arc<Shared>,
@@ -65,7 +65,7 @@ pub struct DynamoDirectory {
 /// The two tables a [`DynamoDirectory`] uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tables {
-    /// One item per cell, keyed by `class` (partition) and `cell` (sort).
+    /// One item per pool, keyed by `class` (partition) and `pool` (sort).
     pub records: String,
     /// One item per model list, keyed by `owner` (partition) and `list`
     /// (sort), with TTL on `expires_at`.
@@ -76,7 +76,7 @@ pub struct Tables {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DynamoLimits {
     /// The changes a watcher may have unread before it is cut off with
-    /// [`gdl_cells::CellEvent::Resnapshot`].
+    /// [`gdl_pools::PoolEvent::Resnapshot`].
     pub buffer: usize,
     /// The latest changes of each class kept for watches that resume.
     pub history: usize,
@@ -101,7 +101,7 @@ impl Default for DynamoLimits {
     }
 }
 
-/// How long a list its cell has moved past stays before the lists table's
+/// How long a list its pool has moved past stays before the lists table's
 /// TTL may remove it: far past the replication lag, so that a reader whose
 /// region still shows the earlier record can still join it.
 const SUPERSEDED: Duration = Duration::from_secs(3_600);
@@ -110,7 +110,7 @@ const SUPERSEDED: Duration = Duration::from_secs(3_600);
 /// active.
 const TABLE_ACTIVE: Duration = Duration::from_secs(300);
 
-/// The list a cell's last write through a handle named, and the write's
+/// The list a pool's last write through a handle named, and the write's
 /// epoch.
 #[derive(Debug, Clone, Copy)]
 struct Written {
@@ -126,7 +126,7 @@ pub(crate) struct Shared {
     // The position before each class's first change through this handle.
     pub(crate) base: u64,
     pub(crate) state: Mutex<State>,
-    // The list each cell's last write through this handle named, so that
+    // The list each pool's last write through this handle named, so that
     // a heartbeat does not write its list again.
     written: Mutex<HashMap<(String, String), Written>>,
 }
@@ -182,7 +182,7 @@ impl DynamoDirectory {
                 .expect("an attribute has its name and type")
         };
         for (table, partition, sort) in [
-            (&tables.records, item::CLASS, item::CELL),
+            (&tables.records, item::CLASS, item::POOL),
             (&tables.lists, item::OWNER, item::LIST_KEY),
         ] {
             client
@@ -235,13 +235,13 @@ impl DynamoDirectory {
         self.shared.watchers(class)
     }
 
-    /// Put `item`, a write of `cell` of `class` at `version`, if it is
-    /// newer than the cell's item, and, given `kept`, only while the cell's
+    /// Put `item`, a write of `pool` of `class` at `version`, if it is
+    /// newer than the pool's item, and, given `kept`, only while the pool's
     /// item names that list: the list the item it replaced named, if any.
     async fn put(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
         version: Version,
         item: Item,
         kept: Option<ListKey>,
@@ -286,40 +286,40 @@ impl DynamoDirectory {
                     // refused a write that kept one.
                     _ if kept.is_some() => {
                         return Err(Refusal::Elsewhere(DirectoryError::Unavailable(format!(
-                            "cell `{cell}` of class `{class}`: a write at {version} found the cell's item naming another list"
+                            "pool `{pool}` of class `{class}`: a write at {version} found the pool's item naming another list"
                         ))));
                     }
                     // The table refused the write, so it holds a newer one;
                     // a table that does not say which is not DynamoDB.
                     _ => {
                         return Err(Refusal::Failed(DirectoryError::Unavailable(format!(
-                            "cell `{cell}` of class `{class}`: a write at {version} was refused without a newer item that refused it"
+                            "pool `{pool}` of class `{class}`: a write at {version} was refused without a newer item that refused it"
                         ))));
                     }
                 };
                 Err(Refusal::NotNewer {
                     error: DirectoryError::NotNewer {
                         class: class.to_owned(),
-                        cell: cell.to_owned(),
+                        pool: pool.to_owned(),
                         held,
                         offered: version,
                     },
                 })
             }
             Err(error) => Err(Refusal::Failed(unavailable(
-                &format!("writing cell `{cell}` of class `{class}`"),
+                &format!("writing pool `{pool}` of class `{class}`"),
                 error,
             ))),
         }
     }
 
-    /// Mark `key`'s list of `cell` to expire: a write replaced the record
+    /// Mark `key`'s list of `pool` to expire: a write replaced the record
     /// that named it, at a higher `models_version`. Only the writer that put
-    /// the list names it, and only while the cell's item names it already,
-    /// so no record of the cell names it again
-    /// (`docs/src/development/cells-design.md`). Best effort: a list left in
+    /// the list names it, and only while the pool's item names it already,
+    /// so no record of the pool names it again
+    /// (`docs/src/development/pools-design.md`). Best effort: a list left in
     /// place costs only its storage.
-    async fn supersede(&self, class: &str, cell: &str, key: ListKey) {
+    async fn supersede(&self, class: &str, pool: &str, key: ListKey) {
         let expires = SystemTime::now()
             .checked_add(SUPERSEDED)
             .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
@@ -329,7 +329,7 @@ impl DynamoDirectory {
             .client
             .update_item()
             .table_name(&self.shared.tables.lists)
-            .set_key(Some(item::list_key(class, cell, key)))
+            .set_key(Some(item::list_key(class, pool, key)))
             // An update makes the item it names, and TTL may have removed
             // this one already.
             .condition_expression("attribute_exists(#list)")
@@ -340,7 +340,7 @@ impl DynamoDirectory {
             .send()
             .await;
         if let Err(error) = updated {
-            tracing::debug!(class, cell, error = %DisplayErrorContext(error), "a superseded model list was not marked to expire");
+            tracing::debug!(class, pool, error = %DisplayErrorContext(error), "a superseded model list was not marked to expire");
         }
     }
 
@@ -352,7 +352,7 @@ impl DynamoDirectory {
     }
 
     /// Put a model list.
-    async fn put_list(&self, cell: &str, list: Item) -> Result<(), DirectoryError> {
+    async fn put_list(&self, pool: &str, list: Item) -> Result<(), DirectoryError> {
         self.shared
             .client
             .put_item()
@@ -362,39 +362,39 @@ impl DynamoDirectory {
             .await
             .map(drop)
             .map_err(|error| {
-                unavailable(&format!("writing the model list of cell `{cell}`"), error)
+                unavailable(&format!("writing the model list of pool `{pool}`"), error)
             })
     }
 
-    /// Write a cell's item, as [`Self::put`] does, and then mark the list
+    /// Write a pool's item, as [`Self::put`] does, and then mark the list
     /// of the item it replaced to expire, if the new item is a record at a
     /// higher `models_version`. A withdrawal expires nothing.
     async fn write(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
         version: Version,
         item: Item,
         models_version: Option<u64>,
         kept: Option<ListKey>,
     ) -> Result<(), Refusal> {
-        let before = self.put(class, cell, version, item, kept).await?;
+        let before = self.put(class, pool, version, item, kept).await?;
         if let Some(before) =
             before.filter(|before| models_version.is_some_and(|now| now > before.models_version()))
         {
-            self.supersede(class, cell, before).await;
+            self.supersede(class, pool, before).await;
         }
         Ok(())
     }
 }
 
-/// Why a cell's write was not stored.
+/// Why a pool's write was not stored.
 enum Refusal {
     /// The table holds a write at least as new.
     NotNewer {
         error: DirectoryError,
     },
-    /// A write that kept its handle's list found the cell's item naming
+    /// A write that kept its handle's list found the pool's item naming
     /// another list, or no item: it puts a list of its own.
     Elsewhere(DirectoryError),
     Failed(DirectoryError),
@@ -416,19 +416,19 @@ impl From<DirectoryError> for Refusal {
     }
 }
 
-impl CellDirectory for DynamoDirectory {
+impl PoolDirectory for DynamoDirectory {
     type Watch = DynamoWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         record.check()?;
         let mut encoded = item::record(&record, item::next_order())?;
-        let (class, cell) = (record.class.as_str(), record.name.as_str());
+        let (class, pool) = (record.class.as_str(), record.name.as_str());
         // One write of the class at a time through this handle, so that a
         // scan never finds one of its writes without the writes before it.
         let io = self.shared.io(class);
         let _io = io.lock().await;
-        let owner = (class.to_owned(), cell.to_owned());
-        // A hint, not a promise: the table checks that the cell's item
+        let owner = (class.to_owned(), pool.to_owned());
+        // A hint, not a promise: the table checks that the pool's item
         // still names a kept list. Out while the write runs, so that a write
         // dropped part way leaves the next one to put its list.
         let cached = self.written().remove(&owner);
@@ -436,11 +436,11 @@ impl CellDirectory for DynamoDirectory {
         let models_version = Some(record.models_version);
         let Some((key, list)) = encoded.list.take() else {
             return Ok(self
-                .write(class, cell, version, encoded.item, models_version, None)
+                .write(class, pool, version, encoded.item, models_version, None)
                 .await?);
         };
-        // A write at the epoch of the handle's last write of the cell, with
-        // the same list, names that list again, but only while the cell's
+        // A write at the epoch of the handle's last write of the pool, with
+        // the same list, names that list again, but only while the pool's
         // item still names it: once another item replaced it, a write of
         // the list makes an item of its own. Another epoch is another
         // writer, such as a command or a restarted hub, and always puts its
@@ -451,7 +451,7 @@ impl CellDirectory for DynamoDirectory {
             let mut kept = encoded.item.clone();
             item::name(&mut kept, cached.key);
             match self
-                .write(class, cell, version, kept, models_version, Some(cached.key))
+                .write(class, pool, version, kept, models_version, Some(cached.key))
                 .await
             {
                 Err(Refusal::Elsewhere(_)) => {}
@@ -461,8 +461,8 @@ impl CellDirectory for DynamoDirectory {
                 }
             }
         }
-        self.put_list(cell, list).await?;
-        self.write(class, cell, version, encoded.item, models_version, None)
+        self.put_list(pool, list).await?;
+        self.write(class, pool, version, encoded.item, models_version, None)
             .await?;
         self.written().insert(
             owner,
@@ -482,7 +482,7 @@ impl CellDirectory for DynamoDirectory {
         Ok(self
             .write(
                 &withdrawal.class,
-                &withdrawal.cell,
+                &withdrawal.pool,
                 withdrawal.version(),
                 item,
                 None,
@@ -493,7 +493,7 @@ impl CellDirectory for DynamoDirectory {
 
     /// The watch begins when it is first polled, which must be inside a
     /// tokio runtime.
-    fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> DynamoWatch {
+    fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> DynamoWatch {
         DynamoWatch::new(Arc::clone(&self.shared), class, from)
     }
 }

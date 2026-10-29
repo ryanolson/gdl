@@ -7,27 +7,27 @@ use crate::manifest::Manifest;
 
 use super::{ClassBoundary, Placement, PlacementError};
 
-/// How a chooser picks a cell of a class it sends to: a placement's
-/// `[cells.<class>]` table. Its one key is optional in the table, and a
+/// How a chooser picks a pool of a class it sends to: a placement's
+/// `[pools.<class>]` table. Its one key is optional in the table, and a
 /// value equal to its default is not recorded. Unknown keys are refused,
-/// `spill_rtt_ms` and `max_near` among them: they chose near cells, which
+/// `spill_rtt_ms` and `max_near` among them: they chose near pools, which
 /// a chooser does not follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct CellPolicy {
-    /// The policy's name, [`CellPolicy::DEFAULT_POLICY`] by default. Named
+pub struct PoolPolicy {
+    /// The policy's name, [`PoolPolicy::DEFAULT_POLICY`] by default. Named
     /// like a selector, and not checked against a list, since a custom
     /// policy can be registered by a deployment.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
 }
 
-impl CellPolicy {
+impl PoolPolicy {
     /// `policy` when the table does not set it: `round_robin`.
     pub const DEFAULT_POLICY: &'static str = "round_robin";
 }
 
-impl Default for CellPolicy {
+impl Default for PoolPolicy {
     fn default() -> Self {
         Self {
             policy: Self::DEFAULT_POLICY.into(),
@@ -36,50 +36,50 @@ impl Default for CellPolicy {
 }
 
 fn is_default_policy(policy: &str) -> bool {
-    policy == CellPolicy::DEFAULT_POLICY
+    policy == PoolPolicy::DEFAULT_POLICY
 }
 
-/// The `[cells]` tables as read, without those that hold only defaults:
+/// The `[pools]` tables as read, without those that hold only defaults:
 /// a placement that spells a default out is the placement that leaves it
 /// unsaid, from TOML and from the hub's JSON alike.
 pub(super) fn recorded<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<BTreeMap<String, CellPolicy>, D::Error> {
-    let mut cells = BTreeMap::<String, CellPolicy>::deserialize(deserializer)?;
-    cells.retain(|_, policy| *policy != CellPolicy::default());
-    Ok(cells)
+) -> Result<BTreeMap<String, PoolPolicy>, D::Error> {
+    let mut pools = BTreeMap::<String, PoolPolicy>::deserialize(deserializer)?;
+    pools.retain(|_, policy| *policy != PoolPolicy::default());
+    Ok(pools)
 }
 
-/// Why `policy` cannot name a cell policy, if it cannot.
-pub(super) fn check_policy_name(policy: &CellPolicy) -> Result<(), String> {
-    super::check_cell_policy_name(&policy.policy)
+/// Why `policy` cannot name a pool policy, if it cannot.
+pub(super) fn check_policy_name(policy: &PoolPolicy) -> Result<(), String> {
+    super::check_pool_policy_name(&policy.policy)
 }
 
-/// Hash the cell policies after the classes: each class's effective
+/// Hash the pool policies after the classes: each class's effective
 /// policy, the default included, so that a change of default changes the
 /// hash rather than what a placement means, and each table that names no
 /// class, which layout refuses. The marker starts them where a class's, a
 /// segment's, or a router's name would start, with a value no name's
-/// length can have and the classes' marker is not, so no cell policy
+/// length can have and the classes' marker is not, so no pool policy
 /// hashes as any of them. A placement with neither classes nor tables
-/// writes nothing and keeps the hash it had before cell policies existed.
+/// writes nothing and keeps the hash it had before pool policies existed.
 pub(super) fn hash<'a>(
     h: &mut Fnv,
     classes: impl Iterator<Item = &'a String> + Clone,
-    cells: &'a BTreeMap<String, CellPolicy>,
+    pools: &'a BTreeMap<String, PoolPolicy>,
 ) {
-    let count = hashed(classes.clone(), cells).count();
+    let count = hashed(classes.clone(), pools).count();
     if count == 0 {
         return;
     }
     h.u64(u64::MAX - 1);
     h.u64(count as u64);
-    for class in hashed(classes, cells) {
+    for class in hashed(classes, pools) {
         h.str(class);
         h.str(
-            cells
+            pools
                 .get(class)
-                .map_or(CellPolicy::DEFAULT_POLICY, |policy| &policy.policy),
+                .map_or(PoolPolicy::DEFAULT_POLICY, |policy| &policy.policy),
         );
     }
 }
@@ -92,10 +92,10 @@ pub(super) fn hash<'a>(
 /// not, layout refuses it.
 fn hashed<'a>(
     classes: impl Iterator<Item = &'a String>,
-    cells: &'a BTreeMap<String, CellPolicy>,
+    pools: &'a BTreeMap<String, PoolPolicy>,
 ) -> impl Iterator<Item = &'a str> {
     let mut classes = classes.peekable();
-    let mut tables = cells.keys().peekable();
+    let mut tables = pools.keys().peekable();
     std::iter::from_fn(move || {
         let next = match (classes.peek(), tables.peek()) {
             (None, None) => None,
@@ -111,21 +111,21 @@ fn hashed<'a>(
     })
 }
 
-/// Every class a `[cells]` table names, with a value or with defaults only.
+/// Every class a `[pools]` table names, with a value or with defaults only.
 fn named(placement: &Placement) -> BTreeSet<&String> {
     placement
-        .cells
+        .pools
         .keys()
-        .chain(&placement.spelled.cells)
+        .chain(&placement.spelled.pools)
         .collect()
 }
 
 /// The checks that need only the placement: each table's policy name, and
 /// that it names a class the placement has.
 pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
-    for (class, policy) in &placement.cells {
+    for (class, policy) in &placement.pools {
         if let Err(reason) = check_policy_name(policy) {
-            errors.push(PlacementError::InvalidCellPolicy {
+            errors.push(PlacementError::InvalidPoolPolicy {
                 class: class.clone(),
                 reason,
             });
@@ -133,11 +133,11 @@ pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
     }
     for class in named(placement) {
         if placement.classes.is_empty() {
-            errors.push(PlacementError::CellPolicyWithoutClasses {
+            errors.push(PlacementError::PoolPolicyWithoutClasses {
                 class: class.clone(),
             });
         } else if !placement.classes.contains_key(class) {
-            errors.push(PlacementError::CellPolicyUnknownClass {
+            errors.push(PlacementError::PoolPolicyUnknownClass {
                 class: class.clone(),
             });
         }
@@ -153,21 +153,21 @@ pub(super) fn entered(
     boundaries: &[ClassBoundary],
     undecided: &Undecided<'_>,
     errors: &mut Vec<PlacementError>,
-) -> BTreeMap<String, CellPolicy> {
+) -> BTreeMap<String, PoolPolicy> {
     let into: BTreeSet<&str> = boundaries.iter().map(|b| b.into.as_str()).collect();
     for class in named(placement) {
         if placement.classes.contains_key(class)
             && !into.contains(class.as_str())
             && !undecided.may_enter(class)
         {
-            errors.push(PlacementError::CellPolicyNotEntered {
+            errors.push(PlacementError::PoolPolicyNotEntered {
                 class: class.clone(),
             });
         }
     }
     into.into_iter()
         .map(|class| {
-            let policy = placement.cells.get(class).cloned().unwrap_or_default();
+            let policy = placement.pools.get(class).cloned().unwrap_or_default();
             (class.to_string(), policy)
         })
         .collect()

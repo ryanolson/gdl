@@ -23,13 +23,13 @@ A deployment is identified by two hashes. Every envelope carries both, and an in
 | Hash | Covers |
 |---|---|
 | contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision |
-| placement hash | each segment's name and node set; the non-default `[routing]` entries; the classes and their segment sets; each class's effective cell policy |
+| placement hash | each segment's name and node set; the non-default `[routing]` entries; the classes and their segment sets; each class's effective pool policy |
 
 - Order does not matter. Node order inside a segment and segment order inside a class do not change a hash.
-- Defaults are not recorded. A placement that spells out `round_robin` for a boundary has the hash of one that leaves it unsaid. For cell policies the exception is deliberate: each class's effective policy is hashed, default included, so that a future change of default changes the hash and not what a placement means.
+- Defaults are not recorded. A placement that spells out `round_robin` for a boundary has the hash of one that leaves it unsaid. For pool policies the exception is deliberate: each class's effective policy is hashed, default included, so that a future change of default changes the hash and not what a placement means.
 - A placement without classes keeps the hash it had before classes existed.
 - A segment's binary carries the hashes of the placement it was generated for. A hub admits only registrations whose hashes match its deployment: [The hub](hub.md).
-- Cells are runtime topology and are not part of the placement. [Classes and cells](cells.md) covers them.
+- Pools are runtime topology and are not part of the placement. [Classes and pools](pools.md) covers them.
 
 ## What is checked, and when
 
@@ -44,7 +44,7 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | Every cut edge, and every anchor-carried edge, has a codec | `check`, `generate`, and segment start |
 | Every cut or anchor-carried message is a wire type | the segment's build ([assertions](generation.md#the-crossing-assertions)) |
 | A `[routing]` key names a node that starts a remote request run | `check`, `generate`, and segment start |
-| Classes: each segment in exactly one, the boundary rule, no cycle, a cell policy only for a class a boundary enters | `check`, `generate`, and segment start |
+| Classes: each segment in exactly one, the boundary rule, no cycle, a pool policy only for a class a boundary enters | `check`, `generate`, and segment start |
 | The deployment was made for this contract | `assemble`, at segment start |
 | A hosted node has a binding | `assemble`, at segment start |
 | The envelope's hashes match the receiver's | every request |
@@ -83,15 +83,15 @@ A class is a set of segments that deploy together, in a `[class.<name>]` table w
 
 A hop crosses a class boundary when one of its stages is in a class other than its outer end's. The boundary rule: such a hop crosses only at its inner end. Its inner end is in the other class, every other stage of the hop is in the outer end's segment, and every hop nested under the inner end stays in the inner end's class. Class boundaries must not form a cycle. The usual fix for a placement that breaks the rule is to put the boundary at an operator. [Known limitations](../operations/limitations.md) explains why the rule exists and what lifts it.
 
-With classes, the crossing report also counts the WAN round trips that each boundary adds when a request spills to a cell in another region: 1 for a request value, and 2 for a streamed request, whose items wait for the input anchor.
+With classes, the crossing report also counts the WAN round trips that each boundary adds when a request spills to a pool in another region: 1 for a request value, and 2 for a streamed request, whose items wait for the input anchor.
 
-A class that a boundary enters can set how the hop's outer end picks a cell, in `[cells.<class>] policy` (`home_first`, for example).
+A class that a boundary enters can set how the hop's outer end picks a pool, in `[pools.<class>] policy` (`home_first`, for example).
 
-The placement checks only the name's shape. gdl provides `home_first` and `round_robin`. A spec's `[cell_policy.<name>]` table binds another name to its crate, and a program can register one ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser given a name that nothing registers and gdl does not have refuses to launch.
+The placement checks only the name's shape. gdl provides `home_first` and `round_robin`. A spec's `[pool_policy.<name>]` table binds another name to its crate, and a program can register one ([Write a pool policy](../guides/write-a-pool-policy.md)). A chooser given a name that nothing registers and gdl does not have refuses to launch.
 
 ## Layouts
 
-One graph can be split differently in different places. A layout is one split: its own segments, `[routing]`, classes, and cell policies. A spec holds several in `[layout.<name>]` tables, each with the same `segment`, `routing`, `class`, and `cells` tables a spec has at its top level, as in `layout.regional.segment.front`.
+One graph can be split differently in different places. A layout is one split: its own segments, `[routing]`, classes, and pool policies. A spec holds several in `[layout.<name>]` tables, each with the same `segment`, `routing`, `class`, and `pools` tables a spec has at its top level, as in `layout.regional.segment.front`.
 
 Here `regional` gives the side source its own class, and `compact` puts it with the frontend:
 
@@ -124,8 +124,8 @@ segments = ["engine"]
 - Every layout places the same graph under the same contract hash. Nothing else is shared.
 - Each layout is checked as a complete graph on its own. A problem names its tables (``[layout.compact.class]``), or the layout (`[layout.compact]`) when it belongs to no table.
 - Each layout has its own placement hash. Two layouts that place the graph alike have equal hashes whatever they are called.
-- A spec with `[layout]` tables has no top-level `[segment]`, `[routing]`, `[class]`, or `[cells]`. A spec without them has one layout, named `default`.
+- A spec with `[layout]` tables has no top-level `[segment]`, `[routing]`, `[class]`, or `[pools]`. A spec without them has one layout, named `default`.
 - A layout name has a class name's shape.
 - With several layouts, each layout's crates go in `<out>/<layout>/<segment>` and are named `<graph>-<layout>-<segment>`. `[deployment.segment.<name>]` names a segment of any layout and serves it in each layout that has it.
 
-A cell runs one layout. A hub follows only cells whose contract and placement hashes equal its own. The placement hash covers the placement's contents and not the layout's name, so cells of layouts that place nodes differently never follow or offer to each other. Two layouts that place every node alike have one hash and are one layout to the runtime. The fleet file still checks each cell's layout against its parent's. `export` and `diagram` take a spec of one layout. `compose` deploys several layouts only by cell. See [Known limitations](../operations/limitations.md).
+A pool runs one layout. A hub follows only pools whose contract and placement hashes equal its own. The placement hash covers the placement's contents and not the layout's name, so pools of layouts that place nodes differently never follow or offer to each other. Two layouts that place every node alike have one hash and are one layout to the runtime. The fleet file still checks each pool's layout against its parent's. `export` and `diagram` take a spec of one layout. `compose` deploys several layouts only by pool. See [Known limitations](../operations/limitations.md).

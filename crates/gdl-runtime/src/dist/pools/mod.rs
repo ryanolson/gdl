@@ -1,18 +1,18 @@
-//! The cells a chooser follows, and how it routes by them: for each entry
-//! segment of the hops it sends into another class, and each cell of that
+//! The pools a chooser follows, and how it routes by them: for each entry
+//! segment of the hops it sends into another class, and each pool of that
 //! class its hub follows, the entry instances it may route to. A chooser
-//! is an instance in a cell whose segment holds the outer end of a hop
+//! is an instance in a pool whose segment holds the outer end of a hop
 //! that leaves its class. It reads its own hub's relay
-//! (`GET /v1/ext/gdl-cell/follows`) for its life and keeps the tables a
+//! (`GET /v1/ext/gdl-pool/follows`) for its life and keeps the tables a
 //! request chooses from, one immutable table per entry segment, swapped
 //! whole, as the roster's is. Each hand-off into the other class chooses
-//! a cell from its table by the class's cell policy, then an instance of
-//! that cell ([`Crossing`]), and offers the request to another cell when
-//! that one declines it (`Runtime::fail_over`), damping the cell that
+//! a pool from its table by the class's pool policy, then an instance of
+//! that pool ([`Crossing`]), and offers the request to another pool when
+//! that one declines it (`Runtime::fail_over`), damping the pool that
 //! declined for the requests after it ([`damping`]). Each offer holds a
-//! lease on the cell's follow until its response ends ([`CellLease`]), so
+//! lease on the pool's follow until its response ends ([`PoolLease`]), so
 //! that the follower can tell its hub when it no longer holds an offer to
-//! a cell the hub stopped offering.
+//! a pool the hub stopped offering.
 
 mod crossing;
 mod damping;
@@ -28,8 +28,8 @@ mod task;
 mod tests;
 
 pub(crate) use crossing::{Crossing, Target, targets};
-pub(crate) use lease::CellLease;
-pub(crate) use meter::CellMeters;
+pub(crate) use lease::PoolLease;
+pub(crate) use meter::PoolMeters;
 pub(crate) use offer::{Declined, answer};
 pub(crate) use task::{REWATCH, REWATCH_CAP, follow, hub_address};
 // The membership's tests drive the follower beside their own.
@@ -42,46 +42,46 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 pub(crate) use damping::Damping;
-use gdl_cells::{CellState, LoadSummary};
 use gdl_model::Layout;
+use gdl_pools::{LoadSummary, PoolState};
 use lease::Leases;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use velo::InstanceId;
 
-/// The tables of the cells a chooser instance follows, shared by its
+/// The tables of the pools a chooser instance follows, shared by its
 /// follower, which writes them, and whoever reads them. Cheap to clone.
 ///
-/// Per entry segment, one table of every followed cell of the segment's
-/// class that the chooser's hub relays: the cell's current follow (its
+/// Per entry segment, one table of every followed pool of the segment's
+/// class that the chooser's hub relays: the pool's current follow (its
 /// generation), its state, its region, its load summary with the time it
 /// arrived, whether it is offered, the entry instances it exposes while it
 /// is, and those that retired, which are never routed to. A table changes
 /// only when the relay says so, and is replaced whole. The chooser's own
-/// region is kept with them, for the cell policy.
+/// region is kept with them, for the pool policy.
 #[derive(Clone)]
-pub struct Cells {
+pub struct Pools {
     shared: Arc<Shared>,
 }
 
 struct Shared {
-    /// The region of the chooser's own cell.
+    /// The region of the chooser's own pool.
     region: Arc<str>,
     /// Fixed at the launch: one per entry segment the instance sends to,
     /// each shared with the hand-offs that choose from it.
     segments: BTreeMap<String, Slot>,
     /// For each class sent to, its entry segments' tables by segment, which
-    /// a node reads ([`gdl::FollowedCells`]).
+    /// a node reads ([`gdl::FollowedPools`]).
     classes: BTreeMap<String, Box<[(String, Slot)]>>,
     /// Counts each change of a table, or of what is registered with velo.
     changes: watch::Sender<u64>,
-    /// The cells this chooser damps, shared by every hand-off that
+    /// The pools this chooser damps, shared by every hand-off that
     /// chooses from the tables.
     damping: Arc<Damping>,
     /// The instances the follower registered with velo, mirrored for
     /// readers; the follower keeps its own copy. Its lock is also the one
     /// lock over the two owners of a peer's registration, this follower
-    /// and the instance's membership ([`Cells::exclusive`]).
+    /// and the instance's membership ([`Pools::exclusive`]).
     registered: watch::Sender<HashSet<InstanceId>>,
     /// The peers the instance's membership saw leave and has not yet
     /// unregistered: until its own drain ends, the follower leaves them
@@ -91,9 +91,9 @@ struct Shared {
     unknown: std::sync::atomic::AtomicU64,
 }
 
-impl Cells {
+impl Pools {
     /// Empty tables for `entries`, each an entry segment and its class, of
-    /// a chooser in `region` that damps the cells by `damping`.
+    /// a chooser in `region` that damps the pools by `damping`.
     pub(crate) fn new<'a>(
         region: &str,
         entries: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -137,44 +137,44 @@ impl Cells {
         self.shared.segments.keys().map(String::as_str)
     }
 
-    /// The cells followed for `segment`, as its table holds them now, by
-    /// class and cell; empty for a segment that has no table.
-    pub fn followed(&self, segment: &str) -> Vec<FollowedCell> {
+    /// The pools followed for `segment`, as its table holds them now, by
+    /// class and pool; empty for a segment that has no table.
+    pub fn followed(&self, segment: &str) -> Vec<FollowedPool> {
         let Some(table) = self.table(segment) else {
             return Vec::new();
         };
         let now = Instant::now();
         let damped = self.shared.damping.view();
         table
-            .cells
+            .pools
             .iter()
             .zip(&table.views)
-            .map(|(cell, view)| FollowedCell {
-                class: cell.class.clone(),
-                cell: cell.cell.clone(),
-                generation: cell.generation,
-                region: cell.region.clone(),
-                state: cell.state,
-                load: cell.load.map(|load| *load.summary()),
-                load_age: cell
+            .map(|(pool, view)| FollowedPool {
+                class: pool.class.clone(),
+                pool: pool.pool.clone(),
+                generation: pool.generation,
+                region: pool.region.clone(),
+                state: pool.state,
+                load: pool.load.map(|load| *load.summary()),
+                load_age: pool
                     .load
                     .map(|load| now.saturating_duration_since(load.arrived())),
                 damped: damped
-                    .is_damped(cell.id)
-                    .then(|| std::time::Duration::from_millis(damped.left(cell.id, now))),
+                    .is_damped(pool.id)
+                    .then(|| std::time::Duration::from_millis(damped.left(pool.id, now))),
                 gone: damped.is_gone(view),
-                eligible: cell.eligible.to_vec(),
-                retired: cell.retired.to_vec(),
-                offered: cell.offering,
-                revision: cell.revision,
-                leases: cell.leases.held(),
-                unread: cell.unread,
+                eligible: pool.eligible.to_vec(),
+                retired: pool.retired.to_vec(),
+                offered: pool.offering,
+                revision: pool.revision,
+                leases: pool.leases.held(),
+                unread: pool.unread,
             })
             .collect()
     }
 
     /// How many events of a kind this build does not know the relay has
-    /// sent this chooser: each left its cell unread until the chooser read
+    /// sent this chooser: each left its pool unread until the chooser read
     /// it again.
     pub fn unknown_events(&self) -> u64 {
         self.shared
@@ -205,12 +205,12 @@ impl Cells {
         self.shared.segments.get(segment).map(Arc::clone)
     }
 
-    /// The region of the chooser's own cell.
+    /// The region of the chooser's own pool.
     pub(crate) fn region(&self) -> Arc<str> {
         Arc::clone(&self.shared.region)
     }
 
-    /// The cells this chooser damps.
+    /// The pools this chooser damps.
     pub(crate) fn damping(&self) -> Arc<Damping> {
         Arc::clone(&self.shared.damping)
     }
@@ -234,31 +234,31 @@ impl Cells {
     /// peer and routes to it, or decides whether to unregister one, inside
     /// it, so that its decision and the follower's never cross. One velo
     /// instance can be both a member of this instance's hub and an entry
-    /// of a followed cell, and then the last owner to let go unregisters.
+    /// of a followed pool, and then the last owner to let go unregisters.
     pub(crate) fn exclusive<T>(&self, act: impl FnOnce(&HashSet<InstanceId>) -> T) -> T {
         act(&self.shared.registered.borrow())
     }
 
-    /// [`Cells::exclusive`] for a chooser's tables, if the instance is a
+    /// [`Pools::exclusive`] for a chooser's tables, if the instance is a
     /// chooser; for any other instance, `act` with nothing held.
     pub(crate) fn exclusive_of<T>(
-        cells: Option<&Cells>,
+        pools: Option<&Pools>,
         act: impl FnOnce(&HashSet<InstanceId>) -> T,
     ) -> T {
-        match cells {
-            Some(cells) => cells.exclusive(act),
+        match pools {
+            Some(pools) => pools.exclusive(act),
             None => act(&HashSet::new()),
         }
     }
 
     /// The membership saw `id` leave: `leave` marks it left, and until the
-    /// membership's drain of it ends ([`Cells::drained`]) the follower does
+    /// membership's drain of it ends ([`Pools::drained`]) the follower does
     /// not unregister it, whatever its own drain says.
-    pub(crate) fn leaving(cells: Option<&Cells>, id: InstanceId, leave: impl FnOnce()) {
-        Self::exclusive_of(cells, |_| {
+    pub(crate) fn leaving(pools: Option<&Pools>, id: InstanceId, leave: impl FnOnce()) {
+        Self::exclusive_of(pools, |_| {
             leave();
-            if let Some(cells) = cells {
-                cells.draining().insert(id);
+            if let Some(pools) = pools {
+                pools.draining().insert(id);
             }
         });
     }
@@ -266,10 +266,10 @@ impl Cells {
     /// The membership's drain of `id` ended: `unregister` runs unless a
     /// table's registration holds it, which the follower then forgets in
     /// its own time.
-    pub(crate) fn drained(cells: Option<&Cells>, id: InstanceId, unregister: impl FnOnce()) {
-        Self::exclusive_of(cells, |held| {
-            if let Some(cells) = cells {
-                cells.draining().remove(&id);
+    pub(crate) fn drained(pools: Option<&Pools>, id: InstanceId, unregister: impl FnOnce()) {
+        Self::exclusive_of(pools, |held| {
+            if let Some(pools) = pools {
+                pools.draining().remove(&id);
             }
             if !held.contains(&id) {
                 unregister();
@@ -290,7 +290,7 @@ impl Cells {
     }
 
     /// Change the follower's registrations with `change`, under the lock
-    /// [`Cells::exclusive`] takes.
+    /// [`Pools::exclusive`] takes.
     fn registered<T>(&self, change: impl FnOnce(&mut HashSet<InstanceId>) -> T) -> T {
         let mut result = None;
         self.shared.registered.send_modify(|registered| {
@@ -305,16 +305,16 @@ impl Cells {
     }
 }
 
-/// What a node reads of the tables: the table an entry segment's cell
-/// policy chooses from, with the class's withdrawn cells and its model
+/// What a node reads of the tables: the table an entry segment's pool
+/// policy chooses from, with the class's withdrawn pools and its model
 /// index, in one load, and
-/// the cells the chooser holds gone, in one more. No table is made for a
+/// the pools the chooser holds gone, in one more. No table is made for a
 /// gone mark: the next read sees the damping the chooser's choices read.
 /// The two loads are not one moment, but a mark holds the follow it was
-/// made in, so a table newer than the mark reads the cell as not gone, as
+/// made in, so a table newer than the mark reads the pool as not gone, as
 /// a choice from that table would.
-impl gdl::__runtime::CellSource for Cells {
-    fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(gdl::ClassCells<'_>)) {
+impl gdl::__runtime::PoolSource for Pools {
+    fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(gdl::ClassPools<'_>)) {
         let Some(tables) = self.shared.classes.get(class) else {
             return;
         };
@@ -329,65 +329,65 @@ impl gdl::__runtime::CellSource for Cells {
         let table = slot.load();
         let damped = self.shared.damping.view();
         read(
-            gdl::ClassCells::new(&table.views, &table.withdrawn)
+            gdl::ClassPools::new(&table.views, &table.withdrawn)
                 .with_damped(&damped)
                 .with_models(&table.models),
         );
     }
 }
 
-impl std::fmt::Debug for Cells {
+impl std::fmt::Debug for Pools {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cells")
+        f.debug_struct("Pools")
             .field("segments", &self.shared.segments.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
 
-/// One followed cell of an entry segment, as its table holds it.
+/// One followed pool of an entry segment, as its table holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FollowedCell {
-    /// The cell's class.
+pub struct FollowedPool {
+    /// The pool's class.
     pub class: String,
-    /// The cell, named within its class.
-    pub cell: String,
-    /// The generation of the hub's follow of the cell that the table is
+    /// The pool, named within its class.
+    pub pool: String,
+    /// The generation of the hub's follow of the pool that the table is
     /// from: a refollow is a new one, and nothing of an earlier one is kept.
     pub generation: u64,
-    /// The region the cell runs in.
+    /// The region the pool runs in.
     pub region: String,
-    /// The cell's state, as its hub last sent it.
-    pub state: CellState,
-    /// The cell's load summary, as its hub last sent it: `None` while it
+    /// The pool's state, as its hub last sent it.
+    pub state: PoolState,
+    /// The pool's load summary, as its hub last sent it: `None` while it
     /// has none. `home_first` chooses by it, and not at all without it;
     /// `round_robin`, the default, does not read it.
     pub load: Option<LoadSummary>,
     /// How long ago, on this instance's clock, the summary reached this
     /// instance's hub: a new watch of the hub's relay is sent each summary
     /// with its age, so a summary the hub has held is as old on every
-    /// watch. A cell's hub sends its summary every period, so this is
-    /// about the time since the cell's hub last made it. `None` with no
+    /// watch. A pool's hub sends its summary every period, so this is
+    /// about the time since the pool's hub last made it. `None` with no
     /// summary.
     pub load_age: Option<std::time::Duration>,
-    /// Whether this chooser damps the cell, and how long its window still
+    /// Whether this chooser damps the pool, and how long its window still
     /// lasts: `Some` from a decline of its offer until it accepts one,
-    /// and while the window lasts the cell is passed over, unless more than
-    /// half of the eligible cells are damped; `None` when it is not damped.
+    /// and while the window lasts the pool is passed over, unless more than
+    /// half of the eligible pools are damped; `None` when it is not damped.
     pub damped: Option<std::time::Duration>,
-    /// Whether the cell declined this chooser's offer as gone, as a
-    /// draining cell does, in the follow shown here: it is passed over
+    /// Whether the pool declined this chooser's offer as gone, as a
+    /// draining pool does, in the follow shown here: it is passed over
     /// until the relay shows a new generation, state, or offered state, or
     /// it accepts an offer. A node reads the same mark with
-    /// [`gdl::ClassCells::is_gone`].
+    /// [`gdl::ClassPools::is_gone`].
     pub gone: bool,
     /// The entry instances of the segment that may be routed to, by id:
-    /// none while the state is `draining` or `unavailable`, or the cell is
+    /// none while the state is `draining` or `unavailable`, or the pool is
     /// unread.
     pub eligible: Vec<InstanceId>,
     /// The entry instances of the segment that retired: never routed to.
     pub retired: Vec<InstanceId>,
-    /// Whether the chooser's hub offers the cell to its choosers: its link
-    /// lives and its state takes work. A cell that is not offered has no
+    /// Whether the chooser's hub offers the pool to its choosers: its link
+    /// lives and its state takes work. A pool that is not offered has no
     /// eligible instance, and is never chosen.
     pub offered: bool,
     /// The revision of the follow's offered state, as the hub numbers its
@@ -395,9 +395,9 @@ pub struct FollowedCell {
     /// between offered and not offered.
     pub revision: u64,
     /// How many offers this chooser holds to the follow: requests it sent
-    /// to the cell whose response has yet to end.
+    /// to the pool whose response has yet to end.
     pub leases: usize,
-    /// Whether the cell is unread: the relay sent an event of a kind this
+    /// Whether the pool is unread: the relay sent an event of a kind this
     /// build does not know for its follow, and the chooser has not read
     /// the follow again since. While it has not, no instance of it is
     /// eligible, so it is not chosen.
@@ -407,19 +407,19 @@ pub struct FollowedCell {
 /// Where one entry segment's table is kept, swapped whole.
 pub(crate) type Slot = Arc<ArcSwap<EntryTable>>;
 
-/// One entry segment's table: each followed cell of its class, ordered by
-/// class and cell, and each as a cell policy sees it, index for index;
-/// and the cells of the class whose records were withdrawn.
+/// One entry segment's table: each followed pool of its class, ordered by
+/// class and pool, and each as a pool policy sees it, index for index;
+/// and the pools of the class whose records were withdrawn.
 #[derive(Debug, Default)]
 pub(crate) struct EntryTable {
-    pub(crate) cells: Box<[Arc<CellTable>]>,
-    /// `cells` as a cell policy sees them, made with the table so that a
+    pub(crate) pools: Box<[Arc<PoolTable>]>,
+    /// `pools` as a pool policy sees them, made with the table so that a
     /// choice borrows them rather than making them per request.
-    pub(crate) views: Box<[gdl::Cell]>,
-    /// The cells of the class the hub said withdrew their records after
-    /// a drain, by name, sorted: kept beside the cells, in the same table,
-    /// so that a node reads both from one snapshot. A withdrawn cell may
-    /// still be in `cells` until its follow is dropped.
+    pub(crate) views: Box<[gdl::Pool]>,
+    /// The pools of the class the hub said withdrew their records after
+    /// a drain, by name, sorted: kept beside the pools, in the same table,
+    /// so that a node reads both from one snapshot. A withdrawn pool may
+    /// still be in `pools` until its follow is dropped.
     pub(crate) withdrawn: Box<[Box<str>]>,
     /// The class's model index, shared by the tables of each of its entry
     /// segments, and made again only when what it lists changes.
@@ -427,18 +427,18 @@ pub(crate) struct EntryTable {
 }
 
 impl EntryTable {
-    /// The table of `cells`, with their views, and no withdrawn cell.
-    pub(crate) fn new(cells: Box<[Arc<CellTable>]>) -> Self {
-        let views = cells.iter().map(|cell| cell.view()).collect();
+    /// The table of `pools`, with their views, and no withdrawn pool.
+    pub(crate) fn new(pools: Box<[Arc<PoolTable>]>) -> Self {
+        let views = pools.iter().map(|pool| pool.view()).collect();
         Self {
-            cells,
+            pools,
             views,
             withdrawn: Box::default(),
             models: Arc::default(),
         }
     }
 
-    /// The table with the class's `withdrawn` cells, sorted.
+    /// The table with the class's `withdrawn` pools, sorted.
     pub(crate) fn with_withdrawn(mut self, withdrawn: Box<[Box<str>]>) -> Self {
         self.withdrawn = withdrawn;
         self
@@ -451,18 +451,18 @@ impl EntryTable {
     }
 }
 
-/// One followed cell, for one entry segment, in its current generation.
+/// One followed pool, for one entry segment, in its current generation.
 #[derive(Debug)]
-pub(crate) struct CellTable {
+pub(crate) struct PoolTable {
     pub(crate) class: String,
-    pub(crate) cell: String,
-    /// The cell's name as a number ([`cell_id`]), the same in every table
-    /// of the cell: what a request that the cell declined excludes.
+    pub(crate) pool: String,
+    /// The pool's name as a number ([`pool_id`]), the same in every table
+    /// of the pool: what a request that the pool declined excludes.
     pub(crate) id: u64,
     pub(crate) generation: u64,
     pub(crate) region: String,
-    pub(crate) state: CellState,
-    /// The cell's load summary, as it arrived.
+    pub(crate) state: PoolState,
+    /// The pool's load summary, as it arrived.
     pub(crate) load: Option<gdl::Load>,
     pub(crate) eligible: Box<[InstanceId]>,
     /// `eligible` as a selector sees it, index for index, made with the
@@ -470,11 +470,11 @@ pub(crate) struct CellTable {
     /// id per request.
     pub(crate) offered: Box<[gdl::InstanceId]>,
     pub(crate) retired: Box<[InstanceId]>,
-    /// Whether the cell is unread ([`FollowedCell::unread`]): `eligible`
+    /// Whether the pool is unread ([`FollowedPool::unread`]): `eligible`
     /// is then empty.
     pub(crate) unread: bool,
-    /// The built-in routers' turn within the cell, shared by every table
-    /// of the cell's follow, so that a new table keeps the turn.
+    /// The built-in routers' turn within the pool, shared by every table
+    /// of the pool's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,
     /// Whether the follow is offered: `eligible` is empty when it is not.
     pub(crate) offering: bool,
@@ -489,10 +489,10 @@ pub(crate) struct CellTable {
     pub(crate) leases: Arc<Leases>,
 }
 
-impl CellTable {
-    /// The cell as a cell policy sees it.
-    fn view(&self) -> gdl::Cell {
-        let view = gdl::Cell::new(&*self.class, &*self.cell, &*self.region, self.state)
+impl PoolTable {
+    /// The pool as a pool policy sees it.
+    fn view(&self) -> gdl::Pool {
+        let view = gdl::Pool::new(&*self.class, &*self.pool, &*self.region, self.state)
             .with_entries(self.eligible.len())
             .with_follow(self.generation, self.changes);
         match self.load {
@@ -502,16 +502,16 @@ impl CellTable {
     }
 }
 
-/// The number that names a cell in its tables ([`gdl::Cell::id`]).
-pub(crate) use gdl::__runtime::cell_id;
+/// The number that names a pool in its tables ([`gdl::Pool::id`]).
+pub(crate) use gdl::__runtime::pool_id;
 
 /// Refuse a chooser of `segment` whose placement names, for a class it
-/// sends to, a cell policy that `policies` does not register and gdl does
+/// sends to, a pool policy that `policies` does not register and gdl does
 /// not have. Nothing for a segment that sends into no other class.
 pub(crate) fn check_policies(
     layout: &Layout,
     segment: &str,
-    policies: &gdl::CellPolicies,
+    policies: &gdl::PoolPolicies,
 ) -> gdl::Result<()> {
     // Only whether each name resolves: the thresholds play no part.
     for class in entries(layout, segment).keys() {

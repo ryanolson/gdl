@@ -3,7 +3,7 @@
 //! [`Rule::Kept`]: it deletes nothing by time, but its records live only
 //! as long as its process.
 
-use gdl_cells::{
+use gdl_pools::{
     MemoryDirectory, MemoryLimits,
     conformance::{self, Backend, Rule},
 };

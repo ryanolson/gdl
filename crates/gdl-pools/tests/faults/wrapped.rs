@@ -4,8 +4,8 @@ use std::{
 };
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits,
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
     ResumeToken, Withdrawal, conformance::Backend,
 };
 
@@ -20,19 +20,19 @@ const LIMITS: MemoryLimits = MemoryLimits {
 #[derive(Clone)]
 struct Wrapped<F> {
     inner: MemoryDirectory,
-    // Records a refused publish stored anyway, by class and cell.
-    refused: Arc<Mutex<HashMap<(String, String), CellRecord>>>,
+    // Records a refused publish stored anyway, by class and pool.
+    refused: Arc<Mutex<HashMap<(String, String), PoolRecord>>>,
     store_refused: bool,
     rewrite: F,
 }
 
-impl<F> CellDirectory for Wrapped<F>
+impl<F> PoolDirectory for Wrapped<F>
 where
     F: Fn(&str, Option<ResumeToken>) -> Option<ResumeToken> + Clone + Send + Sync + 'static,
 {
     type Watch = Events;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         let result = self.inner.publish(record.clone()).await;
         let key = (record.class.clone(), record.name.clone());
         let mut refused = self.refused.lock().expect("lock");
@@ -51,7 +51,7 @@ where
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
-        let key = (withdrawal.class.clone(), withdrawal.cell.clone());
+        let key = (withdrawal.class.clone(), withdrawal.pool.clone());
         let result = self.inner.withdraw(withdrawal).await;
         if result.is_ok() {
             self.refused.lock().expect("lock").remove(&key);
@@ -63,10 +63,10 @@ where
         let refused = Arc::clone(&self.refused);
         let inner = self.inner.watch(class, (self.rewrite)(class, from));
         Box::pin(inner.map(move |event| match event {
-            Ok(CellEvent::Current(record)) => {
+            Ok(PoolEvent::Current(record)) => {
                 let key = (record.class.clone(), record.name.clone());
                 let stored = refused.lock().expect("lock").get(&key).cloned();
-                Ok(CellEvent::Current(stored.unwrap_or(record)))
+                Ok(PoolEvent::Current(stored.unwrap_or(record)))
             }
             other => other,
         }))

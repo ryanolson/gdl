@@ -1,5 +1,5 @@
-//! A global cell's health with `requires`: its own quorum, and enough
-//! followed model cells whose link says they are ready. Every hub runs in
+//! A global pool's health with `requires`: its own quorum, and enough
+//! followed model pools whose link says they are ready. Every hub runs in
 //! process on OS-assigned ports, sharing one directory whose hub names a
 //! test resolves once each hub serves; every wait is for something
 //! observed.
@@ -9,44 +9,44 @@ mod common;
 use std::sync::Arc;
 
 use common::{
-    CELL, Instance, Records, Resolving, get, global_default, global_requiring, health, hub_of_spec,
-    meet_the_quorum, model, serve_cell, timing,
+    Instance, POOL, Records, Resolving, get, global_default, global_requiring, health, hub_of_spec,
+    meet_the_quorum, model, serve_pool, timing,
 };
-use gdl_cells::CellState;
-use gdl_hub::{CellHealth, CellReadiness, RequiredHealth};
+use gdl_hub::{PoolHealth, PoolReadiness, RequiredHealth};
 use gdl_model::{
-    CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
+    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PoolSettings, Role, SegmentPhase,
     TypeInfo,
 };
+use gdl_pools::PoolState;
 use velo_hub::Hub;
 
-fn met(health: &CellHealth) -> u32 {
+fn met(health: &PoolHealth) -> u32 {
     health.requires["model_x"].met
 }
 
 /// The health endpoint's status and body.
 async fn status(hub: &velo_hub::Hub) -> (u16, serde_json::Value) {
-    let (status, body) = get(hub, "/v1/ext/gdl-cell/health").await;
+    let (status, body) = get(hub, "/v1/ext/gdl-pool/health").await;
     (status, serde_json::from_str(&body).expect("JSON"))
 }
 
-/// A global cell that requires one ready model cell answers 503 until it
-/// has its own quorum and follows a model cell whose link says `ready`,
-/// 200 then, and 503 again while that cell is only `degraded` and once
+/// A global pool that requires one ready model pool answers 503 until it
+/// has its own quorum and follows a model pool whose link says `ready`,
+/// 200 then, and 503 again while that pool is only `degraded` and once
 /// its link drops. The body names each required class with the count
-/// required and the count met. A cell that requires nothing answers as
+/// required and the count met. A pool that requires nothing answers as
 /// before, with no `requires` in its body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_global_is_healthy_with_its_quorum_and_its_required_cells() {
+async fn a_global_is_healthy_with_its_quorum_and_its_required_pools() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(1), &directory, timing()).await;
+    let (global_hub, global_pool) = serve_pool(global_requiring(1), &directory, timing()).await;
     let (code, body) = status(&global_hub).await;
     assert_eq!(code, 503);
     assert_eq!(
@@ -56,15 +56,15 @@ async fn a_global_is_healthy_with_its_quorum_and_its_required_cells() {
 
     let mut own = Instance::join(&global_hub, "a").await;
     own.announce(SegmentPhase::Ready).await;
-    health(&global_cell, "the global's own quorum", |h| {
-        h.state == CellState::Ready
+    health(&global_pool, "the global's own quorum", |h| {
+        h.state == PoolState::Ready
     })
     .await;
-    assert_eq!(status(&global_hub).await.0, 503, "no model cell yet");
+    assert_eq!(status(&global_hub).await.0, 503, "no model pool yet");
 
     let (mut instances, _) = meet_the_quorum(&model_hub).await;
-    records.until(CellState::Ready).await;
-    let healthy = health(&global_cell, "a ready model cell", |h| met(h) == 1).await;
+    records.until(PoolState::Ready).await;
+    let healthy = health(&global_pool, "a ready model pool", |h| met(h) == 1).await;
     assert_eq!(
         healthy.requires["model_x"],
         RequiredHealth {
@@ -76,17 +76,17 @@ async fn a_global_is_healthy_with_its_quorum_and_its_required_cells() {
     assert_eq!(code, 200, "{body}");
     assert_eq!(body["state"], "ready");
 
-    // `d` below its quorum: the model cell is degraded, still followed,
+    // `d` below its quorum: the model pool is degraded, still followed,
     // and no longer counts.
     instances[2].withdraw(SegmentPhase::Ready).await;
-    health(&model_cell, "the model cell degraded", |h| {
-        h.state == CellState::Degraded
+    health(&model_pool, "the model pool degraded", |h| {
+        h.state == PoolState::Degraded
     })
     .await;
-    health(&global_cell, "a degraded model cell", |h| met(h) == 0).await;
+    health(&global_pool, "a degraded model pool", |h| met(h) == 0).await;
     assert_eq!(status(&global_hub).await.0, 503);
     instances[2].announce(SegmentPhase::Ready).await;
-    health(&global_cell, "the model cell ready again", |h| met(h) == 1).await;
+    health(&global_pool, "the model pool ready again", |h| met(h) == 1).await;
     assert_eq!(status(&global_hub).await.0, 200);
 
     let (code, body) = status(&model_hub).await;
@@ -94,7 +94,7 @@ async fn a_global_is_healthy_with_its_quorum_and_its_required_cells() {
     assert!(body.get("requires").is_none(), "{body}");
 
     model_hub.shutdown().await.expect("the hub stops");
-    health(&global_cell, "the link dropped", |h| met(h) == 0).await;
+    health(&global_pool, "the link dropped", |h| met(h) == 0).await;
     assert_eq!(status(&global_hub).await.0, 503);
     global_hub.shutdown().await.expect("the hub stops");
 }
@@ -136,14 +136,14 @@ fn two_classes() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-/// The cell `name` of `class`; a model cell is a child of
+/// The pool `name` of `class`; a model pool is a child of
 /// `global-us-east-1`.
-fn cell(name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
-    cell_of("global-us-east-1", name, class, hub, requires)
+fn pool(name: &str, class: &str, hub: &str, requires: &str) -> PoolSettings {
+    pool_of("global-us-east-1", name, class, hub, requires)
 }
 
-/// The cell `name` of `class`; a model cell is a child of `parent`.
-fn cell_of(parent: &str, name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
+/// The pool `name` of `class`; a model pool is a child of `parent`.
+fn pool_of(parent: &str, name: &str, class: &str, hub: &str, requires: &str) -> PoolSettings {
     let home = if class == "global" {
         String::new()
     } else {
@@ -156,45 +156,45 @@ fn cell_of(parent: &str, name: &str, class: &str, hub: &str, requires: &str) -> 
     .expect("valid test fixture")
 }
 
-/// A hub of `two_classes()` for `cell`, resolved in `directory`, with
+/// A hub of `two_classes()` for `pool`, resolved in `directory`, with
 /// one ready instance of `segment`: its quorum.
 async fn serve_ready(
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: &Resolving,
     segment: &'static str,
-) -> (Hub, Arc<CellReadiness<Resolving>>, Instance) {
-    let name = cell.hub.clone().expect("a hub name");
-    let (hub, readiness) = hub_of_spec(two_classes(), cell, directory.clone(), timing()).await;
+) -> (Hub, Arc<PoolReadiness<Resolving>>, Instance) {
+    let name = pool.hub.clone().expect("a hub name");
+    let (hub, readiness) = hub_of_spec(two_classes(), pool, directory.clone(), timing()).await;
     directory.resolve(&name, &hub);
     let mut instance = Instance::join_spec(&hub, &two_classes(), segment).await;
     instance.announce(SegmentPhase::Ready).await;
-    health(&readiness, "the cell's own quorum", |h| {
-        h.state == CellState::Ready
+    health(&readiness, "the pool's own quorum", |h| {
+        h.state == PoolState::Ready
     })
     .await;
     (hub, readiness, instance)
 }
 
-/// A cell is named within its class, as the directory keys it: a global
-/// that sends to two classes follows a cell of each that share a name,
+/// A pool is named within its class, as the directory keys it: a global
+/// that sends to two classes follows a pool of each that share a name,
 /// and each counts toward its own class's requirement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cells_of_two_classes_may_share_a_name() {
+async fn pools_of_two_classes_may_share_a_name() {
     let directory = Resolving::new();
     let (x_hub, _x, _x_instance) = serve_ready(
-        cell("m-us-east-1", "model_x", "x-hub:1337", ""),
+        pool("m-us-east-1", "model_x", "x-hub:1337", ""),
         &directory,
         "f",
     )
     .await;
     let (y_hub, _y, _y_instance) = serve_ready(
-        cell("m-us-east-1", "model_y", "y-hub:1337", ""),
+        pool("m-us-east-1", "model_y", "y-hub:1337", ""),
         &directory,
         "g",
     )
     .await;
-    let (global_hub, global_cell, _own) = serve_ready(
-        cell(
+    let (global_hub, global_pool, _own) = serve_ready(
+        pool(
             "global-us-east-1",
             "global",
             "global-hub:1337",
@@ -204,7 +204,7 @@ async fn cells_of_two_classes_may_share_a_name() {
         "a",
     )
     .await;
-    let healthy = health(&global_cell, "a ready cell of each class", |h| {
+    let healthy = health(&global_pool, "a ready pool of each class", |h| {
         h.requires.values().all(|r| r.met == 1)
     })
     .await;
@@ -222,11 +222,11 @@ async fn cells_of_two_classes_may_share_a_name() {
 async fn a_global_requires_a_ready_child_by_default() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
     let mut own = Instance::join(&global_hub, "a").await;
     own.announce(SegmentPhase::Ready).await;
-    health(&global_cell, "the global's own quorum", |h| {
-        h.state == CellState::Ready
+    health(&global_pool, "the global's own quorum", |h| {
+        h.state == PoolState::Ready
     })
     .await;
     let (code, body) = status(&global_hub).await;
@@ -237,15 +237,15 @@ async fn a_global_requires_a_ready_child_by_default() {
     );
     assert_eq!(body["missing"], serde_json::json!(["model_x"]), "{body}");
 
-    let (model_hub, _model_cell) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (_instances, _) = meet_the_quorum(&model_hub).await;
-    records.until(CellState::Ready).await;
-    let healthy = health(&global_cell, "a ready child", |h| met(h) == 1).await;
+    records.until(PoolState::Ready).await;
+    let healthy = health(&global_pool, "a ready child", |h| met(h) == 1).await;
     assert!(healthy.missing.is_empty(), "{healthy:?}");
     let (code, body) = status(&global_hub).await;
     assert_eq!(code, 200, "{body}");
@@ -263,25 +263,25 @@ async fn a_global_requires_a_ready_child_by_default() {
 async fn an_explicit_requires_overrides_the_default() {
     let directory = Resolving::new();
     let (unsaid_x_hub, _unsaid_x, _unsaid_x_instance) = serve_ready(
-        cell_of("global-us-east-1", "m-1", "model_x", "x1-hub:1337", ""),
+        pool_of("global-us-east-1", "m-1", "model_x", "x1-hub:1337", ""),
         &directory,
         "f",
     )
     .await;
     let (named_x_hub, _named_x, _named_x_instance) = serve_ready(
-        cell_of("global-us-east-2", "m-2", "model_x", "x2-hub:1337", ""),
+        pool_of("global-us-east-2", "m-2", "model_x", "x2-hub:1337", ""),
         &directory,
         "f",
     )
     .await;
     let (unsaid_hub, unsaid, _unsaid_own) = serve_ready(
-        cell("global-us-east-1", "global", "global-1-hub:1337", ""),
+        pool("global-us-east-1", "global", "global-1-hub:1337", ""),
         &directory,
         "a",
     )
     .await;
     let (named_hub, named, _named_own) = serve_ready(
-        cell(
+        pool(
             "global-us-east-2",
             "global",
             "global-2-hub:1337",
@@ -312,8 +312,8 @@ async fn an_explicit_requires_overrides_the_default() {
 }
 
 /// A body without `missing`, as a hub of a build before it serves, is
-/// judged by its counts: a class met by fewer cells than required leaves
-/// the cell unhealthy.
+/// judged by its counts: a class met by fewer pools than required leaves
+/// the pool unhealthy.
 #[test]
 fn a_body_without_missing_is_judged_by_its_counts() {
     let body = serde_json::json!({
@@ -321,7 +321,7 @@ fn a_body_without_missing_is_judged_by_its_counts() {
         "segments": { "a": { "usable": 1, "quorum": 1 } },
         "requires": { "model_x": { "required": 1, "met": 0 } },
     });
-    let health: CellHealth = serde_json::from_value(body).expect("a body");
+    let health: PoolHealth = serde_json::from_value(body).expect("a body");
     assert!(health.missing.is_empty());
     assert!(!health.healthy(), "{health:?}");
     let met = serde_json::json!({
@@ -329,6 +329,6 @@ fn a_body_without_missing_is_judged_by_its_counts() {
         "segments": { "a": { "usable": 1, "quorum": 1 } },
         "requires": { "model_x": { "required": 1, "met": 1 } },
     });
-    let health: CellHealth = serde_json::from_value(met).expect("a body");
+    let health: PoolHealth = serde_json::from_value(met).expect("a body");
     assert!(health.healthy(), "{health:?}");
 }

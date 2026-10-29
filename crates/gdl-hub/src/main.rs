@@ -1,5 +1,5 @@
-//! Run one graph discovery hub: `gdl-hub deployment.json`. A cell's hub
-//! takes its cell's settings from `GDL_CELL__*` variables. The hub listens
+//! Run one graph discovery hub: `gdl-hub deployment.json`. A pool's hub
+//! takes its pool's settings from `GDL_POOL__*` variables. The hub listens
 //! on the deployment's ports unless `GDL_HUB__PUBLIC_PORT` and
 //! `GDL_HUB__CONTROL_PORT` name others (0 lets the OS choose), the
 //! variables a segment reads for where its hub is. Once it serves, it
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
-    let cell = gdl_hub::cell_from_env(&spec)?;
+    let pool = gdl_hub::pool_from_env(&spec)?;
     let mut config = HubConfig::default();
     config.server.public_port = port("GDL_HUB__PUBLIC_PORT", HUB_PUBLIC_PORT)?;
     config.server.control_port = port("GDL_HUB__CONTROL_PORT", HUB_CONTROL_PORT)?;
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // that stopped only on SIGINT ran until Docker killed it, 10 s later.
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let hub = gdl_hub::hub_builder(config, spec, cell)?.serve().await?;
+    let hub = gdl_hub::hub_builder(config, spec, pool)?.serve().await?;
     eprintln!(
         "gdl-hub: serving, public {}, control {}",
         hub.public_addr(),

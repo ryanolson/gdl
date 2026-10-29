@@ -1,10 +1,10 @@
-//! The follower's acknowledgements that it avoids a followed cell's
+//! The follower's acknowledgements that it avoids a followed pool's
 //! retired entry instance: due once its tables hold the instance retired,
-//! from a change, a snapshot, or a cell read from its own watch; sent
+//! from a change, a snapshot, or a pool read from its own watch; sent
 //! again while its hub has not taken one and the follow still holds the
 //! instance retired; and never for a segment it does not route to.
 
-use gdl_cells::CellState;
+use gdl_pools::PoolState;
 use gdl_watch::{Avoids, FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::PeerInfo;
@@ -19,7 +19,7 @@ use super::{M1, exposed, follow, follower, left, live, peer, retired, table};
 fn avoids(generation: u64, peer: &PeerInfo) -> Avoids {
     Avoids {
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation,
         instance: peer.instance_id(),
     }
@@ -30,21 +30,21 @@ fn avoids(generation: u64, peer: &PeerInfo) -> Avoids {
 /// more is due.
 #[test]
 fn a_retirement_is_acknowledged_once_the_tables_hold_it() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     let (x, y) = (peer(), peer());
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             exposed(M1, 1, &y),
         ],
     );
     assert_eq!(follows.next_avoid(), None, "nothing to acknowledge");
     live(&mut follows, now, [retired(M1, 1, &x)]);
-    let shown = table(&cells, M1).expect("followed");
+    let shown = table(&pools, M1).expect("followed");
     assert_eq!(
         (shown.eligible, shown.retired),
         (vec![y.instance_id()], vec![x.instance_id()])
@@ -69,7 +69,7 @@ fn a_retirement_its_hub_did_not_take_is_sent_again_while_it_is_held() {
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             retired(M1, 1, &x),
         ],
@@ -101,7 +101,7 @@ fn a_snapshot_acknowledges_every_retirement_it_shows() {
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             retired(M1, 1, &x),
         ],
@@ -110,7 +110,7 @@ fn a_snapshot_acknowledges_every_retirement_it_shows() {
     follows.avoided(due[0].clone(), true, now);
     let mut snapshot = follows.snapshot();
     for event in [
-        follow(M1, 1, CellState::Ready),
+        follow(M1, 1, PoolState::Ready),
         retired(M1, 1, &x),
         retired(M1, 1, &z),
     ] {
@@ -124,27 +124,27 @@ fn a_snapshot_acknowledges_every_retirement_it_shows() {
     assert_eq!(due, expected);
 }
 
-/// A cell read again from a watch of its own acknowledges every retired
+/// A pool read again from a watch of its own acknowledges every retired
 /// instance its snapshot shows.
 #[test]
-fn a_cell_read_from_its_own_watch_acknowledges_its_retirements() {
+fn a_pool_read_from_its_own_watch_acknowledges_its_retirements() {
     let (mut follows, _, _, _) = follower();
     let now = Instant::now();
     let x = peer();
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
     );
     follows.unknown(UnknownFollowEvent {
         kind: "paused".into(),
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
     });
     let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
     for event in [
-        follow(M1, 1, CellState::Ready),
+        follow(M1, 1, PoolState::Ready),
         retired(M1, 1, &x),
         FollowEvent::Synced { listed: false },
     ] {
@@ -165,10 +165,10 @@ fn a_retirement_of_a_segment_not_sent_to_owes_nothing() {
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             FollowEvent::Retired {
                 class: "model_x".into(),
-                cell: M1.into(),
+                pool: M1.into(),
                 generation: 1,
                 segment: "g".into(),
                 instance: x.instance_id(),
@@ -180,7 +180,7 @@ fn a_retirement_of_a_segment_not_sent_to_owes_nothing() {
 }
 
 /// The task acknowledges a retirement without looking at any other
-/// follow: with 4 or 64 other cells followed, all offered, sending it
+/// follow: with 4 or 64 other pools followed, all offered, sending it
 /// passes over none of them, as a look for a follow not offered would.
 #[tokio::test]
 async fn a_retirement_is_acknowledged_without_a_pass_over_the_follows() {
@@ -190,11 +190,11 @@ async fn a_retirement_is_acknowledged_without_a_pass_over_the_follows() {
         let mut events = Vec::new();
         for other in 0..others {
             let name = format!("other-{other}");
-            events.push(follow(&name, 1, CellState::Ready));
+            events.push(follow(&name, 1, PoolState::Ready));
             events.push(exposed(&name, 1, &peer()));
         }
         events.extend([
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             FollowEvent::Synced { listed: false },
             retired(M1, 1, &x),

@@ -28,17 +28,17 @@ fn a_placement_refuses_an_unknown_key_in_every_table() {
             "line 11: [class.spare] segment: unknown field `segment`",
         ),
         (
-            "[cells.model_x]\npolicyy = 'home_first'\n",
-            "line 10: [cells.model_x] policyy: unknown field `policyy`",
+            "[pools.model_x]\npolicyy = 'home_first'\n",
+            "line 10: [pools.model_x] policyy: unknown field `policyy`",
         ),
-        // They chose near cells, which a chooser does not follow.
+        // They chose near pools, which a chooser does not follow.
         (
-            "[cells.model_x]\npolicy = 'home_first'\nspill_rtt_ms = 80\n",
-            "line 11: [cells.model_x] spill_rtt_ms: unknown field `spill_rtt_ms`, expected `policy`",
+            "[pools.model_x]\npolicy = 'home_first'\nspill_rtt_ms = 80\n",
+            "line 11: [pools.model_x] spill_rtt_ms: unknown field `spill_rtt_ms`, expected `policy`",
         ),
         (
-            "[cells.model_x]\nmax_near = 16\n",
-            "line 10: [cells.model_x] max_near: unknown field `max_near`, expected `policy`",
+            "[pools.model_x]\nmax_near = 16\n",
+            "line 10: [pools.model_x] max_near: unknown field `max_near`, expected `policy`",
         ),
         (
             "[routing]\nD = { selector = 'least_loaded', weight = 2 }\n",
@@ -60,12 +60,12 @@ fn a_placement_refuses_an_unknown_key_in_every_table() {
 fn a_placements_names_are_refused_where_they_are() {
     let text = format!(
         "{SEGMENTS}[class.Global]\nsegments = ['a']\n[class.model_x]\nsegments = ['d']\n\
-         [cells.model_x]\npolicy = 'Home'\n[routing]\nD = {{ selector = 'Near' }}\n"
+         [pools.model_x]\npolicy = 'Home'\n[routing]\nD = {{ selector = 'Near' }}\n"
     );
     let error = refused(&text, Placement::from_toml(&text));
     for expected in [
         "[class.Global]: class name `Global` must be",
-        "[cells.model_x] policy: policy name `Home` must be",
+        "[pools.model_x] policy: policy name `Home` must be",
         "[routing] D: selector name `Near` must be",
     ] {
         assert!(
@@ -88,18 +88,18 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
             "line 3: [class.global] quorum: unknown field `quorum`",
         ),
         (
-            "[cell.g]\nclass = 'global'\nregion = 'r'\nzone = 'a'\n",
-            "line 4: [cell.g] zone: unknown field `zone`",
+            "[pool.g]\nclass = 'global'\nregion = 'r'\nzone = 'a'\n",
+            "line 4: [pool.g] zone: unknown field `zone`",
         ),
         // The relay mesh among global hubs is not built, so nothing reads
         // seeds; a fleet file never took them.
         (
-            "[cell.g]\nclass = 'global'\nregion = 'r'\nseeds = ['hub-a:1337']\n",
-            "line 4: [cell.g] seeds: unknown field `seeds`",
+            "[pool.g]\nclass = 'global'\nregion = 'r'\nseeds = ['hub-a:1337']\n",
+            "line 4: [pool.g] seeds: unknown field `seeds`",
         ),
         (
-            "[cell.g]\nclass = 'global'\n",
-            "line 1: [cell.g] region: missing field `region`",
+            "[pool.g]\nclass = 'global'\n",
+            "line 1: [pool.g] region: missing field `region`",
         ),
         (
             "[class.global]\nready = { a = 'two' }\n",
@@ -109,11 +109,11 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
             "[class.global]\nready = { a = -1 }\n",
             "line 2: [class.global.ready] a: invalid value",
         ),
-        ("[cell.g]\nclass = 'global' x\n", "line 2: [cell.g] class: "),
+        ("[pool.g]\nclass = 'global' x\n", "line 2: [pool.g] class: "),
         // A syntax error outside a key's value, and one in a header.
-        ("[cell.g]\nclass = 'global'\nregion\n", "line 3: [cell.g]: "),
+        ("[pool.g]\nclass = 'global'\nregion\n", "line 3: [pool.g]: "),
         (
-            "[cell.g]\nclass = 'global'\n[cell.h\n",
+            "[pool.g]\nclass = 'global'\n[pool.h\n",
             "line 3: unclosed table",
         ),
     ] {
@@ -123,50 +123,50 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
     }
 }
 
-/// A `[cell]` table refuses a key it does not know, and every problem in
-/// reading one has its key in table `cell`, which its reader turns into
+/// A `[pool]` table refuses a key it does not know, and every problem in
+/// reading one has its key in table `pool`, which its reader turns into
 /// the file or the variable.
 #[test]
-fn a_cells_settings_refuse_an_unknown_key_and_name_it() {
+fn a_pools_settings_refuse_an_unknown_key_and_name_it() {
     const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
     for (extra, expected) in [
-        ("hone = 'h'\n", "[cell] hone: unknown field `hone`"),
+        ("hone = 'h'\n", "[pool] hone: unknown field `hone`"),
         (
             "seeds = ['hub-a:1337']\n",
-            "[cell] seeds: unknown field `seeds`",
+            "[pool] seeds: unknown field `seeds`",
         ),
-        ("[ready]\ne = 'x'\n", "[cell.ready] e: invalid type"),
+        ("[ready]\ne = 'x'\n", "[pool.ready] e: invalid type"),
         (
             "summary_ms = 500\n",
-            "[cell] summary_ms: is 500; the period is at least 1000 ms",
+            "[pool] summary_ms: is 500; the period is at least 1000 ms",
         ),
         (
             "hub = 'http://h:1'\n",
-            "[cell] hub: \"http://h:1\" must be `host:port`",
+            "[pool] hub: \"http://h:1\" must be `host:port`",
         ),
         (
             "directory = 'dir'\n",
-            "[cell] directory: is \"dir\", which needs `dir`",
+            "[pool] directory: is \"dir\", which needs `dir`",
         ),
         (
             "dir = '/srv'\n",
-            "[cell] dir: \"/srv\" is read only by the `dir` backend",
+            "[pool] dir: \"/srv\" is read only by the `dir` backend",
         ),
     ] {
         let text = format!("{LEAST}{extra}");
         let value: toml::Value = toml::from_str(&text).expect("toml");
-        let error = refused(&text, gdl_model::CellSettings::read(value));
+        let error = refused(&text, gdl_model::PoolSettings::read(value));
         assert!(error.starts_with(expected), "{expected}\nin: {error}");
     }
     let value: toml::Value = toml::from_str("class = 'global'\nregion = 'r'\n").expect("toml");
-    let error = refused("no name", gdl_model::CellSettings::read(value));
+    let error = refused("no name", gdl_model::PoolSettings::read(value));
     assert!(
-        error.starts_with("[cell] name: missing field `name`"),
+        error.starts_with("[pool] name: missing field `name`"),
         "{error}"
     );
     assert_eq!(
-        gdl_model::cell_variable("ready.e"),
-        "GDL_CELL__READY__E",
+        gdl_model::pool_variable("ready.e"),
+        "GDL_POOL__READY__E",
         "the variable that sets a key"
     );
 }
@@ -178,14 +178,14 @@ fn a_cells_settings_refuse_an_unknown_key_and_name_it() {
 fn a_syntax_error_is_located_through_strings_and_arrays() {
     for (text, expected, repaired) in [
         (
-            "[config.A]\nnote = \"\"\"\n[cells.phantom]\n\"\"\"\nlimit = 3 x\n",
+            "[config.A]\nnote = \"\"\"\n[pools.phantom]\n\"\"\"\nlimit = 3 x\n",
             "line 5: [config.A] limit: ",
-            "[config.A]\nnote = \"\"\"\n[cells.phantom]\n\"\"\"\nlimit = 3\n",
+            "[config.A]\nnote = \"\"\"\n[pools.phantom]\n\"\"\"\nlimit = 3\n",
         ),
         (
-            "[config.A]\nnote = '''\n[cells.phantom]\n'''\nlimit = 3 x\n",
+            "[config.A]\nnote = '''\n[pools.phantom]\n'''\nlimit = 3 x\n",
             "line 5: [config.A] limit: ",
-            "[config.A]\nnote = '''\n[cells.phantom]\n'''\nlimit = 3\n",
+            "[config.A]\nnote = '''\n[pools.phantom]\n'''\nlimit = 3\n",
         ),
         (
             "[segment.front]\nnodes = [\n  \"A\",\n  \"B\" x\n]\n",

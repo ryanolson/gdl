@@ -1,5 +1,5 @@
 use crate::Roster;
-use crate::dist::Cells;
+use crate::dist::Pools;
 use crate::dist::roster::Live;
 use futures::StreamExt;
 use futures::stream::{BoxStream, SelectAll};
@@ -18,7 +18,7 @@ use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 /// and the phases it announces: `loaded`, once its nodes are ready to work;
 /// `serving`, once its handlers are installed; `ready`, once it routes;
 /// `drained`, once a source has finished its requests; `retired`, once it
-/// has been stopped; and `detach`, once an instance of a draining cell will
+/// has been stopped; and `detach`, once an instance of a draining pool will
 /// send no more work into it. Peers take loaded instances into their rosters,
 /// send only once those are serving, add a joiner when it is ready, and
 /// stop routing to one that retired.
@@ -281,9 +281,9 @@ impl HubSession {
         segments: &[&str],
         inner: &[&str],
         drain: Duration,
-        cells: Option<Cells>,
+        pools: Option<Pools>,
     ) {
-        let follower = self.follower(live, node, segments, inner, drain, cells);
+        let follower = self.follower(live, node, segments, inner, drain, pools);
         if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
             earlier.abort();
         }
@@ -297,7 +297,7 @@ impl HubSession {
         segments: &[&str],
         inner: &[&str],
         drain: Duration,
-        cells: Option<Cells>,
+        pools: Option<Pools>,
     ) -> Follower {
         Follower {
             client: self.client.clone(),
@@ -312,7 +312,7 @@ impl HubSession {
             unsent: Vec::new(),
             forget: Vec::new(),
             unresolved: Vec::new(),
-            cells,
+            pools,
             #[cfg(test)]
             members_gate: None,
         }
@@ -350,8 +350,8 @@ impl HubSession {
         }
     }
 
-    /// Announce that this instance, of a draining cell, will send no more
-    /// work into its cell, retried until `deadline`.
+    /// Announce that this instance, of a draining pool, will send no more
+    /// work into its pool, retried until `deadline`.
     pub(crate) async fn detached(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.detached.is_none() {
             self.detached = Some(self.persist(SegmentPhase::Detached, deadline).await?);
@@ -360,9 +360,9 @@ impl HubSession {
     }
 
     /// Whether every current member of `segments` has announced that it
-    /// detached: it sends no more work into its draining cell. A member of
+    /// detached: it sends no more work into its draining pool. A member of
     /// one of `entries` may have announced that it drained instead, which
-    /// an entry of a draining cell does only once it holds no request; a
+    /// an entry of a draining pool does only once it holds no request; a
     /// source elsewhere drains once its serving body ends, while its
     /// segment may still hand work on. A member that left is no longer
     /// one, so it is not waited for.
@@ -603,7 +603,7 @@ struct Follower {
     /// does not leave a joiner out for good.
     unresolved: Vec<(String, InstanceId)>,
     /// A chooser's tables, whose registrations this follower leaves alone.
-    cells: Option<Cells>,
+    pools: Option<Pools>,
     /// Holds the follower once the hub has said who the members are, so a
     /// test can change membership in between.
     #[cfg(test)]
@@ -787,7 +787,7 @@ impl Follower {
             // Registered before it is routable: a call addressed by
             // instance finds no peer it was not told of.
             let (node, live) = (&self.node, &self.live);
-            let registered = Cells::exclusive_of(self.cells.as_ref(), |_| {
+            let registered = Pools::exclusive_of(self.pools.as_ref(), |_| {
                 let registered = super::register_peer(node, member.peer.clone());
                 if registered.is_ok() {
                     live.join(&segment, id);
@@ -802,7 +802,7 @@ impl Follower {
 
     fn left(&mut self, segment: &str, id: InstanceId) {
         let live = &self.live;
-        Cells::leaving(self.cells.as_ref(), id, || live.leave(segment, id));
+        Pools::leaving(self.pools.as_ref(), id, || live.leave(segment, id));
         self.unresolved.retain(|(_, unresolved)| *unresolved != id);
         // Dropping the promise ends it at the hub, in the background.
         self.acknowledged.remove(&id);
@@ -834,13 +834,13 @@ impl Follower {
 
     async fn tick(&mut self) {
         let now = tokio::time::Instant::now();
-        let (node, cells) = (&self.node, &self.cells);
+        let (node, pools) = (&self.node, &self.pools);
         self.forget.retain(|(at, id)| {
             if *at > now {
                 return true;
             }
             // A peer a chooser's table holds is the chooser's to forget.
-            Cells::drained(cells.as_ref(), *id, || {
+            Pools::drained(pools.as_ref(), *id, || {
                 super::unregister_peer(node, *id);
             });
             false
@@ -1247,12 +1247,12 @@ mod tests {
     }
 }
 
-mod cell;
 mod chooser;
 #[cfg(test)]
 mod drains;
 mod load;
+mod pool;
 mod records;
 
-pub(crate) use cell::{CellDrain, Parent};
 pub(crate) use chooser::ChooserHub;
+pub(crate) use pool::{Parent, PoolDrain};

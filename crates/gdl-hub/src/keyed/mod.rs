@@ -1,4 +1,4 @@
-//! The keyed record service of a cell's hub: a table of key to value and
+//! The keyed record service of a pool's hub: a table of key to value and
 //! version that the hub's own instances read and write by request and
 //! answer.
 
@@ -9,17 +9,17 @@ use gdl_watch::{KeyedAsk, KeyedReply};
 use velo_hub::axum::{Json, Router, routing::post};
 use velo_hub::{Authorized, Committed, Extension, HubJson, Rejection, Txn};
 
-use crate::CellError;
+use crate::PoolError;
 use table::Table;
 
 mod table;
 
 /// The keyed record service: the `gdl-keyed` extension
-/// ([`gdl_watch::KEYED_EXTENSION`]) of a cell's hub, beside the cell's
+/// ([`gdl_watch::KEYED_EXTENSION`]) of a pool's hub, beside the pool's
 /// own.
 ///
 /// It keeps a table of key to value and version, both bytes, of at most
-/// its capacity of records (`[cell] keyed_capacity`), in least recently
+/// its capacity of records (`[pool] keyed_capacity`), in least recently
 /// used order. Its one route, on the control listener, is
 /// `POST instances/{instance_id}/keyed` ([`gdl_watch::KEYED_ROUTE`]), with
 /// the credential of the instance it names: only an instance registered
@@ -35,12 +35,12 @@ mod table;
 /// The table never tells anyone that a record changed: a reader that
 /// caches a record checks it again before a deadline of its own. It is
 /// held in the hub's memory, so it is lost when the hub stops; since
-/// every instance of the cell ends with its hub, no reader outlives it.
+/// every instance of the pool ends with its hub, no reader outlives it.
 ///
 /// A table of 2048 records or more is in shards of at least 1024 records
 /// each, up to 64, each under its own lock, so operations on keys of
 /// different shards never wait for each other; each shard evicts its own
-/// least recently used record. See `docs/src/concepts/cells.md`.
+/// least recently used record. See `docs/src/concepts/pools.md`.
 pub struct KeyedRecords {
     table: Arc<Table>,
 }
@@ -48,11 +48,11 @@ pub struct KeyedRecords {
 impl KeyedRecords {
     /// A service whose table holds at most `capacity` records. Refuses a
     /// capacity of zero, which could hold no record.
-    pub fn new(capacity: usize) -> Result<Self, CellError> {
+    pub fn new(capacity: usize) -> Result<Self, PoolError> {
         if capacity == 0 {
-            return Err(CellError::new(
+            return Err(PoolError::new(
                 gdl_model::Problem::at(
-                    Some("cell".into()),
+                    Some("pool".into()),
                     Some("keyed_capacity".into()),
                     "is 0, which holds no record; it is at least 1",
                 )

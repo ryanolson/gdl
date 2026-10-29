@@ -7,9 +7,9 @@ use std::{
 };
 
 use futures::{FutureExt, StreamExt};
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, MemoryLimits,
-    MemoryWatch, ResumeToken, Withdrawal,
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory, PoolEvent,
+    PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{self, Backend},
 };
 
@@ -25,10 +25,10 @@ struct Stored {
     save_withdrawal_version: bool,
 }
 
-impl CellDirectory for Stored {
+impl PoolDirectory for Stored {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.live.publish(record.clone()).await?;
         self.saved.lock().expect("the store").insert(
             (record.class.clone(), record.name.clone()),
@@ -39,7 +39,7 @@ impl CellDirectory for Stored {
 
     async fn withdraw(&self, mut withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.live.withdraw(withdrawal.clone()).await?;
-        let key = (withdrawal.class.clone(), withdrawal.cell.clone());
+        let key = (withdrawal.class.clone(), withdrawal.pool.clone());
         let mut saved = self.saved.lock().expect("the store");
         // The faulty store persists removal but leaves the row's version unchanged.
         if !self.save_withdrawal_version
@@ -63,7 +63,7 @@ impl CellDirectory for Stored {
 
 #[derive(Clone)]
 enum Saved {
-    Record(Box<CellRecord>),
+    Record(Box<PoolRecord>),
     Withdrawn(Withdrawal),
 }
 
@@ -117,9 +117,9 @@ impl Backend for Store {
     }
 }
 
-fn record(seq: u64) -> CellRecord {
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+fn record(seq: u64) -> PoolRecord {
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -129,11 +129,11 @@ fn record(seq: u64) -> CellRecord {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq,
         hub: "m2:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     }
 }
@@ -155,7 +155,7 @@ async fn a_store_that_loses_the_withdrawal_version_on_restart_fails() {
     directory.publish(record(1)).await.expect("the record");
     let withdrawal = Withdrawal {
         class: "model_x".into(),
-        cell: "m2".into(),
+        pool: "m2".into(),
         epoch: 1,
         seq: 5,
     };
@@ -173,7 +173,7 @@ async fn a_store_that_loses_the_withdrawal_version_on_restart_fails() {
         .await
         .expect("the regressed tombstone allows a stale record to return");
     let mut watch = restarted.watch("model_x", None);
-    assert_eq!(watch.next().await, Some(Ok(CellEvent::Current(record(4)))));
+    assert_eq!(watch.next().await, Some(Ok(PoolEvent::Current(record(4)))));
     drop((watch, restarted));
 
     let outcome = AssertUnwindSafe(conformance::run(&backend))

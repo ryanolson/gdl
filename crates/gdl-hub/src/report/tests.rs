@@ -1,14 +1,14 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use gdl_cells::{CellRecord, CellState, MemoryLimits, RelayDirectory, Version, Withdrawal};
+use gdl_pools::{MemoryLimits, PoolRecord, PoolState, RelayDirectory, Version, Withdrawal};
 use gdl_watch::Report;
 
 use super::Reports;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-/// A withdrawal that arrives while its cell's first report is still
+/// A withdrawal that arrives while its pool's first report is still
 /// being stored is checked after that report's write, so it removes the
 /// record, and a reopened directory holds the withdrawal.
 #[test]
@@ -29,14 +29,14 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
             } else {
                 RelayDirectory::new()
             };
-            let parent = CellRecord {
+            let parent = PoolRecord {
                 name: "global-us".into(),
                 class: "global".into(),
                 region: "us-east-1".into(),
                 home: None,
                 contract: 1,
                 placement: 2,
-                state: CellState::Ready,
+                state: PoolState::Ready,
                 epoch: 1,
                 seq: 1,
                 hub: "global-us:1337".into(),
@@ -47,7 +47,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 models_version: 0,
                 revoked: Vec::new(),
             };
-            let record = CellRecord {
+            let record = PoolRecord {
                 name: "model-x-01".into(),
                 class: "model_x".into(),
                 home: Some(parent.name.clone()),
@@ -56,7 +56,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
             };
             let withdrawal = Withdrawal {
                 class: record.class.clone(),
-                cell: record.name.clone(),
+                pool: record.name.clone(),
                 epoch: 1,
                 seq: 2,
             };

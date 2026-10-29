@@ -1,17 +1,17 @@
-//! A backend may fold several writes of one cell into the latest, as the
+//! A backend may fold several writes of one pool into the latest, as the
 //! `dir` backend does between two polls: rule 3 allows it, so the rule
 //! cases must too.
 
 use std::pin::Pin;
 
 use futures::{FutureExt, Stream, StreamExt, stream};
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits,
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
     ResumeToken, Withdrawal,
     conformance::{self, Backend, Rule},
 };
 
-type Events = Pin<Box<dyn Stream<Item = Result<CellEvent, DirectoryError>> + Send>>;
+type Events = Pin<Box<dyn Stream<Item = Result<PoolEvent, DirectoryError>> + Send>>;
 
 const LIMITS: MemoryLimits = MemoryLimits {
     buffer: 8,
@@ -19,14 +19,14 @@ const LIMITS: MemoryLimits = MemoryLimits {
 };
 
 /// A memory directory whose watches drop a put when the next event, ready
-/// at once, is a put of the same cell.
+/// at once, is a put of the same pool.
 #[derive(Clone)]
 struct Folding(MemoryDirectory);
 
-impl CellDirectory for Folding {
+impl PoolDirectory for Folding {
     type Watch = Events;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.0.publish(record).await
     }
 
@@ -37,20 +37,20 @@ impl CellDirectory for Folding {
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Events {
         let inner: Events = Box::pin(self.0.watch(class, from));
         Box::pin(stream::unfold(
-            (inner, None::<Result<CellEvent, DirectoryError>>),
+            (inner, None::<Result<PoolEvent, DirectoryError>>),
             |(mut inner, held)| async move {
                 let mut event = match held {
                     Some(event) => event,
                     None => inner.next().await?,
                 };
                 loop {
-                    let Ok(CellEvent::Put { record, .. }) = &event else {
+                    let Ok(PoolEvent::Put { record, .. }) = &event else {
                         return Some((event, (inner, None)));
                     };
-                    let cell = record.name.clone();
+                    let pool = record.name.clone();
                     match inner.next().now_or_never() {
-                        Some(Some(Ok(CellEvent::Put { record, token }))) if record.name == cell => {
-                            event = Ok(CellEvent::Put { record, token });
+                        Some(Some(Ok(PoolEvent::Put { record, token }))) if record.name == pool => {
+                            event = Ok(PoolEvent::Put { record, token });
                         }
                         Some(Some(next)) => return Some((event, (inner, Some(next)))),
                         _ => return Some((event, (inner, None))),
@@ -94,6 +94,6 @@ impl Backend for Folds {
 
 /// A folding backend breaks no rule, and passes the suite.
 #[tokio::test]
-async fn a_backend_that_folds_writes_of_one_cell_conforms() {
+async fn a_backend_that_folds_writes_of_one_pool_conforms() {
     conformance::run(&Folds).await;
 }

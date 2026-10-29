@@ -1,4 +1,4 @@
-//! A class's directory on disk: one file per cell, `<cell>.json`, each
+//! A class's directory on disk: one file per pool, `<pool>.json`, each
 //! replaced whole by a rename, and the scan that reads them. The `relay`
 //! backend keeps its state in the same files.
 
@@ -16,29 +16,29 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CellEvent, CellRecord, DirectoryError, ResumeToken, Version, Withdrawal};
+use crate::{DirectoryError, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal};
 
-/// What a scan found in a class's directory, by cell.
+/// What a scan found in a class's directory, by pool.
 pub(crate) type Files = HashMap<String, Seen>;
 
-/// A cell's file as a scan last found it.
+/// A pool's file as a scan last found it.
 #[derive(Debug, Clone)]
 pub(crate) struct Seen {
     stamp: Stamp,
     // When the file was read, on this host's clock; see `Seen::unchanged`.
     read: SystemTime,
-    // None for a file that does not hold its cell's record or tombstone.
+    // None for a file that does not hold its pool's record or tombstone.
     pub(crate) entry: Option<Arc<Entry>>,
 }
 
-/// A cell's file: its record or its withdrawal's tombstone, and where the
+/// A pool's file: its record or its withdrawal's tombstone, and where the
 /// write falls among the writes of the process that made it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Entry {
     // A scan finds several changes at once and has no other way to order
     // them: modification times share the file system's tick. Wall-clock
     // nanoseconds, raised past the process's last, so one process's writes
-    // are in order and different processes' writes, of different cells,
+    // are in order and different processes' writes, of different pools,
     // in about the order they were made.
     order: u64,
     #[serde(flatten)]
@@ -48,21 +48,21 @@ pub(crate) struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Held {
-    Record(Box<CellRecord>),
+    Record(Box<PoolRecord>),
     Withdrawn(Tombstone),
 }
 
-/// What a withdrawal leaves in its cell's file, so that a late write
+/// What a withdrawal leaves in its pool's file, so that a late write
 /// cannot bring the record back, from this process or another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Tombstone {
-    cell: String,
+    pool: String,
     epoch: u64,
     seq: u64,
 }
 
 impl Entry {
-    pub(crate) fn record(&self) -> Option<&CellRecord> {
+    pub(crate) fn record(&self) -> Option<&PoolRecord> {
         match &self.held {
             Held::Record(record) => Some(record),
             Held::Withdrawn(_) => None,
@@ -76,7 +76,7 @@ impl Entry {
             Held::Record(_) => None,
             Held::Withdrawn(tombstone) => Some(Withdrawal {
                 class: class.to_owned(),
-                cell: tombstone.cell.clone(),
+                pool: tombstone.pool.clone(),
                 epoch: tombstone.epoch,
                 seq: tombstone.seq,
             }),
@@ -93,28 +93,28 @@ impl Entry {
         }
     }
 
-    /// Whether `class/cell.json` may hold the entry: it is the record or
-    /// tombstone of that cell, and a record a publish would accept.
-    fn belongs(&self, class: &str, cell: &str) -> bool {
+    /// Whether `class/pool.json` may hold the entry: it is the record or
+    /// tombstone of that pool, and a record a publish would accept.
+    fn belongs(&self, class: &str, pool: &str) -> bool {
         match &self.held {
             Held::Record(record) => {
-                record.name == cell && record.class == class && record.check().is_ok()
+                record.name == pool && record.class == class && record.check().is_ok()
             }
-            Held::Withdrawn(tombstone) => tombstone.cell == cell,
+            Held::Withdrawn(tombstone) => tombstone.pool == pool,
         }
     }
 
     /// The change this entry makes, as a watch reports it at `token`.
-    pub(crate) fn event(&self, class: &str, token: ResumeToken) -> CellEvent {
+    pub(crate) fn event(&self, class: &str, token: ResumeToken) -> PoolEvent {
         match &self.held {
-            Held::Record(record) => CellEvent::Put {
-                record: CellRecord::clone(record),
+            Held::Record(record) => PoolEvent::Put {
+                record: PoolRecord::clone(record),
                 token,
             },
-            Held::Withdrawn(tombstone) => CellEvent::Withdrawn {
+            Held::Withdrawn(tombstone) => PoolEvent::Withdrawn {
                 withdrawal: Withdrawal {
                     class: class.to_owned(),
-                    cell: tombstone.cell.clone(),
+                    pool: tombstone.pool.clone(),
                     epoch: tombstone.epoch,
                     seq: tombstone.seq,
                 },
@@ -132,7 +132,7 @@ impl Entry {
 impl Held {
     pub(crate) fn tombstone(withdrawal: Withdrawal) -> Self {
         Held::Withdrawn(Tombstone {
-            cell: withdrawal.cell,
+            pool: withdrawal.pool,
             epoch: withdrawal.epoch,
             seq: withdrawal.seq,
         })
@@ -148,7 +148,7 @@ struct Stamp {
     // call sets back: a copy that preserves times restores a file's
     // modification time, but not this. Elsewhere, the modification time.
     changed: SystemTime,
-    // On unix, the inode: a rename puts another in the cell's place.
+    // On unix, the inode: a rename puts another in the pool's place.
     inode: u64,
 }
 
@@ -192,11 +192,11 @@ impl Seen {
     }
 }
 
-/// Read the class directory `dir` of `class`: each cell's file, reusing
+/// Read the class directory `dir` of `class`: each pool's file, reusing
 /// what `previous` read of a file that has not changed since. A missing
-/// directory holds no cells. A file that does not hold its cell's entry is
-/// kept without one, and one that is not a cell's (a writer's temporary
-/// file, say) is passed over; a cell's file that cannot be read is an
+/// directory holds no pools. A file that does not hold its pool's entry is
+/// kept without one, and one that is not a pool's (a writer's temporary
+/// file, say) is passed over; a pool's file that cannot be read is an
 /// error, which a writer meets too.
 pub(crate) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<Files> {
     let entries = match std::fs::read_dir(dir) {
@@ -208,10 +208,10 @@ pub(crate) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(cell) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+        let Some(pool) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
             continue;
         };
-        if gdl_model::check_cell_name(cell).is_err() {
+        if gdl_model::check_pool_name(pool).is_err() {
             continue;
         }
         let metadata = match entry.metadata() {
@@ -224,30 +224,30 @@ pub(crate) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
             continue;
         }
         let stamp = Stamp::of(&metadata)?;
-        if let Some(seen) = previous.get(cell).filter(|seen| seen.unchanged(stamp)) {
-            files.insert(cell.to_owned(), seen.clone());
+        if let Some(seen) = previous.get(pool).filter(|seen| seen.unchanged(stamp)) {
+            files.insert(pool.to_owned(), seen.clone());
             continue;
         }
         let read = SystemTime::now();
-        let entry = match load(&entry.path(), class, cell) {
+        let entry = match load(&entry.path(), class, pool) {
             Ok(entry) => entry.map(Arc::new),
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        files.insert(cell.to_owned(), Seen { stamp, read, entry });
+        files.insert(pool.to_owned(), Seen { stamp, read, entry });
     }
     Ok(files)
 }
 
-/// Write `held` as `cell`'s file in the class directory `dir`, if it is
+/// Write `held` as `pool`'s file in the class directory `dir`, if it is
 /// newer than what the file holds: in a temporary file beside it, renamed
 /// over it, so that a reader finds the old file or the new one, whole. A
-/// file that does not hold the cell's entry is replaced.
+/// file that does not hold the pool's entry is replaced.
 ///
 /// The read and the rename are not one step: two processes writing one
-/// cell is a misconfiguration this does not arbitrate.
-pub(crate) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(), DirectoryError> {
-    let path = dir.join(format!("{cell}.json"));
+/// pool is a misconfiguration this does not arbitrate.
+pub(crate) fn write(dir: &Path, class: &str, pool: &str, held: Held) -> Result<(), DirectoryError> {
+    let path = dir.join(format!("{pool}.json"));
     let unavailable = |what: &str, error: io::Error| {
         DirectoryError::Unavailable(format!("{what} {}: {error}", path.display()))
     };
@@ -255,11 +255,11 @@ pub(crate) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(
         order: next_order(),
         held,
     };
-    match load(&path, class, cell) {
+    match load(&path, class, pool) {
         Ok(Some(current)) if entry.version() <= current.version() => {
             return Err(DirectoryError::NotNewer {
                 class: class.to_owned(),
-                cell: cell.to_owned(),
+                pool: pool.to_owned(),
                 held: current.version(),
                 offered: entry.version(),
             });
@@ -277,7 +277,7 @@ pub(crate) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(
     // of every scan.
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let partial = dir.join(format!(
-        ".{cell}.json.{}.{}.tmp",
+        ".{pool}.json.{}.{}.tmp",
         std::process::id(),
         WRITES.fetch_add(1, Ordering::Relaxed)
     ));
@@ -288,13 +288,13 @@ pub(crate) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(
     })
 }
 
-/// The entry `path` holds for `class/cell`; None when it holds anything
+/// The entry `path` holds for `class/pool`; None when it holds anything
 /// else.
-fn load(path: &Path, class: &str, cell: &str) -> io::Result<Option<Entry>> {
+fn load(path: &Path, class: &str, pool: &str) -> io::Result<Option<Entry>> {
     let bytes = std::fs::read(path)?;
     Ok(serde_json::from_slice::<Entry>(&bytes)
         .ok()
-        .filter(|entry| entry.belongs(class, cell)))
+        .filter(|entry| entry.belongs(class, pool)))
 }
 
 /// The order of a write made now: this host's wall clock in nanoseconds,

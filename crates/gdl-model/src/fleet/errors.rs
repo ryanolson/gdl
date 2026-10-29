@@ -6,8 +6,8 @@ use crate::{Error, Problem, Problems};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FleetError {
-    /// A class table, or a cell's `class`, names a class the placement
-    /// does not have: the cell's layout's, for a cell of a spec of several
+    /// A class table, or a pool's `class`, names a class the placement
+    /// does not have: the pool's layout's, for a pool of a spec of several
     /// layouts.
     UnknownClass {
         /// The table it is in.
@@ -56,93 +56,93 @@ pub enum FleetError {
         /// The required class.
         required: String,
     },
-    /// A cell's name is not a DNS label.
-    InvalidCellName {
-        /// The cell.
-        cell: String,
+    /// A pool's name is not a DNS label.
+    InvalidPoolName {
+        /// The pool.
+        pool: String,
         /// Why the name is refused.
         reason: String,
     },
-    /// A cell's region is not a DNS label.
+    /// A pool's region is not a DNS label.
     InvalidRegion {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Why the region is refused.
         reason: String,
     },
-    /// A cell's layout is not a layout's name.
+    /// A pool's layout is not a layout's name.
     InvalidLayout {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Why the name is refused.
         reason: String,
     },
-    /// A cell names no layout, and the spec has several.
+    /// A pool names no layout, and the spec has several.
     MissingLayout {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// The spec's layouts.
         layouts: Vec<String>,
     },
-    /// A cell names a layout the spec does not have.
+    /// A pool names a layout the spec does not have.
     UnknownLayout {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// The unknown name.
         layout: String,
         /// The spec's layouts.
         layouts: Vec<String>,
     },
-    /// A cell's home runs another layout than the cell.
+    /// A pool's home runs another layout than the pool.
     HomeInOtherLayout {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Its home.
         home: String,
         /// The home's layout.
         home_layout: String,
-        /// The cell's layout.
+        /// The pool's layout.
         layout: String,
     },
-    /// A cell's home names no cell of the fleet.
+    /// A pool's home names no pool of the fleet.
     UnknownHome {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Its home.
         home: String,
     },
-    /// A cell of a class that another class sends to has no home.
+    /// A pool of a class that another class sends to has no home.
     MissingHome {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Its class.
         class: String,
         /// The classes that send to it.
         parents: Vec<String>,
     },
-    /// A cell of a class that nothing sends to has a home.
+    /// A pool of a class that nothing sends to has a home.
     HomeOfTopClass {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Its class.
         class: String,
     },
-    /// A cell's home is of a class that does not send to the cell's class.
+    /// A pool's home is of a class that does not send to the pool's class.
     HomeNotParent {
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// Its home.
         home: String,
         /// The home's class.
         home_class: String,
-        /// The cell's class.
+        /// The pool's class.
         class: String,
     },
-    /// A parent cell has no child, a cell whose home it is, of a class its
+    /// A parent pool has no child, a pool whose home it is, of a class its
     /// class sends to.
     MissingChild {
-        /// The parent cell.
-        cell: String,
+        /// The parent pool.
+        pool: String,
         /// The layout it runs, which its child runs too.
         layout: String,
         /// The class it sends to and has no child of.
@@ -155,8 +155,8 @@ pub enum FleetError {
 pub enum FleetTable {
     /// `[class.<name>]`.
     Class(String),
-    /// `[cell.<name>]`.
-    Cell(String),
+    /// `[pool.<name>]`.
+    Pool(String),
 }
 
 impl FleetTable {
@@ -164,7 +164,7 @@ impl FleetTable {
     fn path(&self) -> String {
         match self {
             Self::Class(name) => format!("class.{name}"),
-            Self::Cell(name) => format!("cell.{name}"),
+            Self::Pool(name) => format!("pool.{name}"),
         }
     }
 }
@@ -180,7 +180,7 @@ impl FleetError {
     /// the file.
     pub fn problem(&self) -> Problem {
         let class = |name: &str| Some(format!("class.{name}"));
-        let cell = |name: &str| Some(format!("cell.{name}"));
+        let pool = |name: &str| Some(format!("pool.{name}"));
         let key = |key: &str| Some(key.to_string());
         let quoted = |names: &[String]| {
             let names: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
@@ -196,11 +196,11 @@ impl FleetError {
                 class,
                 layout,
             } => {
-                // A class table's own name is the class; a cell names it
+                // A class table's own name is the class; a pool names it
                 // with its `class` key.
                 let key = match table {
                     FleetTable::Class(_) => None,
-                    FleetTable::Cell(_) => key("class"),
+                    FleetTable::Pool(_) => key("class"),
                 };
                 let message = match layout {
                     Some(layout) => format!("layout `{layout}` has no class `{class}`"),
@@ -245,30 +245,30 @@ impl FleetError {
                 Some(format!("requires.{required}")),
                 "is 0; a requirement is at least 1".into(),
             ),
-            Self::InvalidCellName { cell: name, reason } => (cell(name), None, reason.clone()),
-            Self::InvalidRegion { cell: name, reason } => {
-                (cell(name), key("region"), reason.clone())
+            Self::InvalidPoolName { pool: name, reason } => (pool(name), None, reason.clone()),
+            Self::InvalidRegion { pool: name, reason } => {
+                (pool(name), key("region"), reason.clone())
             }
-            Self::InvalidLayout { cell: name, reason } => {
-                (cell(name), key("layout"), reason.clone())
+            Self::InvalidLayout { pool: name, reason } => {
+                (pool(name), key("layout"), reason.clone())
             }
             Self::MissingLayout {
-                cell: name,
+                pool: name,
                 layouts,
             } => (
-                cell(name),
+                pool(name),
                 key("layout"),
                 format!(
-                    "missing; the spec has layouts {}, and a cell names the one it runs",
+                    "missing; the spec has layouts {}, and a pool names the one it runs",
                     quoted(layouts)
                 ),
             ),
             Self::UnknownLayout {
-                cell: name,
+                pool: name,
                 layout,
                 layouts,
             } => (
-                cell(name),
+                pool(name),
                 key("layout"),
                 format!(
                     "the spec has no layout `{layout}`; its layouts are {}",
@@ -276,63 +276,63 @@ impl FleetError {
                 ),
             ),
             Self::HomeInOtherLayout {
-                cell: name,
+                pool: name,
                 home,
                 home_layout,
                 layout,
             } => (
-                cell(name),
+                pool(name),
                 key("home"),
                 format!(
-                    "cell `{home}` runs layout `{home_layout}`, not `{layout}`; a home is a cell of the cell's own layout"
+                    "pool `{home}` runs layout `{home_layout}`, not `{layout}`; a home is a pool of the pool's own layout"
                 ),
             ),
-            Self::UnknownHome { cell: name, home } => (
-                cell(name),
+            Self::UnknownHome { pool: name, home } => (
+                pool(name),
                 key("home"),
-                format!("the fleet has no cell `{home}`"),
+                format!("the fleet has no pool `{home}`"),
             ),
             Self::MissingHome {
-                cell: name,
+                pool: name,
                 class,
                 parents,
             } => {
                 let parents: Vec<String> = parents.iter().map(|p| format!("`{p}`")).collect();
                 (
-                    cell(name),
+                    pool(name),
                     key("home"),
                     format!(
-                        "missing; a cell of class `{class}` names its parent, a cell of a class that sends to it: {}",
+                        "missing; a pool of class `{class}` names its parent, a pool of a class that sends to it: {}",
                         parents.join(", ")
                     ),
                 )
             }
-            Self::HomeOfTopClass { cell: name, class } => (
-                cell(name),
+            Self::HomeOfTopClass { pool: name, class } => (
+                pool(name),
                 key("home"),
-                format!("no class sends to `{class}`, so its cells have no parent"),
+                format!("no class sends to `{class}`, so its pools have no parent"),
             ),
             Self::HomeNotParent {
-                cell: name,
+                pool: name,
                 home,
                 home_class,
                 class,
             } => (
-                cell(name),
+                pool(name),
                 key("home"),
                 format!(
-                    "cell `{home}` is of class `{home_class}`, which does not send to `{class}`; a home is a cell of a class that sends to the cell's"
+                    "pool `{home}` is of class `{home_class}`, which does not send to `{class}`; a home is a pool of a class that sends to the pool's"
                 ),
             ),
             Self::MissingChild {
-                cell: name,
+                pool: name,
                 layout,
                 class,
             } => (
-                cell(name),
+                pool(name),
                 None,
                 format!(
-                    "no child of class `{class}` in layout `{layout}`; a cell of a class that sends to `{class}` has a child of it, a cell whose `home` is this one"
+                    "no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one"
                 ),
             ),
         };

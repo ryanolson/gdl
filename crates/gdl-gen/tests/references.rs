@@ -63,10 +63,10 @@ fn the_check_sees_each_kind_of_reference() {
         "/// a trick the reader does not chase (ruling Q9), and",
         "// acknowledged while the rendezvous waits (ruling",
         "//! The design is in `agent-docs/plan.md`.",
-        "/// The graph of cells.md section 3.1",
+        "/// The graph of pools.md section 3.1",
         "// ----- milestone 3 review, pass 1 -----",
         "// found in review m19-r12",
-        "/// Counterexample 1 of review `cells-r2`: Route provisions Post first",
+        "/// Counterexample 1 of review `pools-r2`: Route provisions Post first",
         "#[ignore = \"B-2 (review round 2): the hook names no services\"]",
         "// fixed in PR #312",
         "/// see PR 45 for the reason",
@@ -78,14 +78,14 @@ fn the_check_sees_each_kind_of_reference() {
         assert!(cites(line).is_some(), "missed: {line}");
     }
     for line in [
-        "// the ruling class of a cell",
+        "// the ruling class of a pool",
         "/// rulings are not cited here",
         "// a milestone of the stream",
-        "See [Classes and cells](../concepts/cells.md).",
-        "[Classes and cells](cells.md) covers them.",
+        "See [Classes and pools](../concepts/pools.md).",
+        "[Classes and pools](pools.md) covers them.",
         "let rem3 = 1;",
         "// a review of the drain, round two",
-        "/// the cell-r2 table",
+        "/// the pool-r2 table",
         "// the expr 2 form",
         "/// a pull request runs the book job",
         "// pull/push both work",
@@ -291,14 +291,14 @@ fn listed_values(text: &str, heading: &str) -> Option<BTreeSet<String>> {
 /// What kind of plan reference `line` holds, if any.
 fn cites(line: &str) -> Option<&'static str> {
     let lower = line.to_ascii_lowercase();
-    // The book has a `concepts/cells.md` chapter; a link to it is a path
+    // The book has a `concepts/pools.md` chapter; a link to it is a path
     // or a parenthesised link target, never a bare name.
     let bare = |name: &str| {
         lower
             .match_indices(name)
             .any(|(at, _)| !matches!(lower[..at].chars().last(), Some('/' | '(')))
     };
-    if lower.contains("agent-docs") || bare("plan.md") || bare("cells.md") {
+    if lower.contains("agent-docs") || bare("plan.md") || bare("pools.md") {
         return Some("plan document");
     }
     if after(&lower, "ruling ", |rest| {
@@ -347,7 +347,7 @@ fn after(haystack: &str, needle: &str, then: impl Fn(&str) -> bool) -> bool {
 }
 
 /// A review named after "review": a round number (`review round 2`) or
-/// a name ending in a round (`review cells-r2`).
+/// a name ending in a round (`review pools-r2`).
 fn named_review(line: &str) -> bool {
     let digit = |rest: &str| rest.starts_with(|c: char| c.is_ascii_digit());
     after(line, "review round ", digit)

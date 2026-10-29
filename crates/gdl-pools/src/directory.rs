@@ -3,22 +3,22 @@ use std::future::Future;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
-use crate::{CellRecord, Version, Withdrawal};
+use crate::{PoolRecord, Version, Withdrawal};
 
-/// Where cell records are published and watched: one record per cell,
-/// keyed by its class and name, each written only by its own cell's hub.
+/// Where pool records are published and watched: one record per pool,
+/// keyed by its class and name, each written only by its own pool's hub.
 ///
-/// Publishing is how a cell becomes visible: its hub calls
-/// [`CellDirectory::publish`] as it starts, on each change, and as its
+/// Publishing is how a pool becomes visible: its hub calls
+/// [`PoolDirectory::publish`] as it starts, on each change, and as its
 /// heartbeat. Where the record goes is the backend's business: a database
-/// that every hub reads, the hub of a parent cell that the record is
+/// that every hub reads, the hub of a parent pool that the record is
 /// reported to, a store that a top-level hub broadcasts, or a mix of
 /// these. A backend can live in its own crate: `gdl_hub::hub_builder_with`
 /// takes any directory.
 ///
-/// A cell's writes, its publishes and its withdrawal, are ordered by
+/// A pool's writes, its publishes and its withdrawal, are ordered by
 /// their [`Version`]: a write that is not newer than what the directory
-/// holds for the cell is refused with [`DirectoryError::NotNewer`],
+/// holds for the pool is refused with [`DirectoryError::NotNewer`],
 /// stores nothing, and reaches no watcher. A withdrawal leaves a
 /// tombstone at its version, so a late publish cannot bring the record
 /// back; a newer epoch can.
@@ -29,18 +29,18 @@ use crate::{CellRecord, Version, Withdrawal};
 /// `conformance` module, behind the feature of that name) holds each with
 /// cases of its own:
 ///
-/// 1. **Kept until withdrawn.** A published record stays until its cell
+/// 1. **Kept until withdrawn.** A published record stays until its pool
 ///    withdraws it, across the backend's own restart, and so does a
 ///    withdrawal. Nothing deletes a record by time: one whose lease has
 ///    passed is still in a new watch's snapshot.
 /// 2. **Every record.** `watch(class)` yields every record of the class,
 ///    in every region, whatever its parent or hashes. The reader picks
-///    the cells it follows.
+///    the pools it follows.
 /// 3. **Snapshot, then changes.** A watch gives a snapshot, then the
 ///    changes after it, and resumes from a token or says
-///    [`CellEvent::Resnapshot`] ([`CellDirectory::watch`]). A backend may
-///    fold several writes of one cell into the latest, as `dir` does
-///    between two polls: a reader keeps only each cell's newest record,
+///    [`PoolEvent::Resnapshot`] ([`PoolDirectory::watch`]). A backend may
+///    fold several writes of one pool into the latest, as `dir` does
+///    between two polls: a reader keeps only each pool's newest record,
 ///    so it misses no state.
 /// 4. **Whole.** A record arrives as it was published, every field of it,
 ///    never with a part of another version. A backend that stores a part
@@ -53,26 +53,26 @@ use crate::{CellRecord, Version, Withdrawal};
 /// |---|---|---|---|---|
 /// | [`crate::DirDirectory`] | yes | yes | yes | yes |
 /// | [`crate::MemoryDirectory`] | no: it lives as long as its process | yes | yes | yes |
-/// | relay: [`crate::RelayDirectory`], in a parent cell's hub | yes, opened over a state directory ([`crate::RelayDirectory::open`]); without one, it lives as long as its process | no: a hub holds only its own children's records | yes | yes |
+/// | relay: [`crate::RelayDirectory`], in a parent pool's hub | yes, opened over a state directory ([`crate::RelayDirectory::open`]); without one, it lives as long as its process | no: a hub holds only its own children's records | yes | yes |
 ///
 /// Expiry is the reader's: every reader applies a record's lease on its
-/// own clock ([`crate::CellView`]), so the rule is one rule, whatever the
+/// own clock ([`crate::PoolView`]), so the rule is one rule, whatever the
 /// backend holds.
-pub trait CellDirectory: Send + Sync + 'static {
-    /// A watch of one class: see [`CellDirectory::watch`]. Dropping it
+pub trait PoolDirectory: Send + Sync + 'static {
+    /// A watch of one class: see [`PoolDirectory::watch`]. Dropping it
     /// releases what the backend holds for it.
-    type Watch: Stream<Item = Result<CellEvent, DirectoryError>> + Send + 'static;
+    type Watch: Stream<Item = Result<PoolEvent, DirectoryError>> + Send + 'static;
 
-    /// Store `record` for its cell, if it is well formed ([`CellRecord::check`])
-    /// and newer than what the directory holds for the cell.
+    /// Store `record` for its pool, if it is well formed ([`PoolRecord::check`])
+    /// and newer than what the directory holds for the pool.
     fn publish(
         &self,
-        record: CellRecord,
+        record: PoolRecord,
     ) -> impl Future<Output = Result<(), DirectoryError>> + Send;
 
-    /// Remove a cell's record and leave a tombstone at the withdrawal's
-    /// version, if it is newer than what the directory holds for the cell.
-    /// A cell the directory has never held gets the tombstone all the same.
+    /// Remove a pool's record and leave a tombstone at the withdrawal's
+    /// version, if it is newer than what the directory holds for the pool.
+    /// A pool the directory has never held gets the tombstone all the same.
     fn withdraw(
         &self,
         withdrawal: Withdrawal,
@@ -80,12 +80,12 @@ pub trait CellDirectory: Send + Sync + 'static {
 
     /// Watch the records of `class`, and only those.
     ///
-    /// From `None`: each current record ([`CellEvent::Current`]), then
-    /// [`CellEvent::Synced`], then each change as it happens. From a token
+    /// From `None`: each current record ([`PoolEvent::Current`]), then
+    /// [`PoolEvent::Synced`], then each change as it happens. From a token
     /// a change or a `Synced` carried: `Synced` with that token, then only
     /// the changes after it. When the backend no longer holds what follows
     /// the token, or the token is another class's, the watch yields
-    /// [`CellEvent::Resnapshot`] and ends. A watcher that falls further
+    /// [`PoolEvent::Resnapshot`] and ends. A watcher that falls further
     /// behind than the backend buffers gets `Resnapshot` and ends too: it
     /// is neither buffered without bound nor silently skipped. After
     /// `Resnapshot`, the caller watches again from `None`.
@@ -96,28 +96,28 @@ pub trait CellDirectory: Send + Sync + 'static {
 
 /// What a watch of one class yields.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CellEvent {
+pub enum PoolEvent {
     /// A record the directory held when the watch began: part of the
     /// snapshot. It carries no token, since resuming in the middle of a
     /// snapshot would skip the rest of it.
-    Current(CellRecord),
+    Current(PoolRecord),
     /// The watch is up to date as of `token`: the snapshot is complete, or
     /// a resumed watch starts here.
     Synced {
         /// Where a later watch resumes from.
         token: ResumeToken,
-        /// Whether a snapshot came before it. A reader drops the cells a
+        /// Whether a snapshot came before it. A reader drops the pools a
         /// completed snapshot did not hold; a resumed watch drops nothing.
         snapshot: bool,
     },
     /// A record was stored.
     Put {
         /// The record.
-        record: CellRecord,
+        record: PoolRecord,
         /// Where a later watch resumes from: after this change.
         token: ResumeToken,
     },
-    /// A cell withdrew its record.
+    /// A pool withdrew its record.
     Withdrawn {
         /// The withdrawal, with its version.
         withdrawal: Withdrawal,
@@ -165,13 +165,13 @@ pub enum DirectoryError {
     #[error("{0}")]
     Malformed(String),
     /// A write that is not newer than what the directory holds for the
-    /// cell: a record or the tombstone of its withdrawal.
-    #[error("cell `{cell}` of class `{class}`: {offered} is not newer than {held}")]
+    /// pool: a record or the tombstone of its withdrawal.
+    #[error("pool `{pool}` of class `{class}`: {offered} is not newer than {held}")]
     NotNewer {
-        /// The cell's class.
+        /// The pool's class.
         class: String,
-        /// The cell.
-        cell: String,
+        /// The pool.
+        pool: String,
         /// The version the directory holds.
         held: Version,
         /// The version of the refused write.
@@ -184,7 +184,7 @@ pub enum DirectoryError {
     Unavailable(String),
     /// A well-formed write the backend refused for a rule of its own: the
     /// `relay` backend's parent hub refuses a record whose parent is
-    /// another cell, or whose hashes are not its own.
+    /// another pool, or whose hashes are not its own.
     #[error("{0}")]
     Refused(String),
 }

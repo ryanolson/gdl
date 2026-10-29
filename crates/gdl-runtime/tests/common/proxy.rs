@@ -17,8 +17,8 @@ pub enum Mode {
     /// passing it on: a hub that answers an announcement and then stops
     /// answering at the withdrawal that follows it.
     SilentAtDelete,
-    /// Forward, but give back the state `draining` as `ready`: a cell's
-    /// hub whose watch says nothing of the cell's drain to the hub that
+    /// Forward, but give back the state `draining` as `ready`: a pool's
+    /// hub whose watch says nothing of the pool's drain to the hub that
     /// follows it through the proxy, while its other events still come.
     Undrained,
 }

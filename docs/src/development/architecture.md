@@ -4,19 +4,19 @@ The root workspace has thirteen crates. Each example is its own workspace, outsi
 
 | Crate | Depends on | Contents |
 |---|---|---|
-| `gdl` | `gdl-model`, `gdl-cells`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, cell policies, the followed cells' view (`FollowedCells`), the cell hub's record tables (`CellRecords`), metrics, the derives, and local composition |
+| `gdl` | `gdl-model`, `gdl-pools`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, pool policies, the followed pools' view (`FollowedPools`), the pool hub's record tables (`PoolRecords`), metrics, the derives, and local composition |
 | `gdl-runtime` | `gdl`, `gdl-model`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
-| `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a cell's settings, and the names of a segment's hub services. It builds for wasm |
+| `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a pool's settings, and the names of a segment's hub services. It builds for wasm |
 | `gdl-syntax` | `gdl-model` | The graph parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract. It builds for wasm |
 | `gdl-message` | `gdl-model` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue |
 | `gdl-macros` | `gdl-model`, `gdl-syntax` | `graph!`, `segment!` (a generated segment crate's library), `derive(Message)`, `derive(Node)`, `derive(Config)`, `derive(Metrics)`, `derive(Endpoints)`, and `#[export]` |
 | `gdl-extract` | `gdl-model`, `gdl-syntax` | The source reader and the working catalogue |
 | `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
-| `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a cell whose hub is gone (`CellCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
-| `gdl-cells-dynamodb` | `gdl-cells`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` cell directory backend, in DynamoDB global tables. The only crate that links the AWS SDK, and nothing in the workspace depends on it. Its tests against DynamoDB Local run outside the default suite (`scripts/dynamodb-local.sh`) |
-| `gdl-watch` | `gdl-cells`, `gdl-model`, velo's peer types | The watches a cell's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
-| `gdl-hub` | `gdl-cells`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a cell's hub the `gdl-cell` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. See [Discovery](../concepts/hub.md) and [Classes and cells](../concepts/cells.md) |
+| `gdl-pools` | `gdl-model` | The pool plane's shared types: the pool record, the `PoolDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a pool whose hub is gone (`PoolCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `PoolState` and `LoadSummary` from it |
+| `gdl-pools-dynamodb` | `gdl-pools`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` pool directory backend, in DynamoDB global tables. The only crate that links the AWS SDK, and nothing in the workspace depends on it. Its tests against DynamoDB Local run outside the default suite (`scripts/dynamodb-local.sh`) |
+| `gdl-watch` | `gdl-pools`, `gdl-model`, velo's peer types | The watches a pool's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
+| `gdl-hub` | `gdl-pools`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a pool's hub the `gdl-pool` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. See [Discovery](../concepts/hub.md) and [Classes and pools](../concepts/pools.md) |
 
 ## The `gdl` and `gdl-runtime` split
 
@@ -36,7 +36,7 @@ The runtime calls velo in one place: `crates/gdl-runtime/src/dist/fabric.rs` and
 
 | Feature | Enables |
 |---|---|
-| `hub` | Discovery through a hub (`[hub]` in a segment's settings), and a chooser's tables of followed cells |
+| `hub` | Discovery through a hub (`[hub]` in a segment's settings), and a chooser's tables of followed pools |
 | `json-lines` | `serve_json_lines`, a graph's source served as JSON lines, for the binary of a segment that hosts the source |
 | `fault-injection` | Hooks that delay or drop runtime steps, for the fault tests. Never enable it in a deployment |
 

@@ -1,6 +1,6 @@
-//! A handle on a named table of keyed records in the segment's own cell's
+//! A handle on a named table of keyed records in the segment's own pool's
 //! hub: the hub's record service, read by request and answer, and written
-//! in batches. A node or a cell policy takes it once, in
+//! in batches. A node or a pool policy takes it once, in
 //! [`Build::build`](crate::Build::build), and reads it per request. The
 //! runtime binds it to the hub; this crate never calls the hub itself.
 
@@ -24,17 +24,17 @@ tokio::task_local! {
 }
 
 /// A handle on one named table of keyed records in the segment's own
-/// cell's hub. Cheap to clone; every clone is the same handle, with one
+/// pool's hub. Cheap to clone; every clone is the same handle, with one
 /// write queue and one answer callback.
 ///
 /// Take it once, in [`Build::build`](crate::Build::build), with
-/// [`CellRecords::current`]:
+/// [`PoolRecords::current`]:
 ///
 /// ```no_run
 /// # async fn build() -> gdl::Result<()> {
-/// use gdl::{CellRecords, Checked, Expected};
+/// use gdl::{PoolRecords, Checked, Expected};
 ///
-/// let records = CellRecords::current("fingerprints")?;
+/// let records = PoolRecords::current("fingerprints")?;
 /// let found = records.get(b"session-7").await?; // record and version, or none
 /// if let Some(record) = &found {
 ///     let checked = records.check(b"session-7", record.version).await?;
@@ -45,29 +45,29 @@ tokio::task_local! {
 /// # }
 /// ```
 ///
-/// - [`CellRecords::get`] and [`CellRecords::check`] each ask the hub at
+/// - [`PoolRecords::get`] and [`PoolRecords::check`] each ask the hub at
 ///   once and wait for its answer: one round trip. Bound the wait with a
 ///   timeout of your own.
-/// - [`CellRecords::set`] does not wait and does not allocate. It copies
+/// - [`PoolRecords::set`] does not wait and does not allocate. It copies
 ///   the write into a bounded queue, which a task sends to the hub in one
 ///   request 5 ms after its first write, or as soon as 64 KiB are queued,
 ///   one request at a time. When the queue
 ///   is full, the write is dropped and counted
-///   (`cell_record_writes_total{outcome="dropped"}`). Each write's answer
-///   reaches the callback given to [`CellRecords::on_answer`].
+///   (`pool_record_writes_total{outcome="dropped"}`). Each write's answer
+///   reaches the callback given to [`PoolRecords::on_answer`].
 ///
-/// Every table of a cell shares the hub's one table: the name keeps their
+/// Every table of a pool shares the hub's one table: the name keeps their
 /// keys apart, but they share its capacity and its least recently used
 /// order.
 ///
 /// # The eviction age
 ///
 /// Each answer from the hub carries its table's eviction age, the age of
-/// its least recently used record; [`CellRecords::eviction_age`] gives
+/// its least recently used record; [`PoolRecords::eviction_age`] gives
 /// the last one seen. A reader that caches a record checks it again
 /// before a deadline, so that a record in use is touched before the hub
 /// evicts it. The age is a time until eviction only once the table is
-/// full. Below its capacity (`[cell] keyed_capacity`, 1,000,000 records
+/// full. Below its capacity (`[pool] keyed_capacity`, 1,000,000 records
 /// by default) the hub evicts nothing, and the age is only the age of its
 /// oldest record: short soon after the hub starts, or on a small table. So
 /// set a cache deadline of half the age, but never less than a floor of
@@ -75,25 +75,25 @@ tokio::task_local! {
 /// deadline that is too short costs only extra checks; one that is too
 /// long can let the hub evict a record in use, and the next turn misses.
 #[derive(Clone)]
-pub struct CellRecords {
+pub struct PoolRecords {
     front: Arc<Front>,
 }
 
-impl CellRecords {
-    /// The handle on the table named `table` in the cell's hub of the
+impl PoolRecords {
+    /// The handle on the table named `table` in the pool's hub of the
     /// segment whose nodes the runtime is building: call it in
     /// [`Build::build`](crate::Build::build). Each call gives a handle of
     /// its own, with its own queue and callback.
     ///
     /// [`RecordsUnavailable::Unbound`] when the segment instance runs
-    /// without a cell's hub (in one process, or with a hub but no
-    /// `[cell]`), or outside a build: use a store of your own then.
+    /// without a pool's hub (in one process, or with a hub but no
+    /// `[pool]`), or outside a build: use a store of your own then.
     /// [`RecordsUnavailable::Name`] when `table` is empty or longer than
     /// 255 bytes.
     ///
     /// # Panics
     ///
-    /// Outside a tokio runtime, when the segment runs under a cell's hub:
+    /// Outside a tokio runtime, when the segment runs under a pool's hub:
     /// the handle starts the task that sends its writes.
     pub fn current(table: &str) -> std::result::Result<Self, RecordsUnavailable> {
         BUILDING
@@ -124,7 +124,7 @@ impl CellRecords {
     /// Ask whether the record of `key` is still at `version`: unchanged,
     /// at another version (with the record), or gone (the hub evicted it,
     /// or never held it). Asks the hub at once and waits, as
-    /// [`CellRecords::get`] does.
+    /// [`PoolRecords::get`] does.
     pub async fn check(&self, key: &[u8], version: u64) -> Result<Checked> {
         let table = &self.front.table;
         let key = table.wire_key(key);
@@ -141,7 +141,7 @@ impl CellRecords {
 
     /// Write `value` to `key` if the record matches `expected`, without
     /// waiting: the write is queued, and its answer reaches the callback
-    /// given to [`CellRecords::on_answer`]. Does not allocate.
+    /// given to [`PoolRecords::on_answer`]. Does not allocate.
     ///
     /// Whether the write was queued: `false` when the queue had no room
     /// for it, so it was dropped and counted. A write of more than 16 KiB
@@ -167,7 +167,7 @@ impl CellRecords {
     /// The table's eviction age in the last answer from the hub: the age
     /// of its least recently used record, or `None` when the table was
     /// empty or no answer has come yet. See [the eviction
-    /// age](CellRecords#the-eviction-age) for how to use it.
+    /// age](PoolRecords#the-eviction-age) for how to use it.
     pub fn eviction_age(&self) -> Option<Duration> {
         match self.front.table.eviction_age_ms.load(Ordering::Relaxed) {
             NO_AGE => None,
@@ -176,20 +176,20 @@ impl CellRecords {
     }
 }
 
-impl fmt::Debug for CellRecords {
+impl fmt::Debug for PoolRecords {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CellRecords")
+        f.debug_struct("PoolRecords")
             .field("table", &self.table())
             .finish_non_exhaustive()
     }
 }
 
-/// Why [`CellRecords::current`] gave no handle.
+/// Why [`PoolRecords::current`] gave no handle.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordsUnavailable {
-    /// The segment instance runs without a cell's hub, or the call was not
+    /// The segment instance runs without a pool's hub, or the call was not
     /// made in a build.
-    #[error("this segment instance runs without a cell's hub, so it has no record tables")]
+    #[error("this segment instance runs without a pool's hub, so it has no record tables")]
     Unbound,
     /// The table's name cannot be used.
     #[error("record table name {name:?} {why}")]
@@ -207,7 +207,7 @@ impl From<RecordsUnavailable> for Error {
     }
 }
 
-/// A record of a cell hub's table: its value and its version. Each write
+/// A record of a pool hub's table: its value and its version. Each write
 /// the hub applies gets a version greater than any it gave before, so of
 /// two records of one key, the one with the greater version is newer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +229,7 @@ pub enum Expected {
     Version(u64),
 }
 
-/// The answer to [`CellRecords::check`].
+/// The answer to [`PoolRecords::check`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Checked {
     /// The record is still at the version asked about.
@@ -241,8 +241,8 @@ pub enum Checked {
     Gone,
 }
 
-/// The answer to one write ([`CellRecords::set`]), as the callback given
-/// to [`CellRecords::on_answer`] gets it.
+/// The answer to one write ([`PoolRecords::set`]), as the callback given
+/// to [`PoolRecords::on_answer`] gets it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Written<'a> {
     /// The write applied, at this version.
@@ -262,10 +262,10 @@ pub enum Written<'a> {
 }
 
 /// The record service of a segment instance: what its nodes take
-/// [`CellRecords`] through. The runtime makes it for an instance that runs
-/// under a cell's hub, and binds it to the hub once the instance has
-/// registered there. Without a cell's hub it is not bound, and
-/// [`CellRecords::current`] gives [`RecordsUnavailable::Unbound`]. Cheap
+/// [`PoolRecords`] through. The runtime makes it for an instance that runs
+/// under a pool's hub, and binds it to the hub once the instance has
+/// registered there. Without a pool's hub it is not bound, and
+/// [`PoolRecords::current`] gives [`RecordsUnavailable::Unbound`]. Cheap
 /// to clone; every clone is the same service.
 #[derive(Clone, Default)]
 pub struct HubRecords {
@@ -274,7 +274,7 @@ pub struct HubRecords {
 
 #[derive(Default)]
 struct Binding {
-    /// Whether the instance runs under a cell's hub, decided before its
+    /// Whether the instance runs under a pool's hub, decided before its
     /// nodes are built: whether a table can be taken.
     under_hub: bool,
     /// The link to the hub, once the instance has registered there.
@@ -288,12 +288,12 @@ struct Binding {
 
 impl HubRecords {
     /// A record service that is not bound: no table can be taken from it.
-    /// What an instance without a cell's hub has.
+    /// What an instance without a pool's hub has.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// A record service that the runtime binds to the cell's hub at the
+    /// A record service that the runtime binds to the pool's hub at the
     /// launch: tables can be taken from it, and their writes wait for the
     /// link.
     #[doc(hidden)]
@@ -315,7 +315,7 @@ impl HubRecords {
     }
 
     /// Whether tables can be taken from it: the instance runs under a
-    /// cell's hub.
+    /// pool's hub.
     pub fn is_under_hub(&self) -> bool {
         self.inner.under_hub
     }
@@ -338,10 +338,10 @@ impl HubRecords {
         })
     }
 
-    /// The handle on the table named `table`, as [`CellRecords::current`]
+    /// The handle on the table named `table`, as [`PoolRecords::current`]
     /// gives it inside a build.
     #[doc(hidden)]
-    pub fn table(&self, table: &str) -> std::result::Result<CellRecords, RecordsUnavailable> {
+    pub fn table(&self, table: &str) -> std::result::Result<PoolRecords, RecordsUnavailable> {
         if !self.inner.under_hub {
             return Err(RecordsUnavailable::Unbound);
         }
@@ -369,13 +369,13 @@ impl HubRecords {
             Arc::clone(&table),
             self.inner.link.subscribe(),
         ));
-        Ok(CellRecords {
+        Ok(PoolRecords {
             front: Arc::new(Front { table }),
         })
     }
 
     /// Record each table's writes in `registry`, as
-    /// `cell_record_writes_total`, once: later calls do nothing.
+    /// `pool_record_writes_total`, once: later calls do nothing.
     #[doc(hidden)]
     pub fn register(&self, registry: &prometheus::Registry) -> prometheus::Result<()> {
         if self.inner.registered.set(()).is_err() {
@@ -384,7 +384,7 @@ impl HubRecords {
         registry.register(Box::new(scrape::Scrape::new(Arc::clone(&self.inner))?))
     }
 
-    /// Run `build` with this service as the one [`CellRecords::current`]
+    /// Run `build` with this service as the one [`PoolRecords::current`]
     /// takes tables from.
     #[doc(hidden)]
     pub async fn scope<F: Future>(&self, build: F) -> F::Output {
@@ -475,7 +475,7 @@ pub struct RecordReply {
     pub eviction_age: Option<Duration>,
 }
 
-/// What every clone of one [`CellRecords`] holds: dropping the last one
+/// What every clone of one [`PoolRecords`] holds: dropping the last one
 /// ends the task that sends its writes, once it has sent what is queued.
 struct Front {
     table: Arc<Table>,
@@ -585,7 +585,7 @@ impl Table {
         let link = self.binding.link.borrow().clone().ok_or_else(|| {
             Error::new(
                 ErrorKind::Transport,
-                "this segment instance has not reached its cell's hub yet",
+                "this segment instance has not reached its pool's hub yet",
             )
         })?;
         let reply = link.ask(&mut std::iter::once(op)).await?;
@@ -593,7 +593,7 @@ impl Table {
         reply.answers.into_iter().next().ok_or_else(|| {
             Error::new(
                 ErrorKind::Transport,
-                "the cell's hub gave no answer to a record operation",
+                "the pool's hub gave no answer to a record operation",
             )
         })
     }
@@ -635,7 +635,7 @@ struct Counts {
 fn unexpected(op: &str, answer: &RecordAnswer) -> Error {
     Error::new(
         ErrorKind::Transport,
-        format!("the cell's hub answered a {op} with {answer:?}"),
+        format!("the pool's hub answered a {op} with {answer:?}"),
     )
 }
 

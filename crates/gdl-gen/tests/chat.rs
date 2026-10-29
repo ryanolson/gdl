@@ -554,7 +554,7 @@ fn a_segment_cannot_take_the_contract_directory() {
 #[test]
 fn the_books_class_example_renders() {
     let readme =
-        std::fs::read_to_string(root().join("docs/src/concepts/cells.md")).expect("chapter");
+        std::fs::read_to_string(root().join("docs/src/concepts/pools.md")).expect("chapter");
     let block = readme
         .split("```toml\n")
         .skip(1)

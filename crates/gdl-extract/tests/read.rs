@@ -1420,7 +1420,7 @@ fn an_alias_of_an_argument_the_reader_cannot_name_is_left_out_alone() {
     );
 }
 
-/// A crate's cell policies, each with what it reads of the request's
+/// A crate's pool policies, each with what it reads of the request's
 /// head: the message whole, no head, its bytes, or a projection of it and
 /// the message its derive names. A policy no segment could name, one not
 /// reached from the crate root or a generic one, is left out, and the
@@ -1429,7 +1429,7 @@ fn an_alias_of_an_argument_the_reader_cannot_name_is_left_out_alone() {
 /// at all, even after a glob of gdl; the trait reached through a parent's
 /// `use` or rename of it, or through `use gdl::{self}`, is gdl's.
 #[test]
-fn a_crate_offers_its_cell_policies_with_their_heads() {
+fn a_crate_offers_its_pool_policies_with_their_heads() {
     use gdl_extract::PolicyHead;
 
     let extraction = workspace().extract("read-policies").expect("package");

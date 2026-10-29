@@ -27,10 +27,10 @@ pub use dist::{
     Entries, FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad, Served,
     bind_node,
 };
-#[cfg(feature = "hub")]
-pub use dist::{Cells, FollowedCell, HubSession};
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};
+#[cfg(feature = "hub")]
+pub use dist::{FollowedPool, HubSession, Pools};
 pub use figment;
 /// The definitions this runtime runs: generated segment crates and the
 /// `graph!` expansion name node traits through here, so they cannot pick a
@@ -40,14 +40,14 @@ pub use figment;
 pub use gdl;
 #[doc(hidden)]
 pub use gdl::message_encoding;
-#[cfg(feature = "hub")]
-pub use gdl_cells::CellState;
 pub use gdl_model::{
-    CellSettings, CrossingReport, DeploymentSpec, DirectoryBackend, Encoding, GraphConfig,
-    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
-    Placement, PlacementError, PlacementErrors, RequestRouter, Role, Run, SELECTORS,
+    CrossingReport, DeploymentSpec, DirectoryBackend, Encoding, GraphConfig, HUB_CONTROL_PORT,
+    HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
+    PlacementError, PlacementErrors, PoolSettings, RequestRouter, Role, Run, SELECTORS,
     SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout, resolve_config,
 };
+#[cfg(feature = "hub")]
+pub use gdl_pools::PoolState;
 #[cfg(feature = "json-lines")]
 #[doc(hidden)]
 pub use json::probe as __json;

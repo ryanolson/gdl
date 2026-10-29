@@ -1,7 +1,7 @@
 //! The reference graph deployed in two classes, for the tests of a
-//! chooser's routing across cells: `global` runs `a` (A and G: the source,
+//! chooser's routing across pools: `global` runs `a` (A and G: the source,
 //! whose instance chooses), and `model_x` runs `f` (B, C, E, and F: the
-//! cell's entry) and `d` (D). Hop 0 crosses into `model_x` at its inner
+//! pool's entry) and `d` (D). Hop 0 crosses into `model_x` at its inner
 //! end, B. Every instance is a process of its own, in this test process.
 
 use std::sync::Arc;
@@ -9,19 +9,19 @@ use std::time::Duration;
 
 use futures::future::join_all;
 use gdl::{Cx, Next};
-use gdl_hub::{CellReadiness, CellTiming};
-use gdl_model::CellSettings;
+use gdl_hub::{PoolReadiness, PoolTiming};
+use gdl_model::PoolSettings;
 use gdl_runtime::velo::Velo;
 use gdl_runtime::{
-    Cells, Deployment, DeploymentSpec, Placement, Process, ProcessConfig, Register, RuntimeConfig,
+    Deployment, DeploymentSpec, Placement, Pools, Process, ProcessConfig, Register, RuntimeConfig,
     Segment,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
-use super::cells::{
-    GLOBAL, Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings,
+use super::pools::{
+    GLOBAL, Nothing, REGION, Resolving, model_pool, pool_hub_proxied, pool_hub_timed, settings,
     timing,
 };
 use super::proxy::Proxy;
@@ -40,13 +40,13 @@ pub fn placement() -> Placement {
         .class("model_x", ["f", "d"])
 }
 
-/// [`placement`], choosing a cell of `model_x` by `home_first`, which
-/// chooses by the cells' load summaries, rather than by the default,
+/// [`placement`], choosing a pool of `model_x` by `home_first`, which
+/// chooses by the pools' load summaries, rather than by the default,
 /// `round_robin`, which reads none.
 pub fn home_first() -> Placement {
-    placement().cell_policy(
+    placement().pool_policy(
         "model_x",
-        gdl_model::CellPolicy {
+        gdl_model::PoolPolicy {
             policy: "home_first".into(),
         },
     )
@@ -57,10 +57,10 @@ pub fn spec_of(placement: Placement) -> DeploymentSpec {
     DeploymentSpec::new(super::reference_manifest(|_| true), placement).expect("valid test fixture")
 }
 
-/// The settings of the hub of the model cell `name`, a child of
+/// The settings of the hub of the model pool `name`, a child of
 /// [`GLOBAL`], reached under the name `hub`: `f` needs `entries` usable
 /// instances to be ready, `d` one.
-pub fn model_hub_needing(name: &str, hub: &str, entries: u32) -> CellSettings {
+pub fn model_hub_needing(name: &str, hub: &str, entries: u32) -> PoolSettings {
     toml::from_str(&format!(
         "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
          hub = '{hub}'\ndirectory = 'memory'\n[ready]\nf = {entries}\nd = 1\n"
@@ -77,7 +77,7 @@ pub struct Running<H> {
     pub process: Process,
     pub segment: Arc<Segment<H>>,
     /// The tables of a chooser.
-    pub cells: Option<Cells>,
+    pub pools: Option<Pools>,
     /// The instance's velo node.
     pub node: Velo,
     /// While true, the instance's serving body, once it is told to stop,
@@ -155,7 +155,7 @@ pub async fn run_graph_in<H: Register + Send + Sync + 'static>(
     let launch = config
         .launch(&process, segment, segments, spec, async { Ok(()) })
         .await?;
-    let cells = launch.cells();
+    let pools = launch.pools();
     let node = launch.node();
     let deployment = Deployment::new(
         launch.node(),
@@ -184,30 +184,30 @@ pub async fn run_graph_in<H: Register + Send + Sync + 'static>(
     Ok(Running {
         process,
         segment,
-        cells,
+        pools,
         node,
         body,
         serving,
     })
 }
 
-/// A model cell of `spec`: its hub, its entry instances, and its `d`.
-pub struct ModelCell<H> {
+/// A model pool of `spec`: its hub, its entry instances, and its `d`.
+pub struct ModelPool<H> {
     pub hub: Hub,
-    /// The cell's extension on its hub.
-    pub readiness: Arc<CellReadiness<Resolving>>,
+    /// The pool's extension on its hub.
+    pub readiness: Arc<PoolReadiness<Resolving>>,
     pub entries: Vec<Running<H>>,
     pub sink: Running<H>,
 }
 
-impl<H> ModelCell<H> {
+impl<H> ModelPool<H> {
     /// The forward hand-offs its entry instances took, together.
     pub fn forwards(&self) -> usize {
         self.entries.iter().map(Running::forwards).sum()
     }
 }
 
-/// Start the model cell `name`, whose hub is reached under `hub_name`
+/// Start the model pool `name`, whose hub is reached under `hub_name`
 /// and needs `quorum` entry instances, with `entries` entry instances and
 /// one `d`, all serving.
 pub async fn model(
@@ -218,20 +218,20 @@ pub async fn model(
     quorum: u32,
     entries: usize,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    let cell = Model {
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    let pool = Model {
         name,
         hub: hub_name,
         quorum,
         entries,
     };
-    model_of(spec, directory, cell, &|runtime| runtime, &|deployment| {
+    model_of(spec, directory, pool, &|runtime| runtime, &|deployment| {
         reference_graph(deployment, events)
     })
     .await
 }
 
-/// What a model cell has: its name, the name its hub is reached under,
+/// What a model pool has: its name, the name its hub is reached under,
 /// how many entry instances it needs, and how many it starts.
 #[derive(Clone, Copy)]
 pub struct Model<'a> {
@@ -244,15 +244,15 @@ pub struct Model<'a> {
 /// [`model`] for any graph of `spec`, whose root `assemble` builds, with
 /// each entry instance's runtime settings changed by `entry`. Its load
 /// summary period is the shortest, [`SUMMARY`]: a `home_first` chooser
-/// sends only to a cell whose summary it has.
+/// sends only to a pool whose summary it has.
 pub async fn model_of<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> ModelCell<H> {
-    model_summarized(spec, directory, cell, RUNTIME, entry, assemble).await
+) -> ModelPool<H> {
+    model_summarized(spec, directory, pool, RUNTIME, entry, assemble).await
 }
 
 /// [`model`] with the default load summary period, 10 s, so that its
@@ -261,27 +261,27 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
 pub async fn model_unsummarized(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    model_changed(spec, directory, cell, &|hub| hub, events).await
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    model_changed(spec, directory, pool, &|hub| hub, events).await
 }
 
 /// [`model_unsummarized`], with its hub's settings changed by `change`: a
-/// cell with another parent, or none, or in another region.
+/// pool with another parent, or none, or in another region.
 pub async fn model_changed(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
-    change: &dyn Fn(CellSettings) -> CellSettings,
+    pool: Model<'_>,
+    change: &dyn Fn(PoolSettings) -> PoolSettings,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    let hub = change(model_hub_needing(cell.name, cell.hub, cell.quorum));
-    let extra = format!("{}{RUNTIME}", model_cell(cell.name));
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    let hub = change(model_hub_needing(pool.name, pool.hub, pool.quorum));
+    let extra = format!("{}{RUNTIME}", model_pool(pool.name));
     start_model(
         spec,
         directory,
-        cell,
+        pool,
         (hub, timing()),
         &extra,
         &|runtime| runtime,
@@ -290,24 +290,24 @@ pub async fn model_changed(
     .await
 }
 
-/// [`model_of`] for a cell in `region` rather than [`REGION`]: a cell in
+/// [`model_of`] for a pool in `region` rather than [`REGION`]: a pool in
 /// another region than its parent's choosers.
 pub async fn model_in(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     region: &str,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    let (hub, timing, extra) = summarized(cell, RUNTIME);
-    let hub = CellSettings {
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    let (hub, timing, extra) = summarized(pool, RUNTIME);
+    let hub = PoolSettings {
         region: region.into(),
         ..hub
     };
     start_model(
         spec,
         directory,
-        cell,
+        pool,
         (hub, timing),
         &extra,
         &|runtime| runtime,
@@ -320,15 +320,15 @@ pub async fn model_in(
 pub async fn model_timed(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
-    change: &dyn Fn(CellTiming) -> CellTiming,
+    pool: Model<'_>,
+    change: &dyn Fn(PoolTiming) -> PoolTiming,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    let (hub, timing, extra) = summarized(cell, RUNTIME);
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    let (hub, timing, extra) = summarized(pool, RUNTIME);
     start_model(
         spec,
         directory,
-        cell,
+        pool,
         (hub, change(timing)),
         &extra,
         &|runtime| runtime,
@@ -341,22 +341,22 @@ pub async fn model_timed(
 pub const SUMMARY: Duration = Duration::from_secs(1);
 
 /// [`model_of`], with the shortest load summary period, [`SUMMARY`], for
-/// the cell's hub and its instances, a heartbeat as long, so that the
+/// the pool's hub and its instances, a heartbeat as long, so that the
 /// record carries each summary soon after it is made, and `runtime` as
 /// every instance's `[runtime]` table.
 pub async fn model_summarized<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     runtime: &str,
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> ModelCell<H> {
-    let (hub, timing, extra) = summarized(cell, runtime);
+) -> ModelPool<H> {
+    let (hub, timing, extra) = summarized(pool, runtime);
     start_model(
         spec,
         directory,
-        cell,
+        pool,
         (hub, timing),
         &extra,
         entry,
@@ -365,16 +365,16 @@ pub async fn model_summarized<H: Register + Send + Sync + 'static>(
     .await
 }
 
-/// [`model_summarized`], with the cell's hub reached through a proxy by
-/// the hubs that follow it ([`cell_hub_proxied`]).
+/// [`model_summarized`], with the pool's hub reached through a proxy by
+/// the hubs that follow it ([`pool_hub_proxied`]).
 pub async fn model_proxied<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     runtime: &str,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> (ModelCell<H>, Proxy) {
-    model_proxied_leased(spec, directory, cell, runtime, timing().lease, assemble).await
+) -> (ModelPool<H>, Proxy) {
+    model_proxied_leased(spec, directory, pool, runtime, timing().lease, assemble).await
 }
 
 /// [`model_proxied`], whose hub's lease, its record's and its followers'
@@ -382,64 +382,64 @@ pub async fn model_proxied<H: Register + Send + Sync + 'static>(
 pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     runtime: &str,
     lease: Duration,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> (ModelCell<H>, Proxy) {
-    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
-    let timing = CellTiming { lease, ..timing };
-    let (hub, readiness, proxy) = cell_hub_proxied(spec, settings_of_hub, directory, timing).await;
-    let cell = instances(
+) -> (ModelPool<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(pool, runtime);
+    let timing = PoolTiming { lease, ..timing };
+    let (hub, readiness, proxy) = pool_hub_proxied(spec, settings_of_hub, directory, timing).await;
+    let pool = instances(
         spec,
         (hub, readiness),
         None,
-        cell,
+        pool,
         &extra,
         &|_, r| r,
         assemble,
     )
     .await;
-    (cell, proxy)
+    (pool, proxy)
 }
 
 /// The settings of [`model_summarized`]'s hub, its timing, and what it
 /// adds to every instance's settings.
-fn summarized(cell: Model<'_>, runtime: &str) -> (CellSettings, CellTiming, String) {
-    let hub = CellSettings {
+fn summarized(pool: Model<'_>, runtime: &str) -> (PoolSettings, PoolTiming, String) {
+    let hub = PoolSettings {
         layout: None,
         summary: SUMMARY,
-        ..model_hub_needing(cell.name, cell.hub, cell.quorum)
+        ..model_hub_needing(pool.name, pool.hub, pool.quorum)
     };
-    let timing = CellTiming {
+    let timing = PoolTiming {
         heartbeat: SUMMARY,
         ..timing()
     };
     let extra = format!(
         "{}summary_ms = {}\n{runtime}",
-        model_cell(cell.name),
+        model_pool(pool.name),
         SUMMARY.as_millis()
     );
     (hub, timing, extra)
 }
 
-/// Start the model cell `cell` with its hub's settings and timing, and
+/// Start the model pool `pool` with its hub's settings and timing, and
 /// `extra` added to every instance's settings.
 async fn start_model<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
-    (settings_of_hub, timing): (CellSettings, CellTiming),
+    pool: Model<'_>,
+    (settings_of_hub, timing): (PoolSettings, PoolTiming),
     extra: &str,
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> ModelCell<H> {
-    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+) -> ModelPool<H> {
+    let hub = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
     let configure = |segment: &str, runtime| match segment {
         "f" => entry(runtime),
         _ => runtime,
     };
-    instances(spec, hub, None, cell, extra, &configure, assemble).await
+    instances(spec, hub, None, pool, extra, &configure, assemble).await
 }
 
 /// [`model_summarized`] with [`RUNTIME`], each instance's runtime
@@ -447,52 +447,52 @@ async fn start_model<H: Register + Send + Sync + 'static>(
 pub async fn model_configured<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> ModelCell<H> {
-    let (settings_of_hub, timing, extra) = summarized(cell, RUNTIME);
-    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
-    instances(spec, hub, None, cell, &extra, configure, assemble).await
+) -> ModelPool<H> {
+    let (settings_of_hub, timing, extra) = summarized(pool, RUNTIME);
+    let hub = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
+    instances(spec, hub, None, pool, &extra, configure, assemble).await
 }
 
 /// [`model_summarized`], whose instances reach their hub's public
-/// listener through a proxy, which the hubs that follow the cell do not.
+/// listener through a proxy, which the hubs that follow the pool do not.
 pub async fn model_fronted<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     runtime: &str,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> (ModelCell<H>, Proxy) {
-    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
-    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+) -> (ModelPool<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(pool, runtime);
+    let hub = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
     let proxy = Proxy::new(hub.0.public_addr()).await;
-    let cell = instances(
+    let pool = instances(
         spec,
         hub,
         Some(proxy.port),
-        cell,
+        pool,
         &extra,
         &|_, r| r,
         assemble,
     )
     .await;
-    (cell, proxy)
+    (pool, proxy)
 }
 
-/// Start `cell`'s instances at its hub, each with `extra` added to its
+/// Start `pool`'s instances at its hub, each with `extra` added to its
 /// settings, reaching the hub's public listener on `public` if given.
 async fn instances<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
-    (hub, readiness): (Hub, Arc<CellReadiness<Resolving>>),
+    (hub, readiness): (Hub, Arc<PoolReadiness<Resolving>>),
     public: Option<u16>,
-    cell: Model<'_>,
+    pool: Model<'_>,
     extra: &str,
     configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
-) -> ModelCell<H> {
-    let entries = cell.entries;
+) -> ModelPool<H> {
+    let entries = pool.entries;
     let (public, control) = (
         public.unwrap_or(hub.public_addr().port()),
         hub.control_addr().port(),
@@ -513,7 +513,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
     .await;
     let entries = running.split_off(1);
     let sink = running.pop().expect("the sink");
-    ModelCell {
+    ModelPool {
         hub,
         readiness,
         entries,
@@ -521,40 +521,40 @@ async fn instances<H: Register + Send + Sync + 'static>(
     }
 }
 
-/// A model cell whose class splits the model part of the reference graph
+/// A model pool whose class splits the model part of the reference graph
 /// over the entry `f` and other segments: its hub, its entry instances,
 /// and one instance of each other segment, in the order they were named.
 pub struct Spread<H> {
     pub hub: Hub,
-    /// The cell's extension on its hub.
-    pub readiness: Arc<CellReadiness<Resolving>>,
+    /// The pool's extension on its hub.
+    pub readiness: Arc<PoolReadiness<Resolving>>,
     pub entries: Vec<Running<H>>,
     pub interior: Vec<Running<H>>,
 }
 
-/// Start the model cell `cell` of a deployment of `segments`, with
-/// `cell.entries` instances of `f` and one of each of `interior`, with
+/// Start the model pool `pool` of a deployment of `segments`, with
+/// `pool.entries` instances of `f` and one of each of `interior`, with
 /// the shortest load summary period, [`SUMMARY`], and `runtime` as every
 /// instance's `[runtime]` table. `process` changes each instance's
 /// process settings, given its segment.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the deployment, the cell, and how each instance differs"
+    reason = "the deployment, the pool, and how each instance differs"
 )]
 pub async fn model_spread<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     segments: &'static [&'static str],
     interior: &[&'static str],
     runtime: &str,
     process: &(dyn Fn(&str, &mut ProcessConfig<Nothing>) + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> Spread<H> {
-    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
-    let (hub, readiness) = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let (settings_of_hub, timing, extra) = summarized(pool, runtime);
+    let (hub, readiness) = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
     let mut all = interior.to_vec();
-    all.extend(std::iter::repeat_n("f", cell.entries));
+    all.extend(std::iter::repeat_n("f", pool.entries));
     // Each instance's launch waits for the others of its class.
     let mut running = join_all(all.into_iter().map(|segment| {
         let mut config = settings(

@@ -1,6 +1,6 @@
-//! A draining cell's segments leave by their role. An entry instance says
+//! A draining pool's segments leave by their role. An entry instance says
 //! that it has detached once it declines offers and no request it holds
-//! can send work into the cell again. An interior instance drains once
+//! can send work into the pool again. An interior instance drains once
 //! every instance of the segments that send to it has detached, and leaves
 //! once it holds no request. So a sink whose responses ended leaves before
 //! the entry, a segment that only forwards requests leaves while responses
@@ -8,7 +8,7 @@
 //! until its own responses end. A request that may still send, held at a
 //! gate or by an operator that keeps its `next`, keeps every segment it
 //! may reach. An entry that never says it detached, as a build from before
-//! it could, leaves its cell to drain as before: every interior instance
+//! it could, leaves its pool to drain as before: every interior instance
 //! waits for the entry instances to drain or leave.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
@@ -28,14 +28,14 @@ use std::time::Duration;
 use common::boundary::{
     Model, Running, SEGMENTS, Spread, model_spread, placement, run_graph_in, spec_of,
 };
-use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
+use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
 use common::{
     Chunk, Events, Mode, Plan, Prompt, STOP_MARK, WAIT, expected, let_go, prompt, reference_graph,
 };
 use futures::StreamExt;
 use gdl::{Cx, Next, Selectors};
 use gdl_model::{SegmentPhase, segment_service};
-use gdl_runtime::{CellState, Cells, DeploymentSpec, Placement, Register, RuntimeConfig};
+use gdl_runtime::{DeploymentSpec, Placement, PoolState, Pools, Register, RuntimeConfig};
 use tokio::task::JoinHandle;
 use velo::InstanceId;
 use velo::discovery::{ServiceDiscovery, ServiceEvent};
@@ -88,19 +88,19 @@ fn response_path() -> Placement {
 /// Every segment of [`response_path`].
 const RESPONSE_PATH: &[&str] = &["a", "f", "p", "d"];
 
-/// The global cell's hub.
+/// The global pool's hub.
 async fn global_hub_of(spec: &DeploymentSpec, directory: &Resolving) -> Hub {
-    cell_hub_of(spec, global_hub(), directory).await.0
+    pool_hub_of(spec, global_hub(), directory).await.0
 }
 
-/// A chooser, an instance of `a` in the global cell at `hub`, of a
+/// A chooser, an instance of `a` in the global pool at `hub`, of a
 /// deployment of `segments`.
 async fn chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
     segments: &'static [&'static str],
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
-    let extra = format!("{}{LONG}", global_cell());
+    let extra = format!("{}{LONG}", global_pool());
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
@@ -119,15 +119,15 @@ async fn chooser(
     .expect("the chooser serves")
 }
 
-/// The model cell [`M1`] of a deployment of `segments`: `entries`
+/// The model pool [`M1`] of a deployment of `segments`: `entries`
 /// instances of `f`, and one instance of each of `interior`, whose nodes
 /// log to `events`. `process` changes each instance's process settings,
 /// given its segment.
-async fn cell(
+async fn pool(
     spec: &DeploymentSpec,
     directory: &Resolving,
     (segments, interior, entries): (&'static [&'static str], &[&'static str], usize),
-    process: &(dyn Fn(&str, &mut gdl_runtime::ProcessConfig<common::cells::Nothing>) + Sync),
+    process: &(dyn Fn(&str, &mut gdl_runtime::ProcessConfig<common::pools::Nothing>) + Sync),
     events: &Arc<Events>,
 ) -> Spread<impl Next<Prompt, Chunk> + Register + use<>> {
     let ready = Model {
@@ -152,10 +152,10 @@ async fn cell(
 /// Wait until `chooser` follows [`M1`] `ready`, with `entries` entry
 /// instances and a load summary.
 async fn following<H>(chooser: &Running<H>, entries: usize) {
-    let cells: Cells = chooser.cells.clone().expect("a chooser");
-    until(&cells, "the model cell followed", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| {
-            m.state == CellState::Ready && m.eligible.len() == entries && m.load.is_some()
+    let pools: Pools = chooser.pools.clone().expect("a chooser");
+    until(&pools, "the model pool followed", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| {
+            m.state == PoolState::Ready && m.eligible.len() == entries && m.load.is_some()
         })
     })
     .await;
@@ -203,8 +203,8 @@ fn release(events: &Events, text: &str) {
 }
 
 /// Wait until `instance`, an entry instance, declines offers: its bound
-/// has passed since it learned of its cell's drain, or no other cell
-/// follows its cell.
+/// has passed since it learned of its pool's drain, or no other pool
+/// follows its pool.
 async fn declining<H>(instance: &Running<H>) {
     tokio::time::timeout(PAST_BOUND, async {
         while !instance.segment.declines_offers() {
@@ -292,7 +292,7 @@ fn id<H>(instance: &Running<H>) -> InstanceId {
 }
 
 /// No process setting changed.
-fn unchanged(_: &str, _: &mut gdl_runtime::ProcessConfig<common::cells::Nothing>) {}
+fn unchanged(_: &str, _: &mut gdl_runtime::ProcessConfig<common::pools::Nothing>) {}
 
 /// A sink whose responses ended leaves before the entry instance, which
 /// still holds the response: E, in `f`, holds it open after D finished.
@@ -303,7 +303,7 @@ async fn a_sink_whose_responses_ended_leaves_before_the_entry() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, SEGMENTS).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 1),
@@ -319,7 +319,7 @@ async fn a_sink_whose_responses_ended_leaves_before_the_entry() {
     let (_, held) = send(&chooser, "held", plan, &[("E", "hold:sink-first")]);
     events.wait_for("D:done:c(held)#0", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let Spread {
         hub: model_hub,
         entries,
@@ -362,7 +362,7 @@ async fn a_request_only_segment_leaves_while_a_response_still_streams() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, REQUEST_ONLY).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (REQUEST_ONLY, &["c", "d"], 1),
@@ -379,7 +379,7 @@ async fn a_request_only_segment_leaves_while_a_response_still_streams() {
     let (cx, long) = send(&chooser, "long", plan, &[]);
     events.wait_for("D:held:c(long)#0", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let Spread {
         hub: model_hub,
         entries,
@@ -423,7 +423,7 @@ async fn a_response_path_segment_stays_until_its_own_responses_end() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, RESPONSE_PATH).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (RESPONSE_PATH, &["p", "d"], 1),
@@ -439,7 +439,7 @@ async fn a_response_path_segment_stays_until_its_own_responses_end() {
     let (_, held) = send(&chooser, "path", plan, &[("E", "hold:response-path")]);
     events.wait_for("D:done:c(path)#0", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let Spread {
         hub: model_hub,
         entries,
@@ -470,7 +470,7 @@ async fn a_response_path_segment_stays_until_its_own_responses_end() {
 }
 
 /// An entry whose operator keeps its `next` in the response it returned,
-/// as B does when it retries, may still send a request into the cell: it
+/// as B does when it retries, may still send a request into the pool: it
 /// does not say it detached, and the sink stays for the request B sends
 /// once C, in the entry, lets it go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -480,7 +480,7 @@ async fn an_entry_whose_operator_keeps_its_next_does_not_detach() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, SEGMENTS).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 1),
@@ -499,7 +499,7 @@ async fn an_entry_whose_operator_keeps_its_next_does_not_detach() {
     events.wait_for("C:kept", WAIT).await;
     let mut detached = phase(&m1.hub, "f", SegmentPhase::Detached).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let entry = &m1.entries[0];
     declining(entry).await;
     let sink = &m1.interior[0];
@@ -531,13 +531,13 @@ async fn an_entry_whose_operator_keeps_its_next_does_not_detach() {
 /// the sink it will reach, while the entry still holds the request and
 /// declines offers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_request_held_inside_the_cell_keeps_the_segments_it_will_reach() {
+async fn a_request_held_inside_the_pool_keeps_the_segments_it_will_reach() {
     let spec = spec_of(request_only());
     let directory = Resolving::new();
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, REQUEST_ONLY).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (REQUEST_ONLY, &["c", "d"], 1),
@@ -554,12 +554,12 @@ async fn a_request_held_inside_the_cell_keeps_the_segments_it_will_reach() {
     let (_, mid) = send(&chooser, "mid", plan, &[]);
     events.wait_for("C:mid", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     let sink = &m1.interior[1];
     assert!(
         !closes(sink, Duration::from_millis(500)).await,
-        "the sink closed while a request held inside the cell will reach it"
+        "the sink closed while a request held inside the pool will reach it"
     );
     release(&events, "mid");
     assert_eq!(answer(mid).await, expected(0..3), "the request was cut");
@@ -578,10 +578,10 @@ async fn a_request_held_inside_the_cell_keeps_the_segments_it_will_reach() {
 }
 
 /// An entry instance that never says it detached, as a build from before
-/// it could, leaves its cell to drain as before: the sink stays until the
+/// it could, leaves its pool to drain as before: the sink stays until the
 /// entry has drained, although its own response ended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_entry_that_never_detaches_drains_its_cell_as_before() {
+async fn an_entry_that_never_detaches_drains_its_pool_as_before() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
@@ -592,7 +592,7 @@ async fn an_entry_that_never_detaches_drains_its_cell_as_before() {
             config.runtime.faults.withhold_detached = true;
         }
     };
-    let m1 = cell(&spec, &directory, (SEGMENTS, &["d"], 1), &earlier, &events).await;
+    let m1 = pool(&spec, &directory, (SEGMENTS, &["d"], 1), &earlier, &events).await;
     following(&chooser, 1).await;
     let plan = Plan {
         tokens: 3,
@@ -602,7 +602,7 @@ async fn an_entry_that_never_detaches_drains_its_cell_as_before() {
     events.wait_for("D:done:c(earlier)#0", WAIT).await;
     let mut retired = phase(&m1.hub, "d", SegmentPhase::Retired).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let entry = &m1.entries[0];
     declining(entry).await;
     let sink = &m1.interior[0];
@@ -640,7 +640,7 @@ async fn the_sink_stays_while_one_entry_instance_has_not_detached() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, SEGMENTS).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 2),
@@ -662,7 +662,7 @@ async fn the_sink_stays_while_one_entry_instance_has_not_detached() {
     };
     let mut detached = phase(&m1.hub, "f", SegmentPhase::Detached).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     tokio::time::timeout(PAST_BOUND, async {
         while !shows(&mut detached, id(idle)) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -692,7 +692,7 @@ async fn the_sink_stays_while_one_entry_instance_has_not_detached() {
 }
 
 /// A hub that never answers the announcement that an entry instance
-/// detached holds up neither the entry's drain nor the cell's: the entry
+/// detached holds up neither the entry's drain nor the pool's: the entry
 /// announces that it drained once its response ends, and every instance
 /// leaves, as when the entry never detaches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -707,7 +707,7 @@ async fn an_unanswered_detach_holds_up_no_drain() {
             config.runtime.faults.stall_detached = true;
         }
     };
-    let m1 = cell(&spec, &directory, (SEGMENTS, &["d"], 1), &stalled, &events).await;
+    let m1 = pool(&spec, &directory, (SEGMENTS, &["d"], 1), &stalled, &events).await;
     following(&chooser, 1).await;
     let plan = Plan {
         tokens: 3,
@@ -716,7 +716,7 @@ async fn an_unanswered_detach_holds_up_no_drain() {
     let (_, held) = send(&chooser, "stalled", plan, &[("E", "hold:stalled")]);
     events.wait_for("D:done:c(stalled)#0", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     let_go("stalled");
     assert_eq!(answer(held).await, expected(0..3), "the response was cut");
@@ -742,7 +742,7 @@ async fn a_sender_losing_its_lease_keeps_work_that_it_already_holds() {
     let events = Events::new();
     let hub = global_hub_of(&spec, &directory).await;
     let chooser = chooser(&spec, &hub, REQUEST_ONLY).await;
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (REQUEST_ONLY, &["c", "d"], 1),
@@ -759,7 +759,7 @@ async fn a_sender_losing_its_lease_keeps_work_that_it_already_holds() {
     let (_, pending) = send(&chooser, "lease", plan, &[]);
     events.wait_for("C:lease", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     let sender = &m1.interior[0];
     assert_eq!(sender.segment.admitted(), 1);
@@ -871,7 +871,7 @@ async fn a_drained_source_still_keeps_the_requests_its_segment_forwards() {
     let (_, pending) = send(&chooser, "source", plan, &[]);
     events.wait_for("C:source", WAIT).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     let sender = &m1.interior[0];
     let mut drained = phase(&m1.hub, "c", SegmentPhase::Drained).await;
@@ -920,7 +920,7 @@ async fn a_detached_entry_keeps_a_response_past_the_sinks_stop_bound() {
     let received = response_at_drain_bound(false).await;
     let mut whole = expected(0..3);
     whole.push(Ok(format!("g(b(e(f{STOP_MARK})))")));
-    assert_eq!(received, whole, "the cell drain cut a response at the sink");
+    assert_eq!(received, whole, "the pool drain cut a response at the sink");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -945,7 +945,7 @@ async fn response_at_drain_bound(withhold: bool) -> Vec<gdl::Result<Chunk>> {
             config.runtime.faults.withhold_detached = withhold;
         }
     };
-    let m1 = cell(
+    let m1 = pool(
         &spec,
         &directory,
         (SEGMENTS, &["d"], 1),
@@ -964,7 +964,7 @@ async fn response_at_drain_bound(withhold: bool) -> Vec<gdl::Result<Chunk>> {
     let sink = &m1.interior[0];
     let mut serving = phase(&m1.hub, "d", SegmentPhase::Serving).await;
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     declining(&m1.entries[0]).await;
     assert_eq!(m1.entries[0].segment.admitted(), 1);
     assert_eq!(m1.entries[0].segment.senders(), 0);

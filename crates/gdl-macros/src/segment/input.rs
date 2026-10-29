@@ -40,7 +40,7 @@ pub(crate) struct Segment {
     pub(crate) feeds: Vec<Ident>,
     /// The hosted nodes that take an implementation.
     pub(crate) nodes: Vec<Node>,
-    /// The cell policies it builds and registers, by name.
+    /// The pool policies it builds and registers, by name.
     pub(crate) policies: Vec<(LitStr, Path)>,
     pub(crate) serve: Serve,
 }

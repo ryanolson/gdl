@@ -724,7 +724,7 @@ fn pinned(mirror: &Mirror, files: &gdl_gen::Files) -> String {
 }
 
 /// A spec without classes composes as it always has, byte for byte: every
-/// file of the bundle is pinned, so that a bundle for cells changes
+/// file of the bundle is pinned, so that a bundle for pools changes
 /// nothing of one without them.
 #[test]
 fn a_bundle_without_classes_is_pinned() {
@@ -758,16 +758,16 @@ fn a_bundle_without_classes_is_pinned() {
     assert_eq!(found, expected, "the bundle differs from the pin");
 }
 
-/// Every hub's health check is its own liveness, never the cell health
-/// endpoint, and every service waits only for its own cell's hub, given by
-/// `hub_of`, which names a hub for itself. A parent cell's health answers 503 until its children are
-/// ready, so a wait on it, or on another cell, would deadlock a fleet that
+/// Every hub's health check is its own liveness, never the pool health
+/// endpoint, and every service waits only for its own pool's hub, given by
+/// `hub_of`, which names a hub for itself. A parent pool's health answers 503 until its children are
+/// ready, so a wait on it, or on another pool, would deadlock a fleet that
 /// starts together.
 fn assert_liveness(compose: &serde_json::Value, hub_of: impl Fn(&str) -> String) {
     let text = compose.to_string();
-    assert!(!text.contains("/v1/ext/gdl-cell/health"), "{text}");
+    assert!(!text.contains("/v1/ext/gdl-pool/health"), "{text}");
     let services = compose["services"].as_object().expect("services");
-    // A hub waits for nothing: it is its own cell's hub.
+    // A hub waits for nothing: it is its own pool's hub.
     let hubs: Vec<&String> = services
         .keys()
         .filter(|name| hub_of(name) == **name)
@@ -786,7 +786,7 @@ fn assert_liveness(compose: &serde_json::Value, hub_of: impl Fn(&str) -> String)
         assert_eq!(
             depends.keys().collect::<Vec<_>>(),
             [&hub_of(name)],
-            "{name} waits only for its own cell's hub"
+            "{name} waits only for its own pool's hub"
         );
         assert_eq!(depends[&hub_of(name)]["condition"], "service_healthy");
     }
@@ -826,17 +826,17 @@ const SPLIT: &str = "[segment.front]\nnodes = [\"Http\"]\n[segment.engine]\nnode
 const WHOLE: &str = "[segment.front]\nnodes = [\"Http\", \"Engine\"]\n\
     [class.global]\nsegments = [\"front\"]\n";
 
-/// A global cell and two model cells of [`SPLIT`], the second larger.
+/// A global pool and two model pools of [`SPLIT`], the second larger.
 const ONE_FLEET: &str = "[class.global]\nready = { front = 1 }\n[class.model_x]\nready = { engine = 1 }\n\
-    [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
-    [cell.model-x-01]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
-    [cell.model-x-02]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 2 }\n";
+    [pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [pool.model-x-01]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+    [pool.model-x-02]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 2 }\n";
 
-/// Three cells of layout `split` and one of `whole`.
-const TWO_FLEET: &str = "[cell.global-us]\nlayout = \"split\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
-    [cell.model-x-us]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
-    [cell.model-x-us-2]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 3 }\n\
-    [cell.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n";
+/// Three pools of layout `split` and one of `whole`.
+const TWO_FLEET: &str = "[pool.global-us]\nlayout = \"split\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [pool.model-x-us]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+    [pool.model-x-us-2]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 3 }\n\
+    [pool.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n";
 
 /// `text`, a placement, as the tables of layout `name`.
 fn nest(name: &str, text: &str) -> String {
@@ -890,12 +890,12 @@ fn fleet_bundle(
     (files, compose)
 }
 
-/// The hub that `service` of a fleet's bundle waits for: its cell's, the
-/// service named for the cell.
-fn cell_hub(service: &str) -> String {
+/// The hub that `service` of a fleet's bundle waits for: its pool's, the
+/// service named for the pool.
+fn pool_hub(service: &str) -> String {
     service
         .split_once('_')
-        .map_or(service, |(cell, _)| cell)
+        .map_or(service, |(pool, _)| pool)
         .into()
 }
 
@@ -925,9 +925,9 @@ fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Ve
     (run, build)
 }
 
-/// A fleet's bundle shares no volume: each child cell's hub reports its
-/// record to its parent's hub, so its cells may run on several hosts. Each
-/// parent cell's hub, and only a parent's, mounts a volume of its own,
+/// A fleet's bundle shares no volume: each child pool's hub reports its
+/// record to its parent's hub, so its pools may run on several hosts. Each
+/// parent pool's hub, and only a parent's, mounts a volume of its own,
 /// where it keeps its children's records across its restart.
 #[test]
 fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
@@ -954,7 +954,7 @@ fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
                 );
             }
         }
-        let volumes: Vec<String> = parents.iter().map(|cell| format!("{cell}-state")).collect();
+        let volumes: Vec<String> = parents.iter().map(|pool| format!("{pool}-state")).collect();
         let declared: Vec<&String> = compose["volumes"]
             .as_object()
             .expect("the volumes")
@@ -962,7 +962,7 @@ fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
             .collect();
         assert_eq!(declared, volumes.iter().collect::<Vec<_>>(), "{compose}");
         for (name, service) in compose["services"].as_object().expect("services") {
-            let state = &service["environment"]["GDL_CELL__STATE_DIR"];
+            let state = &service["environment"]["GDL_POOL__STATE_DIR"];
             if parents.contains(&name.as_str()) {
                 assert_eq!(
                     service["volumes"],
@@ -972,7 +972,7 @@ fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
                 assert_eq!(state, "/var/lib/gdl-hub", "{name}");
             } else {
                 assert!(service.get("volumes").is_none(), "{name}: {service}");
-                // A parent's segments read the hub's `[cell]`, and nothing
+                // A parent's segments read the hub's `[pool]`, and nothing
                 // else names a state directory.
                 let parents_segment = parents
                     .iter()
@@ -983,12 +983,12 @@ fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
     }
 }
 
-/// A fleet of one layout: a hub per cell, and each cell's segments of its
-/// class, configured as that cell and waiting only for its hub; each
+/// A fleet of one layout: a hub per pool, and each pool's segments of its
+/// class, configured as that pool and waiting only for its hub; each
 /// child reporting to its parent's hub; one image per segment, which both
-/// model cells run.
+/// model pools run.
 #[test]
-fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
+fn a_fleet_of_one_layout_deploys_each_pool_with_its_own_hub() {
     let mirror = Mirror::new();
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
     let (files, compose) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
@@ -1004,49 +1004,49 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
             "model-x-02_engine"
         ]
     );
-    for cell in fleet.cells() {
-        let hub = &services[&cell.name];
-        assert_eq!(hub["image"], "api-hub", "{}", cell.name);
+    for pool in fleet.pools() {
+        let hub = &services[&pool.name];
+        assert_eq!(hub["image"], "api-hub", "{}", pool.name);
         let env = hub["environment"].as_object().expect("the hub's variables");
-        assert_eq!(env["GDL_CELL__NAME"], cell.name.as_str());
-        assert_eq!(env["GDL_CELL__CLASS"], cell.class.as_str());
-        assert_eq!(env["GDL_CELL__DIRECTORY"], "relay");
-        assert!(env.get("GDL_CELL__DIR").is_none(), "{env:?}");
-        assert_eq!(env["GDL_CELL__HUB"], format!("{}:1337", cell.name));
-        let segment = if cell.class == "global" {
+        assert_eq!(env["GDL_POOL__NAME"], pool.name.as_str());
+        assert_eq!(env["GDL_POOL__CLASS"], pool.class.as_str());
+        assert_eq!(env["GDL_POOL__DIRECTORY"], "relay");
+        assert!(env.get("GDL_POOL__DIR").is_none(), "{env:?}");
+        assert_eq!(env["GDL_POOL__HUB"], format!("{}:1337", pool.name));
+        let segment = if pool.class == "global" {
             "front"
         } else {
             "engine"
         };
-        let service = &services[&format!("{}_{segment}", cell.name)];
+        let service = &services[&format!("{}_{segment}", pool.name)];
         assert_eq!(service["image"], format!("api-{segment}"));
         assert!(service.get("volumes").is_none(), "{service}");
         let own = service["environment"]
             .as_object()
             .expect("the segment's variables");
-        assert_eq!(own["GDL_HUB__HOST"], cell.name.as_str());
-        // A segment's `[cell]` is its hub's.
-        let cell_vars = |vars: &serde_json::Map<String, serde_json::Value>| {
+        assert_eq!(own["GDL_HUB__HOST"], pool.name.as_str());
+        // A segment's `[pool]` is its hub's.
+        let pool_vars = |vars: &serde_json::Map<String, serde_json::Value>| {
             vars.iter()
-                .filter(|(name, _)| name.starts_with("GDL_CELL__"))
+                .filter(|(name, _)| name.starts_with("GDL_POOL__"))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(cell_vars(own), cell_vars(env), "{}", cell.name);
+        assert_eq!(pool_vars(own), pool_vars(env), "{}", pool.name);
     }
-    let env = |cell: &str, key: &str| services[cell]["environment"][key].clone();
-    assert_eq!(env("model-x-01", "GDL_CELL__READY__ENGINE"), "1");
-    assert_eq!(env("model-x-02", "GDL_CELL__READY__ENGINE"), "2");
-    assert_eq!(env("model-x-02", "GDL_CELL__HOME"), "global-us");
-    assert_eq!(env("global-us", "GDL_CELL__HOME"), serde_json::Value::Null);
+    let env = |pool: &str, key: &str| services[pool]["environment"][key].clone();
+    assert_eq!(env("model-x-01", "GDL_POOL__READY__ENGINE"), "1");
+    assert_eq!(env("model-x-02", "GDL_POOL__READY__ENGINE"), "2");
+    assert_eq!(env("model-x-02", "GDL_POOL__HOME"), "global-us");
+    assert_eq!(env("global-us", "GDL_POOL__HOME"), serde_json::Value::Null);
     // A child reports to its parent's hub, under the name of its service;
-    // the global cell reports nowhere.
-    assert_eq!(env("model-x-02", "GDL_CELL__PARENT_HUB"), "global-us:1337");
+    // the global pool reports nowhere.
+    assert_eq!(env("model-x-02", "GDL_POOL__PARENT_HUB"), "global-us:1337");
     assert_eq!(
-        env("global-us", "GDL_CELL__PARENT_HUB"),
+        env("global-us", "GDL_POOL__PARENT_HUB"),
         serde_json::Value::Null
     );
-    // One image per segment, built once, which both model cells run.
+    // One image per segment, built once, which both model pools run.
     assert_eq!(
         dockerfiles(&files),
         ["engine/Dockerfile", "front/Dockerfile", "hub/Dockerfile"]
@@ -1064,20 +1064,20 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
     );
     assert_eq!(running(&compose, "api-hub").1, ["global-us"]);
     assert!(files.contains_key(Path::new("deployment.json")));
-    // An image's settings are every cell's: its cell comes from the
+    // An image's settings are every pool's: its pool comes from the
     // service's variables.
     for segment in ["front", "engine"] {
         let config = &files[&Path::new(segment).join("config.toml")];
         assert!(
-            !config.contains("[hub]") && !config.contains("[cell]"),
+            !config.contains("[hub]") && !config.contains("[pool]"),
             "{config}"
         );
     }
-    assert_liveness(&compose, cell_hub);
+    assert_liveness(&compose, pool_hub);
 }
 
-/// A fleet whose cells run two layouts builds each layout's images once,
-/// each from its own layout's crates, and each cell runs its own layout's
+/// A fleet whose pools run two layouts builds each layout's images once,
+/// each from its own layout's crates, and each pool runs its own layout's
 /// segments and its own layout's hub.
 #[test]
 fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
@@ -1166,13 +1166,13 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
     }
     assert!(!files.contains_key(Path::new("deployment.json")));
     assert_eq!(
-        services["global-eu"]["environment"]["GDL_CELL__LAYOUT"],
+        services["global-eu"]["environment"]["GDL_POOL__LAYOUT"],
         "whole"
     );
-    assert_liveness(&compose, cell_hub);
+    assert_liveness(&compose, pool_hub);
 }
 
-/// No hub can be scaled, and the bundle's README says why: a cell's record
+/// No hub can be scaled, and the bundle's README says why: a pool's record
 /// has one writer.
 #[test]
 fn no_hub_can_be_scaled() {
@@ -1187,7 +1187,7 @@ fn no_hub_can_be_scaled() {
         let mut names = Vec::new();
         for (name, service) in services {
             let fixed = service.get("container_name");
-            if fleet.cell(name).is_some() {
+            if fleet.pool(name).is_some() {
                 // Compose refuses to scale a service whose container is named.
                 names.push(fixed.expect("a hub's container name").clone());
                 assert!(service.get("deploy").is_none() && service.get("scale").is_none());
@@ -1198,11 +1198,11 @@ fn no_hub_can_be_scaled() {
         let count = names.len();
         names.dedup();
         assert_eq!(names.len(), count, "{names:?}");
-        assert_eq!(count, fleet.cells().count());
+        assert_eq!(count, fleet.pools().count());
         let readme = &files[Path::new("README.md")];
         for needle in [
             "must never run as two at once",
-            "a cell's record has one writer",
+            "a pool's record has one writer",
             "stops the old container before it starts the new one",
             "share no volume",
             "`relay`",
@@ -1213,7 +1213,7 @@ fn no_hub_can_be_scaled() {
     }
 }
 
-/// The fleet guide reads a cell's health and drains it from a helper
+/// The fleet guide reads a pool's health and drains it from a helper
 /// container on the bundle's network (`docs/src/guides/fleet.md`). That
 /// works only while no hub publishes a host port, and while every service
 /// is on Compose's default network, which Compose names `<project>_default`
@@ -1240,24 +1240,24 @@ fn a_fleets_hubs_publish_no_host_port_and_share_the_default_network() {
             for key in ["networks", "network_mode"] {
                 assert!(service.get(key).is_none(), "{name}: {service}");
             }
-            if fleet.cell(name).is_some() {
+            if fleet.pool(name).is_some() {
                 hubs += 1;
                 assert!(service.get("ports").is_none(), "{name}: {service}");
             }
         }
-        assert_eq!(hubs, fleet.cells().count());
+        assert_eq!(hubs, fleet.pools().count());
     }
 }
 
-/// Each hub's `GDL_CELL__*` variables, read as the hub reads them against
-/// its layout's deployment, are its cell's settings as the fleet gives
+/// Each hub's `GDL_POOL__*` variables, read as the hub reads them against
+/// its layout's deployment, are its pool's settings as the fleet gives
 /// them, with the address other hubs reach it at and, for a child, its
 /// parent's: the `relay` backend, which needs no shared volume.
 #[test]
-fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
+fn each_hub_reads_its_pools_settings_as_the_fleet_gives_them() {
     let mirror = Mirror::new();
-    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, SPLIT), ONE_FLEET);
-    assert_each_hub_reads_its_cell(&mirror, &two_layouts(&mirror), TWO_FLEET);
+    assert_each_hub_reads_its_pool(&mirror, &placed(&mirror, SPLIT), ONE_FLEET);
+    assert_each_hub_reads_its_pool(&mirror, &two_layouts(&mirror), TWO_FLEET);
 }
 
 /// A segment's name may hold `__`, which the environment's keys use
@@ -1270,28 +1270,28 @@ fn a_quorum_of_a_segment_whose_name_holds_a_separator_reads_back() {
         .replace("\"engine\"", "\"engine__work\"");
     let fleet = ONE_FLEET.replace("engine =", "engine__work =");
     assert!(split.contains("engine__work") && fleet.contains("engine__work"));
-    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, &split), &fleet);
+    assert_each_hub_reads_its_pool(&mirror, &placed(&mirror, &split), &fleet);
 }
 
 /// A name that reads as another type when it is written bare, such as a
-/// cell named `true`, reads back as the name it is, in the hub's
+/// pool named `true`, reads back as the name it is, in the hub's
 /// variables and in its segments' `GDL_HUB__HOST`.
 #[test]
 fn a_name_that_reads_as_another_type_reads_back_as_written() {
     let mirror = Mirror::new();
     let fleet = ONE_FLEET.replace("global-us", "true");
-    assert!(fleet.contains("[cell.true]") && fleet.contains("home = \"true\""));
-    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, SPLIT), &fleet);
+    assert!(fleet.contains("[pool.true]") && fleet.contains("home = \"true\""));
+    assert_each_hub_reads_its_pool(&mirror, &placed(&mirror, SPLIT), &fleet);
 }
 
-/// The check of [`each_hub_reads_its_cells_settings_as_the_fleet_gives_them`]
+/// The check of [`each_hub_reads_its_pools_settings_as_the_fleet_gives_them`]
 /// for `spec` and the fleet `fleet`. A segment's `GDL_HUB__HOST` is its
-/// hub's name, written as the hub's own `GDL_CELL__NAME` is.
-fn assert_each_hub_reads_its_cell(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: &str) {
+/// hub's name, written as the hub's own `GDL_POOL__NAME` is.
+fn assert_each_hub_reads_its_pool(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: &str) {
     let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
     let (files, compose) = fleet_bundle(mirror, spec, &fleet);
-    for cell in fleet.cells() {
-        let deployment = cell
+    for pool in fleet.pools() {
+        let deployment = pool
             .layout
             .as_ref()
             .map_or("deployment.json".into(), |layout| {
@@ -1299,52 +1299,52 @@ fn assert_each_hub_reads_its_cell(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: 
             });
         let deployment: gdl_model::DeploymentSpec =
             serde_json::from_str(&files[Path::new(&deployment)]).expect("the hub's spec");
-        let env = compose["services"][&cell.name]["environment"]
+        let env = compose["services"][&pool.name]["environment"]
             .as_object()
             .expect("the hub's variables");
         let vars = env
             .iter()
             .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
-        let read = gdl_hub::cell_from_vars(&deployment, vars)
-            .unwrap_or_else(|error| panic!("{}: {error}", cell.name))
-            .expect("a cell");
+        let read = gdl_hub::pool_from_vars(&deployment, vars)
+            .unwrap_or_else(|error| panic!("{}: {error}", pool.name))
+            .expect("a pool");
         let layout =
             gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
         let parent = layout
             .boundaries()
             .iter()
-            .any(|boundary| boundary.from == cell.class);
-        let mut expected = cell.clone();
+            .any(|boundary| boundary.from == pool.class);
+        let mut expected = pool.clone();
         expected.directory = gdl_model::DirectoryBackend::Relay {
-            parent_hub: cell.home.as_ref().map(|home| format!("{home}:1337")),
+            parent_hub: pool.home.as_ref().map(|home| format!("{home}:1337")),
             state_dir: parent.then(|| "/var/lib/gdl-hub".into()),
         };
-        expected.hub = Some(format!("{}:1337", cell.name));
+        expected.hub = Some(format!("{}:1337", pool.name));
         assert_eq!(read, expected);
-        // Each of its segments reads the same `[cell]`, which fits an
+        // Each of its segments reads the same `[pool]`, which fits an
         // instance of the segment, as the instance checks at its launch.
         let services = compose["services"].as_object().expect("services");
         let mut segments = 0;
         for (name, service) in services {
-            let Some(segment) = name.strip_prefix(&format!("{}_", cell.name)) else {
+            let Some(segment) = name.strip_prefix(&format!("{}_", pool.name)) else {
                 continue;
             };
             read.check(&layout, segment)
                 .unwrap_or_else(|problems| panic!("{name}: {problems}"));
             assert_eq!(
-                service["environment"]["GDL_HUB__HOST"], env["GDL_CELL__NAME"],
+                service["environment"]["GDL_HUB__HOST"], env["GDL_POOL__NAME"],
                 "{name}"
             );
             segments += 1;
         }
-        assert!(segments > 0, "{}", cell.name);
+        assert!(segments > 0, "{}", pool.name);
     }
 }
 
-/// `compose` without a fleet refuses a spec that deploys by cell, one with
+/// `compose` without a fleet refuses a spec that deploys by pool, one with
 /// classes or with several layouts, and says that it needs the fleet.
 #[test]
-fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
+fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_pool() {
     let mirror = Mirror::new();
     for (spec, why) in [
         (placed(&mirror, SPLIT), "with classes"),
@@ -1365,19 +1365,19 @@ fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
             &mirror.target(),
             gdl_gen::Sources::Fetched,
         )
-        .expect_err("a spec that deploys by cell")
+        .expect_err("a spec that deploys by pool")
         .to_string();
         assert_eq!(
             error,
             format!(
-                "`compose` deploys a spec {why} by cell, as its fleet file says: give it `--fleet <fleet.toml>`"
+                "`compose` deploys a spec {why} by pool, as its fleet file says: give it `--fleet <fleet.toml>`"
             )
         );
         assert!(!out.exists());
     }
 }
 
-/// A fleet that `check` refuses, or that has no cells, deploys nothing,
+/// A fleet that `check` refuses, or that has no pools, deploys nothing,
 /// and `compose` writes nothing.
 #[test]
 fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
@@ -1387,13 +1387,13 @@ fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
         .tempdir()
         .expect("a directory");
     let out = temp.path().join("bundle");
-    let childless = "[cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n";
+    let childless = "[pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n";
     for (fleet, expected) in [
         (
             childless,
-            "[cell.global-us]: no child of class `model_x` in layout `default`",
+            "[pool.global-us]: no child of class `model_x` in layout `default`",
         ),
-        ("", "the fleet has no cells, so there is nothing to deploy"),
+        ("", "the fleet has no pools, so there is nothing to deploy"),
     ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
         let error = gdl_gen::compose(
@@ -1410,10 +1410,10 @@ fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
     }
 }
 
-/// A segment that publishes host ports cannot run in two cells on one
+/// A segment that publishes host ports cannot run in two pools on one
 /// host: the second container could not bind them.
 #[test]
-fn a_segment_that_publishes_ports_runs_in_one_cell() {
+fn a_segment_that_publishes_ports_runs_in_one_pool() {
     let mirror = Mirror::new();
     let ports = "[deployment.segment.front]\nports = [\"8082:8082\"]\n";
     let spec = placed(
@@ -1432,17 +1432,17 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
-    .expect_err("two cells publish one port")
+    .expect_err("two pools publish one port")
     .to_string();
     assert!(
         error.contains(
-            "segment `front` publishes host port `8082:8082`, and runs in cells `global-eu`, `global-us`"
+            "segment `front` publishes host port `8082:8082`, and runs in pools `global-eu`, `global-us`"
         ),
         "{error}"
     );
-    // In one cell it publishes them.
+    // In one pool it publishes them.
     let one = gdl_model::Fleet::from_toml(
-        "[cell.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n",
+        "[pool.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n",
     )
     .expect("a fleet");
     let (_, compose) = fleet_bundle(&mirror, &spec, &one);
@@ -1454,9 +1454,9 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
 
 /// A port that Docker gives a host port of its own choosing binds nothing
 /// fixed, so a segment that publishes only such ports runs in several
-/// cells, each container with its own host port.
+/// pools, each container with its own host port.
 #[test]
-fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
+fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_pools() {
     let mirror = Mirror::new();
     let ports =
         "[deployment.segment.engine]\nports = [\"9000\", \"127.0.0.1::9001\", \"9002/udp\"]\n";
@@ -1485,11 +1485,11 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
             &mirror.target(),
             gdl_gen::Sources::Fetched,
         )
-        .expect_err("two cells bind one host port")
+        .expect_err("two pools bind one host port")
         .to_string();
         assert!(
             error.contains(&format!(
-                "segment `engine` publishes host port `{fixed}`, and runs in cells `model-x-01`, `model-x-02`"
+                "segment `engine` publishes host port `{fixed}`, and runs in pools `model-x-01`, `model-x-02`"
             )),
             "{error}"
         );
@@ -1497,7 +1497,7 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
 }
 
 /// A host port of 0 asks Docker for a free one, as a port without a host
-/// port does, so it too runs in several cells.
+/// port does, so it too runs in several pools.
 #[test]
 fn a_host_port_of_zero_lets_docker_choose() {
     let mirror = Mirror::new();
@@ -1549,8 +1549,8 @@ fn the_cli_composes_a_fleet() {
         &std::fs::read_to_string(out.join("compose.yaml")).expect("compose.yaml"),
     )
     .expect("compose.yaml");
-    for cell in ["global-us", "model-x-01", "model-x-02"] {
-        assert!(compose["services"][cell].is_object(), "{compose}");
+    for pool in ["global-us", "model-x-01", "model-x-02"] {
+        assert!(compose["services"][pool].is_object(), "{compose}");
     }
 }
 
@@ -1649,10 +1649,10 @@ fn a_segment_mounts_the_secrets_it_names() {
     assert!(readme.contains("/run/secrets/fingerprint"), "{readme}");
 }
 
-/// In a fleet's bundle, each cell's service of a segment mounts the
+/// In a fleet's bundle, each pool's service of a segment mounts the
 /// segment's secrets, and the bundle declares them beside its volumes.
 #[test]
-fn each_cells_segment_mounts_its_secrets() {
+fn each_pools_segment_mounts_its_secrets() {
     let mirror = Mirror::new();
     let keys = tempfile::Builder::new()
         .prefix("gdl-secrets-")

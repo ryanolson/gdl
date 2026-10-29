@@ -84,13 +84,13 @@ fn a_local_bundle_builds_from_a_context_that_holds_its_crates() {
 const SPLIT: &str = "[segment.front]\nnodes = [\"Http\"]\n[segment.engine]\nnodes = [\"Engine\"]\n\
     [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n";
 
-/// A global cell and two model cells of [`SPLIT`].
+/// A global pool and two model pools of [`SPLIT`].
 const FLEET: &str = "[class.global]\nready = { front = 1 }\n[class.model_x]\nready = { engine = 1 }\n\
-    [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
-    [cell.model-x-01]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
-    [cell.model-x-02]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n";
+    [pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [pool.model-x-01]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+    [pool.model-x-02]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n";
 
-/// `--local` with `--fleet`: each cell has its own hub, its segments wait
+/// `--local` with `--fleet`: each pool has its own hub, its segments wait
 /// only for it, and every image builds from the local context, the hub
 /// from `[gdl] path` and the segments from the crates the spec names by
 /// path.
@@ -117,7 +117,7 @@ fn local_fleet(out: &Path) -> (gdl_model::Fleet, gdl_gen::Files) {
 }
 
 #[test]
-fn a_local_fleet_builds_each_cells_images_from_local_sources() {
+fn a_local_fleet_builds_each_pools_images_from_local_sources() {
     let (fleet, files) = local_fleet(&root().join("target/gdl-local-fleet"));
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
@@ -133,16 +133,16 @@ fn a_local_fleet_builds_each_cells_images_from_local_sources() {
             "model-x-02_engine"
         ]
     );
-    for cell in fleet.cells() {
-        assert_eq!(services[&cell.name]["image"], "api-hub");
-        let segment = match cell.class.as_str() {
+    for pool in fleet.pools() {
+        assert_eq!(services[&pool.name]["image"], "api-hub");
+        let segment = match pool.class.as_str() {
             "global" => "front",
             _ => "engine",
         };
-        let service = &services[&format!("{}_{segment}", cell.name)];
+        let service = &services[&format!("{}_{segment}", pool.name)];
         let depends = service["depends_on"].as_object().expect("depends_on");
-        assert_eq!(depends.keys().collect::<Vec<_>>(), [&cell.name]);
-        assert_eq!(service["environment"]["GDL_HUB__HOST"], cell.name.as_str());
+        assert_eq!(depends.keys().collect::<Vec<_>>(), [&pool.name]);
+        assert_eq!(service["environment"]["GDL_HUB__HOST"], pool.name.as_str());
     }
     // One service builds each image, from the context that holds the
     // repository, with the Dockerfile's own ignore file.
@@ -987,7 +987,7 @@ fn answers(project: &Project) {
     );
 }
 
-/// A spec that binds a cell policy by path: with `--local`, the chooser's
+/// A spec that binds a pool policy by path: with `--local`, the chooser's
 /// image builds the policy's crate from the context, and only the chooser
 /// depends on it; without, the bundle is refused and names the crate, as
 /// a node crate by path is.
@@ -996,8 +996,8 @@ fn a_local_bundle_builds_a_bound_policy_into_its_chooser() {
     let spec = spec("crates/gdl-gen/tests/fixtures/policy/gdl.toml");
     let fleet = gdl_model::Fleet::from_toml(
         "[class.global]\nready = { front = 1 }\n[class.model]\nready = { model = 1 }\n\
-         [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
-         [cell.llama-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
+         [pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+         [pool.llama-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
     )
     .expect("a fleet");
     let compose = |sources| {

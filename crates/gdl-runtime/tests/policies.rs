@@ -1,7 +1,7 @@
-//! A registered cell policy at a class cut, end to end: a frontend sends
+//! A registered pool policy at a class cut, end to end: a frontend sends
 //! a request that carries a large internal request and a small routing
-//! hint into a class of two model cells, and the policy reads only the
-//! hint, through a typed projection, to choose the cell. Every instance
+//! hint into a class of two model pools, and the policy reads only the
+//! hint, through a typed projection, to choose the pool. Every instance
 //! and hub runs in this process, over loopback TCP.
 
 mod common;
@@ -9,18 +9,18 @@ mod common;
 use std::sync::Arc;
 
 use common::boundary::{RUNTIME, run_graph_in};
-use common::cells::{
-    GLOBAL, REGION, Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until,
+use common::pools::{
+    GLOBAL, REGION, Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until,
 };
 use common::{WAIT, collect};
 use gdl::{
-    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Cx, Items, Next, NoCell, Projected,
+    Cx, Items, Next, NoPool, Pool, PoolChoice, PoolPolicies, PoolPolicy, PoolRequest, Projected,
     Projection, Sink, items,
 };
-use gdl_model::CellSettings;
+use gdl_model::PoolSettings;
 use gdl_runtime::{
-    BwdEnd, CellState, DSink, Deployment, DeploymentSpec, FwdEnd, HopInfo, Manifest, NodeInfo,
-    Placement, Register, Role, TypeInfo, wire_codec,
+    BwdEnd, DSink, Deployment, DeploymentSpec, FwdEnd, HopInfo, Manifest, NodeInfo, Placement,
+    PoolState, Register, Role, TypeInfo, wire_codec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,28 +59,28 @@ struct Hinted {
     hint: Hint,
 }
 
-/// The cell whose name starts with the request's model; a model that no
-/// cell serves is named in the request's error.
+/// The pool whose name starts with the request's model; a model that no
+/// pool serves is named in the request's error.
 struct ByModel;
 
-impl CellPolicy for ByModel {
+impl PoolPolicy for ByModel {
     type Head = Projected<Hinted>;
 
     fn choose(
         &self,
-        request: CellRequest<'_, Projected<Hinted>>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
+        request: PoolRequest<'_, Projected<Hinted>>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
         let model = request.head().hint.model.as_str();
-        let serves = |cell: &Cell| cell.name().starts_with(model);
-        if !cells.iter().any(serves) {
-            return Err(NoCell::because(format!("no cell serves model `{model}`")));
+        let serves = |pool: &Pool| pool.name().starts_with(model);
+        if !pools.iter().any(serves) {
+            return Err(NoPool::because(format!("no pool serves model `{model}`")));
         }
-        cells
+        pools
             .iter()
-            .position(|cell| serves(cell) && cell.takes_work() && !request.is_excluded(cell))
-            .map(CellChoice::new)
-            .ok_or_else(NoCell::new)
+            .position(|pool| serves(pool) && pool.takes_work() && !request.is_excluded(pool))
+            .map(PoolChoice::new)
+            .ok_or_else(NoPool::new)
     }
 }
 
@@ -94,21 +94,21 @@ struct Misread {
 
 struct Misreading;
 
-impl CellPolicy for Misreading {
+impl PoolPolicy for Misreading {
     type Head = Projected<Misread>;
 
     fn choose(
         &self,
-        _: CellRequest<'_, Projected<Misread>>,
-        _: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
-        Err(NoCell::new())
+        _: PoolRequest<'_, Projected<Misread>>,
+        _: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
+        Err(NoPool::new())
     }
 }
 
-/// D: answers with its cell's name and how many messages it was sent.
+/// D: answers with its pool's name and how many messages it was sent.
 struct Answer {
-    cell: String,
+    pool: String,
 }
 
 impl Sink for Answer {
@@ -116,12 +116,12 @@ impl Sink for Answer {
     type Item = String;
 
     async fn generate(&self, _: Cx, req: Routed) -> gdl::Result<Items<String>> {
-        let answer = format!("{}:{}", self.cell, req.request.messages.len());
+        let answer = format!("{}:{}", self.pool, req.request.messages.len());
         Ok(items(futures::stream::once(async move { Ok(answer) })))
     }
 }
 
-/// `S => D` across the class cut, whose cells of `model` are chosen by
+/// `S => D` across the class cut, whose pools of `model` are chosen by
 /// `policy`.
 fn spec(policy: &str) -> DeploymentSpec {
     let graph = Manifest {
@@ -153,31 +153,31 @@ fn spec(policy: &str) -> DeploymentSpec {
         .segment("d", ["D"])
         .class("global", ["a"])
         .class("model", ["d"])
-        .cell_policy(
+        .pool_policy(
             "model",
-            gdl_model::CellPolicy {
+            gdl_model::PoolPolicy {
                 policy: policy.into(),
             },
         );
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-/// The graph as every instance assembles it; D answers as `cell`.
+/// The graph as every instance assembles it; D answers as `pool`.
 fn graph(
     deployment: &Deployment,
-    cell: &str,
+    pool: &str,
 ) -> gdl::Result<impl Next<Routed, String> + Register + use<>> {
     deployment.hop(
         0,
         FwdEnd::new(wire_codec!(Routed)),
-        DSink::new(Arc::new(Answer { cell: cell.into() })),
+        DSink::new(Arc::new(Answer { pool: pool.into() })),
         BwdEnd::new(wire_codec!(String)),
     )
 }
 
-/// The settings of the hub of the model cell `name`, reached under the
+/// The settings of the hub of the model pool `name`, reached under the
 /// name `hub`: one `d` makes it ready.
-fn model_hub(name: &str, hub: &str) -> CellSettings {
+fn model_hub(name: &str, hub: &str) -> PoolSettings {
     toml::from_str(&format!(
         "name = '{name}'\nclass = 'model'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
          hub = '{hub}'\ndirectory = 'memory'\n[ready]\nd = 1\n"
@@ -188,15 +188,15 @@ fn model_hub(name: &str, hub: &str) -> CellSettings {
 /// The chooser's settings at `hub`, with `policies` registered.
 fn chooser_settings(
     hub: &velo_hub::Hub,
-    policies: CellPolicies,
-) -> gdl_runtime::ProcessConfig<common::cells::Nothing> {
+    policies: PoolPolicies,
+) -> gdl_runtime::ProcessConfig<common::pools::Nothing> {
     let mut config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
-        &format!("{}{RUNTIME}", global_cell()),
+        &format!("{}{RUNTIME}", global_pool()),
     );
-    config.runtime.cell_policies = policies;
+    config.runtime.pool_policies = policies;
     config
 }
 
@@ -213,17 +213,17 @@ fn routed(model: &str) -> Routed {
     }
 }
 
-/// Two model cells of one class, and a frontend whose policy reads only
+/// Two model pools of one class, and a frontend whose policy reads only
 /// the request's hint: two requests that differ only in the hint's model
-/// reach different cells, each the cell that serves the model, with the
-/// whole request. A model no cell serves fails with `Routing`, which
+/// reach different pools, each the pool that serves the model, with the
+/// whole request. A model no pool serves fails with `Routing`, which
 /// names the model as the policy gave it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_hint_chooses_the_cell_across_the_class_cut() {
+async fn the_hint_chooses_the_pool_across_the_class_cut() {
     let spec = spec("by_model");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
-    let mut policies = CellPolicies::new();
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let mut policies = PoolPolicies::new();
     policies.add("by_model", ByModel).expect("registered");
     let config = chooser_settings(&global, policies);
     let chooser = run_graph_in(
@@ -237,14 +237,14 @@ async fn the_hint_chooses_the_cell_across_the_class_cut() {
     .await
     .expect("the chooser serves");
     let mut models = Vec::new();
-    for (cell, hub_name) in [(LLAMA, "llama-hub:1337"), (QWEN, "qwen-hub:1337")] {
-        let (hub, _) = cell_hub_of(&spec, model_hub(cell, hub_name), &directory).await;
+    for (pool, hub_name) in [(LLAMA, "llama-hub:1337"), (QWEN, "qwen-hub:1337")] {
+        let (hub, _) = pool_hub_of(&spec, model_hub(pool, hub_name), &directory).await;
         let config = settings(
             hub.public_addr().port(),
             hub.control_addr().port(),
             5_000,
             &format!(
-                "[cell]\nname = '{cell}'\nclass = 'model'\nregion = '{REGION}'\ndirectory = 'memory'\n{RUNTIME}"
+                "[pool]\nname = '{pool}'\nclass = 'model'\nregion = '{REGION}'\ndirectory = 'memory'\n{RUNTIME}"
             ),
         );
         let model = run_graph_in(
@@ -253,17 +253,17 @@ async fn the_hint_chooses_the_cell_across_the_class_cut() {
             SEGMENTS,
             &spec,
             config.runtime.clone(),
-            &|deployment| graph(deployment, cell),
+            &|deployment| graph(deployment, pool),
         )
         .await
         .expect("a model instance serves");
         models.push((hub, model));
     }
-    let cells = chooser.cells.clone().expect("the frontend chooses");
-    until(&cells, "both model cells ready", |cells| {
-        [LLAMA, QWEN].iter().all(|cell| {
-            followed(cells, "d", cell)
-                .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 1)
+    let pools = chooser.pools.clone().expect("the frontend chooses");
+    until(&pools, "both model pools ready", |pools| {
+        [LLAMA, QWEN].iter().all(|pool| {
+            followed(pools, "d", pool)
+                .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 1)
         })
     })
     .await;
@@ -279,19 +279,19 @@ async fn the_hint_chooses_the_cell_across_the_class_cut() {
             .expect("answered in time")
         }
     };
-    for (model, cell) in [("qwen", QWEN), ("llama", LLAMA), ("qwen", QWEN)] {
+    for (model, pool) in [("qwen", QWEN), ("llama", LLAMA), ("qwen", QWEN)] {
         let answer = ask(model).await.expect("answered");
         assert_eq!(answer.len(), 1, "{answer:?}");
         assert_eq!(
             answer[0].as_ref().expect("an answer"),
-            &format!("{cell}:100"),
+            &format!("{pool}:100"),
             "{model}"
         );
     }
-    let error = ask("mistral").await.expect_err("no cell serves mistral");
+    let error = ask("mistral").await.expect_err("no pool serves mistral");
     assert_eq!(error.kind(), gdl::ErrorKind::Routing, "{error}");
     let message = error.to_string();
-    for part in ["`model`", "by_model", "no cell serves model `mistral`"] {
+    for part in ["`model`", "by_model", "no pool serves model `mistral`"] {
         assert!(message.contains(part), "{part}: {message}");
     }
     for (hub, model) in models {
@@ -302,15 +302,15 @@ async fn the_hint_chooses_the_cell_across_the_class_cut() {
     global.shutdown().await.expect("valid test fixture");
 }
 
-/// A frontend whose placement names a cell policy that nothing registers
+/// A frontend whose placement names a pool policy that nothing registers
 /// refuses to launch, before it registers with its hub, naming the policy
 /// and the class; with the policy registered, it launches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unregistered_policy_is_refused_at_launch() {
     let spec = spec("by_model");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
-    let launch = |policies: CellPolicies| {
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let launch = |policies: PoolPolicies| {
         let config = chooser_settings(&global, policies);
         let spec = &spec;
         async move {
@@ -324,16 +324,16 @@ async fn an_unregistered_policy_is_refused_at_launch() {
             launched.map(|_| ())
         }
     };
-    let Err(error) = launch(CellPolicies::new()).await else {
+    let Err(error) = launch(PoolPolicies::new()).await else {
         panic!("a policy nothing registers was taken");
     };
     let message = error.to_string();
     assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{message}");
     assert!(
-        message.contains("by_model") && message.contains("[cells.model]"),
+        message.contains("by_model") && message.contains("[pools.model]"),
         "{message}"
     );
-    let mut policies = CellPolicies::new();
+    let mut policies = PoolPolicies::new();
     policies.add("by_model", ByModel).expect("registered");
     launch(policies)
         .await
@@ -348,8 +348,8 @@ async fn an_unregistered_policy_is_refused_at_launch() {
 async fn a_projection_of_another_type_is_refused_at_start() {
     let spec = spec("misreading");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
-    let mut policies = CellPolicies::new();
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let mut policies = PoolPolicies::new();
     policies.add("misreading", Misreading).expect("registered");
     let config = chooser_settings(&global, policies);
     let started = tokio::time::timeout(
@@ -386,15 +386,15 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
     const SEGMENT: &'static str = "a";
     const SEGMENTS: &'static [&'static str] = SEGMENTS;
     const GRAPH_CONFIG: &'static str = "";
-    type Settings = common::cells::Nothing;
+    type Settings = common::pools::Nothing;
     type Hosts = ();
 
     async fn build(
-        _: common::cells::Nothing,
+        _: common::pools::Nothing,
         builder: &gdl_runtime::Builder,
     ) -> Result<(), gdl_runtime::Failure> {
         if REGISTERS {
-            builder.cell_policy("by_model", ByModel)?;
+            builder.pool_policy("by_model", ByModel)?;
         }
         Ok(())
     }
@@ -425,7 +425,7 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
 async fn a_segment_binary_registers_a_policy_before_its_launch() {
     let spec = spec("by_model");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()
         .prefix("gdl-policies-")
         .tempdir()
@@ -437,7 +437,7 @@ async fn a_segment_binary_registers_a_policy_before_its_launch() {
             "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{}{RUNTIME}",
             global.public_addr().port(),
             global.control_addr().port(),
-            global_cell(),
+            global_pool(),
         ),
     )
     .expect("settings");
@@ -455,7 +455,7 @@ async fn a_segment_binary_registers_a_policy_before_its_launch() {
         .expect_err("a policy nothing registers");
     let message = error.to_string();
     assert!(
-        message.contains("by_model") && message.contains("[cells.model]"),
+        message.contains("by_model") && message.contains("[pools.model]"),
         "{message}"
     );
     global.shutdown().await.expect("valid test fixture");
@@ -483,15 +483,15 @@ impl gdl::Build for Gated {
     }
 }
 
-impl CellPolicy for Gated {
+impl PoolPolicy for Gated {
     type Head = Projected<Hinted>;
 
     fn choose(
         &self,
-        request: CellRequest<'_, Self::Head>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
-        ByModel.choose(request, cells)
+        request: PoolRequest<'_, Self::Head>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
+        ByModel.choose(request, pools)
     }
 }
 
@@ -504,14 +504,14 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
     const SEGMENT: &'static str = "a";
     const SEGMENTS: &'static [&'static str] = SEGMENTS;
     const GRAPH_CONFIG: &'static str = "";
-    type Settings = common::cells::Nothing;
+    type Settings = common::pools::Nothing;
     type Hosts = ();
 
     async fn build(
-        _: common::cells::Nothing,
+        _: common::pools::Nothing,
         builder: &gdl_runtime::Builder,
     ) -> Result<(), gdl_runtime::Failure> {
-        builder.build_cell_policy::<Gated>("by_model", None).await
+        builder.build_pool_policy::<Gated>("by_model", None).await
     }
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
@@ -536,7 +536,7 @@ async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
     use velo::discovery::ServiceDiscovery as _;
     let spec = spec("by_model");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()
         .prefix("gdl-policies-")
         .tempdir()
@@ -548,7 +548,7 @@ async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
             "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{}{RUNTIME}",
             global.public_addr().port(),
             global.control_addr().port(),
-            global_cell(),
+            global_pool(),
         ),
     )
     .expect("settings");
@@ -588,7 +588,7 @@ async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
 }
 
 /// The frontend, whose start checks that the registry the runtime records
-/// into already holds the chooser's cell families: a counter of the same
+/// into already holds the chooser's pool families: a counter of the same
 /// name is refused there.
 struct Counting;
 
@@ -597,11 +597,11 @@ impl gdl_runtime::SegmentBinary for Counting {
     const SEGMENT: &'static str = "a";
     const SEGMENTS: &'static [&'static str] = SEGMENTS;
     const GRAPH_CONFIG: &'static str = "";
-    type Settings = common::cells::Nothing;
+    type Settings = common::pools::Nothing;
     type Hosts = ();
 
     async fn build(
-        settings: common::cells::Nothing,
+        settings: common::pools::Nothing,
         builder: &gdl_runtime::Builder,
     ) -> Result<(), gdl_runtime::Failure> {
         Frontend::<true>::build(settings, builder).await
@@ -618,7 +618,7 @@ impl gdl_runtime::SegmentBinary for Counting {
         runtime: gdl_runtime::RuntimeConfig,
     ) -> gdl::Result<gdl_runtime::Serving> {
         let registry = runtime.metrics.as_ref().expect("a listener records");
-        for name in ["cell_offers_total", "cell_failovers_total"] {
+        for name in ["pool_offers_total", "pool_failovers_total"] {
             let counter = prometheus::IntCounter::new(name, "taken").expect("a counter");
             assert!(
                 registry.register(Box::new(counter)).is_err(),
@@ -631,12 +631,12 @@ impl gdl_runtime::SegmentBinary for Counting {
 
 /// A segment binary with its system listener on hands its registry to the
 /// launch, so that the chooser's follower, which starts there, registers
-/// the cells' families in it.
+/// the pools' families in it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_segment_binary_records_its_cell_choices() {
+async fn a_segment_binary_records_its_pool_choices() {
     let spec = spec("by_model");
     let directory = Resolving::new();
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()
         .prefix("gdl-policies-")
         .tempdir()
@@ -648,7 +648,7 @@ async fn a_segment_binary_records_its_cell_choices() {
             "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[system]\nhost = \"127.0.0.1\"\nport = 0\n{}{RUNTIME}",
             global.public_addr().port(),
             global.control_addr().port(),
-            global_cell(),
+            global_pool(),
         ),
     )
     .expect("settings");

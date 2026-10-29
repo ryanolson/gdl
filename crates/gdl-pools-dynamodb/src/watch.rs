@@ -1,5 +1,5 @@
 //! The poller of a watched class, and the watches it answers. The shape is
-//! the `dir` backend's (`gdl_cells::DirDirectory`): one poller per class
+//! the `dir` backend's (`gdl_pools::DirDirectory`): one poller per class
 //! while the class has watches, a scan's differences as changes, a
 //! history of them for resumes, and a watcher cut off when its buffer is
 //! full. What differs is the scan: a query of the class's items, and a
@@ -16,7 +16,7 @@ use std::{
 };
 
 use aws_sdk_dynamodb::types::AttributeValue;
-use gdl_cells::{CellEvent, CellRecord, DirectoryError, ResumeToken};
+use gdl_pools::{DirectoryError, PoolEvent, PoolRecord, ResumeToken};
 use tokio::{
     sync::{Notify, mpsc, oneshot},
     task::AbortHandle,
@@ -32,7 +32,7 @@ mod stream;
 
 pub use stream::DynamoWatch;
 
-/// What a scan found of a class, by cell: each cell's newest write whose
+/// What a scan found of a class, by pool: each pool's newest write whose
 /// list is in hand.
 pub(crate) type Entries = HashMap<String, Arc<Entry>>;
 
@@ -59,12 +59,12 @@ struct Class {
     // The position of the class's latest change.
     head: u64,
     // The latest changes, at positions `head - history.len() + 1 ..= head`.
-    history: VecDeque<CellEvent>,
+    history: VecDeque<PoolEvent>,
     watchers: HashMap<u64, Watcher>,
     // Running while the class has watchers, and only then.
     poller: Option<Poller>,
     pollers: u64,
-    // The cells whose lists the last scan did not find.
+    // The pools whose lists the last scan did not find.
     missing: Vec<String>,
 }
 
@@ -78,18 +78,18 @@ struct Poller {
     scanned: bool,
 }
 
-pub(crate) type Answer = Result<VecDeque<CellEvent>, DirectoryError>;
+pub(crate) type Answer = Result<VecDeque<PoolEvent>, DirectoryError>;
 
 #[derive(Debug)]
 struct Watcher {
-    events: mpsc::Sender<Result<CellEvent, DirectoryError>>,
+    events: mpsc::Sender<Result<PoolEvent, DirectoryError>>,
     lagged: Arc<AtomicBool>,
     // Until a scan that began after the watch answers it, with its
     // snapshot or its replay; with when the watch began.
     start: Option<(Option<ResumeToken>, oneshot::Sender<Answer>, Instant)>,
 }
 
-/// What one scan found: the class's entries, and the cells whose newest
+/// What one scan found: the class's entries, and the pools whose newest
 /// record names a list not yet in this region's lists table.
 #[derive(Debug)]
 pub(crate) struct Found {
@@ -101,7 +101,7 @@ pub(crate) struct Found {
 pub(crate) struct Registered {
     pub(crate) id: u64,
     pub(crate) answer: oneshot::Receiver<Answer>,
-    pub(crate) receiver: mpsc::Receiver<Result<CellEvent, DirectoryError>>,
+    pub(crate) receiver: mpsc::Receiver<Result<PoolEvent, DirectoryError>>,
     pub(crate) lagged: Arc<AtomicBool>,
 }
 
@@ -315,24 +315,24 @@ impl State {
 }
 
 impl Class {
-    /// Turn the cells whose version rose since the entries last seen into
+    /// Turn the pools whose version rose since the entries last seen into
     /// changes, in the order they were written, and keep `entries`.
     fn apply(&mut self, name: &str, entries: Entries, first: bool, history: usize) {
         let mut changed: Vec<_> = entries
             .iter()
-            .filter(|(cell, entry)| {
+            .filter(|(pool, entry)| {
                 self.entries
-                    .get(*cell)
+                    .get(*pool)
                     .is_none_or(|before| before.version < entry.version)
             })
-            .map(|(cell, entry)| (entry.order, cell, Arc::clone(entry)))
+            .map(|(pool, entry)| (entry.order, pool, Arc::clone(entry)))
             .collect();
         changed.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         let changed: Vec<_> = changed.into_iter().map(|(_, _, entry)| entry).collect();
         if first {
             // An item that went missing is no change a watch can report,
             // but it is one of the class's items all the same.
-            let lost = self.entries.keys().any(|cell| !entries.contains_key(cell));
+            let lost = self.entries.keys().any(|pool| !entries.contains_key(pool));
             self.entries = Arc::new(entries);
             // The items changed while nothing through this handle watched
             // them: no token from before can say what followed it. A
@@ -403,7 +403,7 @@ impl Class {
                 match from {
                     None => Ok(snapshot(entries, name, *head)),
                     Some(token) => match after(history, *head, token.position()) {
-                        Some(replay) => Ok([CellEvent::Synced {
+                        Some(replay) => Ok([PoolEvent::Synced {
                             token,
                             snapshot: false,
                         }]
@@ -412,7 +412,7 @@ impl Class {
                         .collect()),
                         None => {
                             ended.push(id);
-                            Ok(VecDeque::from([CellEvent::Resnapshot]))
+                            Ok(VecDeque::from([PoolEvent::Resnapshot]))
                         }
                     },
                 }
@@ -470,7 +470,7 @@ impl Class {
 impl Watcher {
     /// Hand `event` to the watcher without waiting; false when it is gone
     /// or lagged, and is to be dropped.
-    fn offer(&self, event: &CellEvent) -> bool {
+    fn offer(&self, event: &PoolEvent) -> bool {
         match self.events.try_send(Ok(event.clone())) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -540,7 +540,7 @@ async fn poll(shared: Arc<Shared>, name: String, generation: u64, kick: Arc<Noti
 }
 
 /// Read every item of `name`, and join each record whose version rose
-/// since `previous` to its list. A cell whose list is not in hand keeps
+/// since `previous` to its list. A pool whose list is not in hand keeps
 /// its entry from `previous`, if it had one, and is named missing.
 async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, DirectoryError> {
     let mut entries = Entries::with_capacity(previous.len());
@@ -565,11 +565,11 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
             let Some(stored) = item::decode(name, found) else {
                 continue;
             };
-            let before = previous.get(&stored.cell);
+            let before = previous.get(&stored.pool);
             // Never back: global tables keep the last writer's item, which
             // may be an older version than one this reader has seen.
             if let Some(before) = before.filter(|before| stored.version <= before.version) {
-                entries.insert(stored.cell, Arc::clone(before));
+                entries.insert(stored.pool, Arc::clone(before));
                 continue;
             }
             let key = match &stored.held {
@@ -578,7 +578,7 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
                 } => *key,
                 _ => {
                     entries.insert(
-                        stored.cell.clone(),
+                        stored.pool.clone(),
                         Arc::new(Entry::new(name, stored, None)),
                     );
                     continue;
@@ -589,20 +589,20 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
                     models: record.models.clone(),
                     revoked: record.revoked.clone(),
                 }),
-                None => read_list(shared, name, &stored.cell, key).await?,
+                None => read_list(shared, name, &stored.pool, key).await?,
             };
             match joined {
                 Some(list) => {
                     entries.insert(
-                        stored.cell.clone(),
+                        stored.pool.clone(),
                         Arc::new(Entry::new(name, stored, Some(list))),
                     );
                 }
                 None => {
                     if let Some(before) = before {
-                        entries.insert(stored.cell.clone(), Arc::clone(before));
+                        entries.insert(stored.pool.clone(), Arc::clone(before));
                     }
-                    missing.push(stored.cell);
+                    missing.push(stored.pool);
                 }
             }
         }
@@ -615,24 +615,24 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
     Ok(Found { entries, missing })
 }
 
-/// The list `key` of `cell`, if this region's lists table holds it.
+/// The list `key` of `pool`, if this region's lists table holds it.
 async fn read_list(
     shared: &Shared,
     class: &str,
-    cell: &str,
+    pool: &str,
     key: item::ListKey,
 ) -> Result<Option<item::List>, DirectoryError> {
     let got = shared
         .client
         .get_item()
         .table_name(&shared.tables.lists)
-        .set_key(Some(item::list_key(class, cell, key)))
+        .set_key(Some(item::list_key(class, pool, key)))
         .consistent_read(true)
         .send()
         .await
         .map_err(|error| {
             unavailable(
-                &format!("reading the model list of cell `{cell}` of class `{class}`"),
+                &format!("reading the model list of pool `{pool}` of class `{class}`"),
                 error,
             )
         })?;
@@ -640,25 +640,25 @@ async fn read_list(
     if list.is_none() {
         tracing::debug!(
             class,
-            cell,
+            pool,
             list = key.sort_key(),
-            "a record's model list has not arrived: its cell keeps its earlier record"
+            "a record's model list has not arrived: its pool keeps its earlier record"
         );
     }
     Ok(list)
 }
 
-/// The records `entries` holds, by cell name, then the snapshot's end.
-fn snapshot(entries: &Entries, name: &str, head: u64) -> VecDeque<CellEvent> {
-    let mut records: Vec<&CellRecord> = entries
+/// The records `entries` holds, by pool name, then the snapshot's end.
+fn snapshot(entries: &Entries, name: &str, head: u64) -> VecDeque<PoolEvent> {
+    let mut records: Vec<&PoolRecord> = entries
         .values()
         .filter_map(|entry| entry.record())
         .collect();
     records.sort_by(|a, b| a.name.cmp(&b.name));
     records
         .into_iter()
-        .map(|record| CellEvent::Current(record.clone()))
-        .chain([CellEvent::Synced {
+        .map(|record| PoolEvent::Current(record.clone()))
+        .chain([PoolEvent::Synced {
             token: ResumeToken::new(name, head),
             snapshot: true,
         }])
@@ -668,10 +668,10 @@ fn snapshot(entries: &Entries, name: &str, head: u64) -> VecDeque<CellEvent> {
 /// The changes after `position`, if `history`, ending at `head`, still
 /// holds all of them.
 fn after(
-    history: &VecDeque<CellEvent>,
+    history: &VecDeque<PoolEvent>,
     head: u64,
     position: u64,
-) -> Option<impl Iterator<Item = CellEvent> + '_> {
+) -> Option<impl Iterator<Item = PoolEvent> + '_> {
     let oldest = head - history.len() as u64;
     let skip = position.checked_sub(oldest).filter(|_| position <= head)?;
     Some(history.iter().skip(skip as usize).cloned())

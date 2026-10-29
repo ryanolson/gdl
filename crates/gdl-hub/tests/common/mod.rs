@@ -1,6 +1,6 @@
-//! The fixtures the cell hub's tests share: a deployment of two classes,
-//! its model cell, a hub of it, instances registered as segments register,
-//! and the cell's records as a reader sees them.
+//! The fixtures the pool hub's tests share: a deployment of two classes,
+//! its model pool, a hub of it, instances registered as segments register,
+//! and the pool's records as a reader sees them.
 
 // Each test target uses a part of these.
 #![allow(dead_code)]
@@ -10,14 +10,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, MemoryWatch,
-    ResumeToken,
-};
-use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission};
+use gdl_hub::{GraphAdmission, PoolHealth, PoolReadiness, PoolTiming};
 use gdl_model::{
-    CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
+    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PoolSettings, Role, SegmentPhase,
     TypeInfo, segment_service,
+};
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, MemoryWatch, PoolDirectory, PoolEvent, PoolRecord, PoolState,
+    ResumeToken,
 };
 use gdl_watch::{Avoids, KeyedAsk, KeyedOp, KeyedReply, LoadReport, Unoffered};
 use tokio::sync::watch;
@@ -46,7 +46,7 @@ pub fn spec() -> DeploymentSpec {
         backward_types: vec![TypeInfo::new("T", true, Default::default())],
     };
     let graph = Manifest {
-        name: "cells".into(),
+        name: "pools".into(),
         schema: 1,
         nodes: vec![
             node("S", Role::Source),
@@ -64,13 +64,13 @@ pub fn spec() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-pub const CELL: &str = "model-x-01-us-east-1";
+pub const POOL: &str = "model-x-01-us-east-1";
 
-/// The model cell, a child of [`GLOBAL`]: `d` needs two usable instances,
+/// The model pool, a child of [`GLOBAL`]: `d` needs two usable instances,
 /// `f` one.
-pub fn settings() -> CellSettings {
+pub fn settings() -> PoolSettings {
     toml::from_str(&format!(
-        "name = '{CELL}'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = '{GLOBAL}'\n\
+        "name = '{POOL}'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = '{GLOBAL}'\n\
          hub = 'model-x-01-hub:1337'\ndirectory = 'memory'\n[ready]\nd = 2\n"
     ))
     .expect("valid test fixture")
@@ -78,48 +78,48 @@ pub fn settings() -> CellSettings {
 
 /// A hold long enough to observe, short enough to wait out; no heartbeat
 /// in the length of a test, so every record seen is a change of state.
-pub fn timing() -> CellTiming {
-    CellTiming {
+pub fn timing() -> PoolTiming {
+    PoolTiming {
         hold: Duration::from_millis(300),
         heartbeat: Duration::from_secs(600),
         lease: Duration::from_secs(30),
-        ..CellTiming::default()
+        ..PoolTiming::default()
     }
 }
 
-/// A hub of the deployment with the cell's extension beside admission.
-pub async fn cell_hub<D: CellDirectory>(
+/// A hub of the deployment with the pool's extension beside admission.
+pub async fn pool_hub<D: PoolDirectory>(
     directory: D,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<D>>) {
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<D>>) {
     hub_of(settings(), directory, timing).await
 }
 
-/// A hub of the deployment with the extension of the cell `cell`.
-pub async fn hub_of<D: CellDirectory>(
-    cell: CellSettings,
+/// A hub of the deployment with the extension of the pool `pool`.
+pub async fn hub_of<D: PoolDirectory>(
+    pool: PoolSettings,
     directory: D,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<D>>) {
-    hub_of_spec(spec(), cell, directory, timing).await
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<D>>) {
+    hub_of_spec(spec(), pool, directory, timing).await
 }
 
-/// A hub of the deployment `spec` with the extension of the cell `cell`.
-pub async fn hub_of_spec<D: CellDirectory>(
+/// A hub of the deployment `spec` with the extension of the pool `pool`.
+pub async fn hub_of_spec<D: PoolDirectory>(
     spec: DeploymentSpec,
-    cell: CellSettings,
+    pool: PoolSettings,
     directory: D,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<D>>) {
-    let cell =
-        Arc::new(CellReadiness::new(&spec, cell, directory, timing).expect("valid test fixture"));
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<D>>) {
+    let pool =
+        Arc::new(PoolReadiness::new(&spec, pool, directory, timing).expect("valid test fixture"));
     let hub = Hub::builder(config())
         .extension(GraphAdmission::new(spec))
-        .extension(Arc::clone(&cell))
+        .extension(Arc::clone(&pool))
         .serve()
         .await
         .expect("the hub serves");
-    (hub, cell)
+    (hub, pool)
 }
 
 pub fn config() -> HubConfig {
@@ -218,7 +218,7 @@ impl Instance {
     }
 
     /// Join as an instance of `a`, the global's segment that chooses
-    /// cells of `model_x`, and say, as a chooser does before it watches
+    /// pools of `model_x`, and say, as a chooser does before it watches
     /// its hub's relay, that it runs a follower: from then the hub waits
     /// for its acknowledgements.
     pub async fn chooser(hub: &Hub) -> Self {
@@ -287,12 +287,12 @@ impl Instance {
 }
 
 /// Wait until the extension's health satisfies `ready`, and return it.
-pub async fn health<D: CellDirectory>(
-    cell: &CellReadiness<D>,
+pub async fn health<D: PoolDirectory>(
+    pool: &PoolReadiness<D>,
     what: &str,
-    ready: impl FnMut(&CellHealth) -> bool,
-) -> CellHealth {
-    let mut status = cell.health();
+    ready: impl FnMut(&PoolHealth) -> bool,
+) -> PoolHealth {
+    let mut status = pool.health();
     let waited = tokio::time::timeout(WAIT, async {
         status.wait_for(ready).await.map(|health| health.clone())
     })
@@ -303,37 +303,37 @@ pub async fn health<D: CellDirectory>(
     }
 }
 
-pub fn usable(health: &CellHealth, segment: &str) -> u32 {
+pub fn usable(health: &PoolHealth, segment: &str) -> u32 {
     health.segments[segment].usable
 }
 
-/// The cell's records, as a reader of its class sees them.
+/// The pool's records, as a reader of its class sees them.
 pub struct Records {
     watch: MemoryWatch,
-    cell: String,
+    pool: String,
 }
 
 impl Records {
-    /// The records of the model cell.
+    /// The records of the model pool.
     pub fn new(directory: &MemoryDirectory) -> Self {
-        Self::of(directory, "model_x", CELL)
+        Self::of(directory, "model_x", POOL)
     }
 
-    /// The records of the cell `cell` of `class`.
-    pub fn of(directory: &MemoryDirectory, class: &str, cell: &str) -> Self {
+    /// The records of the pool `pool` of `class`.
+    pub fn of(directory: &MemoryDirectory, class: &str, pool: &str) -> Self {
         Self {
             watch: directory.watch(class, None),
-            cell: cell.into(),
+            pool: pool.into(),
         }
     }
 
-    /// The next record of the cell.
-    pub async fn next(&mut self) -> CellRecord {
+    /// The next record of the pool.
+    pub async fn next(&mut self) -> PoolRecord {
         let next = async {
             loop {
                 match self.watch.next().await {
-                    Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }))
-                        if record.name == self.cell =>
+                    Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }))
+                        if record.name == self.pool =>
                     {
                         return record;
                     }
@@ -347,8 +347,8 @@ impl Records {
             .expect("timed out waiting for a record")
     }
 
-    /// The next record of the cell in `state`, and when it was seen.
-    pub async fn until(&mut self, state: CellState) -> (CellRecord, Instant) {
+    /// The next record of the pool in `state`, and when it was seen.
+    pub async fn until(&mut self, state: PoolState) -> (PoolRecord, Instant) {
         loop {
             let record = self.next().await;
             if record.state == state {
@@ -368,7 +368,7 @@ pub fn millis_now() -> u64 {
     .expect("valid test fixture")
 }
 
-/// Bring `f` to one ready instance and `d` to two: the cell's quorum.
+/// Bring `f` to one ready instance and `d` to two: the pool's quorum.
 /// Returns the instances, and when the last announcement began.
 pub async fn meet_the_quorum(hub: &Hub) -> (Vec<Instance>, Instant) {
     let mut instances = Vec::new();
@@ -435,10 +435,10 @@ impl Gated {
     }
 }
 
-impl CellDirectory for Gated {
+impl PoolDirectory for Gated {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         let mut open = self.open.subscribe();
         if !*open.borrow_and_update() {
             self.held.send_modify(|held| *held += 1);
@@ -448,7 +448,7 @@ impl CellDirectory for Gated {
         self.inner.publish(record).await
     }
 
-    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+    async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
     }
 
@@ -457,7 +457,7 @@ impl CellDirectory for Gated {
     }
 }
 
-/// A directory that names each cell's hub as DNS would: a record's `hub`
+/// A directory that names each pool's hub as DNS would: a record's `hub`
 /// is a name, which a test resolves to the address the hub serves at once
 /// it serves, since a hub's port is assigned only then. A publish waits
 /// until its hub's name is resolved, then stores the record with the
@@ -485,10 +485,10 @@ impl Resolving {
     }
 }
 
-impl CellDirectory for Resolving {
+impl PoolDirectory for Resolving {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
         let mut names = self.names.subscribe();
         let address = names
             .wait_for(|names| names.contains_key(&record.hub))
@@ -499,7 +499,7 @@ impl CellDirectory for Resolving {
         self.inner.publish(record).await
     }
 
-    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+    async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
     }
 
@@ -508,22 +508,22 @@ impl CellDirectory for Resolving {
     }
 }
 
-/// A hub of the deployment with the extension of the cell `cell`, its hub
+/// A hub of the deployment with the extension of the pool `pool`, its hub
 /// name resolved in `directory` once it serves.
-pub async fn serve_cell(
-    cell: CellSettings,
+pub async fn serve_pool(
+    pool: PoolSettings,
     directory: &Resolving,
-    timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    let name = cell.hub.clone().expect("a cell's hub has a name");
-    let (hub, readiness) = hub_of(cell, directory.clone(), timing).await;
+    timing: PoolTiming,
+) -> (Hub, Arc<PoolReadiness<Resolving>>) {
+    let name = pool.hub.clone().expect("a pool's hub has a name");
+    let (hub, readiness) = hub_of(pool, directory.clone(), timing).await;
     directory.resolve(&name, &hub);
     (hub, readiness)
 }
 
-/// A model cell named `name` in `region`, a child of [`GLOBAL`], whose hub
+/// A model pool named `name` in `region`, a child of [`GLOBAL`], whose hub
 /// is named `hub`: `d` needs two usable instances, `f` one.
-pub fn model(name: &str, region: &str, hub: &str) -> CellSettings {
+pub fn model(name: &str, region: &str, hub: &str) -> PoolSettings {
     toml::from_str(&format!(
         "name = '{name}'\nclass = 'model_x'\nregion = '{region}'\nhome = '{GLOBAL}'\n\
          hub = '{hub}'\ndirectory = 'memory'\n[ready]\nd = 2\n"
@@ -533,10 +533,10 @@ pub fn model(name: &str, region: &str, hub: &str) -> CellSettings {
 
 pub const GLOBAL: &str = "global-01-us-east-1";
 
-/// The global cell in us-east-1, whose class runs `a` and sends to
+/// The global pool in us-east-1, whose class runs `a` and sends to
 /// `model_x`, with `requires` unsaid: its health requires one ready model
-/// cell, the default.
-pub fn global_default() -> CellSettings {
+/// pool, the default.
+pub fn global_default() -> PoolSettings {
     toml::from_str(&format!(
         "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-01-hub:1337'\n\
          directory = 'memory'\n"
@@ -544,15 +544,15 @@ pub fn global_default() -> CellSettings {
     .expect("valid test fixture")
 }
 
-/// [`global_default`], requiring `requires` ready model cells.
-pub fn global_requiring(requires: u32) -> CellSettings {
-    CellSettings {
+/// [`global_default`], requiring `requires` ready model pools.
+pub fn global_requiring(requires: u32) -> PoolSettings {
+    PoolSettings {
         requires: [("model_x".to_string(), requires)].into(),
         ..global_default()
     }
 }
 
-/// Another directory with its cell's hub named as DNS would name it: the
+/// Another directory with its pool's hub named as DNS would name it: the
 /// record's `hub` is a name, which the test resolves once the hub serves,
 /// since a hub's port is assigned only then. A publish waits until its
 /// hub's name is resolved, and goes on with the address in its place.
@@ -562,7 +562,7 @@ pub struct Named<D> {
     names: Arc<watch::Sender<HashMap<String, String>>>,
 }
 
-impl<D: CellDirectory> Named<D> {
+impl<D: PoolDirectory> Named<D> {
     pub fn new(inner: D) -> Self {
         Self {
             inner,
@@ -579,10 +579,10 @@ impl<D: CellDirectory> Named<D> {
     }
 }
 
-impl<D: CellDirectory> CellDirectory for Named<D> {
+impl<D: PoolDirectory> PoolDirectory for Named<D> {
     type Watch = D::Watch;
 
-    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
         let mut names = self.names.subscribe();
         let address = names
             .wait_for(|names| names.contains_key(&record.hub))
@@ -593,7 +593,7 @@ impl<D: CellDirectory> CellDirectory for Named<D> {
         self.inner.publish(record).await
     }
 
-    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+    async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
     }
 
@@ -617,7 +617,7 @@ pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEv
         FollowEvent::Synced { .. } => Some(FollowEvent::Synced { listed: false }),
         FollowEvent::Follow {
             class,
-            cell,
+            pool,
             generation,
             region,
             state,
@@ -626,7 +626,7 @@ pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEv
             ..
         } => Some(FollowEvent::Follow {
             class,
-            cell,
+            pool,
             generation,
             region,
             state,
@@ -638,20 +638,20 @@ pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEv
     }
 }
 
-/// `event` as a hub without the model index sent it: the cell without its
+/// `event` as a hub without the model index sent it: the pool without its
 /// models. `None` for a `models` event.
-pub fn plain_cell(event: gdl_watch::CellWatchEvent) -> Option<gdl_watch::CellWatchEvent> {
-    use gdl_watch::CellWatchEvent;
+pub fn plain_pool(event: gdl_watch::PoolWatchEvent) -> Option<gdl_watch::PoolWatchEvent> {
+    use gdl_watch::PoolWatchEvent;
     match event {
-        CellWatchEvent::Models { .. } => None,
-        CellWatchEvent::Cell {
+        PoolWatchEvent::Models { .. } => None,
+        PoolWatchEvent::Pool {
             name,
             class,
             epoch,
             state,
             load,
             ..
-        } => Some(CellWatchEvent::Cell {
+        } => Some(PoolWatchEvent::Pool {
             name,
             class,
             epoch,

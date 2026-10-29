@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use gdl_cells::CellState;
+use gdl_pools::PoolState;
 use gdl_watch::{FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
 
@@ -26,8 +26,8 @@ use super::{DRAIN, M1, exposed, follow, follower, left, peer, retired, run};
 type Answer = Result<(Vec<FollowEvent>, Duration), ()>;
 
 #[test]
-fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_cell() {
-    let (mut follows, cells, _, _) = follower();
+fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_pool() {
+    let (mut follows, pools, _, _) = follower();
     let (mut uninterrupted, control, _, _) = follower();
     let now = Instant::now();
     let x = peer();
@@ -35,26 +35,26 @@ fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_cell() {
         super::live(
             follower,
             now,
-            [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+            [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)],
         );
     }
-    for cells in [&cells, &control] {
-        let table = cells.table("f").expect("the table");
-        cells.damping().gone(&table.views[0]);
-        assert!(super::table(cells, M1).expect("followed").gone);
+    for pools in [&pools, &control] {
+        let table = pools.table("f").expect("the table");
+        pools.damping().gone(&table.views[0]);
+        assert!(super::table(pools, M1).expect("followed").gone);
     }
 
     // A snapshot cannot show what changed while no watch was open, so a
-    // rewatch ends the mark even of a cell that did not change; it is
+    // rewatch ends the mark even of a pool that did not change; it is
     // offered one more request, and marked again if it still refuses.
     let mut unchanged = follows.snapshot();
-    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)] {
+    for event in [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)] {
         unchanged.apply(event, now);
     }
     follows.resnapshot(unchanged, now);
-    assert!(!super::table(&cells, M1).expect("followed").gone);
-    let table = cells.table("f").expect("the table");
-    cells.damping().gone(&table.views[0]);
+    assert!(!super::table(&pools, M1).expect("followed").gone);
+    let table = pools.table("f").expect("the table");
+    pools.damping().gone(&table.views[0]);
 
     // The relay changes state while one chooser's watch is disconnected.
     // An uninterrupted chooser sees the changes and releases the mark.
@@ -62,19 +62,19 @@ fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_cell() {
         &mut uninterrupted,
         now,
         [
-            super::state(M1, 1, CellState::Unavailable),
+            super::state(M1, 1, PoolState::Unavailable),
             FollowEvent::Offering {
                 class: "model_x".into(),
-                cell: M1.into(),
+                pool: M1.into(),
                 generation: 1,
                 revision: 2,
                 offered: false,
             },
-            super::state(M1, 1, CellState::Ready),
+            super::state(M1, 1, PoolState::Ready),
             exposed(M1, 1, &x),
             FollowEvent::Offering {
                 class: "model_x".into(),
-                cell: M1.into(),
+                pool: M1.into(),
                 generation: 1,
                 revision: 3,
                 offered: true,
@@ -85,14 +85,14 @@ fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_cell() {
 
     // An offered follow's snapshot omits its offering revision.
     let mut recovered = follows.snapshot();
-    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)] {
+    for event in [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &x)] {
         recovered.apply(event, now);
     }
     follows.resnapshot(recovered, now);
-    let shown = super::table(&cells, M1).expect("followed");
+    let shown = super::table(&pools, M1).expect("followed");
     assert!(
         !shown.gone,
-        "a missed state round trip left a recovered cell permanently gone: {shown:?}"
+        "a missed state round trip left a recovered pool permanently gone: {shown:?}"
     );
 }
 
@@ -214,7 +214,7 @@ async fn a_hub_that_closes_every_watch_is_asked_a_bounded_number_of_times() {
 }
 
 /// A hub that refuses the follower's declaration, as one without the
-/// cell's extension does, is asked as a hub that refuses the watch is: a
+/// pool's extension does, is asked as a hub that refuses the watch is: a
 /// bounded number of times in 5 s, set by the cap.
 #[tokio::test(start_paused = true)]
 async fn a_hub_that_refuses_the_declaration_is_asked_a_bounded_number_of_times() {
@@ -242,10 +242,10 @@ async fn a_hub_that_refuses_the_declaration_is_asked_a_bounded_number_of_times()
 /// does not take is sent again every [`ACK_RETRY`] throughout.
 #[tokio::test(start_paused = true)]
 async fn deadlines_are_kept_while_the_relay_waits_at_its_cap() {
-    let (follows, cells, _, _) = follower();
+    let (follows, pools, _, _) = follower();
     let (x, y) = (peer(), peer());
     let snapshot = vec![
-        follow(M1, 1, CellState::Ready),
+        follow(M1, 1, PoolState::Ready),
         exposed(M1, 1, &x),
         exposed(M1, 1, &y),
         FollowEvent::Synced { listed: false },
@@ -256,14 +256,14 @@ async fn deadlines_are_kept_while_the_relay_waits_at_its_cap() {
     let mut opened = source.opened.subscribe();
     let mut avoided = source.avoided.subscribe();
     let task = tokio::spawn(run(source, follows));
-    let mut changes = cells.changes();
+    let mut changes = pools.changes();
     changes
-        .wait_for(|_| cells.is_registered(x.instance_id()))
+        .wait_for(|_| pools.is_registered(x.instance_id()))
         .await
         .expect("the task runs");
     tokio::time::timeout(
         DRAIN * 2,
-        changes.wait_for(|_| !cells.is_registered(x.instance_id())),
+        changes.wait_for(|_| !pools.is_registered(x.instance_id())),
     )
     .await
     .expect("the unregistration was made")
@@ -315,7 +315,7 @@ async fn deadlines_are_kept_while_the_relay_waits_at_its_cap() {
 async fn a_healthy_watch_is_asked_for_again_within_the_base() {
     let snapshot = || {
         vec![
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             FollowEvent::Synced { listed: false },
         ]
     };
@@ -382,18 +382,18 @@ async fn followers_that_fail_together_spread_their_next_watch() {
     }
 }
 
-/// A cell read from a watch of its own that keeps ending is asked for
+/// A pool read from a watch of its own that keeps ending is asked for
 /// again after waits that grow to the cap, each within its step; one that
 /// an event after its snapshot replaces is asked for at once.
 #[test]
-fn a_cells_own_watch_that_keeps_ending_waits_longer_each_time() {
+fn a_pools_own_watch_that_keeps_ending_waits_longer_each_time() {
     let (mut follows, _, _, _) = follower();
     let now = Instant::now();
-    super::live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
+    super::live(&mut follows, now, [follow(M1, 1, PoolState::Ready)]);
     follows.unknown(UnknownFollowEvent {
         kind: "paused".into(),
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
     });
     let Asked { key, watch, pause } = follows.asked().pop().expect("a watch of its own");

@@ -1,6 +1,6 @@
 [package]
-name = "gdl-cells"
-description = "The cell plane's shared types: the cell record, the cell directory and its backends, and the reader's view"
+name = "gdl-pools"
+description = "The pool plane's shared types: the pool record, the pool directory and its backends, and the reader's view"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,7 +25,7 @@ conformance = []
 
 [dev-dependencies]
 # The crate's own tests run the conformance suite against `memory`.
-gdl-cells = { path = ".", features = ["conformance"] }
+gdl-pools = { path = ".", features = ["conformance"] }
 tempfile = { workspace = true }
 # A paused clock lets the suite's bounds be tested against a backend that
 # never completes, without waiting them out.

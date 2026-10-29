@@ -343,7 +343,7 @@ fn deployment_settings_name_a_segment_of_some_layout() {
 }
 
 /// `export` and `diagram` take one layout, and refuse a spec with several
-/// rather than choose one. `compose` deploys several only by cell, and
+/// rather than choose one. `compose` deploys several only by pool, and
 /// without a fleet file says that it needs one.
 #[test]
 fn the_commands_of_one_layout_refuse_several() {
@@ -354,7 +354,7 @@ fn the_commands_of_one_layout_refuse_several() {
         (
             "compose",
             vec![std::ffi::OsStr::new("--out"), out.as_os_str()],
-            "`compose` deploys a spec of several layouts, `compact` and `regional`, by cell, as its fleet file says: give it `--fleet <fleet.toml>`",
+            "`compose` deploys a spec of several layouts, `compact` and `regional`, by pool, as its fleet file says: give it `--fleet <fleet.toml>`",
         ),
         (
             "export",
@@ -387,27 +387,27 @@ fn the_book_shows_these_layouts() {
     assert!(readme.contains(&shown), "the chapter lacks:\n{shown}");
 }
 
-/// `cargo gdl check --fleet` checks each cell against the layout it names.
-/// Both `global` and `batch` send to `model_x` in `regional`, so a cell of
+/// `cargo gdl check --fleet` checks each pool against the layout it names.
+/// Both `global` and `batch` send to `model_x` in `regional`, so a pool of
 /// each has a child there.
 #[test]
-fn a_fleet_is_checked_against_each_cells_layout() {
+fn a_fleet_is_checked_against_each_pools_layout() {
     let dir = Dir::new(&two_layouts());
     let fleet = dir.dir.path().join("fleet.toml");
     let check = || dir.run("check", &["--fleet".as_ref(), fleet.as_os_str()]);
-    let good = "[cell.global-us]\nlayout = \"regional\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
-                [cell.batch-us]\nlayout = \"regional\"\nclass = \"batch\"\nregion = \"us-east-1\"\n\
-                [cell.model-x-us]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
-                [cell.model-x-us-2]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"batch-us\"\n\
-                [cell.global-eu]\nlayout = \"compact\"\nclass = \"global\"\nregion = \"eu-west-1\"\n\
-                [cell.model-x-eu]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-eu\"\n";
+    let good = "[pool.global-us]\nlayout = \"regional\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
+                [pool.batch-us]\nlayout = \"regional\"\nclass = \"batch\"\nregion = \"us-east-1\"\n\
+                [pool.model-x-us]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+                [pool.model-x-us-2]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"batch-us\"\n\
+                [pool.global-eu]\nlayout = \"compact\"\nclass = \"global\"\nregion = \"eu-west-1\"\n\
+                [pool.model-x-eu]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-eu\"\n";
     std::fs::write(&fleet, good).expect("the fleet");
     succeeded(&check());
     let bad = format!(
-        "{good}[cell.unnamed]\nclass = \"global\"\nregion = \"r\"\n\
-         [cell.nowhere]\nlayout = \"west\"\nclass = \"global\"\nregion = \"r\"\n\
-         [cell.batch-eu]\nlayout = \"compact\"\nclass = \"batch\"\nregion = \"eu-west-1\"\n\
-         [cell.model-x-eu-2]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-us\"\n"
+        "{good}[pool.unnamed]\nclass = \"global\"\nregion = \"r\"\n\
+         [pool.nowhere]\nlayout = \"west\"\nclass = \"global\"\nregion = \"r\"\n\
+         [pool.batch-eu]\nlayout = \"compact\"\nclass = \"batch\"\nregion = \"eu-west-1\"\n\
+         [pool.model-x-eu-2]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-us\"\n"
     );
     std::fs::write(&fleet, &bad).expect("the fleet");
     let f = fleet.display().to_string();
@@ -415,15 +415,15 @@ fn a_fleet_is_checked_against_each_cells_layout() {
     assert_eq!(
         found,
         [
-            format!("{f}: [cell.batch-eu] class: layout `compact` has no class `batch`"),
+            format!("{f}: [pool.batch-eu] class: layout `compact` has no class `batch`"),
             format!(
-                "{f}: [cell.model-x-eu-2] home: cell `global-us` runs layout `regional`, not `compact`; a home is a cell of the cell's own layout"
+                "{f}: [pool.model-x-eu-2] home: pool `global-us` runs layout `regional`, not `compact`; a home is a pool of the pool's own layout"
             ),
             format!(
-                "{f}: [cell.nowhere] layout: the spec has no layout `west`; its layouts are `compact`, `regional`"
+                "{f}: [pool.nowhere] layout: the spec has no layout `west`; its layouts are `compact`, `regional`"
             ),
             format!(
-                "{f}: [cell.unnamed] layout: missing; the spec has layouts `compact`, `regional`, and a cell names the one it runs"
+                "{f}: [pool.unnamed] layout: missing; the spec has layouts `compact`, `regional`, and a pool names the one it runs"
             ),
         ],
         "{}",

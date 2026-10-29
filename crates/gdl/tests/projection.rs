@@ -9,22 +9,22 @@
 
 use std::marker::PhantomData;
 
-use gdl::{Cell, CellPolicy, CellRequest, Projected, Projection, Selector};
+use gdl::{Pool, PoolPolicy, PoolRequest, Projected, Projection, Selector};
 use serde::{Deserialize, Serialize};
 
 struct Route<P>(PhantomData<fn() -> P>);
 
-impl<P: Projection> CellPolicy for Route<P> {
+impl<P: Projection> PoolPolicy for Route<P> {
     type Head = Projected<P>;
 
     fn choose(
         &self,
-        _: CellRequest<'_, Self::Head>,
-        cells: &[Cell],
-    ) -> Result<gdl::CellChoice, gdl::NoCell> {
-        (!cells.is_empty())
-            .then(|| gdl::CellChoice::new(0))
-            .ok_or_else(gdl::NoCell::new)
+        _: PoolRequest<'_, Self::Head>,
+        pools: &[Pool],
+    ) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        (!pools.is_empty())
+            .then(|| gdl::PoolChoice::new(0))
+            .ok_or_else(gdl::NoPool::new)
     }
 }
 
@@ -44,7 +44,7 @@ fn registrations<P: Projection>() -> [(&'static str, gdl::Result<()>); 2] {
     [
         (
             "policy",
-            gdl::CellPolicies::new().add("by_hint", Route::<P>(PhantomData)),
+            gdl::PoolPolicies::new().add("by_hint", Route::<P>(PhantomData)),
         ),
         (
             "selector",

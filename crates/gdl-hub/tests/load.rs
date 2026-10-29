@@ -1,7 +1,7 @@
-//! A cell's load summary: each usable entry instance reports its
-//! admission to its cell's hub once a period, authenticated as itself;
-//! the hub sums the reports it counts into the cell's summary, which the
-//! record carries on each heartbeat, the cell watch sends each period,
+//! A pool's load summary: each usable entry instance reports its
+//! admission to its pool's hub once a period, authenticated as itself;
+//! the hub sums the reports it counts into the pool's summary, which the
+//! record carries on each heartbeat, the pool watch sends each period,
 //! and a following hub relays. Instances here report by hand,
 //! as the runtime's reporter does, through velo-hub's extension client.
 //! Every hub runs in process on OS-assigned ports; every wait is for
@@ -12,21 +12,21 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    GLOBAL, Instance, Records, Resolving, WAIT, global_default, hub_of, model, serve_cell, timing,
+    GLOBAL, Instance, Records, Resolving, WAIT, global_default, hub_of, model, serve_pool, timing,
 };
 use futures::{Stream, StreamExt};
-use gdl_cells::{LoadSummary, MemoryDirectory};
-use gdl_hub::{CellTiming, CellWatch};
-use gdl_model::{CellSettings, InstanceModel, InstanceModelState, SegmentPhase};
-use gdl_watch::{CellWatchEvent, FollowEvent, LoadReport};
+use gdl_hub::{PoolTiming, PoolWatch};
+use gdl_model::{InstanceModel, InstanceModelState, PoolSettings, SegmentPhase};
+use gdl_pools::{LoadSummary, MemoryDirectory};
+use gdl_watch::{FollowEvent, LoadReport, PoolWatchEvent};
 use velo_hub::client::ClientError;
 use velo_hub::protocol::ErrorCode;
 
 const PERIOD: Duration = Duration::from_secs(1);
 
-/// The model cell with the shortest summary period.
-fn cell(name: &str, hub: &str) -> CellSettings {
-    CellSettings {
+/// The model pool with the shortest summary period.
+fn pool(name: &str, hub: &str) -> PoolSettings {
+    PoolSettings {
         layout: None,
         summary: PERIOD,
         ..model(name, "us-east-1", hub)
@@ -35,8 +35,8 @@ fn cell(name: &str, hub: &str) -> CellSettings {
 
 /// A heartbeat of one period, so that a record carries each summary soon
 /// after it is made.
-fn beating() -> CellTiming {
-    CellTiming {
+fn beating() -> PoolTiming {
+    PoolTiming {
         heartbeat: PERIOD,
         ..timing()
     }
@@ -62,13 +62,13 @@ fn summary(admitted: u64, limit: u64, instances: u32, refusals: u64) -> Option<L
 }
 
 /// Read `watch` until it sends a load event of `load`, within `bound`.
-async fn load(watch: &mut CellWatch, load: Option<LoadSummary>, bound: Duration) {
+async fn load(watch: &mut PoolWatch, load: Option<LoadSummary>, bound: Duration) {
     let mut seen = Vec::new();
     let waited = tokio::time::timeout(bound, async {
         loop {
             match watch.next().await.expect("the watch goes on") {
-                CellWatchEvent::Load { load: sent } if sent == load => return,
-                CellWatchEvent::Load { load } => seen.push(load),
+                PoolWatchEvent::Load { load: sent } if sent == load => return,
+                PoolWatchEvent::Load { load } => seen.push(load),
                 _ => {}
             }
         }
@@ -79,11 +79,11 @@ async fn load(watch: &mut CellWatch, load: Option<LoadSummary>, bound: Duration)
 
 /// Read `watch` until it has sent `ready` instances ready, so that the hub
 /// takes their reports.
-async fn ready(watch: &mut CellWatch, ready: usize) {
+async fn ready(watch: &mut PoolWatch, ready: usize) {
     let mut seen = 0;
     let waited = tokio::time::timeout(WAIT, async {
         while seen < ready {
-            if let CellWatchEvent::Ready { .. } = watch.next().await.expect("the watch goes on") {
+            if let PoolWatchEvent::Ready { .. } = watch.next().await.expect("the watch goes on") {
                 seen += 1;
             }
         }
@@ -92,9 +92,9 @@ async fn ready(watch: &mut CellWatch, ready: usize) {
     assert!(waited.is_ok(), "{seen} of {ready} instances ready in time");
 }
 
-/// A watch of the cell, its snapshot read: the first event is the cell.
-async fn watch(cell: &gdl_hub::CellReadiness<impl gdl_cells::CellDirectory>) -> CellWatch {
-    let mut watch = tokio::time::timeout(WAIT, cell.watch())
+/// A watch of the pool, its snapshot read: the first event is the pool.
+async fn watch(pool: &gdl_hub::PoolReadiness<impl gdl_pools::PoolDirectory>) -> PoolWatch {
+    let mut watch = tokio::time::timeout(WAIT, pool.watch())
         .await
         .expect("the watch begins in time")
         .expect("the hub runs");
@@ -105,10 +105,10 @@ async fn watch(cell: &gdl_hub::CellReadiness<impl gdl_cells::CellDirectory>) -> 
             .expect("an event in time")
             .expect("the watch goes on");
         if first {
-            assert!(matches!(event, CellWatchEvent::Cell { .. }), "{event:?}");
+            assert!(matches!(event, PoolWatchEvent::Pool { .. }), "{event:?}");
             first = false;
         }
-        if event == CellWatchEvent::Synced {
+        if event == PoolWatchEvent::Synced {
             return watch;
         }
     }
@@ -133,13 +133,13 @@ fn conflict(refused: Result<(), ClientError>) -> bool {
 
 /// Two entry instances report: the summary is the sum of their admitted
 /// roots, of their limits, and of their refusals, with the count of usable
-/// entry instances, on the cell watch and on the record. A later period's
+/// entry instances, on the pool watch and on the record. A later period's
 /// reports change it, and its refusals are that period's alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_summary_sums_the_reports_of_the_entry_instances() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         directory.clone(),
         beating(),
     )
@@ -169,7 +169,7 @@ async fn the_summary_sums_the_reports_of_the_entry_instances() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retired_or_departed_instance_stops_counting() {
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         MemoryDirectory::new(),
         timing(),
     )
@@ -196,7 +196,7 @@ async fn a_retired_or_departed_instance_stops_counting() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_report_older_than_three_periods_is_dropped() {
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         MemoryDirectory::new(),
         timing(),
     )
@@ -229,7 +229,7 @@ async fn a_report_older_than_three_periods_is_dropped() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         MemoryDirectory::new(),
         timing(),
     )
@@ -296,7 +296,7 @@ async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
 async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     let directory = common::Gated::new();
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         directory.clone(),
         timing(),
     )
@@ -331,7 +331,7 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     b.report(report(2, 8, 0)).await.expect("the hub takes it");
     let both = tokio::time::timeout(WAIT, async {
         loop {
-            if let CellWatchEvent::Load { load: Some(load) } =
+            if let PoolWatchEvent::Load { load: Some(load) } =
                 watch.next().await.expect("the watch goes on")
             {
                 assert_eq!(load.refusals, 0, "the unanswered report's refusals counted");
@@ -360,7 +360,7 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
 async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes() {
     let directory = common::Gated::new();
     let (hub, readiness) = hub_of(
-        cell(common::CELL, "model-x-01-hub:1337"),
+        pool(common::POOL, "model-x-01-hub:1337"),
         directory.clone(),
         timing(),
     )
@@ -390,11 +390,11 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
     let mut summaries = Vec::new();
     for n in 0..4 {
         let (said, stored) = if n % 2 == 0 {
-            (InstanceModelState::Ready, gdl_cells::ModelState::Ready)
+            (InstanceModelState::Ready, gdl_pools::ModelState::Ready)
         } else {
             (
                 InstanceModelState::Starting,
-                gdl_cells::ModelState::Unavailable,
+                gdl_pools::ModelState::Unavailable,
             )
         };
         directory.close();
@@ -413,7 +413,7 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
                     .any(|entry| entry.model == "other" && entry.state == stored)
                 {
                     assert!(record.models.iter().any(|entry| {
-                        entry.model == "m" && entry.state == gdl_cells::ModelState::Draining
+                        entry.model == "m" && entry.state == gdl_pools::ModelState::Draining
                     }));
                     break;
                 }
@@ -423,7 +423,7 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
         .expect("the unrelated write is stored before the next report");
         let counted = tokio::time::timeout(WAIT, async {
             loop {
-                if let CellWatchEvent::Load { load } =
+                if let PoolWatchEvent::Load { load } =
                     watch.next().await.expect("the watch goes on")
                 {
                     return load;
@@ -446,12 +446,12 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
     );
 }
 
-/// A class that no hop enters has no entry instance, so its cell has no
+/// A class that no hop enters has no entry instance, so its pool has no
 /// summary, on its watch or its record, and takes no report.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_no_hop_enters_has_no_summary() {
+async fn a_pool_no_hop_enters_has_no_summary() {
     let directory = MemoryDirectory::new();
-    let global = CellSettings {
+    let global = PoolSettings {
         layout: None,
         summary: PERIOD,
         ..global_default()
@@ -465,7 +465,7 @@ async fn a_cell_no_hop_enters_has_no_summary() {
         .expect("the watch begins in time")
         .expect("the hub runs");
     match watch.next().await {
-        Some(CellWatchEvent::Cell { load, .. }) => assert_eq!(load, None),
+        Some(PoolWatchEvent::Pool { load, .. }) => assert_eq!(load, None),
         other => panic!("{other:?}"),
     }
     // Two heartbeats: a summary would be on the second.
@@ -482,42 +482,42 @@ async fn follow_event(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> 
         .expect("the watch goes on")
 }
 
-/// A hub that follows a cell relays its summary: in the follow's first
-/// event, then as each load event of the cell, with the follow's
-/// generation. The cell sends its summary every period, so the earlier
+/// A hub that follows a pool relays its summary: in the follow's first
+/// event, then as each load event of the pool, with the follow's
+/// generation. The pool sends its summary every period, so the earlier
 /// one may be relayed again before the new one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_following_hub_relays_the_summary() {
     let directory = Resolving::new();
-    let (model_hub, model) = serve_cell(
-        cell(common::CELL, "model-x-01-hub:1337"),
+    let (model_hub, model) = serve_pool(
+        pool(common::POOL, "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let mut cell_watch = watch(&model).await;
+    let mut pool_watch = watch(&model).await;
     let mut instances = Vec::new();
     for segment in ["f", "d", "d"] {
         instances.push(join_ready(&model_hub, segment).await);
     }
-    ready(&mut cell_watch, 1).await;
+    ready(&mut pool_watch, 1).await;
     instances[0]
         .report(report(3, 8, 1))
         .await
         .expect("the hub takes it");
-    load(&mut cell_watch, summary(3, 8, 1, 1), WAIT).await;
+    load(&mut pool_watch, summary(3, 8, 1, 1), WAIT).await;
 
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
     let mut follows = global.follows();
     let generation = tokio::time::timeout(WAIT, async {
         loop {
             if let FollowEvent::Follow {
-                cell,
+                pool,
                 generation,
                 load,
                 ..
             } = follow_event(&mut follows).await
-                && cell == common::CELL
+                && pool == common::POOL
             {
                 assert_eq!(load, summary(3, 8, 1, 1), "the follow's first event");
                 return generation;
@@ -525,7 +525,7 @@ async fn a_following_hub_relays_the_summary() {
         }
     })
     .await
-    .expect("the model cell followed in time");
+    .expect("the model pool followed in time");
 
     instances[0]
         .report(report(5, 8, 0))
@@ -535,13 +535,13 @@ async fn a_following_hub_relays_the_summary() {
         loop {
             if let FollowEvent::Load {
                 class,
-                cell,
+                pool,
                 generation: of,
                 load,
             } = follow_event(&mut follows).await
                 && load != summary(3, 8, 1, 1)
             {
-                return (class, cell, of, load);
+                return (class, pool, of, load);
             }
         }
     })
@@ -551,7 +551,7 @@ async fn a_following_hub_relays_the_summary() {
         relayed,
         (
             "model_x".to_string(),
-            common::CELL.to_string(),
+            common::POOL.to_string(),
             generation,
             summary(5, 8, 1, 0)
         )
@@ -562,27 +562,27 @@ async fn a_following_hub_relays_the_summary() {
 }
 
 /// A summary is sent every period, changed or not, and carries its
-/// period, so that a reader can tell a quiet cell's summary from a stale
-/// one by its age: a cell whose one entry instance reports the same load
+/// period, so that a reader can tell a quiet pool's summary from a stale
+/// one by its age: a pool whose one entry instance reports the same load
 /// each period sends the same summary each period, on its watch and on a
 /// following hub's relay. The instance reports once a period, as the
 /// runtime's reporter does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_quiet_cells_summary_is_sent_every_period() {
+async fn a_quiet_pools_summary_is_sent_every_period() {
     let directory = Resolving::new();
-    let (model_hub, model) = serve_cell(
-        cell(common::CELL, "model-x-01-hub:1337"),
+    let (model_hub, model) = serve_pool(
+        pool(common::POOL, "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let mut cell_watch = watch(&model).await;
+    let mut pool_watch = watch(&model).await;
     let mut instances = Vec::new();
     for segment in ["f", "d", "d"] {
         instances.push(join_ready(&model_hub, segment).await);
     }
-    ready(&mut cell_watch, 1).await;
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
+    ready(&mut pool_watch, 1).await;
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
     let mut follows = global.follows();
     let quiet = summary(2, 8, 1, 0);
     assert_eq!(
@@ -602,8 +602,8 @@ async fn a_quiet_cells_summary_is_sent_every_period() {
     let seen = async {
         let mut watched = 0;
         while watched < 3 {
-            if let CellWatchEvent::Load { load } =
-                cell_watch.next().await.expect("the watch goes on")
+            if let PoolWatchEvent::Load { load } =
+                pool_watch.next().await.expect("the watch goes on")
                 && load == quiet
             {
                 watched += 1;

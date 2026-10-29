@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::WAIT;
-use common::cells::{Instance, Resolving, cell_hub, model_cell, model_hub, settings};
+use common::pools::{Instance, Resolving, model_hub, model_pool, pool_hub, settings};
 use common::proxy::Proxy;
 use gdl::{InstanceModel, InstanceModelState};
 use gdl_runtime::{Drains, SegmentLoad};
@@ -33,9 +33,9 @@ impl Drains for Working {
 
 #[tokio::test]
 async fn the_serving_body_progresses_while_a_stopping_instance_reports_its_drain() {
-    const CELL: &str = "model-x-01-us-east-1";
+    const POOL: &str = "model-x-01-us-east-1";
     let directory = Resolving::new();
-    let (hub, _) = cell_hub(model_hub(CELL, "m1-hub:1337"), &directory).await;
+    let (hub, _) = pool_hub(model_hub(POOL, "m1-hub:1337"), &directory).await;
     let mut sink = Instance::ready(&hub, "d").await;
     sink.announce(gdl_model::SegmentPhase::Loaded).await;
     sink.announce(gdl_model::SegmentPhase::Serving).await;
@@ -48,12 +48,12 @@ async fn the_serving_body_progresses_while_a_stopping_instance_reports_its_drain
             5_000,
             &format!(
                 "{}summary_ms = 1000\n[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 10000\n",
-                model_cell(CELL),
+                model_pool(POOL),
             ),
         );
         config.runtime.models = gdl::InstanceModels::new();
         let models = config.runtime.models.clone();
-        let (process, launch) = common::cells::launch(&config, "f")
+        let (process, launch) = common::pools::launch(&config, "f")
             .await
             .expect("the entry launches");
         let working = Arc::new(AtomicUsize::new(1));

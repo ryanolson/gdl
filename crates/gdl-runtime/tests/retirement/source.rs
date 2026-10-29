@@ -1,14 +1,14 @@
 use super::*;
 
-/// An entry instance that also hosts a source, stopped outside its cell's
+/// An entry instance that also hosts a source, stopped outside its pool's
 /// drain, says `drained` only once it holds no request. Every instance of a
-/// draining cell reads an entry's `drained` as "this entry holds no
+/// draining pool reads an entry's `drained` as "this entry holds no
 /// request". Said as a source's, once the serving body ends, it would let a
-/// later cell drain close the interior instance while the entry still holds
+/// later pool drain close the interior instance while the entry still holds
 /// a request bound for it. The interior is stopped first, so that it is
-/// already in its stop when the cell drain comes.
+/// already in its stop when the pool drain comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source() {
+async fn a_later_pool_drain_keeps_work_held_by_an_entry_with_a_source() {
     use gdl_model::{HopInfo, NodeInfo, Role, TypeInfo, segment_service};
     use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
     use velo::discovery::{ServiceDiscovery, ServiceEvent};
@@ -44,12 +44,12 @@ async fn a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source() {
     let spec = DeploymentSpec::new(graph, placement).expect("valid test fixture");
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let (m1, proxy) = model_fronted(
         &spec,
         &directory,
-        cell(M1, "m1-hub:1337", 1),
+        pool(M1, "m1-hub:1337", 1),
         "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
         &|deployment| {
             let source = deployment.hop(
@@ -81,7 +81,7 @@ async fn a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source() {
         .build()
         .expect("the model hub's client");
     // The entry retires as its stop begins, while it holds the gated
-    // request. It stays open: as the cell's last entry instance, its
+    // request. It stays open: as the pool's last entry instance, its
     // chooser does not avoid it.
     tokio::time::timeout(WAIT, async {
         loop {
@@ -123,7 +123,7 @@ async fn a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source() {
     .expect("the hub answers in time")
     .expect("the hub serves the watch");
 
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     proxy.release();
     let closed = tokio::time::timeout(BOUND, async {
         while !m1.sink.segment.is_closed() {
@@ -161,7 +161,7 @@ async fn a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source() {
     }
     assert!(
         received.is_ok(),
-        "the cell drain cut a request the entry held; interior closed: {closed}: {received:?}"
+        "the pool drain cut a request the entry held; interior closed: {closed}: {received:?}"
     );
     assert!(
         said,

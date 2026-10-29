@@ -1,8 +1,8 @@
 //! What a hub lists, for its choosers' model index: every record of a
-//! class it sends to, followed or not, with the cell's region, condition,
-//! and models, until the cell withdraws. Silence never removes a cell: a
-//! record whose lease passed reads missing, and so does a followed cell
-//! whose link was lost. A followed cell's models come from its link too,
+//! class it sends to, followed or not, with the pool's region, condition,
+//! and models, until the pool withdraws. Silence never removes a pool: a
+//! record whose lease passed reads missing, and so does a followed pool
+//! whose link was lost. A followed pool's models come from its link too,
 //! whichever has the higher version. A watch of the relay begun before the
 //! hub has read the directory waits for it, and one that still has not is
 //! ended once it has. Every hub runs in process on OS-assigned ports;
@@ -16,31 +16,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use common::{
-    CELL, GLOBAL, Instance, Resolving, WAIT, global_default, hub_of, meet_the_quorum, model,
-    serve_cell, spec, timing,
+    GLOBAL, Instance, POOL, Resolving, WAIT, global_default, hub_of, meet_the_quorum, model,
+    serve_pool, spec, timing,
 };
 use futures::{Stream, StreamExt};
-use gdl_cells::{
-    CellCondition, CellDirectory, CellEvent, CellRecord, CellState, DirDirectory, DirectoryError,
-    MemoryDirectory, ModelEntry, ModelState, Presence, ResumeToken, Withdrawal,
-};
 use gdl_model::{InstanceModel, InstanceModelState};
+use gdl_pools::{
+    DirDirectory, DirectoryError, MemoryDirectory, ModelEntry, ModelState, PoolCondition,
+    PoolDirectory, PoolEvent, PoolRecord, PoolState, Presence, ResumeToken, Withdrawal,
+};
 use gdl_watch::{FollowEvent, Listing, LoadReport};
 use tokio::sync::watch;
 
-/// A record of the model cell `cell`, of [`spec`]'s deployment unless
+/// A record of the model pool `pool`, of [`spec`]'s deployment unless
 /// `placement` is given, a child of `home`, listing `models`.
-fn record(cell: &str, home: &str, models: &[(&str, ModelState)], lease: Duration) -> CellRecord {
+fn record(pool: &str, home: &str, models: &[(&str, ModelState)], lease: Duration) -> PoolRecord {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
-    CellRecord {
-        name: cell.into(),
+    PoolRecord {
+        name: pool.into(),
         class: "model_x".into(),
         region: "eu-west-1".into(),
         home: Some(home.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub: "127.0.0.1:1".into(),
@@ -93,27 +93,27 @@ async fn snapshot(
     }
 }
 
-/// The listings of `events`, by cell: from `listed` events, and from
+/// The listings of `events`, by pool: from `listed` events, and from
 /// follows that carry one.
 fn listings(events: &[FollowEvent]) -> Vec<(String, Option<Listing>)> {
     events
         .iter()
         .filter_map(|event| match event {
-            FollowEvent::Listed { cell, listing, .. } => Some((cell.clone(), listing.clone())),
+            FollowEvent::Listed { pool, listing, .. } => Some((pool.clone(), listing.clone())),
             FollowEvent::Follow {
-                cell,
+                pool,
                 listing: Some(listing),
                 ..
-            } => Some((cell.clone(), Some(listing.clone()))),
+            } => Some((pool.clone(), Some(listing.clone()))),
             _ => None,
         })
         .collect()
 }
 
-/// The next listing of `cell` on `watch` that `wanted` holds of.
+/// The next listing of `pool` on `watch` that `wanted` holds of.
 async fn listed_until(
     watch: &mut (impl Stream<Item = FollowEvent> + Unpin),
-    cell: &str,
+    pool: &str,
     what: &str,
     wanted: impl Fn(&Listing) -> bool,
 ) -> Listing {
@@ -121,11 +121,11 @@ async fn listed_until(
         loop {
             let event = watch.next().await.expect("the watch goes on");
             if let FollowEvent::Listed {
-                cell: of,
+                pool: of,
                 listing: Some(listing),
                 ..
             } = event
-                && of == cell
+                && of == pool
                 && wanted(&listing)
             {
                 return listing;
@@ -133,17 +133,17 @@ async fn listed_until(
         }
     })
     .await;
-    found.unwrap_or_else(|_| panic!("{cell}: {what} in time"))
+    found.unwrap_or_else(|_| panic!("{pool}: {what} in time"))
 }
 
-/// A new hub knows a model whose only cell is silent: it lists every
+/// A new hub knows a model whose only pool is silent: it lists every
 /// record of the class it reads, a child or not, with its models, and
-/// the cell's condition. A cell scaled to 0 reads so, and never lapses;
+/// the pool's condition. A pool scaled to 0 reads so, and never lapses;
 /// a serving one whose lease passes reads missing, and stays listed. A
 /// record of another deployment is not listed. Under `dir`, which keeps
-/// every record until its cell withdraws.
+/// every record until its pool withdraws.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_new_hub_lists_a_silent_cell_with_its_models() {
+async fn a_new_hub_lists_a_silent_pool_with_its_models() {
     let root = tempfile::Builder::new()
         .prefix("gdl-listed-")
         .tempdir()
@@ -156,7 +156,7 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
         &[("qwen-32b", ModelState::Ready)],
         lease,
     );
-    let scaled = CellRecord {
+    let scaled = PoolRecord {
         presence: Presence::ScaledToZero,
         ..record(
             "model-x-03-eu-west-1",
@@ -165,7 +165,7 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
             lease,
         )
     };
-    let other = CellRecord {
+    let other = PoolRecord {
         placement: 1,
         ..record(
             "model-x-09-eu-west-1",
@@ -183,14 +183,14 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
     let (events, listed) = snapshot(&mut watch).await;
     assert!(listed, "the directory was read before the snapshot");
     let shown = listings(&events);
-    let names: Vec<&str> = shown.iter().map(|(cell, _)| cell.as_str()).collect();
+    let names: Vec<&str> = shown.iter().map(|(pool, _)| pool.as_str()).collect();
     assert_eq!(names, ["model-x-02-eu-west-1", "model-x-03-eu-west-1"]);
     let first = shown[0].1.as_ref().expect("listed");
     assert_eq!(models(first), [("qwen-32b", ModelState::Ready)]);
     assert_eq!(first.region, "eu-west-1");
     assert_eq!(first.models.version, 7);
     let scaled_listing = shown[1].1.as_ref().expect("listed");
-    assert_eq!(scaled_listing.condition, CellCondition::ScaledToZero);
+    assert_eq!(scaled_listing.condition, PoolCondition::ScaledToZero);
     assert_eq!(
         models(scaled_listing),
         [("llama-70b", ModelState::Unavailable)]
@@ -198,10 +198,10 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
 
     // A busy host may build the snapshot after the lease has passed.
     let missing = match first.condition {
-        CellCondition::Missing => first.clone(),
+        PoolCondition::Missing => first.clone(),
         _ => {
             listed_until(&mut watch, "model-x-02-eu-west-1", "missing", |listing| {
-                listing.condition == CellCondition::Missing
+                listing.condition == PoolCondition::Missing
             })
             .await
         }
@@ -216,7 +216,7 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
     assert_eq!(
         age(scaled_listing),
         None,
-        "a cell scaled to 0 is not silent"
+        "a pool scaled to 0 is not silent"
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (events, _) = snapshot(&mut global.follows()).await;
@@ -229,15 +229,15 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
     );
     assert_eq!(
         shown[1].1.as_ref().map(|listing| listing.condition),
-        Some(CellCondition::ScaledToZero),
-        "a cell scaled to 0 never lapses"
+        Some(PoolCondition::ScaledToZero),
+        "a pool scaled to 0 never lapses"
     );
 
-    // Only a withdrawal unlists the cell.
+    // Only a withdrawal unlists the pool.
     directory
         .withdraw(Withdrawal {
             class: "model_x".into(),
-            cell: silent.name.clone(),
+            pool: silent.name.clone(),
             epoch: 1,
             seq: 2,
         })
@@ -246,23 +246,23 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
     let gone = tokio::time::timeout(WAIT, async {
         loop {
             if let FollowEvent::Listed {
-                cell,
+                pool,
                 listing: None,
                 ..
             } = next(&mut watch).await
-                && cell == silent.name
+                && pool == silent.name
             {
                 return;
             }
         }
     })
     .await;
-    assert!(gone.is_ok(), "the withdrawal unlists the cell");
+    assert!(gone.is_ok(), "the withdrawal unlists the pool");
     hub.shutdown().await.expect("the hub stops");
 }
 
 /// A directory that stores nothing once `frozen`, though it answers each
-/// publish as stored: what a follower learns of a cell from then comes
+/// publish as stored: what a follower learns of a pool from then comes
 /// from its link alone.
 #[derive(Clone)]
 struct Freezing {
@@ -270,10 +270,10 @@ struct Freezing {
     frozen: Arc<AtomicBool>,
 }
 
-impl CellDirectory for Freezing {
-    type Watch = <Resolving as CellDirectory>::Watch;
+impl PoolDirectory for Freezing {
+    type Watch = <Resolving as PoolDirectory>::Watch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         if self.frozen.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -302,22 +302,22 @@ fn says(model: &str, state: InstanceModelState) -> LoadReport {
     }
 }
 
-/// A followed cell's models reach its parent's relay over the follow link
+/// A followed pool's models reach its parent's relay over the follow link
 /// when the directory holds an older list: the link's list has the higher
-/// version. A new watch of the relay gives a followed cell's listing on
-/// its follow, not apart. And a followed cell whose link is lost reads
+/// version. A new watch of the relay gives a followed pool's listing on
+/// its follow, not apart. And a followed pool whose link is lost reads
 /// missing while its record is still fresh, and live again once followed
 /// anew.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_followed_cells_models_come_over_its_link() {
+async fn a_followed_pools_models_come_over_its_link() {
     let resolving = Resolving::new();
     let directory = Freezing {
         inner: resolving.clone(),
         frozen: Arc::new(AtomicBool::new(false)),
     };
-    let model_cell = model(CELL, "us-east-1", "model-x-01-hub:1337");
-    let name = model_cell.hub.clone().expect("named");
-    let (model_hub, _model) = hub_of(model_cell, directory.clone(), timing()).await;
+    let model_pool = model(POOL, "us-east-1", "model-x-01-hub:1337");
+    let name = model_pool.hub.clone().expect("named");
+    let (model_hub, _model) = hub_of(model_pool, directory.clone(), timing()).await;
     resolving.resolve(&name, &model_hub);
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let entry: &Instance = &instances[0];
@@ -326,19 +326,19 @@ async fn a_followed_cells_models_come_over_its_link() {
         .await
         .expect("taken");
 
-    let (global_hub, global) = serve_cell(global_default(), &resolving, timing()).await;
+    let (global_hub, global) = serve_pool(global_default(), &resolving, timing()).await;
     let mut watch = global.follows();
     let (events, _) = snapshot(&mut watch).await;
     let starting = |listing: &Listing| {
         models(listing) == [("qwen-32b", ModelState::Starting)]
-            && listing.condition == CellCondition::Live
+            && listing.condition == PoolCondition::Live
     };
     let shown = listings(&events);
     if !shown
         .iter()
-        .any(|(cell, listing)| cell == CELL && listing.as_ref().is_some_and(starting))
+        .any(|(pool, listing)| pool == POOL && listing.as_ref().is_some_and(starting))
     {
-        listed_until(&mut watch, CELL, "listed and starting", starting).await;
+        listed_until(&mut watch, POOL, "listed and starting", starting).await;
     }
     // Followed: the relay's snapshot has the follow.
     tokio::time::timeout(WAIT, async {
@@ -346,7 +346,7 @@ async fn a_followed_cells_models_come_over_its_link() {
             let (events, _) = snapshot(&mut global.follows()).await;
             if events
                 .iter()
-                .any(|event| matches!(event, FollowEvent::Follow { cell, .. } if cell == CELL))
+                .any(|event| matches!(event, FollowEvent::Follow { pool, .. } if pool == POOL))
             {
                 return;
             }
@@ -361,7 +361,7 @@ async fn a_followed_cells_models_come_over_its_link() {
         .report(says("qwen-32b", InstanceModelState::Ready))
         .await
         .expect("taken");
-    let ready = listed_until(&mut watch, CELL, "ready, from the link", |listing| {
+    let ready = listed_until(&mut watch, POOL, "ready, from the link", |listing| {
         models(listing) == [("qwen-32b", ModelState::Ready)]
     })
     .await;
@@ -370,7 +370,7 @@ async fn a_followed_cells_models_come_over_its_link() {
         .watch("model_x", None)
         .filter_map(|event| {
             std::future::ready(match event {
-                Ok(CellEvent::Current(record)) => Some(record),
+                Ok(PoolEvent::Current(record)) => Some(record),
                 _ => None,
             })
         })
@@ -386,7 +386,7 @@ async fn a_followed_cells_models_come_over_its_link() {
     let follow = events
         .iter()
         .find_map(|event| match event {
-            FollowEvent::Follow { cell, listing, .. } if cell == CELL => Some(listing.clone()),
+            FollowEvent::Follow { pool, listing, .. } if pool == POOL => Some(listing.clone()),
             _ => None,
         })
         .expect("the follow");
@@ -397,16 +397,16 @@ async fn a_followed_cells_models_come_over_its_link() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, FollowEvent::Listed { cell, .. } if cell == CELL)),
-        "a followed cell's listing is on its follow"
+            .any(|event| matches!(event, FollowEvent::Listed { pool, .. } if pool == POOL)),
+        "a followed pool's listing is on its follow"
     );
 
     model_hub.shutdown().await.expect("the hub stops");
     let lost = listed_until(
         &mut watch,
-        CELL,
+        POOL,
         "missing once its link is lost",
-        |listing| listing.condition == CellCondition::Missing,
+        |listing| listing.condition == PoolCondition::Missing,
     )
     .await;
     assert_eq!(models(&lost), [("qwen-32b", ModelState::Ready)], "kept");
@@ -426,10 +426,10 @@ struct Held {
     released: watch::Sender<bool>,
 }
 
-impl CellDirectory for Held {
-    type Watch = Pin<Box<dyn Stream<Item = Result<CellEvent, DirectoryError>> + Send>>;
+impl PoolDirectory for Held {
+    type Watch = Pin<Box<dyn Stream<Item = Result<PoolEvent, DirectoryError>> + Send>>;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.inner.publish(record).await
     }
 
@@ -442,7 +442,7 @@ impl CellDirectory for Held {
         Box::pin(self.inner.watch(class, from).then(move |event| {
             let mut released = released.clone();
             async move {
-                if matches!(event, Ok(CellEvent::Synced { .. })) {
+                if matches!(event, Ok(PoolEvent::Synced { .. })) {
                     let _ = released.wait_for(|released| *released).await;
                 }
                 event
@@ -454,7 +454,7 @@ impl CellDirectory for Held {
 /// Until the hub's watch of the directory has read a snapshot, a watch of
 /// its relay waits a little, then says the listings are not whole, and
 /// it ends once they are; the next one says they are. A reader so tells
-/// a model not known yet from one that no cell lists. The test waits out
+/// a model not known yet from one that no pool lists. The test waits out
 /// the relay's bound on that wait, 2 s, by design.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_before_the_directory_is_read_says_so_and_ends_once_it_is() {
@@ -489,7 +489,7 @@ async fn a_record_at_model_version_zero_keeps_its_models() {
     );
     initial.models_version = 0;
     initial.models[0].since = 0;
-    let control = CellRecord {
+    let control = PoolRecord {
         name: "model-x-03-eu-west-1".into(),
         models_version: 1,
         ..initial.clone()
@@ -504,12 +504,12 @@ async fn a_record_at_model_version_zero_keeps_its_models() {
     assert!(synced, "the directory snapshot is complete");
     let shown = listings(&events);
     assert_eq!(shown.len(), 2, "both records are listed");
-    let get = |cell: &str| {
+    let get = |pool: &str| {
         shown
             .iter()
-            .find(|(name, _)| name == cell)
+            .find(|(name, _)| name == pool)
             .and_then(|(_, listing)| listing.as_ref())
-            .expect("the cell is listed")
+            .expect("the pool is listed")
     };
     assert_eq!(
         models(get(&control.name)),
@@ -528,7 +528,7 @@ async fn a_record_at_model_version_zero_keeps_its_models() {
 /// status.
 async fn control(hub: &velo_hub::Hub, path: &str, body: Option<gdl_model::ModelKey>) -> u16 {
     let url = format!(
-        "http://127.0.0.1:{}/v1/ext/gdl-cell{path}",
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{path}",
         hub.control_addr().port()
     );
     let request = reqwest::Client::new().post(&url);
@@ -544,22 +544,22 @@ async fn control(hub: &velo_hub::Hub, path: &str, body: Option<gdl_model::ModelK
         .as_u16()
 }
 
-/// A model an operator revokes on a cell leaves that cell's listing, so a
-/// chooser's index no longer lists the cell for it, while the cell's
+/// A model an operator revokes on a pool leaves that pool's listing, so a
+/// chooser's index no longer lists the pool for it, while the pool's
 /// other models stay. The record and the link both drop it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revoked_model_leaves_the_cells_listing() {
+async fn a_revoked_model_leaves_the_pools_listing() {
     let directory = Resolving::new();
-    let settings = gdl_model::CellSettings {
+    let settings = gdl_model::PoolSettings {
         models: vec![
             gdl_model::ModelKey::new("acme-legal"),
             gdl_model::ModelKey::new("llama-70b"),
         ],
-        ..model(CELL, "us-east-1", "model-x-01-hub:1337")
+        ..model(POOL, "us-east-1", "model-x-01-hub:1337")
     };
-    let (model_hub, _model) = serve_cell(settings, &directory, timing()).await;
+    let (model_hub, _model) = serve_pool(settings, &directory, timing()).await;
     let (_instances, _) = meet_the_quorum(&model_hub).await;
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
     let mut watch = global.follows();
     let (events, _) = snapshot(&mut watch).await;
     let names = |listing: &Listing| -> Vec<String> {
@@ -573,9 +573,9 @@ async fn a_revoked_model_leaves_the_cells_listing() {
     let both = |listing: &Listing| names(listing) == ["acme-legal", "llama-70b"];
     if !listings(&events)
         .iter()
-        .any(|(cell, listing)| cell == CELL && listing.as_ref().is_some_and(both))
+        .any(|(pool, listing)| pool == POOL && listing.as_ref().is_some_and(both))
     {
-        listed_until(&mut watch, CELL, "both models listed", both).await;
+        listed_until(&mut watch, POOL, "both models listed", both).await;
     }
 
     assert_eq!(
@@ -587,7 +587,7 @@ async fn a_revoked_model_leaves_the_cells_listing() {
         .await,
         204
     );
-    let revoked = listed_until(&mut watch, CELL, "acme-legal revoked", |listing| {
+    let revoked = listed_until(&mut watch, POOL, "acme-legal revoked", |listing| {
         names(listing) == ["llama-70b"]
     })
     .await;
@@ -599,7 +599,7 @@ async fn a_revoked_model_leaves_the_cells_listing() {
     let shown = listings(&events);
     let now = shown
         .iter()
-        .find(|(cell, _)| cell == CELL)
+        .find(|(pool, _)| pool == POOL)
         .and_then(|(_, listing)| listing.as_ref())
         .expect("listed");
     assert_eq!(names(now), ["llama-70b"], "a new watch shows it revoked");
@@ -611,26 +611,26 @@ async fn a_revoked_model_leaves_the_cells_listing() {
 /// parent's hub, unlists the child: its models leave the index, as after
 /// the child's own drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_operators_withdrawal_unlists_the_cell() {
+async fn an_operators_withdrawal_unlists_the_pool() {
     let directory = Resolving::new();
-    let (model_hub, _model) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
     let mut watch = global.follows();
     let (events, _) = snapshot(&mut watch).await;
-    if !listings(&events).iter().any(|(cell, _)| cell == CELL) {
-        listed_until(&mut watch, CELL, "listed", |_| true).await;
+    if !listings(&events).iter().any(|(pool, _)| pool == POOL) {
+        listed_until(&mut watch, POOL, "listed", |_| true).await;
     }
     model_hub.shutdown().await.expect("the child's hub stops");
 
     assert_eq!(
         control(
             &global_hub,
-            &gdl_watch::child_withdraw_path("model_x", CELL),
+            &gdl_watch::child_withdraw_path("model_x", POOL),
             None
         )
         .await,
@@ -639,11 +639,11 @@ async fn an_operators_withdrawal_unlists_the_cell() {
     let unlisted = tokio::time::timeout(WAIT, async {
         loop {
             if let FollowEvent::Listed {
-                cell,
+                pool,
                 listing: None,
                 ..
             } = next(&mut watch).await
-                && cell == CELL
+                && pool == POOL
             {
                 return;
             }
@@ -656,7 +656,7 @@ async fn an_operators_withdrawal_unlists_the_cell() {
     );
     let (events, _) = snapshot(&mut global.follows()).await;
     assert!(
-        !listings(&events).iter().any(|(cell, _)| cell == CELL),
+        !listings(&events).iter().any(|(pool, _)| pool == POOL),
         "a new watch does not list it"
     );
     global_hub.shutdown().await.expect("the hub stops");

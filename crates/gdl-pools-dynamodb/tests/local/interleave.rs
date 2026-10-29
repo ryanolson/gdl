@@ -1,12 +1,12 @@
-//! Every order of the calls of a cell's writers, with TTL and a late
-//! attempt of a write: after each call, the list a cell's stored record
+//! Every order of the calls of a pool's writers, with TTL and a late
+//! attempt of a write: after each call, the list a pool's stored record
 //! names is there and is not set to expire, and no two writers put the
 //! same list item.
 //!
 //! Each writer's client holds every DynamoDB call until the schedule lets
 //! it run, so an order is a sequence of choices of which writer's next
 //! call runs. The orders are explored depth first: each one runs in a new
-//! cell of the same tables, replaying the choices before the one it
+//! pool of the same tables, replaying the choices before the one it
 //! changes. A writer can stop early, refused as not newer, so the orders
 //! come from the runs, not from a count of calls made in advance.
 
@@ -33,8 +33,8 @@ use aws_sdk_dynamodb::{
     operation::{put_item::PutItemInput, update_item::UpdateItemInput},
     types::AttributeValue,
 };
-use gdl_cells::{CellCommand, CellDirectory, CellRecord, CommandWrite, DirectoryError, Withdrawal};
-use gdl_cells_dynamodb::{DynamoDirectory, Tables};
+use gdl_pools::{CommandWrite, DirectoryError, PoolCommand, PoolDirectory, PoolRecord, Withdrawal};
+use gdl_pools_dynamodb::{DynamoDirectory, Tables};
 
 use super::{
     LIMITS, MODEL, WAIT, client, lists, named_list, own_pool, record, snapshot, tables, watch,
@@ -57,7 +57,7 @@ enum Call {
     List(String),
     Record,
     /// A records-table put that keeps the handle's list: it holds only
-    /// while the cell's item names that list.
+    /// while the pool's item names that list.
     Kept,
     Expire,
     Other,
@@ -71,7 +71,7 @@ enum Branch {
     Expiry,
     /// A write was refused as not newer.
     NotNewer,
-    /// A write that kept its list was refused for the list the cell's
+    /// A write that kept its list was refused for the list the pool's
     /// item named, and put a list of its own.
     Fallback,
     /// A records-table put landed, and its answer was lost.
@@ -328,15 +328,15 @@ enum Choice {
     Late(usize),
 }
 
-/// Delete each list of `cell` that is set to expire, as TTL does once its
+/// Delete each list of `pool` that is set to expire, as TTL does once its
 /// hour has passed.
-async fn ttl(client: &Client, tables: &Tables, cell: &str) {
-    for (key, expiry) in lists(client, tables, cell).await {
+async fn ttl(client: &Client, tables: &Tables, pool: &str) {
+    for (key, expiry) in lists(client, tables, pool).await {
         let Some(expiry) = expiry else { continue };
         client
             .delete_item()
             .table_name(&tables.lists)
-            .key("owner", AttributeValue::S(format!("{MODEL}/{cell}")))
+            .key("owner", AttributeValue::S(format!("{MODEL}/{pool}")))
             .key("list", AttributeValue::S(key))
             .condition_expression("#expires = :expires")
             .expression_attribute_names("#expires", "expires_at")
@@ -372,14 +372,14 @@ async fn late(client: &Client, put: &PutItemInput) -> bool {
     }
 }
 
-/// The cell's stored item is a record whose list is there and not set to
+/// The pool's stored item is a record whose list is there and not set to
 /// expire, or a withdrawal.
-async fn live(client: &Client, tables: &Tables, cell: &str) -> Result<(), String> {
+async fn live(client: &Client, tables: &Tables, pool: &str) -> Result<(), String> {
     let stored = client
         .get_item()
         .table_name(&tables.records)
         .key("class", AttributeValue::S(MODEL.into()))
-        .key("cell", AttributeValue::S(cell.into()))
+        .key("pool", AttributeValue::S(pool.into()))
         .consistent_read(true)
         .send()
         .await
@@ -391,15 +391,15 @@ async fn live(client: &Client, tables: &Tables, cell: &str) -> Result<(), String
     if withdrawn {
         return Ok(());
     }
-    let (key, expiry) = named_list(client, tables, cell).await?;
+    let (key, expiry) = named_list(client, tables, pool).await?;
     expiry.map_or(Ok(()), |at| Err(format!("{key} is set to expire at {at}")))
 }
 
-/// A variant: its writers, given the cell's first record, whether TTL runs
+/// A variant: its writers, given the pool's first record, whether TTL runs
 /// in its orders, and the branches its orders must reach.
 struct Variant {
     name: &'static str,
-    writers: fn(&CellRecord) -> Vec<Plan>,
+    writers: fn(&PoolRecord) -> Vec<Plan>,
     ttl: bool,
     reaches: &'static [Branch],
 }
@@ -413,17 +413,17 @@ fn plan(name: &'static str, writes: Vec<CommandWrite>) -> Plan {
     }
 }
 
-fn at(first: &CellRecord, epoch: u64, seq: u64) -> CommandWrite {
-    CommandWrite::Record(Box::new(CellRecord {
+fn at(first: &PoolRecord, epoch: u64, seq: u64) -> CommandWrite {
+    CommandWrite::Record(Box::new(PoolRecord {
         epoch,
         seq,
         ..first.clone()
     }))
 }
 
-/// `first`'s cell at a higher `models_version`.
-fn higher(first: &CellRecord, epoch: u64, seq: u64) -> CommandWrite {
-    CommandWrite::Record(Box::new(CellRecord {
+/// `first`'s pool at a higher `models_version`.
+fn higher(first: &PoolRecord, epoch: u64, seq: u64) -> CommandWrite {
+    CommandWrite::Record(Box::new(PoolRecord {
         epoch,
         seq,
         ..record(&first.name, 1, 2, &["qwen-32b", "llama-70b"])
@@ -434,11 +434,11 @@ fn higher(first: &CellRecord, epoch: u64, seq: u64) -> CommandWrite {
 /// record's `models_version`, `heartbeats` more of the same list, and one
 /// at a higher `models_version`, which expires the list it moves past.
 fn command_and_hub(
-    first: &CellRecord,
+    first: &PoolRecord,
     hub_epoch: impl Fn(&CommandWrite) -> u64,
     heartbeats: u64,
 ) -> [Plan; 2] {
-    let command = CellCommand::ScaleToZero.write(first, std::time::SystemTime::now());
+    let command = PoolCommand::ScaleToZero.write(first, std::time::SystemTime::now());
     let epoch = hub_epoch(&command);
     let mut hub: Vec<CommandWrite> = (1..=1 + heartbeats)
         .map(|seq| at(first, epoch, seq))
@@ -447,15 +447,15 @@ fn command_and_hub(
     [plan("command", vec![command]), plan("hub", hub)]
 }
 
-/// Run every order of `variant`, each in a cell of its own: the number of
+/// Run every order of `variant`, each in a pool of its own: the number of
 /// orders, and the branches they reached.
 async fn explore(client: &Client, tables: &Tables, variant: &Variant) -> (usize, BTreeSet<Branch>) {
     let mut prefix: Vec<Choice> = Vec::new();
     let mut orders = 0;
     let mut reached = BTreeSet::new();
     loop {
-        let cell = format!("{}-{orders}", variant.name);
-        let trace = run(client, tables, variant, &cell, &prefix, &mut reached).await;
+        let pool = format!("{}-{orders}", variant.name);
+        let trace = run(client, tables, variant, &pool, &prefix, &mut reached).await;
         orders += 1;
         // The deepest choice with an untried alternative: change it, and
         // keep the choices before it.
@@ -474,22 +474,22 @@ async fn explore(client: &Client, tables: &Tables, variant: &Variant) -> (usize,
     }
 }
 
-/// Run one order in `cell`: the choices of `prefix`, then the first one
+/// Run one order in `pool`: the choices of `prefix`, then the first one
 /// enabled at each later step. The choices enabled at each step, and the
 /// one taken.
 async fn run(
     client: &Client,
     tables: &Tables,
     variant: &Variant,
-    cell: &str,
+    pool: &str,
     prefix: &[Choice],
     reached: &mut BTreeSet<Branch>,
 ) -> Vec<(Vec<Choice>, usize)> {
-    let first = record(cell, 1, 1, &["qwen-32b"]);
+    let first = record(pool, 1, 1, &["qwen-32b"]);
     DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS)
         .publish(first.clone())
         .await
-        .expect("the cell's first record");
+        .expect("the pool's first record");
     let puts = Arc::new(Mutex::new(Vec::new()));
     let mut writers: Vec<Writer> = (variant.writers)(&first)
         .into_iter()
@@ -520,13 +520,13 @@ async fn run(
             .iter()
             .position(|enabled| *enabled == choice)
             .unwrap_or_else(|| {
-                panic!("{cell}: a replay diverged at {steps:?}: {choice:?} is not in {enabled:?}")
+                panic!("{pool}: a replay diverged at {steps:?}: {choice:?} is not in {enabled:?}")
             });
         trace.push((enabled, chosen));
         match choice {
             Choice::Writer(n) => steps.push(writers[n].step()),
             Choice::Ttl => {
-                ttl(client, tables, cell).await;
+                ttl(client, tables, pool).await;
                 ttl_owed = false;
                 steps.push("TTL".to_owned());
             }
@@ -544,10 +544,10 @@ async fn run(
             }
         }
         // The property holds after every call, not only at the end.
-        if let Err(broken) = live(client, tables, cell).await {
+        if let Err(broken) = live(client, tables, pool).await {
             panic!(
-                "{cell}: the stored record's list is not live after {steps:#?}: {broken}; lists: {:?}",
-                lists(client, tables, cell).await
+                "{pool}: the stored record's list is not live after {steps:#?}: {broken}; lists: {:?}",
+                lists(client, tables, pool).await
             );
         }
     }
@@ -580,7 +580,7 @@ async fn run(
     for (writer, key) in puts.iter() {
         if let Some(other) = by_key.insert(key, writer).filter(|other| other != writer) {
             panic!(
-                "{cell}: {other} and {writer} both put list {key}, so one put replaced the other's, after {steps:#?}"
+                "{pool}: {other} and {writer} both put list {key}, so one put replaced the other's, after {steps:#?}"
             );
         }
     }
@@ -656,7 +656,7 @@ const VARIANTS: [Variant; 6] = [
                     "b",
                     vec![CommandWrite::Withdrawal(Withdrawal {
                         class: first.class.clone(),
-                        cell: first.name.clone(),
+                        pool: first.name.clone(),
                         epoch: 2,
                         seq: 2,
                     })],
@@ -673,7 +673,7 @@ const VARIANTS: [Variant; 6] = [
 // The variants run at once, each on a thread and a client of its own,
 // since the schedule blocks its thread while a call runs.
 #[tokio::test]
-async fn every_order_of_a_cells_writers_and_ttl_leaves_a_live_list() {
+async fn every_order_of_a_pools_writers_and_ttl_leaves_a_live_list() {
     let client = client();
     let tables = tables(&client).await;
     std::thread::scope(|scope| {

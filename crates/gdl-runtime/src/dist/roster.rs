@@ -33,7 +33,7 @@ pub(crate) const CHOICES: usize = 8;
 /// once it is ready, one that retires is skipped while its segment has
 /// another, and one that leaves is dropped.
 ///
-/// A chooser's roster also holds its tables of the cells of the classes
+/// A chooser's roster also holds its tables of the pools of the classes
 /// it sends to: a hand-off into another class routes by them, since the
 /// roster holds no instance of that class.
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ pub struct Roster {
     segments: BTreeMap<String, Vec<PeerInfo>>,
     live: Arc<Live>,
     #[cfg(feature = "hub")]
-    cells: Option<super::Cells>,
+    pools: Option<super::Pools>,
 }
 
 impl Default for Roster {
@@ -50,7 +50,7 @@ impl Default for Roster {
             segments: BTreeMap::new(),
             live: Arc::new(Live::new()),
             #[cfg(feature = "hub")]
-            cells: None,
+            pools: None,
         }
     }
 }
@@ -103,17 +103,17 @@ impl Roster {
         &self.live
     }
 
-    /// Route the hand-offs into other classes by `cells`, a chooser's
+    /// Route the hand-offs into other classes by `pools`, a chooser's
     /// tables.
     #[cfg(feature = "hub")]
-    pub(crate) fn choose_cells(&mut self, cells: super::Cells) {
-        self.cells = Some(cells);
+    pub(crate) fn choose_pools(&mut self, pools: super::Pools) {
+        self.pools = Some(pools);
     }
 
     /// The chooser's tables, for an instance that is one.
     #[cfg(feature = "hub")]
-    pub(crate) fn cells(&self) -> Option<&super::Cells> {
-        self.cells.as_ref()
+    pub(crate) fn pools(&self) -> Option<&super::Pools> {
+        self.pools.as_ref()
     }
 }
 

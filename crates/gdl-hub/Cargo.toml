@@ -9,7 +9,7 @@ publish.workspace = true
 anyhow = "1"
 figment = { workspace = true, features = ["env"] }
 futures.workspace = true
-gdl-cells = { path = "../gdl-cells" }
+gdl-pools = { path = "../gdl-pools" }
 gdl-model = { path = "../gdl-model" }
 gdl-watch = { path = "../gdl-watch" }
 # The keyed record table's order of use.

@@ -72,7 +72,7 @@ Still to measure on machine 2: time to first item and inter-item p50 and p99 for
 | Live rosters: three segments +1.5%, accepted for now | +0.9% (two), +1.5% (three) | +1.10% (two), +2.18% (three), both beyond the spread | No. The owner accepts +2.18% for now, and the row is guarded |
 | Deadline sweeps cost nothing per item | Per-item row bimodal, +2.4% | Per-item row within the spread. About −8,000 per stream sent | Yes |
 | Selectors: built-ins cost what they did | Within the spread | Every row within the spread: +0.1% (`round_robin`), +0.45% (`random`) | Yes |
-| Cells: nothing added to a placement without classes | Not measured | The cells commits add nothing. The range moves +0.94% on two segments, from main's message codec work merged into it | Yes for cells. The codec work costs +1.26% on two segments, and the owner accepts it |
+| Pools: nothing added to a placement without classes | Not measured | The pools commits add nothing. The range moves +0.94% on two segments, from main's message codec work merged into it | Yes for pools. The codec work costs +1.26% on two segments, and the owner accepts it |
 
 Codec timings are not in this list. They are measured in time, not instructions, and [Codec cost](crossing-performance.md#codec-cost) has them.
 
@@ -239,21 +239,21 @@ The saving is about 8,000 user instructions per anchor, one for each stream sent
 
 Every change median is inside the range of its base. The built-in policies cost what they did. Wall time (`remote`, three runs, load average 2.0 to 3.0): the change medians of `concurrent-32x1-reference/1-segment` (+2.4% against the base median) and `request/reference-1-segment` (+0.9%) are above the base range, and `concurrent-32x1000-16B/lean-2-segments` (−0.2%) is below it. The other three rows are inside it.
 
-### Cells
+### Pools
 
 Three comparisons. All five commits are built in one target directory and run in turn for ten rounds, load average 2.4 to 3.9 (8.0 in the first). None of the setups has classes. From `f72bc1a` on, a hand-off that a policy or a selector routes is an offer, so the two- and three-segment setups measure the offer path.
 
 | Comparison | one segment | two | three | two, `random` |
 |---|---|---|---|---|
 | Watch and roster series: `872cc29` → `d15b219` | +291 (+0.5%) | −1,818 (−0.6%) | −1,595 (−0.3%) | −1,182 (−0.4%) |
-| The cells series: `6ded81f` → `75ec8cb` | −233 (−0.4%) | +2,844 (+0.94%) | +495 (+0.1%) | +3,248 (+1.07%) |
+| The pools series: `6ded81f` → `75ec8cb` | −233 (−0.4%) | +2,844 (+0.94%) | +495 (+0.1%) | +3,248 (+1.07%) |
 | Offers inside a class: `75ec8cb` → `f72bc1a` | −470 (−0.8%) | +752 (+0.25%) | +2,017 (+0.37%) | −339 (−0.1%) |
 
 User instructions per request, the change minus the base. The medians of the three bases: one segment 58.5k to 59.0k, two 302.7k to 306.1k, three 539.3k to 540.9k.
 
 - **The watch and roster series and the offers are within the spread** in every setup.
-- **The cells series moves two segments by about 3,000 instructions, and the cells commits add none of it.** Every round of `75ec8cb` is above every round of `6ded81f`, with both routers. The base ranges are 302.7k to 304.3k (`round_robin`) and 301.7k to 305.1k (`random`). The change ranges are 304.9k to 308.1k and 305.2k to 308.6k. Three segments move +0.1%, within the spread.
-- **The step is main's message codec work.** Two bisects of the two-segment setup, seven rounds each, put it at the merge of main into the cells work (`c188275d`): +5,254 (+1.74%) over its first parent. No other step between `d15b219` and `75ec8cb` is above its base range. The largest other rise is +0.53%, inside it. Two steps fall below it, by −0.44% and −0.20%. On main's own line, from `6ded81f` to `3cdf19a`, with no cells code: choosing a wire encoding per message (`9ce6b6d`) adds 7,682 (+2.55%), and reducing the codec's allocations (`3cdf19a`) takes back 2,321. Net +3,809 (+1.26%), beyond the spread. The owner accepts +1.26% as the price of choosing the encoding per message (2026-10-27). The table:
+- **The pools series moves two segments by about 3,000 instructions, and the pools commits add none of it.** Every round of `75ec8cb` is above every round of `6ded81f`, with both routers. The base ranges are 302.7k to 304.3k (`round_robin`) and 301.7k to 305.1k (`random`). The change ranges are 304.9k to 308.1k and 305.2k to 308.6k. Three segments move +0.1%, within the spread.
+- **The step is main's message codec work.** Two bisects of the two-segment setup, seven rounds each, put it at the merge of main into the pools work (`c188275d`): +5,254 (+1.74%) over its first parent. No other step between `d15b219` and `75ec8cb` is above its base range. The largest other rise is +0.53%, inside it. Two steps fall below it, by −0.44% and −0.20%. On main's own line, from `6ded81f` to `3cdf19a`, with no pools code: choosing a wire encoding per message (`9ce6b6d`) adds 7,682 (+2.55%), and reducing the codec's allocations (`3cdf19a`) takes back 2,321. Net +3,809 (+1.26%), beyond the spread. The owner accepts +1.26% as the price of choosing the encoding per message (2026-10-27). The table:
 
 | Two segments, user instructions | Median (range) |
 |---|---|
@@ -261,12 +261,12 @@ User instructions per request, the change minus the base. The medians of the thr
 | `ad6f75c`, the commit before `9ce6b6d` | 301,595 (300,358 to 304,486) |
 | `9ce6b6d`, a wire encoding per message | 309,277 (307,496 to 310,710) |
 | `3cdf19a`, fewer codec allocations | 306,956 (305,855 to 307,410) |
-| `9336ffc`, the cells work before the merge | 302,745 (300,722 to 303,603) |
-| `30efb73`, a cell drains | 302,720 (301,128 to 303,475) |
+| `9336ffc`, the pools work before the merge | 302,745 (300,722 to 303,603) |
+| `30efb73`, a pool drains | 302,720 (301,128 to 303,475) |
 | `aa8b497`, the merge's first parent | 301,696 (301,061 to 303,766) |
 | `c188275`, the merge of main | 306,950 (303,538 to 308,660) |
 
-- **Wall time** (`remote` and `hop`, three runs, load average 1.8 to 5.6): these change medians are outside the base range, given against the base median: `request/gdl` in the cells series (+1.2%) and in the offers (−0.4%), `request/reference-1-segment` in the cells series (−2.4%) and in the offers (+0.7%), and `reference-items/2-segments` in the watch and roster series (+0.4%). The other rows are inside it.
+- **Wall time** (`remote` and `hop`, three runs, load average 1.8 to 5.6): these change medians are outside the base range, given against the base median: `request/gdl` in the pools series (+1.2%) and in the offers (−0.4%), `request/reference-1-segment` in the pools series (−2.4%) and in the offers (+0.7%), and `reference-items/2-segments` in the watch and roster series (+0.4%). The other rows are inside it.
 
 ## Baselines on brev-x86-cpu
 
@@ -388,7 +388,7 @@ The workspace's `Cargo.toml` sets two profiles and no target flags. `[profile.re
 - **Every LTO config runs fewer instructions**: 9% to 17% fewer per two-segment request, and 4.8% to 19% fewer per crossed item. B's 4.8% at 16 KiB is within the spread.
 - **In time, the crossing codec is 10% to 16% faster at 16 B and 1 KiB.** A local hop's request and its stream of 256 items change by 5.3% or less, about the spread.
 - **A target CPU (C, D) cuts more instructions than B, and shows no clear gain in time.** The only time rows more than 5% below B are C's and D's `followed/model`, 79.2 ns and 77.8 ns against 84.0 ns, and B's other job measured 79.5 ns.
-- **Fat LTO (E) makes the cell picks faster**: `round_robin` takes 19.1 ns, not 30.4 ns, and `home_first` over every cell 101.7 ns, not 108.4 ns.
+- **Fat LTO (E) makes the pool picks faster**: `round_robin` takes 19.1 ns, not 30.4 ns, and `home_first` over every pool 101.7 ns, not 108.4 ns.
 - **Allocations stay close.** In every config the footprint bench counts within 1 allocation per request and 0.1 per item of the others.
 - **Builds take longer, and binaries are smaller.** A clean build of the benches takes 108 s with thin LTO and 141 s with fat LTO, against 39 s. A stripped segment binary is 28% to 32% smaller.
 
@@ -428,10 +428,10 @@ The instruction counts are `perf stat -e instructions:u` on cores 16 to 23 over 
 | `hop` `request/gdl` | 2,348 | 2,300 | 2,303 | 2,284 | 2,225 |
 | `hop` `chunks/request` | 2,120 | 2,052 | 2,093 | 2,054 | 2,011 |
 | `hop` `chunks/stream` | 17,311 | 17,298 | 17,591 | 17,015 | 17,282 |
-| `choose/home_first/every cell` | 108.4 | 109.4 | 110.0 | 109.8 | 101.7 |
+| `choose/home_first/every pool` | 108.4 | 109.4 | 110.0 | 109.8 | 101.7 |
 | `choose/home_first/one model` | 84.0 | 79.0 | 80.4 | 79.5 | 80.3 |
 | `choose/home_first/own thresholds` | 117.9 | 121.1 | 125.3 | 121.3 | 113.9 |
-| `choose/round_robin/every cell` | 30.4 | 31.1 | 33.2 | 33.9 | 19.1 |
+| `choose/round_robin/every pool` | 30.4 | 31.1 | 33.2 | 33.9 | 19.1 |
 | `followed/model` | 82.8 | 84.0 | 79.2 | 77.8 | 89.7 |
 
 | User instructions | A | B | C | D | E |
@@ -474,26 +474,26 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 
 | User instructions per pick, before and after | A | B | C | D | E |
 |---|---|---|---|---|---|
-| `home_first`, every cell | 1,804 / 1,628 | 1,869 / 1,713 | 1,892 / 1,756 | 1,895 / 1,760 | 1,593 / 1,591 |
+| `home_first`, every pool | 1,804 / 1,628 | 1,869 / 1,713 | 1,892 / 1,756 | 1,895 / 1,760 | 1,593 / 1,591 |
 | `home_first`, one model | 2,234 / 1,862 | 1,260 / 1,905 | 1,258 / 1,907 | 1,273 / 1,966 | 1,281 / 1,888 |
-| `round_robin`, every cell | 803 / 628 | 809 / 638 | 889 / 703 | 842 / 660 | 365 / 368 |
+| `round_robin`, every pool | 803 / 628 | 809 / 638 | 889 / 703 | 842 / 660 | 365 / 368 |
 
-- **Fat LTO nearly makes the change to `home_first` and `round_robin` over every cell.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
+- **Fat LTO nearly makes the change to `home_first` and `round_robin` over every pool.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
 - **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one model then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
 
 **gb300 history.** Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
 
 | User cycles per pick, before and after | A | B | E |
 |---|---|---|---|
-| `home_first`, every cell | 383 / 353 | 387 / 358 | 349 / 332 |
+| `home_first`, every pool | 383 / 353 | 387 / 358 | 349 / 332 |
 | `home_first`, one model | 325 / 280 | 163 / 269 | 170 / 252 |
-| `round_robin`, every cell | 125 / 101 | 130 / 103 | 65 / 76 |
+| `round_robin`, every pool | 125 / 101 | 130 / 103 | 65 / 76 |
 
 - **Under B and E, the commit before the change is 82 to 106 cycles faster on a pick of one model.** Under A the change saves 45 cycles.
-- **Under E, the change still saves 17 cycles on `home_first` over every cell**, although the two commits run within 2 instructions of each other. So fat LTO does not quite make this part of the change in time.
-- **Some cells are less firm.** Across the rounds, the `round_robin` cells after the change varied by 31% of the median under A and 19% under B. The one-model cells before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other cells varied by 6% or less.
+- **Under E, the change still saves 17 cycles on `home_first` over every pool**, although the two commits run within 2 instructions of each other. So fat LTO does not quite make this part of the change in time.
+- **Some pools are less firm.** Across the rounds, the `round_robin` pools after the change varied by 31% of the median under A and 19% under B. The one-model pools before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other pools varied by 6% or less.
 
-**Inline accessors of a cell policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/cell-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
+**Inline accessors of a pool policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Pool`, `Load`, and `PoolRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/pool-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
 
 ```bash
 cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignored --nocapture --test-threads=1

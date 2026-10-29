@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, live rosters, routing selectors, registered cell policies, and a cell's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -79,9 +79,9 @@ A named selector costs what it costs. The change build only, five rounds, two se
 
 `least_loaded` adds about 2.5k instructions: a table load, a scan of the counts, a boxed lease, and its drop. `affinity` is within the spread of `round_robin`.
 
-## Cell policies
+## Pool policies
 
-A chooser's cell policy became a `gdl` trait that a deployment can register by name. The pick reads the policy through one dynamic call, as before, and the policy reads the head through its `Head`. Measured on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 10, rustc 1.93.1. Base `25e0aeb`, change `1fe0f0a`:
+A chooser's pool policy became a `gdl` trait that a deployment can register by name. The pick reads the policy through one dynamic call, as before, and the policy reads the head through its `Head`. Measured on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 10, rustc 1.93.1. Base `25e0aeb`, change `1fe0f0a`:
 
 ```bash
 cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
@@ -90,14 +90,14 @@ cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignor
 
 | Measure | Base | Change |
 |---|---|---|
-| pick, `round_robin`, four idle cells | 98.7 ns, 98.6 ns | 98.0 ns, 96.8 ns |
-| pick, `home_first`, four idle cells | 125.3 ns, 125.2 ns | 126.3 ns, 125.1 ns |
+| pick, `round_robin`, four idle pools | 98.7 ns, 98.6 ns | 98.0 ns, 96.8 ns |
+| pick, `home_first`, four idle pools | 125.3 ns, 125.2 ns | 126.3 ns, 125.1 ns |
 | boundary pick (`the_cost_of_a_boundary_pick`) | 106 ns | 105 to 107 ns |
 | boundary pick and acceptance | 122 ns | 121 to 122 ns |
-| accepted first offer over loopback, cells | 36.8 us, 37.1 us | 33.1 us, 36.8 us |
+| accepted first offer over loopback, pools | 36.8 us, 37.1 us | 33.1 us, 36.8 us |
 | accepted first offer over loopback, roster | 30.3 us, 33.2 us | 37.9 us, 32.6 us |
 
-The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and these runs built without LTO. Under LTO the attribute makes no measurable difference ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)). A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
+The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Pool`, `Load`, and `PoolRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and these runs built without LTO. Under LTO the attribute makes no measurable difference ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)). A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
 
 What a policy pays to read the head of a 100 KB request (100 messages of 1,000 characters, the hint after them), by the runtime's path, from `crates/gdl/benches/projection.rs`:
 
@@ -112,163 +112,163 @@ cargo bench -p gdl --bench projection
 
 A skipped field is still read. In msgpack, rmp-serde reads an ignored field through `deserialize_any`, which checks each string as UTF-8. In JSON, serde_json scans every skipped byte.
 
-### Choosing among the cells a policy keeps
+### Choosing among the pools a policy keeps
 
-`HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over the cells a filter keeps. Each policy's `choose` is its `choose_where` with a filter that keeps every cell. Measured on the same host, with each test binary pinned to one Cortex-X925 core, load average 10 to 19. Base `03be278`. The control is the change with each `choose` keeping its old body, so that it differs from the base only by the new code and tests in the binary.
+`HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over the pools a filter keeps. Each policy's `choose` is its `choose_where` with a filter that keeps every pool. Measured on the same host, with each test binary pinned to one Cortex-X925 core, load average 10 to 19. Base `03be278`. The control is the change with each `choose` keeping its old body, so that it differs from the base only by the new code and tests in the binary.
 
 ```bash
 cargo test --release -p gdl-runtime --lib --no-run
-taskset -c 17 target/release/deps/gdl_runtime-<hash> cost_of_a_cell --ignored --nocapture --test-threads=1
+taskset -c 17 target/release/deps/gdl_runtime-<hash> cost_of_a_pool --ignored --nocapture --test-threads=1
 taskset -c 17 target/release/deps/gdl_runtime-<hash> the_cost_of_a_boundary_pick --ignored --nocapture --test-threads=1
 ```
 
 | Measure | Base | Change | Control |
 |---|---|---|---|
-| pick, `round_robin`, four idle cells | 98.6 to 98.9 ns | 102.4 to 102.5 ns | 102.4 ns |
-| pick, `home_first`, four idle cells | 126.8 to 127.1 ns | 129.0 to 129.2 ns | 129.1 to 129.2 ns |
+| pick, `round_robin`, four idle pools | 98.6 to 98.9 ns | 102.4 to 102.5 ns | 102.4 ns |
+| pick, `home_first`, four idle pools | 126.8 to 127.1 ns | 129.0 to 129.2 ns | 129.1 to 129.2 ns |
 | boundary pick | 107 ns | 109 to 110 ns | 109 ns |
 | boundary pick and acceptance | 123 ns | 125 to 126 ns | 125 to 126 ns |
-| accepted first offer over loopback, cells | 19.6 to 19.7 us | 19.5 to 19.6 us | |
+| accepted first offer over loopback, pools | 19.6 to 19.7 us | 19.5 to 19.6 us | |
 | accepted first offer over loopback, roster | 19.4 to 19.6 us | 19.5 to 19.6 us | |
 
 The change and the control agree in every row, so the 2 to 4 ns over the base comes from where the test binary places the code, not from the pick. A first version built the filter as a closure that two other closures called. It kept `RoundRobin::rank` out of line, and its `round_robin` pick took 106 ns. A pick through a registered policy that calls `choose_where` allocates nothing either (`a_pick_allocates_nothing_under_either_policy`).
 
-### A lease on a cell choice
+### A lease on a pool choice
 
-A policy's `choose` returns a `CellChoice`, which may carry a lease that learns whether the chosen cell accepted. The runtime holds it in the offer's lease on the cell's follow. Same host and method, pinned to one core, load average 8 to 11. Base: the change before it, `65db589`.
+A policy's `choose` returns a `PoolChoice`, which may carry a lease that learns whether the chosen pool accepted. The runtime holds it in the offer's lease on the pool's follow. Same host and method, pinned to one core, load average 8 to 11. Base: the change before it, `65db589`.
 
 | Measure | Base | A fat lease pointer | Change (thin pointer) |
 |---|---|---|---|
-| pick, `round_robin`, four idle cells | 102.4 to 102.7 ns | 104.0 to 104.1 ns | 100.4 to 100.6 ns |
-| pick, `home_first`, four idle cells | 129.0 to 129.2 ns | 132.6 to 135.2 ns | 129.5 to 129.7 ns |
+| pick, `round_robin`, four idle pools | 102.4 to 102.7 ns | 104.0 to 104.1 ns | 100.4 to 100.6 ns |
+| pick, `home_first`, four idle pools | 129.0 to 129.2 ns | 132.6 to 135.2 ns | 129.5 to 129.7 ns |
 | boundary pick | 109 ns | 113 ns | 109 ns |
 | boundary pick and acceptance | 125 to 126 ns | 128 to 132 ns | 124 ns |
-| accepted first offer over loopback, cells | 19.4 to 19.7 us | 19.4 to 19.7 us | 19.6 to 19.9 us |
+| accepted first offer over loopback, pools | 19.4 to 19.7 us | 19.4 to 19.7 us | 19.6 to 19.9 us |
 
 **gb300 history.** The same comparison on a quiet host (gb300, aarch64 Neoverse-V2, 72 cores, load average under 5, rustc 1.93.1), pinned to core 8, three runs each, with a spread under 0.3 ns per row. Base `5d8c312`, the change before this one `657c639`, this change `dd2ced4`, and the same change with a fat pointer:
 
 | Measure | Base | Change before | Fat lease pointer | Change |
 |---|---|---|---|---|
-| pick, `round_robin`, four idle cells | 123.0 ns | 120.8 to 120.9 ns | 125.1 to 125.3 ns | 122.1 to 122.2 ns |
-| pick, `home_first`, four idle cells | 164.2 to 164.3 ns | 158.5 to 158.7 ns | 162.6 to 162.7 ns | 161.5 to 161.7 ns |
+| pick, `round_robin`, four idle pools | 123.0 ns | 120.8 to 120.9 ns | 125.1 to 125.3 ns | 122.1 to 122.2 ns |
+| pick, `home_first`, four idle pools | 164.2 to 164.3 ns | 158.5 to 158.7 ns | 162.6 to 162.7 ns | 161.5 to 161.7 ns |
 | boundary pick | 133 ns | 132 ns | 137 to 138 ns | 132 ns |
 | boundary pick and acceptance | 152 ns | 152 ns | 156 ns | 151 ns |
 
 With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were three words each. Every pick paid for that, with or without a lease. Behind one more box, each is two words, and a choice costs what an index did. A lease then allocates twice. `send_forward`'s future went from 896 to 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`), and the front's call future stayed at 11,504 bytes (`requests sizes 0`).
 
-### A reason for no cell
+### A reason for no pool
 
-A policy's `choose` returns `Result<CellChoice, NoCell>`. A `NoCell` holds an optional reason as a `Cow<'static, str>`, so the return is 24 bytes, as `Option<CellChoice>` was (`no_cell_carries_its_reason_at_no_cost_to_a_choice`). `send_forward`'s future stays at 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). A pick allocates nothing, also under a registered policy that builds a reason when it refuses (`a_pick_allocates_nothing_under_either_policy`).
+A policy's `choose` returns `Result<PoolChoice, NoPool>`. A `NoPool` holds an optional reason as a `Cow<'static, str>`, so the return is 24 bytes, as `Option<PoolChoice>` was (`no_pool_carries_its_reason_at_no_cost_to_a_choice`). `send_forward`'s future stays at 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). A pick allocates nothing, also under a registered policy that builds a reason when it refuses (`a_pick_allocates_nothing_under_either_policy`).
 
 **gb300 history.** On a quiet host (gb300, aarch64 Neoverse-V2, rustc 1.93.1), pinned to core 8, load average under 4, three runs each, with a spread of 0.1 ns or less per row. Base `56bcf77`, change `b9e783b`. The control is the change without its new tests in the library's test binary, so that it differs from the change only by where the code is placed:
 
 | Measure | Base | Control | Change |
 |---|---|---|---|
-| pick, `round_robin`, four idle cells | 121.9 ns | 123.5 to 123.6 ns | 124.5 to 124.6 ns |
-| pick, `home_first`, four idle cells | 164.6 to 164.7 ns | 165.5 ns | 164.8 ns |
+| pick, `round_robin`, four idle pools | 121.9 ns | 123.5 to 123.6 ns | 124.5 to 124.6 ns |
+| pick, `home_first`, four idle pools | 164.6 to 164.7 ns | 165.5 ns | 164.8 ns |
 | boundary pick | 133 ns | 135 ns | 136 ns |
 | boundary pick and acceptance | 150 to 151 ns | 155 ns | 154 ns |
-| accepted first offer over loopback, cells | 27.6 to 28.1 us | | 28.4 to 31.8 us |
+| accepted first offer over loopback, pools | 27.6 to 28.1 us | | 28.4 to 31.8 us |
 | accepted first offer over loopback, roster | 27.5 to 28.0 us | | 27.4 to 31.2 us |
 
-The offers over loopback vary from run to run, the roster's as much as the cells', so they show no change. The control and the change differ by up to 1 ns either way, from code placement alone. The rest, 1 to 3 ns per `round_robin` pick and per boundary pick, is the change's path, which this measurement does not split further. An accepted offer takes about 28 us, so this is under 0.01% of it.
+The offers over loopback vary from run to run, the roster's as much as the pools', so they show no change. The control and the change differ by up to 1 ns either way, from code placement alone. The rest, 1 to 3 ns per `round_robin` pick and per boundary pick, is the change's path, which this measurement does not split further. An accepted offer takes about 28 us, so this is under 0.01% of it.
 
-What choosing no cell costs, as a pick that the policy refuses and the request's error made from it, measured the same way at `b9e783b`:
+What choosing no pool costs, as a pick that the policy refuses and the request's error made from it, measured the same way at `b9e783b`:
 
 ```bash
-cargo test --release -p gdl-runtime --lib cost_of_no_cell -- --ignored --nocapture --test-threads=1
+cargo test --release -p gdl-runtime --lib cost_of_no_pool -- --ignored --nocapture --test-threads=1
 ```
 
-| No cell | Time |
+| No pool | Time |
 |---|---|
 | no reason | 123.4 ns |
 | a fixed reason | 142.1 ns |
 | a reason built with `format!` | 162.5 ns |
 
-The error message is built in every case. A reason adds its bytes to the message, and a built reason adds the policy's own allocation, only when no cell is chosen.
+The error message is built in every case. A reason adds its bytes to the message, and a built reason adds the policy's own allocation, only when no pool is chosen.
 
-### A cell that is gone
+### A pool that is gone
 
-A cell that refuses as gone is marked in the chooser's damped list ([A cell that is gone](../concepts/cell-routing.md#a-cell-that-is-gone)). Each policy's pass checks each cell for the mark, which is one branch while no cell is gone, and each `gdl::Cell` view holds its follow's generation and count of changes. An offer still reads one atomic at the entry. A pick allocates nothing with a gone cell in the table (`a_pick_allocates_nothing_under_either_policy`).
+A pool that refuses as gone is marked in the chooser's damped list ([A pool that is gone](../concepts/pool-routing.md#a-pool-that-is-gone)). Each policy's pass checks each pool for the mark, which is one branch while no pool is gone, and each `gdl::Pool` view holds its follow's generation and count of changes. An offer still reads one atomic at the entry. A pick allocates nothing with a gone pool in the table (`a_pick_allocates_nothing_under_either_policy`).
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average about 3.9, three runs each. Base `c06ba698`, change `2ec9d213`:
 
 ```bash
-cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_pool_choice_and_an_offer -- --ignored --nocapture --exact
 ```
 
 | Measure | Base | Change |
 |---|---|---|
-| pick, `round_robin`, four idle cells | 121.4 to 121.5 ns | 123.1 ns |
-| pick, `home_first`, four idle cells | 159.3 ns | 160.3 ns |
-| accepted first offer over loopback, cells | 27.9 to 31.7 us | 27.6 to 31.0 us |
+| pick, `round_robin`, four idle pools | 121.4 to 121.5 ns | 123.1 ns |
+| pick, `home_first`, four idle pools | 159.3 ns | 160.3 ns |
+| accepted first offer over loopback, pools | 27.9 to 31.7 us | 27.6 to 31.0 us |
 | accepted first offer over loopback, roster | 27.3 to 31.7 us | 27.2 to 31.1 us |
 
-A pick costs 1.6 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. Code placement alone moved these picks by up to 1 ns before ([A reason for no cell](#a-reason-for-no-cell)), and this measurement does not split the rest. The offers vary from run to run as before, so they show no change.
+A pick costs 1.6 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. Code placement alone moved these picks by up to 1 ns before ([A reason for no pool](#a-reason-for-no-pool)), and this measurement does not split the rest. The offers vary from run to run as before, so they show no change.
 
 ### Counting a chooser's offers
 
-A chooser that records metrics counts each offer under its cell and outcome ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)): one relaxed add to the calling thread's shard of the cell's counts, which the offer's lease on the cell's follow reaches. The pick does not change. An accepted first offer allocates what a roster hand-off does with the counts on (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`), and `send_forward`'s future stays at its size (`a_first_offer_is_no_larger_than_a_hand_off_was`).
+A chooser that records metrics counts each offer under its pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)): one relaxed add to the calling thread's shard of the pool's counts, which the offer's lease on the pool's follow reaches. The pick does not change. An accepted first offer allocates what a roster hand-off does with the counts on (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`), and `send_forward`'s future stays at its size (`a_first_offer_is_no_larger_than_a_hand_off_was`).
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.8 to 4.0, three runs each. Base `42afd4a2`, change `0ae9346b`, whose offers over loopback count their outcomes:
 
 ```bash
-cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_pool_choice_and_an_offer -- --ignored --nocapture --exact
 ```
 
 | Measure | Base | Change |
 |---|---|---|
-| pick, `round_robin`, four idle cells | 121.5 to 121.7 ns | 122.3 to 122.6 ns |
-| pick, `home_first`, four idle cells | 163.4 to 163.5 ns | 164.2 to 164.3 ns |
+| pick, `round_robin`, four idle pools | 121.5 to 121.7 ns | 122.3 to 122.6 ns |
+| pick, `home_first`, four idle pools | 163.4 to 163.5 ns | 164.2 to 164.3 ns |
 | count an outcome | | 4.6 ns |
-| accepted first offer over loopback, cells | 29.1 to 32.0 us | 25.7 to 30.7 us |
+| accepted first offer over loopback, pools | 29.1 to 32.0 us | 25.7 to 30.7 us |
 | accepted first offer over loopback, roster | 29.2 to 30.6 us | 25.2 to 29.9 us |
 
-Counting an outcome costs 4.6 ns, in every run, with one thread. The picks run none of the change's code, so their 0.8 ns comes from where the code is placed ([A reason for no cell](#a-reason-for-no-cell)). The offers vary from run to run, the roster's as much as the cells', so they show no change. The runs are sequential, so they cannot show contention between threads.
+Counting an outcome costs 4.6 ns, in every run, with one thread. The picks run none of the change's code, so their 0.8 ns comes from where the code is placed ([A reason for no pool](#a-reason-for-no-pool)). The offers vary from run to run, the roster's as much as the pools', so they show no change. The runs are sequential, so they cannot show contention between threads.
 
 ### An instance's own decline
 
-An entry instance that declines as its own leaves the request in its cell, and the chooser offers it to the cell's other entry instances ([An instance that cannot serve the request](../concepts/cell-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
+An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
 
 ```bash
-cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_pool_choice_and_an_offer -- --ignored --nocapture --exact
 ```
 
 | Measure | Base | Change |
 |---|---|---|
-| pick, `round_robin`, four idle cells | 122.8 ns | 126.1 to 126.3 ns |
-| pick, `home_first`, four idle cells | 164.1 to 164.2 ns | 165.1 to 165.7 ns |
+| pick, `round_robin`, four idle pools | 122.8 ns | 126.1 to 126.3 ns |
+| pick, `home_first`, four idle pools | 164.1 to 164.2 ns | 165.1 to 165.7 ns |
 | count an outcome | 4.6 ns | 4.6 ns |
-| accepted first offer over loopback, cells | 28.4 to 32.0 us | 25.9 to 29.0 us |
+| accepted first offer over loopback, pools | 28.4 to 32.0 us | 25.9 to 29.0 us |
 | accepted first offer over loopback, roster | 28.1 to 31.3 us | 25.6 to 29.7 us |
 
-A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the cells', so they show no change.
+A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the pools', so they show no change.
 
 ### Thresholds as constants in a pick
 
-`home_first` reads two thresholds: the share of its limit at which a cell is saturated, and the spill bound for a cell in another region. `HomeFirst` has the defaults as constants, and `HomeFirstAt` has them as fields, set from a chooser's `[runtime]` settings. The pass over the cells is generic, and the compiler builds it once for each. In `HomeFirst`'s build, the saturated test is one compare of admitted roots with the limit. In `HomeFirstAt`'s build, it is two 128-bit products for each cell. `HomeFirstAt` at the default thresholds runs `HomeFirst`'s build, so a chooser at its default settings pays one branch per pick for them.
+`home_first` reads two thresholds: the share of its limit at which a pool is saturated, and the spill bound for a pool in another region. `HomeFirst` has the defaults as constants, and `HomeFirstAt` has them as fields, set from a chooser's `[runtime]` settings. The pass over the pools is generic, and the compiler builds it once for each. In `HomeFirst`'s build, the saturated test is one compare of admitted roots with the limit. In `HomeFirstAt`'s build, it is two 128-bit products for each pool. `HomeFirstAt` at the default thresholds runs `HomeFirst`'s build, so a chooser at its default settings pays one branch per pick for them.
 
-The step that finds a cell's tier is a function out of line, as it was before the thresholds became settings. Two designs were rejected:
+The step that finds a pool's tier is a function out of line, as it was before the thresholds became settings. Two designs were rejected:
 
-- **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 cells.
-- **The tier step inlined into the pass.** It cut those instructions in a pick over every cell. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
+- **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 pools.
+- **The tier step inlined into the pass.** It cut those instructions in a pick over every pool. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
 
-The pass calls the filter before the tier step, so a cell the filter drops costs no call to it. With the tier step first, a pick of one model under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one model back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every cell then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every cell, eligible or not, so a costly filter over many cells that are not eligible runs more often than before. The choice does not change, since a filter answers for a cell from that cell alone.
+The pass calls the filter before the tier step, so a pool the filter drops costs no call to it. With the tier step first, a pick of one model under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one model back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every pool then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every pool, eligible or not, so a costly filter over many pools that are not eligible runs more often than before. The choice does not change, since a filter answers for a pool from that pool alone.
 
-A cell that is gone is checked in each policy's pass by `Damped::is_gone` ([A cell that is gone](#a-cell-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any cell is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each cell.
+A pool that is gone is checked in each policy's pass by `Damped::is_gone` ([A pool that is gone](#a-pool-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any pool is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each pool.
 
-Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (history; aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
+Measured with `crates/gdl/benches/choose.rs`: 12 pools of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 pools that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (history; aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
 ```
 
-| Commit | `home_first`, every cell | `home_first`, one model | `home_first`, own thresholds | `round_robin`, every cell |
+| Commit | `home_first`, every pool | `home_first`, one model | `home_first`, own thresholds | `round_robin`, every pool |
 |---|---|---|---|---|
 | `523afc0` | 103.6 to 103.7 ns | 84.9 to 85.2 ns | | 30.8 ns |
-| `488d3e9`, gone cells | 107.6 to 107.7 ns | 89.1 to 89.8 ns | | 37.9 to 38.2 ns |
+| `488d3e9`, gone pools | 107.6 to 107.7 ns | 89.1 to 89.8 ns | | 37.9 to 38.2 ns |
 | `3e56f5e`, thresholds as settings | 115.2 to 115.5 ns | 98.0 to 98.2 ns | | 38.7 to 38.9 ns |
 | `6d0a8509` | 115.2 to 115.9 ns | 98.1 to 98.3 ns | | 38.5 to 38.8 ns |
 | tier step inlined | 105.9 to 106.1 ns | 87.7 to 87.8 ns | 115.2 to 116.2 ns | 32.8 ns |
@@ -287,36 +287,36 @@ perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/pick
 | Commit | `home_first`: instructions, branches | one model: instructions, branches | `round_robin`: instructions, branches |
 |---|---|---|---|
 | `523afc0` | 1,531.9, 348.2 | 1,806.0, 403.0 | 569.5, 176.0 |
-| `488d3e9`, gone cells | 1,588.9, 361.2 | 1,822.0, 420.0 | 796.0, 190.0 |
+| `488d3e9`, gone pools | 1,588.9, 361.2 | 1,822.0, 420.0 | 796.0, 190.0 |
 | `3e56f5e`, thresholds as settings | 1,796.9, 369.2 | 2,227.0, 393.0 | 796.0, 190.0 |
 | `6d0a8509` | 1,796.9, 369.2 | 2,227.0, 393.0 | 796.0, 190.0 |
 | tier step inlined | 1,620.9, 369.2 | 2,164.0, 393.0 | 621.0, 195.5 |
 | this design | 1,620.9, 369.2 | 1,855.0, 428.0 | 621.0, 195.5 |
 
-The rows come from one form of the program. As committed, its loop runs 2 more instructions per pick, with the same branches: 1,622.9, 1,857.0, and 623.0 instructions at this design. Each step in time comes with a step in instructions, so it is work, not where the code is placed. Over `523afc0`, this design runs 89 more instructions and 21 more branches per `home_first` pick, 49 more per pick of one model, and 52 more per `round_robin` pick. That is about 7 instructions and 2 branches for each cell, where the pass checks for a gone cell. It is the price of passing over gone cells, and in time it is 2.2 to 2.7 ns per `home_first` pick and 1.9 to 2.1 ns per `round_robin` pick. A pick of one model is 5.3 to 5.7 ns faster than at `523afc0`.
+The rows come from one form of the program. As committed, its loop runs 2 more instructions per pick, with the same branches: 1,622.9, 1,857.0, and 623.0 instructions at this design. Each step in time comes with a step in instructions, so it is work, not where the code is placed. Over `523afc0`, this design runs 89 more instructions and 21 more branches per `home_first` pick, 49 more per pick of one model, and 52 more per `round_robin` pick. That is about 7 instructions and 2 branches for each pool, where the pass checks for a gone pool. It is the price of passing over gone pools, and in time it is 2.2 to 2.7 ns per `home_first` pick and 1.9 to 2.1 ns per `round_robin` pick. A pick of one model is 5.3 to 5.7 ns faster than at `523afc0`.
 
-On `fb363e8c`, whose `CellRequest` holds one more field, the committed program counts 5 more instructions per pick, with this design and without it. There, this design runs 1,627.9, 1,862.0, and 628.0 instructions per pick, against 1,803.9, 2,234.0, and 803.0 without it. In time, on the same host and core:
+On `fb363e8c`, whose `PoolRequest` holds one more field, the committed program counts 5 more instructions per pick, with this design and without it. There, this design runs 1,627.9, 1,862.0, and 628.0 instructions per pick, against 1,803.9, 2,234.0, and 803.0 without it. In time, on the same host and core:
 
 | Pick | `fb363e8c` | `fb363e8c` with this design |
 |---|---|---|
-| `home_first`, every cell | 116.8 to 117.1 ns | 107.2 to 107.5 ns |
+| `home_first`, every pool | 116.8 to 117.1 ns | 107.2 to 107.5 ns |
 | `home_first`, one model | 93.3 to 95.9 ns | 85.3 to 86.2 ns |
-| `round_robin`, every cell | 39.0 to 39.8 ns | 30.0 to 30.1 ns |
+| `round_robin`, every pool | 39.0 to 39.8 ns | 30.0 to 30.1 ns |
 
 The pick of one model took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
 
 These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before ran fewer instructions per pick of one model until the filter went first ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
 
-A chooser's own pick, through the runtime, over four idle cells, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
+A chooser's own pick, through the runtime, over four idle pools, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
 
 ```bash
-cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_pool_choice_and_an_offer -- --ignored --nocapture --exact
 ```
 
 | Measure | Base | Tier step inlined | This design |
 |---|---|---|---|
-| pick, `round_robin`, four idle cells | 122.7 ns | 120.3 ns | 120.6 to 120.7 ns |
-| pick, `home_first`, four idle cells | 163.4 to 163.5 ns | 159.0 to 159.2 ns | 159.1 to 159.2 ns |
+| pick, `round_robin`, four idle pools | 122.7 ns | 120.3 ns | 120.6 to 120.7 ns |
+| pick, `home_first`, four idle pools | 163.4 to 163.5 ns | 159.0 to 159.2 ns | 159.1 to 159.2 ns |
 
 #### The filter before the tier step
 
@@ -330,34 +330,34 @@ RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example picks
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/picks <policy> 1000   # and 2000
 ```
 
-| Callgrind Ir per pick, B / E | `home_first`, every cell | `home_first`, one model | `round_robin`, every cell |
+| Callgrind Ir per pick, B / E | `home_first`, every pool | `home_first`, one model | `round_robin`, every pool |
 |---|---|---|---|
 | `cf2b60d` | 2,109.8 / 1,848.2 | 1,214.0 / 1,235.0 | 846.5 / 360.5 |
 | `8c651a3`, and main | 2,045.8 / 1,892.6 | 2,102.0 / 2,124.0 | 649.5 / 362.5 |
 | tier step inlined | 2,178.8 / 1,891.2 | 1,305.0 / 1,238.0 | 649.5 / 358.5 |
 | filter first | 2,046.8 / 1,890.2 | 941.0 / 958.0 | 650.5 / 359.5 |
 
-Time is the `choose` bench in the bench profile, set to B or E, three rounds. Each cell gives the range of the three medians:
+Time is the `choose` bench in the bench profile, set to B or E, three rounds. Each pool gives the range of the three medians:
 
 ```bash
 export CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1   # fat for E
 taskset -c 7 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
 ```
 
-| Time, ns, B / E | `home_first`, every cell | `home_first`, one model | `round_robin`, every cell |
+| Time, ns, B / E | `home_first`, every pool | `home_first`, one model | `round_robin`, every pool |
 |---|---|---|---|
 | `cf2b60d` | 185.5 to 187.0 / 172.4 to 174.7 | 79.8 to 81.4 / 75.2 to 75.5 | 73.1 to 74.1 / 24.3 to 25.2 |
 | `8c651a3` | 183.9 to 186.0 / 172.3 to 172.5 | 146.2 to 146.6 / 157.9 to 158.7 | 46.5 to 46.8 / 24.7 to 25.3 |
 | main | 184.6 to 186.7 / 172.1 to 172.4 | 146.3 to 148.0 / 156.9 to 161.1 | 46.4 to 46.6 / 24.7 to 26.4 |
 | filter first | 181.6 to 184.7 / 173.3 to 175.4 | 76.8 to 78.2 / 77.5 to 78.4 | 49.1 / 24.7 to 24.9 |
 
-- **The tier step out of line is the cost.** Inlined again, it brings a pick of one model to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every cell then runs 133 more.
+- **The tier step out of line is the cost.** Inlined again, it brings a pick of one model to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every pool then runs 133 more.
 - **With the filter first, a pick of one model runs 273 to 277 fewer instructions than at `cf2b60d`, and about 1,160 fewer than at main.** It takes 76.8 to 78.4 ns, against 146.3 to 161.1 ns at main. Against `cf2b60d`, it is 1.6 to 4.6 ns faster under B and 2.0 to 3.2 ns slower under E.
-- **The picks over every cell run within 3 instructions of main.** In time, `round_robin` under B takes 2.5 to 2.8 ns more, and `home_first` under E 0.9 to 3.3 ns more. With the same instructions, a change of that size is within what code placement alone moves a pick ([Release profiles](benchmarking.md#release-profiles)).
+- **The picks over every pool run within 3 instructions of main.** In time, `round_robin` under B takes 2.5 to 2.8 ns more, and `home_first` under E 0.9 to 3.3 ns more. With the same instructions, a change of that size is within what code placement alone moves a pick ([Release profiles](benchmarking.md#release-profiles)).
 
-## Reading the followed cells
+## Reading the followed pools
 
-A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by and one of the chooser's damping, then, in the bench, one cell found by name among four and one withdrawal looked up. `followed/gone` also asks whether the cell is gone, as a gate does. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).
+A node reads the pools its chooser follows through `gdl::FollowedPools::read` ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by and one of the chooser's damping, then, in the bench, one pool found by name among four and one withdrawal looked up. `followed/gone` also asks whether the pool is gone, as a gate does. The bench's source has the shape of the runtime's (`gdl_runtime::Pools`). A read allocates nothing (`reading_allocates_nothing`).
 
 ```bash
 cargo bench -p gdl --bench followed -- 'followed/' --warm-up-time 1 --measurement-time 3
@@ -367,15 +367,15 @@ cargo bench -p gdl --bench followed -- 'followed/' --warm-up-time 1 --measuremen
 
 | Read | Base | Change |
 |---|---|---|
-| bound, a cell and a withdrawal looked up (`followed/read`) | 47.6 ns, 47.2 ns | 69.9 ns, 68.5 ns |
-| the same, and whether the cell is gone (`followed/gone`) | | 76.2 ns, 75.1 ns |
+| bound, a pool and a withdrawal looked up (`followed/read`) | 47.6 ns, 47.2 ns | 69.9 ns, 68.5 ns |
+| the same, and whether the pool is gone (`followed/gone`) | | 76.2 ns, 75.1 ns |
 | not bound | 0.83 ns | 0.84 ns, 0.83 ns |
 
-The load of the damping costs about 21 ns per read. It is what lets a gone mark show in the next read with no table rebuilt for it. Asking whether a cell is gone costs about 7 ns more.
+The load of the damping costs about 21 ns per read. It is what lets a gone mark show in the next read with no table rebuilt for it. Asking whether a pool is gone costs about 7 ns more.
 
 At `d133902`, on the same host at load average 3.7, `followed/read` took 48.4 ns and 47.7 ns.
 
-With the model index ([The model index](../concepts/cell-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two cells, and its first cell checked. On gb300 (history), core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
+With the model index ([The model index](../concepts/pool-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two pools, and its first pool checked. On gb300 (history), core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
 
 | Read | Base | Change |
 |---|---|---|
@@ -390,7 +390,7 @@ On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages
 
 | Read | Time |
 |---|---|
-| bound, a cell and a withdrawal looked up | 40.8 ns, 41.9 ns, 42.3 ns, 55.9 ns |
+| bound, a pool and a withdrawal looked up | 40.8 ns, 41.9 ns, 42.3 ns, 55.9 ns |
 | not bound | 0.5 to 0.6 ns |
 
 A run by another agent on the shared host, at load 12.5, measured 83 ns for the bound read.
@@ -399,7 +399,7 @@ Nothing reads the handle unless a node does, so a request that no such node hand
 
 ## Counting what may still send
 
-An instance of a class that a hop enters counts the requests it holds that may still send work onward ([Each segment leaves when its own part is done](../concepts/cell-routing.md#each-segment-leaves-when-its-own-part-is-done)). A forward hand-off adds one sequentially consistent add and one subtract on its root's shard of the admission ledger. So does each `next` an operator is given, and each clone of it. An instance of any other class counts nothing: a hand-off reads one flag, and the `next` handle carries one word more.
+An instance of a class that a hop enters counts the requests it holds that may still send work onward ([Each segment leaves when its own part is done](../concepts/pool-routing.md#each-segment-leaves-when-its-own-part-is-done)). A forward hand-off adds one sequentially consistent add and one subtract on its root's shard of the admission ledger. So does each `next` an operator is given, and each clone of it. An instance of any other class counts nothing: a hand-off reads one flag, and the `next` handle carries one word more.
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.6, three runs, at `66d4119`:
 
@@ -412,7 +412,7 @@ cargo test --release -p gdl-runtime --lib dist::admission::tests::cost_of_counti
 | a hand-off marked and settled | 15.0 ns, 15.0 ns, 15.0 ns |
 | a `next` counted and ended | 10.7 ns, 10.5 ns, 10.7 ns |
 
-Outside a cell, on the same runner, cores 16 to 23, load average 3.0 to 3.9, three runs each, base `edeaad9`, change `2b14b85`:
+Outside a pool, on the same runner, cores 16 to 23, load average 3.0 to 3.9, three runs each, base `edeaad9`, change `2b14b85`:
 
 ```bash
 cargo bench -p gdl-runtime --bench remote -- 'request/reference-[23]-segments$' --warm-up-time 2 --measurement-time 10
@@ -423,7 +423,7 @@ cargo bench -p gdl-runtime --bench remote -- 'request/reference-[23]-segments$' 
 | `reference-2-segments` | 133.2, 132.9, 138.2 µs | 133.8, 132.8, 137.2 µs |
 | `reference-3-segments` | 282.8, 281.1, 288.3 µs | 280.0, 281.0, 287.6 µs |
 
-The change is within the spread between runs. No bench runs a request through a cell's entry, so the count in a cell is shown by the timing above alone.
+The change is within the spread between runs. No bench runs a request through a pool's entry, so the count in a pool is shown by the timing above alone.
 
 ## Request ids
 
@@ -490,7 +490,7 @@ cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
 | `request/reference-3-segments` | 280 us, 279 us | 271 us, 288 us |
 | `reference-items/2-segments` | 71.7 ms, 72.1 ms | 71.7 ms, 72.3 ms |
 | pick, `round_robin`, `home_first` | 127 ns, 168 ns | 124 ns, 162 ns |
-| accepted first offer over loopback, cells | 30.6 us, 29.0 us | 30.3 us, 30.9 us |
+| accepted first offer over loopback, pools | 30.6 us, 29.0 us | 30.3 us, 30.9 us |
 
 No row got slower beyond its spread. `items/direct` runs no gdl code, and it moved by as much as `items/gdl` did between builds, so the items rows show no change.
 

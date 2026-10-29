@@ -15,8 +15,8 @@
 - [Routing, selectors, and offers](concepts/routing.md)
 - [Segment lifecycle](concepts/lifecycle.md)
 - [Discovery: rosters and the hub](concepts/hub.md)
-- [Classes and cells](concepts/cells.md)
-- [Following and choosing cells](concepts/cell-routing.md)
+- [Classes and pools](concepts/pools.md)
+- [Following and choosing pools](concepts/pool-routing.md)
 - [The catalogue and the source reader](concepts/catalogue.md)
 - [Code generation](concepts/generation.md)
 
@@ -28,10 +28,10 @@
 - [Split, generate, and draw](guides/split-and-generate.md)
 - [Hosted frontends and service entries](guides/frontends.md)
 - [Write a selector](guides/write-a-selector.md)
-- [Write a cell policy](guides/write-a-cell-policy.md)
+- [Write a pool policy](guides/write-a-pool-policy.md)
 - [Compose in the browser](guides/composer.md)
 - [Deploy with Docker Compose](guides/compose-deploy.md)
-- [Deploy a fleet of cells](guides/fleet.md)
+- [Deploy a fleet of pools](guides/fleet.md)
 - [Run the examples](guides/examples.md)
 
 # Operations
@@ -57,7 +57,7 @@
 - [Metrics design](development/metrics-design.md)
 - [Generation design](development/generation-design.md)
 - [Catalogue design](development/catalogue-design.md)
-- [Cells design](development/cells-design.md)
+- [Pools design](development/pools-design.md)
 - [What gdl relies on in velo](development/velo.md)
 - [Dynamo compatibility](development/dynamo.md)
 
@@ -66,4 +66,4 @@
 - [Glossary](appendix/glossary.md)
 - [Spec and fleet reference](appendix/spec-reference.md)
 - [Metrics reference](appendix/metrics.md)
-- [Cell hub routes and watch events](appendix/hub-api.md)
+- [Pool hub routes and watch events](appendix/hub-api.md)

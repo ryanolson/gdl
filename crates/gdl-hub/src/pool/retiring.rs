@@ -1,13 +1,13 @@
-//! The retired entry instances whose retirement the cells that follow
+//! The retired entry instances whose retirement the pools that follow
 //! this one have yet to acknowledge: a retiree's stop waits for its
-//! cell's followers to avoid it, since their choosers pick it from tables
+//! pool's followers to avoid it, since their choosers pick it from tables
 //! this hub does not see.
 //!
 //! A retirement waits for the follower watches counted when it is
 //! announced, in the states [`super::followers`] defines: open, closed
 //! without a release, or lost. Each is settled only by an acknowledgement
 //! of the retirement under its own key, or by its release, since a
-//! follower that let go of the cell makes no new offer to it. A watch lost
+//! follower that let go of the pool makes no new offer to it. A watch lost
 //! without a release is never taken as either: it holds the retirement
 //! until the retiree's own bound, as it holds a drain. A watch that opens
 //! after the retirement is not waited for: its snapshot shows the
@@ -34,7 +34,7 @@ pub(super) struct Retiring {
 
 impl Retiring {
     /// `instance` retired while `counted` were the follower watches the
-    /// cell counts: whether it is acknowledged at once, as it is when none
+    /// pool counts: whether it is acknowledged at once, as it is when none
     /// is counted.
     pub(super) fn retire<'a>(
         &mut self,
@@ -65,7 +65,7 @@ impl Retiring {
 
     /// The watch `key` was released: the retirements that are acknowledged
     /// now that it no longer holds them. Costs one look per retirement
-    /// waiting, which is at most the cell's retired entry instances.
+    /// waiting, which is at most the pool's retired entry instances.
     pub(super) fn released(&mut self, key: &WatchKey) -> Vec<InstanceId> {
         let mut acknowledged = Vec::new();
         self.waiting.retain(|instance, waiting| {

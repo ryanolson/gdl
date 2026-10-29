@@ -1,4 +1,4 @@
-// A source in the global class sends into a class of model cells.
+// A source in the global class sends into a class of model pools.
 name = "policy", schema = 1;
 source Front: Ask -> stream Answer;
 sink   Model: Ask -> stream Answer;

@@ -1,8 +1,8 @@
 //! A directory may keep a short replay history and resnapshot older tokens.
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, MemoryDirectory, MemoryLimits,
+use gdl_pools::{
+    MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord, PoolState,
     conformance::{self, Backend, Rule},
 };
 
@@ -40,9 +40,9 @@ impl Backend for ShortHistory {
     }
 }
 
-fn record(seq: u64) -> CellRecord {
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+fn record(seq: u64) -> PoolRecord {
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -52,11 +52,11 @@ fn record(seq: u64) -> CellRecord {
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq,
         hub: "model-a:1337".into(),
-        lease: CellRecord::DEFAULT_LEASE,
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     }
 }
@@ -67,28 +67,28 @@ fn record(seq: u64) -> CellRecord {
 async fn a_backend_with_one_replay_event_conforms() {
     let [directory] = ShortHistory.fresh().await;
     let mut live = directory.watch("model", None);
-    let Some(Ok(CellEvent::Synced { token, .. })) = live.next().await else {
+    let Some(Ok(PoolEvent::Synced { token, .. })) = live.next().await else {
         panic!("the empty snapshot ends");
     };
     directory.publish(record(1)).await.expect("a record");
-    let Some(Ok(CellEvent::Put { token: recent, .. })) = live.next().await else {
+    let Some(Ok(PoolEvent::Put { token: recent, .. })) = live.next().await else {
         panic!("the first change has a token");
     };
     directory.publish(record(2)).await.expect("a newer record");
     let mut replay = directory.watch("model", Some(recent.clone()));
     assert_eq!(
         replay.next().await,
-        Some(Ok(CellEvent::Synced {
+        Some(Ok(PoolEvent::Synced {
             token: recent,
             snapshot: false,
         }))
     );
     assert!(matches!(
         replay.next().await,
-        Some(Ok(CellEvent::Put { record: replayed, .. })) if replayed == record(2)
+        Some(Ok(PoolEvent::Put { record: replayed, .. })) if replayed == record(2)
     ));
     let mut stale = directory.watch("model", Some(token));
-    assert_eq!(stale.next().await, Some(Ok(CellEvent::Resnapshot)));
+    assert_eq!(stale.next().await, Some(Ok(PoolEvent::Resnapshot)));
     assert_eq!(stale.next().await, None);
     drop((live, replay, stale, directory));
 

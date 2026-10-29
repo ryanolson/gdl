@@ -51,7 +51,7 @@ The registry holds:
 - `uptime_seconds`, read at each scrape;
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
 - the runtime's figures for each segment a request passes through;
-- in a chooser, what became of each offer to a cell, by cell and outcome ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)).
+- in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
 The identity labels are applied when the registry gathers, in a hash map's order. Parse the text in tests. Do not compare it as a string.
 
@@ -91,30 +91,30 @@ Known gaps in these rules are in [Known limitations](limitations.md): a deadline
 
 dynamo's `request_duration_seconds` spans the whole handler, its stream included. gdl splits that span into the request path and the response path. So gdl does not emit the name, and reserves it. `error_type` holds gdl's error kinds, not the names of dynamo's handler steps (`generate`, `deserialization`). A dashboard keyed on dynamo's values needs an adapter. [Metrics design](../development/metrics-design.md) records why the figures take this shape. [Runtime feature costs](feature-costs.md) holds what recording costs.
 
-## Reading a chooser's cell choices
+## Reading a chooser's pool choices
 
-A chooser counts each offer to a cell of another class under the cell and how it ended: `accepted`, `declined_full`, `declined_gone`, `declined_instance`, `unsent`, `outcome_unknown`, or `failed`. It counts each offer after a request's first as a failover too: after another cell missed it, or after another instance of the same cell declined it as its own.
+A chooser counts each offer to a pool of another class under the pool and how it ended: `accepted`, `declined_full`, `declined_gone`, `declined_instance`, `unsent`, `outcome_unknown`, or `failed`. It counts each offer after a request's first as a failover too: after another pool missed it, or after another instance of the same pool declined it as its own.
 
-- **Where requests go:** the rate of `cell_offers_total{outcome="accepted"}` by `cell`.
-- **A full cell:** its `declined_full` rises, and `cell_failovers_total` rises on the other cells.
-- **A draining cell:** its `declined_gone` rises, then stops until the relay changes the follow.
-- **Instances that serve different requests:** a cell's `declined_instance` rises with its `cell_failovers_total`, and its other series do not change. Each such decline costs the request one round trip.
+- **Where requests go:** the rate of `pool_offers_total{outcome="accepted"}` by `pool`.
+- **A full pool:** its `declined_full` rises, and `pool_failovers_total` rises on the other pools.
+- **A draining pool:** its `declined_gone` rises, then stops until the relay changes the follow.
+- **Instances that serve different requests:** a pool's `declined_instance` rises with its `pool_failovers_total`, and its other series do not change. Each such decline costs the request one round trip.
 - **A transport fault:** `unsent` says velo refused to send. `outcome_unknown` says the request may have run, and failed for its caller.
 
 The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)).
 
 ## Logs
 
-A segment binary writes the `tracing` events of its nodes, its cell policies, and the runtime to stderr, one line per event. `RUST_LOG` sets the filter, with the `EnvFilter` syntax: a level (`info`), or levels per target (`warn,gdl_runtime=debug`). Without `RUST_LOG`, the level is `warn`. A directive that does not parse is ignored, and the others still apply. Under Docker Compose, `docker compose logs <service>` shows the lines. Set `RUST_LOG` in the service's `environment` with an override file (`docker compose -f compose.yaml -f logs.yaml up`): a new bundle writes `compose.yaml` again.
+A segment binary writes the `tracing` events of its nodes, its pool policies, and the runtime to stderr, one line per event. `RUST_LOG` sets the filter, with the `EnvFilter` syntax: a level (`info`), or levels per target (`warn,gdl_runtime=debug`). Without `RUST_LOG`, the level is `warn`. A directive that does not parse is ignored, and the others still apply. Under Docker Compose, `docker compose logs <service>` shows the lines. Set `RUST_LOG` in the service's `environment` with an override file (`docker compose -f compose.yaml -f logs.yaml up`): a new bundle writes `compose.yaml` again.
 
 ```text
-2026-10-26T15:30:27.098937Z  WARN policy_router: no cell serves the model model="mistral"
+2026-10-26T15:30:27.098937Z  WARN policy_router: no pool serves the model model="mistral"
 ```
 
-The hub binary, `gdl-hub`, writes its own events to stderr by the same rules: `RUST_LOG`, `warn` by default, no colour. Its events include a cell record the directory did not take and a cell directory's watch that failed. `docker compose logs hub` shows them.
+The hub binary, `gdl-hub`, writes its own events to stderr by the same rules: `RUST_LOG`, `warn` by default, no colour. Its events include a pool record the directory did not take and a pool directory's watch that failed. `docker compose logs hub` shows them.
 
 ```text
-2026-10-26T20:12:25.214550Z  WARN gdl_hub::cell::publish: the directory refused the cell's record as not newer held=(epoch 1793045545212, seq 1) offered=(epoch 1793045545208, seq 2)
+2026-10-26T20:12:25.214550Z  WARN gdl_hub::pool::publish: the directory refused the pool's record as not newer held=(epoch 1793045545212, seq 1) offered=(epoch 1793045545208, seq 2)
 ```
 
 Each binary's `main` installs the subscriber, not `gdl-runtime` or the `gdl-hub` library. A program that deploys a segment through the generated library, or serves a hub through `gdl-hub`, installs its own subscriber, or none. The output goes to stderr because a source segment that serves JSON lines answers on stdout. The lines have no colour codes, which would show as noise in a container's log, even when another crate turns on `tracing-subscriber`'s `ansi` feature. Records of the `log` crate are not shown, unless another crate turns on `tracing-subscriber`'s `tracing-log` feature ([limitations](limitations.md#a-segment-binary-does-not-show-records-of-the-log-crate)).

@@ -9,8 +9,8 @@ use futures::{Stream, StreamExt};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
 
-use super::{CellWatcher, events};
-use crate::{CellWatchEvent, UnknownEvent, WatchFailure, WatchItem, WatchLimits, Watched};
+use super::{PoolWatcher, events};
+use crate::{PoolWatchEvent, UnknownEvent, WatchFailure, WatchItem, WatchLimits, Watched};
 
 const WITHIN: Duration = Duration::from_secs(1);
 
@@ -22,7 +22,7 @@ fn limits() -> WatchLimits {
     }
 }
 
-fn sent(event: &CellWatchEvent) -> Vec<u8> {
+fn sent(event: &PoolWatchEvent) -> Vec<u8> {
     format!(
         "data: {}\n\n",
         serde_json::to_string(event).expect("an event serializes")
@@ -30,19 +30,19 @@ fn sent(event: &CellWatchEvent) -> Vec<u8> {
     .into_bytes()
 }
 
-fn cell() -> CellWatchEvent {
-    CellWatchEvent::Cell {
+fn pool() -> PoolWatchEvent {
+    PoolWatchEvent::Pool {
         models: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,
-        state: gdl_cells::CellState::Ready,
+        state: gdl_pools::PoolState::Ready,
         load: None,
     }
 }
 
-fn ready() -> CellWatchEvent {
-    CellWatchEvent::Ready {
+fn ready() -> PoolWatchEvent {
+    PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: PeerInfo::new(
             InstanceId::new_v4(),
@@ -75,7 +75,7 @@ async fn read(
     bytes: impl Stream<Item = Result<Vec<u8>, String>> + Send + 'static,
     limits: WatchLimits,
     wait: Duration,
-) -> (Vec<WatchItem<CellWatchEvent, UnknownEvent>>, Duration) {
+) -> (Vec<WatchItem<PoolWatchEvent, UnknownEvent>>, Duration) {
     let start = Instant::now();
     let items = tokio::time::timeout(
         wait,
@@ -92,10 +92,10 @@ async fn read(
 #[tokio::test(start_paused = true)]
 async fn a_snapshot_not_complete_by_the_bound_ends_the_watch() {
     let readies = vec![ready(), ready()];
-    let bytes = trickle(vec![sent(&cell())], readies.iter().map(sent).collect());
+    let bytes = trickle(vec![sent(&pool())], readies.iter().map(sent).collect());
     let (items, ended) = read(bytes, limits(), WITHIN * 10).await;
-    let mut expected: Vec<WatchItem<CellWatchEvent, UnknownEvent>> =
-        vec![Ok(Watched::Event(cell()))];
+    let mut expected: Vec<WatchItem<PoolWatchEvent, UnknownEvent>> =
+        vec![Ok(Watched::Event(pool()))];
     expected.extend(readies.into_iter().map(|ready| Ok(Watched::Event(ready))));
     expected.push(Err(WatchFailure::SnapshotLate { within: WITHIN }));
     assert_eq!(items, expected);
@@ -111,11 +111,11 @@ async fn a_snapshot_not_complete_by_the_bound_ends_the_watch() {
 #[tokio::test]
 async fn a_snapshot_past_its_limit_ends_the_watch() {
     let limits = limits();
-    let mut chunks = vec![sent(&cell())];
+    let mut chunks = vec![sent(&pool())];
     let one = sent(&ready()).len();
     assert!(one < limits.event);
     chunks.extend((0..2 * limits.snapshot / one).map(|_| sent(&ready())));
-    chunks.push(sent(&CellWatchEvent::Synced));
+    chunks.push(sent(&PoolWatchEvent::Synced));
     let bytes = futures::stream::iter(chunks.into_iter().map(Ok));
     let (items, _) = read(bytes, limits, WITHIN).await;
     let (last, read) = items.split_last().expect("items");
@@ -127,10 +127,10 @@ async fn a_snapshot_past_its_limit_ends_the_watch() {
     );
     assert!(read.iter().all(Result::is_ok));
     assert!(
-        !read.contains(&Ok(Watched::Event(CellWatchEvent::Synced))),
+        !read.contains(&Ok(Watched::Event(PoolWatchEvent::Synced))),
         "the snapshot completed"
     );
-    let bytes = sent(&cell()).len() + (read.len() - 1) * one;
+    let bytes = sent(&pool()).len() + (read.len() - 1) * one;
     assert!(bytes <= limits.snapshot, "{bytes} bytes read");
     assert!(bytes + one > limits.snapshot, "{bytes} bytes read");
 }
@@ -140,19 +140,19 @@ async fn a_snapshot_past_its_limit_ends_the_watch() {
 #[tokio::test(start_paused = true)]
 async fn a_complete_snapshot_is_never_ended_by_its_bounds() {
     let limits = limits();
-    let after: Vec<CellWatchEvent> = (0..limits.snapshot / sent(&ready()).len() * 2)
+    let after: Vec<PoolWatchEvent> = (0..limits.snapshot / sent(&ready()).len() * 2)
         .map(|_| ready())
         .collect();
     let bytes = trickle(
-        vec![sent(&cell()), sent(&CellWatchEvent::Synced)],
+        vec![sent(&pool()), sent(&PoolWatchEvent::Synced)],
         after.iter().map(sent).collect(),
     )
     .take(after.len() * 3 + 10);
     let (items, ended) = read(bytes, limits, WITHIN * 1000).await;
     assert!(ended > WITHIN * 10, "lived {ended:?}");
-    let mut expected: Vec<WatchItem<CellWatchEvent, UnknownEvent>> = vec![
-        Ok(Watched::Event(cell())),
-        Ok(Watched::Event(CellWatchEvent::Synced)),
+    let mut expected: Vec<WatchItem<PoolWatchEvent, UnknownEvent>> = vec![
+        Ok(Watched::Event(pool())),
+        Ok(Watched::Event(PoolWatchEvent::Synced)),
     ];
     expected.extend(after.into_iter().map(|ready| Ok(Watched::Event(ready))));
     assert_eq!(items, expected);
@@ -165,7 +165,7 @@ async fn a_hub_that_never_answers_is_bounded_too() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let address = listener.local_addr().expect("an address").to_string();
     let within = Duration::from_millis(200);
-    let watcher = CellWatcher::with_limits(WatchLimits {
+    let watcher = PoolWatcher::with_limits(WatchLimits {
         synced_within: within,
         ..WatchLimits::default()
     })
@@ -191,18 +191,18 @@ async fn a_hub_that_never_answers_is_bounded_too() {
 /// snapshot's first event does not complete it.
 #[tokio::test(start_paused = true)]
 async fn a_buffered_event_read_after_the_bound_ends_the_watch() {
-    for then in [CellWatchEvent::Synced, ready()] {
-        let chunk = [sent(&cell()), sent(&then)].concat();
+    for then in [PoolWatchEvent::Synced, ready()] {
+        let chunk = [sent(&pool()), sent(&then)].concat();
         let bytes =
             futures::stream::iter([Ok::<_, String>(chunk)]).chain(futures::stream::pending());
         let start = Instant::now();
-        let mut items = std::pin::pin!(events::<CellWatchEvent, _, _, _>(
+        let mut items = std::pin::pin!(events::<PoolWatchEvent, _, _, _>(
             bytes,
             Arc::default(),
             limits(),
             start + WITHIN,
         ));
-        assert_eq!(items.next().await, Some(Ok(Watched::Event(cell()))));
+        assert_eq!(items.next().await, Some(Ok(Watched::Event(pool()))));
         tokio::time::advance(WITHIN * 2).await;
         assert_eq!(
             items.next().await,
@@ -219,7 +219,7 @@ async fn a_buffered_event_read_after_the_bound_ends_the_watch() {
 #[tokio::test(start_paused = true)]
 async fn an_unfinished_event_counts_toward_the_snapshot() {
     let limits = limits();
-    let mut chunk = sent(&cell());
+    let mut chunk = sent(&pool());
     let one = sent(&ready()).len();
     while chunk.len() + one <= limits.snapshot {
         chunk.extend(sent(&ready()));

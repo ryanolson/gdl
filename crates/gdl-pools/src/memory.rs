@@ -12,12 +12,12 @@ use futures::Stream;
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::{
-    CellDirectory, CellEvent, CellRecord, DirectoryError, ResumeToken, Version, Withdrawal,
+    DirectoryError, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal,
 };
 
-/// An in-process cell directory, shared by every hub in one process
+/// An in-process pool directory, shared by every hub in one process
 /// through its clones: the reference implementation of
-/// [`CellDirectory`], for tests that run several cells in one process.
+/// [`PoolDirectory`], for tests that run several pools in one process.
 ///
 /// One lock guards the whole directory. It is held only for the length of
 /// a write's fan-out or a watch's snapshot, never across an `.await`, and
@@ -32,7 +32,7 @@ pub struct MemoryDirectory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryLimits {
     /// The changes a watcher may have unread before it is cut off with
-    /// [`CellEvent::Resnapshot`].
+    /// [`PoolEvent::Resnapshot`].
     pub buffer: usize,
     /// The latest changes of each class kept for watches that resume.
     pub history: usize,
@@ -65,19 +65,19 @@ struct State {
 
 #[derive(Debug, Default)]
 struct Class {
-    cells: HashMap<String, Held>,
+    pools: HashMap<String, Held>,
     // The position of the class's latest change; the first is 1, so a
     // watch of a class with no changes yet starts from 0.
     head: u64,
     // The latest changes, at positions `head - history.len() + 1 ..= head`.
-    history: VecDeque<CellEvent>,
+    history: VecDeque<PoolEvent>,
     watchers: HashMap<u64, Watcher>,
 }
 
 #[derive(Debug)]
 enum Held {
     // Boxed: a record is many times the size of a tombstone.
-    Record(Box<CellRecord>),
+    Record(Box<PoolRecord>),
     // The tombstone a withdrawal leaves, so that a late publish cannot
     // bring the record back.
     Withdrawn(Version),
@@ -85,7 +85,7 @@ enum Held {
 
 #[derive(Debug)]
 struct Watcher {
-    events: mpsc::Sender<CellEvent>,
+    events: mpsc::Sender<PoolEvent>,
     lagged: Arc<AtomicBool>,
 }
 
@@ -112,11 +112,11 @@ impl MemoryDirectory {
         }
     }
 
-    /// The record the directory holds for `cell` of `class`, if any: not
+    /// The record the directory holds for `pool` of `class`, if any: not
     /// a tombstone.
-    pub fn record(&self, class: &str, cell: &str) -> Option<CellRecord> {
-        match self.shared.lock().classes.get(class)?.cells.get(cell)? {
-            Held::Record(record) => Some(CellRecord::clone(record)),
+    pub fn record(&self, class: &str, pool: &str) -> Option<PoolRecord> {
+        match self.shared.lock().classes.get(class)?.pools.get(pool)? {
+            Held::Record(record) => Some(PoolRecord::clone(record)),
             Held::Withdrawn(_) => None,
         }
     }
@@ -130,61 +130,61 @@ impl MemoryDirectory {
             .map_or(0, |class| class.watchers.len())
     }
 
-    /// [`CellDirectory::publish`], which never waits: so that a caller on
+    /// [`PoolDirectory::publish`], which never waits: so that a caller on
     /// a blocking thread can write.
-    pub(crate) fn put(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    pub(crate) fn put(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         record.check()?;
-        let (class, cell) = (record.class.clone(), record.name.clone());
+        let (class, pool) = (record.class.clone(), record.name.clone());
         self.write(
             &class,
-            &cell,
+            &pool,
             Held::Record(Box::new(record.clone())),
-            |token| CellEvent::Put { record, token },
+            |token| PoolEvent::Put { record, token },
         )
     }
 
-    /// [`CellDirectory::withdraw`], which never waits.
+    /// [`PoolDirectory::withdraw`], which never waits.
     pub(crate) fn remove(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
-        let (class, cell) = (withdrawal.class.clone(), withdrawal.cell.clone());
+        let (class, pool) = (withdrawal.class.clone(), withdrawal.pool.clone());
         let held = Held::Withdrawn(withdrawal.version());
-        self.write(&class, &cell, held, |token| CellEvent::Withdrawn {
+        self.write(&class, &pool, held, |token| PoolEvent::Withdrawn {
             withdrawal,
             token,
         })
     }
 
-    /// The version of the latest write the directory took for `cell` of
+    /// The version of the latest write the directory took for `pool` of
     /// `class`, and whether it is a record rather than a withdrawal.
-    pub(crate) fn held(&self, class: &str, cell: &str) -> Option<(Version, bool)> {
+    pub(crate) fn held(&self, class: &str, pool: &str) -> Option<(Version, bool)> {
         let state = self.shared.lock();
-        let held = state.classes.get(class)?.cells.get(cell)?;
+        let held = state.classes.get(class)?.pools.get(pool)?;
         Some((held.version(), matches!(held, Held::Record(_))))
     }
 
     fn write(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
         held: Held,
-        event: impl FnOnce(ResumeToken) -> CellEvent,
+        event: impl FnOnce(ResumeToken) -> PoolEvent,
     ) -> Result<(), DirectoryError> {
         let offered = held.version();
         let history = self.shared.limits.history;
         let base = self.shared.base;
         let mut state = self.shared.lock();
         let entry = state.class(class, base);
-        if let Some(current) = entry.cells.get(cell)
+        if let Some(current) = entry.pools.get(pool)
             && offered <= current.version()
         {
             return Err(DirectoryError::NotNewer {
                 class: class.to_owned(),
-                cell: cell.to_owned(),
+                pool: pool.to_owned(),
                 held: current.version(),
                 offered,
             });
         }
-        entry.cells.insert(cell.to_owned(), held);
+        entry.pools.insert(pool.to_owned(), held);
         entry.head += 1;
         let event = event(ResumeToken::new(class, entry.head));
         entry.watchers.retain(|_, watcher| watcher.offer(&event));
@@ -198,10 +198,10 @@ impl MemoryDirectory {
     }
 }
 
-impl CellDirectory for MemoryDirectory {
+impl PoolDirectory for MemoryDirectory {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.put(record)
     }
 
@@ -215,11 +215,11 @@ impl CellDirectory for MemoryDirectory {
         // The snapshot or the replay, and the subscription, are taken under
         // the lock that writes take, so the watch has no gap and no
         // duplicate between them.
-        let pending: VecDeque<CellEvent> = match from {
+        let pending: VecDeque<PoolEvent> = match from {
             None => {
                 let entry = state.class(class, self.shared.base);
-                let mut records: Vec<&CellRecord> = entry
-                    .cells
+                let mut records: Vec<&PoolRecord> = entry
+                    .pools
                     .values()
                     .filter_map(|held| match held {
                         Held::Record(record) => Some(&**record),
@@ -229,8 +229,8 @@ impl CellDirectory for MemoryDirectory {
                 records.sort_by(|a, b| a.name.cmp(&b.name));
                 records
                     .into_iter()
-                    .map(|record| CellEvent::Current(record.clone()))
-                    .chain([CellEvent::Synced {
+                    .map(|record| PoolEvent::Current(record.clone()))
+                    .chain([PoolEvent::Synced {
                         token: ResumeToken::new(class, entry.head),
                         snapshot: true,
                     }])
@@ -245,7 +245,7 @@ impl CellDirectory for MemoryDirectory {
                 else {
                     return MemoryWatch::ended();
                 };
-                [CellEvent::Synced {
+                [PoolEvent::Synced {
                     token,
                     snapshot: false,
                 }]
@@ -303,7 +303,7 @@ impl State {
 impl Class {
     /// The changes after `position`, if the history still holds all of
     /// them.
-    fn after(&self, position: u64) -> Option<impl Iterator<Item = CellEvent> + '_> {
+    fn after(&self, position: u64) -> Option<impl Iterator<Item = PoolEvent> + '_> {
         let oldest = self.head - self.history.len() as u64;
         let skip = position
             .checked_sub(oldest)
@@ -324,7 +324,7 @@ impl Held {
 impl Watcher {
     /// Hand `event` to the watcher without waiting; false when it is gone
     /// or lagged, and is to be dropped.
-    fn offer(&self, event: &CellEvent) -> bool {
+    fn offer(&self, event: &PoolEvent) -> bool {
         match self.events.try_send(event.clone()) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
@@ -343,8 +343,8 @@ impl Watcher {
 pub struct MemoryWatch {
     // The snapshot or the replay, kept here rather than in the channel so
     // that a large class does not count against the buffer.
-    pending: VecDeque<CellEvent>,
-    receiver: Option<mpsc::Receiver<CellEvent>>,
+    pending: VecDeque<PoolEvent>,
+    receiver: Option<mpsc::Receiver<PoolEvent>>,
     lagged: Arc<AtomicBool>,
     registration: Option<Registration>,
 }
@@ -353,7 +353,7 @@ impl MemoryWatch {
     /// A watch that yields `Resnapshot` and ends, holding nothing.
     fn ended() -> Self {
         Self {
-            pending: VecDeque::from([CellEvent::Resnapshot]),
+            pending: VecDeque::from([PoolEvent::Resnapshot]),
             receiver: None,
             lagged: Arc::default(),
             registration: None,
@@ -367,7 +367,7 @@ impl MemoryWatch {
 }
 
 impl Stream for MemoryWatch {
-    type Item = Result<CellEvent, DirectoryError>;
+    type Item = Result<PoolEvent, DirectoryError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -381,14 +381,14 @@ impl Stream for MemoryWatch {
         // it must take again, so it is told at once.
         if this.lagged.load(Ordering::Acquire) {
             this.end();
-            return Poll::Ready(Some(Ok(CellEvent::Resnapshot)));
+            return Poll::Ready(Some(Ok(PoolEvent::Resnapshot)));
         }
         match receiver.poll_recv(cx) {
             Poll::Ready(Some(event)) => Poll::Ready(Some(Ok(event))),
             Poll::Ready(None) => {
                 this.end();
                 let lagged = this.lagged.load(Ordering::Acquire);
-                Poll::Ready(lagged.then_some(Ok(CellEvent::Resnapshot)))
+                Poll::Ready(lagged.then_some(Ok(PoolEvent::Resnapshot)))
             }
             Poll::Pending => Poll::Pending,
         }

@@ -9,7 +9,7 @@ use super::{ClassBoundary, PlacementError};
 /// the boundary rule, and the classes they cross between for a cycle.
 ///
 /// The rule keeps every stage of a boundary hop but its inner end on the
-/// outer end's instance: that instance chooses the cell, sends the one
+/// outer end's instance: that instance chooses the pool, sends the one
 /// `gdl.fwd` into it, and minted the anchor the inner end's output goes to,
 /// so the only instance the other class must reach is the one that sent to
 /// it. A backward stage in another segment of the outer end's class would

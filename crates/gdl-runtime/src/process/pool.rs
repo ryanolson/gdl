@@ -1,36 +1,36 @@
-//! Where a launch's stop meets its cell's drain: when the drain begins the
+//! Where a launch's stop meets its pool's drain: when the drain begins the
 //! stop, what it changes about the drain, and what the instance announces
 //! at its end; and what an entry instance's retirement waits for across
-//! its cell's boundary. An instance outside a cell, under a roster
+//! its pool's boundary. An instance outside a pool, under a roster
 //! directory, or in a binary without hub discovery, takes no part in
-//! either, and every answer here is the one its stop has without a cell.
+//! either, and every answer here is the one its stop has without a pool.
 
 #[cfg(feature = "hub")]
 use super::{DRAIN_POLL, Peers};
 use super::{Drains, Launch};
 
 impl Launch {
-    /// Resolves when the cell's drain begins this instance's stop; never
+    /// Resolves when the pool's drain begins this instance's stop; never
     /// for an instance that takes no part in one.
-    pub(super) async fn cell_drain_stops(&self) {
+    pub(super) async fn pool_drain_stops(&self) {
         #[cfg(feature = "hub")]
-        if let (Peers::Hub(session), Some(cell)) = (&self.peers, &self.cell_drain) {
-            return cell.stops(session).await;
+        if let (Peers::Hub(session), Some(pool)) = (&self.peers, &self.pool_drain) {
+            return pool.stops(session).await;
         }
         std::future::pending().await
     }
 
-    /// Whether the stop the cell's drain begins retires the instance.
-    pub(super) fn cell_drain_retires(&self) -> bool {
+    /// Whether the stop the pool's drain begins retires the instance.
+    pub(super) fn pool_drain_retires(&self) -> bool {
         #[cfg(feature = "hub")]
-        if let Some(cell) = &self.cell_drain {
-            return cell.retires();
+        if let Some(pool) = &self.pool_drain {
+            return pool.retires();
         }
         true
     }
 
     /// The segments whose instances are this one's drain sources: while
-    /// its cell drains, the cell's entry segments, for an entry instance
+    /// its pool drains, the pool's entry segments, for an entry instance
     /// too; otherwise those hosting a source that can reach it. `None` when
     /// their drain cannot be seen from here, for an instance that a source
     /// of another class reaches: the drain of the sources' requests (B)
@@ -38,66 +38,66 @@ impl Launch {
     /// entry instance for its parent too (A).
     pub(super) fn drain_sources(&self) -> Option<Vec<String>> {
         #[cfg(feature = "hub")]
-        if let Some(cell) = &self.cell_drain {
-            if let Some(sources) = cell.sources() {
+        if let Some(pool) = &self.pool_drain {
+            if let Some(sources) = pool.sources() {
                 return Some(sources.to_vec());
             }
-            if cell.blind() {
+            if pool.blind() {
                 return None;
             }
         }
         Some(self.reaching.clone())
     }
 
-    /// The instance retires now: from here an entry instance in a cell
-    /// counts its wait for the cells that follow its cell.
-    pub(super) fn cell_retires(&mut self) {
+    /// The instance retires now: from here an entry instance in a pool
+    /// counts its wait for the pools that follow its pool.
+    pub(super) fn pool_retires(&mut self) {
         #[cfg(feature = "hub")]
-        if let Some(cell) = &mut self.cell_drain {
-            cell.retire();
+        if let Some(pool) = &mut self.pool_drain {
+            pool.retire();
         }
     }
 
-    /// Whether the cells that follow this instance's cell may be taken to
+    /// Whether the pools that follow this instance's pool may be taken to
     /// avoid it, asked by (A) at each poll: for an entry instance that
-    /// retired, once its hub says they do, or, while its cell drains, that
+    /// retired, once its hub says they do, or, while its pool drains, that
     /// none follows it, or the bound has passed since it retired and since
     /// it learned of a drain; for any other, always. What it reads
     /// is taken now, so that the question borrows nothing of the launch.
     #[cfg(feature = "hub")]
-    pub(super) fn cell_parent(&self) -> impl Fn() -> bool + use<> {
-        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+    pub(super) fn pool_parent(&self) -> impl Fn() -> bool + use<> {
+        let parent = self.pool_drain.as_ref().and_then(|pool| pool.parent());
         move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
     }
 
     /// Whether this instance, a retired entry instance, now declines
-    /// offers because of a drain of its cell that it learned of while it
+    /// offers because of a drain of its pool that it learned of while it
     /// waits ([`crate::dist::Parent::declines`]). It then says `drained`
     /// once it holds no request, as an entry instance that the drain
-    /// stopped does: every instance of the cell waits for that, and a
+    /// stopped does: every instance of the pool waits for that, and a
     /// segment that sends back to the entry would otherwise wait for the
     /// entry while the entry waits for it to leave. Always `false` for any
     /// other instance. What it reads is taken now, so that the question
     /// borrows nothing of the launch.
     #[cfg(feature = "hub")]
-    pub(super) fn cell_declines(&self) -> impl Fn() -> bool + use<> {
-        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+    pub(super) fn pool_declines(&self) -> impl Fn() -> bool + use<> {
+        let parent = self.pool_drain.as_ref().and_then(|pool| pool.parent());
         move || parent.as_ref().is_some_and(crate::dist::Parent::declines)
     }
 
     /// For a retired entry instance, decline offers from `segment` from
-    /// other cells once a drain of its cell it learned of while it waits
-    /// reaches its bound, or no cell follows the cell; then, and for any
+    /// other pools once a drain of its pool it learned of while it waits
+    /// reaches its bound, or no pool follows the pool; then, and for any
     /// other instance, whose stop decided that as it began, never resolve.
     /// It runs beside the drain's waiting rather than between its
     /// questions to the hub, which may stall. What it reads is taken now,
     /// so that it borrows nothing of the launch.
-    pub(super) fn cell_declining<'a>(
+    pub(super) fn pool_declining<'a>(
         &self,
         segment: &'a dyn Drains,
     ) -> impl Future<Output = ()> + use<'a> {
         #[cfg(feature = "hub")]
-        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+        let parent = self.pool_drain.as_ref().and_then(|pool| pool.parent());
         #[cfg(not(feature = "hub"))]
         let _ = segment;
         async move {
@@ -110,18 +110,18 @@ impl Launch {
         }
     }
 
-    /// For an entry instance of a draining cell, decline offers once its
-    /// bound has passed or no other cell follows the cell, or at
+    /// For an entry instance of a draining pool, decline offers once its
+    /// bound has passed or no other pool follows the pool, or at
     /// `deadline`; for any other, nothing. What it reads is taken now, so
     /// that the wait borrows nothing of the launch while the stop goes on
     /// beside it.
-    pub(super) fn cell_drain_declines<'a>(
+    pub(super) fn pool_drain_declines<'a>(
         &self,
         segment: &'a dyn Drains,
         deadline: tokio::time::Instant,
     ) -> impl Future<Output = ()> + use<'a> {
         #[cfg(feature = "hub")]
-        let declining = self.cell_drain.as_ref().and_then(|cell| cell.declining());
+        let declining = self.pool_drain.as_ref().and_then(|pool| pool.declining());
         #[cfg(not(feature = "hub"))]
         let declining: Option<std::future::Ready<()>> = None;
         async move {
@@ -135,29 +135,29 @@ impl Launch {
         }
     }
 
-    /// For an entry instance of a draining cell: wait until its bound has
-    /// passed or no other cell follows the cell, or until `deadline`,
+    /// For an entry instance of a draining pool: wait until its bound has
+    /// passed or no other pool follows the pool, or until `deadline`,
     /// decline offers, wait until it holds no
     /// request, so that every request it took has been answered, and
     /// announce that it has drained, retried until `deadline`; with `hub`
     /// false (its lease is lost), nothing is announced. Meanwhile it
     /// announces that it detached once no request it holds can send work
-    /// into the cell ([`Launch::cell_detaches`]). Any other instance goes
+    /// into the pool ([`Launch::pool_detaches`]). Any other instance goes
     /// on at once.
-    pub(super) async fn cell_drain_settles(
+    pub(super) async fn pool_drain_settles(
         &mut self,
         segment: &dyn Drains,
         deadline: tokio::time::Instant,
         hub: bool,
     ) {
         #[cfg(feature = "hub")]
-        if let Some(cell) = &self.cell_drain
-            && cell.announces()
+        if let Some(pool) = &self.pool_drain
+            && pool.announces()
         {
-            cell.accepting(deadline).await;
+            pool.accepting(deadline).await;
             segment.decline_offers();
             loop {
-                self.cell_detaches(segment, hub, false).await;
+                self.pool_detaches(segment, hub, false).await;
                 if segment.admitted() == 0 || tokio::time::Instant::now() + DRAIN_POLL > deadline {
                     break;
                 }
@@ -167,7 +167,7 @@ impl Launch {
                 && let Err(error) = session.drained(deadline).await
             {
                 eprintln!(
-                    "{}: could not announce that it drained, so the cell's other instances wait for it to leave: {error}",
+                    "{}: could not announce that it drained, so the pool's other instances wait for it to leave: {error}",
                     self.segment
                 );
             }
@@ -177,28 +177,28 @@ impl Launch {
     }
 
     /// Resolves when the bound of the stop that ends at `deadline` has
-    /// passed. An interior instance whose stop its cell's drain began
-    /// (`by_cell`) counts its bound from when every entry instance of the
-    /// cell has drained or left, as it did before such a stop could come
-    /// earlier, so that a response the cell took before its drain is not
+    /// passed. An interior instance whose stop its pool's drain began
+    /// (`by_pool`) counts its bound from when every entry instance of the
+    /// pool has drained or left, as it did before such a stop could come
+    /// earlier, so that a response the pool took before its drain is not
     /// cut sooner than it was. If its lease is lost first, it counts its
     /// bound from the loss, as a stop by a lost lease does.
     /// What it reads is taken now, so that it borrows nothing of the
     /// launch.
-    pub(super) fn cell_cutoff(
+    pub(super) fn pool_cutoff(
         &self,
         deadline: tokio::time::Instant,
-        by_cell: bool,
+        by_pool: bool,
     ) -> impl Future<Output = ()> + Send + use<> {
         #[cfg(feature = "hub")]
-        let deferred = match (&self.cell_drain, &self.peers) {
-            (Some(cell), Peers::Hub(session)) if by_cell && cell.interior() => {
-                Some((session.asker(), cell.entry_segments().to_vec()))
+        let deferred = match (&self.pool_drain, &self.peers) {
+            (Some(pool), Peers::Hub(session)) if by_pool && pool.interior() => {
+                Some((session.asker(), pool.entry_segments().to_vec()))
             }
             _ => None,
         };
         #[cfg(not(feature = "hub"))]
-        let _ = by_cell;
+        let _ = by_pool;
         let bound = self.drain;
         async move {
             #[cfg(feature = "hub")]
@@ -225,23 +225,23 @@ impl Launch {
     }
 
     /// Whether this instance, a source's, says `drained` as a source does,
-    /// once its serving body ends. An entry instance of a cell does not:
-    /// every instance of a draining cell reads an entry's `drained` as
-    /// "this entry holds no request", and a cell drain that begins later
+    /// once its serving body ends. An entry instance of a pool does not:
+    /// every instance of a draining pool reads an entry's `drained` as
+    /// "this entry holds no request", and a pool drain that begins later
     /// would close an interior instance that a request it holds still
     /// needs. It says it at the end of its drain instead
-    /// ([`Launch::cell_entry_drained`]).
+    /// ([`Launch::pool_entry_drained`]).
     #[cfg(feature = "hub")]
     pub(super) fn source_drains_early(&self) -> bool {
-        self.source && self.cell_drain.as_ref().is_none_or(|cell| cell.interior())
+        self.source && self.pool_drain.as_ref().is_none_or(|pool| pool.interior())
     }
 
-    /// For an entry instance of a cell that hosts a source and was stopped
-    /// outside its cell's drain: announce that it has drained, retried
+    /// For an entry instance of a pool that hosts a source and was stopped
+    /// outside its pool's drain: announce that it has drained, retried
     /// until `deadline`, once it holds no request. One that still holds a
     /// request at its bound, or whose lease is lost (`hub` false), says
     /// nothing; its leaving says as much.
-    pub(super) async fn cell_entry_drained(
+    pub(super) async fn pool_entry_drained(
         &mut self,
         segment: &dyn Drains,
         deadline: tokio::time::Instant,
@@ -256,7 +256,7 @@ impl Launch {
             && let Err(error) = session.drained(deadline).await
         {
             eprintln!(
-                "{}: could not announce that it drained, so the cell's other instances wait for it to leave: {error}",
+                "{}: could not announce that it drained, so the pool's other instances wait for it to leave: {error}",
                 self.segment
             );
         }
@@ -264,21 +264,21 @@ impl Launch {
         let _ = (segment, deadline, hub);
     }
 
-    /// For an instance of a draining cell that takes no more work, from
-    /// outside the cell or, with `closed` false, from inside it: announce
+    /// For an instance of a draining pool that takes no more work, from
+    /// outside the pool or, with `closed` false, from inside it: announce
     /// that it detached once no request it holds can send work into the
-    /// cell, tried once, for at most ten hub polls. An instance not in
-    /// a draining cell, one that does not detach, or one whose lease is
+    /// pool, tried once, for at most ten hub polls. An instance not in
+    /// a draining pool, one that does not detach, or one whose lease is
     /// lost (`hub` false) announces nothing. An entry instance that only
     /// declines offers asks its hub first whether the segments of its
     /// class that send to it have detached, so that no hand-off inside the
-    /// cell adds a request after it read none; one that `closed` takes no
+    /// pool adds a request after it read none; one that `closed` takes no
     /// hand-off at all. Every interior instance waits for its senders to
     /// detach before it drains, or for the entry instances to drain.
-    pub(super) async fn cell_detaches(&mut self, segment: &dyn Drains, hub: bool, closed: bool) {
+    pub(super) async fn pool_detaches(&mut self, segment: &dyn Drains, hub: bool, closed: bool) {
         #[cfg(feature = "hub")]
-        if let (Some(cell), Peers::Hub(session), true) = (&self.cell_drain, &mut self.peers, hub)
-            && cell.detaches()
+        if let (Some(pool), Peers::Hub(session), true) = (&self.pool_drain, &mut self.peers, hub)
+            && pool.detaches()
             && !self.detached
         {
             // The hub is asked only once the count has fallen to none, and
@@ -290,7 +290,7 @@ impl Launch {
                 }
                 let asked = tokio::time::timeout(
                     crate::dist::HubSession::poll() * 10,
-                    cell.senders_detached(session),
+                    pool.senders_detached(session),
                 );
                 if !matches!(asked.await, Ok(Ok(true))) {
                     return;
@@ -307,7 +307,7 @@ impl Launch {
             self.detached = true;
             let bound = tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10;
             let announced = async {
-                if cell.stalls() {
+                if pool.stalls() {
                     std::future::pending::<()>().await;
                 }
                 session.detached(bound).await
@@ -319,7 +319,7 @@ impl Launch {
             };
             if let Some(error) = failed {
                 eprintln!(
-                    "{}: could not announce that it detached, so the cell's other instances wait for it to drain or leave: {error}",
+                    "{}: could not announce that it detached, so the pool's other instances wait for it to drain or leave: {error}",
                     self.segment
                 );
             }

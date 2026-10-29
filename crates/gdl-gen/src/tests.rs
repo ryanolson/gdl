@@ -57,7 +57,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
                 ((*node).to_string(), bind)
             })
             .collect(),
-        cell_policies: BTreeMap::new(),
+        pool_policies: BTreeMap::new(),
         allocator: Allocator::DEFAULT,
         problems: Vec::new(),
     }
@@ -987,7 +987,7 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
 /// as the table writes it.
 fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{
-        CellPolicy, CellSettings, DirectoryBackend, HubTiming, RequestRouter, WatchCaps,
+        DirectoryBackend, HubTiming, PoolPolicy, PoolSettings, RequestRouter, WatchCaps,
     };
     let millis = |d: std::time::Duration| d.as_millis().to_string();
     let directory = match DirectoryBackend::DEFAULT {
@@ -1001,8 +1001,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             serde_json::to_string(&RequestRouter::DEFAULT).expect("a name"),
         ),
         (
-            "CellPolicy::DEFAULT_POLICY",
-            format!("{:?}", CellPolicy::DEFAULT_POLICY),
+            "PoolPolicy::DEFAULT_POLICY",
+            format!("{:?}", PoolPolicy::DEFAULT_POLICY),
         ),
         (
             "DEFAULT_BASE_IMAGE",
@@ -1017,21 +1017,21 @@ fn defaults() -> Vec<(&'static str, String)> {
             serde_json::to_string(&Allocator::DEFAULT).expect("a name"),
         ),
         (
-            "CellSettings::DEFAULT_QUORUM",
-            CellSettings::DEFAULT_QUORUM.to_string(),
+            "PoolSettings::DEFAULT_QUORUM",
+            PoolSettings::DEFAULT_QUORUM.to_string(),
         ),
         (
-            "CellSettings::DEFAULT_REQUIRES",
-            CellSettings::DEFAULT_REQUIRES.to_string(),
+            "PoolSettings::DEFAULT_REQUIRES",
+            PoolSettings::DEFAULT_REQUIRES.to_string(),
         ),
         ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (
-            "CellSettings::DEFAULT_SUMMARY",
-            millis(CellSettings::DEFAULT_SUMMARY),
+            "PoolSettings::DEFAULT_SUMMARY",
+            millis(PoolSettings::DEFAULT_SUMMARY),
         ),
         (
-            "CellSettings::MIN_SUMMARY",
-            millis(CellSettings::MIN_SUMMARY),
+            "PoolSettings::MIN_SUMMARY",
+            millis(PoolSettings::MIN_SUMMARY),
         ),
         ("HubTiming::DEFAULT_HOLD", millis(HubTiming::DEFAULT_HOLD)),
         (
@@ -1052,8 +1052,8 @@ fn defaults() -> Vec<(&'static str, String)> {
             millis(HubTiming::DEFAULT_LOST_CHOOSER),
         ),
         (
-            "WatchCaps::DEFAULT_CELL",
-            WatchCaps::DEFAULT_CELL.to_string(),
+            "WatchCaps::DEFAULT_POOL",
+            WatchCaps::DEFAULT_POOL.to_string(),
         ),
         (
             "WatchCaps::DEFAULT_RELAY",
@@ -1084,9 +1084,9 @@ fn defaults_drift(readme: &str) -> Vec<String> {
         .take_while(|line| line.starts_with('|'))
         .skip(2)
         .filter_map(|line| {
-            let cells: Vec<&str> = line.trim_matches('|').split(" | ").map(str::trim).collect();
-            let unquote = |cell: &str| cell.trim_matches('`').to_string();
-            Some((unquote(cells.get(2)?), unquote(cells.get(1)?)))
+            let pools: Vec<&str> = line.trim_matches('|').split(" | ").map(str::trim).collect();
+            let unquote = |pool: &str| pool.trim_matches('`').to_string();
+            Some((unquote(pools.get(2)?), unquote(pools.get(1)?)))
         })
         .collect();
     let constants = defaults();
@@ -1131,36 +1131,36 @@ fn the_spec_reference_names_every_default_with_its_value() {
     }
     // The control: a table that drifted is caught.
     let drifted = reference.replacen(
-        "| `\"round_robin\"` | `CellPolicy::DEFAULT_POLICY` |",
-        "| `\"home_first\"` | `CellPolicy::DEFAULT_POLICY` |",
+        "| `\"round_robin\"` | `PoolPolicy::DEFAULT_POLICY` |",
+        "| `\"home_first\"` | `PoolPolicy::DEFAULT_POLICY` |",
         1,
     );
     assert_ne!(drifted, reference, "the row to change");
     assert_eq!(
         defaults_drift(&drifted),
-        ["CellPolicy::DEFAULT_POLICY is \"round_robin\", but the table says \"home_first\""]
+        ["PoolPolicy::DEFAULT_POLICY is \"round_robin\", but the table says \"home_first\""]
     );
     let missing = reference.replacen(
-        "| `1` | `CellSettings::DEFAULT_QUORUM` |",
+        "| `1` | `PoolSettings::DEFAULT_QUORUM` |",
         "| `1` | (none) |",
         1,
     );
     assert_eq!(
         defaults_drift(&missing),
         [
-            "CellSettings::DEFAULT_QUORUM is not in the table",
+            "PoolSettings::DEFAULT_QUORUM is not in the table",
             "the table's (none) is no default constant"
         ]
     );
 }
 
 /// `S` in `front`, of class `global`, sends into `D` in `engine`, of class
-/// `model_x`, whose cells `policy` chooses.
+/// `model_x`, whose pools `policy` chooses.
 fn classed(policy: &str) -> gdl_model::Placement {
     gdl_model::Placement::from_toml(&format!(
         "[segment.front]\nnodes = [\"S\"]\n[segment.engine]\nnodes = [\"D\"]\n\
          [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
-         [cells.model_x]\npolicy = \"{policy}\"\n"
+         [pools.model_x]\npolicy = \"{policy}\"\n"
     ))
     .expect("a placement")
 }
@@ -1176,12 +1176,12 @@ fn router(ty: &str) -> Bind {
 }
 
 /// Only the chooser depends on a bound policy's crate, builds the policy
-/// from its `[cell_policy.<name>]` settings table, and registers it; the
-/// segment it chooses cells for does not know the crate.
+/// from its `[pool_policy.<name>]` settings table, and registers it; the
+/// segment it chooses pools for does not know the crate.
 #[test]
 fn only_the_chooser_registers_a_bound_policy() {
     let mut spec = spec(classed("by_model"), &[("D", "tiny_nodes::Engine")]);
-    spec.cell_policies
+    spec.pool_policies
         .insert("by_model".into(), router("tiny_router::ByModel"));
     let out = Path::new("/out");
     let files = rendered(&spec, &manifest(), out).expect("rendered");
@@ -1198,14 +1198,14 @@ fn only_the_chooser_registers_a_bound_policy() {
         front.contains("    policies: [\n        \"by_model\" = ::tiny_router::ByModel;\n    ];\n"),
         "{front}"
     );
-    assert!(file("front/src/main.rs").contains("[cell_policy.by_model]"));
+    assert!(file("front/src/main.rs").contains("[pool_policy.by_model]"));
     for path in [
         "engine/Cargo.toml",
         "engine/src/lib.rs",
         "engine/src/main.rs",
     ] {
         assert!(!file(path).contains("router"), "{path}");
-        assert!(!file(path).contains("cell_policy"), "{path}");
+        assert!(!file(path).contains("pool_policy"), "{path}");
     }
 }
 
@@ -1253,11 +1253,11 @@ fn a_policy_two_classes_share_is_registered_once() {
     let placement = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = [\"S\", \"T\"]\n[segment.a]\nnodes = [\"A\"]\n[segment.b]\nnodes = [\"B\"]\n\
          [class.global]\nsegments = [\"front\"]\n[class.model_a]\nsegments = [\"a\"]\n[class.model_b]\nsegments = [\"b\"]\n\
-         [cells.model_a]\npolicy = \"by_model\"\n[cells.model_b]\npolicy = \"by_model\"\n",
+         [pools.model_a]\npolicy = \"by_model\"\n[pools.model_b]\npolicy = \"by_model\"\n",
     )
     .expect("a placement");
     let mut spec = spec(placement, &[("A", "tiny_nodes::A"), ("B", "tiny_nodes::B")]);
-    spec.cell_policies
+    spec.pool_policies
         .insert("by_model".into(), router("tiny_router::ByModel"));
     let files = rendered(&spec, &manifest, Path::new("/out")).expect("rendered");
     let front = &files[Path::new("front/src/lib.rs")];
@@ -1279,7 +1279,7 @@ fn every_bad_policy_table_is_found() {
         (
             "By-Model",
             "tiny_router::ByModel",
-            "[cell_policy.By-Model]: ",
+            "[pool_policy.By-Model]: ",
         ),
         (
             "round_robin",
@@ -1291,16 +1291,16 @@ fn every_bad_policy_table_is_found() {
             "other::ByModel",
             "type `other::ByModel` is not in crate `tiny_router`",
         ),
-        ("by_model", "", "[cell_policy.by_model]: `type` is empty"),
+        ("by_model", "", "[pool_policy.by_model]: `type` is empty"),
         (
             "unused",
             "tiny_router::ByModel",
-            "no `[cells.<class>] policy` names `unused`",
+            "no `[pools.<class>] policy` names `unused`",
         ),
     ];
     for (name, ty, expected) in cases {
         let mut spec = spec(classed("by_model"), &[("D", "tiny_nodes::Engine")]);
-        spec.cell_policies.insert(name.into(), router(ty));
+        spec.pool_policies.insert(name.into(), router(ty));
         let error = check(&spec, &manifest()).expect_err(name).to_string();
         assert!(error.contains(expected), "{name}: {expected} in {error}");
     }
@@ -1311,11 +1311,11 @@ fn every_bad_policy_table_is_found() {
     let placement = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = [\"S\"]\n[segment.engine]\nnodes = [\"by_model\"]\n\
          [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
-         [cells.model_x]\npolicy = \"by_model\"\n",
+         [pools.model_x]\npolicy = \"by_model\"\n",
     )
     .expect("a placement");
     let mut spec = spec(placement, &[("by_model", "tiny_nodes::Engine")]);
-    spec.cell_policies
+    spec.pool_policies
         .insert("by_model".into(), router("tiny_router::ByModel"));
     let error = check(&spec, &named).expect_err("a node's name").to_string();
     assert!(

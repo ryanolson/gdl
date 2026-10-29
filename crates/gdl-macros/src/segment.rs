@@ -60,7 +60,7 @@ fn consts(segment: &Segment) -> TokenStream {
     let segment_doc = doc("This segment's name in the placement.");
     let segments_doc = [
         doc("Every segment of the placement. An instance waits for all of them,"),
-        doc("or, in a cell, only for those of its class."),
+        doc("or, in a pool, only for those of its class."),
     ];
     let placement_doc = doc("The placement this crate was generated for.");
     quote! {
@@ -312,9 +312,9 @@ fn settings_types(segment: &Segment, krate: &TokenStream) -> TokenStream {
         );
     }
     if policies {
-        keys.push("cell_policy");
+        keys.push("pool_policy");
         fields.push(
-            quote!(#[serde(default)] cell_policy: std::collections::BTreeMap<String, toml::Table>,),
+            quote!(#[serde(default)] pool_policy: std::collections::BTreeMap<String, toml::Table>,),
         );
     }
     let names: Vec<String> = segment
@@ -394,7 +394,7 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
         fields.push(quote!(mut adapter));
     }
     if !policies.is_empty() {
-        fields.push(quote!(mut cell_policy));
+        fields.push(quote!(mut pool_policy));
     }
     let nodes = if segment.nodes.is_empty() {
         quote! {
@@ -430,12 +430,12 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
     let policies = (!policies.is_empty()).then(|| {
         let names: Vec<&LitStr> = policies.iter().map(|(name, _)| name).collect();
         let built = policies.iter().map(|(name, ty)| {
-            quote!(builder.build_cell_policy::<#ty>(#name, cell_policy.remove(#name)).await?;)
+            quote!(builder.build_pool_policy::<#ty>(#name, pool_policy.remove(#name)).await?;)
         });
         quote! {
             let policies: &[&str] = &[#(#names),*];
-            if let Some(unknown) = cell_policy.keys().find(|key| !policies.contains(&key.as_str())) {
-                return Err(format!("[cell_policy.{unknown}]: this segment chooses cells by no policy of that name").into());
+            if let Some(unknown) = pool_policy.keys().find(|key| !policies.contains(&key.as_str())) {
+                return Err(format!("[pool_policy.{unknown}]: this segment chooses pools by no policy of that name").into());
             }
             #(#built)*
         }

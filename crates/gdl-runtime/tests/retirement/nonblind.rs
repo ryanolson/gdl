@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
     use common::boundary::run_graph_in;
-    use common::cells::model_cell;
+    use common::pools::model_pool;
     use gdl_model::{HopInfo, NodeInfo, Role, TypeInfo, segment_service};
     use gdl_runtime::{BwdEnd, DSink, FwdEnd, FwdStep, wire_codec};
     use velo::discovery::ServiceDiscovery;
@@ -72,12 +72,12 @@ async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
     };
     const SEGMENTS: &[&str] = &["a", "f", "s", "d"];
     const LONG: &str = "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n";
-    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let config = settings(
         global.public_addr().port(),
         global.control_addr().port(),
         5_000,
-        &format!("{}{LONG}", global_cell()),
+        &format!("{}{LONG}", global_pool()),
     );
     let first = run_graph_in(
         &config,
@@ -91,9 +91,9 @@ async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
     .expect("the chooser serves");
     let mut hub_settings = model_hub(M1, "m1-hub:1337");
     hub_settings.summary = Duration::from_secs(1);
-    let (hub, readiness) = cell_hub_of(&spec, hub_settings, &directory).await;
+    let (hub, readiness) = pool_hub_of(&spec, hub_settings, &directory).await;
     let proxy = Proxy::new(hub.public_addr()).await;
-    let extra = format!("{}summary_ms = 1000\n{LONG}", model_cell(M1));
+    let extra = format!("{}summary_ms = 1000\n{LONG}", model_pool(M1));
     let mut instances = futures::future::join_all(["f", "s", "d"].map(|segment| {
         let public = if segment == "d" {
             proxy.port
@@ -155,7 +155,7 @@ async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
     tokio::time::timeout(WAIT, proxy.holding())
         .await
         .expect("the interior waits before the drain");
-    readiness.drain().await.expect("the cell drains");
+    readiness.drain().await.expect("the pool drains");
     proxy.release();
     tokio::time::timeout(WAIT, proxy.answered_after_hold())
         .await
@@ -163,7 +163,7 @@ async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
     proxy.hold(segment_service("f", SegmentPhase::Drained).as_bytes());
     tokio::time::timeout(WAIT, proxy.holding())
         .await
-        .expect("the interior learned the cell drain");
+        .expect("the interior learned the pool drain");
     source.body.send_replace(false);
     let client = HubClient::builder()
         .host("127.0.0.1")

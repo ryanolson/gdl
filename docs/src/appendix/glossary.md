@@ -50,20 +50,20 @@
 | Drain | The wait, bounded by `drain_ms`, for work to end before an instance exits. See [Segment lifecycle](../concepts/lifecycle.md) |
 | Retire | To stop taking new work while peers promise to avoid the instance |
 
-## Classes and cells
+## Classes and pools
 
 | Term | Meaning |
 |---|---|
-| Class | A named set of segments that deploy together. Every segment is in exactly one class. Classes are part of the placement hash. See [Classes and cells](../concepts/cells.md) |
-| Cell | One running deployment of one class, with its own hub. Cells are runtime topology, like replicas, and not part of the hash |
-| Home | The parent cell of a cell: the one that follows it and prefers it |
-| Fleet | The `fleet.toml` file that lists cells, their classes, regions, and homes. See [Deploy a fleet of cells](../guides/fleet.md) |
-| Cell record | One record per cell, published by its hub: class, region, hashes, state, load summary, hub address, and expiry |
-| Cell directory | Where cell records live and are watched. Its backends are `memory` and `dir` |
-| Chooser | An instance whose segment holds the outer end of a hop into another class. It picks the cell for each attempt. See [Following and choosing cells](../concepts/cell-routing.md) |
+| Class | A named set of segments that deploy together. Every segment is in exactly one class. Classes are part of the placement hash. See [Classes and pools](../concepts/pools.md) |
+| Pool | One running deployment of one class, with its own hub. Pools are runtime topology, like replicas, and not part of the hash |
+| Home | The parent pool of a pool: the one that follows it and prefers it |
+| Fleet | The `fleet.toml` file that lists pools, their classes, regions, and homes. See [Deploy a fleet of pools](../guides/fleet.md) |
+| Pool record | One record per pool, published by its hub: class, region, hashes, state, load summary, hub address, and expiry |
+| Pool directory | Where pool records live and are watched. Its backends are `memory` and `dir` |
+| Chooser | An instance whose segment holds the outer end of a hop into another class. It picks the pool for each attempt. See [Following and choosing pools](../concepts/pool-routing.md) |
 | Entry instance | An instance of the segment that holds the inner end of a hop from another class |
-| Follow, relay | A parent hub follows its children's cell watches, and relays what it follows to its instances |
-| Instance plane, cell plane | The instance plane is one cell's hub, with fast and ordered changes. The cell plane is the records of all cells, with slow and eventual changes |
+| Follow, relay | A parent hub follows its children's pool watches, and relays what it follows to its instances |
+| Instance plane, pool plane | The instance plane is one pool's hub, with fast and ordered changes. The pool plane is the records of all pools, with slow and eventual changes |
 
 ## Tools
 

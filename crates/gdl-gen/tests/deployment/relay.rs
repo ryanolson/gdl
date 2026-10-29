@@ -1,4 +1,4 @@
-//! A parent cell's hub in a fleet's bundle can write its state volume.
+//! A parent pool's hub in a fleet's bundle can write its state volume.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -45,7 +45,7 @@ fn a_parent_can_store_a_record_in_its_new_volume() {
     std::fs::write(
         temp.path().join("probe.rs"),
         r#"fn main() {
-    let root = std::path::PathBuf::from(std::env::var("GDL_CELL__STATE_DIR").expect("state_dir"));
+    let root = std::path::PathBuf::from(std::env::var("GDL_POOL__STATE_DIR").expect("state_dir"));
     let class = root.join("model_x");
     std::fs::create_dir_all(&class).expect("make the child's class directory");
     std::fs::write(class.join("model-x-01.json"), b"{}").expect("store the child's record");

@@ -21,7 +21,7 @@ This guide takes a graph from a spec to checked, generated segment crates and bu
 Every command that builds or fetches takes `--target-dir <dir>`. The default is `$CARGO_TARGET_DIR`, else `target` beside the spec (or beside the crate, for `extract`). Each command exits non-zero on a problem.
 
 - [The catalogue](../concepts/catalogue.md) covers `extract` and `catalog`.
-- [Deploy with Docker Compose](compose-deploy.md) and [Deploy a fleet of cells](fleet.md) cover `compose`.
+- [Deploy with Docker Compose](compose-deploy.md) and [Deploy a fleet of pools](fleet.md) cover `compose`.
 
 ## Write the spec
 
@@ -54,7 +54,7 @@ A node crate marks each node type with `#[derive(gdl::Node)]`. The node's name i
 
 To split a graph, move node names between segments. Any edge between two segments becomes a crossing, and its message must be a wire type. The segment count and the cut change the cost of a request: read `crossings.txt` after you generate.
 
-A spec can also group segments into classes, set a cell policy, or hold several layouts. [The spec reference](../appendix/spec-reference.md) lists every key.
+A spec can also group segments into classes, set a pool policy, or hold several layouts. [The spec reference](../appendix/spec-reference.md) lists every key.
 
 ## Check
 
@@ -66,12 +66,12 @@ cargo gdl check --spec examples/chat/gdl.toml
 
 ```text
 gdl.toml:14: [segment.engine] node: unknown field `node`, expected `nodes`
-gdl.toml: [cells.zz]: cell policy `[cells.zz]`: the placement has no class `zz`
+gdl.toml: [pools.zz]: pool policy `[pools.zz]`: the placement has no class `zz`
 fleet.toml: [class.model_x] ready.front: not a segment of class `model_x`
 cargo gdl: 3 problems
 ```
 
-Every table refuses a key it does not know. A table of names (a segment in `ready`, a class in `requires`, a node in `[config]` or `[nodes] pin`) refuses a name that is not in the spec. A file that does not parse is one problem, and the other file is still checked. When the spec does not read, `check` judges only what needs no layout in the fleet file and says once that the cells' children were not checked. `generate`, `resolve`, `diagram`, and `export` report the spec's problems the same way.
+Every table refuses a key it does not know. A table of names (a segment in `ready`, a class in `requires`, a node in `[config]` or `[nodes] pin`) refuses a name that is not in the spec. A file that does not parse is one problem, and the other file is still checked. When the spec does not read, `check` judges only what needs no layout in the fleet file and says once that the pools' children were not checked. `generate`, `resolve`, `diagram`, and `export` report the spec's problems the same way.
 
 ## Build
 

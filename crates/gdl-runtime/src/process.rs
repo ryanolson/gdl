@@ -5,8 +5,8 @@
 //! and tested here rather than in each generated crate.
 
 mod barrier;
-mod cell;
 mod origins;
+mod pool;
 mod system;
 
 use std::collections::BTreeMap;
@@ -31,7 +31,7 @@ use crate::dist::{
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
-use gdl_model::CellSettings;
+use gdl_model::PoolSettings;
 use system::{Health, Phase, SystemSettings};
 
 /// The settings of one segment process. `H` is what the segment hosts: the
@@ -55,22 +55,22 @@ use system::{Health, Phase, SystemSettings};
 /// host = "0.0.0.0"        # also DYN_SYSTEM_HOST
 /// live_path = "/live"     # also DYN_SYSTEM_LIVE_PATH
 /// health_path = "/health" # also DYN_SYSTEM_HEALTH_PATH
-/// [cell]                  # optional: the cell this instance belongs to (`CellSettings`)
+/// [pool]                  # optional: the pool this instance belongs to (`PoolSettings`)
 /// name = "model-x-01-us-east-1"
 /// class = "model_x"       # the launch refuses a class that is not the segment's
 /// region = "us-east-1"
 /// summary_ms = 10000      # optional: how often an entry instance reports its admission to its hub
 /// ```
 ///
-/// An instance in a cell waits at its launch only for the segments of its
+/// An instance in a pool waits at its launch only for the segments of its
 /// own class: `[instances]` and `[min_replicas]` may name no other. Under a
 /// hub, one whose segment holds a hop into another class (a chooser) also
-/// follows its hub's relay of the cells the hub follows, into the tables
-/// [`Launch::cells`] reads. One whose segment is an entry segment of its
+/// follows its hub's relay of the pools the hub follows, into the tables
+/// [`Launch::pools`] reads. One whose segment is an entry segment of its
 /// class (it holds the inner end of a hop into the class) reports its
 /// admission to its hub once every `summary_ms` while it is ready. Under
-/// a hub, an instance in a cell that a hop enters watches its hub for the
-/// cell's drain ([`Launch::serve`]).
+/// a hub, an instance in a pool that a hop enters watches its hub for the
+/// pool's drain ([`Launch::serve`]).
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
@@ -81,8 +81,8 @@ pub struct ProcessConfig<H> {
     system: SystemSettings,
     /// Each routing selector's table, by the selector's name.
     selector: BTreeMap<String, toml::Table>,
-    cell: Option<CellSettings>,
-    cell_origins: origins::CellOrigins,
+    pool: Option<PoolSettings>,
+    pool_origins: origins::PoolOrigins,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -136,7 +136,7 @@ const KEYS: [&str; 10] = [
     "runtime",
     "system",
     "selector",
-    "cell",
+    "pool",
 ];
 
 fn default_rendezvous_ms() -> u64 {
@@ -234,13 +234,13 @@ impl<H: Hosted> ProcessConfig<H> {
         }
         // Read apart, so that a problem with it names its file or its
         // variable.
-        let (cell, cell_origins) = match settings.remove("cell") {
-            Some(cell) => {
-                let (cell, origins) = origins::CellOrigins::read(&figment, cell)
+        let (pool, pool_origins) = match settings.remove("pool") {
+            Some(pool) => {
+                let (pool, origins) = origins::PoolOrigins::read(&figment, pool)
                     .map_err(|problems| placement(problems.to_string()))?;
-                (Some(cell), origins)
+                (Some(pool), origins)
             }
-            None => (None, origins::CellOrigins::default()),
+            None => (None, origins::PoolOrigins::default()),
         };
         let settings = Settings::deserialize(&Value::Dict(Tag::Default, settings))
             .map_err(|e| placement(e.to_string()))?;
@@ -248,8 +248,8 @@ impl<H: Hosted> ProcessConfig<H> {
             .map_err(|e| placement(e.to_string()))?;
         let mut runtime = settings.runtime;
         // Decided before the nodes are built, which take their tables
-        // then: only a cell's hub has the record service.
-        if settings.hub.is_some() && cell.is_some() {
+        // then: only a pool's hub has the record service.
+        if settings.hub.is_some() && pool.is_some() {
             runtime.records = gdl::HubRecords::under_hub();
         }
         let config = Self {
@@ -261,8 +261,8 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas: settings.min_replicas,
             system: settings.system,
             selector: settings.selector,
-            cell,
-            cell_origins,
+            pool,
+            pool_origins,
             runtime,
             hosted,
         };
@@ -288,8 +288,8 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas,
             system,
             selector,
-            cell,
-            cell_origins,
+            pool,
+            pool_origins,
             runtime,
             hosted,
         } = self;
@@ -302,8 +302,8 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas,
             system,
             selector,
-            cell,
-            cell_origins,
+            pool,
+            pool_origins,
             runtime,
             hosted: (),
         };
@@ -312,9 +312,9 @@ impl<H: Hosted> ProcessConfig<H> {
 }
 
 impl<H> ProcessConfig<H> {
-    /// The cell this instance belongs to, when its deployment has cells.
-    pub fn cell(&self) -> Option<&CellSettings> {
-        self.cell.as_ref()
+    /// The pool this instance belongs to, when its deployment has pools.
+    pub fn pool(&self) -> Option<&PoolSettings> {
+        self.pool.as_ref()
     }
 
     /// Each routing selector's table, by the selector's name.
@@ -343,15 +343,15 @@ impl<H> ProcessConfig<H> {
     /// serves, the instance registers before it is ready, so the hub knows
     /// it is live, then waits for at least `[min_replicas]` loaded
     /// instances of each segment that have not retired, and takes those as
-    /// its roster. An instance in a cell (`[cell]`) waits, either way,
-    /// only for the segments of its own class: the cells of another class
+    /// its roster. An instance in a pool (`[pool]`) waits, either way,
+    /// only for the segments of its own class: the pools of another class
     /// are not part of its start. How many instances a segment has under a hub is not
     /// fixed: from just before it announces `loaded`, the instance follows
     /// membership, so that an instance that joins later is routed to once
     /// it is ready, and one that retires or leaves is not. From the same
-    /// moment, a chooser in a cell follows its hub's relay of the cells of
+    /// moment, a chooser in a pool follows its hub's relay of the pools of
     /// the classes it sends to, for as long as the launch lives, without
-    /// waiting for any of them ([`Launch::cells`]).
+    /// waiting for any of them ([`Launch::pools`]).
     ///
     /// A stop that `process` takes before the launch is done, while the
     /// nodes load or the instances meet, ends it with `Cancelled`.
@@ -382,16 +382,16 @@ impl<H> ProcessConfig<H> {
         let node = process.take_node()?;
         let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
         // Before anything registers or meets: an instance in the wrong
-        // cell would otherwise be counted toward that cell's quorum.
-        if let Some(cell) = &self.cell {
-            cell.check(&layout, segment)
-                .map_err(|problems| placement(self.cell_origins.locate(problems).to_string()))?;
-            // A chooser that cannot run its cell policy refuses before it
+        // pool would otherwise be counted toward that pool's quorum.
+        if let Some(pool) = &self.pool {
+            pool.check(&layout, segment)
+                .map_err(|problems| placement(self.pool_origins.locate(problems).to_string()))?;
+            // A chooser that cannot run its pool policy refuses before it
             // registers or loads.
             #[cfg(feature = "hub")]
-            crate::dist::check_cell_policies(&layout, segment, &self.runtime.cell_policies)?;
+            crate::dist::check_pool_policies(&layout, segment, &self.runtime.pool_policies)?;
         }
-        let barrier = barrier::Barrier::new(&layout, segment, self.cell.is_some());
+        let barrier = barrier::Barrier::new(&layout, segment, self.pool.is_some());
         let inner: Vec<String> = layout
             .sends_to(segment)
             .into_iter()
@@ -430,19 +430,19 @@ impl<H> ProcessConfig<H> {
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
         let drain = self.runtime.drain_bound();
-        // An entry instance in a cell reports its admission to its hub.
+        // An entry instance in a pool reports its admission to its hub.
         #[cfg(feature = "hub")]
         let reports = self
-            .cell
+            .pool
             .as_ref()
-            .filter(|cell| layout.entry_segments(&cell.class).contains(segment))
-            .map(|cell| cell.summary);
-        // A chooser's follower of the cells it sends to, under a hub.
+            .filter(|pool| layout.entry_segments(&pool.class).contains(segment))
+            .map(|pool| pool.summary);
+        // A chooser's follower of the pools it sends to, under a hub.
         #[cfg(feature = "hub")]
         let mut chooser = None;
-        // Under a hub, an instance in a cell watches for its cell's drain.
+        // Under a hub, an instance in a pool watches for its pool's drain.
         #[cfg(feature = "hub")]
-        let mut cell_drain = None;
+        let mut pool_drain = None;
         let (node, roster, peers, follower) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
@@ -480,10 +480,10 @@ impl<H> ProcessConfig<H> {
                     Duration::from_millis(*heartbeat_ms),
                 )
                 .await?;
-                // The nodes, built already, reach the cell hub's records
+                // The nodes, built already, reach the pool hub's records
                 // from now, so that a node can read them while it gets
                 // ready.
-                if self.cell.is_some() {
+                if self.pool.is_some() {
                     self.runtime
                         .records
                         .bind(session.records_link(node.instance_id()));
@@ -509,17 +509,17 @@ impl<H> ProcessConfig<H> {
                 roster.hold();
                 let all: Vec<&str> = segments.to_vec();
                 let sends: Vec<&str> = inner.iter().map(String::as_str).collect();
-                // A chooser in a cell follows the cells of the classes it
+                // A chooser in a pool follows the pools of the classes it
                 // sends to from here too, so that its tables fill while it
                 // meets, and routes into those classes by them; an instance
-                // without a cell follows none. The follower is ended with
+                // without a pool follows none. The follower is ended with
                 // whatever ends the launch, a failed rendezvous or a stop
                 // included.
-                if let Some(cell) = &self.cell {
-                    chooser = crate::dist::follow_cells(
+                if let Some(pool) = &self.pool {
+                    chooser = crate::dist::follow_pools(
                         &layout,
                         segment,
-                        &cell.region,
+                        &pool.region,
                         host,
                         *public_port,
                         &node,
@@ -528,14 +528,14 @@ impl<H> ProcessConfig<H> {
                         session.chooser_hub(node.instance_id()),
                         &self.runtime,
                     )?
-                    .map(|(cells, task)| (cells, Abort(task)));
+                    .map(|(pools, task)| (pools, Abort(task)));
                     // The nodes, built already, read the tables from now.
-                    if let Some((cells, _)) = &chooser {
-                        self.runtime.followed.bind(Arc::new(cells.clone()));
+                    if let Some((pools, _)) = &chooser {
+                        self.runtime.followed.bind(Arc::new(pools.clone()));
                     }
-                    cell_drain = crate::dist::CellDrain::watch(
+                    pool_drain = crate::dist::PoolDrain::watch(
                         &layout,
-                        cell,
+                        pool,
                         segment,
                         node.instance_id(),
                         &reaching,
@@ -545,9 +545,9 @@ impl<H> ProcessConfig<H> {
                     )?;
                 }
                 // The membership leaves to the chooser what its tables hold.
-                let cells = chooser.as_ref().map(|(cells, _)| cells.clone());
-                if let Some(cells) = &cells {
-                    roster.choose_cells(cells.clone());
+                let pools = chooser.as_ref().map(|(pools, _)| pools.clone());
+                if let Some(pools) = &pools {
+                    roster.choose_pools(pools.clone());
                 }
                 session.follow(
                     Arc::clone(roster.live()),
@@ -555,7 +555,7 @@ impl<H> ProcessConfig<H> {
                     &all,
                     &sends,
                     drain,
-                    cells,
+                    pools,
                 );
                 let met = session.roster(&expect, wait).await?;
                 for (segment, peers) in met.segments() {
@@ -607,7 +607,7 @@ impl<H> ProcessConfig<H> {
             #[cfg(feature = "hub")]
             models: self.runtime.models.clone(),
             #[cfg(feature = "hub")]
-            cell_drain,
+            pool_drain,
             #[cfg(feature = "hub")]
             detached: false,
             _leaving: leaving,
@@ -672,11 +672,11 @@ pub struct Launch {
     /// The roster directory's membership follower; the hub session owns
     /// its own.
     _follower: Option<Abort>,
-    /// A chooser's follower of those cells, which lives as long as the
+    /// A chooser's follower of those pools, which lives as long as the
     /// launch, through its drain.
     #[cfg(feature = "hub")]
     _chooser: Option<Abort>,
-    /// For an entry instance in a cell, how often it reports its
+    /// For an entry instance in a pool, how often it reports its
     /// admission to its hub.
     #[cfg(feature = "hub")]
     reports: Option<Duration>,
@@ -684,12 +684,12 @@ pub struct Launch {
     /// load reports carry.
     #[cfg(feature = "hub")]
     models: gdl::InstanceModels,
-    /// For an instance in a cell under a hub, its part in its cell's
+    /// For an instance in a pool under a hub, its part in its pool's
     /// drain.
     #[cfg(feature = "hub")]
-    cell_drain: Option<crate::dist::CellDrain>,
+    pool_drain: Option<crate::dist::PoolDrain>,
     /// Whether the instance has said that it detached from its draining
-    /// cell.
+    /// pool.
     #[cfg(feature = "hub")]
     detached: bool,
     /// Dropped last, on every way out: says the instance has left.
@@ -770,7 +770,7 @@ pub trait Drains: Send + Sync + 'static {
     fn decline_offers(&self) {}
 
     /// What its admission holds, for the load report of an entry instance
-    /// in a cell. `None` by default, for a launch that serves no segment,
+    /// in a pool. `None` by default, for a launch that serves no segment,
     /// which reports nothing.
     fn load(&self) -> Option<SegmentLoad> {
         None
@@ -816,18 +816,18 @@ impl Launch {
         &self.roster
     }
 
-    /// The tables of the cells this instance follows and routes into:
-    /// for a chooser, an instance in a cell under a hub whose segment
+    /// The tables of the pools this instance follows and routes into:
+    /// for a chooser, an instance in a pool under a hub whose segment
     /// holds a hop into another class, one per entry segment of the hops
     /// it sends there. `None` for any other instance, which follows no
-    /// cell.
+    /// pool.
     #[cfg(feature = "hub")]
-    pub fn cells(&self) -> Option<crate::dist::Cells> {
-        self.roster.cells().cloned()
+    pub fn pools(&self) -> Option<crate::dist::Pools> {
+        self.roster.pools().cloned()
     }
 
     /// Announce that this instance's handlers are installed, wait until
-    /// every instance it can route to has announced the same (in a cell,
+    /// every instance it can route to has announced the same (in a pool,
     /// every instance of its own class it routes to), release the
     /// roster, then run `serve` with the started `segment` until it
     /// finishes. A request that reaches this instance before the barrier
@@ -846,21 +846,21 @@ impl Launch {
     /// every instance that sends to its segment has promised to avoid it or
     /// left, and the runtime's setup timeout has passed since; or every
     /// instance of the source segments whose requests can reach it has
-    /// drained (its `serve` returned) or left. An entry instance of a cell
+    /// drained (its `serve` returned) or left. An entry instance of a pool
     /// under a hub, one whose segment a hop from another class enters,
     /// waits also, before the setup timeout, until its hub says that the
-    /// cells that follow its cell avoid it, or for at most the setup
-    /// timeout and twice the cell's `summary_ms` after it retired. An
-    /// instance of a cell that sources of another class reach, entry or
-    /// interior, never takes them for drained outside its cell's drain,
+    /// pools that follow its pool avoid it, or for at most the setup
+    /// timeout and twice the pool's `summary_ms` after it retired. An
+    /// instance of a pool that sources of another class reach, entry or
+    /// interior, never takes them for drained outside its pool's drain,
     /// since its hub does not see their drain. An interior instance that
     /// learns of the drain while it waits goes on by the drain's rule. A
     /// source's instance
     /// announces that it has drained before it waits, so source segments
     /// that route to each other never wait for each other. An entry
-    /// instance of a cell does not: it announces that it has drained once
+    /// instance of a pool does not: it announces that it has drained once
     /// it holds no request, either at the end of its stop or, once a drain
-    /// of its cell that it learns of while it waits makes it decline
+    /// of its pool that it learns of while it waits makes it decline
     /// offers, while it waits. Then it refuses
     /// what arrives, waits until it holds no request (a stream holds its
     /// request until velo has handed its output on), stops velo, and
@@ -874,15 +874,15 @@ impl Launch {
     /// error: the process is invisible to new peers and will be probed as
     /// dead, so the deployment must start it again.
     ///
-    /// Under a hub, the drain of the instance's cell stops it too, once it
-    /// learns of it from its hub's cell watch. An entry instance keeps
+    /// Under a hub, the drain of the instance's pool stops it too, once it
+    /// learns of it from its hub's pool watch. An entry instance keeps
     /// taking new work, and stays ready, for a bound after it learns of the
-    /// drain: the setup timeout and twice the cell's `summary_ms`, so that
-    /// an offer from a chooser whose view of the cell is stale lands. Then
-    /// it stops without retiring, declines offers from other cells from
+    /// drain: the setup timeout and twice the pool's `summary_ms`, so that
+    /// an offer from a chooser whose view of the pool is stale lands. Then
+    /// it stops without retiring, declines offers from other pools from
     /// then, however long its serving body takes to finish, finishes the
     /// requests it holds, and announces that it has drained. It takes the
-    /// hand-offs inside its cell, which carry the requests the cell's entry
+    /// hand-offs inside its pool, which carry the requests the pool's entry
     /// instances took, until every entry instance has drained or left,
     /// then closes and leaves. An
     /// interior instance serves until no more work can reach it: every
@@ -890,7 +890,7 @@ impl Launch {
     /// send to it, has detached or left, or every entry instance has
     /// drained or left. Then it stops as above, and leaves once it holds no
     /// request; its drain's bound counts from when every entry instance
-    /// has drained or left. While its cell drains, the entry instances are
+    /// has drained or left. While its pool drains, the entry instances are
     /// an interior instance's drain sources, whatever stopped it.
     pub async fn serve<S, F, Fut>(mut self, segment: S, serve: F) -> Result<()>
     where
@@ -943,7 +943,7 @@ impl Launch {
                     () = process.stops(2) => return Err(second()),
                     () = self.retire(deadline) => {}
                 }
-                let cutoff = Box::pin(self.cell_cutoff(deadline, false).fuse());
+                let cutoff = Box::pin(self.pool_cutoff(deadline, false).fuse());
                 (Err(stopped), Ok(()), deadline, cutoff)
             }
             Some(Ok(())) => {
@@ -966,7 +966,7 @@ impl Launch {
                         );
                     }
                 }
-                // An entry instance in a cell reports its admission from
+                // An entry instance in a pool reports its admission from
                 // here, while it is usable, and stops before it retires.
                 #[cfg(feature = "hub")]
                 let reporter = match (&self.peers, self.reports) {
@@ -991,17 +991,17 @@ impl Launch {
                         Peers::Hub(session) => session.maintain().await,
                     }
                 };
-                // The cell's drain stops the instance in its own time.
-                let (ended, stop, retires, by_cell) = tokio::select! {
+                // The pool's drain stops the instance in its own time.
+                let (ended, stop, retires, by_pool) = tokio::select! {
                     result = &mut body => (Some(result), Ok(()), true, false),
                     () = process.stops(1) => (None, Ok(()), true, false),
                     result = lease => (None, result, true, false),
-                    () = self.cell_drain_stops() => {
-                        (None, Ok(()), self.cell_drain_retires(), true)
+                    () = self.pool_drain_stops() => {
+                        (None, Ok(()), self.pool_drain_retires(), true)
                     }
                 };
                 let deadline = tokio::time::Instant::now() + self.drain;
-                let mut cutoff = Box::pin(self.cell_cutoff(deadline, by_cell).fuse());
+                let mut cutoff = Box::pin(self.pool_cutoff(deadline, by_pool).fuse());
                 process.health.set(Phase::Draining);
                 shutdown.cancel();
                 // The bound ends every wait, the body's too: a request with
@@ -1020,9 +1020,9 @@ impl Launch {
                         },
                     }
                 };
-                // An entry instance of a draining cell stops taking offers at
+                // An entry instance of a draining pool stops taking offers at
                 // its bound, however long the body takes to finish.
-                let closing = self.cell_drain_declines(segment.as_ref(), deadline);
+                let closing = self.pool_drain_declines(segment.as_ref(), deadline);
                 // Peers hear of the retirement while the body finishes; a
                 // lost lease took the hub that would hear it. First, a drain
                 // the hub has not answered is reported until it is: the hub
@@ -1073,7 +1073,7 @@ impl Launch {
     /// `deadline`; what does not get through leaves the drain to (B) or its
     /// bound.
     async fn retire(&mut self, deadline: tokio::time::Instant) {
-        self.cell_retires();
+        self.pool_retires();
         let retired = match &mut self.peers {
             Peers::Files(dir) => announce(dir, "retired", self.segment, &self.node),
             #[cfg(feature = "hub")]
@@ -1091,15 +1091,15 @@ impl Launch {
 
     /// The drain after the serving body has returned. A
     /// source's instance announces that it has drained, except an entry
-    /// instance of a cell, which says so only once it holds no request
+    /// instance of a pool, which says so only once it holds no request
     /// ([`Launch::source_drains_early`]). Then the instance waits for the
     /// first of: (A) every instance of the segments that send
     /// to this one has promised to avoid it, or left, and `setup` has
     /// passed since, so that a hand-off sent before the promise has
     /// arrived; or (B) every instance of the source segments that can reach
-    /// this one has drained or left. A retired entry instance of a cell
-    /// counts (A) only once the cells that follow its cell avoid it too, or
-    /// its bound has passed. Any instance of a cell, outside its cell's
+    /// this one has drained or left. A retired entry instance of a pool
+    /// counts (A) only once the pools that follow its pool avoid it too, or
+    /// its bound has passed. Any instance of a pool, outside its pool's
     /// drain, never counts (B) while a source of another class reaches it;
     /// an interior one that learns of the drain while it waits then counts
     /// it once no more work can reach it, and a retired entry instance,
@@ -1107,11 +1107,11 @@ impl Launch {
     /// drained while it waits, as soon as it holds no request. Then it closes its
     /// entries and waits until it holds no request; a stream
     /// holds its share until velo has handed its output on. Each wait ends at `deadline`.
-    /// While its cell drains, an entry instance first waits out its bound,
+    /// While its pool drains, an entry instance first waits out its bound,
     /// declines offers, waits until it holds no request, and announces
     /// that it has drained; and every instance's sources in (B) are the
-    /// cell's entry instances, so that an entry instance too takes the
-    /// hand-offs inside the cell until no entry instance holds a request
+    /// pool's entry instances, so that an entry instance too takes the
+    /// hand-offs inside the pool until no entry instance holds a request
     /// that may make one. With `hub` false (its lease is lost), the hub is
     /// not asked. Polls; nothing is added to a request's path.
     async fn drain(
@@ -1121,19 +1121,19 @@ impl Launch {
         // Only a hub is asked; a roster directory has no lease to lose.
         hub: bool,
         // When the stop's bound has passed: at `deadline`, or later for an
-        // interior instance whose stop its cell's drain began
-        // ([`Launch::cell_cutoff`]).
+        // interior instance whose stop its pool's drain began
+        // ([`Launch::pool_cutoff`]).
         mut cutoff: std::pin::Pin<&mut futures::future::Fuse<impl Future<Output = ()>>>,
     ) {
-        self.cell_drain_settles(segment, deadline, hub).await;
+        self.pool_drain_settles(segment, deadline, hub).await;
         let sources = self.drain_sources();
         let blind = sources.is_none();
         let reaching: Vec<&str> = sources.iter().flatten().map(String::as_str).collect();
         #[cfg(feature = "hub")]
-        let parent = self.cell_parent();
-        let declining = self.cell_declining(segment);
+        let parent = self.pool_parent();
+        let declining = self.pool_declining(segment);
         #[cfg(feature = "hub")]
-        let (source_drains_early, declines) = (self.source_drains_early(), self.cell_declines());
+        let (source_drains_early, declines) = (self.source_drains_early(), self.pool_declines());
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {
@@ -1217,11 +1217,11 @@ impl Launch {
                         }
                         let ask = async {
                             // A blind instance asks too, for a drain of its
-                            // cell that it learns of while it waits.
+                            // pool that it learns of while it waits.
                             let drained = (!blind
                                 && (reaching.is_empty() || session.all_drained(&reaching).await?))
-                                || match &self.cell_drain {
-                                    Some(cell) => cell.unreached(session).await?,
+                                || match &self.pool_drain {
+                                    Some(pool) => pool.unreached(session).await?,
                                     None => false,
                                 };
                             let avoiding = avoided.is_some()
@@ -1259,8 +1259,8 @@ impl Launch {
         segment.close();
         loop {
             // Closed, it takes no more work: once no request it holds can
-            // send work into its draining cell, it says so.
-            self.cell_detaches(segment, hub, true).await;
+            // send work into its draining pool, it says so.
+            self.pool_detaches(segment, hub, true).await;
             if segment.admitted() == 0 || cutoff.is_terminated() {
                 break;
             }
@@ -1270,7 +1270,7 @@ impl Launch {
                 () = tokio::time::sleep(DRAIN_POLL) => {}
             }
         }
-        self.cell_entry_drained(segment, deadline, hub).await;
+        self.pool_entry_drained(segment, deadline, hub).await;
     }
 }
 

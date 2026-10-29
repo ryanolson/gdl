@@ -1,4 +1,4 @@
-//! Code generation guards for the cell policies and the node boundaries.
+//! Code generation guards for the pool policies and the node boundaries.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

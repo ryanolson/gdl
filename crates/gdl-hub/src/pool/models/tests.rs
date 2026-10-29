@@ -1,5 +1,5 @@
-use gdl_cells::{ModelEntry, ModelState};
 use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
+use gdl_pools::{ModelEntry, ModelState};
 
 use super::{ModelList, Models, Offer, floor};
 
@@ -36,7 +36,7 @@ fn state(models: &Models, model: &str) -> Option<ModelState> {
         .find_map(|(name, state)| (name == model).then_some(state))
 }
 
-/// A table restored from no record, as a cell's first hub starts it.
+/// A table restored from no record, as a pool's first hub starts it.
 fn fresh() -> Models {
     let mut models = Models::new(Vec::new());
     models.restore(None, 100);
@@ -135,7 +135,7 @@ fn the_version_rises_on_each_change_and_only_then() {
     assert_eq!(
         models.list().version,
         100,
-        "a cell whose last record holds nothing counts from the floor"
+        "a pool whose last record holds nothing counts from the floor"
     );
     assert!(!models.update([Offer::Listed(&[])]));
     assert_eq!(models.list().version, 100);
@@ -162,14 +162,14 @@ fn the_version_rises_on_each_change_and_only_then() {
     );
 }
 
-/// At most [`gdl_cells::CellRecord::MAX_DRAINED`] drained entries are
+/// At most [`gdl_pools::PoolRecord::MAX_DRAINED`] drained entries are
 /// kept, the oldest dropped first; no other entry is dropped for them.
 /// The cap is the record's, so the case drains 1,001 models, in two
 /// updates to keep it fast.
 #[test]
 fn the_oldest_drained_entries_are_dropped_past_the_cap() {
     let mut models = fresh();
-    let max = gdl_cells::CellRecord::MAX_DRAINED;
+    let max = gdl_pools::PoolRecord::MAX_DRAINED;
     let names: Vec<String> = (0..=max).map(|i| format!("m{i:04}")).collect();
     let mut live = vec![says("kept", SaysReady)];
     live.extend(names.iter().map(|name| says(name, SaysReady)));
@@ -306,7 +306,7 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
 
 /// A restart whose rules change nothing keeps the version: the list is
 /// the one readers hold at it. One that reads no record counts from the
-/// floor, so that its versions are above any an earlier hub of the cell
+/// floor, so that its versions are above any an earlier hub of the pool
 /// published, as when a relay parent that restarted holds none.
 #[test]
 fn a_restart_that_changes_nothing_keeps_the_version() {
@@ -373,7 +373,7 @@ fn a_restart_without_a_record_does_not_reuse_a_models_version() {
     );
 }
 
-/// A cell whose instances report no models of their own serves the models
+/// A pool whose instances report no models of their own serves the models
 /// its settings declare: they are registered, `starting`, from the start,
 /// and each usable entry instance, and one not heard from yet, can serve
 /// them now. An instance that reports a list of its own reports only it.
@@ -493,7 +493,7 @@ fn a_raised_floor_raises_the_version() {
     assert_eq!(models.list().version, 501);
 }
 
-/// A cell declares that it serves each model on its own: one model that
+/// A pool declares that it serves each model on its own: one model that
 /// goes away, by a drain or by silence, changes no other model's state.
 #[test]
 fn a_model_that_goes_away_leaves_the_others_as_they_are() {
@@ -545,7 +545,7 @@ fn a_revoked_model_leaves_the_list_whatever_the_instances_say() {
     assert_eq!(models.list(), revoked);
 }
 
-/// A model the cell's settings declare is held out too, though every
+/// A model the pool's settings declare is held out too, though every
 /// instance that reports no list serves it.
 #[test]
 fn a_revoked_declared_model_is_held_out() {
@@ -557,7 +557,7 @@ fn a_revoked_declared_model_is_held_out() {
     assert_eq!(states(&models), [("llama-70b".to_string(), Ready)]);
 }
 
-/// A hub that restarts keeps its cell's revocations from the last record:
+/// A hub that restarts keeps its pool's revocations from the last record:
 /// what an instance reports of a revoked model is not taken, and a
 /// declared one is not listed.
 #[test]

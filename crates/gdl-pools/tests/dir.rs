@@ -17,8 +17,8 @@ use std::{
 };
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirDirectory, DirLimits, DirectoryError,
+use gdl_pools::{
+    DirDirectory, DirLimits, DirectoryError, PoolDirectory, PoolEvent, PoolRecord, PoolState,
     ResumeToken, Version, Withdrawal,
     conformance::{self, Backend},
 };
@@ -79,40 +79,40 @@ async fn the_dir_directory_conforms() {
 const MODEL: &str = "model_x";
 const WAIT: Duration = Duration::from_secs(5);
 
-type Watch = Pin<Box<<DirDirectory as CellDirectory>::Watch>>;
+type Watch = Pin<Box<<DirDirectory as PoolDirectory>::Watch>>;
 
 fn temp() -> TempDir {
     tempfile::Builder::new()
-        .prefix("gdl-cells-dir-")
+        .prefix("gdl-pools-dir-")
         .tempdir()
         .expect("a temporary directory")
 }
 
-fn record(cell: &str, epoch: u64, seq: u64) -> CellRecord {
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+fn record(pool: &str, epoch: u64, seq: u64) -> PoolRecord {
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
-        name: cell.into(),
+        name: pool.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
         home: None,
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch,
         seq,
-        hub: format!("{cell}:1337"),
-        lease: CellRecord::DEFAULT_LEASE,
+        hub: format!("{pool}:1337"),
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     }
 }
 
-fn withdrawal(cell: &str, epoch: u64, seq: u64) -> Withdrawal {
+fn withdrawal(pool: &str, epoch: u64, seq: u64) -> Withdrawal {
     Withdrawal {
         class: MODEL.into(),
-        cell: cell.into(),
+        pool: pool.into(),
         epoch,
         seq,
     }
@@ -122,52 +122,52 @@ fn watch(directory: &DirDirectory, from: Option<ResumeToken>) -> Watch {
     Box::pin(directory.watch(MODEL, from))
 }
 
-async fn next(watch: &mut Watch) -> Option<Result<CellEvent, DirectoryError>> {
+async fn next(watch: &mut Watch) -> Option<Result<PoolEvent, DirectoryError>> {
     tokio::time::timeout(WAIT, watch.next())
         .await
         .unwrap_or_else(|_| panic!("nothing within {WAIT:?}"))
 }
 
-async fn event(watch: &mut Watch) -> CellEvent {
+async fn event(watch: &mut Watch) -> PoolEvent {
     match next(watch).await {
         Some(Ok(event)) => event,
         other => panic!("expected an event, got {other:?}"),
     }
 }
 
-/// A snapshot's cells by name and version, and its token.
+/// A snapshot's pools by name and version, and its token.
 async fn snapshot(watch: &mut Watch) -> (Vec<(String, Version)>, ResumeToken) {
-    let mut cells = Vec::new();
+    let mut pools = Vec::new();
     loop {
         match event(watch).await {
-            CellEvent::Current(record) => cells.push((record.name.clone(), record.version())),
-            CellEvent::Synced {
+            PoolEvent::Current(record) => pools.push((record.name.clone(), record.version())),
+            PoolEvent::Synced {
                 token,
                 snapshot: true,
-            } => return (cells, token),
+            } => return (pools, token),
             other => panic!("the snapshot: {other:?}"),
         }
     }
 }
 
-fn at(cell: &str, epoch: u64, seq: u64) -> (String, Version) {
-    (cell.into(), Version { epoch, seq })
+fn at(pool: &str, epoch: u64, seq: u64) -> (String, Version) {
+    (pool.into(), Version { epoch, seq })
 }
 
-/// The next event is a put of `cell` at `(epoch, seq)`; its token.
-async fn put(watch: &mut Watch, cell: &str, epoch: u64, seq: u64) -> ResumeToken {
+/// The next event is a put of `pool` at `(epoch, seq)`; its token.
+async fn put(watch: &mut Watch, pool: &str, epoch: u64, seq: u64) -> ResumeToken {
     match event(watch).await {
-        CellEvent::Put { record, token }
-            if (record.name.as_str(), record.version()) == (cell, Version { epoch, seq }) =>
+        PoolEvent::Put { record, token }
+            if (record.name.as_str(), record.version()) == (pool, Version { epoch, seq }) =>
         {
             token
         }
-        other => panic!("expected the put of {cell} at ({epoch}, {seq}), got {other:?}"),
+        other => panic!("expected the put of {pool} at ({epoch}, {seq}), got {other:?}"),
     }
 }
 
 async fn resnapshot(watch: &mut Watch) {
-    assert_eq!(event(watch).await, CellEvent::Resnapshot);
+    assert_eq!(event(watch).await, PoolEvent::Resnapshot);
     assert!(next(watch).await.is_none(), "the watch went on");
 }
 
@@ -196,7 +196,7 @@ async fn two_processes_see_each_others_writes_and_a_withdrawal_stands() {
         .expect("m1 withdrawn by a");
     for watch in [&mut seen_by_a, &mut seen_by_b] {
         match event(watch).await {
-            CellEvent::Withdrawn { withdrawal: w, .. } => assert_eq!(w, withdrawal("m1", 1, 2)),
+            PoolEvent::Withdrawn { withdrawal: w, .. } => assert_eq!(w, withdrawal("m1", 1, 2)),
             other => panic!("expected m1's withdrawal, got {other:?}"),
         }
     }
@@ -266,7 +266,7 @@ async fn a_token_outlives_an_unwatched_spell_only_if_nothing_changed() {
     let mut resumed = watch(&a, Some(token.clone()));
     assert_eq!(
         event(&mut resumed).await,
-        CellEvent::Synced {
+        PoolEvent::Synced {
             token,
             snapshot: false
         }
@@ -313,7 +313,7 @@ async fn a_reader_never_sees_a_partial_record() {
         }
     });
     for seq in 1..=WRITES {
-        let record = CellRecord {
+        let record = PoolRecord {
             hub: hub.clone(),
             ..record("m1", 1, seq)
         };
@@ -329,7 +329,7 @@ async fn a_reader_never_sees_a_partial_record() {
     let mut last = 0;
     while last < WRITES {
         match event(&mut seen).await {
-            CellEvent::Put { record, .. } => {
+            PoolEvent::Put { record, .. } => {
                 assert_eq!(record.hub, hub);
                 assert!(record.seq > last, "{} after {last}", record.seq);
                 last = record.seq;
@@ -421,28 +421,28 @@ async fn a_replacement_with_the_files_time_is_seen() {
     assert_eq!(snapshot(&mut watch(&b, None)).await.0, [at("m1", 1, 2)]);
 }
 
-/// A cell's record that stops being readable while nothing watches its
+/// A pool's record that stops being readable while nothing watches its
 /// class is a change of the files: a token from before cannot say what
 /// followed it.
 #[tokio::test]
 async fn a_record_lost_while_unwatched_refuses_the_token() {
     let temp = temp();
     let a = DirDirectory::new(temp.path());
-    let file = |cell: &str| temp.path().join(MODEL).join(format!("{cell}.json"));
-    for cell in ["m1", "m2"] {
-        a.publish(record(cell, 1, 1)).await.expect("a cell");
+    let file = |pool: &str| temp.path().join(MODEL).join(format!("{pool}.json"));
+    for pool in ["m1", "m2"] {
+        a.publish(record(pool, 1, 1)).await.expect("a pool");
     }
     let mut seen = watch(&a, None);
-    let (cells, token) = snapshot(&mut seen).await;
-    assert_eq!(cells, [at("m1", 1, 1), at("m2", 1, 1)]);
+    let (pools, token) = snapshot(&mut seen).await;
+    assert_eq!(pools, [at("m1", 1, 1), at("m2", 1, 1)]);
     drop(seen);
 
     // A record that no longer parses.
     std::fs::write(file("m1"), "garbage").expect("m1 spoiled");
     resnapshot(&mut watch(&a, Some(token))).await;
     let mut seen = watch(&a, None);
-    let (cells, token) = snapshot(&mut seen).await;
-    assert_eq!(cells, [at("m2", 1, 1)]);
+    let (pools, token) = snapshot(&mut seen).await;
+    assert_eq!(pools, [at("m2", 1, 1)]);
     drop(seen);
 
     // A record whose file is gone.
@@ -451,7 +451,7 @@ async fn a_record_lost_while_unwatched_refuses_the_token() {
     assert!(snapshot(&mut watch(&a, None)).await.0.is_empty());
 }
 
-/// A cell's file that is there but cannot be read is not a file that does
+/// A pool's file that is there but cannot be read is not a file that does
 /// not parse: the watch ends with the error, as the write does.
 #[cfg(unix)]
 #[tokio::test]
@@ -515,7 +515,7 @@ async fn a_token_is_served_across_its_history_and_no_further() {
     let mut resumed = watch(&a, Some(tokens[1].clone()));
     assert!(matches!(
         event(&mut resumed).await,
-        CellEvent::Synced {
+        PoolEvent::Synced {
             snapshot: false,
             ..
         }
@@ -561,7 +561,7 @@ async fn a_full_watch_is_told_when_its_class_cannot_be_read() {
     assert!(
         matches!(
             last,
-            Some(Err(DirectoryError::Unavailable(_)) | Ok(CellEvent::Resnapshot))
+            Some(Err(DirectoryError::Unavailable(_)) | Ok(PoolEvent::Resnapshot))
         ),
         "the unread watch ended with {last:?}"
     );
@@ -574,25 +574,25 @@ async fn a_file_that_does_not_parse_is_skipped() {
     std::fs::create_dir_all(&class).expect("the class directory");
     let write = |name: &str, text: &str| std::fs::write(class.join(name), text).expect("a file");
     let json =
-        |record: &CellRecord| serde_json::json!({ "order": 1, "record": record }).to_string();
+        |record: &PoolRecord| serde_json::json!({ "order": 1, "record": record }).to_string();
     write("m2.json", "{\"order\": 1, \"rec");
-    // Whole, but not the record of the cell or class the file is named for.
+    // Whole, but not the record of the pool or class the file is named for.
     write("m3.json", &json(&record("m4", 1, 1)));
     write(
         "m5.json",
-        &json(&CellRecord {
+        &json(&PoolRecord {
             class: "global".into(),
             ..record("m5", 1, 1)
         }),
     );
     write(
         "m6.json",
-        &json(&CellRecord {
+        &json(&PoolRecord {
             lease: Duration::ZERO,
             ..record("m6", 1, 1)
         }),
     );
-    // Not a cell's file at all.
+    // Not a pool's file at all.
     write(".m7.json.tmp", &json(&record("m7", 1, 1)));
     write("notes.txt", "a note");
     write("M8.json", &json(&record("m8", 1, 1)));
@@ -610,7 +610,7 @@ async fn a_file_that_does_not_parse_is_skipped() {
     write("m3.json", "garbage");
     a.publish(record("m9", 1, 1)).await.expect("m9");
     put(&mut seen, "m9", 1, 1).await;
-    // A cell's own hub replaces its unreadable file.
+    // A pool's own hub replaces its unreadable file.
     a.publish(record("m2", 1, 1))
         .await
         .expect("m2 over its bad file");
@@ -620,7 +620,7 @@ async fn a_file_that_does_not_parse_is_skipped() {
 #[tokio::test]
 async fn a_directory_it_cannot_use_is_an_error() {
     let temp = temp();
-    let file = temp.path().join("cells");
+    let file = temp.path().join("pools");
     std::fs::write(&file, "not a directory").expect("a file");
     let directory = DirDirectory::new(&file);
     assert!(
@@ -662,12 +662,12 @@ async fn a_record_keeps_its_presence_and_models_in_its_file() {
         DirDirectory::new(root.path()),
         DirDirectory::new(root.path()),
     );
-    let published = CellRecord {
-        presence: gdl_cells::Presence::ScaledToZero,
-        models: vec![gdl_cells::ModelEntry {
+    let published = PoolRecord {
+        presence: gdl_pools::Presence::ScaledToZero,
+        models: vec![gdl_pools::ModelEntry {
             model: "llama-70b".into(),
             routing_key: Some("a".into()),
-            state: gdl_cells::ModelState::Unavailable,
+            state: gdl_pools::ModelState::Unavailable,
             since: 4,
         }],
         models_version: 4,
@@ -676,5 +676,5 @@ async fn a_record_keeps_its_presence_and_models_in_its_file() {
     };
     writer.publish(published.clone()).await.expect("a record");
     let mut watch = watch(&reader, None);
-    assert_eq!(event(&mut watch).await, CellEvent::Current(published));
+    assert_eq!(event(&mut watch).await, PoolEvent::Current(published));
 }

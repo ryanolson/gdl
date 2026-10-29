@@ -236,7 +236,7 @@ pub(crate) fn validate(
             for (name, bind) in &policies {
                 if package == bind.package {
                     problems.push(format!(
-                        "[{at}]: segment `{segment}` becomes package `{package}`, the name of [cell_policy.{name}]'s crate"
+                        "[{at}]: segment `{segment}` becomes package `{package}`, the name of [pool_policy.{name}]'s crate"
                     ));
                 }
             }
@@ -361,7 +361,7 @@ pub(crate) fn validate(
                 if !hosts_it {
                     key(
                         &bind.package,
-                        format!("[cell_policy.{first}]'s package"),
+                        format!("[pool_policy.{first}]'s package"),
                         &mut problems,
                     );
                 }
@@ -431,8 +431,8 @@ pub(crate) fn validate(
         }
         give(bound_by(node), bind, &mut problems);
     }
-    for (name, bind) in &spec.cell_policies {
-        give(format!("[cell_policy.{name}]"), bind, &mut problems);
+    for (name, bind) in &spec.pool_policies {
+        give(format!("[pool_policy.{name}]"), bind, &mut problems);
     }
     // A graph spec has reported each node that did not bind already.
     for node in &manifest.nodes {

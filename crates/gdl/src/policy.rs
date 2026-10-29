@@ -1,12 +1,12 @@
-//! Cell policies: how a chooser picks, once per attempt, the cell of a
+//! Pool policies: how a chooser picks, once per attempt, the pool of a
 //! class it sends to. A placement names one per entered class
-//! (`[cells.<class>] policy`): gdl's `round_robin` (the default) or
-//! `home_first`, or one a crate registers by name ([`CellPolicies`]).
+//! (`[pools.<class>] policy`): gdl's `round_robin` (the default) or
+//! `home_first`, or one a crate registers by name ([`PoolPolicies`]).
 //!
 //! A policy may read the request's head as a [`Selector`](crate::Selector)
 //! does, as the edge's type, as [`Encoded`](crate::Encoded) bytes, or as a
 //! [`Projected`](crate::Projected) part of it. Its inputs are plain values
-//! ([`Cell`], [`CellRequest`], [`Damped`]) that a policy crate can build
+//! ([`Pool`], [`PoolRequest`], [`Damped`]) that a policy crate can build
 //! itself, so that it tests its policy without a hub or a runtime.
 
 use std::any::TypeId;
@@ -29,52 +29,52 @@ mod home_first;
 mod round_robin;
 
 pub use damped::{Damped, Window};
-pub use gdl_cells::{CellCondition, CellState, LoadSummary, ModelState};
+pub use gdl_pools::{LoadSummary, ModelState, PoolCondition, PoolState};
 pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;
 
-/// Chooses the cell of a class that one attempt of a hand-off goes to. A
-/// placement names it in `[cells.<class>] policy`, and a deployment
-/// registers it under that name ([`CellPolicies`]).
+/// Chooses the pool of a class that one attempt of a hand-off goes to. A
+/// placement names it in `[pools.<class>] policy`, and a deployment
+/// registers it under that name ([`PoolPolicies`]).
 ///
 /// `choose` runs in the sending segment once per attempt: for the first
-/// offer, and again for each cell that declines it, up to `[runtime]
-/// cell_failovers` more times. It is synchronous and runs on every
+/// offer, and again for each pool that declines it, up to `[runtime]
+/// pool_failovers` more times. It is synchronous and runs on every
 /// hand-off into the class, so it should take no lock and allocate
-/// nothing when it chooses a cell.
-pub trait CellPolicy: Send + Sync + 'static {
+/// nothing when it chooses a pool.
+pub trait PoolPolicy: Send + Sync + 'static {
     /// What the policy reads of the request's head: the head's own type,
     /// [`Encoded`](crate::Encoded), or a [`Projected`](crate::Projected)
     /// part of it. The runtime checks it against the crossing's edge when
     /// the segment starts.
     type Head: Head;
 
-    /// The cell in `cells` to send this attempt to, or [`NoCell`] when no
-    /// cell may take it, which fails the request with `Routing` and the
-    /// reason the policy gave, if any. `cells` are the class's cells the
-    /// chooser follows, in a fixed order: by class and cell. A choice with
-    /// a lease learns whether its cell accepted the offer
-    /// ([`CellChoice::with_lease`]).
+    /// The pool in `pools` to send this attempt to, or [`NoPool`] when no
+    /// pool may take it, which fails the request with `Routing` and the
+    /// reason the policy gave, if any. `pools` are the class's pools the
+    /// chooser follows, in a fixed order: by class and pool. A choice with
+    /// a lease learns whether its pool accepted the offer
+    /// ([`PoolChoice::with_lease`]).
     fn choose(
         &self,
-        request: CellRequest<'_, Self::Head>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell>;
+        request: PoolRequest<'_, Self::Head>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool>;
 
-    /// Whether `cell`, which this policy chose, may still be sent to at
+    /// Whether `pool`, which this policy chose, may still be sent to at
     /// `now`: a choice that waited on a selector is checked again with
-    /// it, since the cell's state or summary may have changed meanwhile.
-    /// By default, while the cell [takes work](Cell::takes_work).
-    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
+    /// it, since the pool's state or summary may have changed meanwhile.
+    /// By default, while the pool [takes work](Pool::takes_work).
+    fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool {
         let _ = (region, now);
-        cell.takes_work()
+        pool.takes_work()
     }
 }
 
-/// What a cell policy chose for one attempt: the index of a cell in the
-/// cells it was given, and, if it asks, a lease that learns whether that
-/// cell accepted the offer.
-pub struct CellChoice {
+/// What a pool policy chose for one attempt: the index of a pool in the
+/// pools it was given, and, if it asks, a lease that learns whether that
+/// pool accepted the offer.
+pub struct PoolChoice {
     at: usize,
     lease: Option<ChoiceHeld>,
 }
@@ -87,15 +87,15 @@ pub struct CellChoice {
 pub struct ChoiceHeld(Box<Box<dyn ChoiceLease>>);
 
 impl ChoiceHeld {
-    /// The chosen cell accepted the offer.
+    /// The chosen pool accepted the offer.
     #[inline]
     pub fn accepted(&mut self) {
         self.0.accepted();
     }
 }
 
-impl CellChoice {
-    /// Send this attempt to the cell at `at` in the cells the policy was
+impl PoolChoice {
+    /// Send this attempt to the pool at `at` in the pools the policy was
     /// given.
     #[inline]
     pub fn new(at: usize) -> Self {
@@ -103,21 +103,21 @@ impl CellChoice {
     }
 
     /// Keep `lease` with the choice. The runtime calls its
-    /// [`accepted`](ChoiceLease::accepted) when the chosen cell accepts
+    /// [`accepted`](ChoiceLease::accepted) when the chosen pool accepts
     /// the offer, then holds it while the sending segment holds the
     /// request, as a selector's lease is held. It drops `lease` without
-    /// telling it when the cell declines the offer, when the offer is
+    /// telling it when the pool declines the offer, when the offer is
     /// never sent, when the outcome is unknown (no answer came, so the
-    /// cell may have run the request but did not say it took it), and
-    /// when the runtime chooses again because the cell stopped taking
-    /// work. So a request that no cell accepts tells none of its leases.
+    /// pool may have run the request but did not say it took it), and
+    /// when the runtime chooses again because the pool stopped taking
+    /// work. So a request that no pool accepts tells none of its leases.
     /// The lease is boxed, twice: a choice without one allocates nothing.
     pub fn with_lease(mut self, lease: impl ChoiceLease) -> Self {
         self.lease = Some(ChoiceHeld(Box::new(Box::new(lease))));
         self
     }
 
-    /// The index of the chosen cell.
+    /// The index of the chosen pool.
     #[inline]
     pub fn at(&self) -> usize {
         self.at
@@ -131,40 +131,40 @@ impl CellChoice {
     }
 }
 
-impl fmt::Debug for CellChoice {
+impl fmt::Debug for PoolChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CellChoice")
+        f.debug_struct("PoolChoice")
             .field("at", &self.at)
             .field("lease", &self.lease.is_some())
             .finish()
     }
 }
 
-/// A cell policy chose no cell for this attempt, with a short reason or
-/// none. The first attempt's `NoCell` fails the request with `Routing`,
+/// A pool policy chose no pool for this attempt, with a short reason or
+/// none. The first attempt's `NoPool` fails the request with `Routing`,
 /// and its reason follows the class and the segment in the error, so a
-/// policy can name what no cell serves: "no set serves model `mistral`".
-/// A failover attempt's `NoCell` ends the failover, and the request fails
-/// with the last cell's refusal, which says more than the policy can.
+/// policy can name what no pool serves: "no set serves model `mistral`".
+/// A failover attempt's `NoPool` ends the failover, and the request fails
+/// with the last pool's refusal, which says more than the policy can.
 ///
-/// `NoCell` is two words, as a reason is a [`Cow`]: a policy's return is
-/// no larger than an `Option<CellChoice>` would be, and a choice costs
+/// `NoPool` is two words, as a reason is a [`Cow`]: a policy's return is
+/// no larger than an `Option<PoolChoice>` would be, and a choice costs
 /// nothing more. A fixed reason allocates nothing; a reason built per
-/// request allocates only when no cell is chosen.
+/// request allocates only when no pool is chosen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NoCell {
+pub struct NoPool {
     reason: Option<Cow<'static, str>>,
 }
 
-impl NoCell {
-    /// No cell, with no reason: the error says that no ready cell of the
+impl NoPool {
+    /// No pool, with no reason: the error says that no ready pool of the
     /// class has an instance of the segment.
     #[inline]
     pub fn new() -> Self {
         Self { reason: None }
     }
 
-    /// No cell, because of `reason`: a short phrase, such as "no set
+    /// No pool, because of `reason`: a short phrase, such as "no set
     /// serves model `mistral`", that the request's `Routing` error carries.
     pub fn because(reason: impl Into<Cow<'static, str>>) -> Self {
         Self {
@@ -179,48 +179,48 @@ impl NoCell {
     }
 }
 
-/// What a cell policy keeps with its choice to learn its outcome
-/// ([`CellChoice::with_lease`]): told once if the chosen cell accepts the
+/// What a pool policy keeps with its choice to learn its outcome
+/// ([`PoolChoice::with_lease`]): told once if the chosen pool accepts the
 /// offer, and dropped when the runtime lets it go.
 pub trait ChoiceLease: Send + 'static {
-    /// The cell this lease's choice went to accepted the offer: it admitted
+    /// The pool this lease's choice went to accepted the offer: it admitted
     /// the request and will answer it. Called at most once, on the
     /// sending segment's task, before the request's response starts.
     fn accepted(&mut self);
 }
 
-/// One followed cell of the class a hand-off enters, as a policy sees it:
+/// One followed pool of the class a hand-off enters, as a policy sees it:
 /// its name, region, state, load summary, and how many entry instances it
-/// has to route to. The runtime makes one for each cell when its table
+/// has to route to. The runtime makes one for each pool when its table
 /// changes, never per request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cell {
+pub struct Pool {
     class: String,
     name: String,
     id: u64,
     region: String,
-    state: CellState,
+    state: PoolState,
     load: Option<Load>,
     entries: usize,
-    /// The follow the chooser's table holds the cell in, and how many
-    /// times the relay changed it: a cell that declined an offer as gone
+    /// The follow the chooser's table holds the pool in, and how many
+    /// times the relay changed it: a pool that declined an offer as gone
     /// is passed over until either changes ([`Damped::is_gone`]).
     generation: u64,
     changes: u64,
 }
 
-impl Cell {
-    /// The cell `name` of `class`, in `region`, in `state`, with no entry
+impl Pool {
+    /// The pool `name` of `class`, in `region`, in `state`, with no entry
     /// instance and no load summary.
     pub fn new(
         class: impl Into<String>,
         name: impl Into<String>,
         region: impl Into<String>,
-        state: CellState,
+        state: PoolState,
     ) -> Self {
         let (class, name) = (class.into(), name.into());
         Self {
-            id: cell_id(&class, &name),
+            id: pool_id(&class, &name),
             class,
             name,
             region: region.into(),
@@ -232,7 +232,7 @@ impl Cell {
         }
     }
 
-    /// The cell as the follow `generation` of the chooser's hub shows it,
+    /// The pool as the follow `generation` of the chooser's hub shows it,
     /// after the relay changed its state or offered state `changes` times.
     #[doc(hidden)]
     #[inline]
@@ -242,34 +242,34 @@ impl Cell {
         self
     }
 
-    /// The cell with `entries` entry instances to route to.
+    /// The pool with `entries` entry instances to route to.
     #[inline]
     pub fn with_entries(mut self, entries: usize) -> Self {
         self.entries = entries;
         self
     }
 
-    /// The cell with its load summary.
+    /// The pool with its load summary.
     #[inline]
     pub fn with_load(mut self, load: Load) -> Self {
         self.load = Some(load);
         self
     }
 
-    /// The cell's class.
+    /// The pool's class.
     #[inline]
     pub fn class(&self) -> &str {
         &self.class
     }
 
-    /// The cell's name within its class.
+    /// The pool's name within its class.
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The cell's name as a number: the same in every table of the cell,
-    /// and what [`CellRequest::excluded`] and [`Damped`] hold. It is a hash
+    /// The pool's name as a number: the same in every table of the pool,
+    /// and what [`PoolRequest::excluded`] and [`Damped`] hold. It is a hash
     /// that only one build of gdl is sure to make alike, so key anything
     /// kept or shared across instances by class and name, not by id.
     #[inline]
@@ -277,43 +277,43 @@ impl Cell {
         self.id
     }
 
-    /// The region the cell runs in.
+    /// The region the pool runs in.
     #[inline]
     pub fn region(&self) -> &str {
         &self.region
     }
 
-    /// The cell's state, as its hub last sent it.
+    /// The pool's state, as its hub last sent it.
     #[inline]
-    pub fn state(&self) -> CellState {
+    pub fn state(&self) -> PoolState {
         self.state
     }
 
-    /// The cell's load summary, if one has arrived.
+    /// The pool's load summary, if one has arrived.
     #[inline]
     pub fn load(&self) -> Option<&Load> {
         self.load.as_ref()
     }
 
     /// How many entry instances the chooser may route to: none while the
-    /// cell is draining, unavailable, not offered, or unread.
+    /// pool is draining, unavailable, not offered, or unread.
     #[inline]
     pub fn entries(&self) -> usize {
         self.entries
     }
 
-    /// Whether the cell takes work: `ready` or `degraded`, with an entry
+    /// Whether the pool takes work: `ready` or `degraded`, with an entry
     /// instance to route to.
     #[inline]
     pub fn takes_work(&self) -> bool {
-        self.entries > 0 && matches!(self.state, CellState::Ready | CellState::Degraded)
+        self.entries > 0 && matches!(self.state, PoolState::Ready | PoolState::Degraded)
     }
 }
 
-/// A cell's load summary as the chooser holds it: when it arrived, on the
+/// A pool's load summary as the chooser holds it: when it arrived, on the
 /// chooser's clock, and until when it is fresh, worked out once as it
 /// arrives so that a choice compares one instant rather than doing the
-/// arithmetic per cell and pass.
+/// arithmetic per pool and pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Load {
     summary: LoadSummary,
@@ -322,9 +322,9 @@ pub struct Load {
 }
 
 impl Load {
-    /// A summary older than this many of its cell's summary periods is
+    /// A summary older than this many of its pool's summary periods is
     /// stale, on the chooser's clock, unless the chooser's
-    /// `cell_fresh_periods` says otherwise
+    /// `pool_fresh_periods` says otherwise
     /// ([`with_fresh_periods`](Load::with_fresh_periods)).
     pub const FRESH_PERIODS: u32 = 3;
 
@@ -352,7 +352,7 @@ impl Load {
         }
     }
 
-    /// The summary, as the cell's hub sent it.
+    /// The summary, as the pool's hub sent it.
     #[inline]
     pub fn summary(&self) -> &LoadSummary {
         &self.summary
@@ -382,25 +382,25 @@ impl Load {
     }
 }
 
-/// The number that names the cell `cell` of `class`: a hash of the two,
-/// so that a request can keep the cells it excluded without cloning a
-/// name. Two cells whose names hash alike would be excluded together, for
-/// one request: with a 64-bit hash and a fleet's few cells, that does not
+/// The number that names the pool `pool` of `class`: a hash of the two,
+/// so that a request can keep the pools it excluded without cloning a
+/// name. Two pools whose names hash alike would be excluded together, for
+/// one request: with a 64-bit hash and a fleet's few pools, that does not
 /// happen. `DefaultHasher::new` has fixed keys, so every process of one
-/// build names a cell alike; its algorithm can change between Rust
+/// build names a pool alike; its algorithm can change between Rust
 /// releases.
 #[doc(hidden)]
-pub fn cell_id(class: &str, cell: &str) -> u64 {
+pub fn pool_id(class: &str, pool: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
-    (class, cell).hash(&mut hasher);
+    (class, pool).hash(&mut hasher);
     hasher.finish()
 }
 
-/// What a cell policy sees of one attempt: the request's context and
-/// head, the chooser's region, the cells the request excluded, the cells
+/// What a pool policy sees of one attempt: the request's context and
+/// head, the chooser's region, the pools the request excluded, the pools
 /// the chooser damps, the chooser's clock, and the attempt's turn.
-pub struct CellRequest<'a, H> {
+pub struct PoolRequest<'a, H> {
     cx: &'a Cx,
     head: &'a H,
     bytes: &'a [u8],
@@ -413,20 +413,20 @@ pub struct CellRequest<'a, H> {
     models: &'a ModelIndex,
 }
 
-impl<H> Clone for CellRequest<'_, H> {
+impl<H> Clone for PoolRequest<'_, H> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<H> Copy for CellRequest<'_, H> {}
+impl<H> Copy for PoolRequest<'_, H> {}
 
-/// No damped cell, for a request that names none.
+/// No damped pool, for a request that names none.
 static UNDAMPED: Damped = Damped::EMPTY;
 
-impl<'a, H> CellRequest<'a, H> {
+impl<'a, H> PoolRequest<'a, H> {
     /// The first attempt of a request with context `cx` and head `head`,
-    /// from a chooser in `region` at `now`: no cell excluded or damped,
+    /// from a chooser in `region` at `now`: no pool excluded or damped,
     /// and turn 0.
     pub fn new(cx: &'a Cx, head: &'a H, region: &'a str, now: Instant) -> Self {
         Self {
@@ -443,7 +443,7 @@ impl<'a, H> CellRequest<'a, H> {
         }
     }
 
-    /// The request with `excluded`, the [`id`](Cell::id)s of the cells
+    /// The request with `excluded`, the [`id`](Pool::id)s of the pools
     /// that declined it.
     #[inline]
     pub fn with_excluded(mut self, excluded: &'a [u64]) -> Self {
@@ -451,7 +451,7 @@ impl<'a, H> CellRequest<'a, H> {
         self
     }
 
-    /// The request with the chooser's damped cells.
+    /// The request with the chooser's damped pools.
     #[inline]
     pub fn with_damped(mut self, damped: &'a Damped) -> Self {
         self.damped = damped;
@@ -490,10 +490,10 @@ impl<'a, H> CellRequest<'a, H> {
         self
     }
 
-    /// The class's model index, from the same table as the cells the
-    /// policy chooses from: for each model, every cell of the class that
+    /// The class's model index, from the same table as the pools the
+    /// policy chooses from: for each model, every pool of the class that
     /// lists it ([`ModelIndex`]). [`ModelIndex::NONE`] for a request built
-    /// without one. A policy that sends a request only to the cells that
+    /// without one. A policy that sends a request only to the pools that
     /// serve its model keeps them with `choose_where`.
     #[inline]
     pub fn models(&self) -> &'a ModelIndex {
@@ -501,11 +501,11 @@ impl<'a, H> CellRequest<'a, H> {
     }
 
     /// The same attempt, with `head` read from its bytes.
-    fn with_head<'b, G>(&self, head: &'b G) -> CellRequest<'b, G>
+    fn with_head<'b, G>(&self, head: &'b G) -> PoolRequest<'b, G>
     where
         'a: 'b,
     {
-        CellRequest {
+        PoolRequest {
             cx: self.cx,
             head,
             bytes: self.bytes,
@@ -537,34 +537,34 @@ impl<'a, H> CellRequest<'a, H> {
         self.bytes
     }
 
-    /// The region of the chooser's own cell.
+    /// The region of the chooser's own pool.
     #[inline]
     pub fn region(&self) -> &'a str {
         self.region
     }
 
-    /// The [`id`](Cell::id)s of the cells that declined this request:
+    /// The [`id`](Pool::id)s of the pools that declined this request:
     /// never chosen again for it.
     #[inline]
     pub fn excluded(&self) -> &'a [u64] {
         self.excluded
     }
 
-    /// Whether `cell` may not be chosen for this request: it declined
+    /// Whether `pool` may not be chosen for this request: it declined
     /// it, or it declined an offer as gone and its follow has not changed
     /// since ([`Damped::is_gone`]).
     #[inline]
-    pub fn is_excluded(&self, cell: &Cell) -> bool {
-        self.excluded.contains(&cell.id) || self.damped.is_gone(cell)
+    pub fn is_excluded(&self, pool: &Pool) -> bool {
+        self.excluded.contains(&pool.id) || self.damped.is_gone(pool)
     }
 
-    /// The cells the chooser damps, as one moment's view.
+    /// The pools the chooser damps, as one moment's view.
     #[inline]
     pub fn damped(&self) -> &'a Damped {
         self.damped
     }
 
-    /// The chooser's clock, on which each cell's summary arrived.
+    /// The chooser's clock, on which each pool's summary arrived.
     #[inline]
     pub fn now(&self) -> Instant {
         self.now
@@ -588,18 +588,18 @@ impl<'a, H> CellRequest<'a, H> {
     }
 }
 
-/// A cell policy as the runtime holds it, whatever its head.
+/// A pool policy as the runtime holds it, whatever its head.
 #[doc(hidden)]
 pub trait ErasedPolicy: Send + Sync + 'static {
     /// Read the head from `request`'s bytes in `encoding`, and choose.
     fn choose(
         &self,
-        request: CellRequest<'_, ()>,
+        request: PoolRequest<'_, ()>,
         encoding: Encoding,
-        cells: &[Cell],
-    ) -> Result<Result<CellChoice, NoCell>>;
+        pools: &[Pool],
+    ) -> Result<Result<PoolChoice, NoPool>>;
 
-    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool;
+    fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool;
 
     /// The head type it reads, if it reads one.
     fn edge(&self) -> Option<(TypeId, &'static str)>;
@@ -609,23 +609,23 @@ pub trait ErasedPolicy: Send + Sync + 'static {
     fn by_name(&self) -> bool;
 }
 
-/// A typed cell policy behind [`ErasedPolicy`].
+/// A typed pool policy behind [`ErasedPolicy`].
 #[doc(hidden)]
 pub struct TypedPolicy<P>(pub Arc<P>);
 
-impl<P: CellPolicy> ErasedPolicy for TypedPolicy<P> {
+impl<P: PoolPolicy> ErasedPolicy for TypedPolicy<P> {
     fn choose(
         &self,
-        request: CellRequest<'_, ()>,
+        request: PoolRequest<'_, ()>,
         encoding: Encoding,
-        cells: &[Cell],
-    ) -> Result<Result<CellChoice, NoCell>> {
+        pools: &[Pool],
+    ) -> Result<Result<PoolChoice, NoPool>> {
         let head = <P::Head as Sealed>::decode(request.bytes, encoding)?;
-        Ok(self.0.choose(request.with_head(&head), cells))
+        Ok(self.0.choose(request.with_head(&head), pools))
     }
 
-    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
-        self.0.eligible(cell, region, now)
+    fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool {
+        self.0.eligible(pool, region, now)
     }
 
     fn edge(&self) -> Option<(TypeId, &'static str)> {
@@ -640,44 +640,44 @@ impl<P: CellPolicy> ErasedPolicy for TypedPolicy<P> {
 /// The policies gdl provides, which a placement names without registering.
 const OWN: [&str; 2] = ["home_first", "round_robin"];
 
-/// Cell policies by name, for a deployment to choose cells with. A name
+/// Pool policies by name, for a deployment to choose pools with. A name
 /// the placement uses that is not here resolves to gdl's own policy of
 /// that name, if gdl has one.
 #[derive(Clone, Default)]
-pub struct CellPolicies {
+pub struct PoolPolicies {
     named: BTreeMap<String, Arc<dyn ErasedPolicy>>,
 }
 
-impl CellPolicies {
+impl PoolPolicies {
     /// No policies.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Choose the cells of the classes whose `[cells.<class>] policy` is
+    /// Choose the pools of the classes whose `[pools.<class>] policy` is
     /// `name` by `policy`. Refuses a name a placement cannot use, the name
     /// of one of gdl's own policies, and a name already added.
-    pub fn add<P: CellPolicy>(&mut self, name: &str, policy: P) -> Result<()> {
+    pub fn add<P: PoolPolicy>(&mut self, name: &str, policy: P) -> Result<()> {
         self.add_shared(name, Arc::new(policy))
     }
 
     #[doc(hidden)]
-    pub fn add_shared<P: CellPolicy>(&mut self, name: &str, policy: Arc<P>) -> Result<()> {
-        gdl_model::check_cell_policy_name(name)
+    pub fn add_shared<P: PoolPolicy>(&mut self, name: &str, policy: Arc<P>) -> Result<()> {
+        gdl_model::check_pool_policy_name(name)
             .map_err(|why| Error::new(ErrorKind::Placement, why))?;
         <P::Head as Sealed>::names().map_err(|why| {
-            Error::new(ErrorKind::Placement, format!("cell policy `{name}` {why}"))
+            Error::new(ErrorKind::Placement, format!("pool policy `{name}` {why}"))
         })?;
         if OWN.contains(&name) {
             return Err(Error::new(
                 ErrorKind::Placement,
-                format!("cell policy `{name}` is gdl's own, and cannot be registered"),
+                format!("pool policy `{name}` is gdl's own, and cannot be registered"),
             ));
         }
         if self.named.contains_key(name) {
             return Err(Error::new(
                 ErrorKind::Placement,
-                format!("cell policy `{name}` is registered twice"),
+                format!("pool policy `{name}` is registered twice"),
             ));
         }
         self.named
@@ -690,7 +690,7 @@ impl CellPolicies {
         self.named.contains_key(name)
     }
 
-    /// The policy a class that names `name` chooses its cells by: the one
+    /// The policy a class that names `name` chooses its pools by: the one
     /// registered, or else gdl's own of that name, with `home_first` at the
     /// chooser's thresholds ([`HomeFirstAt`]).
     #[doc(hidden)]
@@ -713,30 +713,30 @@ impl CellPolicies {
     }
 }
 
-impl fmt::Debug for CellPolicies {
+impl fmt::Debug for PoolPolicies {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.named.keys()).finish()
     }
 }
 
-/// The damping cut of a choice among `cells`, of which `eligible` says
+/// The damping cut of a choice among `pools`, of which `eligible` says
 /// which may be chosen, at `now`: the least `cut` such that no more than
-/// half of the eligible cells, rounded down, have more than `cut`
-/// milliseconds of their damping windows left in `damped`. A cell with
+/// half of the eligible pools, rounded down, have more than `cut`
+/// milliseconds of their damping windows left in `damped`. A pool with
 /// more left than the cut is passed over, and one with no more is chosen
 /// as if it were not damped; 0 when no more than half have any left, so
 /// that each of those is passed over. A counting pass, then, only when
 /// more than half are damped, a binary search of counting passes, at most
-/// about 15 over a window of 30 s, each a search of the damped cells per
-/// cell, with no allocation. Taken only while a window lasts.
-fn cut(cells: &[Cell], eligible: impl Fn(&Cell) -> bool, damped: &Damped, now: Instant) -> u64 {
+/// about 15 over a window of 30 s, each a search of the damped pools per
+/// pool, with no allocation. Taken only while a window lasts.
+fn cut(pools: &[Pool], eligible: impl Fn(&Pool) -> bool, damped: &Damped, now: Instant) -> u64 {
     let (mut count, mut held, mut longest) = (0u64, 0u64, 0u64);
-    for cell in cells {
-        if !eligible(cell) {
+    for pool in pools {
+        if !eligible(pool) {
             continue;
         }
         count += 1;
-        let left = damped.left(cell.id, now);
+        let left = damped.left(pool.id, now);
         if left > 0 {
             held += 1;
             longest = longest.max(left);
@@ -747,9 +747,9 @@ fn cut(cells: &[Cell], eligible: impl Fn(&Cell) -> bool, damped: &Damped, now: I
         return 0;
     }
     let over = |cut: u64| -> u64 {
-        let damped = cells
+        let damped = pools
             .iter()
-            .filter(|cell| eligible(cell) && damped.left(cell.id, now) > cut);
+            .filter(|pool| eligible(pool) && damped.left(pool.id, now) > cut);
         u64::try_from(damped.count()).unwrap_or(u64::MAX)
     };
     let (mut low, mut high) = (0, longest);
@@ -764,8 +764,8 @@ fn cut(cells: &[Cell], eligible: impl Fn(&Cell) -> bool, damped: &Damped, now: I
     high
 }
 
-/// A random number for the `nth` cell of a choice from its `draw`: the
-/// splitmix64 finalizer, so that one draw gives each cell its own.
+/// A random number for the `nth` pool of a choice from its `draw`: the
+/// splitmix64 finalizer, so that one draw gives each pool its own.
 fn mix(draw: u64, nth: u64) -> u64 {
     let mut z = draw ^ nth.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -817,23 +817,23 @@ mod tests {
         hint: Hint,
     }
 
-    /// The index of the cell named as the hint's model.
+    /// The index of the pool named as the hint's model.
     struct ByHint;
 
-    impl CellPolicy for ByHint {
+    impl PoolPolicy for ByHint {
         type Head = Projected<Hinted>;
 
         fn choose(
             &self,
-            request: CellRequest<'_, Projected<Hinted>>,
-            cells: &[Cell],
-        ) -> std::result::Result<CellChoice, NoCell> {
+            request: PoolRequest<'_, Projected<Hinted>>,
+            pools: &[Pool],
+        ) -> std::result::Result<PoolChoice, NoPool> {
             let model = &request.head().hint.model;
-            cells
+            pools
                 .iter()
-                .position(|cell| cell.name() == model)
-                .map(CellChoice::new)
-                .ok_or_else(NoCell::new)
+                .position(|pool| pool.name() == model)
+                .map(PoolChoice::new)
+                .ok_or_else(NoPool::new)
         }
     }
 
@@ -858,8 +858,8 @@ mod tests {
         }
 
         let told = Arc::new(AtomicUsize::new(0));
-        let choice = CellChoice::new(3).with_lease(Told(Arc::clone(&told)));
-        assert_eq!(format!("{choice:?}"), "CellChoice { at: 3, lease: true }");
+        let choice = PoolChoice::new(3).with_lease(Told(Arc::clone(&told)));
+        assert_eq!(format!("{choice:?}"), "PoolChoice { at: 3, lease: true }");
         let (at, lease) = choice.into_parts();
         assert_eq!(at, 3);
         let mut lease = lease.expect("a lease");
@@ -867,27 +867,27 @@ mod tests {
         assert_eq!(told.load(Ordering::SeqCst), 1);
         drop(lease);
         assert_eq!(told.load(Ordering::SeqCst), 11);
-        assert!(CellChoice::new(0).into_parts().1.is_none());
-        assert_eq!(std::mem::size_of::<CellChoice>(), 16);
+        assert!(PoolChoice::new(0).into_parts().1.is_none());
+        assert_eq!(std::mem::size_of::<PoolChoice>(), 16);
     }
 
     /// A policy's return with a reason is no larger than one without
     /// could be, so a choice pays nothing for it; a fixed reason is
     /// borrowed, and a reason built for the request is kept.
     #[test]
-    fn no_cell_carries_its_reason_at_no_cost_to_a_choice() {
+    fn no_pool_carries_its_reason_at_no_cost_to_a_choice() {
         use std::mem::size_of;
 
         assert_eq!(
-            size_of::<std::result::Result<CellChoice, NoCell>>(),
-            size_of::<Option<CellChoice>>()
+            size_of::<std::result::Result<PoolChoice, NoPool>>(),
+            size_of::<Option<PoolChoice>>()
         );
-        assert_eq!(NoCell::new().reason(), None);
-        assert_eq!(NoCell::default(), NoCell::new());
-        let fixed = NoCell::because("draining");
+        assert_eq!(NoPool::new().reason(), None);
+        assert_eq!(NoPool::default(), NoPool::new());
+        let fixed = NoPool::because("draining");
         assert!(matches!(fixed.reason, Some(Cow::Borrowed("draining"))));
         let model = "mistral";
-        let built = NoCell::because(format!("no set serves model `{model}`"));
+        let built = NoPool::because(format!("no set serves model `{model}`"));
         assert_eq!(built.reason(), Some("no set serves model `mistral`"));
     }
 
@@ -897,9 +897,9 @@ mod tests {
     #[test]
     fn a_projection_reads_its_fields_of_the_whole_request() {
         let policy = TypedPolicy(Arc::new(ByHint));
-        let cells = [
-            Cell::new("c", "a", "r", CellState::Ready),
-            Cell::new("c", "b", "r", CellState::Ready),
+        let pools = [
+            Pool::new("c", "a", "r", PoolState::Ready),
+            Pool::new("c", "b", "r", PoolState::Ready),
         ];
         let routed = Routed {
             request: vec!["x".repeat(100); 10],
@@ -908,19 +908,19 @@ mod tests {
         let cx = Cx::new();
         for encoding in [Encoding::Msgpack, Encoding::Json] {
             let bytes = crate::codec::encoder::<Routed>(encoding)(&routed).expect("encoded");
-            let request = CellRequest::new(&cx, &(), "r", Instant::now()).with_bytes(&bytes);
+            let request = PoolRequest::new(&cx, &(), "r", Instant::now()).with_bytes(&bytes);
             assert_eq!(
                 policy
-                    .choose(request, encoding, &cells)
+                    .choose(request, encoding, &pools)
                     .expect("read")
                     .map(|choice| choice.at()),
                 Ok(1),
                 "{encoding:?}"
             );
             let other = crate::codec::encoder::<Hint>(encoding)(&routed.hint).expect("encoded");
-            let request = CellRequest::new(&cx, &(), "r", Instant::now()).with_bytes(&other);
+            let request = PoolRequest::new(&cx, &(), "r", Instant::now()).with_bytes(&other);
             let error = policy
-                .choose(request, encoding, &cells)
+                .choose(request, encoding, &pools)
                 .expect_err("no hint");
             assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
         }

@@ -1,4 +1,4 @@
-//! The counting of a cell's usable instances, from its hub's own service
+//! The counting of a pool's usable instances, from its hub's own service
 //! watches over loopback: the extension's only use of velo-hub's client.
 
 use std::collections::HashSet;
@@ -69,7 +69,7 @@ pub(super) async fn run(
     {
         Ok(client) => client,
         Err(error) => {
-            tracing::error!(%error, "the cell cannot watch its hub; it stays unavailable");
+            tracing::error!(%error, "the pool cannot watch its hub; it stays unavailable");
             return;
         }
     };

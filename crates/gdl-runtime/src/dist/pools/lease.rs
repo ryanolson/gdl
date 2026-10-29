@@ -1,4 +1,4 @@
-//! The offers a chooser instance holds to one follow of a cell, counted so
+//! The offers a chooser instance holds to one follow of a pool, counted so
 //! that it knows when none is left: the follow closes only once every
 //! chooser says so, since gdl bounds no request's lifetime and no wait of
 //! fixed length would know that an offer has ended.
@@ -15,21 +15,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gdl::__runtime::ChoiceHeld;
 
-use super::meter::CellFigures;
+use super::meter::PoolFigures;
 
 /// The bit of a follow's word that says it is not offered; the rest count
 /// the leases.
 const UNOFFERED: usize = 1 << (usize::BITS - 1);
 
 /// One follow's word, shared by every table its follow makes, with the
-/// counts of its cell's offers, if the chooser records them: the same for
-/// every follow of the cell.
+/// counts of its pool's offers, if the chooser records them: the same for
+/// every follow of the pool.
 #[derive(Debug, Default)]
-pub(crate) struct Leases(AtomicUsize, Option<&'static CellFigures>);
+pub(crate) struct Leases(AtomicUsize, Option<&'static PoolFigures>);
 
 impl Leases {
-    /// The word of a follow whose cell's offers count into `figures`.
-    pub(crate) fn counted(figures: Option<&'static CellFigures>) -> Self {
+    /// The word of a follow whose pool's offers count into `figures`.
+    pub(crate) fn counted(figures: Option<&'static PoolFigures>) -> Self {
         Self(AtomicUsize::new(0), figures)
     }
 
@@ -57,14 +57,14 @@ impl Leases {
 
 /// One offer to a follow, held for as long as the chooser holds the
 /// request: until the response stream ends or is dropped, as a selector's
-/// lease is. It also holds the cell policy's lease on the choice, if the
+/// lease is. It also holds the pool policy's lease on the choice, if the
 /// policy gave one, which lives as long.
-pub(crate) struct CellLease {
+pub(crate) struct PoolLease {
     follow: Arc<Leases>,
     choice: Option<ChoiceHeld>,
 }
 
-impl CellLease {
+impl PoolLease {
     /// A lease on the follow `leases` counts for, unless it is not
     /// offered: then the offer must not be made, and nothing is held.
     pub(crate) fn take(leases: &Arc<Leases>) -> Option<Self> {
@@ -79,7 +79,7 @@ impl CellLease {
         })
     }
 
-    /// The lease, holding the cell policy's lease on the choice it was
+    /// The lease, holding the pool policy's lease on the choice it was
     /// taken for.
     #[inline]
     pub(crate) fn with_choice(mut self, choice: Option<ChoiceHeld>) -> Self {
@@ -90,23 +90,23 @@ impl CellLease {
     /// Whether this lease is on the follow `table` shows: the leases of a
     /// follow are shared by every table of it, and a newer generation has
     /// its own.
-    pub(crate) fn is_of(&self, table: &super::CellTable) -> bool {
+    pub(crate) fn is_of(&self, table: &super::PoolTable) -> bool {
         Arc::ptr_eq(&self.follow, &table.leases)
     }
 
-    /// The counts of the offers to the cell, if the chooser records them.
+    /// The counts of the offers to the pool, if the chooser records them.
     #[inline]
-    pub(crate) fn figures(&self) -> Option<&'static CellFigures> {
+    pub(crate) fn figures(&self) -> Option<&'static PoolFigures> {
         self.follow.1
     }
 
-    /// The cell policy's lease on the choice, taken out of this lease, so
-    /// that an offer to another instance of the same cell holds it.
+    /// The pool policy's lease on the choice, taken out of this lease, so
+    /// that an offer to another instance of the same pool holds it.
     pub(crate) fn take_choice(&mut self) -> Option<ChoiceHeld> {
         self.choice.take()
     }
 
-    /// The cell accepted the offer: tell the cell policy's lease, if it
+    /// The pool accepted the offer: tell the pool policy's lease, if it
     /// gave one.
     #[inline]
     pub(crate) fn accepted(&mut self) {
@@ -116,15 +116,15 @@ impl CellLease {
     }
 }
 
-impl Drop for CellLease {
+impl Drop for PoolLease {
     fn drop(&mut self) {
         self.follow.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-impl std::fmt::Debug for CellLease {
+impl std::fmt::Debug for PoolLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CellLease")
+        f.debug_struct("PoolLease")
             .field("follow", &self.follow)
             .field("choice", &self.choice.is_some())
             .finish()
@@ -135,7 +135,7 @@ impl std::fmt::Debug for CellLease {
 mod tests {
     use std::sync::Arc;
 
-    use super::{CellLease, Leases};
+    use super::{Leases, PoolLease};
 
     /// A follow is idle once it is not offered and its last lease is let
     /// go; a lease asked for once it is not offered is refused and counts
@@ -143,17 +143,17 @@ mod tests {
     #[test]
     fn a_follow_is_idle_once_not_offered_and_its_last_lease_is_let_go() {
         let leases = Arc::new(Leases::default());
-        let held = CellLease::take(&leases).expect("offered");
+        let held = PoolLease::take(&leases).expect("offered");
         assert_eq!(leases.held(), 1);
         leases.unoffer();
         assert!(!leases.idle(), "idle with a lease held");
-        assert!(CellLease::take(&leases).is_none(), "taken once not offered");
+        assert!(PoolLease::take(&leases).is_none(), "taken once not offered");
         assert_eq!(leases.held(), 1);
         drop(held);
         assert!(leases.idle());
         leases.offer();
         assert!(!leases.idle(), "idle while offered");
-        let again = CellLease::take(&leases).expect("offered again");
+        let again = PoolLease::take(&leases).expect("offered again");
         assert_eq!(leases.held(), 1);
         drop(again);
         assert_eq!(leases.held(), 0);
@@ -172,7 +172,7 @@ mod tests {
                 std::thread::spawn(move || {
                     start.wait();
                     for _ in 0..10_000 {
-                        drop(CellLease::take(&leases));
+                        drop(PoolLease::take(&leases));
                     }
                 })
             })
@@ -183,6 +183,6 @@ mod tests {
             thread.join().expect("a thread");
         }
         assert!(leases.idle());
-        assert!(CellLease::take(&leases).is_none());
+        assert!(PoolLease::take(&leases).is_none());
     }
 }

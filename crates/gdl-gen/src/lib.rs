@@ -146,7 +146,7 @@ fn render_with(
 
 /// `spec` with its graph's nodes bound to the nodes its node crates offer,
 /// in place of the `[bind.*]` tables of a contract spec, which keeps its
-/// own; and with what is wrong with its cell policies' crates among its
+/// own; and with what is wrong with its pool policies' crates among its
 /// problems.
 fn bound<'s>(
     spec: &'s Spec,
@@ -155,7 +155,7 @@ fn bound<'s>(
     from: Offers<'_>,
 ) -> Result<std::borrow::Cow<'s, Spec>, Error> {
     let mut spec = bound_nodes(spec, prepared, target, from)?;
-    if !spec.cell_policies.is_empty() {
+    if !spec.pool_policies.is_empty() {
         let resolution = prepared.graph.as_ref().map(|(_, resolution)| resolution);
         let problems = policies::resolve(&spec, target, from, &prepared.manifest, resolution);
         spec.to_mut().problems.extend(problems);
@@ -285,7 +285,7 @@ pub(crate) fn checked(
     let prepared = prepare(spec, None, target, emit::Deps::Relative, from);
     let layouts = match &prepared {
         Ok(prepared) => validate::unbound(spec, &prepared.manifest).0,
-        // The layouts are still the spec's, whose cells name them.
+        // The layouts are still the spec's, whose pools name them.
         Err(_) => spec
             .layout_names()
             .map(|name| (name.into(), None))

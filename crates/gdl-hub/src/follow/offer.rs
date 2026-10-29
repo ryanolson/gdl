@@ -1,7 +1,7 @@
 //! Whether a follow is offered to the hub's choosers, and who has
 //! acknowledged that it is not: what lets the hub close a follow without a
 //! timer on its offers. gdl bounds no request's lifetime, so no wait of
-//! fixed length would know that nothing offered to the cell is still
+//! fixed length would know that nothing offered to the pool is still
 //! running; only the choosers that hold the offers do.
 //!
 //! An acknowledgement answers the revision it names and no other: every
@@ -12,11 +12,11 @@
 //! that counts for the later one.
 //!
 //! The one timer is for a chooser that cannot answer: one that has had no
-//! watch of the relay open for the hub's bound (`[cell] lost_chooser_ms`)
+//! watch of the relay open for the hub's bound (`[pool] lost_chooser_ms`)
 //! cannot learn that a follow is not offered, so it is not waited for
 //! until it watches again. One that watches is waited for however long
 //! its offers last. Closing the follow cuts nothing either way: the
-//! cell's entry instances finish what they hold before they leave.
+//! pool's entry instances finish what they hold before they leave.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ impl Offer {
 
     /// Whether a snapshot shows the offered state: only while the follow
     /// is not offered. An earlier reader, which does not know the kind,
-    /// fails closed for the cell until a snapshot of it shows none, so a
+    /// fails closed for the pool until a snapshot of it shows none, so a
     /// follow offered again must show none; a reader of this build takes a
     /// follow shown without one as offered, and applies every later
     /// revision, which is greater than the one it then holds.
@@ -95,11 +95,11 @@ impl Offer {
     }
 
     /// The relay's event of the offered state of the follow `generation`
-    /// of the cell `cell` of `class`.
-    pub(super) fn event(&self, class: &str, cell: &str, generation: u64) -> FollowEvent {
+    /// of the pool `pool` of `class`.
+    pub(super) fn event(&self, class: &str, pool: &str, generation: u64) -> FollowEvent {
         FollowEvent::Offering {
             class: class.to_string(),
-            cell: cell.to_string(),
+            pool: pool.to_string(),
             generation,
             revision: self.revision,
             offered: self.offered,
@@ -107,16 +107,16 @@ impl Offer {
     }
 }
 
-/// The hub's members that choose cells of the classes its cell sends to,
+/// The hub's members that choose pools of the classes its pool sends to,
 /// and must acknowledge a follow of a class before it closes: those of the
 /// segments holding the outer end of a hop that crosses into the class,
 /// once they have said that they run a follower of the hub's relay. The
 /// other members never offer anything to another class, and neither does
 /// one of those segments that runs no follower, as an instance without
-/// `[cell]` does: it never acknowledges, and must not hold a follow open.
+/// `[pool]` does: it never acknowledges, and must not hold a follow open.
 #[derive(Debug, Default)]
 pub(crate) struct Choosers {
-    /// For each segment that chooses, the classes it chooses cells of.
+    /// For each segment that chooses, the classes it chooses pools of.
     segments: HashMap<String, Arc<[String]>>,
     /// For each segment that chooses, the entry segments its hops enter.
     entries: HashMap<String, Arc<[String]>>,
@@ -148,7 +148,7 @@ struct Chooser {
 
 impl Choosers {
     /// The choosers of the segments `segments` names, each with the
-    /// classes it chooses cells of and the entry segments of those classes
+    /// classes it chooses pools of and the entry segments of those classes
     /// its hops enter.
     pub(crate) fn new(
         segments: impl IntoIterator<Item = (String, Vec<String>, Vec<String>)>,
@@ -327,7 +327,7 @@ impl Choosers {
         chooser.declared.then_some(chooser.classes)
     }
 
-    /// Whether `id`, in its registration of `epoch`, chooses cells of
+    /// Whether `id`, in its registration of `epoch`, chooses pools of
     /// `class`.
     pub(super) fn chooses(&self, id: InstanceId, epoch: RegistrationEpoch, class: &str) -> bool {
         self.members.get(&id).is_some_and(|chooser| {
@@ -338,7 +338,7 @@ impl Choosers {
     }
 
     /// The members, among those that said they run a follower, that choose
-    /// cells of `class` and route to their entry segment `segment`: what a
+    /// pools of `class` and route to their entry segment `segment`: what a
     /// retirement of an instance of the segment waits for. Costs one look
     /// per chooser of the hub.
     pub(super) fn routing_to(&self, class: &str, segment: &str) -> HashSet<InstanceId> {

@@ -1,10 +1,10 @@
-//! A global's hub follows a model cell over its watch only once the
+//! A global's hub follows a model pool over its watch only once the
 //! watch's snapshot is complete, within its bounds: a peer that sends the
 //! snapshot's first event and then only keep-alives, or more snapshot
-//! than the limit, ends the follow with nothing of the cell on the relay,
-//! and the cell is followed again after the link's backoff, as for any
-//! ended watch. `M` is served by a test server that speaks the cell
-//! watch's protocol as the test chooses; `CELL` is a real cell's hub. The
+//! than the limit, ends the follow with nothing of the pool on the relay,
+//! and the pool is followed again after the link's backoff, as for any
+//! ended watch. `M` is served by a test server that speaks the pool
+//! watch's protocol as the test chooses; `POOL` is a real pool's hub. The
 //! global's bounds are set short for the test, so that it outlasts them.
 
 mod common;
@@ -12,14 +12,14 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    CELL, Instance, Records, Resolving, WAIT, global_default, meet_the_quorum, model, serve_cell,
+    Instance, POOL, Records, Resolving, WAIT, global_default, meet_the_quorum, model, serve_pool,
     timing,
 };
 use futures::{FutureExt, StreamExt};
-use gdl_cells::{CellDirectory, CellRecord, CellState};
-use gdl_hub::CellTiming;
+use gdl_hub::PoolTiming;
 use gdl_model::SegmentPhase;
-use gdl_watch::{CellWatchEvent, CellWatcher, FollowEvent, WatchLimits};
+use gdl_pools::{PoolDirectory, PoolRecord, PoolState};
+use gdl_watch::{FollowEvent, PoolWatchEvent, PoolWatcher, WatchLimits};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -28,7 +28,7 @@ use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
 const M: &str = "model-x-07-us-east-1";
 
-/// The global's bounds on a followed cell's snapshot: short, so that the
+/// The global's bounds on a followed pool's snapshot: short, so that the
 /// test outlasts them.
 const LIMITS: WatchLimits = WatchLimits {
     event: 4096,
@@ -36,7 +36,7 @@ const LIMITS: WatchLimits = WatchLimits {
     synced_within: Duration::from_millis(500),
 };
 
-/// A server that answers every request as a cell's watch, and hands each
+/// A server that answers every request as a pool's watch, and hands each
 /// connection to the test.
 struct Server {
     address: String,
@@ -103,23 +103,23 @@ impl Watch {
             .unwrap_or_else(|| panic!("a generation in {:?}", self.query))
     }
 
-    /// Answer, and send the snapshot's first event: the cell of `record`.
-    async fn begin(&mut self, record: &CellRecord) {
+    /// Answer, and send the snapshot's first event: the pool of `record`.
+    async fn begin(&mut self, record: &PoolRecord) {
         let head =
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
         self.write(head.as_bytes()).await;
-        self.send(&CellWatchEvent::Cell {
+        self.send(&PoolWatchEvent::Pool {
             models: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: record.epoch,
-            state: CellState::Ready,
+            state: PoolState::Ready,
             load: None,
         })
         .await;
     }
 
-    async fn send(&mut self, event: &CellWatchEvent) {
+    async fn send(&mut self, event: &PoolWatchEvent) {
         let sent = format!(
             "data: {}\n\n",
             serde_json::to_string(event).expect("an event serializes")
@@ -144,8 +144,8 @@ impl Watch {
     }
 }
 
-fn ready() -> CellWatchEvent {
-    CellWatchEvent::Ready {
+fn ready() -> PoolWatchEvent {
+    PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: PeerInfo::new(
             InstanceId::new_v4(),
@@ -155,33 +155,33 @@ fn ready() -> CellWatchEvent {
 }
 
 /// A global's hub with `timing`, following `M`, served by a test server,
-/// beside the real model cell `CELL`.
+/// beside the real model pool `POOL`.
 struct Setup {
     server: Server,
     /// Before the global could ask for `M`'s watch.
     began: Instant,
-    record: CellRecord,
-    global: std::sync::Arc<gdl_hub::CellReadiness<Resolving>>,
+    record: PoolRecord,
+    global: std::sync::Arc<gdl_hub::PoolReadiness<Resolving>>,
     _hubs: (velo_hub::Hub, velo_hub::Hub),
     _instances: Vec<Instance>,
 }
 
-async fn setup(timing: CellTiming) -> Setup {
+async fn setup(timing: PoolTiming) -> Setup {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
-    let (model_hub, _model) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         common::timing(),
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (like, _) = records.until(CellState::Ready).await;
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing).await;
+    let (like, _) = records.until(PoolState::Ready).await;
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing).await;
     let server = Server::new().await;
-    let record = CellRecord {
+    let record = PoolRecord {
         name: M.into(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         hub: server.address.clone(),
         ..like
     };
@@ -201,25 +201,25 @@ async fn setup(timing: CellTiming) -> Setup {
     }
 }
 
-fn bounded() -> CellTiming {
-    CellTiming {
+fn bounded() -> PoolTiming {
+    PoolTiming {
         watch: LIMITS,
         ..timing()
     }
 }
 
-/// Whether `event` is of the cell `of`.
+/// Whether `event` is of the pool `of`.
 fn of(event: &FollowEvent, of: &str) -> bool {
     match event {
-        FollowEvent::Follow { cell, .. }
-        | FollowEvent::State { cell, .. }
-        | FollowEvent::Load { cell, .. }
-        | FollowEvent::Offering { cell, .. }
-        | FollowEvent::Exposed { cell, .. }
-        | FollowEvent::Retired { cell, .. }
-        | FollowEvent::Left { cell, .. }
-        | FollowEvent::Dropped { cell, .. }
-        | FollowEvent::Withdrawn { cell, .. } => cell == of,
+        FollowEvent::Follow { pool, .. }
+        | FollowEvent::State { pool, .. }
+        | FollowEvent::Load { pool, .. }
+        | FollowEvent::Offering { pool, .. }
+        | FollowEvent::Exposed { pool, .. }
+        | FollowEvent::Retired { pool, .. }
+        | FollowEvent::Left { pool, .. }
+        | FollowEvent::Dropped { pool, .. }
+        | FollowEvent::Withdrawn { pool, .. } => pool == of,
         FollowEvent::Synced { .. } | FollowEvent::Listed { .. } => false,
     }
 }
@@ -235,7 +235,7 @@ fn of_m(watch: &mut gdl_hub::FollowsWatch) -> Vec<FollowEvent> {
     events
 }
 
-/// `M`'s watch sends the cell and then only keep-alives: the follow ends
+/// `M`'s watch sends the pool and then only keep-alives: the follow ends
 /// at the snapshot's bound, nothing of `M` was installed in the relay,
 /// and `M` is followed again in a new generation after the refollow wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -281,7 +281,7 @@ async fn a_snapshot_past_its_limit_ends_the_follow() {
         _hubs,
         _instances,
         ..
-    } = setup(CellTiming {
+    } = setup(PoolTiming {
         watch: WatchLimits {
             synced_within: WAIT * 2,
             ..LIMITS
@@ -305,7 +305,7 @@ async fn a_snapshot_past_its_limit_ends_the_follow() {
     // The watcher may have hung up already.
     let synced = format!(
         "data: {}\n\n",
-        serde_json::to_string(&CellWatchEvent::Synced).expect("serializes")
+        serde_json::to_string(&PoolWatchEvent::Synced).expect("serializes")
     );
     let _ = first.stream.write_all(synced.as_bytes()).await;
     first.keep_alive();
@@ -319,8 +319,8 @@ async fn a_snapshot_past_its_limit_ends_the_follow() {
     assert_eq!(of_m(&mut relay), [], "nothing of M on the relay");
 }
 
-/// A real cell's hub with many entry instances sends its whole snapshot
-/// well inside the default bounds, both its cell watch and the global's
+/// A real pool's hub with many entry instances sends its whole snapshot
+/// well inside the default bounds, both its pool watch and the global's
 /// relay of it: the bounds do not refuse a healthy hub.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
@@ -328,8 +328,8 @@ async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
     // second to join.
     const ENTRIES: usize = 64;
     let directory = Resolving::new();
-    let (model_hub, _model) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
@@ -340,14 +340,14 @@ async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
         instance.announce(SegmentPhase::Ready).await;
         instances.push(instance);
     }
-    let (global_hub, _global) = serve_cell(global_default(), &directory, timing()).await;
-    let watcher = CellWatcher::new().expect("a client");
+    let (global_hub, _global) = serve_pool(global_default(), &directory, timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
     let model = format!("127.0.0.1:{}", model_hub.public_addr().port());
     let relay = format!("127.0.0.1:{}", global_hub.public_addr().port());
 
-    // The cell's watch, once it shows every entry instance.
+    // The pool's watch, once it shows every entry instance.
     let (bytes, took) = whole(|| watcher.watch(&model), ENTRIES, WAIT).await;
-    println!("a cell's snapshot of {ENTRIES} entry instances: {bytes} bytes in {took:?}");
+    println!("a pool's snapshot of {ENTRIES} entry instances: {bytes} bytes in {took:?}");
     assert!(took < WatchLimits::SYNCED_WITHIN / 30, "{took:?}");
     assert!(bytes < WatchLimits::SNAPSHOT / 100, "{bytes} bytes");
 
@@ -361,19 +361,19 @@ async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
 
 /// A complete snapshot that never shows every entry instance expected
 /// fails the test within its deadline, rather than being watched again
-/// and again: here a cell of one entry instance, expected to show two.
+/// and again: here a pool of one entry instance, expected to show two.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[should_panic(expected = "a snapshot of every entry instance in time")]
 async fn a_snapshot_short_of_its_entries_fails_in_time() {
     let directory = Resolving::new();
-    let (model_hub, _model) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (_instances, _) = meet_the_quorum(&model_hub).await;
-    let watcher = CellWatcher::new().expect("a client");
+    let watcher = PoolWatcher::new().expect("a client");
     let model = format!("127.0.0.1:{}", model_hub.public_addr().port());
     whole(|| watcher.watch(&model), 2, Duration::from_millis(500)).await;
 }
@@ -384,7 +384,7 @@ trait Shown: serde::Serialize {
     fn entry(&self) -> bool;
 }
 
-impl Shown for CellWatchEvent {
+impl Shown for PoolWatchEvent {
     fn synced(&self) -> bool {
         matches!(self, Self::Synced)
     }
@@ -412,7 +412,7 @@ where
     E: Shown,
     F: Fn() -> O,
     O: std::future::Future<
-            Output = Result<gdl_watch::WatchStream<E, U>, gdl_watch::CellWatchError>,
+            Output = Result<gdl_watch::WatchStream<E, U>, gdl_watch::PoolWatchError>,
         >,
 {
     let watched = async {
@@ -446,19 +446,19 @@ where
 
 /// A follow whose snapshot completed is never ended by the snapshot's
 /// bound: it outlives it several times over, in its generation, and
-/// carries the cell's changes throughout.
+/// carries the pool's changes throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_follow_whose_snapshot_completed_outlives_the_bound() {
     let directory = Resolving::new();
-    let (model_hub, _model) = serve_cell(
-        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
     let (_instances, _) = meet_the_quorum(&model_hub).await;
-    let (_global_hub, global) = serve_cell(global_default(), &directory, bounded()).await;
-    let key = ("model_x".to_string(), CELL.to_string());
+    let (_global_hub, global) = serve_pool(global_default(), &directory, bounded()).await;
+    let key = ("model_x".to_string(), POOL.to_string());
     let mut relay = global.follows();
     let generation = loop {
         let event = tokio::time::timeout(WAIT, relay.next())

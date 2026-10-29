@@ -19,8 +19,8 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::{CellPolicies, FollowedCells, HomeFirstAt, HubRecords, InstanceModels, Selectors};
 use gdl::{Error, ErrorKind, Result};
+use gdl::{FollowedPools, HomeFirstAt, HubRecords, InstanceModels, PoolPolicies, Selectors};
 use gdl_model::{Layout, RequestRouter};
 
 /// Runtime settings for one segment instance.
@@ -41,25 +41,25 @@ pub struct RuntimeConfig {
     /// The longest any setup step (a forward hand-off, a run opening, an
     /// attach) may take, on top of the request's own deadline.
     pub setup_timeout: Duration,
-    /// How many other cells a chooser offers a request to after the cell it
+    /// How many other pools a chooser offers a request to after the pool it
     /// chose first declines it, or the hand-off to it provably never left
     /// this instance: only for a hand-off into another class, from an
-    /// instance in a cell. 0 offers each request to one cell.
-    pub cell_failovers: usize,
-    /// How long a chooser passes over a cell after its first decline. The
+    /// instance in a pool. 0 offers each request to one pool.
+    pub pool_failovers: usize,
+    /// How long a chooser passes over a pool after its first decline. The
     /// window doubles with each further decline after it ended, up to
-    /// `cell_damping_max`. At least 1 ms.
-    pub cell_damping_first: Duration,
-    /// The longest a chooser passes over a cell that keeps declining: it
-    /// is tried again at least this often. From `cell_damping_first` to
+    /// `pool_damping_max`. At least 1 ms.
+    pub pool_damping_first: Duration,
+    /// The longest a chooser passes over a pool that keeps declining: it
+    /// is tried again at least this often. From `pool_damping_first` to
     /// one hour.
-    pub cell_damping_max: Duration,
-    /// How many of its periods a cell's load summary stays fresh after it
+    pub pool_damping_max: Duration,
+    /// How many of its periods a pool's load summary stays fresh after it
     /// reached the chooser's hub. A policy that chooses by load, as `home_first`
-    /// does, passes over a cell whose summary is stale. From 1 to 100.
-    pub cell_fresh_periods: u32,
+    /// does, passes over a pool whose summary is stale. From 1 to 100.
+    pub pool_fresh_periods: u32,
     /// The thresholds of the chooser's `home_first`: its saturation
-    /// threshold, from 1 to 100 percent of a cell's admission limit, and
+    /// threshold, from 1 to 100 percent of a pool's admission limit, and
     /// its spill bound, at most the saturation threshold.
     pub home_first: HomeFirstAt,
     /// How many more times a crossing's router chooses an instance after
@@ -100,21 +100,21 @@ pub struct RuntimeConfig {
     /// with its defaults. Not a setting: a segment binary registers them
     /// through its `Builder`.
     pub selectors: Selectors,
-    /// The cell policies a placement's `[cells.<class>] policy` can name,
+    /// The pool policies a placement's `[pools.<class>] policy` can name,
     /// by name. A name that is not here is gdl's own policy of that name.
     /// Not a setting: a segment binary registers them through its
     /// `Builder`. A chooser launched through a `ProcessConfig` checks the
     /// names against its `runtime`'s.
-    pub cell_policies: CellPolicies,
-    /// The handle through which the segment's nodes read the cells its
+    pub pool_policies: PoolPolicies,
+    /// The handle through which the segment's nodes read the pools its
     /// chooser follows. Not a setting: a segment binary's `Builder` gives
     /// it to the nodes it builds, and the launch binds it to the chooser's
     /// tables. A segment that sends into no other class, or runs without a
     /// hub, leaves it unbound.
-    pub followed: FollowedCells,
+    pub followed: FollowedPools,
     /// The record service through which the segment's nodes take tables of
-    /// their cell's hub ([`gdl::CellRecords::current`]). Not a setting: a
-    /// `ProcessConfig` with a `[hub]` and a `[cell]` makes one that tables
+    /// their pool's hub ([`gdl::PoolRecords::current`]). Not a setting: a
+    /// `ProcessConfig` with a `[hub]` and a `[pool]` makes one that tables
     /// can be taken from, a segment binary's `Builder` gives it to the
     /// nodes it builds, and the launch binds it to the hub once the
     /// instance has registered there. Without both, it is not bound. Give
@@ -122,7 +122,7 @@ pub struct RuntimeConfig {
     pub records: HubRecords,
     /// The handle through which the segment's nodes say which models the
     /// instance has. Not a setting: a segment binary's `Builder` gives it
-    /// to the nodes it builds, and an entry instance in a cell reports what
+    /// to the nodes it builds, and an entry instance in a pool reports what
     /// they set with its load reports.
     pub models: InstanceModels,
     /// Test-only delays and drops.
@@ -164,7 +164,7 @@ pub struct Faults {
     /// has retired that input, as a host too busy to run the stop watcher
     /// before the run ends would.
     pub stop_after_input_retired: bool,
-    /// Never announce that the instance detached from its draining cell,
+    /// Never announce that the instance detached from its draining pool,
     /// as a build from before the announcement does.
     pub withhold_detached: bool,
     /// The announcement that the instance detached never gets an answer,
@@ -197,10 +197,10 @@ impl Default for RuntimeConfig {
             admission_wait: Duration::from_millis(100),
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
-            cell_failovers: 2,
-            cell_damping_first: Self::DEFAULT_CELL_DAMPING_FIRST,
-            cell_damping_max: Self::DEFAULT_CELL_DAMPING_MAX,
-            cell_fresh_periods: gdl::Load::FRESH_PERIODS,
+            pool_failovers: 2,
+            pool_damping_first: Self::DEFAULT_POOL_DAMPING_FIRST,
+            pool_damping_max: Self::DEFAULT_POOL_DAMPING_MAX,
+            pool_fresh_periods: gdl::Load::FRESH_PERIODS,
             home_first: HomeFirstAt::DEFAULT,
             instance_failovers: 2,
             anchor_timeout: None,
@@ -212,8 +212,8 @@ impl Default for RuntimeConfig {
             drain: None,
             metrics: None,
             selectors: Selectors::new(),
-            cell_policies: CellPolicies::new(),
-            followed: FollowedCells::new(),
+            pool_policies: PoolPolicies::new(),
+            followed: FollowedPools::new(),
             records: HubRecords::new(),
             models: InstanceModels::new(),
             #[cfg(feature = "fault-injection")]
@@ -230,10 +230,10 @@ struct Settings {
     admission_wait_ms: u64,
     attempt_limit: usize,
     setup_timeout_ms: u64,
-    cell_failovers: usize,
-    cell_damping_first_ms: u64,
-    cell_damping_max_ms: u64,
-    cell_fresh_periods: u32,
+    pool_failovers: usize,
+    pool_damping_first_ms: u64,
+    pool_damping_max_ms: u64,
+    pool_fresh_periods: u32,
     home_first_saturated_percent: u64,
     home_first_spill_percent: u64,
     instance_failovers: usize,
@@ -255,10 +255,10 @@ impl Default for Settings {
             admission_wait_ms: ms(config.admission_wait),
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
-            cell_failovers: config.cell_failovers,
-            cell_damping_first_ms: ms(config.cell_damping_first),
-            cell_damping_max_ms: ms(config.cell_damping_max),
-            cell_fresh_periods: config.cell_fresh_periods,
+            pool_failovers: config.pool_failovers,
+            pool_damping_first_ms: ms(config.pool_damping_first),
+            pool_damping_max_ms: ms(config.pool_damping_max),
+            pool_fresh_periods: config.pool_fresh_periods,
             home_first_saturated_percent: config.home_first.saturated_percent,
             home_first_spill_percent: config.home_first.spill_percent,
             instance_failovers: config.instance_failovers,
@@ -282,10 +282,10 @@ impl TryFrom<Settings> for RuntimeConfig {
             admission_wait: Duration::from_millis(s.admission_wait_ms),
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
-            cell_failovers: s.cell_failovers,
-            cell_damping_first: Duration::from_millis(s.cell_damping_first_ms),
-            cell_damping_max: Duration::from_millis(s.cell_damping_max_ms),
-            cell_fresh_periods: s.cell_fresh_periods,
+            pool_failovers: s.pool_failovers,
+            pool_damping_first: Duration::from_millis(s.pool_damping_first_ms),
+            pool_damping_max: Duration::from_millis(s.pool_damping_max_ms),
+            pool_fresh_periods: s.pool_fresh_periods,
             home_first: HomeFirstAt {
                 saturated_percent: s.home_first_saturated_percent,
                 spill_percent: s.home_first_spill_percent,
@@ -300,8 +300,8 @@ impl TryFrom<Settings> for RuntimeConfig {
             drain: s.drain_ms.map(Duration::from_millis),
             metrics: None,
             selectors: Selectors::new(),
-            cell_policies: CellPolicies::new(),
-            followed: FollowedCells::new(),
+            pool_policies: PoolPolicies::new(),
+            followed: FollowedPools::new(),
             records: HubRecords::new(),
             models: InstanceModels::new(),
             #[cfg(feature = "fault-injection")]
@@ -351,7 +351,7 @@ impl RuntimeConfig {
                 ));
             }
         }
-        self.validate_cells()?;
+        self.validate_pools()?;
         // velo carries the interval in whole milliseconds, so anything
         // shorter becomes zero on the way.
         if self
@@ -368,28 +368,28 @@ impl RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// The damping window after a cell's first decline, unless
-    /// `cell_damping_first_ms` is set: 1 s.
-    pub(crate) const DEFAULT_CELL_DAMPING_FIRST: Duration = Duration::from_secs(1);
+    /// The damping window after a pool's first decline, unless
+    /// `pool_damping_first_ms` is set: 1 s.
+    pub(crate) const DEFAULT_POOL_DAMPING_FIRST: Duration = Duration::from_secs(1);
 
-    /// The longest damping window, unless `cell_damping_max_ms` is set:
+    /// The longest damping window, unless `pool_damping_max_ms` is set:
     /// 30 s.
-    pub(crate) const DEFAULT_CELL_DAMPING_MAX: Duration = Duration::from_secs(30);
+    pub(crate) const DEFAULT_POOL_DAMPING_MAX: Duration = Duration::from_secs(30);
 
-    /// The longest damping window: a cell is tried again at least once an
+    /// The longest damping window: a pool is tried again at least once an
     /// hour, and a window's end stays far inside what the clock holds.
     const MAX_DAMPING: Duration = Duration::from_secs(3600);
 
     /// The most periods a summary may stay fresh: a summary 100 periods
-    /// old says nothing of the cell's load now.
+    /// old says nothing of the pool's load now.
     const MAX_FRESH_PERIODS: u32 = 100;
 
-    /// Refuse the chooser's cell settings that break what it relies on:
+    /// Refuse the chooser's pool settings that break what it relies on:
     /// windows that cannot grow or end, a summary that is never fresh or
-    /// is fresh too long, and thresholds outside a cell's admission limit,
-    /// or a spill bound past the saturation threshold, which no cell
+    /// is fresh too long, and thresholds outside a pool's admission limit,
+    /// or a spill bound past the saturation threshold, which no pool
     /// elsewhere could reach unsaturated.
-    fn validate_cells(&self) -> Result<()> {
+    fn validate_pools(&self) -> Result<()> {
         let refuse = |key: &str, why: String| {
             Err(Error::new(
                 ErrorKind::Placement,
@@ -397,28 +397,28 @@ impl RuntimeConfig {
             ))
         };
         let ms = |d: Duration| d.as_millis();
-        if self.cell_damping_first < Duration::from_millis(1) {
-            return refuse("cell_damping_first_ms", "must be at least 1".into());
+        if self.pool_damping_first < Duration::from_millis(1) {
+            return refuse("pool_damping_first_ms", "must be at least 1".into());
         }
-        if self.cell_damping_max < self.cell_damping_first {
+        if self.pool_damping_max < self.pool_damping_first {
             return refuse(
-                "cell_damping_max_ms",
+                "pool_damping_max_ms",
                 format!(
-                    "is {}; it must be at least `cell_damping_first_ms`, {}",
-                    ms(self.cell_damping_max),
-                    ms(self.cell_damping_first)
+                    "is {}; it must be at least `pool_damping_first_ms`, {}",
+                    ms(self.pool_damping_max),
+                    ms(self.pool_damping_first)
                 ),
             );
         }
-        if self.cell_damping_max > Self::MAX_DAMPING {
+        if self.pool_damping_max > Self::MAX_DAMPING {
             return refuse(
-                "cell_damping_max_ms",
+                "pool_damping_max_ms",
                 format!("must be at most {}", ms(Self::MAX_DAMPING)),
             );
         }
-        if !(1..=Self::MAX_FRESH_PERIODS).contains(&self.cell_fresh_periods) {
+        if !(1..=Self::MAX_FRESH_PERIODS).contains(&self.pool_fresh_periods) {
             return refuse(
-                "cell_fresh_periods",
+                "pool_fresh_periods",
                 format!("must be from 1 to {}", Self::MAX_FRESH_PERIODS),
             );
         }
@@ -505,9 +505,9 @@ pub(crate) struct Runtime {
     /// per name, shared by every crossing that names it.
     selectors: BTreeMap<String, Arc<dyn Erased>>,
     /// A chooser's hand-offs into other classes, by hop and position,
-    /// with the cells each chooses from; empty for any other instance.
+    /// with the pools each chooses from; empty for any other instance.
     #[cfg(feature = "hub")]
-    crossings: BTreeMap<(usize, usize), super::cells::Target>,
+    crossings: BTreeMap<(usize, usize), super::pools::Target>,
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
@@ -517,7 +517,7 @@ pub(crate) struct Runtime {
     closed_at: std::sync::OnceLock<tokio::time::Instant>,
     /// Why the instance declines offers, the hand-offs from another
     /// class, if it does: [`DRAINED`] once an entry instance of a
-    /// draining cell stops taking them, which nothing undoes, and the
+    /// draining pool stops taking them, which nothing undoes, and the
     /// segment's own refusal ([`Runtime::decline_offers_as`]) in the bits
     /// below it. One byte, so that an offer reads both in one load.
     declining: AtomicU8,
@@ -526,7 +526,7 @@ pub(crate) struct Runtime {
     offers: Vec<bool>,
     /// Whether the instance counts the requests it holds that may still
     /// send work onward ([`Admission::senders`]): only in a class that a
-    /// hop enters, whose cells drain segment by segment. Elsewhere no drain
+    /// hop enters, whose pools drain segment by segment. Elsewhere no drain
     /// reads the count, and a request pays nothing for it.
     pub(crate) counts_senders: bool,
     names: Names,
@@ -580,12 +580,12 @@ impl Runtime {
             selectors.insert(name.to_string(), selector);
         }
         #[cfg(feature = "hub")]
-        let crossings = match roster.cells() {
-            Some(cells) => super::cells::targets(
+        let crossings = match roster.pools() {
+            Some(pools) => super::pools::targets(
                 &layout,
                 &segment,
-                cells,
-                &config.cell_policies,
+                pools,
+                &config.pool_policies,
                 config.home_first,
             )?,
             None => BTreeMap::new(),
@@ -682,7 +682,7 @@ impl Runtime {
     }
 
     /// Refuse every offer admitted from now on, for good, saying that the
-    /// cell is gone: a forward hand-off on a hop that crosses into this
+    /// pool is gone: a forward hand-off on a hop that crosses into this
     /// segment's class, which only another class's instances send. The
     /// hand-offs inside the class, which carry the requests already taken,
     /// are still taken. Ordered with the ledger as [`Runtime::close`] is.
@@ -725,7 +725,7 @@ impl Runtime {
 
     /// Refuse an offer the instance has admitted once it declines offers,
     /// with the reason a chooser reads: gone for a drain, since a draining
-    /// cell takes no new work from another cell again, and the segment's
+    /// pool takes no new work from another pool again, and the segment's
     /// own reason otherwise. One atomic load per offer, and none for any
     /// other hand-off.
     pub(crate) fn check_offer(&self) -> std::result::Result<(), Refusal> {
@@ -735,22 +735,22 @@ impl Runtime {
         }
         let (why, decline) = if declining & DRAINED != 0 {
             (
-                "the instance's cell is draining and takes no new work from another cell",
+                "the instance's pool is draining and takes no new work from another pool",
                 Decline::Gone,
             )
         } else if declining & GONE != 0 {
             (
-                "the instance's segment takes no work from another cell by its own policy",
+                "the instance's segment takes no work from another pool by its own policy",
                 Decline::Gone,
             )
         } else if declining & INSTANCE != 0 {
             (
-                "the instance cannot serve work from another cell by its own policy; another instance of its cell may",
+                "the instance cannot serve work from another pool by its own policy; another instance of its pool may",
                 Decline::Instance,
             )
         } else {
             (
-                "the instance's segment has no room for work from another cell by its own policy",
+                "the instance's segment has no room for work from another pool by its own policy",
                 Decline::Full,
             )
         };
@@ -812,13 +812,13 @@ impl Runtime {
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
     /// `Runtime::new` resolved, reading the head in `encoding`, its edge's;
-    /// for a chooser's hand-off into another class, a cell of that class
+    /// for a chooser's hand-off into another class, a pool of that class
     /// first, then an instance within it by the same.
     pub(crate) fn router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
         let within = self.within(hop, pos, encoding);
         #[cfg(feature = "hub")]
         if let Some(target) = self.crossings.get(&(hop, pos)) {
-            return Router::Cells(Arc::new(super::cells::Crossing::new(
+            return Router::Pools(Arc::new(super::pools::Crossing::new(
                 target.clone(),
                 within,
                 encoding,
@@ -855,9 +855,9 @@ impl Runtime {
     /// The hand-off is an offer ([`super::offers`]): when the instance
     /// declines it, or it never left, the router chooses again, up to
     /// `instance_failovers` more times ([`Runtime::offer_again`]). A
-    /// chooser's hand-off into another class first chooses a cell, then
+    /// chooser's hand-off into another class first chooses a pool, then
     /// an instance of it the same way, and offers the request to another
-    /// cell when that one declines it ([`Runtime::fail_over`]); which
+    /// pool when that one declines it ([`Runtime::fail_over`]); which
     /// hand-offs those are was settled when the runtime was built.
     ///
     /// With `timed`, it also returns when the hand-off left: after the
@@ -890,20 +890,20 @@ impl Runtime {
             )]
             let within = match router {
                 Router::Roster(within) => within,
-                // A chooser's hand-off into another class: a cell of the class,
+                // A chooser's hand-off into another class: a pool of the class,
                 // then an instance of it, always remote, since a chooser never
-                // chooses itself (the cell's entry is of another class). Inline,
+                // chooses itself (the pool's entry is of another class). Inline,
                 // as the first offer to an instance is below: an `async` call
                 // keeps its own state beside this future's, rather than in the
                 // room the other path's state takes when this one is not running.
                 #[cfg(feature = "hub")]
-                Router::Cells(crossing) => {
-                    let (instance, cell, mut held) = self
-                        .choose_cell(crossing, cx, &mut envelope, &[])
+                Router::Pools(crossing) => {
+                    let (instance, pool, mut held) = self
+                        .choose_pool(crossing, cx, &mut envelope, &[])
                         .await?
-                        .map_err(|no| crossing.no_cell(no))?;
+                        .map_err(|no| crossing.no_pool(no))?;
                     let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
-                    return match super::cells::answer(offering.await, crossing, cell, &mut held) {
+                    return match super::pools::answer(offering.await, crossing, pool, &mut held) {
                         Answer::Accepted(accepted) => Ok(Handed {
                             accepted,
                             sent,
@@ -914,8 +914,8 @@ impl Runtime {
                         Answer::Missed(missed) => {
                             let choice = held.take_choice();
                             drop(held);
-                            let declined = super::cells::Declined {
-                                cell,
+                            let declined = super::pools::Declined {
+                                pool,
                                 instance,
                                 choice,
                                 missed,
@@ -1006,20 +1006,20 @@ impl Runtime {
 pub(crate) enum Router {
     /// An instance of the next segment, from the roster's routing table.
     Roster(Within),
-    /// A chooser's hand-off into another class: a cell by the class's
-    /// cell policy, then an instance of it by the placement's router.
+    /// A chooser's hand-off into another class: a pool by the class's
+    /// pool policy, then an instance of it by the placement's router.
     #[cfg(feature = "hub")]
-    Cells(Arc<super::cells::Crossing>),
+    Pools(Arc<super::pools::Crossing>),
 }
 
 impl Router {
     /// How the instance is chosen: in the roster, or within the chosen
-    /// cell.
+    /// pool.
     fn within(&self) -> &Within {
         match self {
             Self::Roster(within) => within,
             #[cfg(feature = "hub")]
-            Self::Cells(crossing) => crossing.within(),
+            Self::Pools(crossing) => crossing.within(),
         }
     }
 
@@ -1058,23 +1058,23 @@ pub(crate) struct Handed {
 
 /// What a hand-off holds while its sender holds the request: the lease of
 /// the selector that chose where it went, if one did, and, for a
-/// chooser's offer to a cell, the lease on the cell's follow, by which the
-/// chooser knows when it no longer holds an offer to it, with the cell
+/// chooser's offer to a pool, the lease on the pool's follow, by which the
+/// chooser knows when it no longer holds an offer to it, with the pool
 /// policy's lease on its choice.
 ///
-/// Under the `hub` feature the cell's lease makes it, and so every
+/// Under the `hub` feature the pool's lease makes it, and so every
 /// hand-off's [`Handed`], 16 bytes larger: 32 bytes against the
 /// selector's lease's 16, computed from the fields (a boxed lease is two
 /// words, an `Arc` one, the policy's thin lease one, each `Option`
 /// niched), not measured. A hand-off that is not
-/// a chooser's offer to a cell carries `None` there: making it and
+/// a chooser's offer to a pool carries `None` there: making it and
 /// dropping it take no atomic operation, only the empty check on drop.
 #[derive(Default)]
 #[allow(dead_code, reason = "held for their drop")]
 pub(crate) struct Held {
     selector: Option<Lease>,
     #[cfg(feature = "hub")]
-    cell: Option<super::cells::CellLease>,
+    pool: Option<super::pools::PoolLease>,
 }
 
 impl Held {
@@ -1083,46 +1083,46 @@ impl Held {
         #[cfg(feature = "hub")]
         let held = Self {
             selector,
-            cell: None,
+            pool: None,
         };
         #[cfg(not(feature = "hub"))]
         let held = Self { selector };
         held
     }
 
-    /// A chooser's offer to a cell: the selector's lease, if it gave one,
-    /// and the lease on the cell's follow.
+    /// A chooser's offer to a pool: the selector's lease, if it gave one,
+    /// and the lease on the pool's follow.
     #[cfg(feature = "hub")]
-    pub(crate) fn cell(selector: Option<Lease>, cell: super::cells::CellLease) -> Self {
+    pub(crate) fn pool(selector: Option<Lease>, pool: super::pools::PoolLease) -> Self {
         Self {
             selector,
-            cell: Some(cell),
+            pool: Some(pool),
         }
     }
 
-    /// The lease on the follow of the cell this offer went to, if it went
-    /// to a cell.
+    /// The lease on the follow of the pool this offer went to, if it went
+    /// to a pool.
     #[cfg(feature = "hub")]
-    pub(crate) fn cell_lease(&self) -> Option<&super::cells::CellLease> {
-        self.cell.as_ref()
+    pub(crate) fn pool_lease(&self) -> Option<&super::pools::PoolLease> {
+        self.pool.as_ref()
     }
 
-    /// The cell policy's lease on the choice of the cell this offer went
+    /// The pool policy's lease on the choice of the pool this offer went
     /// to, taken out, if it gave one.
     #[cfg(feature = "hub")]
     pub(crate) fn take_choice(&mut self) -> Option<gdl::__runtime::ChoiceHeld> {
-        self.cell
+        self.pool
             .as_mut()
-            .and_then(super::cells::CellLease::take_choice)
+            .and_then(super::pools::PoolLease::take_choice)
     }
 
-    /// The cell this offer went to accepted it: tell the cell policy's
+    /// The pool this offer went to accepted it: tell the pool policy's
     /// lease, if it gave one.
     #[cfg(feature = "hub")]
     #[inline]
     pub(crate) fn accepted(&mut self) {
-        if let Some(cell) = &mut self.cell {
-            cell.accepted();
+        if let Some(pool) = &mut self.pool {
+            pool.accepted();
         }
     }
 }
@@ -1158,7 +1158,7 @@ pub(crate) struct Served {
     pub(crate) runs: AtomicUsize,
     pub(crate) inputs: AtomicUsize,
     /// Forward hand-offs declined with no room (admission or egress
-    /// refused, or the instance retired), or declined for the cell by its
+    /// refused, or the instance retired), or declined for the pool by its
     /// own policy: what a load report counts as refusals. An instance's
     /// own decline is not counted. Only a refusal touches it.
     pub(crate) declined: AtomicUsize,
@@ -1236,11 +1236,11 @@ mod tests {
     }
 
     #[test]
-    fn cell_failovers_are_two_by_default_and_may_be_none() {
+    fn pool_failovers_are_two_by_default_and_may_be_none() {
         let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
-        assert_eq!(defaults.cell_failovers, 2);
-        let none: RuntimeConfig = toml::from_str("cell_failovers = 0\n").expect("none");
-        assert_eq!(none.cell_failovers, 0);
+        assert_eq!(defaults.pool_failovers, 2);
+        let none: RuntimeConfig = toml::from_str("pool_failovers = 0\n").expect("none");
+        assert_eq!(none.pool_failovers, 0);
     }
 
     #[test]
@@ -1249,32 +1249,32 @@ mod tests {
         assert_eq!(defaults.instance_failovers, 2);
         let none: RuntimeConfig = toml::from_str("instance_failovers = 0\n").expect("none");
         assert_eq!(none.instance_failovers, 0);
-        assert_eq!(none.cell_failovers, 2, "the two bounds are apart");
+        assert_eq!(none.pool_failovers, 2, "the two bounds are apart");
     }
 
     /// A chooser's damping windows, the periods a summary stays fresh, and
     /// `home_first`'s thresholds are settings, each with the value it had
     /// when it was fixed in the binary unless it is set.
     #[test]
-    fn a_choosers_cell_settings_keep_their_defaults_unless_set() {
+    fn a_choosers_pool_settings_keep_their_defaults_unless_set() {
         for defaults in [
             RuntimeConfig::default(),
             toml::from_str::<RuntimeConfig>("").expect("defaults"),
         ] {
-            assert_eq!(defaults.cell_damping_first, Duration::from_secs(1));
-            assert_eq!(defaults.cell_damping_max, Duration::from_secs(30));
-            assert_eq!(defaults.cell_fresh_periods, 3);
+            assert_eq!(defaults.pool_damping_first, Duration::from_secs(1));
+            assert_eq!(defaults.pool_damping_max, Duration::from_secs(30));
+            assert_eq!(defaults.pool_fresh_periods, 3);
             assert_eq!(defaults.home_first.saturated_percent, 100);
             assert_eq!(defaults.home_first.spill_percent, 80);
         }
         let set: RuntimeConfig = toml::from_str(
-            "cell_damping_first_ms = 2000\ncell_damping_max_ms = 5000\ncell_fresh_periods = 5\n\
+            "pool_damping_first_ms = 2000\npool_damping_max_ms = 5000\npool_fresh_periods = 5\n\
              home_first_saturated_percent = 90\nhome_first_spill_percent = 0\n",
         )
         .expect("set");
-        assert_eq!(set.cell_damping_first, Duration::from_secs(2));
-        assert_eq!(set.cell_damping_max, Duration::from_secs(5));
-        assert_eq!(set.cell_fresh_periods, 5);
+        assert_eq!(set.pool_damping_first, Duration::from_secs(2));
+        assert_eq!(set.pool_damping_max, Duration::from_secs(5));
+        assert_eq!(set.pool_fresh_periods, 5);
         assert_eq!(set.home_first.saturated_percent, 90);
         assert_eq!(set.home_first.spill_percent, 0);
     }
@@ -1282,18 +1282,18 @@ mod tests {
     /// A chooser setting that breaks what the chooser relies on is refused,
     /// naming its key.
     #[test]
-    fn a_choosers_cell_setting_out_of_its_bounds_is_refused_by_key() {
+    fn a_choosers_pool_setting_out_of_its_bounds_is_refused_by_key() {
         for (bad, key) in [
-            ("cell_damping_first_ms = 0\n", "cell_damping_first_ms"),
+            ("pool_damping_first_ms = 0\n", "pool_damping_first_ms"),
             (
-                "cell_damping_first_ms = 3000\ncell_damping_max_ms = 2000\n",
-                "cell_damping_max_ms",
+                "pool_damping_first_ms = 3000\npool_damping_max_ms = 2000\n",
+                "pool_damping_max_ms",
             ),
             // Against the first window's default, 1 s.
-            ("cell_damping_max_ms = 999\n", "cell_damping_max_ms"),
-            ("cell_damping_max_ms = 3600001\n", "cell_damping_max_ms"),
-            ("cell_fresh_periods = 0\n", "cell_fresh_periods"),
-            ("cell_fresh_periods = 101\n", "cell_fresh_periods"),
+            ("pool_damping_max_ms = 999\n", "pool_damping_max_ms"),
+            ("pool_damping_max_ms = 3600001\n", "pool_damping_max_ms"),
+            ("pool_fresh_periods = 0\n", "pool_fresh_periods"),
+            ("pool_fresh_periods = 101\n", "pool_fresh_periods"),
             (
                 "home_first_saturated_percent = 0\n",
                 "home_first_saturated_percent",
@@ -1322,11 +1322,11 @@ mod tests {
         }
         // The bounds themselves are taken.
         let edge: RuntimeConfig = toml::from_str(
-            "cell_damping_first_ms = 3600000\ncell_damping_max_ms = 3600000\ncell_fresh_periods = 100\n\
+            "pool_damping_first_ms = 3600000\npool_damping_max_ms = 3600000\npool_fresh_periods = 100\n\
              home_first_saturated_percent = 1\nhome_first_spill_percent = 1\n",
         )
         .expect("the bounds");
-        assert_eq!(edge.cell_damping_max, Duration::from_secs(3600));
+        assert_eq!(edge.pool_damping_max, Duration::from_secs(3600));
     }
 
     #[test]

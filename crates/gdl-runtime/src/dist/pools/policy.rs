@@ -1,28 +1,28 @@
-//! The cell policy a chooser picks a class's cells by, by the name the
-//! placement gives it (`[cells.<class>] policy`): one a deployment
-//! registers ([`gdl::CellPolicies`]), or gdl's `home_first` or
+//! The pool policy a chooser picks a class's pools by, by the name the
+//! placement gives it (`[pools.<class>] policy`): one a deployment
+//! registers ([`gdl::PoolPolicies`]), or gdl's `home_first` or
 //! `round_robin`.
 
 use std::sync::Arc;
 
 use gdl::__runtime::ErasedPolicy;
-use gdl::{CellPolicies, Error, ErrorKind, HomeFirstAt, Result};
-use gdl_model::{CellPolicy, Layout};
+use gdl::{Error, ErrorKind, HomeFirstAt, PoolPolicies, Result};
+use gdl_model::{Layout, PoolPolicy};
 
-/// The cell policy the placement names for `class`, with its name, from
+/// The pool policy the placement names for `class`, with its name, from
 /// `policies` or gdl's own, `home_first` as configured; refused, naming
 /// the policy and the class, when neither has it.
 pub(crate) fn of(
     layout: &Layout,
     class: &str,
-    policies: &CellPolicies,
+    policies: &PoolPolicies,
     home_first: HomeFirstAt,
 ) -> Result<(Arc<str>, Arc<dyn ErasedPolicy>)> {
     let default;
-    let policy = match layout.cell_policy(class) {
+    let policy = match layout.pool_policy(class) {
         Some(policy) => policy,
         None => {
-            default = CellPolicy::default();
+            default = PoolPolicy::default();
             &default
         }
     };
@@ -34,7 +34,7 @@ pub(crate) fn of(
             Err(Error::new(
                 ErrorKind::Placement,
                 format!(
-                    "`[cells.{class}] policy = \"{name}\"`, but nothing registers a cell policy of that name and gdl has none; the policies are {}",
+                    "`[pools.{class}] policy = \"{name}\"`, but nothing registers a pool policy of that name and gdl has none; the policies are {}",
                     known.join(", ")
                 ),
             ))
@@ -44,32 +44,32 @@ pub(crate) fn of(
 
 #[cfg(test)]
 mod tests {
-    use gdl::{Cell, CellRequest, Encoded};
+    use gdl::{Encoded, Pool, PoolRequest};
 
     use super::*;
 
-    /// Takes the last cell, whatever it is.
+    /// Takes the last pool, whatever it is.
     struct Last;
 
-    impl gdl::CellPolicy for Last {
+    impl gdl::PoolPolicy for Last {
         type Head = Encoded;
 
         fn choose(
             &self,
-            _: CellRequest<'_, Encoded>,
-            cells: &[Cell],
-        ) -> Result<gdl::CellChoice, gdl::NoCell> {
-            cells
+            _: PoolRequest<'_, Encoded>,
+            pools: &[Pool],
+        ) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            pools
                 .len()
                 .checked_sub(1)
-                .map(gdl::CellChoice::new)
-                .ok_or_else(gdl::NoCell::new)
+                .map(gdl::PoolChoice::new)
+                .ok_or_else(gdl::NoPool::new)
         }
     }
 
     fn layout_under(policy: Option<&str>) -> Layout {
         let manifest = gdl_model::Manifest {
-            name: "cells".into(),
+            name: "pools".into(),
             schema: 1,
             nodes: vec![
                 gdl_model::NodeInfo {
@@ -98,9 +98,9 @@ mod tests {
             .class("global", ["a"])
             .class("model_x", ["d"]);
         if let Some(policy) = policy {
-            placement = placement.cell_policy(
+            placement = placement.pool_policy(
                 "model_x",
-                CellPolicy {
+                PoolPolicy {
                     policy: policy.into(),
                 },
             );
@@ -113,7 +113,7 @@ mod tests {
     /// class.
     #[test]
     fn a_placement_names_a_policy_that_is_registered_or_gdls_own() {
-        let none = CellPolicies::new();
+        let none = PoolPolicies::new();
         for (policy, name) in [
             (None, "round_robin"),
             (Some("round_robin"), "round_robin"),
@@ -139,20 +139,20 @@ mod tests {
         );
         assert!(message.contains("model_x"), "{message}");
         assert_eq!(error.kind(), ErrorKind::Placement);
-        let mut policies = CellPolicies::new();
+        let mut policies = PoolPolicies::new();
         policies.add("last", Last).expect("registered");
         let (found, policy) =
             of(&layout, "model_x", &policies, HomeFirstAt::DEFAULT).expect("registered");
         assert_eq!(&*found, "last");
-        let cells = [
-            Cell::new("model_x", "m1", "r", gdl::CellState::Ready).with_entries(1),
-            Cell::new("model_x", "m2", "r", gdl::CellState::Ready).with_entries(1),
+        let pools = [
+            Pool::new("model_x", "m1", "r", gdl::PoolState::Ready).with_entries(1),
+            Pool::new("model_x", "m2", "r", gdl::PoolState::Ready).with_entries(1),
         ];
         let cx = gdl::Cx::new();
-        let request = CellRequest::new(&cx, &(), "r", tokio::time::Instant::now());
+        let request = PoolRequest::new(&cx, &(), "r", tokio::time::Instant::now());
         assert_eq!(
             policy
-                .choose(request, Default::default(), &cells)
+                .choose(request, Default::default(), &pools)
                 .expect("no head to read")
                 .map(|choice| choice.at()),
             Ok(1)

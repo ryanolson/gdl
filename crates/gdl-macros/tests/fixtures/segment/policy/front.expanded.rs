@@ -10,7 +10,7 @@ pub use ::policy_contract as contract;
 pub const SEGMENT: &str = "front";
 
 /// Every segment of the placement. An instance waits for all of them,
-/// or, in a cell, only for those of its class.
+/// or, in a pool, only for those of its class.
 pub const SEGMENTS: &[&str] = &["front", "model"];
 
 /// The placement this crate was generated for.
@@ -26,7 +26,7 @@ segments = ["front"]
 [class.model]
 segments = ["model"]
 
-[cells.model]
+[pools.model]
 policy = "by_model"
 "#;
 
@@ -76,11 +76,11 @@ pub struct Settings {
     #[serde(default)]
     node: NodeSettings,
     #[serde(default)]
-    cell_policy: std::collections::BTreeMap<String, toml::Table>,
+    pool_policy: std::collections::BTreeMap<String, toml::Table>,
 }
 
 impl gdl_runtime::Hosted for Settings {
-    const KEYS: &'static [&'static str] = &["node", "cell_policy"];
+    const KEYS: &'static [&'static str] = &["node", "pool_policy"];
     const NAMES: &'static [&'static str] = &[];
 }
 
@@ -106,24 +106,24 @@ impl gdl_runtime::SegmentBinary for Binary {
     ) -> Result<Nodes, gdl_runtime::Failure> {
         let Settings {
             node,
-            mut cell_policy,
+            mut pool_policy,
         } = settings;
         let NodeSettings {} = node;
         let nodes = Nodes {};
         let policies: &[&str] = &["by_model"];
-        if let Some(unknown) = cell_policy
+        if let Some(unknown) = pool_policy
             .keys()
             .find(|key| !policies.contains(&key.as_str()))
         {
             return Err(format!(
-                "[cell_policy.{unknown}]: this segment chooses cells by no policy of that name"
+                "[pool_policy.{unknown}]: this segment chooses pools by no policy of that name"
             )
             .into());
         }
         builder
-            .build_cell_policy::<::policy_router::ByModel>(
+            .build_pool_policy::<::policy_router::ByModel>(
                 "by_model",
-                cell_policy.remove("by_model"),
+                pool_policy.remove("by_model"),
             )
             .await?;
         Ok(nodes)

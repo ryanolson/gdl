@@ -1,5 +1,5 @@
-//! A segment instance's link to its cell's hub's record service: each
-//! request from a [`gdl::CellRecords`] goes to the hub's `gdl-keyed`
+//! A segment instance's link to its pool's hub's record service: each
+//! request from a [`gdl::PoolRecords`] goes to the hub's `gdl-keyed`
 //! route, with the instance's own credential. `gdl` keeps its own types
 //! for the operations and answers, since the wire types live in
 //! `gdl-watch`, which links velo, and a node crate must build without it;
@@ -51,7 +51,7 @@ impl RecordLink for KeyedLink {
                     .map_err(|error: ClientError| {
                         Error::new(
                             ErrorKind::Transport,
-                            format!("the cell's hub did not take a record request: {error}"),
+                            format!("the pool's hub did not take a record request: {error}"),
                         )
                     })?;
             Ok(RecordReply {

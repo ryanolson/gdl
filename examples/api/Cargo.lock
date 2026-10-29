@@ -343,10 +343,10 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "futures",
- "gdl-cells",
  "gdl-macros",
  "gdl-message",
  "gdl-model",
+ "gdl-pools",
  "pin-project-lite",
  "prometheus",
  "rmp-serde",
@@ -356,18 +356,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "gdl-cells"
-version = "0.1.0"
-dependencies = [
- "futures",
- "gdl-model",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -399,6 +387,18 @@ dependencies = [
  "serde",
  "serde_path_to_error",
  "toml",
+]
+
+[[package]]
+name = "gdl-pools"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gdl-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

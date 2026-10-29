@@ -55,7 +55,7 @@ fn spec(router: &Path) -> gdl_gen::Spec {
         .expect("spec")
         .parse()
         .expect("spec table");
-    text["cell_policy"]["by_model"]["path"] = toml::Value::String(router.display().to_string());
+    text["pool_policy"]["by_model"]["path"] = toml::Value::String(router.display().to_string());
     let graph = std::fs::read_to_string(fixture().join("policy.gdl")).expect("graph");
     gdl_gen::Spec::from_text(
         &toml::to_string(&text).expect("spec text"),
@@ -65,18 +65,18 @@ fn spec(router: &Path) -> gdl_gen::Spec {
     .expect("spec")
 }
 
-/// A trait of the same name does not make a type a gdl cell policy.
+/// A trait of the same name does not make a type a gdl pool policy.
 #[test]
-fn check_refuses_an_unrelated_trait_named_cell_policy() {
+fn check_refuses_an_unrelated_trait_named_pool_policy() {
     let router = router(
         r#"
-pub trait CellPolicy {
+pub trait PoolPolicy {
     type Head;
 }
 
 pub struct ByModel;
 
-impl CellPolicy for ByModel {
+impl PoolPolicy for ByModel {
     type Head = gdl::Encoded;
 }
 
@@ -94,7 +94,7 @@ impl gdl::Build for ByModel {
     let checked = gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read);
     assert!(
         checked.is_err(),
-        "check accepts policy_router::ByModel, which implements a local CellPolicy trait but does not implement gdl::CellPolicy"
+        "check accepts policy_router::ByModel, which implements a local PoolPolicy trait but does not implement gdl::PoolPolicy"
     );
 }
 
@@ -103,11 +103,11 @@ fn unit_case() -> (tempfile::TempDir, String, String) {
         r#"
 pub struct ByModel;
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ();
 
-    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, ()>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 
@@ -148,7 +148,7 @@ impl gdl::Sink for Model {
         .expect("spec table");
     let path = toml::Value::String(router.path().display().to_string());
     text["nodes"]["crates"] = vec![path.clone()].into();
-    text["cell_policy"]["by_model"]["path"] = path;
+    text["pool_policy"]["by_model"]["path"] = path;
     let graph = std::fs::read_to_string(fixture().join("policy.gdl"))
         .expect("graph")
         .replace("Ask", "()");
@@ -160,7 +160,7 @@ impl gdl::Sink for Model {
 fn check_accepts_a_unit_request_without_a_policy_binding() {
     let (_router, text, graph) = unit_case();
     let mut text: toml::Table = text.parse().expect("spec table");
-    text.remove("cell_policy");
+    text.remove("pool_policy");
     let spec = gdl_gen::Spec::from_text(
         &toml::to_string(&text).expect("spec text"),
         &graph,
@@ -177,7 +177,7 @@ fn check_accepts_a_bound_policy_for_a_unit_request() {
     let (_router, text, graph) = unit_case();
     let spec = gdl_gen::Spec::from_text(&text, &graph, &fixture()).expect("spec");
     gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
-        .expect("a nongeneric public CellPolicy<Head = ()> can be bound for a unit request");
+        .expect("a nongeneric public PoolPolicy<Head = ()> can be bound for a unit request");
 }
 
 fn entry_case(policy: &str) -> (tempfile::TempDir, gdl_gen::Spec) {
@@ -248,10 +248,10 @@ impl gdl::Build for ByModel {
     async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> { Ok(Self) }
 }
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = gdl::Encoded;
-    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 "#,
@@ -267,17 +267,17 @@ impl gdl::CellPolicy for ByModel {
         toml::Table::from_iter([("front".into(), "policy_router::Server".into())]).into(),
     );
     text["segment"]["front"]["nodes"] = vec![toml::Value::String("front".into())].into();
-    text["cells"]["model"]["policy"] = policy.into();
-    let table = text["cell_policy"]
+    text["pools"]["model"]["policy"] = policy.into();
+    let table = text["pool_policy"]
         .as_table_mut()
         .expect("policy table")
         .remove("by_model")
         .expect("binding");
-    text["cell_policy"]
+    text["pool_policy"]
         .as_table_mut()
         .expect("policy table")
         .insert(policy.into(), table);
-    text["cell_policy"][policy]["path"] = path;
+    text["pool_policy"][policy]["path"] = path;
     text.insert(
         "entry".into(),
         toml::Table::from_iter([(
@@ -313,7 +313,7 @@ fn check_accepts_a_policy_named_apart_from_entry_adapters() {
         .expect("the entry adapter and policy have different build names");
 }
 
-/// The entry adapter's graph config must not be given to a cell policy.
+/// The entry adapter's graph config must not be given to a pool policy.
 /// Building the generated binary takes seconds on a warm target.
 #[test]
 fn check_refuses_a_policy_named_for_an_entry_adapter() {
@@ -369,7 +369,7 @@ fn check_refuses_a_policy_named_for_an_entry_adapter() {
     }
     assert!(
         checked.is_err(),
-        "check accepts a cell policy and a service entry adapter with the same build name; the adapter's suffix is injected into the policy's config"
+        "check accepts a pool policy and a service entry adapter with the same build name; the adapter's suffix is injected into the policy's config"
     );
 }
 
@@ -377,18 +377,18 @@ fn check_refuses_a_policy_named_for_an_entry_adapter() {
 #[test]
 fn check_accepts_a_policy_imported_from_its_parent() {
     let source = r#"
-use gdl::CellPolicy;
+use gdl::PoolPolicy;
 
 mod implementation {
-    use super::CellPolicy;
+    use super::PoolPolicy;
 
     pub struct ByModel;
 
-    impl CellPolicy for ByModel {
+    impl PoolPolicy for ByModel {
         type Head = gdl::Encoded;
 
-        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 
@@ -404,7 +404,7 @@ mod implementation {
 
 pub use implementation::ByModel;
 "#;
-    let direct = router(&source.replace("use super::CellPolicy;", "use gdl::CellPolicy;"));
+    let direct = router(&source.replace("use super::PoolPolicy;", "use gdl::PoolPolicy;"));
     gdl_gen::check(
         &spec(direct.path()),
         &target("gdl-gen-tests"),
@@ -418,7 +418,7 @@ pub use implementation::ByModel;
         &target("gdl-gen-tests"),
         gdl_gen::Offers::Read,
     )
-    .expect("the public policy implements gdl::CellPolicy through a parent import");
+    .expect("the public policy implements gdl::PoolPolicy through a parent import");
 }
 
 /// A local module can shadow gdl in a glob without implementing gdl's trait.
@@ -428,7 +428,7 @@ fn check_refuses_a_policy_from_a_shadowed_gdl_glob() {
     let router = router(
         r#"
 mod gdl {
-    pub trait CellPolicy {
+    pub trait PoolPolicy {
         type Head;
     }
 }
@@ -437,7 +437,7 @@ use gdl::*;
 
 pub struct ByModel;
 
-impl CellPolicy for ByModel {
+impl PoolPolicy for ByModel {
     type Head = ::gdl::Encoded;
 }
 
@@ -472,21 +472,21 @@ impl ::gdl::Build for ByModel {
         let stderr = String::from_utf8_lossy(&compiled.stderr);
         assert!(!compiled.status.success(), "{stderr}");
         assert!(
-            stderr.contains("E0277") && stderr.contains("CellPolicy") && stderr.contains("ByModel"),
+            stderr.contains("E0277") && stderr.contains("PoolPolicy") && stderr.contains("ByModel"),
             "{stderr}"
         );
         eprintln!("generated chooser: {stderr}");
     }
     assert!(
         checked.is_err(),
-        "check accepts a local trait imported through a module named gdl; the generated chooser cannot register ByModel as gdl::CellPolicy"
+        "check accepts a local trait imported through a module named gdl; the generated chooser cannot register ByModel as gdl::PoolPolicy"
     );
 }
 
 #[test]
 fn check_accepts_a_policy_imported_by_a_parent_alias() {
     let source = r#"
-use gdl::CellPolicy as Routing;
+use gdl::PoolPolicy as Routing;
 
 mod implementation {
     use super::Routing;
@@ -496,8 +496,8 @@ mod implementation {
     impl Routing for ByModel {
         type Head = gdl::Encoded;
 
-        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-            Err(gdl::NoCell::new())
+        fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
         }
     }
 
@@ -513,7 +513,7 @@ mod implementation {
 
 pub use implementation::ByModel;
 "#;
-    let direct = router(&source.replace("use super::Routing;", "use gdl::CellPolicy as Routing;"));
+    let direct = router(&source.replace("use super::Routing;", "use gdl::PoolPolicy as Routing;"));
     gdl_gen::check(
         &spec(direct.path()),
         &target("gdl-gen-tests"),
@@ -535,7 +535,7 @@ fn check_refuses_a_shadowed_gdl_after_an_external_glob() {
     let source = r#"
 mod facade {
     pub mod gdl {
-        pub trait CellPolicy {
+        pub trait PoolPolicy {
             type Head;
         }
     }
@@ -546,7 +546,7 @@ use facade::*;
 
 pub struct ByModel;
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ::gdl::Encoded;
 }
 
@@ -589,7 +589,7 @@ impl ::gdl::Build for ByModel {
         let stderr = String::from_utf8_lossy(&compiled.stderr);
         assert!(!compiled.status.success(), "{stderr}");
         assert!(
-            stderr.contains("E0277") && stderr.contains("CellPolicy") && stderr.contains("ByModel"),
+            stderr.contains("E0277") && stderr.contains("PoolPolicy") && stderr.contains("ByModel"),
             "{stderr}"
         );
         eprintln!("generated chooser: {stderr}");
@@ -639,7 +639,7 @@ fn dependency_rename(names_trait: bool) -> tempfile::TempDir {
     .expect("facade manifest");
     std::fs::write(
         facade.join("src/lib.rs"),
-        "pub use gdl::CellPolicy as Routing;\n",
+        "pub use gdl::PoolPolicy as Routing;\n",
     )
     .expect("facade source");
     let manifest_path = router.path().join("Cargo.toml");
@@ -661,13 +661,13 @@ fn dependency_rename(names_trait: bool) -> tempfile::TempDir {
     .expect("manifest");
     let source = source
         .replace(
-            "Build, Cell, CellChoice, CellPolicy, CellRequest",
-            "Build, Cell, CellChoice, CellRequest",
+            "Build, Pool, PoolChoice, PoolPolicy, PoolRequest",
+            "Build, Pool, PoolChoice, PoolRequest",
         )
-        .replace("impl CellPolicy for", "impl Routing for");
+        .replace("impl PoolPolicy for", "impl Routing for");
     let source = format!("use policy_facade::Routing;\n{source}").replace("//!", "//");
     let source = match names_trait {
-        true => format!("use gdl::CellPolicy;\n{source}"),
+        true => format!("use gdl::PoolPolicy;\n{source}"),
         false => source,
     };
     std::fs::write(router.path().join("src/lib.rs"), source).expect("policy source");
@@ -676,14 +676,14 @@ fn dependency_rename(names_trait: bool) -> tempfile::TempDir {
 }
 
 #[test]
-fn check_accepts_a_dependency_trait_alias_when_cell_policy_is_also_named() {
+fn check_accepts_a_dependency_trait_alias_when_pool_policy_is_also_named() {
     let router = dependency_rename(true);
     gdl_gen::check(
         &spec(router.path()),
         &target("gdl-gen-tests"),
         gdl_gen::Offers::Read,
     )
-    .expect("the resolver follows a dependency's rename when CellPolicy is also named");
+    .expect("the resolver follows a dependency's rename when PoolPolicy is also named");
 }
 
 #[test]
@@ -694,7 +694,7 @@ fn check_accepts_a_policy_trait_renamed_by_a_dependency() {
         &target("gdl-gen-tests"),
         gdl_gen::Offers::Read,
     )
-    .expect("removing an unused import keeps the same gdl::CellPolicy implementation");
+    .expect("removing an unused import keeps the same gdl::PoolPolicy implementation");
 }
 
 fn unrelated_dependency(padding: usize) -> tempfile::TempDir {
@@ -747,7 +747,7 @@ fn check_accepts_a_policy_with_an_unrelated_dependency_trait() {
         &target("gdl-gen-tests"),
         gdl_gen::Offers::Read,
     )
-    .expect("the helper's trait is unrelated to the cell policy");
+    .expect("the helper's trait is unrelated to the pool policy");
 }
 
 #[test]
@@ -773,7 +773,7 @@ fn check_refuses_a_dependency_that_shadows_the_gdl_crate() {
     .expect("the real policy works with the unrelated dependency");
     std::fs::write(
         router.path().join("helper/src/lib.rs"),
-        "pub trait CellPolicy { type Head; }\n",
+        "pub trait PoolPolicy { type Head; }\n",
     )
     .expect("unrelated trait");
     std::fs::write(
@@ -783,7 +783,7 @@ use policy_helper as gdl;
 
 pub struct ByModel;
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ::gdl::Encoded;
 }
 
@@ -820,14 +820,14 @@ impl ::gdl::Build for ByModel {
         let stderr = String::from_utf8_lossy(&compiled.stderr);
         assert!(!compiled.status.success(), "{stderr}");
         assert!(
-            stderr.contains("E0277") && stderr.contains("CellPolicy") && stderr.contains("ByModel"),
+            stderr.contains("E0277") && stderr.contains("PoolPolicy") && stderr.contains("ByModel"),
             "{stderr}"
         );
         eprintln!("generated chooser: {stderr}");
     }
     assert!(
         checked.is_err(),
-        "check accepts policy_helper::CellPolicy as gdl::CellPolicy after the dependency gate skips the explicit import that shadows gdl"
+        "check accepts policy_helper::PoolPolicy as gdl::PoolPolicy after the dependency gate skips the explicit import that shadows gdl"
     );
 }
 
@@ -844,26 +844,26 @@ fn check_accepts_a_policy_when_a_shadowing_trait_is_disabled() {
     )
     .expect("the policy implements gdl's trait");
 
-    let source = format!("{source}\n#[cfg(any())]\npub trait CellPolicy {{}}\n");
+    let source = format!("{source}\n#[cfg(any())]\npub trait PoolPolicy {{}}\n");
     let router = router(&source);
     gdl_gen::check(
         &spec(router.path()),
         &target("gdl-gen-tests"),
         gdl_gen::Offers::Read,
     )
-    .expect("a cfg-disabled trait cannot hide the imported gdl::CellPolicy");
+    .expect("a cfg-disabled trait cannot hide the imported gdl::PoolPolicy");
 }
 
 /// A name `gdl` that a crate without gdl binds hides the gdl crate.
 /// The reader does not enter such a crate, so it cannot see that binding:
 /// a documented limitation, kept here as its failing case.
 #[test]
-#[ignore = "known limitation: a `gdl` that a module of a crate without gdl binds is not seen (\"The reader finds a cell policy only where it can follow the trait's path\" in docs/src/operations/limitations.md)"]
+#[ignore = "known limitation: a `gdl` that a module of a crate without gdl binds is not seen (\"The reader finds a pool policy only where it can follow the trait's path\" in docs/src/operations/limitations.md)"]
 fn check_refuses_a_dependency_module_import_that_shadows_gdl() {
     let router = unrelated_dependency(0);
     std::fs::write(
         router.path().join("helper/src/lib.rs"),
-        "pub mod routing { pub trait CellPolicy { type Head; } }\n",
+        "pub mod routing { pub trait PoolPolicy { type Head; } }\n",
     )
     .expect("unrelated trait");
     std::fs::write(
@@ -873,7 +873,7 @@ use policy_helper::routing as gdl;
 
 pub struct ByModel;
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ::gdl::Encoded;
 }
 
@@ -910,14 +910,14 @@ impl ::gdl::Build for ByModel {
         let stderr = String::from_utf8_lossy(&compiled.stderr);
         assert!(!compiled.status.success(), "{stderr}");
         assert!(
-            stderr.contains("E0277") && stderr.contains("CellPolicy") && stderr.contains("ByModel"),
+            stderr.contains("E0277") && stderr.contains("PoolPolicy") && stderr.contains("ByModel"),
             "{stderr}"
         );
         eprintln!("generated chooser: {stderr}");
     }
     assert!(
         checked.is_err(),
-        "check accepts policy_helper::routing::CellPolicy as gdl::CellPolicy when a qualified import shadows gdl"
+        "check accepts policy_helper::routing::PoolPolicy as gdl::PoolPolicy when a qualified import shadows gdl"
     );
 }
 
@@ -925,12 +925,12 @@ impl ::gdl::Build for ByModel {
 /// The reader does not enter such a crate, so it cannot see that binding:
 /// a documented limitation, kept here as its failing case.
 #[test]
-#[ignore = "known limitation: a `gdl` that a glob of a crate without gdl binds is not seen (\"The reader finds a cell policy only where it can follow the trait's path\" in docs/src/operations/limitations.md)"]
+#[ignore = "known limitation: a `gdl` that a glob of a crate without gdl binds is not seen (\"The reader finds a pool policy only where it can follow the trait's path\" in docs/src/operations/limitations.md)"]
 fn check_refuses_a_dependency_glob_that_shadows_gdl() {
     let router = unrelated_dependency(0);
     std::fs::write(
         router.path().join("helper/src/lib.rs"),
-        "pub mod gdl { pub trait CellPolicy { type Head; } }\n",
+        "pub mod gdl { pub trait PoolPolicy { type Head; } }\n",
     )
     .expect("unrelated trait");
     std::fs::write(
@@ -940,7 +940,7 @@ use policy_helper::*;
 
 pub struct ByModel;
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ::gdl::Encoded;
 }
 
@@ -977,14 +977,14 @@ impl ::gdl::Build for ByModel {
         let stderr = String::from_utf8_lossy(&compiled.stderr);
         assert!(!compiled.status.success(), "{stderr}");
         assert!(
-            stderr.contains("E0277") && stderr.contains("CellPolicy") && stderr.contains("ByModel"),
+            stderr.contains("E0277") && stderr.contains("PoolPolicy") && stderr.contains("ByModel"),
             "{stderr}"
         );
         eprintln!("generated chooser: {stderr}");
     }
     assert!(
         checked.is_err(),
-        "check ignores the gdl module imported by an unrelated dependency's glob and accepts the unrelated CellPolicy trait"
+        "check ignores the gdl module imported by an unrelated dependency's glob and accepts the unrelated PoolPolicy trait"
     );
 }
 
@@ -1029,11 +1029,11 @@ impl gdl::Build for ByModel {{
 fn check_refuses_a_policy_that_reads_another_message() {
     let refused = head_check(
         r#"
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = policy_messages::Answer;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 "#,
@@ -1059,11 +1059,11 @@ pub struct Ask {
     pub model: String,
 }
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = Ask;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 "#,
@@ -1079,11 +1079,11 @@ impl gdl::CellPolicy for ByModel {
 fn check_refuses_a_policy_that_reads_unit_where_a_message_crosses() {
     let refused = head_check(
         r#"
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = ();
 
-    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, ()>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 "#,
@@ -1106,11 +1106,11 @@ pub struct Part {{
     pub text: String,
 }}
 
-impl gdl::CellPolicy for ByModel {{
+impl gdl::PoolPolicy for ByModel {{
     type Head = gdl::Projected<Part>;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {{
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {{
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }}
 }}
 "#
@@ -1136,11 +1136,11 @@ impl gdl::CellPolicy for ByModel {{
 fn check_accepts_an_encoded_head_on_any_edge() {
     if let Some(refused) = head_check(
         r#"
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = gdl::Encoded;
 
-    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 "#,
@@ -1178,11 +1178,11 @@ impl gdl::Build for ByModel {
     }
 }
 
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = gdl::Projected<Part>;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
     }
 }
 
@@ -1215,7 +1215,7 @@ impl gdl::Sink for Model {
     let path = toml::Value::String(router.path().display().to_string());
     text["messages"]["crates"] = vec![toml::Value::String("messages".into()), path.clone()].into();
     text["nodes"]["crates"] = vec![path.clone()].into();
-    text["cell_policy"]["by_model"]["path"] = path;
+    text["pool_policy"]["by_model"]["path"] = path;
     let graph = std::fs::read_to_string(fixture().join("policy.gdl"))
         .expect("graph")
         .replace("Ask", "Packed");
@@ -1252,15 +1252,15 @@ impl gdl::Build for ByModel {
 }
 
 #[cfg(feature = "matching")]
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = policy_messages::Ask;
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> { Err(gdl::NoCell::new()) }
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> { Err(gdl::NoPool::new()) }
 }
 
 #[cfg(not(feature = "matching"))]
-impl gdl::CellPolicy for ByModel {
+impl gdl::PoolPolicy for ByModel {
     type Head = policy_messages::Answer;
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> { Err(gdl::NoCell::new()) }
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> { Err(gdl::NoPool::new()) }
 }
 "#,
     );
@@ -1353,7 +1353,7 @@ fn main() {
         .parse()
         .expect("spec table");
     text["nodes"]["crates"] = vec![path(nodes.path().to_path_buf())].into();
-    text["cell_policy"]["by_model"]["path"] = path(router.path().to_path_buf());
+    text["pool_policy"]["by_model"]["path"] = path(router.path().to_path_buf());
     text["segment"]["front"]["nodes"] = vec![
         toml::Value::String("Front".into()),
         toml::Value::String("Stamp".into()),

@@ -75,7 +75,7 @@ impl MetricKind {
 }
 
 /// The metrics the runtime records for each segment, those a chooser
-/// records of its offers to cells, the writes to a cell hub's record
+/// records of its offers to pools, the writes to a pool hub's record
 /// tables, and dynamo's `request_duration_seconds`,
 /// which it reserves. A node's own metrics may not take these names: they
 /// would collide in the registry, or, for the reserved one, a dashboard
@@ -97,9 +97,9 @@ pub const RUNTIME_METRICS: [&str; 20] = [
     "end_to_end_time_to_first_item_seconds",
     "end_to_end_duration_seconds",
     "uptime_seconds",
-    "cell_offers_total",
-    "cell_failovers_total",
-    "cell_record_writes_total",
+    "pool_offers_total",
+    "pool_failovers_total",
+    "pool_record_writes_total",
     "request_duration_seconds",
 ];
 

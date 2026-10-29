@@ -1,24 +1,24 @@
-//! The model index a chooser keeps for each class it sends to: every cell
-//! its hub lists, followed or not, with each model's state, the cell's
+//! The model index a chooser keeps for each class it sends to: every pool
+//! its hub lists, followed or not, with each model's state, the pool's
 //! condition, and whether this chooser offers it work. A node reads it
-//! with `ClassCells::models`, and a cell policy with
-//! `CellRequest::models`, from the same table as the cells. Until the
+//! with `ClassPools::models`, and a pool policy with
+//! `PoolRequest::models`, from the same table as the pools. Until the
 //! hub's snapshot says its listings are whole, the index is not synced,
-//! so a reader tells a model not known yet from one no cell lists.
+//! so a reader tells a model not known yet from one no pool lists.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl::{CellCondition, CellState, FollowedCells, ModelState};
-use gdl_cells::{LoadSummary, ModelEntry};
+use gdl::{FollowedPools, ModelState, PoolCondition, PoolState};
+use gdl_pools::{LoadSummary, ModelEntry};
 use gdl_watch::{FollowEvent, Listing, ModelList};
 use tokio::time::Instant;
 
-use super::super::Cells;
+use super::super::Pools;
 use super::{M1, M2, follow, follower};
 use crate::dist::counting::{counted, counting};
 
-fn listing(condition: CellCondition, models: &[(&str, ModelState)], version: u64) -> Listing {
+fn listing(condition: PoolCondition, models: &[(&str, ModelState)], version: u64) -> Listing {
     Listing {
         region: "eu-west-1".into(),
         condition,
@@ -43,41 +43,41 @@ fn listing(condition: CellCondition, models: &[(&str, ModelState)], version: u64
 fn missing(models: &[(&str, ModelState)], version: u64, age_ms: Option<u64>) -> Listing {
     Listing {
         missing_age_ms: age_ms,
-        ..listing(CellCondition::Missing, models, version)
+        ..listing(PoolCondition::Missing, models, version)
     }
 }
 
-fn listed(cell: &str, listing: Option<Listing>) -> FollowEvent {
+fn listed(pool: &str, listing: Option<Listing>) -> FollowEvent {
     FollowEvent::Listed {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         generation: 0,
         listing,
     }
 }
 
-fn handle(cells: &Cells) -> FollowedCells {
-    let handle = FollowedCells::new();
-    assert!(handle.bind(Arc::new(cells.clone())), "bound once");
+fn handle(pools: &Pools) -> FollowedPools {
+    let handle = FollowedPools::new();
+    assert!(handle.bind(Arc::new(pools.clone())), "bound once");
     handle
 }
 
 /// What a node reads of `model`: whether the index is synced, and each
-/// cell that lists it, with the model's state, the cell's condition, and
+/// pool that lists it, with the model's state, the pool's condition, and
 /// whether it is offered.
 fn sets(
-    node: &FollowedCells,
+    node: &FollowedPools,
     model: &str,
-) -> (bool, Vec<(String, ModelState, CellCondition, bool)>) {
-    node.read("model_x", |cells| {
-        let index = cells.models();
+) -> (bool, Vec<(String, ModelState, PoolCondition, bool)>) {
+    node.read("model_x", |pools| {
+        let index = pools.models();
         let sets = index
             .sets(model, None)
             .unwrap_or_default()
             .iter()
             .map(|set| {
                 (
-                    set.cell().to_string(),
+                    set.pool().to_string(),
                     set.state(),
                     set.condition(),
                     set.is_offered(),
@@ -89,22 +89,22 @@ fn sets(
     .expect("the chooser sends to model_x")
 }
 
-/// A snapshot's listings make the index: a followed cell's from its
+/// A snapshot's listings make the index: a followed pool's from its
 /// follow, another's from its own event, the marker's flag whether it is
 /// synced. Before any snapshot the index is not synced; after one that
-/// says the hub's listings are whole, a model no cell lists is unknown.
+/// says the hub's listings are whole, a model no pool lists is unknown.
 #[test]
 fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
-    let (mut follows, cells, _, _) = follower();
-    let node = handle(&cells);
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
     let now = Instant::now();
     assert_eq!(sets(&node, "qwen-32b"), (false, vec![]), "no snapshot yet");
 
     let mut snapshot = follows.snapshot();
-    let mut first = follow(M1, 1, CellState::Ready);
+    let mut first = follow(M1, 1, PoolState::Ready);
     if let FollowEvent::Follow { listing: shown, .. } = &mut first {
         *shown = Some(listing(
-            CellCondition::Live,
+            PoolCondition::Live,
             &[("qwen-32b", ModelState::Ready)],
             3,
         ));
@@ -114,7 +114,7 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
         listed(
             M2,
             Some(listing(
-                CellCondition::Missing,
+                PoolCondition::Missing,
                 &[
                     ("qwen-32b", ModelState::Ready),
                     ("llama-70b", ModelState::Unavailable),
@@ -131,18 +131,18 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     assert_eq!(
         qwen,
         [
-            (M1.to_string(), ModelState::Ready, CellCondition::Live, true),
+            (M1.to_string(), ModelState::Ready, PoolCondition::Live, true),
             (
                 M2.to_string(),
                 ModelState::Ready,
-                CellCondition::Missing,
+                PoolCondition::Missing,
                 false
             ),
         ]
     );
 
     let mut snapshot = follows.snapshot();
-    snapshot.apply(follow(M1, 1, CellState::Ready), now);
+    snapshot.apply(follow(M1, 1, PoolState::Ready), now);
     snapshot.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(snapshot, now);
     assert_eq!(
@@ -153,13 +153,13 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     assert_eq!(sets(&node, "mistral"), (true, vec![]), "unknown");
 }
 
-/// A model that moves: cell A drains it before cell B is `ready`. The
+/// A model that moves: pool A drains it before pool B is `ready`. The
 /// index shows A's `drained` and B's `starting`, so a gate answers 503,
 /// not 404, through the move.
 #[test]
-fn a_model_that_moves_shows_both_cells() {
-    let (mut follows, cells, _, _) = follower();
-    let node = handle(&cells);
+fn a_model_that_moves_shows_both_pools() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
     let now = Instant::now();
     let mut snapshot = follows.snapshot();
     snapshot.apply(FollowEvent::Synced { listed: true }, now);
@@ -168,7 +168,7 @@ fn a_model_that_moves_shows_both_cells() {
         listed(
             M1,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[("qwen-32b", ModelState::Draining)],
                 2,
             )),
@@ -179,7 +179,7 @@ fn a_model_that_moves_shows_both_cells() {
         listed(
             M1,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[("qwen-32b", ModelState::Drained)],
                 3,
             )),
@@ -190,7 +190,7 @@ fn a_model_that_moves_shows_both_cells() {
         listed(
             M2,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[("qwen-32b", ModelState::Starting)],
                 1,
             )),
@@ -205,13 +205,13 @@ fn a_model_that_moves_shows_both_cells() {
             (
                 M1.to_string(),
                 ModelState::Drained,
-                CellCondition::Live,
+                PoolCondition::Live,
                 false
             ),
             (
                 M2.to_string(),
                 ModelState::Starting,
-                CellCondition::Live,
+                PoolCondition::Live,
                 false
             ),
         ]
@@ -222,30 +222,30 @@ fn a_model_that_moves_shows_both_cells() {
         [(
             M2.to_string(),
             ModelState::Starting,
-            CellCondition::Live,
+            PoolCondition::Live,
             false
         )],
-        "a cell that withdrew is no longer listed"
+        "a pool that withdrew is no longer listed"
     );
 }
 
-/// A missing cell's silence reaches the index as an instant on the
+/// A missing pool's silence reaches the index as an instant on the
 /// chooser's clock: the age the hub sent, dated back from when the
 /// listing arrived, from a snapshot's follow or a `listed` event alike. An
-/// index made later keeps it. A cell that is not missing, and one whose
+/// index made later keeps it. A pool that is not missing, and one whose
 /// hub sent no age, has none.
 #[test]
-fn a_missing_cells_silence_is_dated_back_by_its_age() {
-    let (mut follows, cells, _, _) = follower();
-    let node = handle(&cells);
-    let since = |node: &FollowedCells, cell: &str| {
-        node.read("model_x", |cells| {
-            cells
+fn a_missing_pools_silence_is_dated_back_by_its_age() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let since = |node: &FollowedPools, pool: &str| {
+        node.read("model_x", |pools| {
+            pools
                 .models()
                 .sets("qwen-32b", None)
                 .unwrap_or_default()
                 .iter()
-                .find(|set| set.cell() == cell)
+                .find(|set| set.pool() == pool)
                 .map(|set| (set.condition(), set.missing_since()))
         })
         .expect("the chooser sends to model_x")
@@ -254,7 +254,7 @@ fn a_missing_cells_silence_is_dated_back_by_its_age() {
     let now = Instant::now();
 
     let mut snapshot = follows.snapshot();
-    let mut first = follow(M1, 1, CellState::Ready);
+    let mut first = follow(M1, 1, PoolState::Ready);
     if let FollowEvent::Follow { listing: shown, .. } = &mut first {
         *shown = Some(missing(&qwen, 3, Some(12_000)));
     }
@@ -265,12 +265,12 @@ fn a_missing_cells_silence_is_dated_back_by_its_age() {
     let lapsed = now - Duration::from_secs(12);
     assert_eq!(
         since(&node, M1),
-        Some((CellCondition::Missing, Some(lapsed))),
+        Some((PoolCondition::Missing, Some(lapsed))),
         "silent for 12 s when the snapshot came"
     );
     assert_eq!(
         since(&node, M2),
-        Some((CellCondition::Missing, None)),
+        Some((PoolCondition::Missing, None)),
         "a hub that sent no age"
     );
 
@@ -279,14 +279,14 @@ fn a_missing_cells_silence_is_dated_back_by_its_age() {
     follows.apply(listed(M2, Some(missing(&qwen, 1, Some(3_000)))), later);
     assert_eq!(
         since(&node, M2),
-        Some((CellCondition::Missing, Some(later - Duration::from_secs(3))))
+        Some((PoolCondition::Missing, Some(later - Duration::from_secs(3))))
     );
 
     // An index made a minute on, for a change of offer, keeps the instant.
     follows.apply(
         FollowEvent::Offering {
             class: "model_x".into(),
-            cell: M1.into(),
+            pool: M1.into(),
             generation: 1,
             revision: 2,
             offered: false,
@@ -295,37 +295,37 @@ fn a_missing_cells_silence_is_dated_back_by_its_age() {
     );
     assert_eq!(
         since(&node, M1),
-        Some((CellCondition::Missing, Some(lapsed)))
+        Some((PoolCondition::Missing, Some(lapsed)))
     );
 
     // Live again: no silence.
     follows.apply(
-        listed(M1, Some(listing(CellCondition::Live, &qwen, 4))),
+        listed(M1, Some(listing(PoolCondition::Live, &qwen, 4))),
         later,
     );
-    assert_eq!(since(&node, M1), Some((CellCondition::Live, None)));
+    assert_eq!(since(&node, M1), Some((PoolCondition::Live, None)));
 }
 
 /// The index is made again when what it lists or what the chooser offers
-/// changes, not when a cell's summary does, which a table is stored for
-/// every period; a cell policy reads the same index as a node.
+/// changes, not when a pool's summary does, which a table is stored for
+/// every period; a pool policy reads the same index as a node.
 #[test]
 fn the_index_is_made_again_only_when_it_may_have_changed() {
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
-    follows.apply(follow(M1, 1, CellState::Ready), now);
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
     follows.apply(
         listed(
             M1,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[("qwen-32b", ModelState::Ready)],
                 1,
             )),
         ),
         now,
     );
-    let index = || Arc::clone(&cells.table("f").expect("a table").models);
+    let index = || Arc::clone(&pools.table("f").expect("a table").models);
     let before = index();
     assert!(
         before
@@ -335,7 +335,7 @@ fn the_index_is_made_again_only_when_it_may_have_changed() {
     follows.apply(
         FollowEvent::Load {
             class: "model_x".into(),
-            cell: M1.into(),
+            pool: M1.into(),
             generation: 1,
             load: Some(LoadSummary::default()),
         },
@@ -345,7 +345,7 @@ fn the_index_is_made_again_only_when_it_may_have_changed() {
     follows.apply(
         FollowEvent::Offering {
             class: "model_x".into(),
-            cell: M1.into(),
+            pool: M1.into(),
             generation: 1,
             revision: 2,
             offered: false,
@@ -361,18 +361,18 @@ fn the_index_is_made_again_only_when_it_may_have_changed() {
     );
 }
 
-/// A listing the relay sends while the cell is read from a watch of its
+/// A listing the relay sends while the pool is read from a watch of its
 /// own is still applied: no watch of one follow carries one.
 #[test]
-fn a_listing_reaches_a_cell_read_from_its_own_watch() {
-    let (mut follows, cells, _, _) = follower();
-    let node = handle(&cells);
+fn a_listing_reaches_a_pool_read_from_its_own_watch() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
     let now = Instant::now();
-    follows.apply(follow(M1, 1, CellState::Ready), now);
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
     follows.unknown(gdl_watch::UnknownFollowEvent {
         kind: "paused".into(),
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation: 1,
     });
     assert!(!follows.asked().is_empty(), "read from a watch of its own");
@@ -380,7 +380,7 @@ fn a_listing_reaches_a_cell_read_from_its_own_watch() {
         listed(
             M1,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[("qwen-32b", ModelState::Ready)],
                 1,
             )),
@@ -392,7 +392,7 @@ fn a_listing_reaches_a_cell_read_from_its_own_watch() {
         [(
             M1.to_string(),
             ModelState::Ready,
-            CellCondition::Live,
+            PoolCondition::Live,
             false
         )],
         "listed, and not offered while unread"
@@ -402,15 +402,15 @@ fn a_listing_reaches_a_cell_read_from_its_own_watch() {
 /// Looking a model up in the index allocates nothing.
 #[test]
 fn a_model_lookup_allocates_nothing() {
-    let (mut follows, cells, _, _) = follower();
-    let node = handle(&cells);
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
     let now = Instant::now();
-    follows.apply(follow(M1, 1, CellState::Ready), now);
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
     follows.apply(
         listed(
             M1,
             Some(listing(
-                CellCondition::Live,
+                PoolCondition::Live,
                 &[
                     ("qwen-32b", ModelState::Ready),
                     ("llama-70b", ModelState::Starting),
@@ -428,13 +428,13 @@ fn a_model_lookup_allocates_nothing() {
     let mut found = 0;
     for _ in 0..100 {
         found += node
-            .read("model_x", |cells| {
-                let index = cells.models();
+            .read("model_x", |pools| {
+                let index = pools.models();
                 usize::from(
                     index.sets("qwen-32b", None).is_some_and(|sets| {
                         sets.iter().any(|set| {
                             set.is_offered()
-                                && cells.cell(set.cell()).is_some_and(gdl::Cell::takes_work)
+                                && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
                         })
                     }) || index.sets("mistral", None).is_none(),
                 )

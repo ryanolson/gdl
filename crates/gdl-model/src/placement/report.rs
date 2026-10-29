@@ -108,7 +108,7 @@ pub(super) fn hop_lines<B: Borrow<ClassBoundary>>(
     lines
 }
 
-/// The WAN round trips one request adds at a class boundary when the cell
+/// The WAN round trips one request adds at a class boundary when the pool
 /// it is offered to is in another region, between warm peers. The
 /// `gdl.fwd` goes out and the inner end's output opens the outer end's
 /// ticket back, with no attach round trip. A streamed request's items wait

@@ -1,4 +1,4 @@
-//! Where each `[cell]` setting was read from, a file or a `GDL_CELL__*`
+//! Where each `[pool]` setting was read from, a file or a `GDL_POOL__*`
 //! variable, so that a problem with it names that file or that variable,
 //! whether it is found as the settings are read or as the instance
 //! launches against its deployment. Each `GDL_` variable is a provider of
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider, Source};
-use gdl_model::{CellSettings, Origin, Problems, cell_variable};
+use gdl_model::{Origin, PoolSettings, Problems, pool_variable};
 
 use super::{Hosted, KEYS, canonical};
 
@@ -17,7 +17,7 @@ use super::{Hosted, KEYS, canonical};
 /// overrides the files as a whole. Within it each variable is a provider
 /// of its own, so that a value's provenance names its variable; the
 /// variables are merged with each other first, so that one a later one
-/// supersedes (`GDL_CELL__READY=[]` before `GDL_CELL__READY__FRONT=1`)
+/// supersedes (`GDL_POOL__READY=[]` before `GDL_POOL__READY__FRONT=1`)
 /// replaces nothing of a file's beside the later one's key, as within one
 /// provider. figment keeps a layer's own provenance when it is merged.
 pub(super) fn environment<H: Hosted>() -> Figment {
@@ -71,19 +71,19 @@ impl Provider for Variable {
     }
 }
 
-/// The origin of each key of a `[cell]` table, by its path in the table
+/// The origin of each key of a `[pool]` table, by its path in the table
 /// (`ready.e`).
 #[derive(Debug, Clone, Default)]
-pub(super) struct CellOrigins(BTreeMap<String, Origin>);
+pub(super) struct PoolOrigins(BTreeMap<String, Origin>);
 
-impl CellOrigins {
-    /// Read `cell`, the `[cell]` table that `figment` merged, with where each
+impl PoolOrigins {
+    /// Read `pool`, the `[pool]` table that `figment` merged, with where each
     /// of its keys came from. A problem in reading it names its origin.
-    pub(super) fn read(figment: &Figment, cell: Value) -> Result<(CellSettings, Self), Problems> {
+    pub(super) fn read(figment: &Figment, pool: Value) -> Result<(PoolSettings, Self), Problems> {
         let mut origins = BTreeMap::new();
         let mut note = |key: String| {
             let origin = figment
-                .find_metadata(&format!("cell.{key}"))
+                .find_metadata(&format!("pool.{key}"))
                 .and_then(|metadata| match &metadata.source {
                     Some(Source::File(path)) => Some(Origin::File(path.display().to_string())),
                     Some(Source::Custom(source)) if source == VARIABLE => {
@@ -95,7 +95,7 @@ impl CellOrigins {
                 origins.insert(key, origin);
             }
         };
-        if let Some(table) = cell.as_dict() {
+        if let Some(table) = pool.as_dict() {
             for (key, value) in table {
                 if let Some(nested) = value.as_dict() {
                     for inner in nested.keys() {
@@ -106,7 +106,7 @@ impl CellOrigins {
             }
         }
         let origins = Self(origins);
-        let settings = CellSettings::read(&cell).map_err(|problems| origins.locate(problems))?;
+        let settings = PoolSettings::read(&pool).map_err(|problems| origins.locate(problems))?;
         Ok((settings, origins))
     }
 
@@ -130,7 +130,7 @@ impl CellOrigins {
             .filter(|first| files.all(|other| other == *first))
             .cloned();
         let unset = |key: &str| match variables {
-            true => Some(Origin::Variable(cell_variable(key))),
+            true => Some(Origin::Variable(pool_variable(key))),
             false => file.clone(),
         };
         Problems(
@@ -140,7 +140,7 @@ impl CellOrigins {
                 .map(|mut problem| {
                     if problem.origin.is_none() {
                         let path = problem.path();
-                        problem.origin = match path.as_deref().and_then(|p| p.strip_prefix("cell."))
+                        problem.origin = match path.as_deref().and_then(|p| p.strip_prefix("pool."))
                         {
                             Some(key) => self.0.get(key).cloned().or_else(|| unset(key)),
                             None => file.clone(),

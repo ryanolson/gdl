@@ -1,22 +1,22 @@
-//! The model index of one class's cells: for each model and routing key,
-//! every cell of the class whose record lists it, followed or not. A
-//! chooser builds it when what it knows of the class's cells changes, off
+//! The model index of one class's pools: for each model and routing key,
+//! every pool of the class whose record lists it, followed or not. A
+//! chooser builds it when what it knows of the class's pools changes, off
 //! the request path, and a read finds a model by binary search, with no
 //! lock and no allocation.
 
-use gdl_cells::{CellCondition, ModelState};
 use gdl_model::ModelKey;
+use gdl_pools::{ModelState, PoolCondition};
 use tokio::time::Instant;
 
-/// For each model and routing key, the cells of one class that list it.
-/// A chooser's hub learns them from every record of the class in the cell
-/// directory, live, missing, or scaled to 0, until the cell withdraws its
-/// record, and from the follow link of each cell it follows. A node reads
-/// the index with [`ClassCells::models`](crate::ClassCells::models), and a
-/// cell policy with [`CellRequest::models`](crate::CellRequest::models),
-/// from the same table the cells come from.
+/// For each model and routing key, the pools of one class that list it.
+/// A chooser's hub learns them from every record of the class in the pool
+/// directory, live, missing, or scaled to 0, until the pool withdraws its
+/// record, and from the follow link of each pool it follows. A node reads
+/// the index with [`ClassPools::models`](crate::ClassPools::models), and a
+/// pool policy with [`PoolRequest::models`](crate::PoolRequest::models),
+/// from the same table the pools come from.
 ///
-/// Until the hub's watch of the cell directory has completed its first
+/// Until the hub's watch of the pool directory has completed its first
 /// snapshot, the index is not synced ([`ModelIndex::is_synced`]): a model
 /// it does not list may still be listed by a record the hub has not read,
 /// so a gate answers 503, not 404.
@@ -24,9 +24,9 @@ use tokio::time::Instant;
 pub struct ModelIndex {
     synced: bool,
     /// The keys, sorted by model, then routing key, each with the range of
-    /// its cells in `sets`.
+    /// its pools in `sets`.
     keys: Vec<Key>,
-    /// Each key's cells, sorted by cell name.
+    /// Each key's pools, sorted by pool name.
     sets: Vec<ModelSet>,
 }
 
@@ -55,13 +55,13 @@ impl ModelIndex {
         sets: Vec::new(),
     };
 
-    /// The index of `sets`, each a cell that lists a model under its key,
-    /// `synced` once the directory's first snapshot is read. A cell named
+    /// The index of `sets`, each a pool that lists a model under its key,
+    /// `synced` once the directory's first snapshot is read. A pool named
     /// twice under one key is kept once: the first.
     pub fn new(synced: bool, sets: impl IntoIterator<Item = (ModelKey, ModelSet)>) -> Self {
         let mut sets: Vec<(ModelKey, ModelSet)> = sets.into_iter().collect();
-        sets.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.cell.cmp(&y.cell)));
-        sets.dedup_by(|(a, x), (b, y)| a == b && x.cell == y.cell);
+        sets.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.pool.cmp(&y.pool)));
+        sets.dedup_by(|(a, x), (b, y)| a == b && x.pool == y.pool);
         let mut keys: Vec<Key> = Vec::new();
         let mut flat = Vec::with_capacity(sets.len());
         for (key, set) in sets {
@@ -85,16 +85,16 @@ impl ModelIndex {
         }
     }
 
-    /// Whether the chooser's hub had read the cell directory's first
+    /// Whether the chooser's hub had read the pool directory's first
     /// snapshot of the class when the index was built. Before then, a
-    /// model that no cell lists is not known to be unknown.
+    /// model that no pool lists is not known to be unknown.
     #[inline]
     pub fn is_synced(&self) -> bool {
         self.synced
     }
 
-    /// The cells that list `model` under `routing_key`, by name: `None`
-    /// when no cell does. One binary search, no allocation.
+    /// The pools that list `model` under `routing_key`, by name: `None`
+    /// when no pool does. One binary search, no allocation.
     pub fn sets(&self, model: &str, routing_key: Option<&str>) -> Option<&[ModelSet]> {
         let at = self
             .keys
@@ -104,7 +104,7 @@ impl ModelIndex {
         Some(&self.sets[key.start..key.end])
     }
 
-    /// Each model and routing key listed, in order, with its cells.
+    /// Each model and routing key listed, in order, with its pools.
     pub fn models(&self) -> impl Iterator<Item = (&str, Option<&str>, &[ModelSet])> {
         self.keys.iter().map(|key| {
             (
@@ -115,36 +115,36 @@ impl ModelIndex {
         })
     }
 
-    /// Whether no cell lists a model.
+    /// Whether no pool lists a model.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 }
 
-/// One cell that lists a model, in a [`ModelIndex`]: the model's state in
-/// the cell's list, the cell's condition, since when a missing cell has
-/// been silent, and whether the chooser offers the cell work.
+/// One pool that lists a model, in a [`ModelIndex`]: the model's state in
+/// the pool's list, the pool's condition, since when a missing pool has
+/// been silent, and whether the chooser offers the pool work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSet {
-    cell: Box<str>,
+    pool: Box<str>,
     region: Box<str>,
     state: ModelState,
-    condition: CellCondition,
+    condition: PoolCondition,
     missing_since: Option<Instant>,
     offered: bool,
 }
 
 impl ModelSet {
-    /// The cell `cell`, in `region`, whose list gives the model `state`,
+    /// The pool `pool`, in `region`, whose list gives the model `state`,
     /// in `condition`, and not offered.
     pub fn new(
-        cell: impl Into<String>,
+        pool: impl Into<String>,
         region: impl Into<String>,
         state: ModelState,
-        condition: CellCondition,
+        condition: PoolCondition,
     ) -> Self {
         Self {
-            cell: cell.into().into_boxed_str(),
+            pool: pool.into().into_boxed_str(),
             region: region.into().into_boxed_str(),
             state,
             condition,
@@ -165,44 +165,44 @@ impl ModelSet {
         self
     }
 
-    /// The cell, named within its class.
+    /// The pool, named within its class.
     #[inline]
-    pub fn cell(&self) -> &str {
-        &self.cell
+    pub fn pool(&self) -> &str {
+        &self.pool
     }
 
-    /// The region the cell runs in, from its record.
+    /// The region the pool runs in, from its record.
     #[inline]
     pub fn region(&self) -> &str {
         &self.region
     }
 
-    /// The model's state in the cell's list.
+    /// The model's state in the pool's list.
     #[inline]
     pub fn state(&self) -> ModelState {
         self.state
     }
 
-    /// Whether the cell is live, scaled to 0, or missing.
+    /// Whether the pool is live, scaled to 0, or missing.
     #[inline]
-    pub fn condition(&self) -> CellCondition {
+    pub fn condition(&self) -> PoolCondition {
         self.condition
     }
 
-    /// Since when a [`CellCondition::Missing`] cell has been silent, on the
+    /// Since when a [`PoolCondition::Missing`] pool has been silent, on the
     /// chooser's clock: its record's last write when its lease passed, or
     /// the loss of its follow's link, whichever came first, as the
     /// chooser's hub saw it. A reader takes `now` once and subtracts, so a
-    /// gate can say how long a cell has had no heartbeat. `None` for a
-    /// cell that is not missing, and for one whose hub, of an earlier
+    /// gate can say how long a pool has had no heartbeat. `None` for a
+    /// pool that is not missing, and for one whose hub, of an earlier
     /// build, did not say.
     #[inline]
     pub fn missing_since(&self) -> Option<Instant> {
         self.missing_since
     }
 
-    /// Whether the chooser offers the cell work: its hub follows the cell,
-    /// the follow is offered, and the chooser has read it. A cell of
+    /// Whether the chooser offers the pool work: its hub follows the pool,
+    /// the follow is offered, and the chooser has read it. A pool of
     /// another parent, or in a region this chooser may not route to, is
     /// listed and not offered.
     #[inline]
@@ -222,12 +222,12 @@ mod tests {
         }
     }
 
-    fn set(cell: &str, state: ModelState) -> ModelSet {
-        ModelSet::new(cell, "us-east", state, CellCondition::Live)
+    fn set(pool: &str, state: ModelState) -> ModelSet {
+        ModelSet::new(pool, "us-east", state, PoolCondition::Live)
     }
 
-    /// A model is found by its name and routing key, with its cells by
-    /// name; another routing key is another entry, and a model no cell
+    /// A model is found by its name and routing key, with its pools by
+    /// name; another routing key is another entry, and a model no pool
     /// lists is `None`.
     #[test]
     fn a_model_is_found_by_its_key() {
@@ -248,7 +248,7 @@ mod tests {
             ],
         );
         fn names(sets: &[ModelSet]) -> Vec<&str> {
-            sets.iter().map(ModelSet::cell).collect()
+            sets.iter().map(ModelSet::pool).collect()
         }
         let qwen = index.sets("qwen", None).expect("listed");
         assert_eq!(names(qwen), ["model-x-01", "model-x-02"]);

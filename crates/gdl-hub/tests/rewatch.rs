@@ -1,6 +1,6 @@
-//! The follower's watch of the cell directory, when it ends before its
+//! The follower's watch of the pool directory, when it ends before its
 //! snapshot is complete: the next watch's snapshot is the directory as it
-//! is, and a cell only the interrupted one named is not kept. The
+//! is, and a pool only the interrupted one named is not kept. The
 //! directory here is scripted, so that a watch fails exactly where the
 //! test says.
 
@@ -13,15 +13,15 @@ use std::time::Duration;
 use common::{GLOBAL, WAIT, global_default, hub_of, spec, timing};
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, ResumeToken,
+use gdl_hub::PoolTiming;
+use gdl_pools::{
+    DirectoryError, MemoryDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken,
     Withdrawal,
 };
-use gdl_hub::CellTiming;
 use gdl_watch::FollowEvent;
 use tokio::sync::watch;
 
-type Script = Vec<Result<CellEvent, DirectoryError>>;
+type Script = Vec<Result<PoolEvent, DirectoryError>>;
 
 /// A directory whose watches of `model_x` yield the scripts given, one
 /// per watch, each then left open; every other class is a memory
@@ -34,10 +34,10 @@ struct Scripted {
     watches: Arc<watch::Sender<usize>>,
 }
 
-impl CellDirectory for Scripted {
-    type Watch = BoxStream<'static, Result<CellEvent, DirectoryError>>;
+impl PoolDirectory for Scripted {
+    type Watch = BoxStream<'static, Result<PoolEvent, DirectoryError>>;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         self.inner.publish(record).await
     }
 
@@ -68,18 +68,18 @@ impl CellDirectory for Scripted {
 
 /// A watch that names a child of the global and then fails, before its
 /// snapshot is complete, then a watch whose complete snapshot is empty:
-/// the cell was withdrawn meanwhile. The global follows the cell from the first
-/// watch; its link fails, since no hub serves the cell, and once the
+/// the pool was withdrawn meanwhile. The global follows the pool from the first
+/// watch; its link fails, since no hub serves the pool, and once the
 /// second snapshot is in, the global does not follow it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
+async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let refused = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
-    let cell = CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    let pool = PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -89,7 +89,7 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         home: Some(GLOBAL.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub: nowhere,
@@ -100,10 +100,10 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         inner: MemoryDirectory::new(),
         scripts: Arc::new(Mutex::new(VecDeque::from([
             vec![
-                Ok(CellEvent::Current(cell.clone())),
+                Ok(PoolEvent::Current(pool.clone())),
                 Err(DirectoryError::Unavailable("the watch broke".into())),
             ],
-            vec![Ok(CellEvent::Synced {
+            vec![Ok(PoolEvent::Synced {
                 token: ResumeToken::new("model_x", 1),
                 snapshot: true,
             })],
@@ -114,18 +114,18 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
     let (hub, global) = hub_of(
         global_default(),
         directory.clone(),
-        CellTiming {
+        PoolTiming {
             refollow: Duration::from_millis(20),
             ..timing()
         },
     )
     .await;
     let mut relay = global.follows();
-    let key = ("model_x".to_string(), cell.name.clone());
+    let key = ("model_x".to_string(), pool.name.clone());
     let mut following = global.following();
-    tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))
+    tokio::time::timeout(WAIT, following.wait_for(|pools| pools.contains_key(&key)))
         .await
-        .expect("the global follows the cell the first watch named")
+        .expect("the global follows the pool the first watch named")
         .expect("the extension lives");
     tokio::time::timeout(WAIT, watches.wait_for(|watches| *watches >= 2))
         .await
@@ -133,17 +133,17 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         .expect("the directory lives");
     let waited = tokio::time::timeout(WAIT, async {
         following
-            .wait_for(|cells| !cells.contains_key(&key))
+            .wait_for(|pools| !pools.contains_key(&key))
             .await
             .map(|_| ())
     })
     .await;
     assert!(
         waited.is_ok(),
-        "{GLOBAL} still follows the cell: {:?}",
+        "{GLOBAL} still follows the pool: {:?}",
         *following.borrow()
     );
-    // A snapshot that does not hold the cell is no withdrawal: the
+    // A snapshot that does not hold the pool is no withdrawal: the
     // directory may have lost the record for any reason, an expiry
     // included, and silence is never a decommission.
     let withdrawn: Vec<FollowEvent> = std::iter::from_fn(|| relay.next().now_or_never().flatten())
@@ -154,26 +154,26 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
 }
 
 /// A withdrawal the directory's watch shows is relayed, naming the
-/// cell's latest follow: the control for the test above.
+/// pool's latest follow: the control for the test above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawal_the_watch_shows_is_relayed() {
     let directory = MemoryDirectory::new();
-    let cell = record();
+    let pool = record();
     let (hub, global) = hub_of(global_default(), directory.clone(), timing()).await;
     let mut relay = global.follows();
-    let key = ("model_x".to_string(), cell.name.clone());
+    let key = ("model_x".to_string(), pool.name.clone());
     let mut following = global.following();
-    directory.publish(cell.clone()).await.expect("stored");
-    tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))
+    directory.publish(pool.clone()).await.expect("stored");
+    tokio::time::timeout(WAIT, following.wait_for(|pools| pools.contains_key(&key)))
         .await
-        .expect("the global follows the cell")
+        .expect("the global follows the pool")
         .expect("the extension lives");
     directory
         .withdraw(Withdrawal {
-            class: cell.class.clone(),
-            cell: cell.name.clone(),
-            epoch: cell.epoch,
-            seq: cell.seq + 1,
+            class: pool.class.clone(),
+            pool: pool.name.clone(),
+            epoch: pool.epoch,
+            seq: pool.seq + 1,
         })
         .await
         .expect("withdrawn");
@@ -181,11 +181,11 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
         loop {
             if let FollowEvent::Withdrawn {
                 class,
-                cell,
+                pool,
                 generation,
             } = relay.next().await.expect("the relay lives")
             {
-                return (class, cell, generation);
+                return (class, pool, generation);
             }
         }
     })
@@ -195,21 +195,21 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
     // later follow may have begun by then.
     assert_eq!(
         (withdrawn.0.as_str(), withdrawn.1.as_str()),
-        ("model_x", &*cell.name)
+        ("model_x", &*pool.name)
     );
     assert!(withdrawn.2 >= 1, "{withdrawn:?}");
     hub.shutdown().await.expect("the hub stops");
 }
 
 /// A ready child of the global whose hub nobody serves.
-fn record() -> CellRecord {
+fn record() -> PoolRecord {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let refused = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -219,7 +219,7 @@ fn record() -> CellRecord {
         home: Some(GLOBAL.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub: nowhere,
@@ -273,8 +273,8 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
     });
     let directory = MemoryDirectory::new();
     directory
-        .publish(CellRecord {
-            presence: gdl_cells::Presence::Serving,
+        .publish(PoolRecord {
+            presence: gdl_pools::Presence::Serving,
             models: Vec::new(),
             models_version: 0,
             revoked: Vec::new(),
@@ -284,7 +284,7 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
             home: Some(GLOBAL.into()),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
-            state: CellState::Ready,
+            state: PoolState::Ready,
             epoch: 1,
             seq: 1,
             hub: address,
@@ -302,7 +302,7 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
     let began = tokio::time::Instant::now();
     tokio::time::sleep_until(began + WINDOW).await;
     let attempts = *watches.borrow() - 1;
-    let most = most_attempts(timing().refollow, CellTiming::REFOLLOW_CAP, WINDOW);
+    let most = most_attempts(timing().refollow, PoolTiming::REFOLLOW_CAP, WINDOW);
     hub.shutdown().await.expect("the hub stops");
     closer.abort();
     assert!(

@@ -6,28 +6,28 @@
 use std::str::FromStr;
 
 use figment::value::Value as Read;
-use gdl_model::cell_variable;
+use gdl_model::pool_variable;
 use serde_json::{Map, Value};
 
-/// `table`, a `[cell]` table, as one variable per setting:
-/// `GDL_CELL__NAME`, `GDL_CELL__READY__ENGINE`. A nested table whose keys
+/// `table`, a `[pool]` table, as one variable per setting:
+/// `GDL_POOL__NAME`, `GDL_POOL__READY__ENGINE`. A nested table whose keys
 /// a variable's name can spell is one variable per entry; one with a key
 /// that holds `__`, which the name would split, is one variable holding
-/// the whole table (`GDL_CELL__READY={"engine__work"=2}`).
-pub(super) fn cell_variables(table: &toml::Table) -> Map<String, Value> {
+/// the whole table (`GDL_POOL__READY={"engine__work"=2}`).
+pub(super) fn pool_variables(table: &toml::Table) -> Map<String, Value> {
     let mut variables = Map::new();
     for (key, value) in table {
         match value {
             toml::Value::Table(nested) if nested.keys().all(|name| spelled(name)) => {
                 for (name, value) in nested {
                     variables.insert(
-                        cell_variable(&format!("{key}.{name}")),
+                        pool_variable(&format!("{key}.{name}")),
                         encode(value).into(),
                     );
                 }
             }
             value => {
-                variables.insert(cell_variable(key), encode(value).into());
+                variables.insert(pool_variable(key), encode(value).into());
             }
         }
     }
@@ -80,7 +80,7 @@ mod tests {
         for (text, written) in [
             ("global-us", "global-us"),
             ("model-x-01:1337", "model-x-01:1337"),
-            ("/var/lib/gdl/cells", "/var/lib/gdl/cells"),
+            ("/var/lib/gdl/pools", "/var/lib/gdl/pools"),
             ("true", "\"true\""),
             ("false", "\"false\""),
             ("12", "\"12\""),
@@ -107,7 +107,7 @@ mod tests {
             "name = \"true\"\nready = { engine__work = 2, front = 1 }\nrequires = { model_x = 1 }\n",
         )
         .expect("a table");
-        let variables = cell_variables(&table);
+        let variables = pool_variables(&table);
         let found: Vec<(&str, &str)> = variables
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str().expect("a string")))
@@ -115,12 +115,12 @@ mod tests {
         assert_eq!(
             found,
             [
-                ("GDL_CELL__NAME", "\"true\""),
-                ("GDL_CELL__READY", "{\"engine__work\"=2, \"front\"=1}"),
-                ("GDL_CELL__REQUIRES__MODEL_X", "1"),
+                ("GDL_POOL__NAME", "\"true\""),
+                ("GDL_POOL__READY", "{\"engine__work\"=2, \"front\"=1}"),
+                ("GDL_POOL__REQUIRES__MODEL_X", "1"),
             ]
         );
-        let ready = Read::from_str(variables["GDL_CELL__READY"].as_str().expect("a string"))
+        let ready = Read::from_str(variables["GDL_POOL__READY"].as_str().expect("a string"))
             .expect("a value");
         let ready = ready.into_dict().expect("a table");
         assert_eq!(ready.keys().collect::<Vec<_>>(), ["engine__work", "front"]);

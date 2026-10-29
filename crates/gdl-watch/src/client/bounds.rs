@@ -9,7 +9,7 @@ use velo::{InstanceId, PeerInfo, WorkerAddress};
 
 use super::events;
 use super::tests::{read_within, runtime};
-use crate::{CellWatchEvent, UnknownEvent, WatchFailure, WatchItem, WatchLimits, Watched};
+use crate::{PoolWatchEvent, UnknownEvent, WatchFailure, WatchItem, WatchLimits, Watched};
 
 /// A small limit, so that a test sends a few kilobytes, not megabytes.
 const LIMIT: usize = 1024;
@@ -22,10 +22,10 @@ fn limits() -> WatchLimits {
 }
 
 /// A `left` event whose bytes, as sent, are `len` long.
-fn left_of_len(len: usize) -> (CellWatchEvent, String) {
+fn left_of_len(len: usize) -> (PoolWatchEvent, String) {
     let instance = InstanceId::new_v4();
-    let event = |segment: String| CellWatchEvent::Left { segment, instance };
-    let sent = |event: &CellWatchEvent| {
+    let event = |segment: String| PoolWatchEvent::Left { segment, instance };
+    let sent = |event: &PoolWatchEvent| {
         format!(
             "data: {}\n\n",
             serde_json::to_string(event).expect("an event serializes")
@@ -62,7 +62,7 @@ fn bytes_past_the_limit_without_an_end_end_the_watch() {
     let bytes = futures::stream::iter(chunks).inspect(move |_| {
         counted.fetch_add(1, Ordering::Relaxed);
     });
-    let items: Vec<WatchItem<CellWatchEvent, UnknownEvent>> = runtime().block_on(async {
+    let items: Vec<WatchItem<PoolWatchEvent, UnknownEvent>> = runtime().block_on(async {
         let synced_by = tokio::time::Instant::now() + WatchLimits::SYNCED_WITHIN;
         events(bytes, Arc::default(), limits(), synced_by)
             .collect()
@@ -89,11 +89,11 @@ fn an_event_at_the_limit_parses_and_one_past_it_does_not() {
     let (_, past_sent) = left_of_len(LIMIT + 1);
     let (after, after_sent) = left_of_len(100);
     let (got, failed, _) =
-        read_within::<CellWatchEvent>(chunked(&format!("{at_sent}{after_sent}"), 7), limits());
+        read_within::<PoolWatchEvent>(chunked(&format!("{at_sent}{after_sent}"), 7), limits());
     assert_eq!(got, [Watched::Event(at.clone()), Watched::Event(after)]);
     assert_eq!(failed, None);
 
-    let (got, failed, _) = read_within::<CellWatchEvent>(
+    let (got, failed, _) = read_within::<PoolWatchEvent>(
         chunked(&format!("{at_sent}{past_sent}{after_sent}"), 7),
         limits(),
     );
@@ -102,7 +102,7 @@ fn an_event_at_the_limit_parses_and_one_past_it_does_not() {
 
     // Whole in one chunk, too: the limit is the event's, not the chunk's.
     let (got, failed, _) =
-        read_within::<CellWatchEvent>(vec![Ok(past_sent.into_bytes())], limits());
+        read_within::<PoolWatchEvent>(vec![Ok(past_sent.into_bytes())], limits());
     assert_eq!(got, []);
     assert_eq!(failed, Some(WatchFailure::EventTooLarge { limit: LIMIT }));
 }
@@ -111,10 +111,10 @@ fn an_event_at_the_limit_parses_and_one_past_it_does_not() {
 /// the limit is per event.
 #[test]
 fn many_small_events_in_one_chunk_all_parse() {
-    let events: Vec<(CellWatchEvent, String)> = (0..500).map(|_| left_of_len(120)).collect();
+    let events: Vec<(PoolWatchEvent, String)> = (0..500).map(|_| left_of_len(120)).collect();
     let chunk: String = events.iter().map(|(_, sent)| sent.as_str()).collect();
     assert!(chunk.len() > 50 * LIMIT);
-    let (got, failed, _) = read_within::<CellWatchEvent>(vec![Ok(chunk.into_bytes())], limits());
+    let (got, failed, _) = read_within::<PoolWatchEvent>(vec![Ok(chunk.into_bytes())], limits());
     assert_eq!(failed, None);
     assert_eq!(
         got,
@@ -130,7 +130,7 @@ fn many_small_events_in_one_chunk_all_parse() {
 #[test]
 fn the_endings_are_told_apart() {
     let (event, sent) = left_of_len(100);
-    let read = |chunks| read_within::<CellWatchEvent>(chunks, limits());
+    let read = |chunks| read_within::<PoolWatchEvent>(chunks, limits());
     assert_eq!(
         read(chunked(&sent, 9)),
         (vec![Watched::Event(event)], None, 0)
@@ -161,7 +161,7 @@ fn the_default_limit_takes_the_largest_peer_a_hub_admits() {
     let registration = serde_json::to_string(&serde_json::json!({ "peer": peer }))
         .expect("a registration serializes");
     assert!(registration.len() <= BODY, "{}", registration.len());
-    let ready = CellWatchEvent::Ready {
+    let ready = PoolWatchEvent::Ready {
         segment: "s".repeat(64),
         peer,
     };
@@ -171,7 +171,7 @@ fn the_default_limit_takes_the_largest_peer_a_hub_admits() {
     );
     assert!(sent.len() > BODY - 1024, "{}", sent.len());
     let (got, failed, _) =
-        read_within::<CellWatchEvent>(chunked(&sent, 16 << 10), WatchLimits::default());
+        read_within::<PoolWatchEvent>(chunked(&sent, 16 << 10), WatchLimits::default());
     assert_eq!(failed, None);
     assert_eq!(got, [Watched::Event(ready)]);
 }

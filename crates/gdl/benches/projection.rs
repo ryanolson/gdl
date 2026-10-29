@@ -1,4 +1,4 @@
-//! What a cell policy pays to read a request's head, by the path the
+//! What a pool policy pays to read a request's head, by the path the
 //! runtime takes (`TypedPolicy::choose`): the whole head of a 100 KB
 //! request decoded as its own type, against a projection that reads only
 //! its routing hint, in each encoding that names fields. The hint comes
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gdl::__runtime::{ErasedPolicy, TypedPolicy};
 use gdl::{
-    Cell, CellChoice, CellPolicy, CellRequest, CellState, Cx, Encoding, NoCell, Projected,
+    Cx, Encoding, NoPool, Pool, PoolChoice, PoolPolicy, PoolRequest, PoolState, Projected,
     Projection,
 };
 use serde::{Deserialize, Serialize};
@@ -53,40 +53,40 @@ struct Hinted {
 /// Reads the whole head.
 struct Whole;
 
-impl CellPolicy for Whole {
+impl PoolPolicy for Whole {
     type Head = Routed;
 
     fn choose(
         &self,
-        request: CellRequest<'_, Routed>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
+        request: PoolRequest<'_, Routed>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
         let model = &request.head().hint.model;
-        cells
+        pools
             .iter()
-            .position(|cell| cell.name() == model)
-            .map(CellChoice::new)
-            .ok_or_else(NoCell::new)
+            .position(|pool| pool.name() == model)
+            .map(PoolChoice::new)
+            .ok_or_else(NoPool::new)
     }
 }
 
 /// Reads only the hint.
 struct Hinting;
 
-impl CellPolicy for Hinting {
+impl PoolPolicy for Hinting {
     type Head = Projected<Hinted>;
 
     fn choose(
         &self,
-        request: CellRequest<'_, Projected<Hinted>>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
+        request: PoolRequest<'_, Projected<Hinted>>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
         let model = &request.head().hint.model;
-        cells
+        pools
             .iter()
-            .position(|cell| cell.name() == model)
-            .map(CellChoice::new)
-            .ok_or_else(NoCell::new)
+            .position(|pool| pool.name() == model)
+            .map(PoolChoice::new)
+            .ok_or_else(NoPool::new)
     }
 }
 
@@ -112,14 +112,14 @@ fn routed() -> Routed {
 }
 
 fn read(c: &mut Criterion) {
-    let cells = [
-        Cell::new("model", "qwen", "r", CellState::Ready).with_entries(1),
-        Cell::new("model", "llama", "r", CellState::Ready).with_entries(1),
+    let pools = [
+        Pool::new("model", "qwen", "r", PoolState::Ready).with_entries(1),
+        Pool::new("model", "llama", "r", PoolState::Ready).with_entries(1),
     ];
     let cx = Cx::new();
     let whole: Arc<dyn ErasedPolicy> = Arc::new(TypedPolicy(Arc::new(Whole)));
     let hinting: Arc<dyn ErasedPolicy> = Arc::new(TypedPolicy(Arc::new(Hinting)));
-    let mut group = c.benchmark_group("cell-policy-head");
+    let mut group = c.benchmark_group("pool-policy-head");
     for encoding in [Encoding::Msgpack, Encoding::Json] {
         let bytes = gdl::__runtime::encoder::<Routed>(encoding)(&routed()).expect("encoded");
         group.throughput(Throughput::Bytes(bytes.len() as u64));
@@ -127,8 +127,8 @@ fn read(c: &mut Criterion) {
             let id = BenchmarkId::new(name, encoding.name());
             group.bench_with_input(id, &bytes, |b, bytes| {
                 b.iter(|| {
-                    let request = CellRequest::new(&cx, &(), "r", Instant::now()).with_bytes(bytes);
-                    let chosen = policy.choose(request, encoding, &cells).expect("read");
+                    let request = PoolRequest::new(&cx, &(), "r", Instant::now()).with_bytes(bytes);
+                    let chosen = policy.choose(request, encoding, &pools).expect("read");
                     assert_eq!(black_box(chosen).map(|choice| choice.at()), Ok(1));
                 });
             });

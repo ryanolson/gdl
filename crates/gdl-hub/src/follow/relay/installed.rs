@@ -1,22 +1,22 @@
-//! A followed cell as its cell watch has shown it, and what the relay's
+//! A followed pool as its pool watch has shown it, and what the relay's
 //! watchers are sent of it as each event of the watch comes.
 
 use std::collections::{HashMap, HashSet};
 
-use gdl_cells::{CellState, LoadSummary};
-use gdl_watch::{CellWatchEvent, FollowEvent, Listing, ModelList};
+use gdl_pools::{LoadSummary, PoolState};
+use gdl_watch::{FollowEvent, Listing, ModelList, PoolWatchEvent};
 use tokio::time::Instant;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
-/// A followed cell as its cell watch has shown it.
+/// A followed pool as its pool watch has shown it.
 #[derive(Debug)]
 pub(crate) struct Installed {
-    pub(super) cell: String,
+    pub(super) pool: String,
     pub(super) class: String,
     region: String,
-    /// The cell's hub, as its record names it.
+    /// The pool's hub, as its record names it.
     pub(super) hub: String,
-    state: CellState,
+    state: PoolState,
     load: Option<LoadSummary>,
     /// When `load` was received, which a snapshot sends as its age.
     received: Instant,
@@ -29,26 +29,26 @@ pub(crate) struct Installed {
     /// consumer keeps them reachable while the follow lives, so each is
     /// sent `left` when it leaves, whatever the state is by then.
     sent: HashSet<InstanceId>,
-    /// Whether the cell is withheld: its watch sent an event of a kind
+    /// Whether the pool is withheld: its watch sent an event of a kind
     /// this build does not know, and it has not been read again since.
     pub(super) withheld: bool,
-    /// The cell's model entries as its watch last sent them: `None` from a
+    /// The pool's model entries as its watch last sent them: `None` from a
     /// hub of an earlier build.
     models: Option<ModelList>,
 }
 
 impl Installed {
-    /// A cell as its watch's first event shows it.
+    /// A pool as its watch's first event shows it.
     pub(crate) fn new(
-        cell: String,
+        pool: String,
         class: String,
         region: String,
         hub: String,
-        state: CellState,
+        state: PoolState,
         load: Option<LoadSummary>,
     ) -> Self {
         Self {
-            cell,
+            pool,
             class,
             region,
             hub,
@@ -63,42 +63,42 @@ impl Installed {
         }
     }
 
-    /// The cell with the model entries its watch's first event carried.
+    /// The pool with the model entries its watch's first event carried.
     pub(crate) fn with_models(mut self, models: Option<ModelList>) -> Self {
         self.models = models;
         self
     }
 
-    /// The cell's model entries as its watch last sent them.
+    /// The pool's model entries as its watch last sent them.
     pub(super) fn models(&self) -> Option<&ModelList> {
         self.models.as_ref()
     }
 
-    /// The state the relay shows: the one the cell last sent, or
-    /// `unavailable` while the cell is withheld.
-    fn shown(&self) -> CellState {
+    /// The state the relay shows: the one the pool last sent, or
+    /// `unavailable` while the pool is withheld.
+    fn shown(&self) -> PoolState {
         if self.withheld {
-            CellState::Unavailable
+            PoolState::Unavailable
         } else {
             self.state
         }
     }
 
-    /// Whether the cell counts toward what a requirement of its class
+    /// Whether the pool counts toward what a requirement of its class
     /// meets: its link last said it is `ready`, and it is not withheld.
     pub(super) fn counted(&self) -> bool {
-        self.shown() == CellState::Ready
+        self.shown() == PoolState::Ready
     }
 
-    /// Whether the state shown lets the cell's instances be routed to.
+    /// Whether the state shown lets the pool's instances be routed to.
     pub(super) fn exposes(&self) -> bool {
-        matches!(self.shown(), CellState::Ready | CellState::Degraded)
+        matches!(self.shown(), PoolState::Ready | PoolState::Degraded)
     }
 
-    /// The cell's watch sent an event of a kind this build does not know,
-    /// so the relay cannot tell what the cell is: it is withheld until it
+    /// The pool's watch sent an event of a kind this build does not know,
+    /// so the relay cannot tell what the pool is: it is withheld until it
     /// has been read again ([`Installed::restore`]). The relay shows a
-    /// withheld cell as `unavailable`, which hides its instances, keeps
+    /// withheld pool as `unavailable`, which hides its instances, keeps
     /// every chooser from it, and leaves it out of what a requirement of
     /// its class meets, and so makes its follow not offered, at its next
     /// revision; the relay keeps the follow open meanwhile. Its watchers
@@ -109,17 +109,17 @@ impl Installed {
         }
         let shown = self.shown();
         self.withheld = true;
-        if shown != CellState::Unavailable {
+        if shown != PoolState::Unavailable {
             send(FollowEvent::State {
                 class: self.class.clone(),
-                cell: self.cell.clone(),
+                pool: self.pool.clone(),
                 generation,
-                state: CellState::Unavailable,
+                state: PoolState::Unavailable,
             });
         }
     }
 
-    /// The cell, withheld, was read again, as `fresh`: send its watchers
+    /// The pool, withheld, was read again, as `fresh`: send its watchers
     /// what changed while it was withheld, then its state, and, if that
     /// exposes them, its ready instances, as for a state that exposes
     /// them again. An instance that `fresh` does not have left; one it
@@ -141,20 +141,20 @@ impl Installed {
             )
             .filter(|(id, _)| !fresh.ready.contains_key(id) && !fresh.retired.contains_key(id))
             .collect();
-        // While the cell is withheld, these send only what its watchers
+        // While the pool is withheld, these send only what its watchers
         // still hold: retirements, and the instances retired that left.
         self.withheld = true;
         for (instance, segment) in gone {
             self.apply(
                 generation,
-                CellWatchEvent::Left { segment, instance },
+                PoolWatchEvent::Left { segment, instance },
                 &mut send,
             );
         }
         for (instance, segment) in fresh.retired {
             self.apply(
                 generation,
-                CellWatchEvent::Retired {
+                PoolWatchEvent::Retired {
                     segment,
                     instance,
                     acknowledged: false,
@@ -165,18 +165,18 @@ impl Installed {
         for (segment, peer) in fresh.ready.into_values() {
             self.apply(
                 generation,
-                CellWatchEvent::Ready { segment, peer },
+                PoolWatchEvent::Ready { segment, peer },
                 &mut send,
             );
         }
         if self.load != fresh.load {
             self.apply(
                 generation,
-                CellWatchEvent::Load { load: fresh.load },
+                PoolWatchEvent::Load { load: fresh.load },
                 &mut send,
             );
         }
-        // The cell's hub sent the summary again in the reading, so it is
+        // The pool's hub sent the summary again in the reading, so it is
         // as new as the reading even when it has not changed.
         self.received = fresh.received;
         if fresh.models.is_some() {
@@ -186,7 +186,7 @@ impl Installed {
         self.state = fresh.state;
         send(FollowEvent::State {
             class: self.class.clone(),
-            cell: self.cell.clone(),
+            pool: self.pool.clone(),
             generation,
             state: self.state,
         });
@@ -198,33 +198,33 @@ impl Installed {
         }
     }
 
-    /// Apply one event of the cell's watch after its first, sending what
+    /// Apply one event of the pool's watch after its first, sending what
     /// the relay's watchers see of it to `send`.
     pub(crate) fn apply(
         &mut self,
         generation: u64,
-        event: CellWatchEvent,
+        event: PoolWatchEvent,
         mut send: impl FnMut(FollowEvent),
     ) {
-        let (class, cell) = (self.class.clone(), self.cell.clone());
+        let (class, pool) = (self.class.clone(), self.pool.clone());
         match event {
-            // That the draining cell has no follower left is for the
-            // cell's own instances, and changes nothing a chooser sees.
-            CellWatchEvent::State {
+            // That the draining pool has no follower left is for the
+            // pool's own instances, and changes nothing a chooser sees.
+            PoolWatchEvent::State {
                 state,
                 unfollowed: true,
             } if state == self.state => {}
-            CellWatchEvent::State { state, .. } => {
+            PoolWatchEvent::State { state, .. } => {
                 let hidden = !self.exposes();
                 self.state = state;
-                // A withheld cell's watchers are shown it `unavailable`
+                // A withheld pool's watchers are shown it `unavailable`
                 // until it is read again.
                 if self.withheld {
                     return;
                 }
                 send(FollowEvent::State {
                     class,
-                    cell,
+                    pool,
                     generation,
                     state,
                 });
@@ -235,17 +235,17 @@ impl Installed {
                     self.sent.extend(self.ready.keys().copied());
                 }
             }
-            CellWatchEvent::Load { load } => {
+            PoolWatchEvent::Load { load } => {
                 self.load = load;
                 self.received = Instant::now();
                 send(FollowEvent::Load {
                     class,
-                    cell,
+                    pool,
                     generation,
                     load,
                 });
             }
-            CellWatchEvent::Ready { segment, peer } => {
+            PoolWatchEvent::Ready { segment, peer } => {
                 let id = peer.instance_id();
                 if self.retired.contains_key(&id) || self.ready.contains_key(&id) {
                     return;
@@ -255,7 +255,7 @@ impl Installed {
                     self.sent.insert(id);
                     send(FollowEvent::Exposed {
                         class,
-                        cell,
+                        pool,
                         generation,
                         segment,
                         peer,
@@ -264,7 +264,7 @@ impl Installed {
             }
             // Sent again once the retirement is acknowledged, which is for
             // the retiree and changes nothing here.
-            CellWatchEvent::Retired {
+            PoolWatchEvent::Retired {
                 segment, instance, ..
             } => {
                 self.ready.remove(&instance);
@@ -272,14 +272,14 @@ impl Installed {
                 if self.retired.insert(instance, segment.clone()).is_none() {
                     send(FollowEvent::Retired {
                         class,
-                        cell,
+                        pool,
                         generation,
                         segment,
                         instance,
                     });
                 }
             }
-            CellWatchEvent::Left { segment, instance } => {
+            PoolWatchEvent::Left { segment, instance } => {
                 // A consumer holds an instance it was sent as retired or as
                 // exposed, also while a state hides it; one that was ready
                 // only while hidden was never sent.
@@ -288,24 +288,24 @@ impl Installed {
                 if exposed || retired {
                     send(FollowEvent::Left {
                         class,
-                        cell,
+                        pool,
                         generation,
                         segment,
                         instance,
                     });
                 }
             }
-            // The relay lists the cell's models from the version it holds
+            // The relay lists the pool's models from the version it holds
             // ([`super::Shared::relist`]); a chooser sees nothing of the
             // follow change.
-            CellWatchEvent::Models { models } => self.models = Some(models),
+            PoolWatchEvent::Models { models } => self.models = Some(models),
             // A watch has one snapshot, which the link reads before it
-            // installs the cell.
-            CellWatchEvent::Cell { .. } | CellWatchEvent::Synced => {}
+            // installs the pool.
+            PoolWatchEvent::Pool { .. } | PoolWatchEvent::Synced => {}
         }
     }
 
-    /// The follow as a watch of the relay begins with it: the cell, with
+    /// The follow as a watch of the relay begins with it: the pool, with
     /// its summary's age and `listing`, then `offering`, then its retired
     /// instances, then those it exposes.
     pub(super) fn snapshot(
@@ -320,7 +320,7 @@ impl Installed {
         events.push(FollowEvent::Follow {
             listing,
             class: self.class.clone(),
-            cell: self.cell.clone(),
+            pool: self.pool.clone(),
             generation,
             region: self.region.clone(),
             state: self.shown(),
@@ -336,7 +336,7 @@ impl Installed {
                 .into_iter()
                 .map(|(instance, segment)| FollowEvent::Retired {
                     class: self.class.clone(),
-                    cell: self.cell.clone(),
+                    pool: self.pool.clone(),
                     generation,
                     segment: segment.clone(),
                     instance: *instance,
@@ -356,7 +356,7 @@ impl Installed {
             .into_iter()
             .map(|(_, (segment, peer))| FollowEvent::Exposed {
                 class: self.class.clone(),
-                cell: self.cell.clone(),
+                pool: self.pool.clone(),
                 generation,
                 segment: segment.clone(),
                 peer: peer.clone(),

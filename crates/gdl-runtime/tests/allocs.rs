@@ -133,7 +133,7 @@ impl gdl::RecordLink for Applying {
     }
 }
 
-/// Queueing a cell hub record write copies it into buffers allocated once:
+/// Queueing a pool hub record write copies it into buffers allocated once:
 /// no allocation for a write that is queued, none for one that a full
 /// queue drops and counts, and none once the queue has been sent and its
 /// buffers are reused. The table's task runs only inside `block_on`, so
@@ -147,7 +147,7 @@ fn records() {
     let registry = gdl::prometheus::Registry::new();
     records.register(&registry).expect("registered");
     let table = runtime
-        .block_on(records.scope(async { gdl::CellRecords::current("fingerprints") }))
+        .block_on(records.scope(async { gdl::PoolRecords::current("fingerprints") }))
         .expect("a table under a hub");
     let answered = std::sync::Arc::new(AtomicUsize::new(0));
     let counted = std::sync::Arc::clone(&answered);
@@ -181,7 +181,7 @@ fn records() {
     let dropped_series = registry
         .gather()
         .into_iter()
-        .filter(|family| family.name() == "cell_record_writes_total")
+        .filter(|family| family.name() == "pool_record_writes_total")
         .flat_map(|family| family.get_metric().to_vec())
         .find(|metric| {
             metric

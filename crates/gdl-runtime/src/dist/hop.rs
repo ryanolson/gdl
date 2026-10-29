@@ -89,7 +89,7 @@ struct HopCore<F, I, B> {
     /// segment records them.
     figures: HopFigures,
     /// Whether the hop's hand-offs to this segment are offers from another
-    /// class, which a draining cell's entry declines.
+    /// class, which a draining pool's entry declines.
     offer: bool,
 }
 
@@ -358,12 +358,12 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                 ));
             }
         }
-        // A cell policy that reads the head as a type must be given that
+        // A pool policy that reads the head as a type must be given that
         // type too, and one that reads its fields by name an encoding that
         // names them.
         #[cfg(feature = "hub")]
         for pos in 1..forward.len() {
-            if let Router::Cells(crossing) = &plan.routers[pos] {
+            if let Router::Pools(crossing) = &plan.routers[pos] {
                 let head = &heads[pos - 1];
                 crossing.check_head(&rt.segment, head.id, head.name)?;
             }
@@ -490,7 +490,7 @@ where
                         Box::pin(async move {
                             let accepted = hop.accept_forward(envelope).await;
                             // An instance's own decline says nothing of its
-                            // cell's room, so its load does not report it.
+                            // pool's room, so its load does not report it.
                             if let Err(refused) = &accepted
                                 && refused.error.kind() == ErrorKind::Overloaded
                                 && refused.decline != Decline::Instance
@@ -548,7 +548,7 @@ where
 
     /// The outer end's side of a hop that leaves its segment, with what
     /// the hand-off holds (the lease of the selector that chose where it
-    /// went, if one did, and a chooser's lease on the cell it offered the
+    /// went, if one did, and a chooser's lease on the pool it offered the
     /// request to): the caller holds it as long as the response stream.
     async fn run_remote(
         self: &Arc<Self>,
@@ -760,7 +760,7 @@ where
     /// envelope ([`HopCore::admit`]), and after it only the acknowledgement
     /// does: a sender takes an `Overloaded` or `Placement` answer as its
     /// offer declined, and offers the request to another instance, or a
-    /// chooser to another cell.
+    /// chooser to another pool.
     async fn accept_forward(
         self: &Arc<Self>,
         mut envelope: Forward,
@@ -969,7 +969,7 @@ where
 
     /// Everything that may refuse a forward hand-off, in order: the
     /// deployment, the request's deadline, admission, a retired instance or
-    /// a draining cell's entry, and egress. Takes `envelope`'s context,
+    /// a draining pool's entry, and egress. Takes `envelope`'s context,
     /// and leaves the rest of it, so that a refused envelope goes back
     /// whole but for that.
     async fn admit(
@@ -993,7 +993,7 @@ where
         .await
         {
             Ok(share) => share,
-            // An offer that admission refuses still says that a cell that
+            // An offer that admission refuses still says that a pool that
             // declines offers is gone, not full.
             Err(error) => {
                 if self.offer {
@@ -1009,7 +1009,7 @@ where
             share.sending();
         }
         // A retiring instance that has closed refuses, releasing the share
-        // it just took; so does a draining cell's entry, for an offer.
+        // it just took; so does a draining pool's entry, for an offer.
         rt.check_open()?;
         if self.offer {
             rt.check_offer()?;

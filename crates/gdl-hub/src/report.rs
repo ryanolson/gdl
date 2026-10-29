@@ -1,19 +1,19 @@
-//! The `relay` directory backend in a cell's hub: the hub reports its
-//! cell's record to its parent cell's hub, and holds the records its own
+//! The `relay` directory backend in a pool's hub: the hub reports its
+//! pool's record to its parent pool's hub, and holds the records its own
 //! children report to it, which its follow watches.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl_cells::{
-    CellDirectory, CellRecord, DirectoryError, MemoryLimits, MemoryWatch, RelayDirectory,
+use gdl_pools::{
+    DirectoryError, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord, RelayDirectory,
     Withdrawal,
 };
-use gdl_watch::{CellWatcher, Report, ReportReply};
+use gdl_watch::{PoolWatcher, Report, ReportReply};
 use tokio::sync::watch;
 
-use crate::CellError;
+use crate::PoolError;
 
 #[cfg(test)]
 mod tests;
@@ -22,21 +22,21 @@ mod tests;
 /// parent's mistake cannot make a child report in a loop.
 const MIN_CADENCE: Duration = gdl_model::HubTiming::MIN_RELAY_CADENCE;
 
-/// A cell hub's directory under the `relay` backend
-/// (`[cell] directory = "relay"`).
+/// A pool hub's directory under the `relay` backend
+/// (`[pool] directory = "relay"`).
 ///
-/// Its writes are the cell's own record and withdrawal, which it reports
-/// to its parent cell's hub ([`gdl_watch::REPORT_ROUTE`]); a cell of a
+/// Its writes are the pool's own record and withdrawal, which it reports
+/// to its parent pool's hub ([`gdl_watch::REPORT_ROUTE`]); a pool of a
 /// class that nothing sends to has no parent, and reports nowhere. Its
-/// watches read the records the cell's own children report to its hub,
+/// watches read the records the pool's own children report to its hub,
 /// which the hub holds in process and keeps in its state directory
 /// ([`RelayDirectory`]), so a hub follows its children as it would from
-/// any directory, and still holds their records after it restarts. A cell
+/// any directory, and still holds their records after it restarts. A pool
 /// in the middle of a chain of classes does both.
 ///
 /// The parent answers each report with the interval at which it expects
-/// the next, and the cell's hub reports at that cadence from then
-/// ([`crate::CellReadiness::with_reports`]), within a third of its
+/// the next, and the pool's hub reports at that cadence from then
+/// ([`crate::PoolReadiness::with_reports`]), within a third of its
 /// record's lease.
 #[derive(Clone)]
 pub struct HubDirectory {
@@ -48,12 +48,12 @@ pub struct HubDirectory {
 
 struct Parent {
     hub: String,
-    watcher: CellWatcher,
+    watcher: PoolWatcher,
 }
 
 impl HubDirectory {
-    /// The directory of a cell whose hub reports to the parent's hub at
-    /// `parent_hub`, `host:port`, or of a cell that reports nowhere; and
+    /// The directory of a pool whose hub reports to the parent's hub at
+    /// `parent_hub`, `host:port`, or of a pool that reports nowhere; and
     /// that keeps its children's records in `state_dir`, reading back
     /// what an earlier hub kept there, or keeps them only in memory.
     ///
@@ -62,18 +62,18 @@ impl HubDirectory {
     /// A parent's hub address that is not `host:port`, or a state
     /// directory that cannot be made or read: a hub that started without
     /// the records it kept would read a silent child as gone.
-    pub fn new(parent_hub: Option<String>, state_dir: Option<PathBuf>) -> Result<Self, CellError> {
+    pub fn new(parent_hub: Option<String>, state_dir: Option<PathBuf>) -> Result<Self, PoolError> {
         let parent = parent_hub
             .map(|hub| {
                 gdl_model::check_hub_address(&hub)
-                    .map_err(|why| CellError::new(format!("[cell] parent_hub: {why}")))?;
-                let watcher = CellWatcher::new().map_err(|e| CellError::new(e.to_string()))?;
-                Ok::<_, CellError>(Arc::new(Parent { hub, watcher }))
+                    .map_err(|why| PoolError::new(format!("[pool] parent_hub: {why}")))?;
+                let watcher = PoolWatcher::new().map_err(|e| PoolError::new(e.to_string()))?;
+                Ok::<_, PoolError>(Arc::new(Parent { hub, watcher }))
             })
             .transpose()?;
         let children = match state_dir {
             Some(path) => RelayDirectory::open(path, MemoryLimits::default())
-                .map_err(|e| CellError::new(format!("[cell] state_dir: {e}")))?,
+                .map_err(|e| PoolError::new(format!("[pool] state_dir: {e}")))?,
             None => RelayDirectory::new(),
         };
         Ok(Self {
@@ -89,30 +89,30 @@ impl HubDirectory {
         self.cadence.subscribe()
     }
 
-    /// Whether the cell's hub reports to a parent's hub.
+    /// Whether the pool's hub reports to a parent's hub.
     pub(crate) fn reports_up(&self) -> bool {
         self.parent.is_some()
     }
 
-    /// The records the cell's children report, for the hub's gate alone.
+    /// The records the pool's children report, for the hub's gate alone.
     pub(crate) fn children(&self) -> &RelayDirectory {
         &self.children
     }
 
-    /// The record the parent's hub holds for the cell `cell` of `class`,
-    /// for a restarted hub to keep its cell's history: `None` for a cell
+    /// The record the parent's hub holds for the pool `pool` of `class`,
+    /// for a restarted hub to keep its pool's history: `None` for a pool
     /// that reports nowhere, or when the parent holds none, as a parent of
     /// a build that does not answer the route says too. A parent that
-    /// cannot be reached is an error, never a cell with no record.
+    /// cannot be reached is an error, never a pool with no record.
     pub(crate) async fn held(
         &self,
         class: &str,
-        cell: &str,
-    ) -> Result<Option<CellRecord>, DirectoryError> {
+        pool: &str,
+    ) -> Result<Option<PoolRecord>, DirectoryError> {
         let Some(parent) = &self.parent else {
             return Ok(None);
         };
-        parent.watcher.held(&parent.hub, class, cell).await
+        parent.watcher.held(&parent.hub, class, pool).await
     }
 
     /// Report `report` to the parent: the interval of its answer.
@@ -124,14 +124,14 @@ impl HubDirectory {
     }
 }
 
-impl CellDirectory for HubDirectory {
+impl PoolDirectory for HubDirectory {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         let lease = record.lease;
         if let Some(answer) = self.report(Report::Record(record)).await? {
             // Within a third of the record's lease whatever the parent
-            // says, so that two lost reports do not drop the cell.
+            // says, so that two lost reports do not drop the pool.
             let cadence = answer.clamp(MIN_CADENCE, (lease / 3).max(MIN_CADENCE));
             self.cadence.send_if_modified(|current| {
                 let changed = *current != Some(cadence);
@@ -146,7 +146,7 @@ impl CellDirectory for HubDirectory {
         self.report(Report::Withdrawal(withdrawal)).await.map(drop)
     }
 
-    fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> MemoryWatch {
+    fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> MemoryWatch {
         self.children.watch(class, from)
     }
 }
@@ -158,12 +158,12 @@ impl CellDirectory for HubDirectory {
 #[derive(Debug)]
 pub struct VerifiedReport(Report);
 
-/// The gate of a parent cell's hub: it verifies its children's reports
+/// The gate of a parent pool's hub: it verifies its children's reports
 /// and writes what it verified into the records it holds for them.
 pub(crate) struct Reports {
     children: RelayDirectory,
-    /// The parent's own cell, which a child's record names as its `home`.
-    cell: String,
+    /// The parent's own pool, which a child's record names as its `home`.
+    pool: String,
     contract: u64,
     placement: u64,
     /// The interval at which the parent asks for reports, unless a
@@ -172,16 +172,16 @@ pub(crate) struct Reports {
     /// Held by each report from its check to the end of its write, taken
     /// in the order the reports arrive. A withdrawal is checked against
     /// what is held, so it must not be checked while an earlier report of
-    /// its cell is still being stored.
+    /// its pool is still being stored.
     order: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Reports {
-    /// The gate of the cell `record` describes, writing into `children`.
-    pub(crate) fn new(children: RelayDirectory, record: &CellRecord, heartbeat: Duration) -> Self {
+    /// The gate of the pool `record` describes, writing into `children`.
+    pub(crate) fn new(children: RelayDirectory, record: &PoolRecord, heartbeat: Duration) -> Self {
         Self {
             children,
-            cell: record.name.clone(),
+            pool: record.name.clone(),
             contract: record.contract,
             placement: record.placement,
             heartbeat,
@@ -189,9 +189,9 @@ impl Reports {
         }
     }
 
-    /// The record held for the child `cell` of `class`, expired or not.
-    pub(crate) fn held(&self, class: &str, cell: &str) -> Option<CellRecord> {
-        self.children.record(class, cell)
+    /// The record held for the child `pool` of `class`, expired or not.
+    pub(crate) fn held(&self, class: &str, pool: &str) -> Option<PoolRecord> {
+        self.children.record(class, pool)
     }
 
     /// Verify `report`, write it, and answer with the interval at which
@@ -221,31 +221,31 @@ impl Reports {
     }
 
     /// Whether `report` may be written: a record of the right shape whose
-    /// `home` is this cell, whose hashes are this cell's, since a parent
+    /// `home` is this pool, whose hashes are this pool's, since a parent
     /// and its children share one layout, and that is newer than what is
-    /// held for the cell; or the newer withdrawal of a cell whose record is
-    /// held. A withdrawal of a cell whose record is not held has nothing to
+    /// held for the pool; or the newer withdrawal of a pool whose record is
+    /// held. A withdrawal of a pool whose record is not held has nothing to
     /// withdraw, and writes nothing (`None`), so that a withdrawal can
-    /// never stop a cell's records before it reports.
+    /// never stop a pool's records before it reports.
     pub(crate) fn verify(&self, report: Report) -> Result<Option<VerifiedReport>, DirectoryError> {
-        let (class, cell) = report.cell();
-        let (class, cell) = (class.to_owned(), cell.to_owned());
+        let (class, pool) = report.pool();
+        let (class, pool) = (class.to_owned(), pool.to_owned());
         let offered = match &report {
             Report::Record(record) => {
                 record.check()?;
-                if record.home.as_deref() != Some(self.cell.as_str()) {
+                if record.home.as_deref() != Some(self.pool.as_str()) {
                     return Err(DirectoryError::Refused(format!(
-                        "cell `{cell}` names {} as its parent, not this cell, `{}`",
+                        "pool `{pool}` names {} as its parent, not this pool, `{}`",
                         record
                             .home
                             .as_deref()
-                            .map_or("no cell".to_string(), |home| format!("`{home}`")),
-                        self.cell
+                            .map_or("no pool".to_string(), |home| format!("`{home}`")),
+                        self.pool
                     )));
                 }
                 if (record.contract, record.placement) != (self.contract, self.placement) {
                     return Err(DirectoryError::Refused(format!(
-                        "cell `{cell}` has contract hash {:016x} and placement hash {:016x}, and this cell {:016x} and {:016x}: a parent and its children share one layout",
+                        "pool `{pool}` has contract hash {:016x} and placement hash {:016x}, and this pool {:016x} and {:016x}: a parent and its children share one layout",
                         record.contract, record.placement, self.contract, self.placement
                     )));
                 }
@@ -253,18 +253,18 @@ impl Reports {
             }
             Report::Withdrawal(withdrawal) => {
                 withdrawal.check()?;
-                if !self.children.holds_record(&class, &cell) {
+                if !self.children.holds_record(&class, &pool) {
                     return Ok(None);
                 }
                 withdrawal.version()
             }
         };
-        if let Some(held) = self.children.held(&class, &cell)
+        if let Some(held) = self.children.held(&class, &pool)
             && offered <= held
         {
             return Err(DirectoryError::NotNewer {
                 class,
-                cell,
+                pool,
                 held,
                 offered,
             });
@@ -273,7 +273,7 @@ impl Reports {
     }
 
     /// Write what `verified` carries. The directory still refuses a write
-    /// that is not newer, which settles two reports of one cell verified at
+    /// that is not newer, which settles two reports of one pool verified at
     /// once.
     pub(crate) async fn write(&self, verified: VerifiedReport) -> Result<(), DirectoryError> {
         match verified.0 {

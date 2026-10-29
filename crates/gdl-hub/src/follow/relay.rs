@@ -1,16 +1,16 @@
 //! What a hub follows, as its instances will route by it: each followed
-//! cell's current generation, and, once its snapshot is complete, its
-//! state and entry instances, fanned out to the relay's watchers. A cell
+//! pool's current generation, and, once its snapshot is complete, its
+//! state and entry instances, fanned out to the relay's watchers. A pool
 //! is named within its class, as the directory names it, so two classes
-//! may each have a cell of one name.
+//! may each have a pool of one name.
 //!
 //! Every write names the generation it belongs to and is applied only
-//! while that generation is the cell's current one, so a link that ended,
+//! while that generation is the pool's current one, so a link that ended,
 //! or whose task is still running after a newer generation began, never
 //! writes again. Each change is applied and sent under one lock, and a
 //! watch takes its snapshot and subscribes under the same lock.
 //!
-//! A follow is offered to the hub's choosers while its cell's state lets
+//! A follow is offered to the hub's choosers while its pool's state lets
 //! its instances be routed to, and each change between offered and not
 //! offered is the follow's next revision. One that is not offered closes
 //! once every chooser of its class among the hub's members has
@@ -20,19 +20,19 @@
 //! ([`expire`] settles what waited only for it). A follow whose link ends
 //! first, or that a newer epoch replaces, is not offered from then, and is
 //! kept beside the
-//! cell's later follows, its instances still relayed, until it closes the
+//! pool's later follows, its instances still relayed, until it closes the
 //! same way, since what the choosers offered to it may still be under
 //! way.
 //!
-//! A retirement of a followed cell's entry instance that the relay applies
+//! A retirement of a followed pool's entry instance that the relay applies
 //! waits for the choosers that route to the instance's segment to avoid
 //! it ([`super::avoid`]); once they have, or left, the relay says so to the
-//! cell's hub, once for the whole cell. A follow that closes forgets what
-//! it waited for: its release tells the cell's hub more. So does one whose
-//! retiree left, which its cell's hub has forgotten too.
+//! pool's hub, once for the whole pool. A follow that closes forgets what
+//! it waited for: its release tells the pool's hub more. So does one whose
+//! retiree left, which its pool's hub has forgotten too.
 //!
 //! The relay also counts, per class, the installed follows whose link
-//! last said `ready`, and shows each count in the cell's health as it
+//! last said `ready`, and shows each count in the pool's health as it
 //! changes, under the same lock, so that a count is never overwritten by
 //! an older one. A change costs one count, never a pass over the
 //! follows.
@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_cells::CellRecord;
+use gdl_pools::PoolRecord;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -65,29 +65,29 @@ use listed::Listings;
 use super::avoid::Avoiding;
 use super::offer::{Choosers, Offer};
 use super::release::{Release, Told};
-use crate::CellHealth;
+use crate::PoolHealth;
 use crate::fanout::Watchers;
-use gdl_watch::{Avoids, CellWatchEvent, FollowEvent, Unoffered};
+use gdl_watch::{Avoids, FollowEvent, PoolWatchEvent, Unoffered};
 
-/// How long a watch of the relay begun before the hub has read the cell
+/// How long a watch of the relay begun before the hub has read the pool
 /// directory's first snapshot of each class it sends to waits for it
 /// before it takes its own snapshot.
 const LISTED_WAIT: Duration = Duration::from_secs(2);
 
 /// A retirement the relay waits for its choosers to avoid: the follow, by
-/// its cell's class and name and its generation, and the instance.
+/// its pool's class and name and its generation, and the instance.
 pub(crate) type Retirement = (String, String, u64, InstanceId);
 
-/// The followed cells, and the relay's watchers.
+/// The followed pools, and the relay's watchers.
 pub(crate) struct Relay {
-    /// Shared with each watch of one follow, which releases its cell's
+    /// Shared with each watch of one follow, which releases its pool's
     /// channel when it closes.
     shared: Arc<Mutex<Shared>>,
     watchers: Watchers,
     /// The watchers of one follow each: counted apart, so that the count of
     /// the relay's watchers is of its whole watches.
     one: Watchers,
-    /// The cells a follower has decided to follow, by class and name, with
+    /// The pools a follower has decided to follow, by class and name, with
     /// the generation of the follow under way or the last one, for whoever
     /// needs to see the follower's decisions.
     following: watch::Sender<BTreeMap<(String, String), u64>>,
@@ -98,16 +98,16 @@ pub(crate) struct Relay {
 
 impl Relay {
     /// A relay whose watchers are ended when they fall more than `buffer`
-    /// events behind, which shows how many ready cells of each class it
+    /// events behind, which shows how many ready pools of each class it
     /// follows in `health`, and whose follows that are not offered close
     /// once every member of `choosers` that chooses their class has
     /// acknowledged them, but for those that have had no watch of the
     /// relay open for `lost`.
-    /// Each follow it closes is sent to `releases`, for the cell's hub to
+    /// Each follow it closes is sent to `releases`, for the pool's hub to
     /// be told.
     pub(crate) fn new(
         buffer: usize,
-        health: watch::Sender<CellHealth>,
+        health: watch::Sender<PoolHealth>,
         choosers: Choosers,
         releases: mpsc::UnboundedSender<Release>,
         lost: Duration,
@@ -138,26 +138,26 @@ impl Relay {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Begin a new follow of the cell `cell` of `class`: its generation,
+    /// Begin a new follow of the pool `pool` of `class`: its generation,
     /// and the signal that the relay closed it, on which its link ends.
-    /// The cell's earlier follow, if any, ends first, as
+    /// The pool's earlier follow, if any, ends first, as
     /// [`Relay::end`] ends it.
-    pub(crate) fn begin(&self, class: &str, cell: &str) -> (u64, CancellationToken) {
+    pub(crate) fn begin(&self, class: &str, pool: &str) -> (u64, CancellationToken) {
         let mut shared = self.lock();
         let generation = shared
             .generations
             .entry(class.to_string())
             .or_default()
-            .entry(cell.to_string())
+            .entry(pool.to_string())
             .or_insert(0);
         *generation += 1;
         let generation = *generation;
-        if let Some(earlier) = shared.follow(class, cell).map(|follow| follow.generation) {
-            shared.end(class, cell, earlier);
+        if let Some(earlier) = shared.follow(class, pool).map(|follow| follow.generation) {
+            shared.end(class, pool, earlier);
         }
         let close = CancellationToken::new();
         shared.follows.entry(class.to_string()).or_default().insert(
-            cell.to_string(),
+            pool.to_string(),
             Follow {
                 generation,
                 installed: None,
@@ -167,46 +167,46 @@ impl Relay {
             },
         );
         self.following.send_modify(|following| {
-            following.insert((class.to_string(), cell.to_string()), generation);
+            following.insert((class.to_string(), pool.to_string()), generation);
         });
         (generation, close)
     }
 
-    /// The link of the follow `generation` of the cell `cell` of `class`
-    /// ended, or a newer epoch replaced it: if it is the cell's current
+    /// The link of the follow `generation` of the pool `pool` of `class`
+    /// ended, or a newer epoch replaced it: if it is the pool's current
     /// follow, it is no longer offered, and it is kept, its instances
     /// still relayed, until every chooser has acknowledged that, since
-    /// what they offered to the cell may still be under way. One whose
+    /// what they offered to the pool may still be under way. One whose
     /// snapshot never completed was never relayed, and is forgotten.
-    pub(crate) fn end(&self, class: &str, cell: &str, generation: u64) {
-        self.lock().end(class, cell, generation);
+    pub(crate) fn end(&self, class: &str, pool: &str, generation: u64) {
+        self.lock().end(class, pool, generation);
     }
 
-    /// The follower no longer follows the cell `cell` of `class`, until it
+    /// The follower no longer follows the pool `pool` of `class`, until it
     /// decides again.
-    pub(crate) fn forget(&self, class: &str, cell: &str) {
+    pub(crate) fn forget(&self, class: &str, pool: &str) {
         self.following.send_if_modified(|following| {
             following
-                .remove(&(class.to_string(), cell.to_string()))
+                .remove(&(class.to_string(), pool.to_string()))
                 .is_some()
         });
     }
 
-    /// The cell `cell` of `class` withdrew its record: if it was ever
+    /// The pool `pool` of `class` withdrew its record: if it was ever
     /// followed, say so, naming its latest follow, which may have closed.
-    pub(crate) fn withdrawn(&self, class: &str, cell: &str) {
+    pub(crate) fn withdrawn(&self, class: &str, pool: &str) {
         let mut shared = self.lock();
-        shared.unlist(class, cell);
+        shared.unlist(class, pool);
         let Some(&generation) = shared
             .generations
             .get(class)
-            .and_then(|cells| cells.get(cell))
+            .and_then(|pools| pools.get(pool))
         else {
             return;
         };
         shared.changes.send(FollowEvent::Withdrawn {
             class: class.to_string(),
-            cell: cell.to_string(),
+            pool: pool.to_string(),
             generation,
         });
     }
@@ -225,34 +225,34 @@ impl Relay {
         self.lock().listings.synced(class);
     }
 
-    /// The follower read `record`, of a cell of this deployment: the cell
+    /// The follower read `record`, of a pool of this deployment: the pool
     /// is listed, and its choosers are sent what changed. `lapsed` holds
     /// when the follower saw the record's last write, if its lease has
     /// passed.
-    pub(crate) fn record(&self, record: &CellRecord, lapsed: Option<std::time::Instant>) {
+    pub(crate) fn record(&self, record: &PoolRecord, lapsed: Option<std::time::Instant>) {
         let mut shared = self.lock();
         shared.listings.record(record, lapsed);
         shared.relist(&record.class, &record.name);
     }
 
-    /// The record of the cell `cell` of `class`, which the follower saw
+    /// The record of the pool `pool` of `class`, which the follower saw
     /// last written at `written`, lapsed.
-    pub(crate) fn lapsed(&self, class: &str, cell: &str, written: std::time::Instant) {
+    pub(crate) fn lapsed(&self, class: &str, pool: &str, written: std::time::Instant) {
         let mut shared = self.lock();
-        shared.listings.lapse(class, cell, written);
-        shared.relist(class, cell);
+        shared.listings.lapse(class, pool, written);
+        shared.relist(class, pool);
     }
 
-    /// The cell `cell` of `class` is of another deployment now: it is no
+    /// The pool `pool` of `class` is of another deployment now: it is no
     /// longer listed.
-    pub(crate) fn unlist(&self, class: &str, cell: &str) {
-        self.lock().unlist(class, cell);
+    pub(crate) fn unlist(&self, class: &str, pool: &str) {
+        self.lock().unlist(class, pool);
     }
 
-    /// The snapshot of the follow `generation` of `installed`'s cell is
+    /// The snapshot of the follow `generation` of `installed`'s pool is
     /// complete: expose it, its state first, then whether it is offered if
     /// it is not, then its retired instances, then the ready ones its state
-    /// allows. A cell that takes no work is installed not offered, and
+    /// allows. A pool that takes no work is installed not offered, and
     /// closes once acknowledged without ever having been offered.
     pub(crate) fn install(&self, generation: u64, installed: Installed) {
         let mut shared = self.lock();
@@ -261,7 +261,7 @@ impl Relay {
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(&installed.class)
-            .and_then(|cells| cells.get_mut(&installed.cell))
+            .and_then(|pools| pools.get_mut(&installed.pool))
             .filter(|follow| follow.generation == generation && follow.installed.is_none())
         else {
             return;
@@ -270,57 +270,57 @@ impl Relay {
         let offering = (!follow.offer.offered()).then(|| {
             follow
                 .offer
-                .event(&installed.class, &installed.cell, generation)
+                .event(&installed.class, &installed.pool, generation)
         });
         for event in installed.snapshot(generation, offering, None) {
             changes.send(event);
         }
         let counted = installed.counted();
-        let (class, cell) = (installed.class.clone(), installed.cell.clone());
+        let (class, pool) = (installed.class.clone(), installed.pool.clone());
         follow.installed = Some(installed);
         if counted {
             shared.count(&class, true);
         }
-        shared.listings.lose(&class, &cell, None);
-        shared.relist(&class, &cell);
-        shared.settle(&class, &cell, generation);
+        shared.listings.lose(&class, &pool, None);
+        shared.relist(&class, &pool);
+        shared.settle(&class, &pool, generation);
     }
 
-    /// The cell watch of the follow `generation` of the cell `cell` of
+    /// The pool watch of the follow `generation` of the pool `pool` of
     /// `class` sent `event`, after its snapshot: a change of state that
     /// makes the follow offered or not offered is sent after it, at the
     /// next revision.
-    pub(crate) fn apply(&self, class: &str, cell: &str, generation: u64, event: CellWatchEvent) {
-        self.change(class, cell, generation, |installed, send| {
+    pub(crate) fn apply(&self, class: &str, pool: &str, generation: u64, event: PoolWatchEvent) {
+        self.change(class, pool, generation, |installed, send| {
             installed.apply(generation, event, send);
         });
     }
 
-    /// The cell watch of the follow `generation` of the cell `cell` of
+    /// The pool watch of the follow `generation` of the pool `pool` of
     /// `class` sent an event of a kind this build does not know: withhold
-    /// the cell until [`Relay::restore`] (see [`Installed::withhold`]).
-    pub(crate) fn withhold(&self, class: &str, cell: &str, generation: u64) {
-        self.change(class, cell, generation, |installed, send| {
+    /// the pool until [`Relay::restore`] (see [`Installed::withhold`]).
+    pub(crate) fn withhold(&self, class: &str, pool: &str, generation: u64) {
+        self.change(class, pool, generation, |installed, send| {
             installed.withhold(generation, send);
         });
     }
 
-    /// The cell of the follow `generation` of the cell `cell` of `class`
-    /// was read again, as `fresh`: it is what the relay shows of the cell,
+    /// The pool of the follow `generation` of the pool `pool` of `class`
+    /// was read again, as `fresh`: it is what the relay shows of the pool,
     /// which is no longer withheld.
-    pub(crate) fn restore(&self, class: &str, cell: &str, generation: u64, fresh: Installed) {
-        self.change(class, cell, generation, |installed, send| {
+    pub(crate) fn restore(&self, class: &str, pool: &str, generation: u64, fresh: Installed) {
+        self.change(class, pool, generation, |installed, send| {
             installed.restore(fresh, generation, send);
         });
     }
 
-    /// Change the installed follow `generation` of the cell `cell` of
+    /// Change the installed follow `generation` of the pool `pool` of
     /// `class` by `change`, sending what it sends to the watchers and
-    /// counting the cell again, under the lock.
+    /// counting the pool again, under the lock.
     fn change(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
         generation: u64,
         change: impl FnOnce(&mut Installed, &mut dyn FnMut(FollowEvent)),
     ) {
@@ -335,7 +335,7 @@ impl Relay {
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(class)
-            .and_then(|cells| cells.get_mut(cell))
+            .and_then(|pools| pools.get_mut(pool))
             .filter(|follow| follow.generation == generation && follow.installed.is_some())
         else {
             return;
@@ -353,13 +353,13 @@ impl Relay {
             }
             changes.send(event);
         });
-        // A retiree that left is forgotten by its cell's hub, and no
+        // A retiree that left is forgotten by its pool's hub, and no
         // chooser is shown it again: what it waited for would stay.
         let gone: Vec<InstanceId> = left
             .into_iter()
             .filter(|instance| follow.avoiding.gone(*instance))
             .collect();
-        unwait(retirements, class, cell, generation, gone);
+        unwait(retirements, class, pool, generation, gone);
         for (instance, segment) in retired {
             if follow
                 .avoiding
@@ -368,20 +368,20 @@ impl Relay {
                 tell(releases, installed, generation, Told::Avoided(instance));
             } else {
                 retirements.send_modify(|waiting| {
-                    waiting.insert((class.to_string(), cell.to_string(), generation, instance));
+                    waiting.insert((class.to_string(), pool.to_string(), generation, instance));
                 });
             }
         }
         let (offered, recounted) = (installed.exposes(), installed.counted());
         if follow.offer.set(offered) {
-            changes.send(follow.offer.event(class, cell, generation));
+            changes.send(follow.offer.event(class, pool, generation));
         }
         if recounted != counted {
             shared.count(class, recounted);
         }
-        shared.relist(class, cell);
+        shared.relist(class, pool);
         if !offered {
-            shared.settle(class, cell, generation);
+            shared.settle(class, pool, generation);
         }
     }
 
@@ -389,7 +389,7 @@ impl Relay {
     /// holds no offer to the follow `unoffered` names at its revision: it
     /// counts if that is the follow's current revision and the follow is
     /// still not offered, and the follow closes once every chooser of its
-    /// class has. Refused for an instance that chooses no cell of the
+    /// class has. Refused for an instance that chooses no pool of the
     /// class at this hub.
     pub(crate) fn acknowledge(
         &self,
@@ -400,29 +400,29 @@ impl Relay {
         let mut shared = self.lock();
         let Unoffered {
             class,
-            cell,
+            pool,
             generation,
             revision,
         } = unoffered;
         if !shared.choosers.chooses(chooser, epoch, class) {
             return Err(format!(
-                "instance {chooser} is not a member of this hub that chooses cells of class `{class}`"
+                "instance {chooser} is not a member of this hub that chooses pools of class `{class}`"
             ));
         }
         if shared
-            .offer(class, cell, *generation)
+            .offer(class, pool, *generation)
             .is_some_and(|offer| offer.acknowledge(chooser, *revision))
         {
-            shared.settle(class, cell, *generation);
+            shared.settle(class, pool, *generation);
         }
         Ok(())
     }
 
     /// `chooser`, in its registration of `epoch`, avoids the retired entry
     /// instance `avoids` names: once every chooser the retirement waited
-    /// for does, or has left, the cell's hub is told. One the relay does
+    /// for does, or has left, the pool's hub is told. One the relay does
     /// not wait for changes nothing. Refused for an instance that chooses
-    /// no cell of the class at this hub.
+    /// no pool of the class at this hub.
     pub(crate) fn avoids(
         &self,
         chooser: InstanceId,
@@ -432,13 +432,13 @@ impl Relay {
         let mut shared = self.lock();
         let Avoids {
             class,
-            cell,
+            pool,
             generation,
             instance,
         } = avoids;
         if !shared.choosers.chooses(chooser, epoch, class) {
             return Err(format!(
-                "instance {chooser} is not a member of this hub that chooses cells of class `{class}`"
+                "instance {chooser} is not a member of this hub that chooses pools of class `{class}`"
             ));
         }
         let Shared {
@@ -450,7 +450,7 @@ impl Relay {
         } = &mut *shared;
         let current = follows
             .get_mut(class)
-            .and_then(|cells| cells.get_mut(cell))
+            .and_then(|pools| pools.get_mut(pool))
             .filter(|follow| follow.generation == *generation);
         let found = match current {
             Some(Follow {
@@ -461,20 +461,20 @@ impl Relay {
             Some(_) => None,
             None => closing
                 .get_mut(class)
-                .and_then(|cells| cells.get_mut(cell))
+                .and_then(|pools| pools.get_mut(pool))
                 .and_then(|closing| closing.get_mut(generation))
                 .map(|closing| (&closing.installed, &mut closing.avoiding)),
         };
         if let Some((installed, avoiding)) = found
             && avoiding.avoids(*instance, chooser)
         {
-            unwait(retirements, class, cell, *generation, [*instance]);
+            unwait(retirements, class, pool, *generation, [*instance]);
             tell(releases, installed, *generation, Told::Avoided(*instance));
         }
         Ok(())
     }
 
-    /// The retirements of the followed cells' entry instances the relay
+    /// The retirements of the followed pools' entry instances the relay
     /// waits for its choosers to avoid, as it changes.
     pub(crate) fn retirements(&self) -> watch::Receiver<HashSet<Retirement>> {
         self.lock().retirements.subscribe()
@@ -512,7 +512,7 @@ impl Relay {
             return Ok(());
         }
         Err(format!(
-            "instance {chooser} is not a member of this hub of a segment that chooses cells"
+            "instance {chooser} is not a member of this hub of a segment that chooses pools"
         ))
     }
 
@@ -527,33 +527,33 @@ impl Relay {
         shared.settle_left(&classes, removal.id);
     }
 
-    /// A watch of one follow: the follow of the cell `cell` of `class` as
+    /// A watch of one follow: the follow of the pool `pool` of `class` as
     /// a watch of the relay begins with it, then the marker, then each
-    /// change that names the cell, of whichever generation, from the cell's
+    /// change that names the pool, of whichever generation, from the pool's
     /// own channel ([`Changes`]). The snapshot is taken and the changes
     /// subscribed to under one hold of the lock, as for a watch of the
     /// whole relay, so that no change falls between them: a reader that
-    /// reads the cell from this watch, rather than from a watch it already
+    /// reads the pool from this watch, rather than from a watch it already
     /// had, depends on it.
-    pub(crate) fn watch_of(&self, class: &str, cell: &str) -> FollowsWatch {
+    pub(crate) fn watch_of(&self, class: &str, pool: &str) -> FollowsWatch {
         let counted = self.one.count();
         let (snapshot, events) = {
             let mut shared = self.lock();
-            let snapshot = shared.followed(class, cell);
-            (snapshot, shared.changes.subscribe_one(class, cell))
+            let snapshot = shared.followed(class, pool);
+            (snapshot, shared.changes.subscribe_one(class, pool))
         };
         FollowsWatch {
             events: self.one.stream(counted, snapshot, events),
             release: Some(ChannelRelease {
                 shared: Arc::clone(&self.shared),
                 class: class.to_string(),
-                cell: cell.to_string(),
+                pool: pool.to_string(),
             }),
             chooser: None,
         }
     }
 
-    /// How many channels of cells watched alone the relay holds.
+    /// How many channels of pools watched alone the relay holds.
     #[cfg(test)]
     pub(crate) fn channels(&self) -> usize {
         self.lock().changes.channels()
@@ -613,8 +613,8 @@ impl Relay {
         let mut shared = self.lock();
         let lost = shared.lost;
         if shared.choosers.lost_since(shared.swept, now, lost) {
-            for (class, cell, generation) in shared.unoffered() {
-                shared.settle(&class, &cell, generation);
+            for (class, pool, generation) in shared.unoffered() {
+                shared.settle(&class, &pool, generation);
             }
         }
         shared.swept = now;
@@ -626,7 +626,7 @@ impl Relay {
         self.watchers.watchers()
     }
 
-    /// The cells the follower follows, by class and name, as it changes.
+    /// The pools the follower follows, by class and name, as it changes.
     pub(crate) fn following(&self) -> watch::Receiver<BTreeMap<(String, String), u64>> {
         self.following.subscribe()
     }
@@ -652,21 +652,21 @@ impl Relay {
 }
 
 /// What the relay knows, behind its lock. Its maps are by class, then by
-/// cell, so that a lookup by the names an event carries allocates
+/// pool, so that a lookup by the names an event carries allocates
 /// nothing.
 struct Shared {
-    /// The last generation numbered for each cell ever followed, so that a
+    /// The last generation numbered for each pool ever followed, so that a
     /// later follow of it is numbered after every earlier one.
     generations: HashMap<String, HashMap<String, u64>>,
-    /// Each followed cell's current follow.
+    /// Each followed pool's current follow.
     follows: HashMap<String, HashMap<String, Follow>>,
-    /// Each cell's earlier follows, by generation, whose links ended and
+    /// Each pool's earlier follows, by generation, whose links ended and
     /// that have yet to close.
     closing: HashMap<String, HashMap<String, BTreeMap<u64, Closing>>>,
     changes: Changes,
     /// Per class, the installed follows whose link last said `ready`.
     ready: HashMap<String, u32>,
-    health: watch::Sender<CellHealth>,
+    health: watch::Sender<PoolHealth>,
     /// The members that must acknowledge a follow before it closes.
     choosers: Choosers,
     /// How long a chooser may have no watch of the relay open before it is
@@ -676,15 +676,15 @@ struct Shared {
     /// being waited for ([`Relay::sweep`]).
     swept: Instant,
     /// Where each follow the relay closes, and each retirement its
-    /// choosers avoid, is sent, for its cell's hub.
+    /// choosers avoid, is sent, for its pool's hub.
     releases: mpsc::UnboundedSender<Release>,
     /// The retirements waited for, for whoever needs to see them.
     retirements: watch::Sender<HashSet<Retirement>>,
-    /// Every cell of the classes sent to whose record the follower read.
+    /// Every pool of the classes sent to whose record the follower read.
     listings: Listings,
 }
 
-/// One cell's current follow: its generation, what it exposes once its
+/// One pool's current follow: its generation, what it exposes once its
 /// snapshot is complete, whether it is offered, and the signal that ends
 /// its link once it closes.
 struct Follow {
@@ -696,7 +696,7 @@ struct Follow {
     close: CancellationToken,
 }
 
-/// An earlier follow of a cell, not offered, whose link ended: what its
+/// An earlier follow of a pool, not offered, whose link ended: what its
 /// link last showed, until it closes.
 struct Closing {
     installed: Installed,
@@ -705,35 +705,35 @@ struct Closing {
 }
 
 impl Shared {
-    fn follow(&self, class: &str, cell: &str) -> Option<&Follow> {
-        self.follows.get(class).and_then(|cells| cells.get(cell))
+    fn follow(&self, class: &str, pool: &str) -> Option<&Follow> {
+        self.follows.get(class).and_then(|pools| pools.get(pool))
     }
 
-    /// The offered state of the follow `generation` of the cell `cell` of
+    /// The offered state of the follow `generation` of the pool `pool` of
     /// `class`, current and installed or closing.
-    fn offer(&mut self, class: &str, cell: &str, generation: u64) -> Option<&mut Offer> {
+    fn offer(&mut self, class: &str, pool: &str, generation: u64) -> Option<&mut Offer> {
         let current = self
             .follows
             .get_mut(class)
-            .and_then(|cells| cells.get_mut(cell))
+            .and_then(|pools| pools.get_mut(pool))
             .filter(|follow| follow.generation == generation && follow.installed.is_some());
         match current {
             Some(follow) => Some(&mut follow.offer),
             None => self
                 .closing
                 .get_mut(class)
-                .and_then(|cells| cells.get_mut(cell))
+                .and_then(|pools| pools.get_mut(pool))
                 .and_then(|closing| closing.get_mut(&generation))
                 .map(|closing| &mut closing.offer),
         }
     }
 
-    fn end(&mut self, class: &str, cell: &str, generation: u64) {
-        let Some(cells) = self.follows.get_mut(class) else {
+    fn end(&mut self, class: &str, pool: &str, generation: u64) {
+        let Some(pools) = self.follows.get_mut(class) else {
             return;
         };
-        if cells
-            .get(cell)
+        if pools
+            .get(pool)
             .is_none_or(|follow| follow.generation != generation)
         {
             return;
@@ -743,13 +743,13 @@ impl Shared {
             mut offer,
             avoiding,
             ..
-        } = cells.remove(cell).expect("the follow was just found");
+        } = pools.remove(pool).expect("the follow was just found");
         // The relay closes a follow in `settle`, never here: a follow that
-        // ends here lost its link, or was replaced, so its cell is missing
+        // ends here lost its link, or was replaced, so its pool is missing
         // until a later one is installed.
         self.listings
-            .lose(class, cell, Some(std::time::Instant::now()));
-        self.relist(class, cell);
+            .lose(class, pool, Some(std::time::Instant::now()));
+        self.relist(class, pool);
         let Some(installed) = installed else {
             return;
         };
@@ -757,12 +757,12 @@ impl Shared {
             self.count(class, false);
         }
         if offer.set(false) {
-            self.changes.send(offer.event(class, cell, generation));
+            self.changes.send(offer.event(class, pool, generation));
         }
         self.closing
             .entry(class.to_string())
             .or_default()
-            .entry(cell.to_string())
+            .entry(pool.to_string())
             .or_default()
             .insert(
                 generation,
@@ -772,13 +772,13 @@ impl Shared {
                     avoiding,
                 },
             );
-        self.settle(class, cell, generation);
+        self.settle(class, pool, generation);
     }
 
-    /// Close the follow `generation` of the cell `cell` of `class` if it
+    /// Close the follow `generation` of the pool `pool` of `class` if it
     /// is not offered and every chooser of the class acknowledged it:
     /// drop it from the relay, and end its link if it is the current one.
-    fn settle(&mut self, class: &str, cell: &str, generation: u64) {
+    fn settle(&mut self, class: &str, pool: &str, generation: u64) {
         let waited: Vec<InstanceId> = self
             .choosers
             .waited(class, Instant::now(), self.lost)
@@ -786,14 +786,14 @@ impl Shared {
         let closes = |offer: &Offer| offer.closes(waited.iter().copied());
         let dropped = || FollowEvent::Dropped {
             class: class.to_string(),
-            cell: cell.to_string(),
+            pool: pool.to_string(),
             generation,
         };
-        // A withheld cell is not offered while its link reads it again, but
+        // A withheld pool is not offered while its link reads it again, but
         // its follow lives on: the link holds it, and it closes only once
-        // the cell, read again, still takes no work, or the link ends.
-        if let Some(cells) = self.follows.get_mut(class)
-            && cells.get(cell).is_some_and(|follow| {
+        // the pool, read again, still takes no work, or the link ends.
+        if let Some(pools) = self.follows.get_mut(class)
+            && pools.get(pool).is_some_and(|follow| {
                 follow.generation == generation
                     && follow
                         .installed
@@ -802,13 +802,13 @@ impl Shared {
                     && closes(&follow.offer)
             })
         {
-            let follow = cells.remove(cell).expect("the follow was just found");
+            let follow = pools.remove(pool).expect("the follow was just found");
             // Not offered, so not ready, and not counted.
             follow.close.cancel();
             unwait(
                 &self.retirements,
                 class,
-                cell,
+                pool,
                 generation,
                 follow.avoiding.waiting(),
             );
@@ -818,10 +818,10 @@ impl Shared {
             }
             return;
         }
-        let Some(cells) = self.closing.get_mut(class) else {
+        let Some(pools) = self.closing.get_mut(class) else {
             return;
         };
-        let Some(generations) = cells.get_mut(cell) else {
+        let Some(generations) = pools.get_mut(pool) else {
             return;
         };
         if generations
@@ -832,12 +832,12 @@ impl Shared {
                 .remove(&generation)
                 .expect("the follow was just found");
             if generations.is_empty() {
-                cells.remove(cell);
+                pools.remove(pool);
             }
             unwait(
                 &self.retirements,
                 class,
-                cell,
+                pool,
                 generation,
                 closing.avoiding.waiting(),
             );
@@ -847,25 +847,25 @@ impl Shared {
     }
 
     /// Every follow that is not offered, current or closing, by class,
-    /// cell, and generation.
+    /// pool, and generation.
     fn unoffered(&self) -> Vec<(String, String, u64)> {
-        let current = self.follows.iter().flat_map(|(class, cells)| {
-            cells
+        let current = self.follows.iter().flat_map(|(class, pools)| {
+            pools
                 .iter()
                 .filter(|(_, follow)| follow.installed.is_some() && !follow.offer.offered())
-                .map(|(cell, follow)| (class.clone(), cell.clone(), follow.generation))
+                .map(|(pool, follow)| (class.clone(), pool.clone(), follow.generation))
         });
-        let closing = self.closing.iter().flat_map(|(class, cells)| {
-            cells.iter().flat_map(move |(cell, generations)| {
+        let closing = self.closing.iter().flat_map(|(class, pools)| {
+            pools.iter().flat_map(move |(pool, generations)| {
                 generations
                     .keys()
-                    .map(move |generation| (class.clone(), cell.clone(), *generation))
+                    .map(move |generation| (class.clone(), pool.clone(), *generation))
             })
         });
         current.chain(closing).collect()
     }
 
-    /// Tell the hub of `installed`'s cell that its follow `generation`
+    /// Tell the hub of `installed`'s pool that its follow `generation`
     /// closed.
     fn release(&self, installed: &Installed, generation: u64) {
         tell(&self.releases, installed, generation, Told::Released);
@@ -875,16 +875,16 @@ impl Shared {
     /// of them that is not offered, since it may have waited only for it.
     fn settle_left(&mut self, classes: &[String], id: InstanceId) {
         for class in classes {
-            for (cell, generation) in self.left(class, id) {
-                self.settle(class, &cell, generation);
+            for (pool, generation) in self.left(class, id) {
+                self.settle(class, &pool, generation);
             }
         }
     }
 
     /// The chooser `id` of `class` left: it avoids every retirement of
-    /// the class's follows that waited for it, so the cells' hubs are told
+    /// the class's follows that waited for it, so the pools' hubs are told
     /// of those it was the last for; forget what it acknowledged of every
-    /// follow of the class that is not offered, and return them, by cell
+    /// follow of the class that is not offered, and return them, by pool
     /// and generation, for each to be settled.
     fn left(&mut self, class: &str, id: InstanceId) -> Vec<(String, u64)> {
         let mut unoffered = Vec::new();
@@ -895,7 +895,7 @@ impl Shared {
             retirements,
             ..
         } = self;
-        for (cell, follow) in follows.get_mut(class).into_iter().flatten() {
+        for (pool, follow) in follows.get_mut(class).into_iter().flatten() {
             let Some(installed) = &follow.installed else {
                 continue;
             };
@@ -903,7 +903,7 @@ impl Shared {
             unwait(
                 retirements,
                 class,
-                cell,
+                pool,
                 follow.generation,
                 avoided.iter().copied(),
             );
@@ -917,16 +917,16 @@ impl Shared {
             }
             if !follow.offer.offered() {
                 follow.offer.left(id);
-                unoffered.push((cell.clone(), follow.generation));
+                unoffered.push((pool.clone(), follow.generation));
             }
         }
-        for (cell, generations) in closing.get_mut(class).into_iter().flatten() {
+        for (pool, generations) in closing.get_mut(class).into_iter().flatten() {
             for (generation, closing) in generations {
                 let avoided = closing.avoiding.left(id);
                 unwait(
                     retirements,
                     class,
-                    cell,
+                    pool,
                     *generation,
                     avoided.iter().copied(),
                 );
@@ -939,14 +939,14 @@ impl Shared {
                     );
                 }
                 closing.offer.left(id);
-                unoffered.push((cell.clone(), *generation));
+                unoffered.push((pool.clone(), *generation));
             }
         }
         unoffered
     }
 
-    /// One more, or one fewer, ready cell of `class` is followed: show the
-    /// count in the cell's health, if the cell requires cells of the
+    /// One more, or one fewer, ready pool of `class` is followed: show the
+    /// count in the pool's health, if the pool requires pools of the
     /// class.
     fn count(&mut self, class: &str, more: bool) {
         let ready = self.ready.entry(class.to_string()).or_insert(0);
@@ -960,59 +960,59 @@ impl Shared {
             .send_if_modified(|health| health.meet(class, ready));
     }
 
-    /// The follows of the cell `cell` of `class` as a watch of the relay
+    /// The follows of the pool `pool` of `class` as a watch of the relay
     /// begins with them, its closing ones included, then the marker; only
     /// the marker when it has none.
-    fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+    fn followed(&self, class: &str, pool: &str) -> Vec<FollowEvent> {
         #[cfg(test)]
         self.changes.work.snapshot();
         let mut events = Vec::new();
-        self.snapshot_of(class, cell, std::time::Instant::now(), &mut events);
+        self.snapshot_of(class, pool, std::time::Instant::now(), &mut events);
         events.push(FollowEvent::Synced {
             listed: self.listings.whole(),
         });
         events
     }
 
-    /// Every installed follow, by class and cell, each cell's closing
+    /// Every installed follow, by class and pool, each pool's closing
     /// follows before its current one, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
         #[cfg(test)]
         self.changes.work.snapshot();
-        let mut cells: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut pools: BTreeSet<(&str, &str)> = BTreeSet::new();
         for (class, follows) in &self.follows {
-            for (cell, follow) in follows {
+            for (pool, follow) in follows {
                 if follow.installed.is_some() {
-                    cells.insert((class, cell));
+                    pools.insert((class, pool));
                 }
             }
         }
         for (class, closing) in &self.closing {
-            cells.extend(closing.keys().map(|cell| (class.as_str(), cell.as_str())));
+            pools.extend(closing.keys().map(|pool| (class.as_str(), pool.as_str())));
         }
         let mut events = Vec::new();
         // One instant for the snapshot: every silence is aged to it.
         let now = std::time::Instant::now();
-        for (class, cell) in &cells {
-            self.snapshot_of(class, cell, now, &mut events);
+        for (class, pool) in &pools {
+            self.snapshot_of(class, pool, now, &mut events);
         }
-        // A cell with a current follow has its listing on the follow's
+        // A pool with a current follow has its listing on the follow's
         // event; every other one is sent apart.
         let mut listed: Vec<(&str, &str)> = self
             .listings
-            .cells()
-            .filter(|(class, cell)| {
-                self.follow(class, cell)
+            .pools()
+            .filter(|(class, pool)| {
+                self.follow(class, pool)
                     .is_none_or(|follow| follow.installed.is_none())
             })
             .collect();
         listed.sort_unstable();
-        for (class, cell) in listed {
+        for (class, pool) in listed {
             events.push(FollowEvent::Listed {
                 class: class.to_string(),
-                cell: cell.to_string(),
-                generation: self.generation(class, cell),
-                listing: self.listings.listing(class, cell, now),
+                pool: pool.to_string(),
+                generation: self.generation(class, pool),
+                listing: self.listings.listing(class, pool, now),
             });
         }
         events.push(FollowEvent::Synced {
@@ -1021,83 +1021,83 @@ impl Shared {
         events
     }
 
-    /// The follows of the cell `cell` of `class` as a watch of the relay
+    /// The follows of the pool `pool` of `class` as a watch of the relay
     /// begins with them, into `events`: its closing follows, then its
     /// current one, if installed.
     fn snapshot_of(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
         now: std::time::Instant,
         events: &mut Vec<FollowEvent>,
     ) {
-        let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
+        let closing = self.closing.get(class).and_then(|pools| pools.get(pool));
         for (generation, closing) in closing.into_iter().flatten() {
-            let offering = closing.offer.event(class, cell, *generation);
+            let offering = closing.offer.event(class, pool, *generation);
             events.extend(
                 closing
                     .installed
                     .snapshot(*generation, Some(offering), None),
             );
         }
-        if let Some(follow) = self.follow(class, cell)
+        if let Some(follow) = self.follow(class, pool)
             && let Some(installed) = &follow.installed
         {
             let offering = follow
                 .offer
                 .shown()
-                .then(|| follow.offer.event(class, cell, follow.generation));
-            let listing = self.listings.listing(class, cell, now);
+                .then(|| follow.offer.event(class, pool, follow.generation));
+            let listing = self.listings.listing(class, pool, now);
             events.extend(installed.snapshot(follow.generation, offering, listing));
         }
     }
 
-    /// The generation of the latest follow of the cell `cell` of `class`,
+    /// The generation of the latest follow of the pool `pool` of `class`,
     /// or 0 if it was never followed.
-    fn generation(&self, class: &str, cell: &str) -> u64 {
+    fn generation(&self, class: &str, pool: &str) -> u64 {
         self.generations
             .get(class)
-            .and_then(|cells| cells.get(cell))
+            .and_then(|pools| pools.get(pool))
             .copied()
             .unwrap_or(0)
     }
 
-    /// Send the listing of the cell `cell` of `class` if it changed, with
+    /// Send the listing of the pool `pool` of `class` if it changed, with
     /// the models its current follow's link sent, if newer.
-    fn relist(&mut self, class: &str, cell: &str) {
+    fn relist(&mut self, class: &str, pool: &str) {
         let Shared {
             follows, listings, ..
         } = self;
         if let Some(models) = follows
             .get(class)
-            .and_then(|cells| cells.get(cell))
+            .and_then(|pools| pools.get(pool))
             .and_then(|follow| follow.installed.as_ref())
             .and_then(Installed::models)
         {
-            listings.link_models(class, cell, models);
+            listings.link_models(class, pool, models);
         }
         if let Some(listing) = self
             .listings
-            .changed(class, cell, std::time::Instant::now())
+            .changed(class, pool, std::time::Instant::now())
         {
-            let generation = self.generation(class, cell);
+            let generation = self.generation(class, pool);
             self.changes.send(FollowEvent::Listed {
                 class: class.to_string(),
-                cell: cell.to_string(),
+                pool: pool.to_string(),
                 generation,
                 listing: Some(listing),
             });
         }
     }
 
-    /// The cell `cell` of `class` is no longer listed: its choosers are
+    /// The pool `pool` of `class` is no longer listed: its choosers are
     /// told, if they were shown it.
-    fn unlist(&mut self, class: &str, cell: &str) {
-        if self.listings.remove(class, cell) {
-            let generation = self.generation(class, cell);
+    fn unlist(&mut self, class: &str, pool: &str) {
+        if self.listings.remove(class, pool) {
+            let generation = self.generation(class, pool);
             self.changes.send(FollowEvent::Listed {
                 class: class.to_string(),
-                cell: cell.to_string(),
+                pool: pool.to_string(),
                 generation,
                 listing: None,
             });
@@ -1105,7 +1105,7 @@ impl Shared {
     }
 }
 
-/// Tell the hub of `installed`'s cell `told` of its follow `generation`.
+/// Tell the hub of `installed`'s pool `told` of its follow `generation`.
 fn tell(
     releases: &mpsc::UnboundedSender<Release>,
     installed: &Installed,
@@ -1115,18 +1115,18 @@ fn tell(
     let _ = releases.send(Release {
         hub: installed.hub.clone(),
         class: installed.class.clone(),
-        cell: installed.cell.clone(),
+        pool: installed.pool.clone(),
         generation,
         told,
     });
 }
 
-/// The retirements `instances` of the follow `generation` of the cell
-/// `cell` of `class` are no longer waited for.
+/// The retirements `instances` of the follow `generation` of the pool
+/// `pool` of `class` are no longer waited for.
 fn unwait(
     retirements: &watch::Sender<HashSet<Retirement>>,
     class: &str,
-    cell: &str,
+    pool: &str,
     generation: u64,
     instances: impl IntoIterator<Item = InstanceId>,
 ) {
@@ -1136,7 +1136,7 @@ fn unwait(
     }
     retirements.send_modify(|waiting| {
         for instance in instances {
-            waiting.remove(&(class.to_string(), cell.to_string(), generation, instance));
+            waiting.remove(&(class.to_string(), pool.to_string(), generation, instance));
         }
     });
 }
@@ -1144,14 +1144,14 @@ fn unwait(
 /// A watch of what a hub follows, in process: its snapshot, then each
 /// change, until the hub stops or the watch falls more than the hub's
 /// buffer behind. The hub serves the same events at
-/// `GET /v1/ext/gdl-cell/follows`. Dropping it releases what the hub holds
+/// `GET /v1/ext/gdl-pool/follows`. Dropping it releases what the hub holds
 /// for it.
 pub struct FollowsWatch {
     events: BoxStream<'static, FollowEvent>,
     /// For a watch of one follow: dropped after `events`, whose receiver is
-    /// then gone, so that the cell's channel, and its buffer, is released
-    /// as its last watch closes, not only at the cell's next change, which
-    /// a cell that left never sends.
+    /// then gone, so that the pool's channel, and its buffer, is released
+    /// as its last watch closes, not only at the pool's next change, which
+    /// a pool that left never sends.
     release: Option<ChannelRelease>,
     /// For a watch that names its chooser: the relay waits for the chooser
     /// while it is open, and for the bound once it closes.
@@ -1176,11 +1176,11 @@ impl Drop for ChooserWatch {
     }
 }
 
-/// Releases a cell's channel as a watch of its follow closes.
+/// Releases a pool's channel as a watch of its follow closes.
 struct ChannelRelease {
     shared: Arc<Mutex<Shared>>,
     class: String,
-    cell: String,
+    pool: String,
 }
 
 impl Drop for ChannelRelease {
@@ -1189,7 +1189,7 @@ impl Drop for ChannelRelease {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .changes
-            .release(&self.class, &self.cell);
+            .release(&self.class, &self.pool);
     }
 }
 

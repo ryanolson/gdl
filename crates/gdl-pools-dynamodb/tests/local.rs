@@ -4,7 +4,7 @@
 //! tables, each standing for a hub's process, see each other's writes and
 //! refuse each other's tokens; a record whose list has not arrived is not
 //! installed, and a new watch's snapshot waits for it, within a bound; a
-//! list its cell has moved past is marked to expire, and the one a record
+//! list its pool has moved past is marked to expire, and the one a record
 //! names is not.
 //!
 //! Outside the default suite: the target needs the `dynamodb-local`
@@ -24,12 +24,12 @@ use aws_sdk_dynamodb::{
     types::AttributeValue,
 };
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, ModelEntry, ModelState,
+use gdl_pools::{
+    DirectoryError, ModelEntry, ModelState, PoolDirectory, PoolEvent, PoolRecord, PoolState,
     Presence, ResumeToken, Version, Withdrawal,
     conformance::{self, Backend},
 };
-use gdl_cells_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
+use gdl_pools_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
 
 // In a directory of its own, so that cargo does not take it for a test
 // target.
@@ -83,7 +83,7 @@ async fn tables(client: &Client) -> Tables {
     let n = TABLES.fetch_add(1, Ordering::Relaxed);
     let run = std::process::id();
     let tables = Tables {
-        records: format!("gdl-cells-{run}-{n}"),
+        records: format!("gdl-pools-{run}-{n}"),
         lists: format!("gdl-lists-{run}-{n}"),
     };
     DynamoDirectory::create_tables(client, &tables)
@@ -131,10 +131,10 @@ async fn the_dynamodb_directory_conforms() {
     conformance::run(&Local { client: client() }).await;
 }
 
-type Watch = Pin<Box<<DynamoDirectory as CellDirectory>::Watch>>;
+type Watch = Pin<Box<<DynamoDirectory as PoolDirectory>::Watch>>;
 
-fn record(cell: &str, epoch: u64, seq: u64, models: &[&str]) -> CellRecord {
-    CellRecord {
+fn record(pool: &str, epoch: u64, seq: u64, models: &[&str]) -> PoolRecord {
+    PoolRecord {
         presence: Presence::Serving,
         models: models
             .iter()
@@ -147,17 +147,17 @@ fn record(cell: &str, epoch: u64, seq: u64, models: &[&str]) -> CellRecord {
             .collect(),
         models_version: (epoch << 32) + models.len() as u64,
         revoked: Vec::new(),
-        name: cell.into(),
+        name: pool.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
         home: Some("global-us".into()),
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch,
         seq,
-        hub: format!("{cell}:4000"),
-        lease: CellRecord::DEFAULT_LEASE,
+        hub: format!("{pool}:4000"),
+        lease: PoolRecord::DEFAULT_LEASE,
         load: None,
     }
 }
@@ -166,13 +166,13 @@ fn watch(directory: &DynamoDirectory, from: Option<ResumeToken>) -> Watch {
     Box::pin(directory.watch(MODEL, from))
 }
 
-async fn next(watch: &mut Watch) -> Option<Result<CellEvent, DirectoryError>> {
+async fn next(watch: &mut Watch) -> Option<Result<PoolEvent, DirectoryError>> {
     tokio::time::timeout(WAIT, watch.next())
         .await
         .unwrap_or_else(|_| panic!("nothing within {WAIT:?}"))
 }
 
-async fn event(watch: &mut Watch) -> CellEvent {
+async fn event(watch: &mut Watch) -> PoolEvent {
     match next(watch).await {
         Some(Ok(event)) => event,
         other => panic!("expected an event, got {other:?}"),
@@ -180,12 +180,12 @@ async fn event(watch: &mut Watch) -> CellEvent {
 }
 
 /// A snapshot's whole records, and its token.
-async fn snapshot(watch: &mut Watch) -> (Vec<CellRecord>, ResumeToken) {
+async fn snapshot(watch: &mut Watch) -> (Vec<PoolRecord>, ResumeToken) {
     let mut records = Vec::new();
     loop {
         match event(watch).await {
-            CellEvent::Current(record) => records.push(record),
-            CellEvent::Synced {
+            PoolEvent::Current(record) => records.push(record),
+            PoolEvent::Synced {
                 token,
                 snapshot: true,
             } => return (records, token),
@@ -195,21 +195,21 @@ async fn snapshot(watch: &mut Watch) -> (Vec<CellRecord>, ResumeToken) {
 }
 
 /// The next event is the put of `published`, whole; its token.
-async fn put(watch: &mut Watch, published: &CellRecord) -> ResumeToken {
+async fn put(watch: &mut Watch, published: &PoolRecord) -> ResumeToken {
     match event(watch).await {
-        CellEvent::Put { record, token } if record == *published => token,
+        PoolEvent::Put { record, token } if record == *published => token,
         other => panic!("expected the put of {published:?}, got {other:?}"),
     }
 }
 
-/// The lists table's items of `cell`, by sort key.
-async fn lists(client: &Client, tables: &Tables, cell: &str) -> Vec<(String, Option<u64>)> {
+/// The lists table's items of `pool`, by sort key.
+async fn lists(client: &Client, tables: &Tables, pool: &str) -> Vec<(String, Option<u64>)> {
     let page = client
         .query()
         .table_name(&tables.lists)
         .key_condition_expression("#owner = :owner")
         .expression_attribute_names("#owner", "owner")
-        .expression_attribute_values(":owner", AttributeValue::S(format!("{MODEL}/{cell}")))
+        .expression_attribute_values(":owner", AttributeValue::S(format!("{MODEL}/{pool}")))
         .consistent_read(true)
         .send()
         .await
@@ -230,11 +230,11 @@ async fn lists(client: &Client, tables: &Tables, cell: &str) -> Vec<(String, Opt
         .collect()
 }
 
-/// The key of the list that `cell`'s stored record names, and that list's
+/// The key of the list that `pool`'s stored record names, and that list's
 /// expiry. Fails when the record names no list or its list is missing: a
 /// stored record must name a list that is there.
-async fn named(client: &Client, tables: &Tables, cell: &str) -> (String, Option<u64>) {
-    named_list(client, tables, cell)
+async fn named(client: &Client, tables: &Tables, pool: &str) -> (String, Option<u64>) {
+    named_list(client, tables, pool)
         .await
         .unwrap_or_else(|broken| panic!("{broken}"))
 }
@@ -243,13 +243,13 @@ async fn named(client: &Client, tables: &Tables, cell: &str) -> (String, Option<
 async fn named_list(
     client: &Client,
     tables: &Tables,
-    cell: &str,
+    pool: &str,
 ) -> Result<(String, Option<u64>), String> {
     let stored = client
         .get_item()
         .table_name(&tables.records)
         .key("class", AttributeValue::S(MODEL.into()))
-        .key("cell", AttributeValue::S(cell.into()))
+        .key("pool", AttributeValue::S(pool.into()))
         .consistent_read(true)
         .send()
         .await
@@ -258,22 +258,22 @@ async fn named_list(
         Some(AttributeValue::S(key)) => key.clone(),
         other => {
             return Err(format!(
-                "the stored record of {cell} names no list: {other:?}"
+                "the stored record of {pool} names no list: {other:?}"
             ));
         }
     };
-    let lists = lists(client, tables, cell).await;
+    let lists = lists(client, tables, pool).await;
     match lists.iter().find(|(list, _)| *list == key) {
         Some(&(_, expires)) => Ok((key, expires)),
         None => Err(format!(
-            "the stored record of {cell} names {key}, which is missing: {lists:?}"
+            "the stored record of {pool} names {key}, which is missing: {lists:?}"
         )),
     }
 }
 
 /// Whether no list of `lists` is set to expire. With [`named`], or a
 /// snapshot that joins the record to its list, the claim of a case whose
-/// cell's lists all stay: the list the record names is there and live.
+/// pool's lists all stay: the list the record names is there and live.
 fn none_expire(lists: &[(String, Option<u64>)]) -> bool {
     lists.iter().all(|(_, expiry)| expiry.is_none())
 }
@@ -283,7 +283,7 @@ type Item = std::collections::HashMap<String, AttributeValue>;
 /// The items a publish of `record` writes, made in tables of their own: its
 /// record and its list, to put in a case's tables in either order, as
 /// replication may deliver them.
-async fn items(client: &Client, record: CellRecord) -> (Item, Item) {
+async fn items(client: &Client, record: PoolRecord) -> (Item, Item) {
     let tables = tables(client).await;
     DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS)
         .publish(record)
@@ -349,7 +349,7 @@ async fn two_processes_see_each_others_writes_and_refuse_each_others_tokens() {
     // refused at the version the other wrote.
     a.withdraw(Withdrawal {
         class: MODEL.into(),
-        cell: "model-x-01".into(),
+        pool: "model-x-01".into(),
         epoch: 1,
         seq: 2,
     })
@@ -365,12 +365,12 @@ async fn two_processes_see_each_others_writes_and_refuse_each_others_tokens() {
 
     // A token is served only by the handle whose watch made it.
     let mut elsewhere = watch(&b, Some(token.clone()));
-    assert_eq!(event(&mut elsewhere).await, CellEvent::Resnapshot);
+    assert_eq!(event(&mut elsewhere).await, PoolEvent::Resnapshot);
     assert!(next(&mut elsewhere).await.is_none(), "the watch went on");
     let mut resumed = watch(&a, Some(token));
     assert!(matches!(
         event(&mut resumed).await,
-        CellEvent::Synced {
+        PoolEvent::Synced {
             snapshot: false,
             ..
         }
@@ -379,7 +379,7 @@ async fn two_processes_see_each_others_writes_and_refuse_each_others_tokens() {
 
 /// Replication does not order the two tables, so a region can hold a
 /// record before its list. The record is not installed until the list
-/// arrives: a live watch keeps the cell's earlier record, a new watch's
+/// arrives: a live watch keeps the pool's earlier record, a new watch's
 /// snapshot waits, and both see the record whole once the list is there.
 #[tokio::test]
 async fn a_record_waits_for_its_list() {
@@ -413,7 +413,7 @@ async fn a_record_waits_for_its_list() {
 }
 
 /// A snapshot whose list never arrives is not completed: the watch ends
-/// with the cells it waited for, and the reader watches again after its
+/// with the pools it waited for, and the reader watches again after its
 /// backoff.
 #[tokio::test]
 async fn a_snapshot_that_waits_too_long_for_a_list_ends_its_watch() {
@@ -444,7 +444,7 @@ async fn a_snapshot_that_waits_too_long_for_a_list_ends_its_watch() {
     assert_eq!(reader.watchers(MODEL), 0);
 }
 
-/// Only a list its cell has moved past is marked to expire, and only the
+/// Only a list its pool has moved past is marked to expire, and only the
 /// lists table has TTL. A heartbeat does not write its list again.
 #[tokio::test]
 async fn a_superseded_list_expires_and_the_named_one_stays() {
@@ -478,17 +478,17 @@ async fn a_superseded_list_expires_and_the_named_one_stays() {
     let (records, _) = snapshot(&mut watch(&directory, None)).await;
     assert_eq!(records, [latest]);
 
-    // A withdrawal moves its cell past every list.
+    // A withdrawal moves its pool past every list.
     directory
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: "model-x-01".into(),
+            pool: "model-x-01".into(),
             epoch: 1,
             seq: 4,
         })
         .await
         .expect("withdrawn");
-    // A withdrawal expires nothing: the cell keeps its last list.
+    // A withdrawal expires nothing: the pool keeps its last list.
     let lists_now = lists(&client, &tables, "model-x-01").await;
     assert_eq!(
         lists_now.iter().filter(|list| list.1.is_none()).count(),
@@ -531,7 +531,7 @@ async fn a_cached_list_is_kept_when_published_after_another_handles_withdrawal()
     operator
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: first.name.clone(),
+            pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
         })
@@ -542,7 +542,7 @@ async fn a_cached_list_is_kept_when_published_after_another_handles_withdrawal()
         "a withdrawal expires no list"
     );
 
-    let latest = CellRecord { seq: 3, ..first };
+    let latest = PoolRecord { seq: 3, ..first };
     writer
         .publish(latest.clone())
         .await
@@ -632,7 +632,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
                     operator
                         .withdraw(Withdrawal {
                             class: MODEL.into(),
-                            cell: "model-x-01".into(),
+                            pool: "model-x-01".into(),
                             epoch: 1,
                             seq: 2,
                         })
@@ -654,7 +654,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
     );
     drop(release);
 
-    let latest = CellRecord { seq: 3, ..first };
+    let latest = PoolRecord { seq: 3, ..first };
     writer
         .publish(latest.clone())
         .await
@@ -663,7 +663,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
         none_expire(&lists(&client, &tables, &latest.name).await),
         "the newer publish leaves its list without TTL"
     );
-    let latest = CellRecord { seq: 4, ..latest };
+    let latest = PoolRecord { seq: 4, ..latest };
     writer
         .publish(latest.clone())
         .await
@@ -742,8 +742,8 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
         })
         .build();
     let writer = DynamoDirectory::with_limits(Client::from_conf(config), tables.clone(), LIMITS);
-    let published = CellRecord { seq: 3, ..first };
-    let latest = CellRecord {
+    let published = PoolRecord { seq: 3, ..first };
+    let latest = PoolRecord {
         seq: 4,
         ..published.clone()
     };
@@ -756,7 +756,7 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
                 tokio::time::timeout(WAIT, async {
                     writer.publish(published.clone()).await?;
                     writer
-                        .publish(CellRecord {
+                        .publish(PoolRecord {
                             seq: 4,
                             ..published
                         })
@@ -773,7 +773,7 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
     operator
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: latest.name.clone(),
+            pool: latest.name.clone(),
             epoch: 1,
             seq: 2,
         })
@@ -804,10 +804,10 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
     );
 }
 
-/// A cell scaled to 0 after a withdrawal in its region sends no later
+/// A pool scaled to 0 after a withdrawal in its region sends no later
 /// write, so its list must not be left expiring: a withdrawal expires none.
 #[tokio::test]
-async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
+async fn a_pool_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
     use std::sync::Arc;
 
     use aws_sdk_dynamodb::{
@@ -861,7 +861,7 @@ async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
     operator
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: first.name.clone(),
+            pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
         })
@@ -869,8 +869,8 @@ async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
         .expect("the same-region withdrawal");
     assert!(none_expire(&lists(&client, &tables, &first.name).await));
 
-    // A scaled-to-zero cell sends no heartbeat that could repair the list.
-    let latest = CellRecord {
+    // A scaled-to-zero pool sends no heartbeat that could repair the list.
+    let latest = PoolRecord {
         seq: 3,
         presence: Presence::ScaledToZero,
         ..first
@@ -887,9 +887,9 @@ async fn a_cell_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
         std::slice::from_ref(&latest)
     );
 
-    // The next publish repairs the cache miss, but it is not owed by the cell.
+    // The next publish repairs the cache miss, but it is not owed by the pool.
     writer
-        .publish(CellRecord { seq: 4, ..latest })
+        .publish(PoolRecord { seq: 4, ..latest })
         .await
         .expect("a later publish");
     assert!(none_expire(&lists(&client, &tables, "model-x-01").await));
@@ -1089,7 +1089,7 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
             let record = context
                 .input()
                 .downcast_ref::<PutItemInput>()
-                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell")));
+                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("pool")));
             self.record.store(record, Ordering::Relaxed);
             Ok(())
         }
@@ -1130,7 +1130,7 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
     operator
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: first.name.clone(),
+            pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
         })
@@ -1138,11 +1138,11 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
         .expect("the same-region withdrawal");
     assert!(none_expire(&lists(&client, &tables, &first.name).await));
 
-    // The cached list's put is refused, since the cell's item is the
+    // The cached list's put is refused, since the pool's item is the
     // withdrawal: the write puts a list of its own, then its record, whose
     // answer is lost.
     lose.store(true, Ordering::Relaxed);
-    let stored = CellRecord { seq: 3, ..first };
+    let stored = PoolRecord { seq: 3, ..first };
     let uncertain = writer.publish(stored.clone()).await;
     assert!(!lose.load(Ordering::Relaxed), "the response was lost");
     assert!(
@@ -1155,7 +1155,7 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
         "DynamoDB stored the record before its response was lost"
     );
 
-    let latest = CellRecord {
+    let latest = PoolRecord {
         seq: 4,
         presence: Presence::ScaledToZero,
         ..stored
@@ -1175,11 +1175,11 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
     );
 }
 
-/// Two publishes of one cell through clones of a handle run one at a
+/// Two publishes of one pool through clones of a handle run one at a
 /// time, and neither leaves the list expiring after a withdrawal between
 /// them.
 #[tokio::test]
-async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
+async fn overlapping_publishes_of_a_pool_leave_its_list_unexpired() {
     use aws_sdk_dynamodb::{
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
         operation::{put_item::PutItemInput, transact_write_items::TransactWriteItemsInput},
@@ -1285,7 +1285,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
         .await
         .expect("the first record");
 
-    let start = |directory: DynamoDirectory, published: CellRecord| {
+    let start = |directory: DynamoDirectory, published: PoolRecord| {
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1298,7 +1298,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     };
     let one = start(
         writer.clone(),
-        CellRecord {
+        PoolRecord {
             seq: 2,
             ..first.clone()
         },
@@ -1310,7 +1310,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     armed.store(true, Ordering::Relaxed);
     let two = start(
         writer.clone(),
-        CellRecord {
+        PoolRecord {
             seq: 4,
             ..first.clone()
         },
@@ -1339,7 +1339,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     operator
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: first.name.clone(),
+            pool: first.name.clone(),
             epoch: 1,
             seq: 3,
         })
@@ -1357,7 +1357,7 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     );
     assert_eq!(failed.load(Ordering::Relaxed), 0);
 
-    let latest = CellRecord {
+    let latest = PoolRecord {
         seq: 5,
         presence: Presence::ScaledToZero,
         ..first
@@ -1374,8 +1374,8 @@ async fn overlapping_publishes_of_a_cell_leave_its_list_unexpired() {
     );
 }
 
-/// A list expires only when its cell's record is stored at a higher
-/// `models_version`, which only the cell's hub raises: a heartbeat, an
+/// A list expires only when its pool's record is stored at a higher
+/// `models_version`, which only the pool's hub raises: a heartbeat, an
 /// operator's command at a new epoch that copies the record, a record at
 /// a lower version, and a withdrawal expire nothing.
 #[tokio::test]
@@ -1393,7 +1393,7 @@ async fn a_list_expires_only_past_its_models_version() {
     let first = record("model-x-01", 1, 1, &["qwen-32b", "llama-70b"]);
     directory.publish(first.clone()).await.expect("a record");
     directory
-        .publish(CellRecord {
+        .publish(PoolRecord {
             seq: 2,
             ..first.clone()
         })
@@ -1401,7 +1401,7 @@ async fn a_list_expires_only_past_its_models_version() {
         .expect("a heartbeat");
     assert_eq!(expiring().await, 0, "a heartbeat");
     // A command copies the record at a new epoch, models and all.
-    let command = CellRecord {
+    let command = PoolRecord {
         epoch: 7,
         seq: 1,
         presence: Presence::ScaledToZero,
@@ -1410,8 +1410,8 @@ async fn a_list_expires_only_past_its_models_version() {
     directory.publish(command.clone()).await.expect("a command");
     assert_eq!(expiring().await, 0, "a command at the same models_version");
     // A newer write whose models_version is lower names its own list, and
-    // moves the cell past none.
-    let lower = CellRecord {
+    // moves the pool past none.
+    let lower = PoolRecord {
         epoch: 8,
         seq: 1,
         models_version: first.models_version - 1,
@@ -1432,7 +1432,7 @@ async fn a_list_expires_only_past_its_models_version() {
     directory
         .withdraw(Withdrawal {
             class: MODEL.into(),
-            cell: "model-x-01".into(),
+            pool: "model-x-01".into(),
             epoch: 9,
             seq: 2,
         })
@@ -1449,7 +1449,7 @@ async fn a_same_region_command_keeps_its_list_after_delayed_expiry() {
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
         operation::update_item::UpdateItemInput,
     };
-    use gdl_cells::CellCommand;
+    use gdl_pools::PoolCommand;
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -1490,12 +1490,12 @@ async fn a_same_region_command_keeps_its_list_after_delayed_expiry() {
         .publish(first.clone())
         .await
         .expect("the first record");
-    let last = gdl_cells::last_record(&operator, MODEL, &first.name)
+    let last = gdl_pools::last_record(&operator, MODEL, &first.name)
         .await
         .expect("the command's snapshot")
-        .expect("the cell");
-    let command = CellCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
-    let gdl_cells::CommandWrite::Record(command_record) = command.clone() else {
+        .expect("the pool");
+    let command = PoolCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
+    let gdl_pools::CommandWrite::Record(command_record) = command.clone() else {
         panic!("a scale-to-zero record");
     };
 
@@ -1626,7 +1626,7 @@ async fn a_new_snapshot_keeps_first_sync_after_the_live_pollers_backoff() {
     let mut resumed = watch(&reader, Some(token));
     assert!(matches!(
         event(&mut resumed).await,
-        CellEvent::Synced {
+        PoolEvent::Synced {
             snapshot: false,
             ..
         }
@@ -1651,7 +1651,7 @@ async fn a_new_snapshot_keeps_first_sync_after_the_live_pollers_backoff() {
 
 #[tokio::test]
 async fn a_cached_command_handle_keeps_the_list_it_names_again() {
-    use gdl_cells::{CellCommand, CommandWrite};
+    use gdl_pools::{CommandWrite, PoolCommand};
 
     let client = client();
     let tables = tables(&client).await;
@@ -1660,22 +1660,22 @@ async fn a_cached_command_handle_keeps_the_list_it_names_again() {
     let first = record("model-x-01", 1, 1, &["qwen-32b"]);
     hub.publish(first.clone()).await.expect("the first record");
 
-    // A command handle can serve more than one request for this cell.
-    CellCommand::ScaleToZero
+    // A command handle can serve more than one request for this pool.
+    PoolCommand::ScaleToZero
         .write(&first, std::time::SystemTime::now())
         .to(&operator)
         .await
         .expect("the first command");
-    let last = gdl_cells::last_record(&operator, MODEL, &first.name)
+    let last = gdl_pools::last_record(&operator, MODEL, &first.name)
         .await
         .expect("the command's snapshot")
-        .expect("the cell");
-    let command = CellCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
+        .expect("the pool");
+    let command = PoolCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
     let CommandWrite::Record(command_record) = command.clone() else {
         panic!("a scale-to-zero record");
     };
 
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: last.epoch,
         seq: last.seq + 1,
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
@@ -1716,7 +1716,7 @@ async fn a_fresh_command_keeps_its_list_when_another_put_overtakes_it() {
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
         operation::put_item::PutItemInput,
     };
-    use gdl_cells::{CellCommand, CommandWrite};
+    use gdl_pools::{CommandWrite, PoolCommand};
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -1758,7 +1758,7 @@ async fn a_fresh_command_keeps_its_list_when_another_put_overtakes_it() {
         .publish(first.clone())
         .await
         .expect("the first record");
-    let command = CellCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
+    let command = PoolCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
     let CommandWrite::Record(command_record) = command.clone() else {
         panic!("a scale-to-zero record");
     };
@@ -1785,14 +1785,14 @@ async fn a_fresh_command_keeps_its_list_when_another_put_overtakes_it() {
 
     // A new hub handle puts the same list, then moves past it.
     let hub = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: 2,
         seq: 1,
         ..first.clone()
     })
     .await
     .expect("a new hub handle puts the list again");
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: 2,
         seq: 2,
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
@@ -1963,7 +1963,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         },
         operation::{put_item::PutItemInput, update_item::UpdateItemInput},
     };
-    use gdl_cells::{CellCommand, CommandWrite};
+    use gdl_pools::{CommandWrite, PoolCommand};
     use tokio::sync::oneshot;
 
     // The first writer pauses after its record is stored, before its
@@ -2013,7 +2013,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
             self.record.store(
                 input
                     .downcast_ref::<PutItemInput>()
-                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell"))),
+                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("pool"))),
                 Ordering::Relaxed,
             );
             if matches!(self.at, At::Expiry) && input.downcast_ref::<UpdateItemInput>().is_some() {
@@ -2054,7 +2054,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
             release,
         )
     };
-    let start = |directory: DynamoDirectory, published: CellRecord| {
+    let start = |directory: DynamoDirectory, published: PoolRecord| {
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2075,11 +2075,11 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
         .expect("the first record is stored");
 
     let operator = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
-    let last = gdl_cells::last_record(&operator, MODEL, &first.name)
+    let last = gdl_pools::last_record(&operator, MODEL, &first.name)
         .await
         .expect("the command's snapshot")
-        .expect("the cell");
-    let command = CellCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
+        .expect("the pool");
+    let command = PoolCommand::ScaleToZero.write(&last, std::time::SystemTime::now());
     let CommandWrite::Record(command_record) = command.clone() else {
         panic!("a scale-to-zero record");
     };
@@ -2087,7 +2087,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
     let (hub, expiry_paused, expiry_release) = pausing(At::Expiry);
     let higher_write = start(
         hub,
-        CellRecord {
+        PoolRecord {
             epoch: 2,
             seq: 1,
             ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
@@ -2130,7 +2130,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
     assert_eq!(
         snapshot(&mut watch(&reader, None)).await.0,
         [*command_record],
-        "the command remains the cell's live record"
+        "the command remains the pool's live record"
     );
     let (list, expiry) = named(&client, &tables, &first.name).await;
     assert_eq!(
@@ -2149,7 +2149,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
         operation::{put_item::PutItemInput, update_item::UpdateItemInput},
     };
-    use gdl_cells::{CellCommand, CommandWrite};
+    use gdl_pools::{CommandWrite, PoolCommand};
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -2179,7 +2179,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
                 At::Record => context
                     .input()
                     .downcast_ref::<PutItemInput>()
-                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell"))),
+                    .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("pool"))),
                 At::Expiry => context.input().downcast_ref::<UpdateItemInput>().is_some(),
             };
             if pause && let Some(began) = self.began.lock().expect("the signal lock").take() {
@@ -2212,7 +2212,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
             release,
         )
     };
-    let start = |directory: DynamoDirectory, published: CellRecord| {
+    let start = |directory: DynamoDirectory, published: PoolRecord| {
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2229,7 +2229,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
         .publish(first.clone())
         .await
         .expect("the first record");
-    let command = CellCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
+    let command = PoolCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
     let CommandWrite::Record(command_record) = command else {
         panic!("a scale-to-zero record");
     };
@@ -2241,7 +2241,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
         .expect("the command has put its list");
 
     let (hub, expiry_paused, expiry_release) = pausing(At::Expiry);
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: 2,
         seq: 1,
         ..first.clone()
@@ -2250,7 +2250,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
     .expect("a restarted hub puts the same list with its own token");
     let advancing = start(
         hub,
-        CellRecord {
+        PoolRecord {
             epoch: 2,
             seq: 2,
             ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
@@ -2304,7 +2304,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
         operation::put_item::PutItemInput,
     };
-    use gdl_cells::{CellCommand, CommandWrite};
+    use gdl_pools::{CommandWrite, PoolCommand};
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
@@ -2326,7 +2326,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
             let record = context
                 .input()
                 .downcast_ref::<PutItemInput>()
-                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("cell")));
+                .is_some_and(|put| put.item().is_some_and(|item| item.contains_key("pool")));
             if record && let Some(began) = self.began.lock().expect("the signal lock").take() {
                 began.send(()).expect("the test waits for the record");
                 self.release
@@ -2346,7 +2346,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
         .publish(first.clone())
         .await
         .expect("the first record");
-    let command = CellCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
+    let command = PoolCommand::ScaleToZero.write(&first, std::time::SystemTime::now());
     let CommandWrite::Record(command_record) = command.clone() else {
         panic!("a scale-to-zero record");
     };
@@ -2372,14 +2372,14 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
         .expect("the command has put its list");
 
     let hub = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: 2,
         seq: 1,
         ..first.clone()
     })
     .await
     .expect("a restarted hub puts the same list with its own token");
-    hub.publish(CellRecord {
+    hub.publish(PoolRecord {
         epoch: 2,
         seq: 2,
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
@@ -2428,7 +2428,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
         .get_item()
         .table_name(&tables.records)
         .key("class", AttributeValue::S(MODEL.into()))
-        .key("cell", AttributeValue::S(first.name.clone()))
+        .key("pool", AttributeValue::S(first.name.clone()))
         .consistent_read(true)
         .send()
         .await

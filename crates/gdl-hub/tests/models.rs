@@ -1,9 +1,9 @@
-//! A cell's models and presence in its record: each usable entry instance
+//! A pool's models and presence in its record: each usable entry instance
 //! says what it has of its models in its load reports, and the hub makes
 //! each model's state from what they say, with its history, and writes it
 //! on each change, not only at the heartbeat. A hub that restarts keeps
-//! the history of its cell's last record. A cell whose instances report no
-//! models serves the ones its settings declare. A cell told it is scaled to
+//! the history of its pool's last record. A pool whose instances report no
+//! models serves the ones its settings declare. A pool told it is scaled to
 //! 0 says so in its record before the call returns. Every hub runs in
 //! process on OS-assigned ports; every wait is for something observed.
 
@@ -13,27 +13,27 @@ use std::time::Duration;
 
 use common::{Instance, Records, WAIT, hub_of, model, timing};
 use futures::StreamExt;
-use gdl_cells::{CellRecord, MemoryDirectory, ModelEntry, ModelState, Presence};
-use gdl_hub::CellTiming;
-use gdl_model::{CellSettings, InstanceModel, InstanceModelState, ModelKey, SegmentPhase};
-use gdl_watch::{CellWatchEvent, LoadReport};
+use gdl_hub::PoolTiming;
+use gdl_model::{InstanceModel, InstanceModelState, ModelKey, PoolSettings, SegmentPhase};
+use gdl_pools::{MemoryDirectory, ModelEntry, ModelState, PoolRecord, Presence};
+use gdl_watch::{LoadReport, PoolWatchEvent};
 use velo_hub::Hub;
 
 /// The summary period, at which the hub sees an instance that is no
 /// longer usable stop serving its models.
 const PERIOD: Duration = Duration::from_secs(1);
 
-/// The model cell with the shortest summary period.
-fn cell() -> CellSettings {
-    CellSettings {
+/// The model pool with the shortest summary period.
+fn pool() -> PoolSettings {
+    PoolSettings {
         summary: PERIOD,
-        ..model(common::CELL, "us-east-1", "model-x-01-hub:1337")
+        ..model(common::POOL, "us-east-1", "model-x-01-hub:1337")
     }
 }
 
 /// No heartbeat within a test: a record written after the first says
 /// something changed.
-fn quiet() -> CellTiming {
+fn quiet() -> PoolTiming {
     timing()
 }
 
@@ -54,13 +54,13 @@ fn report(models: Option<Vec<InstanceModel>>) -> LoadReport {
     }
 }
 
-/// Entry instances (of `f`), joined and ready, once the cell's watch
+/// Entry instances (of `f`), joined and ready, once the pool's watch
 /// shows them ready: from then the hub takes their reports.
-async fn entries<const N: usize, D: gdl_cells::CellDirectory>(
+async fn entries<const N: usize, D: gdl_pools::PoolDirectory>(
     hub: &Hub,
-    cell: &gdl_hub::CellReadiness<D>,
+    pool: &gdl_hub::PoolReadiness<D>,
 ) -> [Instance; N] {
-    let mut watch = tokio::time::timeout(WAIT, cell.watch())
+    let mut watch = tokio::time::timeout(WAIT, pool.watch())
         .await
         .expect("the watch begins in time")
         .expect("the hub runs");
@@ -74,7 +74,7 @@ async fn entries<const N: usize, D: gdl_cells::CellDirectory>(
     let seen = tokio::time::timeout(WAIT, async {
         while ready < N {
             let event = watch.next().await.expect("the watch goes on");
-            if let CellWatchEvent::Ready { .. } = event {
+            if let PoolWatchEvent::Ready { .. } = event {
                 ready += 1;
             }
         }
@@ -90,7 +90,7 @@ async fn send(instance: &Instance, load: LoadReport) {
 }
 
 /// Each model's state in `record`, by model.
-fn states(record: &CellRecord) -> Vec<(&str, ModelState)> {
+fn states(record: &PoolRecord) -> Vec<(&str, ModelState)> {
     record
         .models
         .iter()
@@ -99,7 +99,7 @@ fn states(record: &CellRecord) -> Vec<(&str, ModelState)> {
 }
 
 /// The next record whose models are in `expected` states.
-async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> CellRecord {
+async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> PoolRecord {
     loop {
         let record = records.next().await;
         if states(&record) == expected {
@@ -114,7 +114,7 @@ async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> CellRe
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_that_served_is_unavailable_once_its_server_leaves() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a, b] = entries(&hub, &readiness).await;
     send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
@@ -137,7 +137,7 @@ async fn a_model_that_served_is_unavailable_once_its_server_leaves() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drained_model_stays_in_the_record() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
@@ -173,14 +173,14 @@ async fn a_drained_model_stays_in_the_record() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A hub that restarts reads its cell's last record before its first
+/// A hub that restarts reads its pool's last record before its first
 /// write: a model that was `ready` is `unavailable` until an instance
 /// reports, one being drained is still `draining`, and the version goes on
 /// rising.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_hub_keeps_its_models_history() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let models = vec![
@@ -198,7 +198,7 @@ async fn a_restarted_hub_keeps_its_models_history() {
     .await;
     hub.shutdown().await.expect("the hub stops");
 
-    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, _pool) = hub_of(pool(), directory.clone(), quiet()).await;
     let after = loop {
         let record = records.next().await;
         if record.epoch > before.epoch {
@@ -217,18 +217,18 @@ async fn a_restarted_hub_keeps_its_models_history() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A cell whose instances report no models of their own serves the models
+/// A pool whose instances report no models of their own serves the models
 /// its settings declare: `starting` until an entry instance is usable,
 /// then `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_publishes_the_models_its_settings_declare() {
+async fn a_pool_publishes_the_models_its_settings_declare() {
     let directory = MemoryDirectory::new();
-    let settings = CellSettings {
+    let settings = PoolSettings {
         models: vec![ModelKey {
             model: "llama-70b".into(),
             routing_key: Some("a".into()),
         }],
-        ..cell()
+        ..pool()
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
@@ -248,10 +248,10 @@ async fn a_cell_publishes_the_models_its_settings_declare() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// Ask the hub to set its cell's presence: the status.
+/// Ask the hub to set its pool's presence: the status.
 async fn set_presence(hub: &Hub, presence: Presence) -> u16 {
     let url = format!(
-        "http://127.0.0.1:{}/v1/ext/gdl-cell/presence",
+        "http://127.0.0.1:{}/v1/ext/gdl-pool/presence",
         hub.control_addr().port()
     );
     let body = gdl_watch::SetPresence { presence };
@@ -262,13 +262,13 @@ async fn set_presence(hub: &Hub, presence: Presence) -> u16 {
     response.status().as_u16()
 }
 
-/// A cell told it is scaled to 0 has a record that says so by the time
+/// A pool told it is scaled to 0 has a record that says so by the time
 /// the hub answers, so that its instances can stop at once; told it
 /// serves, its record says so again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cell_scaled_to_zero_says_so_before_the_hub_answers() {
+async fn a_pool_scaled_to_zero_says_so_before_the_hub_answers() {
     let directory = MemoryDirectory::new();
-    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, _pool) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     assert_eq!(records.next().await.presence, Presence::Serving);
 
@@ -283,22 +283,22 @@ async fn a_cell_scaled_to_zero_says_so_before_the_hub_answers() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// The record the directory holds for the cell now, from a new watch's
+/// The record the directory holds for the pool now, from a new watch's
 /// snapshot.
-async fn held(directory: &MemoryDirectory) -> CellRecord {
+async fn held(directory: &MemoryDirectory) -> PoolRecord {
     Records::new(directory).next().await
 }
 
-/// The record the directory holds for the cell now, which must be newer
+/// The record the directory holds for the pool now, which must be newer
 /// than `than`.
-async fn held_newer(directory: &MemoryDirectory, than: &CellRecord) -> CellRecord {
+async fn held_newer(directory: &MemoryDirectory, than: &PoolRecord) -> PoolRecord {
     let now = held(directory).await;
     assert!(now.version() > than.version(), "{now:?} after {than:?}");
     now
 }
 
-/// A restarted hub whose first read of its cell's last record fails does
-/// not take that for a cell with no record: it reads again before its
+/// A restarted hub whose first read of its pool's last record fails does
+/// not take that for a pool with no record: it reads again before its
 /// first write, so the models keep their history and the version goes on
 /// rising. Waits out one re-read, 1 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -306,29 +306,29 @@ async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
     /// A directory whose first watch fails.
     struct SnapshotUnavailable(MemoryDirectory, std::sync::atomic::AtomicBool);
 
-    impl gdl_cells::CellDirectory for SnapshotUnavailable {
+    impl gdl_pools::PoolDirectory for SnapshotUnavailable {
         type Watch = futures::stream::BoxStream<
             'static,
-            Result<gdl_cells::CellEvent, gdl_cells::DirectoryError>,
+            Result<gdl_pools::PoolEvent, gdl_pools::DirectoryError>,
         >;
 
-        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+        async fn publish(&self, record: PoolRecord) -> Result<(), gdl_pools::DirectoryError> {
             self.0.publish(record).await
         }
 
         async fn withdraw(
             &self,
-            withdrawal: gdl_cells::Withdrawal,
-        ) -> Result<(), gdl_cells::DirectoryError> {
+            withdrawal: gdl_pools::Withdrawal,
+        ) -> Result<(), gdl_pools::DirectoryError> {
             self.0.withdraw(withdrawal).await
         }
 
-        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+        fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> Self::Watch {
             if self.1.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return self.0.watch(class, from).boxed();
             }
             futures::stream::once(async {
-                Err(gdl_cells::DirectoryError::Unavailable(
+                Err(gdl_pools::DirectoryError::Unavailable(
                     "the restart snapshot is unavailable".into(),
                 ))
             })
@@ -337,7 +337,7 @@ async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
     }
 
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
@@ -354,7 +354,7 @@ async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
     .await
     .expect("the clock passes the first epoch");
     let failing = SnapshotUnavailable(directory.clone(), std::sync::atomic::AtomicBool::new(false));
-    let (hub, _cell) = hub_of(cell(), failing, quiet()).await;
+    let (hub, _pool) = hub_of(pool(), failing, quiet()).await;
     let after = loop {
         let record = records.next().await;
         if record.epoch > before.epoch {
@@ -391,10 +391,10 @@ async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
         release: Arc<Notify>,
     }
 
-    impl gdl_cells::CellDirectory for DelayedAnswer {
-        type Watch = gdl_cells::MemoryWatch;
+    impl gdl_pools::PoolDirectory for DelayedAnswer {
+        type Watch = gdl_pools::MemoryWatch;
 
-        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+        async fn publish(&self, record: PoolRecord) -> Result<(), gdl_pools::DirectoryError> {
             let delay =
                 record.presence == Presence::Serving && self.armed.swap(false, Ordering::SeqCst);
             self.records.publish(record).await?;
@@ -409,12 +409,12 @@ async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
 
         async fn withdraw(
             &self,
-            withdrawal: gdl_cells::Withdrawal,
-        ) -> Result<(), gdl_cells::DirectoryError> {
+            withdrawal: gdl_pools::Withdrawal,
+        ) -> Result<(), gdl_pools::DirectoryError> {
             self.records.withdraw(withdrawal).await
         }
 
-        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+        fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> Self::Watch {
             self.records.watch(class, from)
         }
     }
@@ -425,7 +425,7 @@ async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
         arrived: Arc::new(Notify::new()),
         release: Arc::new(Notify::new()),
     };
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     readiness
         .set_presence(Presence::ScaledToZero)
         .await
@@ -471,13 +471,13 @@ async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
     }
 }
 
-/// A cell declares that it serves each model on its own: when acme-legal
-/// drains and goes, llama-70b stays `ready` in the record and the cell
+/// A pool declares that it serves each model on its own: when acme-legal
+/// drains and goes, llama-70b stays `ready` in the record and the pool
 /// stays `serving`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn one_model_going_away_leaves_the_other_and_the_cell_serving() {
+async fn one_model_going_away_leaves_the_other_and_the_pool_serving() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
@@ -532,7 +532,7 @@ async fn revoke(hub: &Hub, model: &str, revoked: bool) -> u16 {
         gdl_watch::LIFT_ROUTE
     };
     let url = format!(
-        "http://127.0.0.1:{}/v1/ext/gdl-cell{route}",
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{route}",
         hub.control_addr().port()
     );
     let body = ModelKey::new(model);
@@ -549,13 +549,13 @@ fn key(model: &str) -> ModelKey {
 
 /// A set serving llama-70b and acme-legal: revoking acme-legal takes it
 /// out of the record by the time the hub answers, while llama-70b stays
-/// `ready` and the cell stays as it was. The instance's own reports, which
+/// `ready` and the pool stays as it was. The instance's own reports, which
 /// still name acme-legal, never bring it back, until the operator lifts
 /// the revocation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
@@ -580,7 +580,7 @@ async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
     assert_eq!(
         (revoked.state, revoked.presence),
         (serving.state, serving.presence),
-        "the cell serves its other models as before"
+        "the pool serves its other models as before"
     );
 
     // The instance still has acme-legal, and says so with a change of its
@@ -613,12 +613,12 @@ async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
 }
 
 /// A revocation holds across a restart of the hub: the restarted hub reads
-/// it from the cell's last record, and leaves the model out though the
+/// it from the pool's last record, and leaves the model out though the
 /// instance reports it `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revocation_survives_a_hub_restart() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
         says("llama-70b", InstanceModelState::Ready),
@@ -631,7 +631,7 @@ async fn a_revocation_survives_a_hub_restart() {
     hub.shutdown().await.expect("the hub stops");
 
     let mut records = Records::new(&directory);
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let [a] = entries(&hub, &readiness).await;
     send(&a, report(Some(both))).await;
     let after = loop {
@@ -650,7 +650,7 @@ async fn a_revocation_survives_a_hub_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_draining_model_stays_listed_where_a_revoked_one_leaves() {
     let directory = MemoryDirectory::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let three = vec![
@@ -697,7 +697,7 @@ async fn a_draining_model_stays_listed_where_a_revoked_one_leaves() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_model_is_not_revoked() {
     let directory = MemoryDirectory::new();
-    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, _pool) = hub_of(pool(), directory.clone(), quiet()).await;
     held(&directory).await;
     assert_eq!(revoke(&hub, "", true).await, 400);
     assert!(held(&directory).await.revoked.is_empty());
@@ -710,9 +710,9 @@ async fn a_malformed_model_is_not_revoked() {
 async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
     let directory = common::Gated::new();
     directory.close();
-    let settings = CellSettings {
+    let settings = PoolSettings {
         models: vec![key("acme-legal")],
-        ..cell()
+        ..pool()
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
     directory.holding().await;
@@ -752,11 +752,11 @@ async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lifted_declared_model_is_listed_without_instances() {
     let directory = MemoryDirectory::new();
-    let settings = CellSettings {
+    let settings = PoolSettings {
         models: vec![key("acme-legal"), key("llama-70b")],
-        ..cell()
+        ..pool()
     };
-    let (hub, _cell) = hub_of(settings, directory.clone(), quiet()).await;
+    let (hub, _pool) = hub_of(settings, directory.clone(), quiet()).await;
     let before = held(&directory).await;
     assert_eq!(
         states(&before),
@@ -805,10 +805,10 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
         arrived: Arc<Notify>,
     }
 
-    impl gdl_cells::CellDirectory for PendingDrain {
-        type Watch = gdl_cells::MemoryWatch;
+    impl gdl_pools::PoolDirectory for PendingDrain {
+        type Watch = gdl_pools::MemoryWatch;
 
-        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+        async fn publish(&self, record: PoolRecord) -> Result<(), gdl_pools::DirectoryError> {
             if self.blocked
                 && record
                     .models
@@ -825,12 +825,12 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
 
         async fn withdraw(
             &self,
-            withdrawal: gdl_cells::Withdrawal,
-        ) -> Result<(), gdl_cells::DirectoryError> {
+            withdrawal: gdl_pools::Withdrawal,
+        ) -> Result<(), gdl_pools::DirectoryError> {
             self.records.withdraw(withdrawal).await
         }
 
-        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+        fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> Self::Watch {
             self.records.watch(class, from)
         }
     }
@@ -841,7 +841,7 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
             blocked: block,
             arrived: Arc::new(Notify::new()),
         };
-        let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+        let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
         let mut records = Records::new(&directory.records);
         let [a] = entries(&hub, &readiness).await;
         send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
@@ -877,7 +877,7 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
         hub.shutdown().await.expect("the reporting hub stops");
         drop(a);
 
-        let (hub, readiness) = hub_of(cell(), directory.records.clone(), quiet()).await;
+        let (hub, readiness) = hub_of(pool(), directory.records.clone(), quiet()).await;
         let [a] = entries(&hub, &readiness).await;
         send(&a, dropped).await;
         send(&a, report(Some(vec![]))).await;
@@ -900,7 +900,7 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
     let directory = common::Gated::new();
-    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory.inner);
     let [a] = entries(&hub, &readiness).await;
     send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
@@ -931,7 +931,7 @@ async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
     hub.shutdown().await.expect("the reporting hub stops");
     drop(a);
 
-    let (hub, readiness) = hub_of(cell(), directory.inner.clone(), quiet()).await;
+    let (hub, readiness) = hub_of(pool(), directory.inner.clone(), quiet()).await;
     let [a] = entries(&hub, &readiness).await;
     send(&a, dropped).await;
     send(&a, report(Some(vec![]))).await;

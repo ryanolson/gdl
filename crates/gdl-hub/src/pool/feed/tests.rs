@@ -1,10 +1,10 @@
-//! The cell watch's fan-out, without a hub: its feed driven by the
+//! The pool watch's fan-out, without a hub: its feed driven by the
 //! registration hooks, the loopback's service events, and the judgment.
 
-use super::{CellWatch, Feed, Watched};
+use super::{Feed, PoolWatch, Watched};
 use futures::{FutureExt, StreamExt};
-use gdl_watch::CellWatchEvent;
 use gdl_watch::LoadReport;
+use gdl_watch::PoolWatchEvent;
 use std::time::{Duration, Instant};
 use velo_hub::Lease;
 use velo_hub::protocol::RegistrationEpoch;
@@ -15,7 +15,7 @@ use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 /// `f` is the entry segment at index 0; `d`, at 1, is not.
 fn feed() -> Feed {
     let feed = Feed::new(
-        "cell".into(),
+        "pool".into(),
         "class".into(),
         vec![("f".into(), true), ("d".into(), false)],
         Duration::from_secs(1),
@@ -35,7 +35,7 @@ fn peer() -> PeerInfo {
 }
 
 /// The events the watch has now, past its snapshot.
-fn pending(watch: &mut CellWatch) -> Vec<CellWatchEvent> {
+fn pending(watch: &mut PoolWatch) -> Vec<PoolWatchEvent> {
     let mut events = Vec::new();
     while let Some(Some(event)) = watch.next().now_or_never() {
         events.push(event);
@@ -44,15 +44,15 @@ fn pending(watch: &mut CellWatch) -> Vec<CellWatchEvent> {
 }
 
 /// A watch whose snapshot has been read.
-fn watch(feed: &Feed) -> CellWatch {
+fn watch(feed: &Feed) -> PoolWatch {
     let mut watch = watch_now(feed);
     let snapshot = pending(&mut watch);
-    assert_eq!(snapshot.last(), Some(&CellWatchEvent::Synced));
+    assert_eq!(snapshot.last(), Some(&PoolWatchEvent::Synced));
     watch
 }
 
 /// A watch with its snapshot unread.
-fn watch_now(feed: &Feed) -> CellWatch {
+fn watch_now(feed: &Feed) -> PoolWatch {
     feed.watch()
         .now_or_never()
         .expect("the epoch is settled")
@@ -85,7 +85,7 @@ async fn a_ready_instance_is_sent_once_its_peer_is_known() {
     );
     assert_eq!(
         pending(&mut watch),
-        [CellWatchEvent::Ready {
+        [PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: early,
         }]
@@ -126,7 +126,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
     feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
     assert_eq!(
         pending(&mut watch),
-        [CellWatchEvent::Ready {
+        [PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: member.clone(),
         }],
@@ -147,7 +147,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
     );
     assert_eq!(
         pending(&mut watch),
-        [CellWatchEvent::Left {
+        [PoolWatchEvent::Left {
             segment: "f".into(),
             instance: id,
         }],
@@ -173,14 +173,14 @@ async fn a_retirement_seen_before_the_peer_is_known_is_kept() {
         RegistrationEpoch::new(),
         member,
     );
-    let retired = CellWatchEvent::Retired {
+    let retired = PoolWatchEvent::Retired {
         segment: "f".into(),
         instance: id,
         acknowledged: true,
     };
     assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
     let mut again = watch_now(&feed);
-    assert_eq!(pending(&mut again)[1..], [retired, CellWatchEvent::Synced]);
+    assert_eq!(pending(&mut again)[1..], [retired, PoolWatchEvent::Synced]);
 }
 
 /// The hub tells this extension of a departure before it drops the
@@ -207,16 +207,16 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
     assert_eq!(
         pending(&mut watch),
         [
-            CellWatchEvent::Ready {
+            PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
             },
-            CellWatchEvent::Retired {
+            PoolWatchEvent::Retired {
                 segment: "f".into(),
                 instance: id,
                 acknowledged: true,
             },
-            CellWatchEvent::Left {
+            PoolWatchEvent::Left {
                 segment: "f".into(),
                 instance: id,
             },
@@ -249,16 +249,16 @@ async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_bef
     assert_eq!(
         pending(&mut watch),
         [
-            CellWatchEvent::Ready {
+            PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
             },
-            CellWatchEvent::Retired {
+            PoolWatchEvent::Retired {
                 segment: "f".into(),
                 instance: id,
                 acknowledged: true,
             },
-            CellWatchEvent::Left {
+            PoolWatchEvent::Left {
                 segment: "f".into(),
                 instance: id,
             },
@@ -299,11 +299,11 @@ async fn a_watch_opened_again_completes_a_departure() {
     assert_eq!(
         pending(&mut watch),
         [
-            CellWatchEvent::Ready {
+            PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
             },
-            CellWatchEvent::Left {
+            PoolWatchEvent::Left {
                 segment: "f".into(),
                 instance: id,
             },
@@ -337,7 +337,7 @@ async fn retirement_is_final_and_comes_before_readiness() {
     feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
     feed.observe(0, Watched::Retired, &ServiceEvent::Initial(vec![id]));
     feed.removed(removal(idle.instance_id(), 1));
-    let retired = CellWatchEvent::Retired {
+    let retired = PoolWatchEvent::Retired {
         segment: "f".into(),
         instance: id,
         acknowledged: true,
@@ -345,7 +345,7 @@ async fn retirement_is_final_and_comes_before_readiness() {
     assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
     let mut again = watch_now(&feed);
     let snapshot = pending(&mut again);
-    assert_eq!(snapshot[1..], [retired, CellWatchEvent::Synced]);
+    assert_eq!(snapshot[1..], [retired, PoolWatchEvent::Synced]);
 }
 
 /// The services of a segment that is not an entry segment, and a
@@ -383,7 +383,7 @@ async fn a_report_does_not_outlive_its_registration() {
     let now = Instant::now();
     for complete in [true, false] {
         let feed = feed();
-        // The hub takes reports once it has read its cell's last record.
+        // The hub takes reports once it has read its pool's last record.
         feed.restore(None, 0);
         let member = peer();
         let id = member.instance_id();
@@ -419,7 +419,7 @@ async fn a_report_does_not_outlive_its_registration() {
 #[tokio::test]
 async fn a_watch_waits_for_the_epoch() {
     let feed = Feed::new(
-        "cell".into(),
+        "pool".into(),
         "class".into(),
         vec![],
         Duration::from_secs(1),
@@ -433,11 +433,11 @@ async fn a_watch_waits_for_the_epoch() {
     feed.settle(8);
     let mut watch = early.await.expect("the hub runs");
     match pending(&mut watch).first() {
-        Some(CellWatchEvent::Cell { epoch, .. }) => assert_eq!(*epoch, 7),
+        Some(PoolWatchEvent::Pool { epoch, .. }) => assert_eq!(*epoch, 7),
         other => panic!("{other:?}"),
     }
     let stopping = Feed::new(
-        "cell".into(),
+        "pool".into(),
         "class".into(),
         vec![],
         Duration::from_secs(1),
@@ -455,8 +455,8 @@ async fn a_watch_waits_for_the_epoch() {
 /// registration.
 #[test]
 fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
-    use gdl_cells::ModelState;
     use gdl_model::{InstanceModel, InstanceModelState};
+    use gdl_pools::ModelState;
 
     let feed = feed();
     feed.restore(None, 100);
@@ -508,14 +508,14 @@ fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
     );
 }
 
-/// The hub takes no report before it has read its cell's last record,
+/// The hub takes no report before it has read its pool's last record,
 /// so no drain it acknowledged is lost behind the read: the instance
 /// keeps the drain until a report that carries it is taken, and the same
 /// reports sent after the read end it.
 #[test]
 fn a_drain_reported_before_the_restart_snapshot_is_kept() {
-    use gdl_cells::{ModelEntry, ModelState};
     use gdl_model::{InstanceModel, InstanceModelState};
+    use gdl_pools::{ModelEntry, ModelState};
 
     let snapshot = [ModelEntry {
         model: "m".into(),

@@ -11,11 +11,11 @@ pub struct Ask {
     pub text: String,
 }
 
-/// The answer, with the cell that gave it.
+/// The answer, with the pool that gave it.
 #[derive(Debug, Clone, Serialize, Deserialize, gdl_message::Message)]
 pub struct Answer {
-    /// The cell whose model answered.
-    pub cell: String,
+    /// The pool whose model answered.
+    pub pool: String,
     /// The text.
     pub text: String,
 }

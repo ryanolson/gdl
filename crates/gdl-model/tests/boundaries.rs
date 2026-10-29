@@ -37,12 +37,12 @@ fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
     }
 }
 
-/// The graph of a model served in cells (docs/src/concepts/cells.md),
+/// The graph of a model served in pools (docs/src/concepts/pools.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`, with its roles
 /// and types, and with `forward` and `backward` stages added to Route's
 /// hop. `gdl-syntax`'s `tests/classes.rs` parses the same graph from its
 /// text and pins the same report.
-fn cells(forward: &[&str], backward: &[&str]) -> Manifest {
+fn pools(forward: &[&str], backward: &[&str]) -> Manifest {
     let mut nodes = vec![
         ("Http", Role::Source),
         ("Pre", Role::Operator),
@@ -114,9 +114,9 @@ fn both(
     [parsed, built]
 }
 
-/// The segments of that graph, one per stage (docs/src/concepts/cells.md), with room for the
+/// The segments of that graph, one per stage (docs/src/concepts/pools.md), with room for the
 /// stages the counterexamples add: Post and Tok in B, Fix in C.
-const CELL_SEGMENTS: Segments = &[
+const POOL_SEGMENTS: Segments = &[
     ("A", &["Http"]),
     ("B", &["Pre", "Post", "Tok"]),
     ("C", &["Route", "Fix"]),
@@ -126,11 +126,11 @@ const CELL_SEGMENTS: Segments = &[
 ];
 
 /// The classes of section 3.2.
-const CELL_CLASSES: Segments = &[("global", &["A", "B", "C"]), ("model_x", &["D", "E", "F"])];
+const POOL_CLASSES: Segments = &[("global", &["A", "B", "C"]), ("model_x", &["D", "E", "F"])];
 
 /// The segments of section 3.2 holding only the nodes `graph` has.
-fn cell_segments(graph: &Manifest) -> Vec<(&'static str, Vec<&'static str>)> {
-    CELL_SEGMENTS
+fn pool_segments(graph: &Manifest) -> Vec<(&'static str, Vec<&'static str>)> {
+    POOL_SEGMENTS
         .iter()
         .map(|&(name, nodes)| {
             let nodes = nodes
@@ -143,20 +143,20 @@ fn cell_segments(graph: &Manifest) -> Vec<(&'static str, Vec<&'static str>)> {
         .collect()
 }
 
-/// `graph` under the cell segments and `classes`, parsed and built.
-fn cell_placements(graph: &Manifest, classes: Segments) -> [Placement; 2] {
-    routed_cell_placements(graph, classes, "", |p| p)
+/// `graph` under the pool segments and `classes`, parsed and built.
+fn pool_placements(graph: &Manifest, classes: Segments) -> [Placement; 2] {
+    routed_pool_placements(graph, classes, "", |p| p)
 }
 
 /// The same, with `extra` appended to the text and `build` applied to the
 /// built placement.
-fn routed_cell_placements(
+fn routed_pool_placements(
     graph: &Manifest,
     classes: Segments,
     extra: &str,
     build: impl Fn(Placement) -> Placement,
 ) -> [Placement; 2] {
-    let segments = cell_segments(graph);
+    let segments = pool_segments(graph);
     let segments: Vec<(&str, &[&str])> = segments.iter().map(|(n, s)| (*n, s.as_slice())).collect();
     both(&segments, classes, extra, build)
 }
@@ -175,8 +175,8 @@ fn refused(graph: &Manifest, placement: &Placement) -> String {
 
 #[test]
 fn the_recommended_shape_crosses_once_at_the_choosers_hop() {
-    let graph = cells(&[], &[]);
-    for placement in cell_placements(&graph, CELL_CLASSES) {
+    let graph = pools(&[], &[]);
+    for placement in pool_placements(&graph, POOL_CLASSES) {
         let laid = layout(&graph, &placement).expect("a layout");
         assert_eq!(
             laid.boundaries(),
@@ -198,7 +198,7 @@ fn the_recommended_shape_crosses_once_at_the_choosers_hop() {
             assert_eq!(
                 laid.chosen_classes(segment).into_iter().collect::<Vec<_>>(),
                 chosen,
-                "Route, the hop's outer end, chooses the cells of model_x"
+                "Route, the hop's outer end, chooses the pools of model_x"
             );
         }
         let report = laid.report();
@@ -218,8 +218,8 @@ fn the_recommended_shape_crosses_once_at_the_choosers_hop() {
 /// Model's output would go to Post's instance, which never sent to Model.
 #[test]
 fn a_backward_stage_in_another_segment_of_the_outer_class_is_refused() {
-    let graph = cells(&[], &["Post"]);
-    for placement in cell_placements(&graph, CELL_CLASSES) {
+    let graph = pools(&[], &["Post"]);
+    for placement in pool_placements(&graph, POOL_CLASSES) {
         assert_eq!(
             refused(&graph, &placement),
             "hop `Route` -> `Model` crosses from class `global` into `model_x`, but its backward stage `Post` is in segment `B`; every stage but the inner end must be in `Route`'s segment `C`"
@@ -231,8 +231,8 @@ fn a_backward_stage_in_another_segment_of_the_outer_class_is_refused() {
 /// returns to it, possibly on another instance than the one that chose.
 #[test]
 fn a_forward_path_that_leaves_and_returns_to_the_outer_segment_is_refused() {
-    let graph = cells(&["Tok", "Fix"], &[]);
-    for placement in cell_placements(&graph, CELL_CLASSES) {
+    let graph = pools(&["Tok", "Fix"], &[]);
+    for placement in pool_placements(&graph, POOL_CLASSES) {
         assert_eq!(
             refused(&graph, &placement),
             "hop `Route` -> `Model` crosses from class `global` into `model_x`, but its forward stage `Tok` is in segment `B`; every stage but the inner end must be in `Route`'s segment `C`"
@@ -274,20 +274,20 @@ fn a_hop_whose_inner_end_stays_in_the_outer_class_may_not_cross() {
 
 #[test]
 fn a_hop_under_the_inner_end_stays_in_the_inner_class() {
-    let graph = cells(&[], &[]);
+    let graph = pools(&[], &[]);
     let third: Segments = &[
         ("global", &["A", "B", "C"]),
         ("model_x", &["D", "F"]),
         ("other", &["E"]),
     ];
-    for placement in cell_placements(&graph, third) {
+    for placement in pool_placements(&graph, third) {
         assert_eq!(
             refused(&graph, &placement),
             "hop `Route` -> `Model` crosses from class `global` into `model_x`, but `Engine`, under `Model`, is in segment `E` of class `other`; every hop under the inner end must stay in `model_x`"
         );
     }
     let back: Segments = &[("global", &["A", "B", "C", "F"]), ("model_x", &["D", "E"])];
-    for placement in cell_placements(&graph, back) {
+    for placement in pool_placements(&graph, back) {
         assert_eq!(
             refused(&graph, &placement),
             "hop `Route` -> `Model` crosses from class `global` into `model_x`, but `Detok`, under `Model`, is in segment `F` of class `global`; every hop under the inner end must stay in `model_x`"
@@ -366,7 +366,7 @@ fn two_boundaries_into_one_class_are_not_a_cycle() {
 /// the inner end's input anchor: a second round trip.
 #[test]
 fn a_streamed_request_into_another_class_costs_two_round_trips() {
-    let mut graph = cells(&[], &[]);
+    let mut graph = pools(&[], &[]);
     graph.hops[2].forward_types = vec![TypeInfo::streamed(
         "Tokens",
         true,
@@ -375,7 +375,7 @@ fn a_streamed_request_into_another_class_costs_two_round_trips() {
         true,
         Default::default(),
     )];
-    for placement in cell_placements(&graph, CELL_CLASSES) {
+    for placement in pool_placements(&graph, POOL_CLASSES) {
         let report = layout(&graph, &placement).expect("a layout").report();
         assert_eq!(report.wan_round_trips(), 2);
         assert_eq!(
@@ -401,10 +401,10 @@ fn assert_all(mut errors: Vec<String>, expected: &[&str]) {
 
 #[test]
 fn a_boundary_problem_is_reported_with_every_other_problem() {
-    let graph = cells(&[], &["Post"]);
+    let graph = pools(&[], &["Post"]);
     // `Http` is the source: no request boundary enters it.
     for placement in
-        routed_cell_placements(&graph, CELL_CLASSES, "[routing]\nHttp = 'random'\n", |p| {
+        routed_pool_placements(&graph, POOL_CLASSES, "[routing]\nHttp = 'random'\n", |p| {
             p.route("Http", RequestRouter::Random)
         })
     {
@@ -418,7 +418,7 @@ fn a_boundary_problem_is_reported_with_every_other_problem() {
     }
     let mut opaque = graph.clone();
     opaque.hops[0].forward_types[0] = TypeInfo::new("ChatRequest", false, Default::default());
-    for placement in cell_placements(&opaque, CELL_CLASSES) {
+    for placement in pool_placements(&opaque, POOL_CLASSES) {
         assert_all(
             refusals(&opaque, &placement),
             &[
@@ -431,14 +431,14 @@ fn a_boundary_problem_is_reported_with_every_other_problem() {
         ("global", &["A", "B", "C", "zz"]),
         ("model_x", &["D", "E", "F"]),
     ];
-    for placement in cell_placements(&graph, unknown) {
+    for placement in pool_placements(&graph, unknown) {
         assert_all(
             refusals(&graph, &placement),
             &["class `global` lists unknown segment `zz`", POST_IN_B],
         );
     }
     let back: Segments = &[("global", &["A", "B", "C", "F"]), ("model_x", &["D", "E"])];
-    for placement in cell_placements(&graph, back) {
+    for placement in pool_placements(&graph, back) {
         assert_all(
             refusals(&graph, &placement),
             &[
@@ -455,17 +455,17 @@ fn a_boundary_problem_is_reported_with_every_other_problem() {
 fn without_classes_a_hop_may_cut_anywhere() {
     for (graph, hop2, total) in [
         (
-            cells(&[], &["Post"]),
+            pools(&[], &["Post"]),
             "hop 2: 3 crossings, 2 anchors",
             "per request: 10 crossings, 6 anchors",
         ),
         (
-            cells(&["Tok", "Fix"], &[]),
+            pools(&["Tok", "Fix"], &[]),
             "hop 2: 4 crossings, 1 anchors",
             "per request: 11 crossings, 5 anchors",
         ),
     ] {
-        for placement in cell_placements(&graph, &[]) {
+        for placement in pool_placements(&graph, &[]) {
             let laid = layout(&graph, &placement).expect("a layout");
             assert_eq!(laid.class_of("C"), None);
             assert_eq!(

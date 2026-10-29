@@ -1,4 +1,4 @@
-//! The hub binary refuses a cell's settings it cannot run before it binds
+//! The hub binary refuses a pool's settings it cannot run before it binds
 //! a port, and says what to set; a hub that serves stops on either signal
 //! that stops a container; and it writes its log to stderr, at the level
 //! `RUST_LOG` sets. A hub that starts here takes ports the
@@ -15,7 +15,7 @@ use gdl_model::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, Ty
 
 fn spec() -> DeploymentSpec {
     let graph = Manifest {
-        name: "cells".into(),
+        name: "pools".into(),
         schema: 1,
         nodes: vec![
             NodeInfo {
@@ -60,31 +60,31 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
     .expect("written");
     // `relay` is the default; a child's hub reports to its parent's.
     for (directory, expected) in [
-        (None, "GDL_CELL__PARENT_HUB: missing"),
+        (None, "GDL_POOL__PARENT_HUB: missing"),
         (
             Some("memory"),
-            "[cell] directory = \"memory\" is a directory inside one process",
+            "[pool] directory = \"memory\" is a directory inside one process",
         ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_gdl-hub"));
         command
             .arg(&deployment)
-            .env("GDL_CELL__NAME", "model-x-01-us-east-1")
-            .env("GDL_CELL__CLASS", "model_x")
-            .env("GDL_CELL__REGION", "us-east-1")
-            .env("GDL_CELL__HUB", "model-x-01-hub:1337");
+            .env("GDL_POOL__NAME", "model-x-01-us-east-1")
+            .env("GDL_POOL__CLASS", "model_x")
+            .env("GDL_POOL__REGION", "us-east-1")
+            .env("GDL_POOL__HUB", "model-x-01-hub:1337");
         if let Some(directory) = directory {
-            command.env("GDL_CELL__DIRECTORY", directory);
+            command.env("GDL_POOL__DIRECTORY", directory);
         }
         let output = command.output().expect("the binary runs");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "started with {directory:?}");
         assert!(stderr.contains(expected), "{stderr}");
-        assert!(stderr.contains("GDL_CELL__PARENT_HUB"), "{stderr}");
+        assert!(stderr.contains("GDL_POOL__PARENT_HUB"), "{stderr}");
     }
 }
 
-/// A parent cell's hub keeps its children's records in its state
+/// A parent pool's hub keeps its children's records in its state
 /// directory: the binary refuses to start without one, or with one it
 /// cannot read, rather than start without the records it kept.
 #[test]
@@ -102,23 +102,23 @@ fn the_binary_refuses_a_parent_hub_with_nowhere_to_keep_its_childrens_records() 
     let file = dir.path().join("a-file");
     std::fs::write(&file, b"not a directory").expect("written");
     for (state_dir, expected) in [
-        (None, "GDL_CELL__STATE_DIR: missing"),
+        (None, "GDL_POOL__STATE_DIR: missing"),
         (
             Some(&file),
-            "[cell] state_dir: the directory is unavailable",
+            "[pool] state_dir: the directory is unavailable",
         ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_gdl-hub"));
         command
             .arg(&deployment)
-            .env("GDL_CELL__NAME", "global-us")
-            .env("GDL_CELL__CLASS", "global")
-            .env("GDL_CELL__REGION", "us-east-1")
-            .env("GDL_CELL__HUB", "global-us:1337")
+            .env("GDL_POOL__NAME", "global-us")
+            .env("GDL_POOL__CLASS", "global")
+            .env("GDL_POOL__REGION", "us-east-1")
+            .env("GDL_POOL__HUB", "global-us:1337")
             .env("GDL_HUB__PUBLIC_PORT", "0")
             .env("GDL_HUB__CONTROL_PORT", "0");
         if let Some(state_dir) = state_dir {
-            command.env("GDL_CELL__STATE_DIR", state_dir);
+            command.env("GDL_POOL__STATE_DIR", state_dir);
         }
         let output = command.output().expect("the binary runs");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -312,16 +312,16 @@ fn wait_for_record(path: &std::path::Path, accept: impl Fn(u64) -> bool) -> u64 
     }
 }
 
-/// The error the hub logs when another hub of its cell publishes with a
+/// The error the hub logs when another hub of its pool publishes with a
 /// later epoch.
-const OVERTAKEN: &str = "another hub publishes this cell with a later epoch";
+const OVERTAKEN: &str = "another hub publishes this pool with a later epoch";
 
 /// The warn event the hub logs, just before [`OVERTAKEN`], when the
 /// directory refuses its record.
-const REFUSED: &str = "the directory refused the cell's record as not newer";
+const REFUSED: &str = "the directory refused the pool's record as not newer";
 
 /// The stderr of a hub run with `rust_log` (none: the variable unset),
-/// whose cell another hub has since published with a later epoch, from its
+/// whose pool another hub has since published with a later epoch, from its
 /// start up to the `error` line that says so. A drain makes the hub write
 /// its record again, the directory refuses the write with a `warn` event,
 /// and the hub logs the `error` event next, in the same task: so once the
@@ -333,19 +333,19 @@ fn overtaken(rust_log: Option<&str>) -> Vec<String> {
         .tempdir()
         .expect("a directory");
     let deployment = deployment(&dir);
-    let cells = dir.path().join("cells");
-    let cell = |command: &mut Command| {
+    let pools = dir.path().join("pools");
+    let pool = |command: &mut Command| {
         command
-            .env("GDL_CELL__NAME", "model-x-01-us-east-1")
-            .env("GDL_CELL__CLASS", "model_x")
-            .env("GDL_CELL__REGION", "us-east-1")
-            .env("GDL_CELL__HUB", "model-x-01-hub:1337")
-            .env("GDL_CELL__DIRECTORY", "dir")
-            .env("GDL_CELL__DIR", &cells);
+            .env("GDL_POOL__NAME", "model-x-01-us-east-1")
+            .env("GDL_POOL__CLASS", "model_x")
+            .env("GDL_POOL__REGION", "us-east-1")
+            .env("GDL_POOL__HUB", "model-x-01-hub:1337")
+            .env("GDL_POOL__DIRECTORY", "dir")
+            .env("GDL_POOL__DIR", &pools);
     };
-    let record = cells.join("model_x").join("model-x-01-us-east-1.json");
+    let record = pools.join("model_x").join("model-x-01-us-east-1.json");
     let mut first = Serving::start_with(&deployment, |command| {
-        cell(command);
+        pool(command);
         // The runner's own `RUST_LOG` must not choose the level.
         match rust_log {
             Some(filter) => command.env("RUST_LOG", filter),
@@ -353,14 +353,14 @@ fn overtaken(rust_log: Option<&str>) -> Vec<String> {
         };
     });
     let stored = wait_for_record(&record, |_| true);
-    let _second = Serving::start_with(&deployment, cell);
+    let _second = Serving::start_with(&deployment, pool);
     wait_for_record(&record, |epoch| epoch > stored);
     // Held open until the lines are read: the drain is answered only
     // once its record is stored, which this one never is.
     let mut drain = TcpStream::connect((Ipv4Addr::LOCALHOST, first.control)).expect("connect");
     drain
         .write_all(
-            b"POST /v1/ext/gdl-cell/drain HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            b"POST /v1/ext/gdl-pool/drain HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
         )
         .expect("drain");
     first.lines_until(Duration::from_secs(10), |line| {

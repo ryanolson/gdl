@@ -36,7 +36,7 @@ The derives expand to `::gdl::...`, so a crate that uses one depends on `gdl` it
 - **Admission and egress limits** per instance. See [Admission and egress](concepts/admission.md).
 - **Live rosters.** Instances join, retire, and drain while the others serve. See [Segment lifecycle](concepts/lifecycle.md).
 - **Routing between replicas** by round robin, random, or a selector you write. See [Routing, selectors, and offers](concepts/routing.md).
-- **Cells.** One graph across several deployments, each with its own hub. See [Classes and cells](concepts/cells.md).
+- **Pools.** One graph across several deployments, each with its own hub. See [Classes and pools](concepts/pools.md).
 - **Health and metrics** in the shape dynamo expects. See [Health and metrics](operations/observability.md).
 
 ## Where to go next

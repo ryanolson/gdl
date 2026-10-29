@@ -1,11 +1,11 @@
-//! The graph of a model served in cells (docs/src/concepts/cells.md), parsed
+//! The graph of a model served in pools (docs/src/concepts/pools.md), parsed
 //! from its text, under a placement of one segment per stage in two classes
 //! (A to C, then D to F): one class boundary, at
 //! the chooser's hop, and one WAN round trip when a request spills.
 
 use gdl_syntax::Graph;
 
-const CELLS: &str = r#"
+const POOLS: &str = r#"
     name = "llm", schema = 1;
     source   Http:     ChatRequest -> stream ChatChunk;
     operator Pre:      (ChatRequest -> stream ChatChunk) over (Prompt -> stream Text);
@@ -37,8 +37,8 @@ const PLACEMENT: &str = r#"
 "#;
 
 #[test]
-fn the_cells_graph_crosses_once_at_the_chooser() {
-    let graph = Graph::parse(CELLS.parse().expect("tokens")).expect("the cells graph");
+fn the_pools_graph_crosses_once_at_the_chooser() {
+    let graph = Graph::parse(POOLS.parse().expect("tokens")).expect("the pools graph");
     let manifest = graph
         .manifest(&|name| Some(gdl_model::TypeInfo::new(name, true, Default::default())))
         .expect("manifest");

@@ -138,26 +138,26 @@ pub enum PlacementError {
         /// The classes on the cycle, in name order.
         classes: Vec<String>,
     },
-    /// A cell policy's name is not one a policy can have.
-    InvalidCellPolicy {
+    /// A pool policy's name is not one a policy can have.
+    InvalidPoolPolicy {
         /// The class the policy is for.
         class: String,
         /// Why the name is refused.
         reason: String,
     },
-    /// A placement without classes has a cell policy.
-    CellPolicyWithoutClasses {
+    /// A placement without classes has a pool policy.
+    PoolPolicyWithoutClasses {
         /// The class the policy names.
         class: String,
     },
-    /// A cell policy names a class the placement does not have.
-    CellPolicyUnknownClass {
+    /// A pool policy names a class the placement does not have.
+    PoolPolicyUnknownClass {
         /// The class the policy names.
         class: String,
     },
-    /// A cell policy is for a class that no class boundary enters, so no
-    /// chooser picks a cell of it.
-    CellPolicyNotEntered {
+    /// A pool policy is for a class that no class boundary enters, so no
+    /// chooser picks a pool of it.
+    PoolPolicyNotEntered {
         /// The class the policy names.
         class: String,
     },
@@ -220,10 +220,10 @@ impl PlacementError {
             Self::NestedOutsideClass { class, .. } => {
                 at(format!("class.{class}"), Some("segments"))
             }
-            Self::InvalidCellPolicy { class, .. } => at(format!("cells.{class}"), Some("policy")),
-            Self::CellPolicyWithoutClasses { class }
-            | Self::CellPolicyUnknownClass { class }
-            | Self::CellPolicyNotEntered { class } => at(format!("cells.{class}"), None),
+            Self::InvalidPoolPolicy { class, .. } => at(format!("pools.{class}"), Some("policy")),
+            Self::PoolPolicyWithoutClasses { class }
+            | Self::PoolPolicyUnknownClass { class }
+            | Self::PoolPolicyNotEntered { class } => at(format!("pools.{class}"), None),
         };
         Problem::at(table, key, self.to_string())
     }
@@ -303,20 +303,20 @@ impl fmt::Display for PlacementError {
                     classes.join(", ")
                 )
             }
-            Self::InvalidCellPolicy { class, reason } => {
-                write!(f, "cell policy `[cells.{class}]`: {reason}")
+            Self::InvalidPoolPolicy { class, reason } => {
+                write!(f, "pool policy `[pools.{class}]`: {reason}")
             }
-            Self::CellPolicyWithoutClasses { class } => write!(
+            Self::PoolPolicyWithoutClasses { class } => write!(
                 f,
-                "cell policy `[cells.{class}]`: the placement has no classes"
+                "pool policy `[pools.{class}]`: the placement has no classes"
             ),
-            Self::CellPolicyUnknownClass { class } => write!(
+            Self::PoolPolicyUnknownClass { class } => write!(
                 f,
-                "cell policy `[cells.{class}]`: the placement has no class `{class}`"
+                "pool policy `[pools.{class}]`: the placement has no class `{class}`"
             ),
-            Self::CellPolicyNotEntered { class } => write!(
+            Self::PoolPolicyNotEntered { class } => write!(
                 f,
-                "cell policy `[cells.{class}]`: no class boundary enters class `{class}`; a cell policy picks a cell of a class that another class sends to"
+                "pool policy `[pools.{class}]`: no class boundary enters class `{class}`; a pool policy picks a pool of a class that another class sends to"
             ),
             Self::NotWire {
                 from,

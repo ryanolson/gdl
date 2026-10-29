@@ -105,6 +105,6 @@ front: ready
 
 Set the default runtime image and the build image, and override either per segment. Set published ports and runtime TOML per segment. Each change regenerates the preview. **Download Compose bundle** stays off until generation succeeds, and downloads the exact files previewed.
 
-Deploy takes only crates from Git or crates.io, since an image build cannot see a local directory. Start the server with `--gdl-git` and `--gdl-rev` so that the runtime is fetchable too. Deploy writes a bundle without cells only, and refuses a spec with classes or several layouts.
+Deploy takes only crates from Git or crates.io, since an image build cannot see a local directory. Start the server with `--gdl-git` and `--gdl-rev` so that the runtime is fetchable too. Deploy writes a bundle without pools only, and refuses a spec with classes or several layouts.
 
 The tab reports what the host offers on each visit: Docker Compose when `docker compose` and the daemon both answer, and Kubernetes when `kubectl` has a current context (reported only). With `--docker`, **Build and apply** generates the bundle again on the server from the previewed draft. It writes it to `<target-dir>/deployments/gdl-<graph>/` and runs `docker compose -p gdl-<graph> up --build --detach` there, showing the output as it runs. Applying again updates the same project. One apply runs at a time. [Deploy with Docker Compose](compose-deploy.md) covers the bundle itself.

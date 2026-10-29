@@ -1,4 +1,4 @@
-//! The cell's load summary, made from its entry instances' reports.
+//! The pool's load summary, made from its entry instances' reports.
 //!
 //! Each usable entry instance reports its admission once a period; the
 //! hub keeps each one's latest report, and once a period sums the reports
@@ -7,7 +7,7 @@
 //! clocks, so two reports can arrive between two summaries: the later
 //! one's admission stands, and the refusals of the earlier one, which no
 //! summary counted, are carried into it. Taking a report and making a summary each cost the work of
-//! one instance and of the cell's entry instances, once a period, never
+//! one instance and of the pool's entry instances, once a period, never
 //! per request. The reports are kept under the feed's lock, with the entry
 //! instances they belong to, so that whether an instance is usable is
 //! judged with its report.
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gdl_cells::LoadSummary;
+use gdl_pools::LoadSummary;
 use gdl_watch::LoadReport;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -41,7 +41,7 @@ pub(super) struct Reports {
 }
 
 impl Reports {
-    /// The reports of a cell whose summary period is `period`.
+    /// The reports of a pool whose summary period is `period`.
     pub(super) fn new(period: Duration) -> Self {
         Self {
             reports: HashMap::new(),
@@ -130,7 +130,7 @@ struct Report {
     summarized: bool,
 }
 
-/// Make the cell's summary once a `period` until `cancel`, starting one
+/// Make the pool's summary once a `period` until `cancel`, starting one
 /// period from now, when the first reports can have arrived: each one
 /// goes to the feed's watchers (every period while there is one), and to
 /// `loads`, which the record is written from when it changed.

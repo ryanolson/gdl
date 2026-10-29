@@ -1,22 +1,22 @@
-//! A model that answers with the name of the cell it runs in.
+//! A model that answers with the name of the pool it runs in.
 
 use futures::stream;
 use gdl::{Build, Cx, Items, Result, Sink, items};
 use policy_messages::{Answer, Ask};
 use serde::Deserialize;
 
-/// The model's settings: the cell it runs in, as its instance is told.
+/// The model's settings: the pool it runs in, as its instance is told.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSettings {
-    /// The cell's name.
-    pub cell: String,
+    /// The pool's name.
+    pub pool: String,
 }
 
-/// Answers each request with its cell's name.
+/// Answers each request with its pool's name.
 #[derive(gdl::Node)]
 pub struct Model {
-    cell: String,
+    pool: String,
 }
 
 impl Build for Model {
@@ -25,7 +25,7 @@ impl Build for Model {
 
     async fn build(settings: ModelSettings, (): ()) -> Result<Self> {
         Ok(Self {
-            cell: settings.cell,
+            pool: settings.pool,
         })
     }
 }
@@ -36,7 +36,7 @@ impl Sink for Model {
 
     async fn generate(&self, _cx: Cx, req: Ask) -> Result<Items<Answer>> {
         let answer = Answer {
-            cell: self.cell.clone(),
+            pool: self.pool.clone(),
             text: req.text,
         };
         Ok(items(stream::iter([Ok(answer)])))

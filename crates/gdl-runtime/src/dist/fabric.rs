@@ -13,7 +13,7 @@ pub use hub::HubSession;
 #[cfg(feature = "hub")]
 pub(crate) use hub::bind_under_hub;
 #[cfg(feature = "hub")]
-pub(crate) use hub::{CellDrain, ChooserHub, Parent};
+pub(crate) use hub::{ChooserHub, Parent, PoolDrain};
 #[cfg(test)]
 pub(crate) use refusing::Refusing;
 
@@ -83,7 +83,7 @@ pub(crate) fn unregister_peer(node: &Velo, instance: InstanceId) {
     node.unregister_peer(instance);
 }
 
-/// Where a follower of other cells makes their instances reachable by
+/// Where a follower of other pools makes their instances reachable by
 /// instance id, and forgets them: the instance's node, or, in a test, a
 /// record of what it was asked, so that the order of a registration and
 /// a table's change can be seen from inside the call.

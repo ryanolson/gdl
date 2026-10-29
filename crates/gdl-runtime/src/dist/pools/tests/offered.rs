@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use gdl_cells::CellState;
+use gdl_pools::PoolState;
 use gdl_watch::{FollowEvent, Unoffered};
 use tokio::time::Instant;
 
 use super::super::follow::{ACK_POLL, ACK_RETRY, Follows, SCANNED};
-use super::super::lease::CellLease;
-use super::super::{CellTable, Cells};
+use super::super::lease::PoolLease;
+use super::super::{PoolTable, Pools};
 use super::{
     Call, DRAIN, M1, Recorded, dropped, exposed, follow, follower, live, peer, state, table,
 };
@@ -18,7 +18,7 @@ use super::{
 fn offering(generation: u64, revision: u64, offered: bool) -> FollowEvent {
     FollowEvent::Offering {
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation,
         revision,
         offered,
@@ -28,39 +28,39 @@ fn offering(generation: u64, revision: u64, offered: bool) -> FollowEvent {
 fn unoffered(generation: u64, revision: u64) -> Unoffered {
     Unoffered {
         class: "model_x".into(),
-        cell: M1.into(),
+        pool: M1.into(),
         generation,
         revision,
     }
 }
 
 /// `M1`'s table of `f`, as an offer chooses from it.
-fn chosen_from(cells: &Cells) -> Arc<CellTable> {
-    let table = cells.table("f").expect("a table of f");
+fn chosen_from(pools: &Pools) -> Arc<PoolTable> {
+    let table = pools.table("f").expect("a table of f");
     Arc::clone(
         table
-            .cells
+            .pools
             .iter()
-            .find(|cell| cell.cell == M1)
+            .find(|pool| pool.pool == M1)
             .expect("M1 is followed"),
     )
 }
 
 /// A lease on `M1`'s follow, as an offer takes one.
-fn offer(cells: &Cells) -> Option<CellLease> {
-    CellLease::take(&chosen_from(cells).leases)
+fn offer(pools: &Pools) -> Option<PoolLease> {
+    PoolLease::take(&chosen_from(pools).leases)
 }
 
 /// `M1` followed in generation 1, ready, with one entry instance.
-fn followed() -> (Follows<Recorded>, Cells, Recorded, Instant) {
-    let (mut follows, cells, recorded, _) = follower();
+fn followed() -> (Follows<Recorded>, Pools, Recorded, Instant) {
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     live(
         &mut follows,
         now,
-        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &peer())],
+        [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &peer())],
     );
-    (follows, cells, recorded, now)
+    (follows, pools, recorded, now)
 }
 
 /// A follow marked not offered shows no eligible instance and refuses
@@ -70,17 +70,17 @@ fn followed() -> (Follows<Recorded>, Cells, Recorded, Instant) {
 /// acknowledgement, nothing more is due.
 #[test]
 fn a_follow_not_offered_is_acknowledged_once_its_last_lease_ends() {
-    let (mut follows, cells, _, now) = followed();
-    let before = chosen_from(&cells);
-    let held = offer(&cells).expect("offered");
+    let (mut follows, pools, _, now) = followed();
+    let before = chosen_from(&pools);
+    let held = offer(&pools).expect("offered");
     assert_eq!(follows.next_poll(), None, "nothing to acknowledge");
 
     live(&mut follows, now, [offering(1, 2, false)]);
-    let shown = table(&cells, M1).expect("followed");
+    let shown = table(&pools, M1).expect("followed");
     assert!(!shown.offered && shown.eligible.is_empty(), "{shown:?}");
     assert_eq!((shown.revision, shown.leases), (2, 1));
     assert!(
-        CellLease::take(&before.leases).is_none(),
+        PoolLease::take(&before.leases).is_none(),
         "a lease taken from a table loaded before the mark"
     );
     assert_eq!(follows.next_poll(), Some(now), "looked for at once");
@@ -101,18 +101,18 @@ fn a_follow_not_offered_is_acknowledged_once_its_last_lease_ends() {
 /// the last applied is ignored.
 #[test]
 fn a_follow_offered_again_owes_nothing_of_its_earlier_revision() {
-    let (mut follows, cells, _, now) = followed();
+    let (mut follows, pools, _, now) = followed();
     live(&mut follows, now, [offering(1, 2, false)]);
     live(&mut follows, now, [offering(1, 3, true)]);
     assert_eq!(follows.acknowledgements(now), []);
     assert_eq!(follows.next_poll(), None, "looked for again");
-    let shown = table(&cells, M1).expect("followed");
+    let shown = table(&pools, M1).expect("followed");
     assert!(shown.offered && shown.eligible.len() == 1, "{shown:?}");
-    assert!(offer(&cells).is_some(), "offered again, but refused");
+    assert!(offer(&pools).is_some(), "offered again, but refused");
 
     live(&mut follows, now, [offering(1, 2, false)]);
     assert!(
-        table(&cells, M1).expect("followed").offered,
+        table(&pools, M1).expect("followed").offered,
         "an older revision applied"
     );
 }
@@ -148,20 +148,20 @@ fn an_acknowledgement_not_taken_is_sent_again() {
 /// still counts, and it is acknowledged once that ends.
 #[test]
 fn a_replaced_follow_keeps_its_instances_until_it_is_dropped() {
-    let (mut follows, cells, recorded, now) = followed();
-    let first = table(&cells, M1).expect("followed").eligible[0];
-    let held = offer(&cells).expect("offered");
+    let (mut follows, pools, recorded, now) = followed();
+    let first = table(&pools, M1).expect("followed").eligible[0];
+    let held = offer(&pools).expect("offered");
     live(
         &mut follows,
         now,
         [
             offering(1, 2, false),
-            follow(M1, 2, CellState::Ready),
+            follow(M1, 2, PoolState::Ready),
             exposed(M1, 2, &peer()),
         ],
     );
     recorded.take();
-    assert_eq!(table(&cells, M1).expect("followed").generation, 2);
+    assert_eq!(table(&pools, M1).expect("followed").generation, 2);
     follows.forget(now + DRAIN * 2);
     assert_eq!(recorded.take(), [], "unregistered before the drop");
     assert_eq!(follows.acknowledgements(now), [], "a lease is held");
@@ -172,7 +172,7 @@ fn a_replaced_follow_keeps_its_instances_until_it_is_dropped() {
     live(&mut follows, dropped_at, [dropped(M1, 1)]);
     follows.forget(dropped_at + DRAIN);
     assert_eq!(recorded.take(), [Call::Unregister(first)]);
-    assert_eq!(table(&cells, M1).expect("followed").generation, 2);
+    assert_eq!(table(&pools, M1).expect("followed").generation, 2);
 }
 
 /// A watch of the relay begun again while a follow is not offered keeps
@@ -181,20 +181,20 @@ fn a_replaced_follow_keeps_its_instances_until_it_is_dropped() {
 /// which the snapshot does not show, still registered.
 #[test]
 fn a_snapshot_keeps_the_leases_and_hidden_instances_of_its_follows() {
-    let (mut follows, cells, recorded, now) = followed();
-    let entry = table(&cells, M1).expect("followed").eligible[0];
-    let held = offer(&cells).expect("offered");
+    let (mut follows, pools, recorded, now) = followed();
+    let entry = table(&pools, M1).expect("followed").eligible[0];
+    let held = offer(&pools).expect("offered");
     live(
         &mut follows,
         now,
-        [state(M1, 1, CellState::Draining), offering(1, 2, false)],
+        [state(M1, 1, PoolState::Draining), offering(1, 2, false)],
     );
     let mut snapshot = follows.snapshot();
-    for event in [follow(M1, 1, CellState::Draining), offering(1, 2, false)] {
+    for event in [follow(M1, 1, PoolState::Draining), offering(1, 2, false)] {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    assert_eq!(table(&cells, M1).expect("followed").leases, 1);
+    assert_eq!(table(&pools, M1).expect("followed").leases, 1);
     assert_eq!(follows.acknowledgements(now), [], "a lease is held");
     follows.forget(now + DRAIN * 2);
     assert!(
@@ -205,7 +205,7 @@ fn a_snapshot_keeps_the_leases_and_hidden_instances_of_its_follows() {
     assert_eq!(follows.acknowledgements(now), [unoffered(1, 2)]);
 }
 
-/// An event of one cell, and the follower's look at when it next looks
+/// An event of one pool, and the follower's look at when it next looks
 /// for an acknowledgement, which its task takes after every event, pass
 /// over no follow: only the look itself does, once a poll.
 #[test]
@@ -214,7 +214,7 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
     let now = Instant::now();
     let named = |n: usize| format!("c{n}");
     for n in 0..50 {
-        let cell = named(n);
+        let pool = named(n);
         live(
             &mut follows,
             now,
@@ -222,16 +222,16 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
                 FollowEvent::Follow {
                     listing: None,
                     class: "model_x".into(),
-                    cell: cell.clone(),
+                    pool: pool.clone(),
                     generation: 1,
                     region: "r".into(),
-                    state: CellState::Draining,
+                    state: PoolState::Draining,
                     load: None,
                     load_age_ms: None,
                 },
                 FollowEvent::Offering {
                     class: "model_x".into(),
-                    cell,
+                    pool,
                     generation: 1,
                     revision: 2,
                     offered: false,
@@ -244,7 +244,7 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
         follows.apply(
             FollowEvent::Load {
                 class: "model_x".into(),
-                cell: named(0),
+                pool: named(0),
                 generation: 1,
                 load: None,
             },
@@ -264,30 +264,30 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
     );
 }
 
-/// A follow the hub installs not offered, at revision 1, as it does a cell
+/// A follow the hub installs not offered, at revision 1, as it does a pool
 /// that already drains, is shown not offered and acknowledged at that
 /// revision, whether it arrives after a snapshot or in one: the revision
 /// a follow is installed at is not one this instance has applied yet.
 #[test]
 fn a_follow_installed_not_offered_is_acknowledged() {
-    let installed = [follow(M1, 1, CellState::Draining), offering(1, 1, false)];
-    let (mut follows, cells, _, _) = follower();
+    let installed = [follow(M1, 1, PoolState::Draining), offering(1, 1, false)];
+    let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     live(&mut follows, now, installed.clone());
-    assert!(!table(&cells, M1).expect("followed").offered);
+    assert!(!table(&pools, M1).expect("followed").offered);
     assert_eq!(
         follows.acknowledgements(now),
         [unoffered(1, 1)],
         "after a snapshot"
     );
 
-    let (mut follows, cells, _, _) = follower();
+    let (mut follows, pools, _, _) = follower();
     let mut snapshot = follows.snapshot();
     for event in installed {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    assert!(!table(&cells, M1).expect("followed").offered);
+    assert!(!table(&pools, M1).expect("followed").offered);
     assert_eq!(
         follows.acknowledgements(now),
         [unoffered(1, 1)],
@@ -295,20 +295,20 @@ fn a_follow_installed_not_offered_is_acknowledged() {
     );
 }
 
-/// An instance a state hid that then leaves its cell is let go of: it is
+/// An instance a state hid that then leaves its pool is let go of: it is
 /// unregistered after the drain, though its follow lives on.
 #[test]
 fn a_hidden_instance_that_leaves_is_let_go() {
-    let (mut follows, cells, recorded, _) = follower();
+    let (mut follows, pools, recorded, _) = follower();
     let now = Instant::now();
     let gone = peer();
     live(
         &mut follows,
         now,
         [
-            follow(M1, 1, CellState::Ready),
+            follow(M1, 1, PoolState::Ready),
             exposed(M1, 1, &gone),
-            state(M1, 1, CellState::Unavailable),
+            state(M1, 1, PoolState::Unavailable),
             super::left(M1, 1, &gone),
         ],
     );
@@ -320,7 +320,7 @@ fn a_hidden_instance_that_leaves_is_let_go() {
             Call::Unregister(gone.instance_id())
         ]
     );
-    assert!(table(&cells, M1).is_some(), "the follow lives on");
+    assert!(table(&pools, M1).is_some(), "the follow lives on");
 }
 
 /// A follow offered again at a later revision is shown in a later relay
@@ -329,21 +329,21 @@ fn a_hidden_instance_that_leaves_is_let_go() {
 /// held before the snapshot, is applied and acknowledged at its revision.
 #[test]
 fn a_follow_shown_without_its_offering_applies_every_later_revision() {
-    let (mut follows, cells, _, now) = followed();
+    let (mut follows, pools, _, now) = followed();
     live(
         &mut follows,
         now,
         [offering(1, 2, false), offering(1, 3, true)],
     );
     let mut snapshot = follows.snapshot();
-    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &peer())] {
+    for event in [follow(M1, 1, PoolState::Ready), exposed(M1, 1, &peer())] {
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
-    assert!(chosen_from(&cells).offering, "offered");
-    assert!(offer(&cells).is_some());
+    assert!(chosen_from(&pools).offering, "offered");
+    assert!(offer(&pools).is_some());
     live(&mut follows, now, [offering(1, 4, false)]);
-    assert!(!chosen_from(&cells).offering);
+    assert!(!chosen_from(&pools).offering);
     assert_eq!(follows.acknowledgements(now), [unoffered(1, 4)]);
 }
 
@@ -356,19 +356,19 @@ fn a_follow_shown_without_its_offering_applies_every_later_revision() {
 /// instances go the drain after its last lease ends.
 #[test]
 fn a_follow_a_snapshot_no_longer_shows_keeps_its_instances_while_leased() {
-    let (mut follows, cells, recorded, now) = followed();
-    let entry = table(&cells, M1).expect("followed").eligible[0];
-    let before = chosen_from(&cells);
-    let held = offer(&cells).expect("offered");
+    let (mut follows, pools, recorded, now) = followed();
+    let entry = table(&pools, M1).expect("followed").eligible[0];
+    let before = chosen_from(&pools);
+    let held = offer(&pools).expect("offered");
     recorded.take();
 
     let snapshot = follows.snapshot();
     follows.resnapshot(snapshot, now);
     follows.forget(now + DRAIN * 2);
     assert_eq!(recorded.take(), [], "unregistered while a lease is held");
-    assert!(table(&cells, M1).is_none(), "shown after the snapshot");
+    assert!(table(&pools, M1).is_none(), "shown after the snapshot");
     assert!(
-        CellLease::take(&before.leases).is_none(),
+        PoolLease::take(&before.leases).is_none(),
         "a lease on a follow no longer shown"
     );
     let ended = now + DRAIN * 2;
@@ -391,17 +391,17 @@ fn a_follow_a_snapshot_no_longer_shows_keeps_its_instances_while_leased() {
 /// its last lease ends, as one a snapshot no longer shows does.
 #[test]
 fn a_follow_dropped_while_leased_keeps_its_instances_until_its_last_lease_ends() {
-    let (mut follows, cells, recorded, now) = followed();
-    let entry = table(&cells, M1).expect("followed").eligible[0];
-    let before = chosen_from(&cells);
-    let held = offer(&cells).expect("offered");
+    let (mut follows, pools, recorded, now) = followed();
+    let entry = table(&pools, M1).expect("followed").eligible[0];
+    let before = chosen_from(&pools);
+    let held = offer(&pools).expect("offered");
     recorded.take();
 
     live(&mut follows, now, [dropped(M1, 1)]);
     follows.forget(now + DRAIN * 2);
     assert_eq!(recorded.take(), [], "unregistered while a lease is held");
-    assert!(table(&cells, M1).is_none());
-    assert!(CellLease::take(&before.leases).is_none());
+    assert!(table(&pools, M1).is_none());
+    assert!(PoolLease::take(&before.leases).is_none());
 
     let ended = now + DRAIN * 2;
     drop(held);
@@ -416,9 +416,9 @@ fn a_follow_dropped_while_leased_keeps_its_instances_until_its_last_lease_ends()
 /// drain, and nothing is left to look at.
 #[test]
 fn a_follow_a_snapshot_no_longer_shows_with_no_lease_is_let_go_at_once() {
-    let (mut follows, cells, recorded, now) = followed();
-    let entry = table(&cells, M1).expect("followed").eligible[0];
-    drop(offer(&cells).expect("offered"));
+    let (mut follows, pools, recorded, now) = followed();
+    let entry = table(&pools, M1).expect("followed").eligible[0];
+    drop(offer(&pools).expect("offered"));
     recorded.take();
 
     let snapshot = follows.snapshot();

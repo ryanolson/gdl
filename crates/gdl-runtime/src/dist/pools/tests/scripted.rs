@@ -1,4 +1,4 @@
-//! A relay scripted by a test: its watches, and its watches of one cell.
+//! A relay scripted by a test: its watches, and its watches of one pool.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -13,7 +13,7 @@ use super::super::task::{Relayed, Relaying, Source};
 /// or, for a relaying script, stays open after them; after the last, a
 /// watch that never ends. Each watch asked for is
 /// counted, and begins only once the test has released that many. Each
-/// watch of one cell asked for is recorded, and answered from `readings`
+/// watch of one pool asked for is recorded, and answered from `readings`
 /// in order, each open after its items, once the test has released that
 /// many.
 pub(super) struct Scripted {
@@ -69,12 +69,12 @@ impl Source for Scripted {
     async fn watch_of(
         &self,
         class: &str,
-        cell: &str,
+        pool: &str,
     ) -> Result<BoxStream<'static, Relaying>, String> {
         let mut asked = 0;
-        self.asked.send_modify(|cells| {
-            cells.push((class.to_string(), cell.to_string()));
-            asked = cells.len();
+        self.asked.send_modify(|pools| {
+            pools.push((class.to_string(), pool.to_string()));
+            asked = pools.len();
         });
         let mut answered = self.answered.clone();
         answered

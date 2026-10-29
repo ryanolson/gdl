@@ -1,4 +1,4 @@
-//! The `relay` backend's directory, the records a parent cell's hub holds
+//! The `relay` backend's directory, the records a parent pool's hub holds
 //! for its children, passes the directory conformance suite, and keeps
 //! [`Rule::Kept`] when it is given a state directory: it writes each
 //! record and withdrawal there before it takes it, and reads them back
@@ -11,8 +11,8 @@
 use std::{sync::Mutex, time::Duration};
 
 use futures::StreamExt;
-use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, CellView, DirectoryError, MemoryLimits,
+use gdl_pools::{
+    DirectoryError, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord, PoolState, PoolView,
     Presence, RelayDirectory, Version, Withdrawal,
     conformance::{self, Backend},
 };
@@ -82,23 +82,23 @@ const WAIT: Duration = Duration::from_secs(5);
 
 fn temp() -> TempDir {
     tempfile::Builder::new()
-        .prefix("gdl-cells-relay-")
+        .prefix("gdl-pools-relay-")
         .tempdir()
         .expect("a temporary directory")
 }
 
-fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
-    CellRecord {
-        name: cell.into(),
+fn record(pool: &str, seq: u64, lease: Duration) -> PoolRecord {
+    PoolRecord {
+        name: pool.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some("global-us-east-1".into()),
         contract: 1,
         placement: 2,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 7,
         seq,
-        hub: format!("{cell}:1337"),
+        hub: format!("{pool}:1337"),
         lease,
         load: None,
         presence: Presence::Serving,
@@ -108,26 +108,26 @@ fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
     }
 }
 
-fn withdrawal(cell: &str, seq: u64) -> Withdrawal {
+fn withdrawal(pool: &str, seq: u64) -> Withdrawal {
     Withdrawal {
         class: "model_x".into(),
-        cell: cell.into(),
+        pool: pool.into(),
         epoch: 7,
         seq,
     }
 }
 
-/// The cells of a new watch's snapshot, each with its version.
+/// The pools of a new watch's snapshot, each with its version.
 async fn snapshot(directory: &RelayDirectory) -> Vec<(String, Version)> {
     let mut watch = std::pin::pin!(directory.watch("model_x", None));
-    let mut cells = Vec::new();
+    let mut pools = Vec::new();
     let read = async {
         loop {
             match watch.next().await {
-                Some(Ok(CellEvent::Current(record))) => {
-                    cells.push((record.name.clone(), record.version()))
+                Some(Ok(PoolEvent::Current(record))) => {
+                    pools.push((record.name.clone(), record.version()))
                 }
-                Some(Ok(CellEvent::Synced { .. })) => return,
+                Some(Ok(PoolEvent::Synced { .. })) => return,
                 other => panic!("the snapshot: {other:?}"),
             }
         }
@@ -135,7 +135,7 @@ async fn snapshot(directory: &RelayDirectory) -> Vec<(String, Version)> {
     tokio::time::timeout(WAIT, read)
         .await
         .expect("the snapshot in time");
-    cells
+    pools
 }
 
 /// A record that has not been renewed for its lease stays in a new
@@ -184,8 +184,8 @@ async fn a_reader_does_not_renew_an_expired_record_on_a_new_watch() {
         .expect("a record");
 
     let start = std::time::Instant::now();
-    let mut view = CellView::new();
-    let read = async |view: &mut CellView, at: std::time::Instant| {
+    let mut view = PoolView::new();
+    let read = async |view: &mut PoolView, at: std::time::Instant| {
         let mut watch = std::pin::pin!(directory.watch("model_x", None));
         loop {
             let event = tokio::time::timeout(WAIT, watch.next())
@@ -193,7 +193,7 @@ async fn a_reader_does_not_renew_an_expired_record_on_a_new_watch() {
                 .expect("an event in time")
                 .expect("the watch goes on")
                 .expect("an event");
-            let synced = matches!(event, CellEvent::Synced { .. });
+            let synced = matches!(event, PoolEvent::Synced { .. });
             view.apply(event, at);
             if synced {
                 return;
@@ -206,7 +206,7 @@ async fn a_reader_does_not_renew_an_expired_record_on_a_new_watch() {
     // The watch ended, and the reader watches again once the lease has
     // passed on its clock.
     let later = start + lease * 2;
-    view.apply(CellEvent::Resnapshot, later);
+    view.apply(PoolEvent::Resnapshot, later);
     read(&mut view, later).await;
     assert!(
         view.get("m1", later).is_none(),
@@ -228,13 +228,13 @@ async fn a_reader_does_not_renew_an_expired_record_on_a_new_watch() {
 async fn a_stored_directory_reads_back_what_it_held() {
     let temp = temp();
     let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
-    let m1 = CellRecord {
-        state: CellState::Degraded,
+    let m1 = PoolRecord {
+        state: PoolState::Degraded,
         ..record("m1", 3, Duration::from_millis(300))
     };
     directory.publish(m1.clone()).await.expect("a record");
     directory
-        .publish(record("m2", 1, CellRecord::DEFAULT_LEASE))
+        .publish(record("m2", 1, PoolRecord::DEFAULT_LEASE))
         .await
         .expect("a record");
     directory
@@ -249,13 +249,13 @@ async fn a_stored_directory_reads_back_what_it_held() {
         tokio::time::timeout(WAIT, watch.next())
             .await
             .expect("in time"),
-        Some(Ok(CellEvent::Current(m1)))
+        Some(Ok(PoolEvent::Current(m1)))
     );
     assert!(matches!(
         tokio::time::timeout(WAIT, watch.next())
             .await
             .expect("in time"),
-        Some(Ok(CellEvent::Synced { snapshot: true, .. }))
+        Some(Ok(PoolEvent::Synced { snapshot: true, .. }))
     ));
     assert_eq!(
         again.held("model_x", "m2"),
@@ -264,7 +264,7 @@ async fn a_stored_directory_reads_back_what_it_held() {
     assert!(!again.holds_record("model_x", "m2"));
     assert!(matches!(
         again
-            .publish(record("m2", 2, CellRecord::DEFAULT_LEASE))
+            .publish(record("m2", 2, PoolRecord::DEFAULT_LEASE))
             .await,
         Err(DirectoryError::NotNewer { .. })
     ));
@@ -282,7 +282,7 @@ async fn a_write_that_cannot_be_stored_is_refused_and_holds_nothing() {
     std::fs::write(&blocker, b"not a directory").expect("a file");
 
     let refused = directory
-        .publish(record("m1", 1, CellRecord::DEFAULT_LEASE))
+        .publish(record("m1", 1, PoolRecord::DEFAULT_LEASE))
         .await;
     assert!(
         matches!(refused, Err(DirectoryError::Unavailable(_))),
@@ -293,7 +293,7 @@ async fn a_write_that_cannot_be_stored_is_refused_and_holds_nothing() {
 
     std::fs::remove_file(&blocker).expect("the file goes");
     directory
-        .publish(record("m1", 1, CellRecord::DEFAULT_LEASE))
+        .publish(record("m1", 1, PoolRecord::DEFAULT_LEASE))
         .await
         .expect("the same write, once it can be stored");
     assert_eq!(
@@ -324,7 +324,7 @@ fn a_state_directory_that_cannot_be_read_is_refused() {
 async fn a_record_scaled_to_zero_stays_past_its_lease() {
     let directory = RelayDirectory::new();
     let lease = Duration::from_millis(300);
-    let scaled = CellRecord {
+    let scaled = PoolRecord {
         presence: Presence::ScaledToZero,
         ..record("m1", 1, lease)
     };
@@ -346,21 +346,21 @@ async fn a_record_scaled_to_zero_stays_past_its_lease() {
 async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
     let temp = temp();
     let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
-    let first = record("m1", 1, CellRecord::DEFAULT_LEASE);
+    let first = record("m1", 1, PoolRecord::DEFAULT_LEASE);
     directory.publish(first.clone()).await.expect("a record");
     let mut watch = directory.watch("model_x", None);
     assert_eq!(
         watch.next().await,
-        Some(Ok(CellEvent::Current(first.clone())))
+        Some(Ok(PoolEvent::Current(first.clone())))
     );
-    let Some(Ok(CellEvent::Synced { token, .. })) = watch.next().await else {
+    let Some(Ok(PoolEvent::Synced { token, .. })) = watch.next().await else {
         panic!("the snapshot's token");
     };
     drop(watch);
-    let mut view = CellView::new();
-    view.apply(CellEvent::Current(first), std::time::Instant::now());
+    let mut view = PoolView::new();
+    view.apply(PoolEvent::Current(first), std::time::Instant::now());
     directory
-        .publish(record("m1", 2, CellRecord::DEFAULT_LEASE))
+        .publish(record("m1", 2, PoolRecord::DEFAULT_LEASE))
         .await
         .expect("a write while the reader is disconnected");
     drop(directory);
@@ -369,7 +369,7 @@ async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
     let mut resumed = again.watch("model_x", Some(token));
     // This later write bounds the replay without a sleep or a pending read.
     again
-        .publish(record("m2", 1, CellRecord::DEFAULT_LEASE))
+        .publish(record("m2", 1, PoolRecord::DEFAULT_LEASE))
         .await
         .expect("a later write");
     loop {
@@ -378,7 +378,7 @@ async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
             .expect("an event in time")
             .expect("the watch continues")
             .expect("an event");
-        if matches!(event, CellEvent::Resnapshot) {
+        if matches!(event, PoolEvent::Resnapshot) {
             assert_eq!(
                 snapshot(&again).await,
                 [
@@ -388,7 +388,7 @@ async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
             );
             return;
         }
-        let later = matches!(&event, CellEvent::Put { record, .. } if record.name == "m2");
+        let later = matches!(&event, PoolEvent::Put { record, .. } if record.name == "m2");
         view.apply(event, std::time::Instant::now());
         if later {
             break;
@@ -396,7 +396,7 @@ async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
     }
     assert_eq!(
         view.get("m1", std::time::Instant::now())
-            .map(CellRecord::version),
+            .map(PoolRecord::version),
         Some(Version { epoch: 7, seq: 2 }),
         "the resumed reader missed a stored write before the restart"
     );

@@ -1,6 +1,6 @@
 [package]
 name = "gdl-watch"
-description = "The watches a cell's hub serves: the cell watch and the relay of what the hub follows, as typed events, and the client that reads them"
+description = "The watches a pool's hub serves: the pool watch and the relay of what the hub follows, as typed events, and the client that reads them"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ publish.workspace = true
 # Keys and values of the keyed record table as JSON text.
 base64 = "0.22"
 futures = { workspace = true }
-gdl-cells = { path = "../gdl-cells" }
+gdl-pools = { path = "../gdl-pools" }
 gdl-model = { path = "../gdl-model" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 serde = { workspace = true }

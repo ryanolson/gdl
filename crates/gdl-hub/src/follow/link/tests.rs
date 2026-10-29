@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl_cells::{CellRecord, CellState};
-use gdl_watch::{Backoff, CellWatchEvent, CellWatcher, Follower};
+use gdl_pools::{PoolRecord, PoolState};
+use gdl_watch::{Backoff, Follower, PoolWatchEvent, PoolWatcher};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use super::super::relay::Relay;
 use super::run;
-use crate::{CellHealth, Quorum};
+use crate::{PoolHealth, Quorum};
 
 const BASE: Duration = Duration::from_millis(250);
 const CAP: Duration = Duration::from_secs(5);
@@ -49,7 +49,7 @@ async fn send(stream: &mut TcpStream, data: &str) {
 
 fn relay() -> Arc<Relay> {
     let quorum = Quorum::new([("a", 1)], Duration::ZERO);
-    let health = CellHealth::of(&quorum, CellState::Unavailable, &Default::default());
+    let health = PoolHealth::of(&quorum, PoolState::Unavailable, &Default::default());
     Arc::new(Relay::new(
         16,
         tokio::sync::watch::Sender::new(health),
@@ -59,9 +59,9 @@ fn relay() -> Arc<Relay> {
     ))
 }
 
-fn record(hub: String) -> CellRecord {
-    CellRecord {
-        presence: gdl_cells::Presence::Serving,
+fn record(hub: String) -> PoolRecord {
+    PoolRecord {
+        presence: gdl_pools::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
         revoked: Vec::new(),
@@ -71,7 +71,7 @@ fn record(hub: String) -> CellRecord {
         home: Some("g".into()),
         contract: 1,
         placement: 1,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         epoch: 1,
         seq: 1,
         hub,
@@ -89,8 +89,8 @@ fn capped() -> Backoff {
     backoff
 }
 
-/// Start a link of the cell at `address` with `backoff`, and answer its
-/// first watch with the cell, `unknown` if it is to have an event of a
+/// Start a link of the pool at `address` with `backoff`, and answer its
+/// first watch with the pool, `unknown` if it is to have an event of a
 /// kind this build does not know, and the snapshot's end: the link, and
 /// the watch, still open.
 async fn linked(
@@ -106,13 +106,13 @@ async fn linked(
     let (generation, close) = relay.begin("model_x", "m");
     let me = Follower {
         class: "global".into(),
-        cell: "g".into(),
+        pool: "g".into(),
         run: 1,
         generation,
     };
     let link = tokio::spawn(run(
         Arc::clone(&relay),
-        CellWatcher::new().expect("a client"),
+        PoolWatcher::new().expect("a client"),
         me,
         record(address),
         generation,
@@ -126,17 +126,17 @@ async fn linked(
         )
         .await
         .expect("the link reads");
-    let cell = CellWatchEvent::Cell {
+    let pool = PoolWatchEvent::Pool {
         models: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,
-        state: CellState::Ready,
+        state: PoolState::Ready,
         load: None,
     };
     send(
         &mut first,
-        &serde_json::to_string(&cell).expect("serializes"),
+        &serde_json::to_string(&pool).expect("serializes"),
     )
     .await;
     if unknown {
@@ -144,14 +144,14 @@ async fn linked(
     }
     send(
         &mut first,
-        &serde_json::to_string(&CellWatchEvent::Synced).expect("serializes"),
+        &serde_json::to_string(&PoolWatchEvent::Synced).expect("serializes"),
     )
     .await;
     (link, first)
 }
 
 /// A link whose backoff is at its cap reads a snapshot with an event of a
-/// kind this build does not know, and reads the cell again after a wait;
+/// kind this build does not know, and reads the pool again after a wait;
 /// that reading never answers, and ends at its snapshot's 30 s bound. No
 /// watch was healthy since the snapshot: the wait after the link ends is
 /// drawn at the cap, not from the base, however long the wait and the
@@ -174,7 +174,7 @@ async fn a_failed_reading_does_not_count_as_a_healthy_watch() {
 
 /// The control: a link whose backoff is at its cap reads a whole snapshot
 /// and is healthy for longer than the healthy span, when an event of a
-/// kind this build does not know makes it read the cell again at once;
+/// kind this build does not know makes it read the pool again at once;
 /// that reading never answers. The healthy watch returned the step to the
 /// base, and the failed reading doubles it: the wait after the link ends
 /// is drawn from the base.

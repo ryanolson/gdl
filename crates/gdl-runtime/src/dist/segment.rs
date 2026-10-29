@@ -231,7 +231,7 @@ impl<H> Segment<H> {
     /// The requests this instance holds that may still send work to
     /// another segment: a hand-off it has not yet handed on or run to its
     /// inner end's stream, and an operator's `next` still held. Counted
-    /// only in a class that a hop enters, whose cells drain segment by
+    /// only in a class that a hop enters, whose pools drain segment by
     /// segment; 0 elsewhere.
     pub fn senders(&self) -> usize {
         self.rt.senders()
@@ -282,9 +282,9 @@ impl<H> Segment<H> {
 
     /// Refuse every offer that arrives from now on, the forward hand-offs
     /// from another class, and take the rest: an entry instance of a
-    /// draining cell stops taking new work, and still takes the hand-offs
-    /// inside its cell that carry the requests it took. The refusal says
-    /// that the cell is gone, and nothing undoes it.
+    /// draining pool stops taking new work, and still takes the hand-offs
+    /// inside its pool that carry the requests it took. The refusal says
+    /// that the pool is gone, and nothing undoes it.
     pub fn decline_offers(&self) {
         self.rt.decline_offers();
     }
@@ -292,15 +292,15 @@ impl<H> Segment<H> {
     /// Refuse every offer that arrives from now on by this segment's own
     /// policy, saying `decline` to the chooser that sent it, and take the
     /// rest, until [`Segment::take_offers`]. [`Decline::Gone`] keeps each
-    /// chooser that hears it from offering this cell more work until the
-    /// cell's follow changes (a new generation, state, or offered state);
-    /// [`Decline::Full`] damps the cell for a short window. Either is
-    /// about the whole cell, since a chooser chooses cells: a chooser that
+    /// chooser that hears it from offering this pool more work until the
+    /// pool's follow changes (a new generation, state, or offered state);
+    /// [`Decline::Full`] damps the pool for a short window. Either is
+    /// about the whole pool, since a chooser chooses pools: a chooser that
     /// hears gone from one entry instance offers no entry instance of the
-    /// cell more work. So decline as gone on every entry instance, for a
-    /// reason that holds for the cell. [`Decline::Instance`] is about this
+    /// pool more work. So decline as gone on every entry instance, for a
+    /// reason that holds for the pool. [`Decline::Instance`] is about this
     /// instance alone: a chooser that hears it offers the request to the
-    /// cell's other entry instances, each once, before another cell, and
+    /// pool's other entry instances, each once, before another pool, and
     /// damps nothing. A call replaces the reason an earlier one gave. Costs nothing per request beyond the one load an
     /// offer already makes.
     pub fn decline_offers_as(&self, decline: Decline) {

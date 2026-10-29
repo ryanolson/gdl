@@ -1,4 +1,4 @@
-//! The caps of a cell hub's watch routes, over its listener: a watch beyond
+//! The caps of a pool hub's watch routes, over its listener: a watch beyond
 //! its route's cap is refused before anything is built for it, a watch
 //! that closes frees its place at once, and each route holds its own.
 
@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use gdl_cells::MemoryDirectory;
 use gdl_model::{
-    CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo,
+    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PoolSettings, Role, TypeInfo,
 };
-use gdl_watch::{CellWatcher, WatchFailure};
+use gdl_pools::MemoryDirectory;
+use gdl_watch::{PoolWatcher, WatchFailure};
 use tokio::sync::watch;
 use velo_hub::{Hub, HubConfig};
 
-use super::{CellReadiness, CellTiming};
+use super::{PoolReadiness, PoolTiming};
 use crate::GraphAdmission;
 use gdl_model::WatchCaps;
 
@@ -25,43 +25,43 @@ const WAIT: Duration = Duration::from_secs(5);
 /// Each route's cap in these tests.
 const CAP: usize = 2;
 
-/// The cell the watches of one follow name: no cell the hub follows, whose
+/// The pool the watches of one follow name: no pool the hub follows, whose
 /// watch is served all the same.
 const FOLLOWED: (&str, &str) = ("model_x", "model-x-01-us-east-1");
 
-/// A watch route of the cell's hub.
+/// A watch route of the pool's hub.
 #[derive(Debug, Clone, Copy)]
 enum Route {
-    Cell,
+    Pool,
     Relay,
     Follow,
 }
 
-const ROUTES: [Route; 3] = [Route::Cell, Route::Relay, Route::Follow];
+const ROUTES: [Route; 3] = [Route::Pool, Route::Relay, Route::Follow];
 
-/// A hub of the global cell, whose class sends to `model_x`, with each
+/// A hub of the global pool, whose class sends to `model_x`, with each
 /// route capped at [`CAP`].
 struct Served {
     hub: Hub,
-    cell: Arc<CellReadiness<MemoryDirectory>>,
-    watcher: CellWatcher,
+    pool: Arc<PoolReadiness<MemoryDirectory>>,
+    watcher: PoolWatcher,
     address: String,
 }
 
 impl Served {
     async fn new() -> Self {
         let caps = WatchCaps {
-            cell: CAP,
+            pool: CAP,
             relay: CAP,
             follow: CAP,
         };
-        let timing = CellTiming {
+        let timing = PoolTiming {
             watch_caps: caps,
-            ..CellTiming::default()
+            ..PoolTiming::default()
         };
         let spec = spec();
-        let cell = Arc::new(
-            CellReadiness::new(&spec, settings(), MemoryDirectory::new(), timing)
+        let pool = Arc::new(
+            PoolReadiness::new(&spec, settings(), MemoryDirectory::new(), timing)
                 .expect("valid test fixture"),
         );
         let mut config = HubConfig::default();
@@ -69,15 +69,15 @@ impl Served {
         config.server.control_port = 0;
         let hub = Hub::builder(config)
             .extension(GraphAdmission::new(spec))
-            .extension(Arc::clone(&cell))
+            .extension(Arc::clone(&pool))
             .serve()
             .await
             .expect("the hub serves");
         let address = format!("127.0.0.1:{}", hub.public_addr().port());
         Self {
             hub,
-            cell,
-            watcher: CellWatcher::new().expect("a client"),
+            pool,
+            watcher: PoolWatcher::new().expect("a client"),
             address,
         }
     }
@@ -87,7 +87,7 @@ impl Served {
         let (class, name) = FOLLOWED;
         let opening = async {
             match route {
-                Route::Cell => self
+                Route::Pool => self
                     .watcher
                     .watch(&self.address)
                     .await
@@ -113,13 +113,13 @@ impl Served {
         watch
     }
 
-    /// Ask for a watch of `route` of the cell `cell`, as a client that
+    /// Ask for a watch of `route` of the pool `pool`, as a client that
     /// does not read the answer's body would.
-    async fn ask(&self, route: Route, cell: &str) -> reqwest::Response {
+    async fn ask(&self, route: Route, pool: &str) -> reqwest::Response {
         let path = match route {
-            Route::Cell => gdl_watch::WATCH_ROUTE.to_string(),
+            Route::Pool => gdl_watch::WATCH_ROUTE.to_string(),
             Route::Relay => gdl_watch::FOLLOWS_ROUTE.to_string(),
-            Route::Follow => gdl_watch::followed_path(FOLLOWED.0, cell),
+            Route::Follow => gdl_watch::followed_path(FOLLOWED.0, pool),
         };
         let url = format!(
             "http://{}/v1/ext/{}{path}",
@@ -136,23 +136,23 @@ impl Served {
     /// `route`, counted where each is built and taken.
     fn work(&self, route: Route) -> (usize, usize) {
         match route {
-            Route::Cell => self.cell.feed.work(),
-            Route::Relay | Route::Follow => self.cell.relay.work(),
+            Route::Pool => self.pool.feed.work(),
+            Route::Relay | Route::Follow => self.pool.relay.work(),
         }
     }
 
     /// The snapshots built and the subscriptions taken for every watch of
     /// the hub, whatever its route.
     fn all_work(&self) -> (usize, usize) {
-        let (cell, relay) = (self.cell.feed.work(), self.cell.relay.work());
-        (cell.0 + relay.0, cell.1 + relay.1)
+        let (pool, relay) = (self.pool.feed.work(), self.pool.relay.work());
+        (pool.0 + relay.0, pool.1 + relay.1)
     }
 
     /// The watches of `route` refused.
     fn refused(&self, route: Route) -> u64 {
-        let refused = self.cell.refused_watches();
+        let refused = self.pool.refused_watches();
         match route {
-            Route::Cell => refused.cell,
+            Route::Pool => refused.pool,
             Route::Relay => refused.relay,
             Route::Follow => refused.follow,
         }
@@ -161,9 +161,9 @@ impl Served {
     /// How many watches of `route` are open, as it changes.
     fn watching(&self, route: Route) -> watch::Receiver<usize> {
         match route {
-            Route::Cell => self.cell.watchers(),
-            Route::Relay => self.cell.follows_watchers(),
-            Route::Follow => self.cell.relay.one_watchers(),
+            Route::Pool => self.pool.watchers(),
+            Route::Relay => self.pool.follows_watchers(),
+            Route::Follow => self.pool.relay.one_watchers(),
         }
     }
 
@@ -189,8 +189,8 @@ impl Served {
     /// with no snapshot built and no subscription taken for it.
     async fn refuses(&self, route: Route) {
         let (work, refused) = (self.all_work(), self.refused(route));
-        let channels = self.cell.relay.channels();
-        // A cell no watch names yet: a subscription to it would be a new
+        let channels = self.pool.relay.channels();
+        // A pool no watch names yet: a subscription to it would be a new
         // channel.
         let response = self.ask(route, "model-x-02-us-east-1").await;
         assert_eq!(
@@ -211,7 +211,7 @@ impl Served {
             "{route:?}: a snapshot was built or a subscription taken"
         );
         assert_eq!(
-            self.cell.relay.channels(),
+            self.pool.relay.channels(),
             channels,
             "{route:?}: a subscription was taken"
         );
@@ -281,15 +281,15 @@ async fn each_route_holds_its_own_cap() {
 fn a_cap_of_zero_is_refused() {
     let full = WatchCaps::default();
     for caps in [
-        WatchCaps { cell: 0, ..full },
+        WatchCaps { pool: 0, ..full },
         WatchCaps { relay: 0, ..full },
         WatchCaps { follow: 0, ..full },
     ] {
-        let timing = CellTiming {
+        let timing = PoolTiming {
             watch_caps: caps,
-            ..CellTiming::default()
+            ..PoolTiming::default()
         };
-        let Err(error) = CellReadiness::new(&spec(), settings(), MemoryDirectory::new(), timing)
+        let Err(error) = PoolReadiness::new(&spec(), settings(), MemoryDirectory::new(), timing)
         else {
             panic!("a cap of zero was taken: {caps:?}");
         };
@@ -301,11 +301,11 @@ fn a_cap_of_zero_is_refused() {
 /// settings reader refuses it, naming its key.
 #[test]
 fn a_lost_chooser_bound_of_zero_is_refused() {
-    let timing = CellTiming {
+    let timing = PoolTiming {
         lost_chooser: Duration::ZERO,
-        ..CellTiming::default()
+        ..PoolTiming::default()
     };
-    let result = CellReadiness::new(&spec(), settings(), MemoryDirectory::new(), timing);
+    let result = PoolReadiness::new(&spec(), settings(), MemoryDirectory::new(), timing);
     let error = result
         .err()
         .expect("a lost chooser bound of zero is refused");
@@ -329,7 +329,7 @@ fn spec() -> DeploymentSpec {
         backward_types: vec![TypeInfo::new("T", true, Default::default())],
     };
     let graph = Manifest {
-        name: "cells".into(),
+        name: "pools".into(),
         schema: 1,
         nodes: vec![
             node("S", Role::Source),
@@ -347,8 +347,8 @@ fn spec() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
-/// The global cell, which follows the cells of `model_x`.
-fn settings() -> CellSettings {
+/// The global pool, which follows the pools of `model_x`.
+fn settings() -> PoolSettings {
     toml::from_str(
         "name = 'global-01-us-east-1'\nclass = 'global'\nregion = 'us-east-1'\n\
          hub = 'global-hub:1337'\ndirectory = 'memory'\n",

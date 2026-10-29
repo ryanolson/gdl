@@ -1,14 +1,14 @@
-//! What a segment instance asks its own cell's hub of the hub's keyed
+//! What a segment instance asks its own pool's hub of the hub's keyed
 //! record table, and the hub's answer: request and answer only, with no
 //! change messages and no holders. A node may read keyed data from its
-//! own cell's hub this way; a router still reads only typed request data,
+//! own pool's hub this way; a router still reads only typed request data,
 //! which a node computes from what it read.
 
 use serde::{Deserialize, Serialize};
 use velo::InstanceId;
 
 /// The name the keyed record service mounts its routes under, at
-/// `/v1/ext/{KEYED_EXTENSION}`, beside the cell's extension
+/// `/v1/ext/{KEYED_EXTENSION}`, beside the pool's extension
 /// ([`crate::EXTENSION`]).
 pub const KEYED_EXTENSION: &str = "gdl-keyed";
 

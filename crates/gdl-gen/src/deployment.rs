@@ -127,9 +127,9 @@ use crate::{
     spec::{CrateSource, GdlDep, Source},
 };
 
-mod cells;
 pub(crate) mod context;
 pub(crate) mod locks;
+mod pools;
 mod variables;
 
 /// Where a bundle's images take the crates they build.
@@ -150,10 +150,10 @@ pub enum Sources {
 
 /// Render a Docker Compose deployment, its images built from `sources`.
 /// Without `fleet`, it deploys the spec's one placement with one hub. With
-/// it, it deploys by cell: one hub per cell, and each cell's segments of
-/// its class in its layout ([`cells`]). A spec with classes or several
-/// layouts deploys only by cell, and a fleet is checked against the spec
-/// first; a fleet for a spec without classes can have no cell, and the
+/// it, it deploys by pool: one hub per pool, and each pool's segments of
+/// its class in its layout ([`pools`]). A spec with classes or several
+/// layouts deploys only by pool, and a fleet is checked against the spec
+/// first; a fleet for a spec without classes can have no pool, and the
 /// spec deploys as without one.
 pub fn compose_files(
     spec: &Spec,
@@ -173,10 +173,10 @@ fn bundle_files(
     target: &Path,
     sources: Sources,
 ) -> Result<(Files, Option<context::Context>), Error> {
-    let by_cell = cells::by_cell(spec);
-    if let (None, Some(why)) = (fleet, &by_cell) {
+    let by_pool = pools::by_pool(spec);
+    if let (None, Some(why)) = (fleet, &by_pool) {
         return Err(Error::new(format!(
-            "`compose` deploys a spec {why} by cell, as its fleet file says: give it `--fleet <fleet.toml>`"
+            "`compose` deploys a spec {why} by pool, as its fleet file says: give it `--fleet <fleet.toml>`"
         )));
     }
     let (spec, bundle) = Bundle::prepare(spec, out, target, sources)?;
@@ -190,11 +190,11 @@ fn bundle_files(
             fleet
                 .check(Some(&layouts))
                 .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-            if by_cell.is_none() {
+            if by_pool.is_none() {
                 single(&spec, bundle, target)?
             } else {
                 let stdin = stdin_source(&spec, &checked.manifest)?;
-                cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts, stdin)?
+                pools::bundle(&spec, fleet, bundle, &checked.manifest, &layouts, stdin)?
             }
         }
     };
@@ -288,14 +288,14 @@ impl Bundle {
             .chain(
                 spec.bind
                     .values()
-                    .chain(spec.cell_policies.values())
+                    .chain(spec.pool_policies.values())
                     .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
                     .map(|binding| binding.package.as_str()),
             )
             .collect();
         if !local.is_empty() && sources == Sources::Fetched {
             return Err(Error::new(format!(
-                "Deploy requires Git or crates.io node, message, and cell policy packages. Re-import these local packages from Git or crates.io: {}",
+                "Deploy requires Git or crates.io node, message, and pool policy packages. Re-import these local packages from Git or crates.io: {}",
                 local.join(", ")
             )));
         }
@@ -514,8 +514,8 @@ impl Bundle {
             let mut config: toml::Table = toml::from_str(&files[&path]).map_err(io)?;
             for (key, value) in &image.config {
                 // Where a segment finds its peers is the bundle's, and its
-                // cell the fleet's.
-                if ["hub", "roster", "instances", "cell"].contains(&key.as_str()) {
+                // pool the fleet's.
+                if ["hub", "roster", "instances", "pool"].contains(&key.as_str()) {
                     return Err(Error::new(format!("deployment cannot override `{key}`")));
                 }
                 config.insert(key.clone(), value.clone());
@@ -749,7 +749,7 @@ fn check_segment_name(segment: &str) -> Result<(), Error> {
 }
 
 /// A hub's health check: its own liveness, answered by its binary. Never
-/// a cell's health, which a parent cell answers 503 until its children are
+/// a pool's health, which a parent pool answers 503 until its children are
 /// ready: a wait on it would deadlock a fleet that starts together.
 fn hub_healthcheck() -> serde_json::Value {
     json!({"test":["CMD","/usr/local/bin/segment","--healthcheck"],"interval":"2s","timeout":"2s","retries":30})

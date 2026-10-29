@@ -38,7 +38,7 @@ const BATCH: u64 = 64;
 const INSTANCES: usize = 8;
 const IN_FLIGHT: usize = 8;
 
-/// A session fingerprint's size of key, and a cell name's size of value.
+/// A session fingerprint's size of key, and a pool name's size of value.
 fn key(n: u64) -> Vec<u8> {
     let mut key = n.to_be_bytes().to_vec();
     key.extend_from_slice(&n.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());

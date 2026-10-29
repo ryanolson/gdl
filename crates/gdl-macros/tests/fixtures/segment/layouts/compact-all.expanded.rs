@@ -10,7 +10,7 @@ pub use ::trio_contract as contract;
 pub const SEGMENT: &str = "all";
 
 /// Every segment of the placement. An instance waits for all of them,
-/// or, in a cell, only for those of its class.
+/// or, in a pool, only for those of its class.
 pub const SEGMENTS: &[&str] = &["all"];
 
 /// The placement this crate was generated for.

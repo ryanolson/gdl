@@ -1,8 +1,8 @@
 //! What a chooser tells its own hub, through velo-hub's extension client
 //! with the instance's own credential: that it runs a follower of the
 //! hub's relay, so that the hub waits for it before it closes a follow,
-//! that it holds no offer to a followed cell the hub marked not offered,
-//! and that it avoids a followed cell's retired entry instance. Each is
+//! that it holds no offer to a followed pool the hub marked not offered,
+//! and that it avoids a followed pool's retired entry instance. Each is
 //! sent from the chooser's follower, never from a request's path.
 
 use std::time::Duration;

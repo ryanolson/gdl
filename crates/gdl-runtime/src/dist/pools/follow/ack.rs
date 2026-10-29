@@ -12,11 +12,11 @@ use crate::dist::fabric::Registry;
 
 /// How often the follower looks for a follow not offered whose last lease
 /// has ended, while it has one to acknowledge.
-pub(in crate::dist::cells) const ACK_POLL: Duration = Duration::from_millis(50);
+pub(in crate::dist::pools) const ACK_POLL: Duration = Duration::from_millis(50);
 
 /// How long after its hub did not take an acknowledgement the follower
 /// sends it again.
-pub(in crate::dist::cells) const ACK_RETRY: Duration = Duration::from_millis(500);
+pub(in crate::dist::pools) const ACK_RETRY: Duration = Duration::from_millis(500);
 
 impl<R: Registry> Follows<R> {
     /// When the follower looks again for a follow to acknowledge: `None`
@@ -24,7 +24,7 @@ impl<R: Registry> Follows<R> {
     /// as a change makes it not offered or a snapshot shows it so, and by
     /// each look that leaves one waiting, so that an event never passes
     /// over the follows to find out.
-    pub(in crate::dist::cells) fn next_poll(&self) -> Option<Instant> {
+    pub(in crate::dist::pools) fn next_poll(&self) -> Option<Instant> {
         self.poll
     }
 
@@ -35,7 +35,7 @@ impl<R: Registry> Follows<R> {
     /// took it. A follow no longer seen whose last lease has ended is let
     /// go of. The follower looks again [`ACK_POLL`] later while a follow
     /// still waits for either.
-    pub(in crate::dist::cells) fn acknowledgements(&mut self, now: Instant) -> Vec<Unoffered> {
+    pub(in crate::dist::pools) fn acknowledgements(&mut self, now: Instant) -> Vec<Unoffered> {
         let leased = self.let_go_ended(now);
         let due = self.followed.due(now);
         self.poll = (leased || self.followed.awaiting()).then(|| now + ACK_POLL);
@@ -45,13 +45,13 @@ impl<R: Registry> Follows<R> {
     /// The hub took `unoffered`, or did not, when it is sent again after
     /// [`ACK_RETRY`]. One of a revision the follow has since left behind
     /// changes nothing.
-    pub(in crate::dist::cells) fn acknowledged(
+    pub(in crate::dist::pools) fn acknowledged(
         &mut self,
         unoffered: &Unoffered,
         taken: bool,
         now: Instant,
     ) {
-        let key = (unoffered.class.clone(), unoffered.cell.clone());
+        let key = (unoffered.class.clone(), unoffered.pool.clone());
         let Some(follow) = self.followed.find_mut(&key, unoffered.generation) else {
             return;
         };
@@ -100,7 +100,7 @@ impl Followed {
             follow.ack = Ack::Sending(follow.revision);
             due.push(Unoffered {
                 class: key.0.clone(),
-                cell: key.1.clone(),
+                pool: key.1.clone(),
                 generation: follow.generation,
                 revision: follow.revision,
             });
@@ -127,7 +127,7 @@ pub(super) enum Ack {
 thread_local! {
     /// The follows the acknowledgements' bookkeeping on this thread has
     /// looked at.
-    pub(in crate::dist::cells) static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(in crate::dist::pools) static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Count one follow looked at for an acknowledgement, in a test.

@@ -14,11 +14,11 @@
 //! times, telling it which instances declined ([`Request::declined`]). It
 //! may choose one of them again: a decline can come from a state that its
 //! view did not show yet, and the view catches up. A chooser's hand-off
-//! into another class is the exception: when the cell chosen for it
-//! declines, another cell is chosen, at most `[runtime] cell_failovers`
-//! times, and the selector chooses within that cell with nothing
-//! declined. When an entry instance of the cell declines as its own, the
-//! selector is asked about each other instance of the cell in turn, with
+//! into another class is the exception: when the pool chosen for it
+//! declines, another pool is chosen, at most `[runtime] pool_failovers`
+//! times, and the selector chooses within that pool with nothing
+//! declined. When an entry instance of the pool declines as its own, the
+//! selector is asked about each other instance of the pool in turn, with
 //! that instance alone to choose from.
 
 use std::any::{Any, TypeId};
@@ -57,8 +57,8 @@ pub use least::LeastLoaded;
 /// wait), and, inside a class, again each time the chosen instance
 /// declines the hand-off or the hand-off to it never left, up to
 /// `[runtime] instance_failovers` more times (a hand-off into another
-/// class is offered to other cells, up to `cell_failovers`, and to each
-/// other instance of the cell, one at a time, after an instance declines
+/// class is offered to other pools, up to `pool_failovers`, and to each
+/// other instance of the pool, one at a time, after an instance declines
 /// it as its own). Each
 /// choice's lease is its own, and a choice that is not sent to drops its
 /// lease before the next. Nothing else runs for it.
@@ -76,7 +76,7 @@ pub trait Selector: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Choice<'a>>> + Send + 'a;
 }
 
-/// A type a selector or a cell policy can read a request's head as: any
+/// A type a selector or a pool policy can read a request's head as: any
 /// type that deserializes, [`Encoded`], or a [`Projected`] part of the
 /// head.
 pub trait Head: sealed::Sealed + Sized + Send + Sync + 'static {}
@@ -284,7 +284,7 @@ impl<'a, H> Request<'a, H> {
     /// stopped taking work; a hand-off that never left this instance is
     /// not a decline. Nothing is excluded from [`Instances`] for it.
     /// Always empty for a chooser's hand-off into another class, which
-    /// offers the request to another cell instead.
+    /// offers the request to another pool instead.
     pub fn declined(&self) -> &'a [InstanceId] {
         self.declined
     }

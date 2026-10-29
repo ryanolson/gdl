@@ -1,9 +1,9 @@
-//! A model cell's entry instance that retires is acknowledged by its
-//! parent: each chooser of the global cell that follows the cell avoids it
+//! A model pool's entry instance that retires is acknowledged by its
+//! parent: each chooser of the global pool that follows the pool avoids it
 //! once its tables hold it retired, and says so to its own hub; the global
-//! cell's hub, once every chooser has, tells the model cell's hub, which
-//! says so on the cell's watch. The retiree waits for that, up to a bound
-//! of the setup timeout and twice the cell's summary period from its
+//! pool's hub, once every chooser has, tells the model pool's hub, which
+//! says so on the pool's watch. The retiree waits for that, up to a bound
+//! of the setup timeout and twice the pool's summary period from its
 //! retirement, then for the setup timeout, before it stops taking work.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::boundary::{
-    Model, ModelCell, Running, ask, model_fronted, model_summarized, placement, run_graph, spec_of,
+    Model, ModelPool, Running, ask, model_fronted, model_summarized, placement, run_graph, spec_of,
 };
-use common::cells::{
-    Instance, Resolving, cell_hub, cell_hub_of, followed, global_cell, global_hub, launch,
-    model_hub, settings, sorted, until,
+use common::pools::{
+    Instance, Resolving, followed, global_hub, global_pool, launch, model_hub, pool_hub,
+    pool_hub_of, settings, sorted, until,
 };
 use common::proxy::{Mode, Proxy};
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
@@ -38,8 +38,8 @@ use futures::StreamExt;
 use gdl::{Cx, Next, Selectors};
 use gdl_model::SegmentPhase;
 use gdl_runtime::velo::InstanceId;
-use gdl_runtime::{CellState, Cells, Deployment, DeploymentSpec, Register, RuntimeConfig};
-use gdl_watch::CellWatchEvent;
+use gdl_runtime::{Deployment, DeploymentSpec, PoolState, Pools, Register, RuntimeConfig};
+use gdl_watch::PoolWatchEvent;
 use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
@@ -50,7 +50,7 @@ const M2: &str = "model-x-02-us-east-1";
 const SETUP: Duration = Duration::from_secs(1);
 
 /// A retiree's bound on its wait for its parent: the setup timeout and
-/// twice the cells' summary period, the shortest, 1 s.
+/// twice the pools' summary period, the shortest, 1 s.
 const BOUND: Duration = Duration::from_secs(3);
 
 /// Every instance's `[runtime]` table: a drain long enough that its bound
@@ -58,11 +58,11 @@ const BOUND: Duration = Duration::from_secs(3);
 const RUNTIME: &str = "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 10000\n";
 
 /// The next event of `watch` about `instance`'s retirement.
-async fn retirement(watch: &mut gdl_hub::CellWatch, instance: InstanceId) -> CellWatchEvent {
+async fn retirement(watch: &mut gdl_hub::PoolWatch, instance: InstanceId) -> PoolWatchEvent {
     let read = async {
         loop {
             match watch.next().await.expect("the watch goes on") {
-                event @ CellWatchEvent::Retired { instance: of, .. } if of == instance => {
+                event @ PoolWatchEvent::Retired { instance: of, .. } if of == instance => {
                     return event;
                 }
                 _ => {}
@@ -74,14 +74,14 @@ async fn retirement(watch: &mut gdl_hub::CellWatch, instance: InstanceId) -> Cel
         .expect("the retirement in time")
 }
 
-/// A chooser that follows the model cell avoids its retired entry
-/// instance once its tables hold it retired, and the model cell's hub
-/// learns of it through the global cell's hub.
+/// A chooser that follows the model pool avoids its retired entry
+/// instance once its tables hold it retired, and the model pool's hub
+/// learns of it through the global pool's hub.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_choosers_acknowledgement_reaches_the_retirees_cell() {
+async fn a_choosers_acknowledgement_reaches_the_retirees_pool() {
     let directory = Resolving::new();
-    let (global, _) = cell_hub(global_hub(), &directory).await;
-    let (m1, model) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (global, _) = pool_hub(global_hub(), &directory).await;
+    let (m1, model) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let (mut retiring, staying, _d) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "f").await,
@@ -91,47 +91,47 @@ async fn a_choosers_acknowledgement_reaches_the_retirees_cell() {
         global.public_addr().port(),
         global.control_addr().port(),
         5_000,
-        &global_cell(),
+        &global_pool(),
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
-    let cells = chooser
-        .cells()
-        .expect("a global instance in a cell is a chooser");
-    until(&cells, "the model cell ready with its entries", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| {
-            m.state == CellState::Ready && m.eligible == sorted(&[&retiring, &staying])
+    let pools = chooser
+        .pools()
+        .expect("a global instance in a pool is a chooser");
+    until(&pools, "the model pool ready with its entries", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| {
+            m.state == PoolState::Ready && m.eligible == sorted(&[&retiring, &staying])
         })
     })
     .await;
-    let mut watch = model.watch().await.expect("the cell's watch");
+    let mut watch = model.watch().await.expect("the pool's watch");
     retiring.announce(SegmentPhase::Retired).await;
     let id = retiring.id();
     assert_eq!(
         retirement(&mut watch, id).await,
-        CellWatchEvent::Retired {
+        PoolWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
             acknowledged: false,
         },
-        "the global cell follows the model cell"
+        "the global pool follows the model pool"
     );
     assert_eq!(
         retirement(&mut watch, id).await,
-        CellWatchEvent::Retired {
+        PoolWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
             acknowledged: true,
         }
     );
     assert!(
-        followed(&cells, "f", M1).is_some_and(|m| m.retired == [id]),
+        followed(&pools, "f", M1).is_some_and(|m| m.retired == [id]),
         "acknowledged before the chooser's tables held it retired"
     );
 }
 
-/// A cell of `entries` entry instances, of which one makes its quorum, so
+/// A pool of `entries` entry instances, of which one makes its quorum, so
 /// that it stays `ready` when one retires.
-fn cell(name: &'static str, hub: &'static str, entries: usize) -> Model<'static> {
+fn pool(name: &'static str, hub: &'static str, entries: usize) -> Model<'static> {
     Model {
         name,
         hub,
@@ -140,17 +140,17 @@ fn cell(name: &'static str, hub: &'static str, entries: usize) -> Model<'static>
     }
 }
 
-/// A model cell of the reference graph whose nodes log to `events`.
+/// A model pool of the reference graph whose nodes log to `events`.
 async fn model(
     spec: &DeploymentSpec,
     directory: &Resolving,
-    cell: Model<'_>,
+    pool: Model<'_>,
     events: &Arc<Events>,
-) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
     model_summarized(
         spec,
         directory,
-        cell,
+        pool,
         RUNTIME,
         &|runtime| runtime,
         &|deployment| reference_graph(deployment, events),
@@ -158,14 +158,14 @@ async fn model(
     .await
 }
 
-/// A chooser, an instance of `a` in the global cell at `hub`, which reaches
+/// A chooser, an instance of `a` in the global pool at `hub`, which reaches
 /// the hub's public listener on `public`: the hub's own, or a proxy's.
 async fn chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
     public: u16,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
-    let extra = format!("{}{RUNTIME}", global_cell());
+    let extra = format!("{}{RUNTIME}", global_pool());
     let config = settings(public, hub.control_addr().port(), 5_000, &extra);
     let runtime = RuntimeConfig {
         selectors: Selectors::new(),
@@ -179,19 +179,19 @@ async fn chooser(
     .expect("the chooser serves")
 }
 
-fn tables<H>(chooser: &Running<H>) -> Cells {
+fn tables<H>(chooser: &Running<H>) -> Pools {
     chooser
-        .cells
+        .pools
         .clone()
-        .expect("a global instance in a cell chooses")
+        .expect("a global instance in a pool chooses")
 }
 
-/// Wait until the chooser follows `cell` ready, with `entries` entry
+/// Wait until the chooser follows `pool` ready, with `entries` entry
 /// instances to route to.
-async fn following(cells: &Cells, cell: &str, entries: usize) {
-    until(cells, "the model cell followed", |cells| {
-        followed(cells, "f", cell).is_some_and(|m| {
-            m.state == CellState::Ready && m.offered && m.eligible.len() == entries
+async fn following(pools: &Pools, pool: &str, entries: usize) {
+    until(pools, "the model pool followed", |pools| {
+        followed(pools, "f", pool).is_some_and(|m| {
+            m.state == PoolState::Ready && m.offered && m.eligible.len() == entries
         })
     })
     .await;
@@ -212,11 +212,11 @@ fn stop<H: Send + Sync + 'static>(instance: Running<H>) -> (Instant, JoinHandle<
     (began, ended)
 }
 
-/// Wait until the cell's watch says that `instance`'s retirement is
+/// Wait until the pool's watch says that `instance`'s retirement is
 /// acknowledged, and return when it did.
-async fn acknowledged(watch: &mut gdl_hub::CellWatch, instance: InstanceId) -> Instant {
+async fn acknowledged(watch: &mut gdl_hub::PoolWatch, instance: InstanceId) -> Instant {
     loop {
-        if let CellWatchEvent::Retired {
+        if let PoolWatchEvent::Retired {
             acknowledged: true, ..
         } = retirement(watch, instance).await
         {
@@ -225,9 +225,9 @@ async fn acknowledged(watch: &mut gdl_hub::CellWatch, instance: InstanceId) -> I
     }
 }
 
-/// A model cell with two entry instances, followed by a global cell with
+/// A model pool with two entry instances, followed by a global pool with
 /// two choosers: once one entry instance retires, each chooser avoids it,
-/// the global's hub tells the model cell's, and the retiree, told by its
+/// the global's hub tells the model pool's, and the retiree, told by its
 /// hub, waits out the setup timeout and leaves, long before its bound. No
 /// offer reaches it once its parent has acknowledged it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -235,13 +235,13 @@ async fn an_acknowledged_retiree_waits_out_the_setup_timeout_and_leaves() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let second = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 2), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 2), &quiet).await;
     following(&tables(&first), M1, 2).await;
     following(&tables(&second), M1, 2).await;
-    let mut watch = m1.readiness.watch().await.expect("the cell's watch");
+    let mut watch = m1.readiness.watch().await.expect("the pool's watch");
     let retiree = m1.entries.remove(0);
     let (id, offers) = (retiree.node.instance_id(), Arc::clone(&retiree.segment));
     let (began, ended) = stop(retiree);
@@ -261,7 +261,7 @@ async fn an_acknowledged_retiree_waits_out_the_setup_timeout_and_leaves() {
     assert!(took < BOUND, "took {took:?} to leave");
 }
 
-/// With one chooser's view of the model cell held back, so that it has
+/// With one chooser's view of the model pool held back, so that it has
 /// not applied the retirement, the global's hub waits for it, and so does
 /// the retiree, which takes the hand-offs that chooser still sends it and
 /// does not leave. Once the chooser applies it, the retiree goes on.
@@ -270,15 +270,15 @@ async fn a_chooser_that_has_not_applied_the_retirement_holds_the_retiree() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, global) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, global) = pool_hub_of(&spec, global_hub(), &directory).await;
     let proxy = Proxy::new(hub.public_addr()).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let held = chooser(&spec, &hub, proxy.port).await;
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 2), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 2), &quiet).await;
     following(&tables(&first), M1, 2).await;
     following(&tables(&held), M1, 2).await;
     proxy.set(Mode::Silent);
-    let mut watch = m1.readiness.watch().await.expect("the cell's watch");
+    let mut watch = m1.readiness.watch().await.expect("the pool's watch");
     let retiree = m1.entries.remove(0);
     let (id, taken) = (retiree.node.instance_id(), Arc::clone(&retiree.segment));
     let (_, ended) = stop(retiree);
@@ -292,8 +292,8 @@ async fn a_chooser_that_has_not_applied_the_retirement_holds_the_retiree() {
     .await
     .expect("the global's hub waits for its choosers in time")
     .expect("the hub lives");
-    until(&tables(&first), "the retirement applied", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.retired == [id])
+    until(&tables(&first), "the retirement applied", |pools| {
+        followed(pools, "f", M1).is_some_and(|m| m.retired == [id])
     })
     .await;
     let before = taken.served().forwards;
@@ -316,7 +316,7 @@ async fn a_chooser_that_has_not_applied_the_retirement_holds_the_retiree() {
     assert!(
         !matches!(
             retirement_now(&mut watch, id),
-            Some(CellWatchEvent::Retired {
+            Some(PoolWatchEvent::Retired {
                 acknowledged: true,
                 ..
             })
@@ -329,21 +329,21 @@ async fn a_chooser_that_has_not_applied_the_retirement_holds_the_retiree() {
     ended.await.expect("the retiree's task");
 }
 
-/// With a chooser whose view of the model cell is held back for good, the
+/// With a chooser whose view of the model pool is held back for good, the
 /// retiree is never acknowledged: it goes on once its bound has passed,
 /// then the setup timeout, and stops taking work, while a request it took
 /// holds it. An offer that reaches it then is refused, and the chooser
-/// offers the request to another cell, which answers it.
+/// offers the request to another pool, which answers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let proxy = Proxy::new(hub.public_addr()).await;
     let held = chooser(&spec, &hub, proxy.port).await;
-    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &events).await;
-    let m2 = model(&spec, &directory, cell(M2, "m2-hub:1337", 1), &events).await;
+    let m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &events).await;
+    let m2 = model(&spec, &directory, pool(M2, "m2-hub:1337", 1), &events).await;
     following(&tables(&held), M1, 1).await;
     following(&tables(&held), M2, 1).await;
     // A request the retiree holds, so that it is still there once it
@@ -362,7 +362,7 @@ async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
     let deadline = Instant::now() + BOUND + SETUP + WAIT;
     while refused() == 0 {
         assert!(Instant::now() < deadline, "the retiree never refused");
-        ask(&held.segment).await.expect("answered by a cell");
+        ask(&held.segment).await.expect("answered by a pool");
         // Looked at again a poll later: the retiree's own drain polls too.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -371,7 +371,7 @@ async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
         took >= BOUND + SETUP,
         "stopped taking work {took:?} after it retired"
     );
-    assert!(other.forwards() > 0, "another cell answered");
+    assert!(other.forwards() > 0, "another pool answered");
     assert!(!ended.is_finished(), "the held request holds the retiree");
     events.record("test:release:held");
     holding
@@ -382,22 +382,22 @@ async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
     proxy.set(Mode::Forward);
 }
 
-/// A retiree whose cell starts to drain while it waits for its parent goes
+/// A retiree whose pool starts to drain while it waits for its parent goes
 /// by the drain's rules from then: with no acknowledgement and no follower
-/// letting go of the cell, it keeps taking work until the drain's bound
+/// letting go of the pool, it keeps taking work until the drain's bound
 /// has passed since it learned of the drain, and then declines offers from
-/// other cells, as a draining entry does; the chooser offers the request to
-/// another cell.
+/// other pools, as a draining entry does; the chooser offers the request to
+/// another pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, global) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, global) = pool_hub_of(&spec, global_hub(), &directory).await;
     let proxy = Proxy::new(hub.public_addr()).await;
     let held = chooser(&spec, &hub, proxy.port).await;
-    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &events).await;
-    let m2 = model(&spec, &directory, cell(M2, "m2-hub:1337", 1), &events).await;
+    let m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &events).await;
+    let m2 = model(&spec, &directory, pool(M2, "m2-hub:1337", 1), &events).await;
     following(&tables(&held), M1, 1).await;
     following(&tables(&held), M2, 1).await;
     let holding = gated(&held, &events, "held").await;
@@ -419,33 +419,33 @@ async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
     .expect("the global's hub waits for its chooser in time")
     .expect("the hub lives");
     // Its retirement's last step is to withdraw `loaded`: from then it
-    // waits for its parent in its drain, which the cell's drain must find
+    // waits for its parent in its drain, which the pool's drain must find
     // it in.
     withdrawn(&holder.hub, id).await;
     let drained = Instant::now();
-    holder.readiness.drain().await.expect("the cell drains");
+    holder.readiness.drain().await.expect("the pool drains");
     let refused = || taken.offered() - taken.served().forwards;
     while refused() == 0 {
         assert!(
             drained.elapsed() < BOUND + SETUP + WAIT,
             "the retiree never refused"
         );
-        ask(&held.segment).await.expect("answered by a cell");
+        ask(&held.segment).await.expect("answered by a pool");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let took = drained.elapsed();
     assert!(
         took >= BOUND,
-        "stopped taking work {took:?} after its cell began to drain"
+        "stopped taking work {took:?} after its pool began to drain"
     );
     // Declined at the bound, as a draining entry declines: within the
     // retiree's poll and this probe's, not a setup timeout later.
     assert!(
         took < BOUND + Duration::from_millis(400),
-        "took offers {took:?} after its cell began to drain"
+        "took offers {took:?} after its pool began to drain"
     );
 
-    assert!(other.forwards() > 0, "another cell answered");
+    assert!(other.forwards() > 0, "another pool answered");
     events.record("test:release:held");
     holding
         .await
@@ -457,21 +457,21 @@ async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
 
 /// A question the retiree asks its hub that stalls, as one to a hub that
 /// takes the connection and does not answer, does not hold off the drain's
-/// cutoff: the retiree still declines offers from other cells once the
+/// cutoff: the retiree still declines offers from other pools once the
 /// drain's bound has passed, and takes none after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, global) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, global) = pool_hub_of(&spec, global_hub(), &directory).await;
     let proxy = Proxy::new(hub.public_addr()).await;
     let held = chooser(&spec, &hub, proxy.port).await;
     let assemble = |deployment: &Deployment| reference_graph(deployment, &events);
     let (m1, front1) = model_fronted(
         &spec,
         &directory,
-        cell(M1, "m1-hub:1337", 1),
+        pool(M1, "m1-hub:1337", 1),
         RUNTIME,
         &assemble,
     )
@@ -479,7 +479,7 @@ async fn a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff() {
     let (m2, front2) = model_fronted(
         &spec,
         &directory,
-        cell(M2, "m2-hub:1337", 1),
+        pool(M2, "m2-hub:1337", 1),
         RUNTIME,
         &assemble,
     )
@@ -506,34 +506,34 @@ async fn a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff() {
     .expect("the hub lives");
     withdrawn(&holder.hub, id).await;
     // The retiree's questions about its hub's members go unanswered from
-    // here; its cell watch, open already, goes on.
+    // here; its pool watch, open already, goes on.
     front.hold(b"/v1/ext/gdl/members");
     let drained = Instant::now();
-    holder.readiness.drain().await.expect("the cell drains");
+    holder.readiness.drain().await.expect("the pool drains");
     let refused = || taken.offered() - taken.served().forwards;
     while refused() == 0 {
         assert!(
             drained.elapsed() < BOUND + SETUP + WAIT,
             "the retiree never refused"
         );
-        ask(&held.segment).await.expect("answered by a cell");
+        ask(&held.segment).await.expect("answered by a pool");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let took = drained.elapsed();
     assert!(
         took < BOUND + Duration::from_millis(400),
-        "took offers {took:?} after its cell began to drain"
+        "took offers {took:?} after its pool began to drain"
     );
     let taken_then = taken.served().forwards;
     for _ in 0..4 {
-        ask(&held.segment).await.expect("answered by a cell");
+        ask(&held.segment).await.expect("answered by a pool");
     }
     assert_eq!(
         taken.served().forwards,
         taken_then,
         "took an offer after it declined"
     );
-    assert!(other.forwards() > 0, "another cell answered");
+    assert!(other.forwards() > 0, "another pool answered");
     front.release();
     events.record("test:release:held");
     holding
@@ -544,14 +544,14 @@ async fn a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff() {
     proxy.set(Mode::Forward);
 }
 
-/// A model cell no global cell follows: its retiree is told at once that
+/// A model pool no global pool follows: its retiree is told at once that
 /// it is acknowledged, and waits out the setup timeout alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_retiree_no_cell_follows_waits_out_the_setup_timeout_alone() {
+async fn a_retiree_no_pool_follows_waits_out_the_setup_timeout_alone() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 2), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 2), &quiet).await;
     let retiree = m1.entries.remove(0);
     let (began, ended) = stop(retiree);
     let took = ended.await.expect("the retiree's task") - began;
@@ -559,10 +559,10 @@ async fn a_retiree_no_cell_follows_waits_out_the_setup_timeout_alone() {
     assert!(took < BOUND, "took {took:?} to leave");
 }
 
-/// An interior instance of a model cell retires inside its cell: it cannot
-/// see the drain of its source in the global cell, so it waits for the
-/// entry instances of its cell to avoid it or leave, then the setup
-/// timeout, and for no cell outside it. Stopped together, the entry leaves
+/// An interior instance of a model pool retires inside its pool: it cannot
+/// see the drain of its source in the global pool, so it waits for the
+/// entry instances of its pool to avoid it or leave, then the setup
+/// timeout, and for no pool outside it. Stopped together, the entry leaves
 /// first, and the interior instance leaves well inside its drain's bound.
 /// It takes the entry's setup timeout and then its own, so 2 to 3 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -570,9 +570,9 @@ async fn an_interior_instance_waits_for_its_entry_to_leave() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &quiet).await;
     following(&tables(&first), M1, 1).await;
     let (began, ended) = stop(m1.sink);
     let (_, entry) = stop(m1.entries.remove(0));
@@ -594,9 +594,9 @@ async fn a_stopped_interior_preserves_an_admitted_request() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &events).await;
+    let m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &events).await;
     following(&tables(&first), M1, 1).await;
     ask(&first.segment)
         .await
@@ -635,9 +635,9 @@ async fn a_stopped_interior_preserves_an_admitted_request() {
     ended.expect("the interior drained");
 }
 
-/// A later cell drain lets an empty interior leave while its entry keeps a response.
+/// A later pool drain lets an empty interior leave while its entry keeps a response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_waiting_interior_observes_a_later_cell_drain() {
+async fn a_waiting_interior_observes_a_later_pool_drain() {
     use gdl_model::segment_service;
     use velo::discovery::ServiceDiscovery;
     use velo_hub::client::HubClient;
@@ -645,12 +645,12 @@ async fn a_waiting_interior_observes_a_later_cell_drain() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let (m1, proxy) = model_fronted(
         &spec,
         &directory,
-        cell(M1, "m1-hub:1337", 1),
+        pool(M1, "m1-hub:1337", 1),
         "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
         &|deployment| reference_graph(deployment, &events),
     )
@@ -686,7 +686,7 @@ async fn a_waiting_interior_observes_a_later_cell_drain() {
         .await
         .expect("the stopped interior asked about its senders");
     assert!(!m1.sink.segment.is_closed());
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     proxy.release();
 
     let client = HubClient::builder()
@@ -732,7 +732,7 @@ async fn a_waiting_interior_observes_a_later_cell_drain() {
     }
     assert!(
         closed,
-        "F1: the empty interior ignored its cell's drain after its entry detached"
+        "F1: the empty interior ignored its pool's drain after its entry detached"
     );
 }
 
@@ -750,14 +750,14 @@ fn returning() -> gdl_runtime::Placement {
 /// A returning forward path drains without peers waiting for each other to leave.
 /// A failure waits out both ten-second bounds so their duration can be reported.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F2: a known limitation: the last instances of a returning path, stopped outside their cell's drain, each wait for the other to leave until their drain bounds"]
-async fn a_deployment_stop_breaks_an_empty_cells_returning_path() {
+#[ignore = "F2: a known limitation: the last instances of a returning path, stopped outside their pool's drain, each wait for the other to leave until their drain bounds"]
+async fn a_deployment_stop_breaks_an_empty_pools_returning_path() {
     let spec = spec_of(returning());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &quiet).await;
     following(&tables(&first), M1, 1).await;
     ask(&first.segment).await.expect("the returning path works");
     tokio::time::timeout(WAIT, async {
@@ -801,23 +801,23 @@ async fn a_deployment_stop_breaks_an_empty_cells_returning_path() {
     );
 }
 
-/// The control for the case above: a drain of the cell, rather than a stop
+/// The control for the case above: a drain of the pool, rather than a stop
 /// of each instance, takes the same empty returning path down well inside
-/// its drain's bound, since the cell's entry instances are then the drain
+/// its drain's bound, since the pool's entry instances are then the drain
 /// sources. It waits out the entry's bound (3 s here), so it takes 3 to 4 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cell_drain_takes_down_an_empty_returning_path() {
+async fn a_pool_drain_takes_down_an_empty_returning_path() {
     let spec = spec_of(returning());
     let directory = Resolving::new();
     let quiet = Events::quiet();
-    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 1), &quiet).await;
     following(&tables(&first), M1, 1).await;
     ask(&first.segment).await.expect("the returning path works");
 
     let began = Instant::now();
-    m1.readiness.drain().await.expect("the cell drains");
+    m1.readiness.drain().await.expect("the pool drains");
     let entry = m1.entries.remove(0);
     let (entry_left, interior_left) =
         tokio::join!(entry.ended(BOUND + WAIT), m1.sink.ended(BOUND + WAIT));
@@ -834,17 +834,17 @@ async fn a_cell_drain_takes_down_an_empty_returning_path() {
 
 /// The next event of `watch` about `instance`'s retirement that has come
 /// already, if any.
-fn retirement_now(watch: &mut gdl_hub::CellWatch, instance: InstanceId) -> Option<CellWatchEvent> {
+fn retirement_now(watch: &mut gdl_hub::PoolWatch, instance: InstanceId) -> Option<PoolWatchEvent> {
     use futures::FutureExt;
     while let Some(Some(event)) = watch.next().now_or_never() {
-        if matches!(event, CellWatchEvent::Retired { instance: of, .. } if of == instance) {
+        if matches!(event, PoolWatchEvent::Retired { instance: of, .. } if of == instance) {
             return Some(event);
         }
     }
     None
 }
 
-/// Send a request whose C waits, in the model cell, until the test
+/// Send a request whose C waits, in the model pool, until the test
 /// releases it, and return the request's answer once that C has it.
 async fn gated<H: Next<Prompt, Chunk> + Send + Sync + 'static>(
     chooser: &Running<H>,

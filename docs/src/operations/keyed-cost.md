@@ -1,10 +1,10 @@
 # Keyed record service cost
 
-This chapter gives the round trip of a cell hub's keyed record service ([The keyed record service](../concepts/cells.md#the-keyed-record-service)) on one host, and how many requests one hub answers.
+This chapter gives the round trip of a pool hub's keyed record service ([The keyed record service](../concepts/pools.md#the-keyed-record-service)) on one host, and how many requests one hub answers.
 
 ## Setup
 
-`crates/gdl-hub/benches/keyed.rs` runs a hub with the keyed record service at its default capacity, and eight registered instances, in one process. The instances ask over loopback TCP, through velo-hub's extension client, as a segment instance would. The table holds 10,000 records first: 16-byte keys and 21-byte values, the size of a session fingerprint and a cell name.
+`crates/gdl-hub/benches/keyed.rs` runs a hub with the keyed record service at its default capacity, and eight registered instances, in one process. The instances ask over loopback TCP, through velo-hub's extension client, as a segment instance would. The table holds 10,000 records first: 16-byte keys and 21-byte values, the size of a session fingerprint and a pool name.
 
 - **Round trip.** One instance asks one request at a time, 20,000 untimed and then 20,000 timed: a get, a set with `replace`, and a batch of 64 sets with `replace`.
 - **Low rate.** The same instance pauses 1 ms or 5 ms before each request, 1,100 times, and the last 1,000 are timed: a get, and the hub's health route (`/v1/health`) on the control listener through a plain `reqwest` client. The health route runs no keyed code and no gdl code, so it is the control. A health row without a pause is the control's back-to-back round trip.
@@ -18,7 +18,7 @@ cargo bench -p gdl-hub --bench keyed
 
 ## Results
 
-**gb300 history.** Measured on the gb300 bench host (Neoverse-V2), pinned to cores 0 to 15, at commit `5ed1e835`, load average 3.6 to 3.9. Three runs. Each cell is the median of the three runs, with their range. The hub and its eight instances share the same 16 cores, so the rate is what one process of both sustains, not the hub alone.
+**gb300 history.** Measured on the gb300 bench host (Neoverse-V2), pinned to cores 0 to 15, at commit `5ed1e835`, load average 3.6 to 3.9. Three runs. Each pool is the median of the three runs, with their range. The hub and its eight instances share the same 16 cores, so the rate is what one process of both sustains, not the hub alone.
 
 | Round trip, one at a time | p50 | p99 | p99.9 |
 |---|---|---|---|
@@ -40,7 +40,7 @@ cargo bench -p gdl-hub --bench keyed
 
 On a host whose cores sleep deeply, a get that follows a pause costs 6 to 15 times as much as a get that follows another get. The pause lets the threads that serve the request park, and the cores they ran on go idle. The next request wakes them first. The hub's health route, which runs no keyed code and no gdl code, shows the same cost.
 
-**gb300 history.** The gb300 bench host's cores have one idle state, with an exit latency of 1 µs. There, a pause adds only 3 to 17 µs. Commit `2447e8e1`, pinned to cores 0 to 15, load average 3.7 to 3.9, three runs; each cell is the median p50, with the range:
+**gb300 history.** The gb300 bench host's cores have one idle state, with an exit latency of 1 µs. There, a pause adds only 3 to 17 µs. Commit `2447e8e1`, pinned to cores 0 to 15, load average 3.7 to 3.9, three runs; each pool is the median p50, with the range:
 
 | Row | Back to back | After 1 ms | After 5 ms |
 |---|---|---|---|
@@ -57,14 +57,14 @@ On spark-d (spark-e504, 20 cores, 1-minute load 5 to 11), with the bench pinned 
 | 2 (`taskset -c 5-6`) | 33.3 µs | 24.1 µs | 191.7 µs | 246.7 µs | 361.9 µs | 380.5 µs |
 | 4 (`taskset -c 5-8`) | 33.7 µs | 25.2 µs | 445.4 µs | 389.4 µs | 505.8 µs | 450.1 µs |
 
-The cells are p50s. Two costs add up:
+The pools are p50s. Two costs add up:
 
 - **A core that wakes.** On one core, the client and the hub share one core, and a request still costs about 130 to 170 µs more after a pause. spark-d's cores have idle states with exit latencies of 42, 231, and 433 µs (`/sys/devices/system/cpu/cpu0/cpuidle/state*/latency`). During one 4-core run of the bench, those cores entered the two deepest states 70,637 times.
 - **More threads to wake.** With more cores, a request crosses more threads, and each sleeping thread must be woken on its own core. The p50 after a pause grows from about 150 to 190 µs on one core to about 390 to 510 µs on four.
 
 ### In Compose
 
-Docker Compose runs of dynamo-http-endpoints' `examples/set-records`, an ingress cell with 8 front replicas, measured a get at 0.33 ms p50 and 0.69 ms p99, with each replica asking its hub about 6 times a second. A `curl` on one kept-alive connection from a front replica to the hub took 21 µs at p50. That `curl` sent its requests back to back, so it is not the floor for a get at 6 a second.
+Docker Compose runs of dynamo-http-endpoints' `examples/set-records`, an ingress pool with 8 front replicas, measured a get at 0.33 ms p50 and 0.69 ms p99, with each replica asking its hub about 6 times a second. A `curl` on one kept-alive connection from a front replica to the hub took 21 µs at p50. That `curl` sent its requests back to back, so it is not the floor for a get at 6 a second.
 
 On the same host, a gdl hub image and a Node.js client in two containers on one Docker bridge network give the same jump. The client pauses with `setTimeout` before each request. One kept-alive connection to `/v1/health` took:
 
@@ -77,7 +77,7 @@ On the same host, a gdl hub image and a Node.js client in two containers on one 
 
 So the 0.33 ms is what a request costs on that host when it is the only work in flight.
 
-A get does not wait for the handle's write batch or its queue: `CellRecords::get` sends its request at once (`a_get_bypasses_queued_writes_and_a_batch_in_flight` in `crates/gdl/src/records/tests.rs`). At the hub, a get takes its key's shard lock, as each write does, so it can wait for one write to a key of the same shard. The lock is held for one operation, never across an await. The low-rate rows send no writes, so the lock is not the cost they measure.
+A get does not wait for the handle's write batch or its queue: `PoolRecords::get` sends its request at once (`a_get_bypasses_queued_writes_and_a_batch_in_flight` in `crates/gdl/src/records/tests.rs`). At the hub, a get takes its key's shard lock, as each write does, so it can wait for one write to a key of the same shard. The lock is held for one operation, never across an await. The low-rate rows send no writes, so the lock is not the cost they measure.
 
 ### What would cut it
 
