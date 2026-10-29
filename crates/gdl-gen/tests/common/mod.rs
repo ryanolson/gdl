@@ -56,22 +56,44 @@ pub fn cargo() -> Command {
 /// The chat example's binaries, built once for the test binary: the
 /// directory that holds them.
 pub fn built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    &chat_build().bin
+}
+
+/// A build of the chat example by `cargo gdl build`, as a user runs it.
+pub struct Built {
+    /// The directory the binaries were copied to.
+    pub bin: PathBuf,
+    /// The generated workspace.
+    pub workspace: PathBuf,
+    /// What the build printed on stderr: Cargo's progress and warnings.
+    pub stderr: String,
+}
+
+/// The chat example built once for the test binary, offline: the local
+/// cache holds every crate. Test binaries that build it at once share its
+/// target directory, where one build waits for the other.
+pub fn chat_build() -> &'static Built {
+    static BUILT: OnceLock<Built> = OnceLock::new();
     BUILT.get_or_init(|| {
-        let build = cargo()
-            .arg("build")
-            .arg("--manifest-path")
-            .arg(example().join("Cargo.toml"))
-            .arg("--bins")
-            .env("CARGO_TARGET_DIR", target("examples"))
+        let target = target("examples");
+        let bin = target.join("chat-bin");
+        let build = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+            .args(["gdl", "build", "--spec"])
+            .arg(example().join("gdl.toml"))
+            .arg("--target-dir")
+            .arg(&target)
+            .arg("--out")
+            .arg(&bin)
+            .env("CARGO_NET_OFFLINE", "true")
             .output()
-            .expect("cargo build");
-        assert!(
-            build.status.success(),
-            "{}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        target("examples").join("debug")
+            .expect("cargo gdl build");
+        let stderr = String::from_utf8_lossy(&build.stderr).into_owned();
+        assert!(build.status.success(), "{stderr}");
+        Built {
+            bin,
+            workspace: target.join("gdl/chat/gdl/workspace"),
+            stderr,
+        }
     })
 }
 

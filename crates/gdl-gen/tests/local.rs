@@ -275,7 +275,28 @@ fn local_needs_a_gdl_path_and_a_graph_spec() {
         .expect_err("gdl from Git")
         .to_string();
     assert!(error.contains("names gdl by Git or version"), "{error}");
-    let error = local(&spec("examples/asr/gdl.toml"), &out)
+    // A contract spec: a crate with `graph!` that the spec names.
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-local-contract-")
+        .tempdir()
+        .expect("a directory");
+    std::fs::create_dir_all(temp.path().join("contract/src")).expect("the contract");
+    std::fs::write(
+        temp.path().join("contract/Cargo.toml"),
+        "[package]\nname = \"tiny-contract\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .expect("the contract's manifest");
+    std::fs::write(temp.path().join("contract/src/lib.rs"), "").expect("the contract");
+    std::fs::write(
+        temp.path().join("gdl.toml"),
+        format!(
+            "[contract]\npath = \"contract\"\n[gdl]\npath = {}\n[segment.front]\nnodes = [\"A\"]\n",
+            toml::Value::String(root().join("crates/gdl-runtime").display().to_string())
+        ),
+    )
+    .expect("the spec");
+    let contract = gdl_gen::Spec::load(&temp.path().join("gdl.toml")).expect("a spec");
+    let error = local(&contract, &out)
         .expect_err("a contract spec")
         .to_string();
     assert!(error.contains("graph definition"), "{error}");

@@ -1,11 +1,22 @@
-# The ASR example's placement. The audio crosses twice: from the client's
-# segment to the resampler, and from the resampler to the recognizer.
-# Generate the segment crates with:
+# The ASR example's spec: the graph file, the crate that holds its
+# messages, the crates that implement its nodes, and which segment hosts
+# which node. The audio crosses twice: from the client's segment to the
+# resampler, and from the resampler to the recognizer. Build every segment
+# with:
 #
-#     cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments
+#     cargo run -p gdl-gen -- build --spec examples/asr/gdl.toml
 
-[contract]
-path = "contract"
+[graph]
+path = "asr.gdl"
+
+[messages]
+crates = ["protocols"]
+
+# The node crates: each graph node binds to the node of its name that
+# they offer, read from their source. The source, `Client`, is the
+# program that calls the front segment's library.
+[nodes]
+crates = ["front-nodes", "dsp-nodes", "engine-mock"]
 
 [gdl]
 path = "../../crates/gdl-runtime"
@@ -18,23 +29,3 @@ nodes = ["Resample"]
 
 [segment.engine]
 nodes = ["Recognizer", "Punctuate"]
-
-[bind.Gateway]
-crate = "asr-front-nodes"
-path = "front-nodes"
-type = "asr_front_nodes::Gateway"
-
-[bind.Resample]
-crate = "asr-dsp-nodes"
-path = "dsp-nodes"
-type = "asr_dsp_nodes::Resample"
-
-[bind.Recognizer]
-crate = "asr-engine-mock"
-path = "engine-mock"
-type = "asr_engine_mock::Recognizer"
-
-[bind.Punctuate]
-crate = "asr-engine-mock"
-path = "engine-mock"
-type = "asr_engine_mock::Punctuate"

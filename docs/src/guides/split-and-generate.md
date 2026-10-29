@@ -100,7 +100,7 @@ cargo gdl build --spec examples/chat/gdl.toml
 Use `generate` when you want the crates in your own tree, to read them, or to build them in your own workspace.
 
 ```bash
-cargo gdl generate --spec examples/chat/gdl.toml --out examples/chat/segments
+cargo gdl generate --spec examples/chat/gdl.toml --out chat-segments
 ```
 
 The output has `contract/` (for a graph file), one directory per segment, and `crossings.txt`. With several layouts, the segments go in `<out>/<layout>/<segment>`. Never edit a generated file. [Code generation](../concepts/generation.md) lists what each crate holds.
@@ -108,10 +108,10 @@ The output has `contract/` (for a graph file), one directory per segment, and `c
 `generate --check` regenerates in memory and fails if the files in `--out` differ from the output. Run it in CI to catch a spec change whose output was not committed.
 
 ```bash
-cargo gdl generate --spec examples/chat/gdl.toml --out examples/chat/segments --check
+cargo gdl generate --spec examples/chat/gdl.toml --out chat-segments --check
 ```
 
-It reports a missing, changed, or stale file, and a file in a segment crate that the generator did not write. Then build and run the segments as [Run the examples](examples.md) shows.
+It reports a missing, changed, or stale file, and a file in a segment crate that the generator did not write. To build the crates, list them in your workspace's `members`. A profile in their manifests would be ignored there, so `generate` writes none, and your workspace's root profile applies.
 
 ## Draw
 

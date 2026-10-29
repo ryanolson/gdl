@@ -1,0 +1,7 @@
+name = "asr", schema = 1;
+source   Client: Session + stream Audio -> stream Transcript;
+operator Gateway: (Session + stream Audio -> stream Transcript) over (Session + stream Audio -> stream Partial);
+forward  Resample: Session + stream Audio -> Session + stream Pcm;
+sink     Recognizer: Session + stream Pcm -> stream Partial;
+backward Punctuate: Partial -> Partial;
+topology: Client => Gateway { Resample => Recognizer => Punctuate };

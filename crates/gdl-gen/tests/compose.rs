@@ -1803,14 +1803,19 @@ fn chat_offers() -> Vec<gdl_gen::Offer> {
 
 /// `check` validates a spec as generation does and writes nothing: from
 /// source, or from offers a catalogue holds, to the same manifest and the
-/// committed crossing report. A crate the catalogue lacks is named.
+/// crossing report that generation writes. A crate the catalogue lacks is
+/// named.
 #[test]
 fn a_check_agrees_with_generation() {
     let chat = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
     let spec = gdl_gen::Spec::load(&chat.join("gdl.toml")).expect("spec");
     let read = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Read).expect("read");
-    let committed =
-        std::fs::read_to_string(chat.join("segments/crossings.txt")).expect("crossings");
+    let out = tempfile::Builder::new()
+        .prefix("gdl-check-agrees-")
+        .tempdir()
+        .expect("scratch");
+    let files = gdl_gen::render(&spec, out.path(), &target()).expect("render");
+    let committed = &files[Path::new("crossings.txt")];
     assert!(
         committed.contains(&read.crossings),
         "{}\nvs\n{committed}",

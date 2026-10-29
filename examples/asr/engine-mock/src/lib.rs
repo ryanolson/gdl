@@ -2,12 +2,13 @@
 //! each chunk of audio as one word, spelled by its samples (each sample is a
 //! letter's code times 100), and reports the text so far after each chunk.
 
-use asr_contract::{Partial, Pcm, Session};
+use asr_protocols::{Partial, Pcm, Session};
 use futures::StreamExt;
 use gdl::{Backward, Build, Cx, Error, Items, Result, Sink, Streamed, items};
 use serde::Deserialize;
 
 /// The recognizer.
+#[derive(gdl::Node)]
 pub struct Recognizer {
     language: String,
 }
@@ -80,6 +81,7 @@ pub struct NoSettings {}
 
 /// The punctuator: a final text starts with a capital and ends with a
 /// full stop.
+#[derive(gdl::Node)]
 pub struct Punctuate;
 
 impl Build for Punctuate {

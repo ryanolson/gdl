@@ -32,7 +32,6 @@ impl Project {
         let manifest = std::fs::read_to_string(from.join("Cargo.toml"))
             .expect("the chat workspace")
             .lines()
-            .filter(|line| !line.contains("\"segments/"))
             .map(|line| line.replace("../../crates/", &crates) + "\n")
             .collect::<String>();
         std::fs::write(dir.path().join("Cargo.toml"), manifest).expect("workspace");
@@ -51,25 +50,6 @@ impl Project {
             .expect("the chat spec")
             .replace("../../crates/", &relative);
         std::fs::write(dir.path().join("gdl.toml"), spec).expect("spec");
-        // The copied lock still lists the generated crates the example's
-        // own workspace holds: resolve it once for this workspace, as a
-        // user's lock is.
-        let settled = common::cargo()
-            .args([
-                "metadata",
-                "--offline",
-                "--format-version",
-                "1",
-                "--manifest-path",
-            ])
-            .arg(dir.path().join("Cargo.toml"))
-            .output()
-            .expect("cargo metadata");
-        assert!(
-            settled.status.success(),
-            "{}",
-            String::from_utf8_lossy(&settled.stderr)
-        );
         Self { dir }
     }
 
@@ -82,14 +62,13 @@ impl Project {
     }
 }
 
-/// Copy the tree `from` into `to`, without generated crates and build
-/// output.
+/// Copy the tree `from` into `to`, without build output.
 fn copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).expect("directory");
     for entry in std::fs::read_dir(from).expect("directory") {
         let entry = entry.expect("entry");
         let name = entry.file_name();
-        if name == "segments" || name == "target" {
+        if name == "target" {
             continue;
         }
         let path = entry.path();

@@ -2,7 +2,7 @@
 //! back: the client's audio crosses to the resampler and on to the
 //! recognizer, which answers after each chunk.
 
-use asr_contract::{Session, Transcript};
+use asr_protocols::{Session, Transcript};
 use futures::StreamExt;
 
 fn session(language: &str, sample_rate: u32) -> Session {

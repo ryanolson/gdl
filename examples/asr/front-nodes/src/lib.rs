@@ -1,12 +1,13 @@
 //! The gateway: checks a session, passes its audio on, and turns what the
 //! recognizer heard into transcripts.
 
-use asr_contract::{Audio, Partial, Session, Transcript};
+use asr_protocols::{Audio, Partial, Session, Transcript};
 use futures::StreamExt;
 use gdl::{Build, Cx, Error, Items, Next, Operator, Result, Streamed, items};
 use serde::Deserialize;
 
 /// The gateway.
+#[derive(gdl::Node)]
 pub struct Gateway {
     languages: Vec<String>,
 }

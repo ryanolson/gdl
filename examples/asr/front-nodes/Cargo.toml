@@ -6,7 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-asr-contract = { path = "../contract" }
+asr-protocols = { path = "../protocols" }
 futures = { workspace = true }
 gdl = { workspace = true }
 serde = { workspace = true }

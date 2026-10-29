@@ -279,11 +279,27 @@ mod tests {
     /// is its own workspace has its own, or none.
     #[test]
     fn the_seed_is_the_lock_of_the_workspace_that_holds_the_crate() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let asr = std::fs::read_to_string(root.join("examples/asr/Cargo.lock")).expect("lock");
+        let workspace = tempfile::Builder::new()
+            .prefix("gdl-gen-member-lock-")
+            .tempdir()
+            .expect("dir");
+        let member = workspace.path().join("contract");
+        std::fs::create_dir_all(member.join("src")).expect("src");
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"contract\"]\nresolver = \"3\"\n",
+        )
+        .expect("the workspace");
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(member.join("src/lib.rs"), "").expect("lib");
+        std::fs::write(workspace.path().join("Cargo.lock"), "# the workspace's\n").expect("lock");
         assert_eq!(
-            workspace_lock(&root.join("examples/asr/contract")).as_deref(),
-            Some(asr.as_str())
+            workspace_lock(&member).as_deref(),
+            Some("# the workspace's\n")
         );
 
         let dir = tempfile::Builder::new()
@@ -338,10 +354,24 @@ mod tests {
     #[test]
     fn a_dump_waits_while_another_holds_the_target_directory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let spec = crate::Spec::load(&root.join("examples/asr/gdl.toml")).expect("spec");
-        let contract = spec.contract().expect("a contract spec").clone();
-        let seed = workspace_lock(&contract.path);
         let target = root.join("target/gdl-gen-tests");
+        // A contract crate to dump: the one the chat example's graph file
+        // generates, written into a scratch directory.
+        let scratch = tempfile::Builder::new()
+            .prefix("gdl-gen-dump-wait-")
+            .tempdir()
+            .expect("dir");
+        let spec = crate::Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
+        let files = crate::render(&spec, scratch.path(), &target).expect("render");
+        crate::write(scratch.path(), &files).expect("written");
+        let contract = Contract {
+            package: "chat-contract".into(),
+            lib: "chat_contract".into(),
+            path: absolute(&scratch.path().join("contract")).expect("the contract's path"),
+            module: "chat_contract".into(),
+        };
+        // gdl's own lock pins every crate the runtime builds.
+        let seed = std::fs::read_to_string(root.join("Cargo.lock")).ok();
         // Built once, so the next dump neither compiles nor links; that one
         // is timed, and the wait below is many times as long. A dump that
         // ignored the lock would finish well inside it.
@@ -369,6 +399,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(120))
             .expect("the dump finished")
             .expect("manifest");
-        assert_eq!(name, "asr");
+        assert_eq!(name, "chat");
     }
 }

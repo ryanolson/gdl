@@ -1,5 +1,6 @@
-# The chat example: its messages, the crates implementing its nodes, and the
-# contract and segment crates gdl-gen generates from `gdl.toml`. Its own workspace, as a
+# The chat example: its messages and the crates implementing its nodes.
+# `cargo gdl build --spec gdl.toml` generates the contract and segment
+# crates in the target directory and builds them. Its own workspace, as a
 # deployment's would be.
 [workspace]
 members = [
@@ -7,10 +8,6 @@ members = [
     "front-nodes",
     "post-nodes",
     "protocols",
-    "segments/contract",
-    "segments/engine",
-    "segments/front",
-    "segments/post",
     "sentinel",
 ]
 resolver = "3"

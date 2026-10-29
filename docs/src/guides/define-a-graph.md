@@ -83,6 +83,6 @@ gdl_runtime::graph! {
 }
 ```
 
-The spec then uses `[contract]` with `path` (and `module` when `graph!` is not at the crate root) and binds each node in a `[bind.<Node>]` table. `examples/asr` uses this form, and `examples/chat` uses a graph file, so the tests cover both. [The spec reference](../appendix/spec-reference.md) lists the keys.
+The spec then uses `[contract]` with `path` (and `module` when `graph!` is not at the crate root) and binds each node in a `[bind.<Node>]` table. Every example uses a graph file. `crates/gdl-gen/tests/asr.rs` builds the asr example's nodes from this form too, so the tests cover both. [The spec reference](../appendix/spec-reference.md) lists the keys.
 
 Next: [split the graph and generate the crates](split-and-generate.md).

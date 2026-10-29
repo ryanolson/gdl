@@ -1,19 +1,16 @@
 # The ASR example: a graph whose requests stream. A client sends a session's
 # settings and a stream of audio; transcripts stream back while the audio
-# still streams in. A contract, the crates implementing its nodes, the
-# segment crates gdl-gen generates from `gdl.toml`, and a demo that runs the
-# three segments in one process. Its own workspace, as a deployment's would
-# be.
+# still streams in. Its messages, the crates implementing its nodes, and the
+# graph and spec that `cargo gdl build` builds the segments from. Its own
+# workspace, as a deployment's would be. The demo in `demo/` links the
+# generated segment libraries, so it is not a member:
+# `crates/gdl-gen/tests/asr.rs` builds it beside them.
 [workspace]
 members = [
-    "contract",
-    "demo",
     "dsp-nodes",
     "engine-mock",
     "front-nodes",
-    "segments/dsp",
-    "segments/engine",
-    "segments/front",
+    "protocols",
 ]
 resolver = "3"
 
@@ -26,5 +23,6 @@ publish = false
 futures = "0.3"
 gdl = { path = "../../crates/gdl" }
 gdl-runtime = { path = "../../crates/gdl-runtime" }
+gdl-message = { path = "../../crates/gdl-message" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

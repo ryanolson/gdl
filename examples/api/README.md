@@ -14,13 +14,15 @@ Use “+” or drag a matching catalog node to extend an arm. Operators open a d
 
 Entry nodes run beside the frontend. The shared pipeline can span segments. Independent placement of entry nodes and saved pipeline insertion are not implemented.
 
-## Generate and run
+## Build and run
 
 From the repository root:
 
 ```bash
-cargo run -p gdl-gen -- generate --spec examples/api/gdl.toml --out /tmp/gdl-api-segments
+cargo run -p gdl-gen -- build --spec examples/api/gdl.toml
 ```
+
+It prints the paths of the binaries `api-engine` and `api-front`, in `examples/api/target/gdl/api/gdl/bin/debug`.
 
 Create `/tmp/api-front.toml`:
 
@@ -41,8 +43,8 @@ roster = "/tmp/api-roster"
 Use a fresh roster directory for each deployment. Run these commands in separate terminals:
 
 ```bash
-cargo run --manifest-path /tmp/gdl-api-segments/engine/Cargo.toml -- /tmp/api-engine.toml
-cargo run --manifest-path /tmp/gdl-api-segments/front/Cargo.toml -- /tmp/api-front.toml
+examples/api/target/gdl/api/gdl/bin/debug/api-engine /tmp/api-engine.toml
+examples/api/target/gdl/api/gdl/bin/debug/api-front /tmp/api-front.toml
 ```
 
 Call each path:

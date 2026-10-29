@@ -557,13 +557,9 @@ fn build_segments(spec: &str, members: &[&str]) -> std::process::Output {
         ),
     )
     .expect("workspace");
-    // Resolved as the chat example is, so that the build reuses its
-    // artifacts.
-    std::fs::copy(
-        root().join("examples/chat/Cargo.lock"),
-        out.join("Cargo.lock"),
-    )
-    .expect("lockfile");
+    // Resolved as gdl's own workspace is: its lock pins every crate the
+    // runtime builds, so the build reads no registry and reuses artifacts.
+    std::fs::copy(root().join("Cargo.lock"), out.join("Cargo.lock")).expect("lockfile");
     cargo()
         .arg("build")
         .arg("--manifest-path")
@@ -788,18 +784,14 @@ fn the_carrier_crosses_between_two_generated_segments() {
         "{contract}"
     );
 
-    // One workspace for the generated crates, resolved as the chat
-    // example is, so that the build reuses its artifacts.
+    // One workspace for the generated crates.
     std::fs::write(
         out.join("Cargo.toml"),
         "[workspace]\nmembers = [\"back\", \"contract\", \"front\"]\nresolver = \"3\"\n",
     )
     .expect("workspace");
-    std::fs::copy(
-        root().join("examples/chat/Cargo.lock"),
-        out.join("Cargo.lock"),
-    )
-    .expect("lockfile");
+    // gdl's own lock pins every crate the runtime builds.
+    std::fs::copy(root().join("Cargo.lock"), out.join("Cargo.lock")).expect("lockfile");
     let build = cargo()
         .arg("build")
         .arg("--manifest-path")
@@ -877,5 +869,31 @@ fn the_carrier_crosses_between_two_generated_segments() {
             r#"{"done":null}"#,
         ],
         "front stderr: {stderr}"
+    );
+}
+
+/// Run the carrier test with a blocked proxy so a cached crate cannot hide a fetch.
+#[test]
+fn the_carrier_test_runs_with_only_the_documented_cache() {
+    let run = Command::new("timeout")
+        .arg(common::CARGO_LIMIT)
+        .arg(std::env::current_exe().expect("the test binary"))
+        .args([
+            "the_carrier_crosses_between_two_generated_segments",
+            "--exact",
+            "--nocapture",
+        ])
+        .env_remove("CARGO_NET_OFFLINE")
+        .env("CARGO_HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("https_proxy", "http://127.0.0.1:9")
+        .env("CARGO_NET_RETRY", "0")
+        .output()
+        .expect("the carrier test with the proxy blocked");
+    assert!(
+        run.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
     );
 }

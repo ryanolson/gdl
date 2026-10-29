@@ -24,13 +24,13 @@ Streaming is the default. Each NDJSON line contains an `item`, or a terminal `er
 
 To compose it in the web UI, enable local imports with `--local-root "$PWD"`. Import `examples/http`, choose `HttpFrontend` in the source card, and add Echo as the sink. The frontend fixes the source messages. Generated source binaries read its listener configuration from `[frontend]`.
 
-Generate a standalone segment:
+Build a standalone segment:
 
 ```bash
-cargo run -p gdl-gen -- generate --spec examples/http/gdl.toml --out /tmp/gdl-http-segments
+cargo run -p gdl-gen -- build --spec examples/http/gdl.toml
 ```
 
-Before running the generated binary, write `/tmp/gdl-http.toml` with a fresh roster directory:
+It prints the path of the binary, `examples/http/target/gdl/http/gdl/bin/debug/http-main`. Before running it, write `/tmp/gdl-http.toml` with a fresh roster directory:
 
 ```toml
 listen = "127.0.0.1:0"
@@ -43,7 +43,7 @@ listen = "127.0.0.1:8081"
 Run the generated service:
 
 ```bash
-cargo run --manifest-path /tmp/gdl-http-segments/main/Cargo.toml -- /tmp/gdl-http.toml
+examples/http/target/gdl/http/gdl/bin/debug/http-main /tmp/gdl-http.toml
 ```
 
 The graph spec pins the source explicitly under `[nodes] pin`. Without a source pin, a graph has a programmatic entry point. Its generated binary uses the existing JSON-lines frontend when the types support it.

@@ -2,7 +2,7 @@
 //! process, through the libraries gdl-gen generated for them, and a client
 //! that streams a session's audio to the front segment.
 
-use asr_contract::{Audio, Session, Transcript};
+use asr_protocols::{Audio, Session, Transcript};
 use gdl::{Cx, Items, Next, Result, Streamed, items};
 use gdl_runtime::{Register, Segment};
 

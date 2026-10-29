@@ -10,8 +10,8 @@
 |------|----------|
 | `docs/` | The book (mdBook): how gdl works and why, measurements with their setup, rejected designs, known limitations (`docs/src/operations/limitations.md`). Start at `docs/src/SUMMARY.md`. The crate map is `docs/src/development/architecture.md`; the rules for documentation are `docs/src/development/documentation.md` |
 | `crates/` | The workspace crates; see the crate map in the book |
-| `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, node crates that mark their nodes with `derive(gdl::Node)`, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
-| `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
+| `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, and node crates that mark their nodes with `derive(gdl::Node)`. Build the segments with `cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml`, which generates them in `examples/chat/target`. No example commits generated crates |
+| `examples/asr` | A separate workspace with a streamed request (`asr.gdl`), its protocols and node crates, and a demo in `demo/` that links the generated segment libraries. Build the segments with `cargo run -p gdl-gen -- build --spec examples/asr/gdl.toml`. The demo is not a member: `crates/gdl-gen/tests/asr.rs` builds it beside the generated crates |
 | `examples/http` | A separate workspace: a hosted `Frontend` on axum, its graph, and a test that drives the generated service over HTTP |
 | `examples/api` | A separate workspace: a `Service` with three typed entry points sharing one engine, and the deployment spec that `cargo gdl compose` and the composer's Deploy tab use |
 | `examples/film` | Two reference/vendor node crates with configuration and metrics, distributed and compact specs, and native proof in `crates/gdl-gen/tests/film.rs` |

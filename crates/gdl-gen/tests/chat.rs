@@ -1,7 +1,7 @@
-//! The chat example end to end: the committed segment crates are what the
-//! generator produces from `examples/chat/gdl.toml`; each segment builds
-//! with only the implementations it hosts; and the three segment binaries,
-//! run as separate processes, answer requests.
+//! The chat example end to end: `cargo gdl build` builds its segments from
+//! `examples/chat/gdl.toml`; each segment builds with only the
+//! implementations it hosts; and the three segment binaries, run as
+//! separate processes, answer requests.
 
 mod common;
 
@@ -34,27 +34,19 @@ fn the_placed_graph_draws_as_a_diagram() {
     assert_eq!(dot.matches("penwidth=2").count(), 3, "{dot}");
 }
 
-#[test]
-fn the_committed_segments_are_current() {
-    let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
-    let out = example().join("segments");
-    let files = gdl_gen::render(&spec, &out, &target("gdl-gen-tests")).expect("render");
-    let drift = gdl_gen::drift(&out, &files).expect("drift");
-    assert!(
-        drift.is_empty(),
-        "regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`:\n{}",
-        drift.join("\n")
-    );
-}
-
 /// `generate` writes crates into the user's workspace, where Cargo reads
 /// a profile only from the workspace's root and warns about one in a
 /// member: the user's root profile applies, so the crates carry none.
 #[test]
 fn a_generated_segment_leaves_the_profile_to_its_workspace() {
     let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
-    let files = gdl_gen::render(&spec, &example().join("segments"), &target("gdl-gen-tests"))
-        .expect("render");
+    let temp = scratch("profile");
+    let files = gdl_gen::render(
+        &spec,
+        &temp.path().join("segments"),
+        &target("gdl-gen-tests"),
+    )
+    .expect("render");
     let manifests: Vec<_> = files
         .iter()
         .filter(|(path, _)| path.ends_with("Cargo.toml"))
@@ -72,7 +64,7 @@ fn a_generated_segment_leaves_the_profile_to_its_workspace() {
 
 #[test]
 fn only_the_engine_segment_links_the_engine_dependency() {
-    let manifest = example().join("Cargo.toml");
+    let manifest = common::chat_build().workspace.join("Cargo.toml");
     for (package, links) in [
         ("chat-front", false),
         ("chat-engine", true),
@@ -108,26 +100,20 @@ fn only_the_engine_segment_links_the_engine_dependency() {
 
 #[test]
 fn three_segment_binaries_answer_requests() {
-    let build = cargo()
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(example().join("Cargo.toml"))
-        .arg("--bins")
-        .env("CARGO_TARGET_DIR", target("examples"))
-        .output()
-        .expect("cargo build");
-    let stderr = String::from_utf8_lossy(&build.stderr);
-    assert!(build.status.success(), "{stderr}");
-    // Generated code is built by people who deny warnings.
-    let warned: Vec<&str> = stderr
+    let build = common::chat_build();
+    // Generated code is built by people who deny warnings. Cargo replays a
+    // fresh crate's warnings, so a build with nothing to do shows them too.
+    let warned: Vec<&str> = build
+        .stderr
         .lines()
         .filter(|line| line.starts_with("warning:") && line.contains("generated"))
         .collect();
     assert!(
         warned.is_empty(),
-        "generated crates warned: {warned:?}\n{stderr}"
+        "generated crates warned: {warned:?}\n{}",
+        build.stderr
     );
-    let bin = target("examples").join("debug");
+    let bin = &build.bin;
 
     let temp = tempfile::Builder::new()
         .prefix("gdl-chat-")
@@ -246,7 +232,14 @@ fn the_check_does_not_depend_on_where_it_runs() {
     )
     .expect("config");
     let spec = example().join("gdl.toml");
-    let out = example().join("segments");
+    let generated = scratch("cwd-out");
+    let out = generated.path();
+    let generate = generate_into(out, false);
+    assert!(
+        generate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
     let output = gdl_gen(
         dir,
         &[
@@ -448,9 +441,17 @@ fn a_cache_marker_in_a_source_directory_hides_nothing() {
 #[test]
 fn the_spec_path_may_be_given_any_way() {
     // From the example's own directory: a bare file name, a `./` path, and
-    // an absolute one must all find the committed output current.
+    // an absolute one must all find the generated output current.
     let dir = example();
     let spec_abs = dir.join("gdl.toml");
+    let generated = scratch("spellings");
+    let out = generated.path();
+    let generate = generate_into(out, false);
+    assert!(
+        generate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
     for spec in [
         std::ffi::OsString::from("gdl.toml"),
         std::ffi::OsString::from("./gdl.toml"),
@@ -462,7 +463,7 @@ fn the_spec_path_may_be_given_any_way() {
                 "--spec".as_ref(),
                 spec.as_os_str(),
                 "--out".as_ref(),
-                "segments".as_ref(),
+                out.as_os_str(),
                 "--check".as_ref(),
             ],
         );

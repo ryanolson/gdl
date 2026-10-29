@@ -1,6 +1,6 @@
 # Run the examples
 
-The examples are in `examples/`. Each is its own Cargo workspace, outside the root workspace, as a deployment's would be. Run the commands from the repository root. [Getting started](getting-started.md) walks through `chat`.
+The examples are in `examples/`. Each is its own Cargo workspace, outside the root workspace, as a deployment's would be. Each has a graph file and a spec, and `cargo gdl build` builds its segments into its `target` directory. No example commits generated crates. Run the commands from the repository root. [Getting started](getting-started.md) walks through `chat`.
 
 | Example | Shows | Test |
 |---|---|---|
@@ -12,7 +12,13 @@ The examples are in `examples/`. Each is its own Cargo workspace, outside the ro
 
 ## chat
 
-Three segments, `front`, `engine`, and `post`, from `chat.gdl` and `gdl.toml`. Regenerate its segments with the command in [Getting started](getting-started.md). The segment crates in `segments/` are generated, so do not edit them.
+Three segments, `front`, `engine`, and `post`, from `chat.gdl` and `gdl.toml`. Build them with:
+
+```bash
+cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
+```
+
+[Getting started](getting-started.md) runs them.
 
 ## asr
 
@@ -26,17 +32,20 @@ sink     Recognizer: Session + stream Pcm -> stream Partial;
 backward Punctuate: Partial -> Partial;
 ```
 
-The placement in `gdl.toml` puts `Resample` in its own segment, so the audio crosses two times. Regenerate the segments with:
+The graph is `asr.gdl`, the messages are in `protocols`, and the node crates mark their nodes with `derive(gdl::Node)`. The source, `Client`, binds to no node: the program that calls the front segment is the client. The placement in `gdl.toml` puts `Resample` in its own segment, so the audio crosses two times. Build the segments with:
 
 ```bash
-cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments
+cargo run -p gdl-gen -- build --spec examples/asr/gdl.toml
 ```
 
-The generated binary of the source's segment has no JSON-lines server, because one line cannot carry a streamed request. Call the source through the segment library instead. The `asr-demo` crate starts the three segments in one process, sends audio, and receives transcripts while the audio streams in:
+The generated binary of the source's segment has no JSON-lines server, because one line cannot carry a streamed request. Call the source through the segment library instead. The demo in `examples/asr/demo` starts the three segments in one process, sends audio, and receives transcripts while the audio streams in. It links the generated segment libraries, so it is not a member of the example's workspace: a test generates the segment crates in the target directory and builds the demo beside them. Run it with:
 
 ```bash
-(cd examples/asr && timeout 300 cargo nextest run -p asr-demo)
+cargo nextest run -p gdl-gen --test asr --no-run
+timeout 300 cargo nextest run -p gdl-gen --test asr
 ```
+
+A program of your own that links a segment library takes the crates from `cargo gdl generate --out` into its own workspace, as the test does.
 
 See [Streamed requests](../concepts/streamed-requests.md).
 

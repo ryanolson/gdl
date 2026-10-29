@@ -1,8 +1,8 @@
 # The chat example's spec: the graph file, the crate that holds its
 # messages, the crates that implement its nodes, and which segment hosts
-# which node. Generate the contract and segment crates with:
+# which node. Build every segment with:
 #
-#     cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments
+#     cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 
 [graph]
 path = "chat.gdl"

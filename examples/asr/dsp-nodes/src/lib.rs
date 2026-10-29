@@ -1,7 +1,7 @@
 //! The resampler: brings each chunk of a session's audio to 16 kHz, as it
 //! arrives.
 
-use asr_contract::{Audio, Pcm, Session};
+use asr_protocols::{Audio, Pcm, Session};
 use futures::StreamExt;
 use gdl::{Build, Cx, Forward, Result, Streamed, items};
 use serde::Deserialize;
@@ -12,6 +12,7 @@ use serde::Deserialize;
 pub struct NoSettings {}
 
 /// The resampler. It keeps every n-th sample, a mock of a real filter.
+#[derive(gdl::Node)]
 pub struct Resample;
 
 impl Build for Resample {

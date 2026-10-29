@@ -50,6 +50,15 @@ The graph specification, generated segments, and deployment placement select how
 | [compact.toml](compact.toml) | The same graph and graph settings in one serving process, with mimalloc as its global allocator |
 | [deploy.toml](deploy.toml) | Pinned public Git packages and Compose runtime settings |
 
+Build the segments of a local spec. Each spec builds in its own directory of the target directory, and the command prints the path of each binary:
+
+```bash
+cargo run -p gdl-gen -- build --spec examples/film/gdl.toml
+cargo run -p gdl-gen -- build --spec examples/film/compact.toml
+```
+
+`deploy.toml` names its packages by Git, for `cargo gdl compose`.
+
 The [public snapshot](https://github.com/ryanolson/gdl-demo/tree/d0d911b4424aa6b6d33b73b164017ba20f304293) includes the accounting receiver's Dockerfile and Compose overlay. Its README records the complete Docker rehearsal. Container execution still needs a Docker host.
 
 ## Extract the catalog
