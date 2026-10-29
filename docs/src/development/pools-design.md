@@ -72,8 +72,6 @@ A shared pool needs a directory that every parent's hub reads, such as `dir` or 
 
 **Rejected: one parent per pool.** A pool in one region then takes work only from the one parent that names it. A parent places a request by region and load in any region, so each parent needs every child pool. With one parent per pool, a fleet must run a copy of each child pool for each parent, and a child's capacity is split between the parents and cannot move between them.
 
-**Rejected: a parent's hub that stops releases its follows.** It would end a later drain or retirement sooner after a clean stop. But a stopped hub's choosers can still hold offers to the child: they lose their hub lease, but a request in flight can outlive the hub. A crash would still wait for the bound. The rule for one parent is kept.
-
 ## Failover only before acceptance
 
 The chooser tries another pool only when it knows the chosen pool did not take the request: an explicit refusal before the request's work starts, or a send that velo refused before it left. Nothing stays admitted there, and no input was sent, because a streamed request's input starts only after acceptance. So nothing needs replay.

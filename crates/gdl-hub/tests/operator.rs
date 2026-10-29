@@ -195,6 +195,46 @@ async fn a_parent_commands_only_its_own_children() {
     parent.shutdown().await.expect("the parent's hub stops");
 }
 
+/// A shared pool is a child of every pool of its parents' class, so the
+/// hub of any of them, here a second global, commands it once its hub is
+/// gone. That hub still finds no pool whose `home` is another global.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn any_parent_commands_a_shared_child_whose_hub_is_gone() {
+    let directory = MemoryDirectory::new();
+    let second: PoolSettings = toml::from_str(
+        "name = 'global-02-us-west-2'
+class = 'global'
+region = 'us-west-2'
+         hub = 'global-02-hub:1337'
+directory = 'memory'
+",
+    )
+    .expect("valid test fixture");
+    let (parent, _readiness) = hub_of(second, directory.clone(), timing()).await;
+    let last = gone_child(&directory).await;
+    let shared = PoolRecord {
+        name: "model-x-shared-us-east-1".into(),
+        parent: Some(gdl_model::Parent::Class("global".into())),
+        ..last
+    };
+    directory
+        .publish(shared.clone())
+        .await
+        .expect("a shared pool's last record");
+
+    assert_eq!(
+        command(&parent, &withdraw(CHILD)).await,
+        404,
+        "a child whose home is the first global"
+    );
+    assert_eq!(command(&parent, &withdraw(&shared.name)).await, 204);
+    let now = Instant::now();
+    let seen = view(&directory, now).await;
+    assert!(seen.get(&shared.name, now).is_none(), "withdrawn");
+    assert!(seen.get(CHILD, now).is_some(), "untouched");
+    parent.shutdown().await.expect("the parent's hub stops");
+}
+
 /// A pool's hub under the `relay` backend, its own name resolved once it
 /// serves.
 struct RelayPool {
