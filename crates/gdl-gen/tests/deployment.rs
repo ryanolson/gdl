@@ -3,6 +3,8 @@ use std::path::Path;
 
 mod common;
 
+#[path = "deployment/clusters.rs"]
+mod clusters;
 #[path = "deployment/relay.rs"]
 mod relay;
 
@@ -743,20 +745,25 @@ fn a_bundle_without_classes_is_pinned() {
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
-    let expected = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt"),
-    )
-    .expect("the pinned bundle");
-    let found = pinned(&mirror, &files);
+    assert_pinned(
+        &pinned(&mirror, &files),
+        Path::new("tests/fixtures/bundle/api.txt"),
+    );
+}
+
+/// `found`, a bundle as [`pinned`] gives it, is the pin at `pin`, a path
+/// under the crate; with `GDL_UPDATE_FIXTURES` set, it becomes the pin.
+fn assert_pinned(found: &str, pin: &Path) {
+    let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join(pin);
     if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
-        let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt");
-        std::fs::write(pin, &found).expect("the pinned bundle");
+        std::fs::write(pin, found).expect("the pinned bundle");
         return;
     }
+    let expected = std::fs::read_to_string(&pin).expect("the pinned bundle");
     for (found, expected) in found.lines().zip(expected.lines()) {
-        assert_eq!(found, expected, "the bundle differs from the pin");
+        assert_eq!(found, expected, "the bundle differs from {}", pin.display());
     }
-    assert_eq!(found, expected, "the bundle differs from the pin");
+    assert_eq!(found, expected, "the bundle differs from {}", pin.display());
 }
 
 /// Every hub's health check is its own liveness, never the pool health
