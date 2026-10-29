@@ -107,6 +107,27 @@ docker run --rm --network fleet_default curlimages/curl:8.10.1 -s http://global-
 
 The global pool answers 200 once its own quorum holds and a model pool is `ready` and followed. `docker compose down` stops the fleet. The global pool's hub keeps its children's records in its volume, so after `docker compose up` again it still holds them, a model pool that does not come back included, until that pool withdraws. `docker compose down --volumes` removes them.
 
+## Use the DynamoDB directory
+
+By default the hubs find each other through their parents ([The relay backend](../concepts/pools.md#the-relay-backend)). With a `[directory]` table, every pool's hub publishes its record to two DynamoDB tables instead, and every hub reads every pool's record, whatever its region ([The DynamoDB backend](../concepts/pools.md#the-dynamodb-backend)):
+
+```toml
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true                      # one DynamoDB Local in the bundle; Compose requires it
+```
+
+`compose` then adds two services:
+
+- `dynamodb-local`: DynamoDB Local, pinned by digest, in memory and with `-sharedDb`, so that every region sees one database.
+- `dynamodb-tables`: `gdl-hub --tables`, from the hub's image. It makes the tables and checks their keys. Every hub waits for it to complete.
+
+Each hub gets `GDL_POOL__DIRECTORY=dynamodb`, the two table names, `GDL_POOL__AWS_REGION` set to its pool's region, and `GDL_POOL__ENDPOINT=http://dynamodb-local:8000`. It gets no `GDL_POOL__PARENT_HUB` and no state volume. The hubs sign with fixed test credentials in their code, which DynamoDB Local never checks, so no credential is in the bundle. The hub's image is built with the hub's `dynamodb` feature.
+
+`compose` refuses `[directory]` without `local = true`, since a Compose bundle carries no AWS role for real tables ([Limitations](../operations/limitations.md#compose-runs-a-fleets-dynamodb-directory-only-in-dynamodb-local)). DynamoDB Local keeps the directory in memory: `docker compose down`, or a restart of `dynamodb-local`, empties it. After a restart, run `docker compose up -d` again, which runs the tables step again, and the hubs publish at their next heartbeat.
+
 ## Run local sources
 
 To test crates that are not pushed, add `--local`. The spec must name its node and message crates and gdl by path, as `examples/api/gdl.toml` does. Add the classes of step 1 to it, and run from the repository's root:

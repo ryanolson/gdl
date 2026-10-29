@@ -117,6 +117,9 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[pool.<name>] home` | the parent pool | this or `parents` is required for a class that another class sends to; refused otherwise |
 | `[pool.<name>] parents` | in place of `home`, the parent class: every pool of it follows this pool | none; refused while the fleet's pools publish through `relay` |
 | `[pool.<name>] ready` | overrides the class's quorum for a segment | the class's, else 1 |
+| `[directory] backend` | where every pool's hub publishes its record: `dynamodb`, the one value. Without the table, each child's hub reports to its parent's (`relay`) | no table |
+| `[directory] records_table`, `lists_table` | the DynamoDB tables' names: 3 to 255 letters, digits, `_`, `-`, and `.` | required |
+| `[directory] local` | the deployment runs one DynamoDB Local for the tables, which every hub uses. Compose requires it | `false` |
 
 - A pool's quorum for a segment is its own `ready`, else its class's, else 1.
 - An explicit `requires` replaces the default whole. It can raise a count or name a subset of the classes sent to. A count of 0, and a class that the class does not send to, are refused.
@@ -131,6 +134,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 - A fleet's pools publish through `relay`, so `check` refuses a pool with `parents`.
 - A `ready` key must be a segment of the class, and a count is at least 1.
 - A `[class.<name>]` table applies to the class's pools in every layout with the class, and is checked against each.
+- With `[directory]`, each pool's settings name the `dynamodb` backend, with the pool's `region` as `aws_region`. A Compose bundle adds the endpoint of its DynamoDB Local.
 
 ## A pool's settings
 

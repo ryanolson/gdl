@@ -760,7 +760,7 @@ pub fn check_hub_address(address: &str) -> Result<(), String> {
 /// Whether `name` can name a DynamoDB table: 3 to 255 letters, digits,
 /// `_`, `-`, and `.`, DynamoDB's own rule, so that a bad name is refused
 /// where it is written rather than at the hub's first call.
-fn check_table_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_table_name(name: &str) -> Result<(), String> {
     let shaped = (3..=255).contains(&name.len())
         && name
             .bytes()

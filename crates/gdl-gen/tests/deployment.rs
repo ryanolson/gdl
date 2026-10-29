@@ -7,6 +7,8 @@ mod common;
 mod clusters;
 #[path = "deployment/deploy.rs"]
 mod deploy;
+#[path = "deployment/dynamodb.rs"]
+mod dynamodb;
 #[path = "deployment/images.rs"]
 mod images;
 #[path = "deployment/k8s.rs"]

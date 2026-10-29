@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::pool::{check_pool_name, check_region_name};
+use crate::pool::{check_pool_name, check_region_name, check_table_name};
 use crate::{
     DirectoryBackend, Layout, Parent, PoolSettings, Problem, Problems, check_layout_name, read_toml,
 };
@@ -43,6 +43,12 @@ use cluster::{Header, check_clusters};
 /// home = "global-us-east-1"          # the parent pool, required when another class sends to this one: whose hub follows it
 /// # parents = "global"               # or, in place of `home`, the parent class: every pool of it follows this one
 /// ready = { e = 8 }                  # optional: overrides the class's default
+///
+/// [directory]                        # optional: without it, each child's hub reports to its parent's (`relay`)
+/// backend = "dynamodb"               # every pool's hub publishes to two DynamoDB tables
+/// records_table = "gdl-pools"
+/// lists_table = "gdl-pool-lists"
+/// local = true                       # optional: the bundle runs one DynamoDB Local for them
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +65,34 @@ pub struct Fleet {
     classes: BTreeMap<String, ClassDefaults>,
     #[serde(rename = "pool", default, skip_serializing_if = "BTreeMap::is_empty")]
     pools: BTreeMap<String, PoolSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory: Option<FleetDirectory>,
+}
+
+/// The fleet's `[directory]` table: where every pool's hub publishes its
+/// record. Without it, each child pool's hub reports to its parent's
+/// (`relay`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetDirectory {
+    /// The backend: `dynamodb`, the one a fleet can name.
+    pub backend: FleetBackend,
+    /// The records table's name.
+    pub records_table: String,
+    /// The lists table's name.
+    pub lists_table: String,
+    /// Whether the deployment runs one DynamoDB Local for the tables, which
+    /// every hub uses with fixed test credentials, instead of AWS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
+}
+
+/// The backends a fleet's `[directory]` can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetBackend {
+    /// Two DynamoDB tables ([`DirectoryBackend::DynamoDb`]).
+    Dynamodb,
 }
 
 /// What every pool of a class needs unless it says otherwise.
@@ -198,6 +232,19 @@ impl Fleet {
                 .collect()
         });
         let mut errors = Vec::new();
+        if let Some(directory) = &self.directory {
+            for (key, name) in [
+                ("records_table", &directory.records_table),
+                ("lists_table", &directory.lists_table),
+            ] {
+                if let Err(reason) = check_table_name(name) {
+                    errors.push(FleetError::InvalidDirectory {
+                        key: key.into(),
+                        reason,
+                    });
+                }
+            }
+        }
         for (class, defaults) in &self.classes {
             self.check_class(class, defaults, laid.as_ref(), &mut errors);
         }
@@ -266,9 +313,7 @@ impl Fleet {
                 },
             }
             errors.extend(self.home_problem(name, pool, laid.as_ref()));
-            if let Some(parents) = &pool.parents
-                && matches!(self.directory(), DirectoryBackend::Relay { .. })
-            {
+            if let Some(parents) = &pool.parents {
                 errors.push(FleetError::SharedUnderRelay {
                     pool: name.clone(),
                     parents: parents.clone(),
@@ -588,8 +633,11 @@ impl Fleet {
     /// [`PoolSettings::quorum`]'s fallback. Its region is its cluster's,
     /// when it names one, else its own. Its `requires` is its class's, and
     /// unsaid when that is, which requires one ready child of each class its
-    /// class sends to ([`PoolSettings::requirements`]). The directory, hub
-    /// address, summary period, and hub timing are not in the fleet file and take their defaults. Meant for a fleet that
+    /// class sends to ([`PoolSettings::requirements`]). Its directory is
+    /// the `[directory]` table's, in the pool's region, with no endpoint,
+    /// or the default, `relay`, without one. The hub address, summary
+    /// period, and hub timing are not in the fleet file and take their
+    /// defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the pool's class.
     pub fn pool(&self, name: &str) -> Option<PoolSettings> {
@@ -599,21 +647,30 @@ impl Fleet {
             .map(|class| class.ready.clone())
             .unwrap_or_default();
         ready.extend(pool.ready.iter().map(|(s, n)| (s.clone(), *n)));
+        let region = self
+            .cluster_of(name)
+            .map(|(_, cluster)| cluster.region.clone())
+            .or_else(|| pool.region.clone())
+            .unwrap_or_default();
         Some(PoolSettings {
             properties: Vec::new(),
             name: name.to_string(),
             layout: pool.layout.clone(),
             class: pool.class.clone(),
-            region: self
-                .cluster_of(name)
-                .map(|(_, cluster)| cluster.region.clone())
-                .or_else(|| pool.region.clone())
-                .unwrap_or_default(),
+            region: region.clone(),
             // A fleet that `check` accepted names at most one.
             parent: Parent::from_keys(pool.home.clone(), pool.parents.clone())
                 .ok()
                 .flatten(),
-            directory: self.directory(),
+            directory: match &self.directory {
+                None => DirectoryBackend::default(),
+                Some(directory) => DirectoryBackend::DynamoDb {
+                    records_table: directory.records_table.clone(),
+                    lists_table: directory.lists_table.clone(),
+                    aws_region: region,
+                    endpoint: None,
+                },
+            },
             ready,
             requires: defaults
                 .map(|class| class.requires.clone())
@@ -624,11 +681,9 @@ impl Fleet {
         })
     }
 
-    /// The directory the fleet's pools publish their records through:
-    /// `relay`, the default, whose parent's hub a bundle generator fills in
-    /// for each pool. So a fleet refuses a shared pool ([`Fleet::check`]).
-    fn directory(&self) -> DirectoryBackend {
-        DirectoryBackend::default()
+    /// The fleet's `[directory]` table, if it has one.
+    pub fn directory(&self) -> Option<&FleetDirectory> {
+        self.directory.as_ref()
     }
 
     /// Every pool's settings, as [`Fleet::pool`] gives them, in name order:

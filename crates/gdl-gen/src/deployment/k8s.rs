@@ -434,7 +434,13 @@ impl Render<'_> {
         }
         let relay = relay::Relay::of(pool, parent);
         let variables = |hub: String| {
-            pools::variables(pool, hub, relay.parent_hub(), relay.state_dir().is_some())
+            pools::variables(
+                pool,
+                hub,
+                relay.parent_hub(),
+                relay.state_dir().is_some(),
+                None,
+            )
         };
         let mut objects = Vec::new();
         let config = pod.config_map(deployment, segments);

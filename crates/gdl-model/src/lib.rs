@@ -33,7 +33,9 @@ pub use deployment::{
     SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
 };
 pub use encoding::Encoding;
-pub use fleet::{Cluster, Fleet, FleetError, FleetErrors, FleetTable};
+pub use fleet::{
+    Cluster, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors, FleetTable,
+};
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,

@@ -405,11 +405,15 @@ impl Bundle {
 
     /// The Dockerfile of a hub that admits the deployment in
     /// `deployment`, a path in the bundle, with an empty directory at
-    /// `state_dir` that any user can write, if it names one.
-    fn hub_dockerfile(&self, deployment: &Path, state_dir: Option<&str>) -> String {
+    /// `state_dir` that any user can write, if it names one, and built with
+    /// its `dynamodb` feature when `dynamodb` is set.
+    fn hub_dockerfile(&self, deployment: &Path, state_dir: Option<&str>, dynamodb: bool) -> String {
         let settings = &self.settings;
+        // The DynamoDB directory is a feature of the hub, off by default,
+        // since it links the AWS SDK.
+        let features = if dynamodb { " --features dynamodb" } else { "" };
         let install = format!(
-            "cargo install {} --locked --root /build-tools gdl-hub",
+            "cargo install {}{features} --locked --root /build-tools gdl-hub",
             self.hub_install
         );
         let Some(state_dir) = state_dir else {
@@ -667,7 +671,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         "hub".into(),
         json!({"build":build,"healthcheck":hub_healthcheck()}),
     );
-    let hub = bundle.hub_dockerfile(Path::new("deployment.json"), None);
+    let hub = bundle.hub_dockerfile(Path::new("deployment.json"), None, false);
     bundle.files.insert("hub/Dockerfile".into(), hub);
     let source = placement
         .segments()

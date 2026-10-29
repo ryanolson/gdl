@@ -793,3 +793,84 @@ fn a_pools_parents_name_a_class_that_sends_to_it() {
         );
     }
 }
+
+/// A fleet's `[directory]` table names the DynamoDB tables that every
+/// pool's hub publishes to, each in its own region's copy; without it,
+/// each pool takes the default, `relay`. It survives TOML, with `local`.
+#[test]
+fn the_directory_table_selects_dynamodb_for_every_pool() {
+    let text = format!(
+        "{FLEET}[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\n"
+    );
+    let with = fleet(&text);
+    with.check(Some(&laid())).expect("a sound fleet");
+    let directory = with.directory().expect("a directory");
+    assert_eq!(
+        (
+            directory.records_table.as_str(),
+            directory.lists_table.as_str(),
+            directory.local
+        ),
+        ("gdl-pools", "gdl-pool-lists", true)
+    );
+    for pool in with.pools() {
+        assert_eq!(
+            pool.directory,
+            DirectoryBackend::DynamoDb {
+                records_table: "gdl-pools".into(),
+                lists_table: "gdl-pool-lists".into(),
+                aws_region: pool.region.clone(),
+                endpoint: None,
+            },
+            "{}",
+            pool.name
+        );
+    }
+    let written = toml::to_string(&with).expect("toml");
+    assert_eq!(Fleet::from_toml(&written).expect("read back"), with);
+
+    let without = fleet(FLEET);
+    assert!(without.directory().is_none());
+    assert!(
+        without
+            .pools()
+            .all(|pool| pool.directory == DirectoryBackend::DEFAULT)
+    );
+    // `local` is false unless it is set.
+    let unsaid = fleet(&text.replace("local = true\n", ""));
+    assert!(!unsaid.directory().expect("a directory").local);
+}
+
+/// The `[directory]` table's keys are checked where they are written: a
+/// table name DynamoDB refuses is reported at its key, an unknown backend
+/// or key does not read, and the table names are required.
+#[test]
+fn a_directory_table_is_checked_at_its_keys() {
+    const DIRECTORY: &str = "[directory]\nbackend = \"dynamodb\"\n";
+    for (bad, expected) in [
+        (
+            "records_table = \"a b\"\nlists_table = \"gdl-pool-lists\"\n",
+            "[directory] records_table: \"a b\" must be a DynamoDB table name",
+        ),
+        (
+            "records_table = \"gdl-pools\"\nlists_table = \"l\"\n",
+            "[directory] lists_table: \"l\" must be a DynamoDB table name",
+        ),
+    ] {
+        let found = problems(&format!("{FLEET}{DIRECTORY}{bad}"));
+        assert!(
+            found.iter().any(|problem| problem.starts_with(expected)),
+            "{bad}: {found:?}"
+        );
+    }
+    for unreadable in [
+        "[directory]\nbackend = \"relay\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\n",
+        "[directory]\nbackend = \"dynamodb\"\nlists_table = \"gdl-pool-lists\"\n",
+        "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nendpoint = \"http://x:8000\"\n",
+    ] {
+        assert!(
+            Fleet::from_toml(&format!("{FLEET}{unreadable}")).is_err(),
+            "{unreadable}"
+        );
+    }
+}

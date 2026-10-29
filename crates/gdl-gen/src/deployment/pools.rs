@@ -2,12 +2,17 @@
 //! and a service for each segment of the pool's class in the pool's
 //! layout, each configured as that pool. Each image is built once per
 //! layout and segment, and every pool of that layout and class runs it.
-//! Each parent pool's hub mounts a volume of its own, where it keeps its
-//! children's records.
+//! Under `relay`, each parent pool's hub mounts a volume of its own, where
+//! it keeps its children's records. Under a `[directory]` of DynamoDB, the
+//! bundle runs one DynamoDB Local and the tables step instead, and every
+//! hub waits for the step.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gdl_model::{DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Layout, Manifest, Parent, PoolSettings};
+use gdl_model::{
+    DirectoryBackend, Fleet, FleetDirectory, HUB_PUBLIC_PORT, Layout, Manifest, Parent,
+    PoolSettings,
+};
 use serde_json::{Map, Value, json};
 
 use super::variables::{pool_variables, string};
@@ -57,6 +62,10 @@ pub(super) fn bundle(
         ));
     }
     bundle.validate_images()?;
+    let directory = fleet.directory();
+    if let Some(directory) = directory {
+        local_directory(directory, &pools)?;
+    }
     let graph = bundle.graph.clone();
     let mut services = Map::new();
     // The pools that run each segment, by its name, which its deployment
@@ -89,7 +98,10 @@ pub(super) fn bundle(
             serde_json::to_string_pretty(&spec_of).map_err(io)?,
         );
         let hub_dockerfile = dir.join("hub/Dockerfile");
-        let text = bundle.hub_dockerfile(&deployment, Some(STATE_DIR));
+        let text = match directory {
+            None => bundle.hub_dockerfile(&deployment, Some(STATE_DIR), false),
+            Some(_) => bundle.hub_dockerfile(&deployment, None, true),
+        };
         bundle.files.insert(hub_dockerfile.clone(), text);
         let hub = Image {
             name: match laid.among_several() {
@@ -126,7 +138,7 @@ pub(super) fn bundle(
         }
         let mut built = BTreeSet::new();
         for pool in ours {
-            let parent = parent(layout, pool);
+            let parent = parent(layout, pool) && directory.is_none();
             let variables = variables(
                 pool,
                 format!("{}:{HUB_PUBLIC_PORT}", pool.name),
@@ -137,6 +149,7 @@ pub(super) fn bundle(
                     _ => None,
                 },
                 parent,
+                directory.map(|_| format!("http://{LOCAL}:8000")),
             )?;
             let mut service = json!({
                 "image": hub.name,
@@ -151,7 +164,25 @@ pub(super) fn bundle(
                 service["volumes"] = json!([format!("{volume}:{STATE_DIR}")]);
                 volumes.insert(volume, json!({}));
             }
+            if directory.is_some() {
+                service["depends_on"] =
+                    json!({TABLES: {"condition": "service_completed_successfully"}});
+            }
             hub.build(&mut service, &mut built);
+            // The tables step runs from the hub's image, which a hub
+            // service builds; it shares its pool's variables, and reads
+            // only the directory's.
+            if directory.is_some() && !services.contains_key(TABLES) {
+                services.insert(
+                    TABLES.into(),
+                    json!({
+                        "image": hub.name,
+                        "entrypoint": ["/usr/local/bin/segment", "--tables"],
+                        "environment": variables,
+                        "depends_on": {LOCAL: {"condition": "service_started"}},
+                    }),
+                );
+            }
             services.insert(pool.name.clone(), service);
             for (segment, (image, grace, reads)) in &images {
                 if layout.class_of(segment) != Some(pool.class.as_str()) {
@@ -195,6 +226,15 @@ pub(super) fn bundle(
             )));
         }
     }
+    if directory.is_some() {
+        services.insert(
+            LOCAL.into(),
+            json!({
+                "image": DYNAMODB_LOCAL,
+                "command": ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb", "-port", "8000"],
+            }),
+        );
+    }
     let mut compose = json!({"services": services});
     if !volumes.is_empty() {
         compose["volumes"] = Value::Object(volumes);
@@ -209,6 +249,11 @@ pub(super) fn bundle(
         serde_json::to_string_pretty(&compose).map_err(io)?,
     );
     let mut readme = String::from(README);
+    readme.push_str(match directory {
+        None => RELAY_README,
+        Some(_) => DYNAMODB_README,
+    });
+    readme.push_str(README_TAIL);
     for source in &sources {
         readme.push_str(&stdin_readme(source));
     }
@@ -240,6 +285,39 @@ impl Image {
 /// container: its own volume's mount.
 pub(super) const STATE_DIR: &str = "/var/lib/gdl-hub";
 
+/// The service of a DynamoDB directory's Local, and of its tables step:
+/// names with a `-`, which a pool's name may also hold, so a pool of either
+/// name is refused ([`local_directory`]).
+const LOCAL: &str = "dynamodb-local";
+const TABLES: &str = "dynamodb-tables";
+
+/// DynamoDB Local 3.3.2, pinned by the digest of its multi-architecture
+/// index, as `scripts/dynamodb-local.sh` runs it.
+const DYNAMODB_LOCAL: &str =
+    "amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
+
+/// Whether the bundle can carry `directory` for `pools`: only with
+/// `local = true`, since a Compose bundle carries no AWS role and no
+/// credential goes into a file, and only when no pool takes the name of a
+/// service the directory adds.
+fn local_directory(directory: &FleetDirectory, pools: &[PoolSettings]) -> Result<(), Error> {
+    if !directory.local {
+        return Err(Error::new(
+            "the fleet's [directory] backend = \"dynamodb\" needs [directory] local = true under Compose: a Compose bundle carries no AWS role for the tables, and no credential goes into its files. With local = true, the bundle runs one DynamoDB Local, which every hub uses",
+        ));
+    }
+    if let Some(pool) = pools
+        .iter()
+        .find(|pool| [LOCAL, TABLES].contains(&pool.name.as_str()))
+    {
+        return Err(Error::new(format!(
+            "pool `{}` takes the name of a service that the bundle's DynamoDB directory adds: rename the pool",
+            pool.name
+        )));
+    }
+    Ok(())
+}
+
 /// Whether `pool` is a parent in `layout`: its class sends to another, so
 /// its hub holds the records of its children.
 pub(super) fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
@@ -250,22 +328,38 @@ pub(super) fn parent(layout: &Layout, pool: &PoolSettings) -> bool {
 }
 
 /// The `GDL_POOL__*` variables of `pool`'s hub and segments: its settings
-/// as its fleet gives them, under the `relay` backend, with `hub`, where
-/// other pools' hubs reach its hub, `parent_hub`, where a child's hub
+/// as its fleet gives them, with `hub`, where other pools' hubs reach its
+/// hub. Under the `relay` backend, `parent_hub`, where a child's hub
 /// reports to its parent's, and, for a `parent`, the state directory its
-/// hub keeps its children's records in. Compose and Kubernetes both write
-/// a pool's variables here, so the two differ only in the addresses each
-/// network spells.
+/// hub keeps its children's records in. Under the fleet's DynamoDB
+/// directory, which the pool's settings name, `endpoint`, the DynamoDB
+/// Local every hub uses, if the fleet runs one. Compose and Kubernetes both
+/// write a pool's variables here, so the two differ only in the addresses
+/// each network spells.
 pub(super) fn variables(
     pool: &PoolSettings,
     hub: String,
     parent_hub: Option<String>,
     parent: bool,
+    endpoint: Option<String>,
 ) -> Result<Map<String, Value>, Error> {
     let mut pool = pool.clone();
-    pool.directory = DirectoryBackend::Relay {
-        parent_hub,
-        state_dir: parent.then(|| STATE_DIR.into()),
+    pool.directory = match pool.directory {
+        DirectoryBackend::DynamoDb {
+            records_table,
+            lists_table,
+            aws_region,
+            ..
+        } => DirectoryBackend::DynamoDb {
+            records_table,
+            lists_table,
+            aws_region,
+            endpoint,
+        },
+        _ => DirectoryBackend::Relay {
+            parent_hub,
+            state_dir: parent.then(|| STATE_DIR.into()),
+        },
     };
     pool.hub = Some(hub);
     let toml::Value::Table(table) = toml::Value::try_from(&pool).map_err(io)? else {
@@ -292,9 +386,17 @@ fn binds_host_port(port: &str) -> bool {
 const README: &str = "# Docker Compose deployment of a fleet\n\n\
 Run `docker compose up --build` from this directory, on one host. Each pool of the fleet has one hub, the service named for the pool, and a service for each segment of its class in its layout, named `<pool>_<segment>`. A pool's hub and segments take the pool's settings from `GDL_POOL__*` variables, and a segment finds its own pool's hub through `GDL_HUB__HOST`.\n\n\
 A segment starts once its own pool's hub is healthy, and waits for nothing else. A hub's health check is its own liveness. Nothing waits for a pool's health, or for another pool: a parent pool's health answers 503 until its children are ready, so a wait on it would deadlock a fleet that starts together.\n\n\
-A pool's hub must never run as two at once: a pool's record has one writer, its hub. Each hub's service names its container, so Compose refuses to scale it. Container names are global on the Docker host, so a host runs one copy of this bundle at a time. Compose's default recreate stops the old container before it starts the new one, so `docker compose up` after a change replaces a hub without two running at once.\n\n\
-Each pool's hub publishes its record under the `relay` directory backend: a child pool's hub reports it to its parent pool's hub (`GDL_POOL__PARENT_HUB`), and the parent's hub holds its children's records. The hubs share no volume, so the pools can run on several hosts, if each hub reaches its parent's hub by the name the bundle gives it. Each parent pool's hub keeps its children's records in a volume of its own, `<pool>-state`, mounted at `/var/lib/gdl-hub` (`GDL_POOL__STATE_DIR`), so it still holds them after it restarts, a silent child's included, until the child withdraws. `docker compose down --volumes` removes them. A parent's hub on another host needs that volume, or a directory of its own, on its host.\n\n\
-Each image is built once, from one Dockerfile per layout and segment, and every pool of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\
+A pool's hub must never run as two at once: a pool's record has one writer, its hub. Each hub's service names its container, so Compose refuses to scale it. Container names are global on the Docker host, so a host runs one copy of this bundle at a time. Compose's default recreate stops the old container before it starts the new one, so `docker compose up` after a change replaces a hub without two running at once.\n\n";
+
+/// The README's paragraph on the `relay` directory backend.
+const RELAY_README: &str = "Each pool's hub publishes its record under the `relay` directory backend: a child pool's hub reports it to its parent pool's hub (`GDL_POOL__PARENT_HUB`), and the parent's hub holds its children's records. The hubs share no volume, so the pools can run on several hosts, if each hub reaches its parent's hub by the name the bundle gives it. Each parent pool's hub keeps its children's records in a volume of its own, `<pool>-state`, mounted at `/var/lib/gdl-hub` (`GDL_POOL__STATE_DIR`), so it still holds them after it restarts, a silent child's included, until the child withdraws. `docker compose down --volumes` removes them. A parent's hub on another host needs that volume, or a directory of its own, on its host.\n\n\
+";
+
+/// The README's paragraph on a fleet's DynamoDB directory.
+const DYNAMODB_README: &str = "Every pool's hub publishes its record to the fleet's DynamoDB directory: two tables in one DynamoDB Local, the `dynamodb-local` service (`GDL_POOL__DIRECTORY=dynamodb`, `GDL_POOL__ENDPOINT=http://dynamodb-local:8000`), which every hub reads, whatever its region. The hubs sign with fixed test credentials in their code, which DynamoDB Local never checks: no credential is in this bundle. DynamoDB Local runs with `-sharedDb`, so that every region sees one database, and in memory: `docker compose down` removes the directory, and so does a restart of `dynamodb-local`, after which the hubs cannot publish until `docker compose up` runs the tables step again. Before any hub starts, the `dynamodb-tables` service runs `gdl-hub --tables` from the hub's image, which makes the tables, and checks the keys of tables that exist. The hubs share no volume, and need no parent's hub. The hub's image is built with its `dynamodb` feature.\n\n";
+
+/// The rest of the README of a fleet's bundle.
+const README_TAIL: &str = "Each image is built once, from one Dockerfile per layout and segment, and every pool of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\
 Each segment takes its roster from its pool's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <pool>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one pool; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. `cargo gdl k8s` writes a fleet's Kubernetes objects instead; srt-slurm is not generated.\n";
 
 #[cfg(test)]
@@ -316,6 +418,7 @@ mod tests {
             "model-x-01:1337".into(),
             Some("global-us:1337".into()),
             false,
+            None,
         )
         .expect("variables");
         let expected = [
@@ -341,8 +444,8 @@ mod tests {
                 .expect("a fleet")
                 .pool("global-us")
                 .expect("a pool");
-        let kept =
-            super::variables(&parent, "global-us:1337".into(), None, true).expect("variables");
+        let kept = super::variables(&parent, "global-us:1337".into(), None, true, None)
+            .expect("variables");
         assert_eq!(kept["GDL_POOL__STATE_DIR"], STATE_DIR);
         assert!(kept.get("GDL_POOL__PARENT_HUB").is_none(), "{kept:?}");
     }

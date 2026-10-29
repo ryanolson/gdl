@@ -63,6 +63,13 @@ pub enum FleetError {
         /// Why the name is refused.
         reason: String,
     },
+    /// A key of the `[directory]` table does not fit.
+    InvalidDirectory {
+        /// The key.
+        key: String,
+        /// Why its value is refused.
+        reason: String,
+    },
     /// A pool's or a cluster's region is not a DNS label.
     InvalidRegion {
         /// The pool's or the cluster's table.
@@ -368,6 +375,9 @@ impl FleetError {
                 "is 0; a requirement is at least 1".into(),
             ),
             Self::InvalidPoolName { pool: name, reason } => (pool(name), None, reason.clone()),
+            Self::InvalidDirectory { key: name, reason } => {
+                (Some("directory".into()), key(name), reason.clone())
+            }
             Self::InvalidRegion { table, reason } => {
                 (Some(table.path()), key("region"), reason.clone())
             }
