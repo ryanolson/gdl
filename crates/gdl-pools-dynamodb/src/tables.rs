@@ -58,20 +58,15 @@ impl DynamoDirectory {
     ) -> Result<(TableOutcome, TableOutcome), DirectoryError> {
         let records = ensure(client, &tables.records, CLASS, POOL).await?;
         let lists = ensure(client, &tables.lists, OWNER, LIST_KEY).await?;
+        // A new table takes writes, and TTL, only once it is active: the
+        // hubs that start after the step write at once. DynamoDB Local
+        // makes a table active at once; AWS takes seconds.
+        for (table, outcome) in [(&tables.records, records), (&tables.lists, lists)] {
+            if outcome == TableOutcome::Made {
+                active(client, table).await?;
+            }
+        }
         if lists == TableOutcome::Made {
-            // A new table takes TTL only once it is active.
-            client
-                .wait_until_table_exists()
-                .table_name(&tables.lists)
-                .wait(TABLE_ACTIVE)
-                .await
-                .map_err(|error| {
-                    DirectoryError::Unavailable(format!(
-                        "waiting for table {} to be active: {}",
-                        tables.lists,
-                        DisplayErrorContext(error)
-                    ))
-                })?;
             let ttl = TimeToLiveSpecification::builder()
                 .attribute_name(EXPIRES_AT)
                 .enabled(true)
@@ -89,6 +84,22 @@ impl DynamoDirectory {
         }
         Ok((records, lists))
     }
+}
+
+/// Wait for `table` to be active, within [`TABLE_ACTIVE`].
+async fn active(client: &Client, table: &str) -> Result<(), DirectoryError> {
+    client
+        .wait_until_table_exists()
+        .table_name(table)
+        .wait(TABLE_ACTIVE)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            DirectoryError::Unavailable(format!(
+                "waiting for table {table} to be active: {}",
+                DisplayErrorContext(error)
+            ))
+        })
 }
 
 /// Make `table`, keyed by `partition` and `sort`, if it is absent, or check
