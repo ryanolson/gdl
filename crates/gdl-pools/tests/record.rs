@@ -11,9 +11,15 @@ use gdl_pools::{
 use serde::Deserialize;
 use serde_json::json;
 
-/// A key of the test property type, `{ name, partition }`.
+/// A key of the test property type, `{ name, partition }`, written as a
+/// type that skips a missing partition writes it.
 fn key(name: &str, partition: Option<&str>) -> PropertyKey {
-    PropertyKey::new("test", json!({ "name": name, "partition": partition }))
+    match partition {
+        Some(partition) => {
+            PropertyKey::new("test", json!({ "name": name, "partition": partition }))
+        }
+        None => PropertyKey::new("test", json!({ "name": name })),
+    }
 }
 
 fn record() -> PoolRecord {

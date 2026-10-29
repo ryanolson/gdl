@@ -1,5 +1,6 @@
 use gdl_model::{EntryState, PropertyEntry, PropertyKey, PropertyLists};
 use gdl_pools::{PoolProperty, PropertyState};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::{Offer, Properties, PropertyList, floor};
@@ -434,6 +435,51 @@ fn declared_properties_are_served_by_every_instance_that_reports_none() {
             ("z".into(), Ready)
         ]
     );
+}
+
+/// Two instances that write one key with its fields in another order, or
+/// with a missing optional field as `null`, make one entry. The record
+/// keeps the key as it was first reported, so a type whose field is
+/// required and encodes as `null` still decodes it.
+#[test]
+fn two_encodings_of_a_key_make_one_entry_in_the_form_first_reported() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Nullable {
+        name: String,
+        marker: (),
+    }
+    let said = |text: &str| {
+        let key = PropertyKey::new("test", serde_json::from_str(text).expect("json"));
+        [PropertyEntry::new(key, SaysReady)]
+    };
+    for (first, second) in [
+        (
+            r#"{"name":"a","marker":null}"#,
+            r#"{"marker":null,"name":"a"}"#,
+        ),
+        (r#"{"name":"a","marker":null}"#, r#"{"name":"a"}"#),
+    ] {
+        let mut properties = fresh();
+        let (a, b) = (said(first), said(second));
+        properties.update([Offer::Listed(&lists(&a))]);
+        properties.update([Offer::Listed(&lists(&a)), Offer::Listed(&lists(&b))]);
+        let listed = properties.list().entries;
+        assert_eq!(listed.len(), 1, "{second}: one entry");
+        assert_eq!(listed[0].state, Ready);
+        let sent = serde_json::to_value(&listed[0].property).expect("json");
+        assert_eq!(
+            sent["key"],
+            serde_json::from_str::<serde_json::Value>(first).expect("json"),
+            "the form first reported"
+        );
+        assert_eq!(
+            Nullable::deserialize(&sent["key"]).expect("decodes"),
+            Nullable {
+                name: "a".into(),
+                marker: (),
+            }
+        );
+    }
 }
 
 /// An instance that has a list of one kind and none of another serves the

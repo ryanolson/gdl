@@ -755,8 +755,8 @@ fn a_relay_pool_refuses_a_lease_its_reports_cannot_cover() {
 }
 
 /// A pool whose instances report no properties of a kind declares the
-/// ones of that kind it serves: each a key of the kind's type, in its
-/// canonical form. A kind that is not a settings key, a key that is not
+/// ones of that kind it serves: each a key of the kind's type, compared
+/// in its canonical form. A kind that is not a settings key, a key that is not
 /// an object or that holds a float, and a key declared twice, also in
 /// another encoding, are refused, each naming `properties`.
 #[test]

@@ -11,25 +11,29 @@ use serde_json::{Map, Number, Value};
 /// decodes a key only where a node or a pool policy registered the kind
 /// (`gdl::PropertyKind`).
 ///
-/// The key is held in a canonical form, so that two builds that encode one
-/// value differently name one property: an object's fields are sorted by
-/// name, and a field whose value is `null` is left out, as a missing
-/// optional field is. A key is put in that form when it is made and when
-/// it is read, so that every hub, directory, and reader compares, orders,
-/// and stores it alike.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Two keys are compared, ordered, and hashed in a canonical form, so that
+/// two builds that encode one value differently name one property: an
+/// object's fields are sorted by name, and a field whose value is `null`
+/// is left out, as a missing optional field is. The key itself is kept,
+/// and written, as it was made or read: a field that the type requires
+/// and that encodes as `null` stays, so the key still decodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "KeyWire", into = "KeyWire")]
 pub struct PropertyKey {
     kind: String,
     key: Value,
+    /// `key` in its canonical form: what equality, order, and hashing
+    /// read.
+    canonical: Value,
 }
 
 impl PropertyKey {
-    /// The property of `kind` whose key is `key`, in its canonical form.
+    /// The property of `kind` whose key is `key`, kept as it is.
     pub fn new(kind: impl Into<String>, key: Value) -> Self {
         Self {
             kind: kind.into(),
-            key: canonical(key),
+            canonical: canonical(key.clone()),
+            key,
         }
     }
 
@@ -48,7 +52,7 @@ impl PropertyKey {
         &self.kind
     }
 
-    /// The property's key, in its canonical form.
+    /// The property's key, as it was made or read.
     #[inline]
     pub fn key(&self) -> &Value {
         &self.key
@@ -78,6 +82,21 @@ impl PropertyKey {
     }
 }
 
+impl PartialEq for PropertyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.canonical == other.canonical
+    }
+}
+
+impl Eq for PropertyKey {}
+
+impl std::hash::Hash for PropertyKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.canonical.hash(state);
+    }
+}
+
 impl PartialOrd for PropertyKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -91,7 +110,7 @@ impl Ord for PropertyKey {
     fn cmp(&self, other: &Self) -> Ordering {
         self.kind
             .cmp(&other.kind)
-            .then_with(|| compare(&self.key, &other.key))
+            .then_with(|| compare(&self.canonical, &other.canonical))
     }
 }
 

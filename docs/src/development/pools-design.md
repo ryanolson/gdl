@@ -154,7 +154,13 @@ An entry stopped outside the drain, which then learns of it, says `drained` whil
 
 A pool's record lists the properties the pool serves. A property is a key of a type the application defines, under a kind name. The node that provides a kind encodes its keys, and the hub, the relay, `gdl-watch` and every directory backend carry them as JSON objects. Only a node or a pool policy that registered the kind decodes the keys, when the chooser builds the class's property index, off the request path. So gdl knows nothing of what a pool serves, and a new kind needs no change to the hub or to a backend.
 
-Every field of a key is part of its identity. Each layer puts a key in a canonical form when it reads it: fields sorted by name, and a `null` field left out, as a missing optional field is. So two builds that write a key's fields in another order name one entry, and the record, the DynamoDB list digest, and a revocation agree on it.
+Every field of a key is part of its identity. Each layer compares, orders, and hashes keys in a canonical form: fields sorted by name, and a `null` field left out, as a missing optional field is. So two builds that write a key's fields in another order name one entry, and a revocation names it whatever order the operator writes. The hub keeps each entry's key as it was first reported, and sends that form.
+
+**Rejected: storing the canonical form.** A type whose field is required and encodes as `null`, such as `()`, no longer decodes once the field is left out, and its entry would be counted as undecodable.
+
+A key's numbers must be integers. JSON reads a float back as a near value, not always the same one, so a key with a float would name another property after a report or a stored record.
+
+**Rejected: reading floats exactly (`serde_json`'s `float_roundtrip`).** The feature unifies into every `serde_json` of the process, the JSON edge codec on the request path included.
 
 **Rejected: a typed key in the hub.** The stock hub binary cannot link an application's types, so it could not read them.
 

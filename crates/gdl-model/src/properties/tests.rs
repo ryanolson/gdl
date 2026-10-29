@@ -8,7 +8,7 @@ fn read(text: &str) -> PropertyKey {
 
 /// Two builds that write a key's fields in another order, or write a
 /// missing optional field as `null`, name one property: equal, ordered
-/// equal, hashed alike, and written alike.
+/// equal, and hashed alike. Each key is written back as it was read.
 #[test]
 fn two_encodings_of_one_key_name_one_property() {
     use std::hash::{BuildHasher, RandomState};
@@ -20,15 +20,19 @@ fn two_encodings_of_one_key_name_one_property() {
         assert_eq!(&a, other);
         assert_eq!(a.cmp(other), Ordering::Equal);
         assert_eq!(hasher.hash_one(&a), hasher.hash_one(other));
-        assert_eq!(
-            serde_json::to_string(&a).expect("json"),
-            serde_json::to_string(other).expect("json")
-        );
     }
+    assert_eq!(a.key()["version"], Value::Null, "kept as read");
     assert_eq!(
-        serde_json::to_string(&a).expect("json"),
-        r#"{"kind":"test","key":{"name":"a","partition":"p"}}"#,
-        "the canonical form"
+        serde_json::to_value(&c).expect("json"),
+        json!({"kind": "test", "key": {"partition": "p", "name": "a"}}),
+        "written as read"
+    );
+    assert_eq!(
+        serde_json::from_str::<PropertyKey>(&serde_json::to_string(&a).expect("json"))
+            .expect("a key")
+            .key(),
+        a.key(),
+        "the null field survives a round trip"
     );
     let made = PropertyKey::new(
         "test",
@@ -50,14 +54,14 @@ fn two_encodings_of_one_key_name_one_property() {
 fn a_canonical_object_iterates_its_fields_by_name() {
     let key = read(r#"{"kind":"test","key":{"z":1,"a":{"y":null,"c":2,"b":3}}}"#);
     let names: Vec<&str> = key
-        .key()
+        .canonical
         .as_object()
         .expect("an object")
         .keys()
         .map(String::as_str)
         .collect();
     assert_eq!(names, ["a", "z"]);
-    let inner: Vec<&str> = key.key()["a"]
+    let inner: Vec<&str> = key.canonical["a"]
         .as_object()
         .expect("an object")
         .keys()

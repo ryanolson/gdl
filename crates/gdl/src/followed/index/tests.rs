@@ -292,7 +292,6 @@ fn no_index_is_not_synced() {
 }
 
 #[test]
-#[ignore = "F2: canonicalization removes a required null field before typed decoding"]
 fn a_required_null_field_decodes_from_its_own_kind() {
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, crate::Message)]
     struct Nullable {

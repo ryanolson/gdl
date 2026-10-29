@@ -759,7 +759,7 @@ async fn two_encodings_of_a_key_name_one_property() {
     assert_eq!(
         serde_json::to_value(&listed.properties[0].property).expect("json"),
         serde_json::json!({ "kind": "test", "key": { "name": "m", "partition": "p" } }),
-        "one entry, in the canonical form"
+        "one entry, in the form first reported"
     );
     assert_eq!(
         revoke_written(
