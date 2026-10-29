@@ -206,3 +206,54 @@ fn every_segment_call_is_the_pinned_one() {
         differ.join("\n")
     );
 }
+
+/// The kinds a service's entries need reach the service block of the
+/// segment that hosts it, as one `needs` line: each kind once, in name
+/// order, whichever entries name it. A service whose entries need none
+/// writes no line, as every pinned call above shows.
+#[test]
+fn a_services_entry_needs_are_one_sorted_line() {
+    let api = std::fs::read_to_string(root().join("examples/api/gdl.toml")).expect("api");
+    let spec =
+        api.replacen(
+            "[entry.chat]\n",
+            "[entry.chat]\nneeds = { shard = \"engines\", region = \"engines\" }\n",
+            1,
+        )
+        .replacen(
+            "[entry.responses]\n",
+            "[entry.responses]\nneeds = { shard = \"engines\" }\n",
+            1,
+        ) + "[class.global]\nsegments = [\"front\"]\n[class.engines]\nsegments = [\"engine\"]\n";
+    let graph = "name = \"api\", schema = 1;\n\
+        property shard: Prompt;\n\
+        property region: Prompt;\n\
+        source Http: Prompt -> stream Chunk;\n\
+        sink Engine: Prompt -> stream Chunk provides shard, region;\n\
+        topology: Http => Engine;\n";
+    let libraries = libraries(&Case::Text {
+        spec,
+        graph: graph.into(),
+        dir: root().join("examples/api"),
+    });
+    let front = &libraries
+        .iter()
+        .find(|(segment, _)| segment == "front")
+        .expect("the front segment")
+        .1;
+    let lines: Vec<&str> = front
+        .lines()
+        .filter(|line| line.trim_start().starts_with("needs:"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["        needs: [\"region\", \"shard\"];"],
+        "{front}"
+    );
+    let engine = &libraries
+        .iter()
+        .find(|(segment, _)| segment == "engine")
+        .expect("the engine segment")
+        .1;
+    assert!(!engine.contains("needs:"), "{engine}");
+}
