@@ -291,6 +291,38 @@ fn no_index_is_not_synced() {
     assert!(index.is_synced() && index.get(&test("qwen", None, None)).is_empty());
 }
 
+#[test]
+#[ignore = "F2: canonicalization removes a required null field before typed decoding"]
+fn a_required_null_field_decodes_from_its_own_kind() {
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, crate::Message)]
+    struct Nullable {
+        name: String,
+        marker: (),
+    }
+    const NULLABLE: PropertyKind<Nullable> = PropertyKind::new("nullable");
+    let value = Nullable {
+        name: "a".into(),
+        marker: (),
+    };
+    let plain = serde_json::to_value(&value).expect("encoded without canonicalization");
+    assert_eq!(
+        Nullable::deserialize(&plain).expect("the required null field is valid"),
+        value
+    );
+    let encoded = NULLABLE.encode(&value).expect("a valid object key");
+    let kinds = PropertyKinds::new();
+    kinds.register(&NULLABLE).expect("registered");
+    let (_, now) = kinds.snapshot();
+    let indexes = PropertyIndexes::decode(
+        &now,
+        true,
+        &[(encoded, pool("model-x-01", PropertyState::Ready))],
+    );
+    let index = indexes.get(&NULLABLE).expect("registered");
+    assert_eq!(index.undecoded(), 0, "the kind must decode its own key");
+    assert_eq!(index.get(&value).len(), 1);
+}
+
 /// A range ends where its last key is, whatever its length: the end is
 /// found by doubling steps, then a search of the last step. Checked
 /// against a scan for each length up to past several steps, with keys
