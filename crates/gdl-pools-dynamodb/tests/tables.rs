@@ -268,7 +268,6 @@ async fn a_kept_lists_table_gets_ttl_only_when_it_is_off() {
 /// A table that exists but is still being made is waited for: the step
 /// ends only once a description shows it active.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kept tables bypass readiness: a kept table is not waited for: it is read once, while CREATING"]
 async fn a_kept_table_still_being_made_is_waited_for() {
     let mut state = existing(Some("ENABLED"));
     state.tables.insert(
@@ -292,7 +291,6 @@ async fn a_kept_table_still_being_made_is_waited_for() {
 
 /// A table that is being deleted fails the step, by its name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kept tables bypass readiness: a kept table is judged by its keys alone, so a DELETING one is kept"]
 async fn a_table_being_deleted_fails_the_step() {
     let mut state = existing(Some("ENABLED"));
     state

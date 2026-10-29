@@ -6,12 +6,11 @@ use std::time::Duration;
 
 use aws_sdk_dynamodb::{
     Client,
-    client::Waiters,
-    error::{DisplayErrorContext, SdkError},
+    error::SdkError,
     operation::{create_table::CreateTableError, describe_table::DescribeTableError},
     types::{
         AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
-        TableDescription, TimeToLiveSpecification, TimeToLiveStatus,
+        TableDescription, TableStatus, TimeToLiveSpecification, TimeToLiveStatus,
     },
 };
 use gdl_pools::DirectoryError;
@@ -22,9 +21,16 @@ use crate::{
     item::{CLASS, EXPIRES_AT, LIST_KEY, OWNER, POOL},
 };
 
-/// How long [`DynamoDirectory::ensure_tables`] waits for a new table to be
+/// How long [`DynamoDirectory::ensure_tables`] waits for a table to be
 /// active.
 const TABLE_ACTIVE: Duration = Duration::from_secs(300);
+
+/// The first wait between two reads of a table that is not active yet,
+/// doubled up to [`ACTIVE_POLL_CAP`]. The SDK's waiter waits 20 s at the
+/// least, which would hold every hub for that long behind a table that is
+/// active in a second.
+const ACTIVE_POLL: Duration = Duration::from_millis(100);
+const ACTIVE_POLL_CAP: Duration = Duration::from_secs(2);
 
 /// What a table was found as, or made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,13 +69,13 @@ impl DynamoDirectory {
     ) -> Result<(TableOutcome, TableOutcome), DirectoryError> {
         let records = ensure(client, &tables.records, CLASS, POOL).await?;
         let lists = ensure(client, &tables.lists, OWNER, LIST_KEY).await?;
-        // A new table takes writes, and TTL, only once it is active: the
-        // hubs that start after the step write at once. DynamoDB Local
-        // makes a table active at once; AWS takes seconds.
-        for (table, outcome) in [(&tables.records, records), (&tables.lists, lists)] {
-            if outcome == TableOutcome::Made {
-                active(client, table).await?;
-            }
+        // A table takes writes, and TTL, only once it is active, and the
+        // hubs that start after the step write at once. A kept table may
+        // still be being made, by an earlier run or another caller, or be
+        // being deleted. DynamoDB Local makes a table active at once; AWS
+        // takes seconds.
+        for table in [&tables.records, &tables.lists] {
+            active(client, table).await?;
         }
         ttl(client, &tables.lists).await?;
         Ok((records, lists))
@@ -120,20 +126,39 @@ async fn ttl(client: &Client, table: &str) -> Result<(), DirectoryError> {
         .map_err(|error| unavailable(&format!("turning on TTL of {table}"), error))
 }
 
-/// Wait for `table` to be active, within [`TABLE_ACTIVE`].
+/// Wait for `table` to be active, within [`TABLE_ACTIVE`], while it is
+/// being made or updated. A table in any other state, such as one being
+/// deleted, is refused by its name, as is one that is gone.
 async fn active(client: &Client, table: &str) -> Result<(), DirectoryError> {
-    client
-        .wait_until_table_exists()
-        .table_name(table)
-        .wait(TABLE_ACTIVE)
-        .await
-        .map(|_| ())
-        .map_err(|error| {
-            DirectoryError::Unavailable(format!(
-                "waiting for table {table} to be active: {}",
-                DisplayErrorContext(error)
-            ))
-        })
+    let started = tokio::time::Instant::now();
+    let mut wait = ACTIVE_POLL;
+    loop {
+        let found = describe(client, table)
+            .await?
+            .ok_or_else(|| DirectoryError::Unavailable(format!("table {table} is gone")))?;
+        match found.table_status() {
+            Some(TableStatus::Active) => return Ok(()),
+            Some(TableStatus::Creating | TableStatus::Updating)
+                if started.elapsed() < TABLE_ACTIVE =>
+            {
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(ACTIVE_POLL_CAP);
+            }
+            Some(status @ (TableStatus::Creating | TableStatus::Updating)) => {
+                return Err(DirectoryError::Unavailable(format!(
+                    "table {table} is still {} after {} s",
+                    status.as_str(),
+                    TABLE_ACTIVE.as_secs()
+                )));
+            }
+            status => {
+                return Err(DirectoryError::Refused(format!(
+                    "table {table} is {}, and the directory needs it ACTIVE",
+                    status.map_or("of no status", |status| status.as_str())
+                )));
+            }
+        }
+    }
 }
 
 /// Make `table`, keyed by `partition` and `sort`, if it is absent, or check
