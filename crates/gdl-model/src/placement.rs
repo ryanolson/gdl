@@ -637,6 +637,28 @@ impl Layout {
             .collect()
     }
 
+    /// The selectors `segment` sends through: each crossing whose first
+    /// stage is in another segment, whose sending run is in `segment`, and
+    /// whose router names a selector, as (hop, position, name). The edge
+    /// the crossing carries is the hop's forward edge `position - 1`. The
+    /// segment must register each name, or have gdl's own of that name.
+    pub fn sent_selectors<'a>(
+        &'a self,
+        segment: &'a str,
+    ) -> impl Iterator<Item = (usize, usize, &'a str)> + 'a {
+        self.hops.iter().enumerate().flat_map(move |(hop, plan)| {
+            plan.forward_runs.windows(2).filter_map(move |pair| {
+                if pair[0].segment != segment {
+                    return None;
+                }
+                match self.request_router(hop, pair[1].start) {
+                    RequestRouter::Selector(name) => Some((hop, pair[1].start, name.as_str())),
+                    _ => None,
+                }
+            })
+        })
+    }
+
     /// The classes `segment` chooses pools of: those a hop crosses into
     /// whose outer end `segment` holds. Each needs its pool policy where
     /// `segment` runs. Empty for a segment that is not a chooser, and for a

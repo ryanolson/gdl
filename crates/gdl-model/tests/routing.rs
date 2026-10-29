@@ -305,3 +305,61 @@ fn gdls_own_selectors_have_usable_names() {
         assert!(!selector.summary.is_empty());
     }
 }
+
+/// The selectors a segment sends through are those of the crossings whose
+/// sending run it holds: each by its hop, the position of the stage it
+/// enters, and its name. A crossing routed by a policy, and a crossing
+/// another segment sends, are not its own.
+#[test]
+fn a_segment_sends_through_the_selectors_of_the_crossings_it_sends() {
+    let node = |name: &str, role, binding: Option<&str>| NodeInfo {
+        name: name.into(),
+        role,
+        binding: binding.map(str::to_string),
+    };
+    let graph = Manifest {
+        name: "chain".into(),
+        schema: 1,
+        nodes: vec![
+            node("S", Role::Source, None),
+            node("F", Role::Forward, Some("f")),
+            node("D", Role::Sink, Some("d")),
+        ],
+        hops: vec![HopInfo {
+            outer: "S".into(),
+            forward: vec!["F".into()],
+            inner: "D".into(),
+            backward: vec![],
+            forward_types: vec![
+                TypeInfo::new("Request", true, Default::default()),
+                TypeInfo::new("Prepared", true, Default::default()),
+            ],
+            backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
+        }],
+    };
+    let selector = |name: &str| gdl_model::RequestRouter::Selector(name.into());
+    let placement = Placement::new()
+        .segment("front", ["S"])
+        .segment("prep", ["F"])
+        .segment("sink", ["D"])
+        .route("F", selector("by_length"))
+        .route("D", selector("least_loaded"));
+    let layout = layout(&graph, &placement).expect("a layout");
+    let sent = |segment: &str| -> Vec<(usize, usize, String)> {
+        layout
+            .sent_selectors(segment)
+            .map(|(hop, at, name)| (hop, at, name.to_string()))
+            .collect()
+    };
+    assert_eq!(sent("front"), [(0, 1, "by_length".to_string())]);
+    assert_eq!(sent("prep"), [(0, 2, "least_loaded".to_string())]);
+    assert!(sent("sink").is_empty());
+    // A crossing routed by a policy sends through no selector.
+    let policy = Placement::new()
+        .segment("front", ["S"])
+        .segment("prep", ["F"])
+        .segment("sink", ["D"])
+        .route("F", gdl_model::RequestRouter::Random);
+    let layout = gdl_model::layout(&graph, &policy).expect("a layout");
+    assert_eq!(layout.sent_selectors("front").count(), 0);
+}

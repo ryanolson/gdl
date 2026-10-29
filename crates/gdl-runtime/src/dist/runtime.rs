@@ -596,7 +596,7 @@ impl Runtime {
         meters: Option<Meters>,
     ) -> Result<Self> {
         let mut selectors = BTreeMap::new();
-        for (hop, at, name) in sent_selectors(&layout, &segment) {
+        for (hop, at, name) in layout.sent_selectors(&segment) {
             if selectors.contains_key(name) {
                 continue;
             }
@@ -1195,30 +1195,6 @@ impl Held {
             pool.accepted();
         }
     }
-}
-
-/// The selectors `segment` sends through: each crossing whose first node
-/// is in another segment, whose sending run is in `segment`, and whose
-/// router names a selector, as (hop, position, name).
-fn sent_selectors<'a>(
-    layout: &'a Layout,
-    segment: &'a str,
-) -> impl Iterator<Item = (usize, usize, &'a str)> + 'a {
-    layout
-        .hops()
-        .iter()
-        .enumerate()
-        .flat_map(move |(hop, plan)| {
-            plan.forward_runs.windows(2).filter_map(move |pair| {
-                if pair[0].segment != segment {
-                    return None;
-                }
-                match layout.request_router(hop, pair[1].start) {
-                    RequestRouter::Selector(name) => Some((hop, pair[1].start, name.as_str())),
-                    _ => None,
-                }
-            })
-        })
 }
 
 /// Work an instance has taken on, for tests and diagnostics.
