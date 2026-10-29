@@ -333,6 +333,7 @@ For each offer, before admission, the entry reads the head and looks the key up 
 | `draining`, or not at all | declines it as not present, naming the kind |
 
 - A draining pool's refusal comes first, as gone, since it holds for every request.
+- An offer that waited for admission or egress reads its want again before it is accepted, when the node set a list meanwhile. A decline then leaves nothing admitted. An offer that did not see a list change reads the head once.
 - The entry reads its own instance's list, not its pool's record, which lags the instance. So a segment that wants a kind sets that kind's list too. An instance that never sets it declines every offer.
 - A head that the function cannot read fails the request with `Codec`. No other pool could read it either.
 - The segment refuses to start when a want reads a head type that no offer into the segment carries, naming the kind, or reads fields by name on an edge encoded as `msgpack_array`.

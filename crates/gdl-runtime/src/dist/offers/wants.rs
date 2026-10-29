@@ -36,6 +36,14 @@ fn model(name: &str) -> Model {
 async fn entry(
     properties: &InstanceProperties,
 ) -> (gdl::Result<Segment<impl Register + use<>>>, Entries) {
+    entry_under(properties, RuntimeConfig::default()).await
+}
+
+/// [`entry`], under `config`.
+async fn entry_under(
+    properties: &InstanceProperties,
+    config: RuntimeConfig,
+) -> (gdl::Result<Segment<impl Register + use<>>>, Entries) {
     let node = bind_node(([127, 0, 0, 1], 0).into())
         .await
         .expect("a velo node");
@@ -48,7 +56,7 @@ async fn entry(
         &Roster::new(),
         RuntimeConfig {
             properties: properties.clone(),
-            ..RuntimeConfig::default()
+            ..config
         },
     )
     .expect("a deployment");
@@ -198,4 +206,47 @@ async fn a_want_costs_an_offer_its_head_and_key() {
         plain + 2,
         "an offer allocated {plain} with no want, {wanting} with one"
     );
+}
+
+/// An offer for a ready model that waits for admission, while the node
+/// drops the model, declines as not present once it is admitted, and
+/// leaves nothing admitted: the instance takes no request for a property
+/// it no longer has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offer_that_waited_for_admission_reads_the_list_again() {
+    let properties = InstanceProperties::new();
+    properties
+        .wants(&MODEL, |text: &String| model(text))
+        .expect("registered");
+    properties
+        .set(&MODEL, [(model("m"), EntryState::Ready)])
+        .expect("a list");
+    let config = RuntimeConfig {
+        admission_limit: 1,
+        admission_wait: WAIT,
+        ..RuntimeConfig::default()
+    };
+    let (segment, entries) = entry_under(&properties, config).await;
+    let segment = segment.expect("started");
+    let rt = segment.runtime();
+    let enter = entries.forward(0, 1).expect("the entry");
+    let held = rt.admission.admit(7).await.expect("the only permit");
+    let waiting = enter(offer(rt, "m"));
+    tokio::pin!(waiting);
+    // Its only wait before acceptance is admission, which `held` keeps.
+    assert!(
+        futures::poll!(waiting.as_mut()).is_pending(),
+        "the offer did not wait for admission"
+    );
+    properties.set(&MODEL, []).expect("a list");
+    drop(held);
+    let answer = tokio::time::timeout(WAIT, waiting)
+        .await
+        .expect("answered in time");
+    let refused = match answer {
+        Ok(_) => panic!("an offer for a model the instance dropped while it waited was taken"),
+        Err(refused) => refused,
+    };
+    assert_eq!(refused.decline, Decline::NotPresent, "{}", refused.error);
+    assert_eq!(segment.admitted(), 0, "the decline left a request admitted");
 }

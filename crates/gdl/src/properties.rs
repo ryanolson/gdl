@@ -236,6 +236,7 @@ impl InstanceProperties {
             kind: kind.name(),
             key,
             held: Default::default(),
+            version: Default::default(),
             head: std::marker::PhantomData::<fn(&H)>,
         });
         let drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);

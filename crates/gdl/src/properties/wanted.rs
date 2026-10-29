@@ -5,6 +5,7 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use gdl_model::{Encoding, EntryState, PropertyLists};
@@ -45,6 +46,10 @@ pub trait Want: Send + Sync + 'static {
 
     /// Hold the instance's keys of the kind as `lists` has them.
     fn hold(&self, lists: &PropertyLists);
+
+    /// How many times the keys held were replaced: an offer that read the
+    /// keys before a wait reads them again only if this changed.
+    fn version(&self) -> u64;
 }
 
 /// [`Want`] for the head `H`, whose wanted key of type `T` is `key`'s.
@@ -54,6 +59,8 @@ pub(super) struct Typed<H, T, F> {
     /// The instance's keys of the kind, sorted by `T`'s `Ord`, with their
     /// states. Swapped whole when the node sets the kind's list.
     pub(super) held: ArcSwap<Vec<(T, EntryState)>>,
+    /// Raised after each replacement of `held`.
+    pub(super) version: AtomicU64,
     pub(super) head: PhantomData<fn(&H)>,
 }
 
@@ -100,5 +107,10 @@ where
             .collect();
         held.sort_by(|(a, _), (b, _)| a.cmp(b));
         self.held.store(Arc::new(held));
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
     }
 }

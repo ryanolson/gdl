@@ -167,6 +167,21 @@ impl Wanted {
         Ok((!at.is_empty()).then(|| Box::new(Self { at: at.into() })))
     }
 
+    /// The versions of the keys that the wants of the offers entering at
+    /// `pos` hold, added up: an offer whose wait for admission or egress
+    /// saw it change reads its wants again. One atomic load per want.
+    fn version(&self, pos: usize) -> u64 {
+        self.at
+            .iter()
+            .find(|entering| entering.pos == pos)
+            .map_or(0, |entering| {
+                entering
+                    .wants
+                    .iter()
+                    .fold(0, |sum: u64, want| sum.wrapping_add(want.version()))
+            })
+    }
+
     /// Refuse the offer that enters at `pos` with `head` when the instance
     /// does not have a property it wants: as not present when it does not
     /// list it or drains it, and as full while it starts. A head a want
@@ -1096,11 +1111,17 @@ where
         let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
         // Before admission, so that an offer the instance cannot serve
         // takes no permit and waits for none; after a drain's refusal,
-        // which says more, since it holds for every request.
-        if let Some(wanted) = &self.wanted {
-            rt.check_offer()?;
-            wanted.check(pos, &envelope.payload)?;
-        }
+        // which says more, since it holds for every request. The version
+        // is read first, so that a list set after it is read again below.
+        let wanted = match &self.wanted {
+            Some(wanted) => {
+                rt.check_offer()?;
+                let version = wanted.version(pos);
+                wanted.check(pos, &envelope.payload)?;
+                Some((wanted, version))
+            }
+            None => None,
+        };
         let mut share = match setup(
             &cx,
             rt.config.setup_timeout,
@@ -1139,6 +1160,13 @@ where
         } else {
             None
         };
+        // The node may have set a list while the offer waited: it is read
+        // again, and a refusal drops the share and the permit it took.
+        if let Some((wanted, version)) = wanted
+            && wanted.version(pos) != version
+        {
+            wanted.check(pos, &envelope.payload)?;
+        }
         Ok((cx, share, egress))
     }
 
