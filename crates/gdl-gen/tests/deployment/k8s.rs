@@ -719,3 +719,5 @@ fn a_source_that_reads_stdin_is_refused() {
 
 #[path = "k8s/credentials.rs"]
 mod credentials;
+#[path = "k8s/variables.rs"]
+mod variables;

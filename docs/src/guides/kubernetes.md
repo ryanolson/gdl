@@ -67,7 +67,7 @@ cargo gdl k8s --spec gdl.toml --fleet fleet.toml --out target/k8s
 - A key of a cluster's `secrets` is not a secret of the spec's `[deployment.secrets]`.
 - A segment that a pool runs mounts a secret that the pool's cluster does not map.
 - An `env` key names a static AWS credential: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, or `AWS_CONTAINER_AUTHORIZATION_TOKEN`, in any case. Use the service account's role, or a Secret.
-- An `env` key is a variable that the render sets: `GDL_POD_IP`, or one under `GDL_POOL__` or `GDL_HUB__`, in any case.
+- An `env` key is a variable that the render sets: `GDL_POD_IP`, `GDL_POOL`, `GDL_HUB`, or one under `GDL_POOL__` or `GDL_HUB__`, in any case.
 - A child runs in another cluster than its parent.
 - A segment's name is not a DNS label, or a port is a range.
 - The graph's source reads its requests on stdin, which a pod cannot give it.
