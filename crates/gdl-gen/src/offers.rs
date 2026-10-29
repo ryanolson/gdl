@@ -165,12 +165,17 @@ pub(crate) fn given_offer(
         .map(|m| m.path.as_str())
         .chain(offer.exports.iter().map(|e| e.path.as_str()))
         .chain(offer.nodes.iter().map(|n| n.ty.as_str()))
+        .chain(offer.policies.iter().map(|p| p.ty.as_str()))
+        .chain(offer.selectors.iter().map(|s| s.ty.as_str()))
         .find_map(|path| path.split("::").next());
     if let Some(library) = library.filter(|l| *l != lib) {
-        return Err(vec![format!(
-            "{package}@{}: its library is `{library}`, not `{lib}`; a crate listed by version must name its library for its package",
-            offer.version
-        )]);
+        return Err(vec![match source {
+            spec::CrateSource::Version(_) => format!(
+                "{package}@{}: its library is `{library}`, not `{lib}`; a crate listed by version must name its library for its package",
+                offer.version
+            ),
+            _ => format!("{package}: its library is `{library}`, not `{lib}`"),
+        }]);
     }
     Ok((*offer).clone())
 }
@@ -214,6 +219,49 @@ mod tests {
         let mut named = offer.clone();
         named.messages[0].path = "proto::Words".into();
         assert!(given_offer(&[&named], "proto", "proto", &version).is_ok());
+    }
+
+    /// A crate that offers only a pool policy or only a selector is held
+    /// to its library too: generated code names the router's type by it,
+    /// so one bound under another library would not build.
+    #[test]
+    fn a_given_router_crate_names_its_library_for_its_package() {
+        let entry = gdl_extract::PolicyEntry {
+            name: "ByText".into(),
+            ty: "router_library::ByText".into(),
+            head: gdl_extract::PolicyHead::Encoded,
+        };
+        let empty = Offer {
+            package: "selector-router".into(),
+            version: "0.1.0".into(),
+            source: CRATES_IO[0].into(),
+            messages: Vec::new(),
+            exports: Vec::new(),
+            nodes: Vec::new(),
+            policies: Vec::new(),
+            skipped: Vec::new(),
+            skipped_policies: Vec::new(),
+            selectors: Vec::new(),
+            skipped_selectors: Vec::new(),
+        };
+        let policy = Offer {
+            policies: vec![entry.clone()],
+            ..empty.clone()
+        };
+        let selector = Offer {
+            selectors: vec![entry],
+            ..empty
+        };
+        let version = spec::CrateSource::Version("0.1.0".into());
+        for offer in [&policy, &selector] {
+            let error = given_offer(&[offer], "selector-router", "selector_router", &version)
+                .expect_err("another library");
+            assert!(
+                error[0].contains("its library is `router_library`, not `selector_router`"),
+                "{error:?}"
+            );
+            assert!(given_offer(&[offer], "selector-router", "router_library", &version).is_ok());
+        }
     }
 
     /// A crate listed by version is the registry's: a git package of the

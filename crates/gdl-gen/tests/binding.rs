@@ -149,7 +149,6 @@ impl gdl::PoolPolicy for ByText {
 }
 
 #[test]
-#[ignore = "F3: catalogue checks accept a selector-only crate under the wrong library"]
 fn a_catalogue_selector_must_have_the_bound_library() {
     let router = router(
         r#"
