@@ -13,7 +13,9 @@
 
 mod directory;
 mod item;
+mod tables;
 mod watch;
 
 pub use directory::{DynamoDirectory, DynamoLimits, Tables};
+pub use tables::TableOutcome;
 pub use watch::DynamoWatch;

@@ -6,13 +6,9 @@ use std::{
 
 use aws_sdk_dynamodb::{
     Client,
-    client::Waiters,
     error::{DisplayErrorContext, SdkError},
     operation::put_item::PutItemError,
-    types::{
-        AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType, ReturnValue,
-        ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TimeToLiveSpecification,
-    },
+    types::{AttributeValue, ReturnValue, ReturnValuesOnConditionCheckFailure},
 };
 use gdl_pools::{DirectoryError, PoolDirectory, PoolRecord, Version, Withdrawal};
 
@@ -106,10 +102,6 @@ impl Default for DynamoLimits {
 /// region still shows the earlier record can still join it.
 const SUPERSEDED: Duration = Duration::from_secs(3_600);
 
-/// How long [`DynamoDirectory::create_tables`] waits for a new table to be
-/// active.
-const TABLE_ACTIVE: Duration = Duration::from_secs(300);
-
 /// The list a pool's last write through a handle named, and the write's
 /// epoch.
 #[derive(Debug, Clone, Copy)]
@@ -155,74 +147,6 @@ impl DynamoDirectory {
                 written: Mutex::default(),
             }),
         }
-    }
-
-    /// Make the two tables, in this client's region alone, with on-demand
-    /// billing and TTL on the lists table. For DynamoDB Local and for
-    /// trials: a deployment makes its global tables with their replicas in
-    /// the tool that owns its infrastructure, with the same keys.
-    ///
-    /// # Errors
-    ///
-    /// [`DirectoryError::Unavailable`] when a table cannot be made, for
-    /// example because it exists.
-    pub async fn create_tables(client: &Client, tables: &Tables) -> Result<(), DirectoryError> {
-        let key = |name: &str, kind| {
-            KeySchemaElement::builder()
-                .attribute_name(name)
-                .key_type(kind)
-                .build()
-                .expect("a key has its name and type")
-        };
-        let text = |name: &str| {
-            AttributeDefinition::builder()
-                .attribute_name(name)
-                .attribute_type(ScalarAttributeType::S)
-                .build()
-                .expect("an attribute has its name and type")
-        };
-        for (table, partition, sort) in [
-            (&tables.records, item::CLASS, item::POOL),
-            (&tables.lists, item::OWNER, item::LIST_KEY),
-        ] {
-            client
-                .create_table()
-                .table_name(table)
-                .billing_mode(BillingMode::PayPerRequest)
-                .key_schema(key(partition, KeyType::Hash))
-                .key_schema(key(sort, KeyType::Range))
-                .attribute_definitions(text(partition))
-                .attribute_definitions(text(sort))
-                .send()
-                .await
-                .map_err(|error| unavailable(&format!("making table {table}"), error))?;
-        }
-        // A new table takes TTL only once it is active.
-        client
-            .wait_until_table_exists()
-            .table_name(&tables.lists)
-            .wait(TABLE_ACTIVE)
-            .await
-            .map_err(|error| {
-                DirectoryError::Unavailable(format!(
-                    "waiting for table {} to be active: {}",
-                    tables.lists,
-                    DisplayErrorContext(error)
-                ))
-            })?;
-        let ttl = TimeToLiveSpecification::builder()
-            .attribute_name(item::EXPIRES_AT)
-            .enabled(true)
-            .build()
-            .expect("TTL has its attribute and switch");
-        client
-            .update_time_to_live()
-            .table_name(&tables.lists)
-            .time_to_live_specification(ttl)
-            .send()
-            .await
-            .map_err(|error| unavailable(&format!("turning on TTL of {}", tables.lists), error))?;
-        Ok(())
     }
 
     /// The tables, as given.

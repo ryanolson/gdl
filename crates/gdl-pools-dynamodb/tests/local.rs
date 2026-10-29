@@ -33,6 +33,8 @@ use gdl_pools_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
 
 // In a directory of its own, so that cargo does not take it for a test
 // target.
+#[path = "local/ensure.rs"]
+mod ensure;
 #[path = "local/interleave.rs"]
 mod interleave;
 
@@ -86,7 +88,7 @@ async fn tables(client: &Client) -> Tables {
         records: format!("gdl-pools-{run}-{n}"),
         lists: format!("gdl-lists-{run}-{n}"),
     };
-    DynamoDirectory::create_tables(client, &tables)
+    DynamoDirectory::ensure_tables(client, &tables)
         .await
         .expect("the tables");
     tables
