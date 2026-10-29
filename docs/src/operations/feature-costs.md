@@ -255,7 +255,7 @@ The step that finds a pool's tier is a function out of line, as it was before th
 - **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 pools.
 - **The tier step inlined into the pass.** It cut those instructions in a pick over every pool. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
 
-The pass calls the filter before the tier step, so a pool the filter drops costs no call to it. With the tier step first, a pick of one model under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one model back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every pool then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every pool, eligible or not, so a costly filter over many pools that are not eligible runs more often than before. The choice does not change, since a filter answers for a pool from that pool alone.
+The pass calls the filter before the tier step, so a pool the filter drops costs no call to it. With the tier step first, a pick of one shard under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one shard back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every pool then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every pool, eligible or not, so a costly filter over many pools that are not eligible runs more often than before. The choice does not change, since a filter answers for a pool from that pool alone.
 
 A pool that is gone is checked in each policy's pass by `Damped::is_gone` ([A pool that is gone](#a-pool-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any pool is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each pool.
 
@@ -265,7 +265,7 @@ Measured with `crates/gdl/benches/choose.rs`: 12 pools of 4 models in 2 regions,
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
 ```
 
-| Commit | `home_first`, every pool | `home_first`, one model | `home_first`, own thresholds | `round_robin`, every pool |
+| Commit | `home_first`, every pool | `home_first`, one shard | `home_first`, own thresholds | `round_robin`, every pool |
 |---|---|---|---|---|
 | `523afc0` | 103.6 to 103.7 ns | 84.9 to 85.2 ns | | 30.8 ns |
 | `488d3e9`, gone pools | 107.6 to 107.7 ns | 89.1 to 89.8 ns | | 37.9 to 38.2 ns |
@@ -284,7 +284,7 @@ perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/pick
 perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/picks <policy> 20000000
 ```
 
-| Commit | `home_first`: instructions, branches | one model: instructions, branches | `round_robin`: instructions, branches |
+| Commit | `home_first`: instructions, branches | one shard: instructions, branches | `round_robin`: instructions, branches |
 |---|---|---|---|
 | `523afc0` | 1,531.9, 348.2 | 1,806.0, 403.0 | 569.5, 176.0 |
 | `488d3e9`, gone pools | 1,588.9, 361.2 | 1,822.0, 420.0 | 796.0, 190.0 |
@@ -293,19 +293,19 @@ perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/pick
 | tier step inlined | 1,620.9, 369.2 | 2,164.0, 393.0 | 621.0, 195.5 |
 | this design | 1,620.9, 369.2 | 1,855.0, 428.0 | 621.0, 195.5 |
 
-The rows come from one form of the program. As committed, its loop runs 2 more instructions per pick, with the same branches: 1,622.9, 1,857.0, and 623.0 instructions at this design. Each step in time comes with a step in instructions, so it is work, not where the code is placed. Over `523afc0`, this design runs 89 more instructions and 21 more branches per `home_first` pick, 49 more per pick of one model, and 52 more per `round_robin` pick. That is about 7 instructions and 2 branches for each pool, where the pass checks for a gone pool. It is the price of passing over gone pools, and in time it is 2.2 to 2.7 ns per `home_first` pick and 1.9 to 2.1 ns per `round_robin` pick. A pick of one model is 5.3 to 5.7 ns faster than at `523afc0`.
+The rows come from one form of the program. As committed, its loop runs 2 more instructions per pick, with the same branches: 1,622.9, 1,857.0, and 623.0 instructions at this design. Each step in time comes with a step in instructions, so it is work, not where the code is placed. Over `523afc0`, this design runs 89 more instructions and 21 more branches per `home_first` pick, 49 more per pick of one shard, and 52 more per `round_robin` pick. That is about 7 instructions and 2 branches for each pool, where the pass checks for a gone pool. It is the price of passing over gone pools, and in time it is 2.2 to 2.7 ns per `home_first` pick and 1.9 to 2.1 ns per `round_robin` pick. A pick of one shard is 5.3 to 5.7 ns faster than at `523afc0`.
 
 On `fb363e8c`, whose `PoolRequest` holds one more field, the committed program counts 5 more instructions per pick, with this design and without it. There, this design runs 1,627.9, 1,862.0, and 628.0 instructions per pick, against 1,803.9, 2,234.0, and 803.0 without it. In time, on the same host and core:
 
 | Pick | `fb363e8c` | `fb363e8c` with this design |
 |---|---|---|
 | `home_first`, every pool | 116.8 to 117.1 ns | 107.2 to 107.5 ns |
-| `home_first`, one model | 93.3 to 95.9 ns | 85.3 to 86.2 ns |
+| `home_first`, one shard | 93.3 to 95.9 ns | 85.3 to 86.2 ns |
 | `round_robin`, every pool | 39.0 to 39.8 ns | 30.0 to 30.1 ns |
 
-The pick of one model took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
+The pick of one shard took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
 
-These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before ran fewer instructions per pick of one model until the filter went first ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
+These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before ran fewer instructions per pick of one shard until the filter went first ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
 
 A chooser's own pick, through the runtime, over four idle pools, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
 
@@ -330,7 +330,7 @@ RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example picks
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/picks <policy> 1000   # and 2000
 ```
 
-| Callgrind Ir per pick, B / E | `home_first`, every pool | `home_first`, one model | `round_robin`, every pool |
+| Callgrind Ir per pick, B / E | `home_first`, every pool | `home_first`, one shard | `round_robin`, every pool |
 |---|---|---|---|
 | `cf2b60d` | 2,109.8 / 1,848.2 | 1,214.0 / 1,235.0 | 846.5 / 360.5 |
 | `8c651a3`, and main | 2,045.8 / 1,892.6 | 2,102.0 / 2,124.0 | 649.5 / 362.5 |
@@ -344,15 +344,15 @@ export CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1   # fat 
 taskset -c 7 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
 ```
 
-| Time, ns, B / E | `home_first`, every pool | `home_first`, one model | `round_robin`, every pool |
+| Time, ns, B / E | `home_first`, every pool | `home_first`, one shard | `round_robin`, every pool |
 |---|---|---|---|
 | `cf2b60d` | 185.5 to 187.0 / 172.4 to 174.7 | 79.8 to 81.4 / 75.2 to 75.5 | 73.1 to 74.1 / 24.3 to 25.2 |
 | `8c651a3` | 183.9 to 186.0 / 172.3 to 172.5 | 146.2 to 146.6 / 157.9 to 158.7 | 46.5 to 46.8 / 24.7 to 25.3 |
 | main | 184.6 to 186.7 / 172.1 to 172.4 | 146.3 to 148.0 / 156.9 to 161.1 | 46.4 to 46.6 / 24.7 to 26.4 |
 | filter first | 181.6 to 184.7 / 173.3 to 175.4 | 76.8 to 78.2 / 77.5 to 78.4 | 49.1 / 24.7 to 24.9 |
 
-- **The tier step out of line is the cost.** Inlined again, it brings a pick of one model to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every pool then runs 133 more.
-- **With the filter first, a pick of one model runs 273 to 277 fewer instructions than at `cf2b60d`, and about 1,160 fewer than at main.** It takes 76.8 to 78.4 ns, against 146.3 to 161.1 ns at main. Against `cf2b60d`, it is 1.6 to 4.6 ns faster under B and 2.0 to 3.2 ns slower under E.
+- **The tier step out of line is the cost.** Inlined again, it brings a pick of one shard to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every pool then runs 133 more.
+- **With the filter first, a pick of one shard runs 273 to 277 fewer instructions than at `cf2b60d`, and about 1,160 fewer than at main.** It takes 76.8 to 78.4 ns, against 146.3 to 161.1 ns at main. Against `cf2b60d`, it is 1.6 to 4.6 ns faster under B and 2.0 to 3.2 ns slower under E.
 - **The picks over every pool run within 3 instructions of main.** In time, `round_robin` under B takes 2.5 to 2.8 ns more, and `home_first` under E 0.9 to 3.3 ns more. With the same instructions, a change of that size is within what code placement alone moves a pick ([Release profiles](benchmarking.md#release-profiles)).
 
 ## Reading the followed pools

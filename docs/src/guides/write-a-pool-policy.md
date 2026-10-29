@@ -10,12 +10,12 @@ A policy's `Head` is what it reads of the request's head, as for a [selector](wr
 - `gdl::Encoded`, the bytes only, with no decode;
 - `gdl::Projected<P>`, a part of the head: a type `P` that declares some of the edge type's fields, under the same names and types.
 
-A request that crosses into a model's class often carries a large body and a small hint. A projection reads the hint and skips the body:
+A request that crosses into a class often carries a large body and a small hint. A projection reads the hint and skips the body:
 
 ```rust
 use gdl::Projection;
 
-/// What crosses into the model's class.
+/// What crosses into the class.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Routed {
     pub request: Internal,
@@ -24,7 +24,7 @@ pub struct Routed {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Hint {
-    pub model: String,
+    pub shard: String,
     pub fingerprint: [u8; 16],
     pub first_turn: bool,
 }
@@ -46,17 +46,17 @@ The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips 
 ```rust
 use gdl::{Pool, PoolChoice, PoolPolicy, PoolRequest, NoPool, Projected};
 
-/// The first pool that serves the request's model.
-struct ByModel;
+/// The first pool that serves the request's shard.
+struct ByShard;
 
-impl PoolPolicy for ByModel {
+impl PoolPolicy for ByShard {
     type Head = Projected<Hinted>;
 
     fn choose(&self, request: PoolRequest<'_, Projected<Hinted>>, pools: &[Pool]) -> Result<PoolChoice, NoPool> {
-        let model = request.head().hint.model.as_str();
-        let serves = |pool: &Pool| pool.name().starts_with(model);
+        let shard = request.head().hint.shard.as_str();
+        let serves = |pool: &Pool| pool.name().starts_with(shard);
         if !pools.iter().any(serves) {
-            return Err(NoPool::because(format!("no pool serves model `{model}`")));
+            return Err(NoPool::because(format!("no pool serves shard `{shard}`")));
         }
         let at = pools
             .iter()
@@ -68,7 +68,7 @@ impl PoolPolicy for ByModel {
 ```
 
 - Return a `PoolChoice` of the index in `pools` of the pool to offer this attempt to, or a `NoPool` when no pool may take it. A `NoPool` fails the request with `Routing`.
-- Give a `NoPool` a short reason with `NoPool::because` when the error should say why, such as the model that no pool serves. The error then reads ``pool policy `by_model` of class `model` chose no pool for segment `d`: no pool serves model `mistral` ``. `NoPool::new()` gives no reason, and the error says that no ready pool has an instance of the segment.
+- Give a `NoPool` a short reason with `NoPool::because` when the error should say why, such as the shard that no pool serves. The error then reads ``pool policy `by_shard` of class `model` chose no pool for segment `d`: no pool serves shard `mistral` ``. `NoPool::new()` gives no reason, and the error says that no ready pool has an instance of the segment.
 - A reason is a `Cow<'static, str>`. A fixed `&'static str` allocates nothing. A reason that you `format!` allocates only when no pool is chosen. The reason reaches the error only on the first attempt. After a decline, the request fails with the last pool's refusal, unless the chooser holds every pool that declined it gone and the policy chooses no other pool: then it fails with `Routing` and the reason.
 - Skip a pool that `request.is_excluded` names: it declined this request, or it declined an offer as gone and its follow has not changed since (`request.damped().is_gone(pool)`).
 - `request` also gives the chooser's region, the clock, the damped pools (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
@@ -77,19 +77,19 @@ impl PoolPolicy for ByModel {
 
 ### Choose as gdl's own policies do, among the pools you keep
 
-A policy often filters the pools first, then wants to choose among the rest by load and region. `HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over only the pools a filter keeps. They return an index into all of `pools`, and allocate nothing. `ByModel` written this way chooses as `home_first` does among its model's pools:
+A policy often filters the pools first, then wants to choose among the rest by load and region. `HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over only the pools a filter keeps. They return an index into all of `pools`, and allocate nothing. `ByShard` written this way chooses as `home_first` does among its shard's pools:
 
 ```rust
 use gdl::HomeFirst;
 use tokio::time::Instant;
 
-impl PoolPolicy for ByModel {
+impl PoolPolicy for ByShard {
     type Head = Projected<Hinted>;
 
     fn choose(&self, request: PoolRequest<'_, Projected<Hinted>>, pools: &[Pool]) -> Result<PoolChoice, NoPool> {
-        let model = request.head().hint.model.as_str();
+        let shard = request.head().hint.shard.as_str();
         let at = HomeFirst
-            .choose_where(request, pools, |pool| pool.name().starts_with(model))
+            .choose_where(request, pools, |pool| pool.name().starts_with(shard))
             .ok_or_else(NoPool::new)?;
         Ok(PoolChoice::new(at))
     }
@@ -151,12 +151,12 @@ let pools = [
     Pool::new("model", "qwen-1", "us-east-1", PoolState::Ready).with_entries(1).with_load(idle),
 ];
 let cx = Cx::new();
-let head = Projected(Hinted { hint: Hint { model: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
+let head = Projected(Hinted { hint: Hint { shard: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
 let request = PoolRequest::new(&cx, &head, "us-east-1", now);
-assert_eq!(ByModel.choose(request, &pools).map(|choice| choice.at()), Ok(1));
+assert_eq!(ByShard.choose(request, &pools).map(|choice| choice.at()), Ok(1));
 ```
 
-Both versions of `ByModel` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
+Both versions of `ByShard` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
 
 ## 4. Bind it in the spec
 
@@ -166,14 +166,14 @@ For a generated binary, implement `gdl::Build` too: the segment builds the polic
 use gdl::Build;
 
 #[derive(serde::Deserialize)]
-struct ByModelSettings {}
+struct ByShardSettings {}
 
-impl Build for ByModel {
-    type Config = ByModelSettings;
+impl Build for ByShard {
+    type Config = ByShardSettings;
     type Metrics = ();
 
-    async fn build(_: ByModelSettings, (): ()) -> gdl::Result<Self> {
-        Ok(ByModel)
+    async fn build(_: ByShardSettings, (): ()) -> gdl::Result<Self> {
+        Ok(ByShard)
     }
 }
 ```
@@ -181,22 +181,22 @@ impl Build for ByModel {
 Then name its crate and type in the spec, under the name the placement uses:
 
 ```toml
-[pool_policy.by_model]
+[pool_policy.by_shard]
 crate = "router"
 path = "router"
-type = "router::ByModel"
+type = "router::ByShard"
 ```
 
-- `cargo gdl check` reads the crate and refuses a type that the crate does not offer as a pool policy. Write the type from the crate's root, as `router::ByModel`, and make it reachable there.
+- `cargo gdl check` reads the crate and refuses a type that the crate does not offer as a pool policy. Write the type from the crate's root, as `router::ByShard`, and make it reachable there.
 - `cargo gdl check` compares the policy's `Head` with the request that crosses into each class that names it, as the chooser does when it starts. A message must be the edge's message, and a projection's `Of` must be too: the same type from the same package, not one of the same name. `()` fits only a request of `()`, and `Encoded` fits any. A projection on an edge encoded as `msgpack_array` is refused. A spec with a `[contract]` crate is not checked this way.
-- Each segment that chooses pools of a class named `by_model` in `[pools.<class>] policy` depends on the crate. No other segment does.
-- That segment builds the policy from the `[pool_policy.by_model]` table of its settings file, or `GDL_POOL_POLICY__BY_MODEL__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
+- Each segment that chooses pools of a class named `by_shard` in `[pools.<class>] policy` depends on the crate. No other segment does.
+- That segment builds the policy from the `[pool_policy.by_shard]` table of its settings file, or `GDL_POOL_POLICY__BY_SHARD__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
 - Under a hub, the instance registers first, then waits for the policy's `ready`, with its nodes' and selectors', before it announces itself as loaded.
 - The spec can name the crate by `version`, or by `git` with `rev` (and `lib` when the library has another name), in place of `path`. `cargo gdl compose` needs `--local` only for a crate named by `path`, and `cargo gdl export` writes an archive that builds anywhere only when no crate is named by `path`.
 
 ## 5. Or register it in code
 
-In an in-process deployment, add it to the `RuntimeConfig` with `config.pool_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.pool_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.pool_policy("by_model", ByModel)?` in `build`, or `builder.build_pool_policy::<ByModel>("by_model", table).await?` to build it from a settings table as a generated segment does, with its `ready` waited for after the instance registers.
+In an in-process deployment, add it to the `RuntimeConfig` with `config.pool_policies.add("by_shard", ByShard)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.pool_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.pool_policy("by_shard", ByShard)?` in `build`, or `builder.build_pool_policy::<ByShard>("by_shard", table).await?` to build it from a settings table as a generated segment does, with its `ready` waited for after the instance registers.
 
 A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, and has at most 64 characters. It cannot be `home_first` or `round_robin`, and it can be registered once.
 
@@ -204,7 +204,7 @@ A name is lowercase letters and digits in words joined by single `_`s, starts wi
 
 ```toml
 [pools.model]
-policy = "by_model"
+policy = "by_shard"
 ```
 
 The placement hash covers the name. A chooser refuses to launch when nothing registers the name and gdl does not have it, and names the policy and the class.

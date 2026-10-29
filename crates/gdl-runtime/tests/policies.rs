@@ -25,13 +25,13 @@ use gdl_runtime::{
 use serde::{Deserialize, Serialize};
 
 /// Every segment: `a` (S, the frontend, which chooses) in `global`, and
-/// `d` (D, the model) in `model`.
+/// `d` (D, the shard) in `model`.
 const SEGMENTS: &[&str] = &["a", "d"];
 
 const LLAMA: &str = "llama-01-us-east-1";
 const QWEN: &str = "qwen-01-us-east-1";
 
-/// What the frontend sends into the model's class: the request, and the
+/// What the frontend sends into the model class: the request, and the
 /// hint a router reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Routed {
@@ -39,7 +39,7 @@ struct Routed {
     hint: Hint,
 }
 
-/// The request a model serves: here about 100 KB of messages.
+/// The request a shard serves: here about 100 KB of messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Internal {
     messages: Vec<String>,
@@ -47,7 +47,7 @@ struct Internal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Hint {
-    model: String,
+    shard: String,
     fingerprint: [u8; 16],
     first_turn: bool,
 }
@@ -59,11 +59,11 @@ struct Hinted {
     hint: Hint,
 }
 
-/// The pool whose name starts with the request's model; a model that no
+/// The pool whose name starts with the request's shard; a shard that no
 /// pool serves is named in the request's error.
-struct ByModel;
+struct ByShard;
 
-impl PoolPolicy for ByModel {
+impl PoolPolicy for ByShard {
     type Head = Projected<Hinted>;
 
     fn choose(
@@ -71,10 +71,10 @@ impl PoolPolicy for ByModel {
         request: PoolRequest<'_, Projected<Hinted>>,
         pools: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        let model = request.head().hint.model.as_str();
-        let serves = |pool: &Pool| pool.name().starts_with(model);
+        let shard = request.head().hint.shard.as_str();
+        let serves = |pool: &Pool| pool.name().starts_with(shard);
         if !pools.iter().any(serves) {
-            return Err(NoPool::because(format!("no pool serves model `{model}`")));
+            return Err(NoPool::because(format!("no pool serves shard `{shard}`")));
         }
         pools
             .iter()
@@ -200,13 +200,13 @@ fn chooser_settings(
     config
 }
 
-fn routed(model: &str) -> Routed {
+fn routed(shard: &str) -> Routed {
     Routed {
         request: Internal {
             messages: vec!["x".repeat(1000); 100],
         },
         hint: Hint {
-            model: model.into(),
+            shard: shard.into(),
             fingerprint: [7; 16],
             first_turn: true,
         },
@@ -214,17 +214,17 @@ fn routed(model: &str) -> Routed {
 }
 
 /// Two model pools of one class, and a frontend whose policy reads only
-/// the request's hint: two requests that differ only in the hint's model
-/// reach different pools, each the pool that serves the model, with the
-/// whole request. A model no pool serves fails with `Routing`, which
-/// names the model as the policy gave it.
+/// the request's hint: two requests that differ only in the hint's shard
+/// reach different pools, each the pool that serves the shard, with the
+/// whole request. A shard no pool serves fails with `Routing`, which
+/// names the shard as the policy gave it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_hint_chooses_the_pool_across_the_class_cut() {
-    let spec = spec("by_model");
+    let spec = spec("by_shard");
     let directory = Resolving::new();
     let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let mut policies = PoolPolicies::new();
-    policies.add("by_model", ByModel).expect("registered");
+    policies.add("by_shard", ByShard).expect("registered");
     let config = chooser_settings(&global, policies);
     let chooser = run_graph_in(
         &config,
@@ -236,7 +236,7 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
     )
     .await
     .expect("the chooser serves");
-    let mut models = Vec::new();
+    let mut instances = Vec::new();
     for (pool, hub_name) in [(LLAMA, "llama-hub:1337"), (QWEN, "qwen-hub:1337")] {
         let (hub, _) = pool_hub_of(&spec, model_hub(pool, hub_name), &directory).await;
         let config = settings(
@@ -247,7 +247,7 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
                 "[pool]\nname = '{pool}'\nclass = 'model'\nregion = '{REGION}'\ndirectory = 'memory'\n{RUNTIME}"
             ),
         );
-        let model = run_graph_in(
+        let instance = run_graph_in(
             &config,
             "d",
             SEGMENTS,
@@ -257,7 +257,7 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
         )
         .await
         .expect("a model instance serves");
-        models.push((hub, model));
+        instances.push((hub, instance));
     }
     let pools = chooser.pools.clone().expect("the frontend chooses");
     until(&pools, "both model pools ready", |pools| {
@@ -267,8 +267,8 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
         })
     })
     .await;
-    let ask = |model: &str| {
-        let request = routed(model);
+    let ask = |shard: &str| {
+        let request = routed(shard);
         let segment = Arc::clone(&chooser.segment);
         async move {
             tokio::time::timeout(WAIT, async {
@@ -279,23 +279,23 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
             .expect("answered in time")
         }
     };
-    for (model, pool) in [("qwen", QWEN), ("llama", LLAMA), ("qwen", QWEN)] {
-        let answer = ask(model).await.expect("answered");
+    for (shard, pool) in [("qwen", QWEN), ("llama", LLAMA), ("qwen", QWEN)] {
+        let answer = ask(shard).await.expect("answered");
         assert_eq!(answer.len(), 1, "{answer:?}");
         assert_eq!(
             answer[0].as_ref().expect("an answer"),
             &format!("{pool}:100"),
-            "{model}"
+            "{shard}"
         );
     }
     let error = ask("mistral").await.expect_err("no pool serves mistral");
     assert_eq!(error.kind(), gdl::ErrorKind::Routing, "{error}");
     let message = error.to_string();
-    for part in ["`model`", "by_model", "no pool serves model `mistral`"] {
+    for part in ["`model`", "by_shard", "no pool serves shard `mistral`"] {
         assert!(message.contains(part), "{part}: {message}");
     }
-    for (hub, model) in models {
-        model.stop().await;
+    for (hub, instance) in instances {
+        instance.stop().await;
         hub.shutdown().await.expect("valid test fixture");
     }
     chooser.stop().await;
@@ -307,7 +307,7 @@ async fn the_hint_chooses_the_pool_across_the_class_cut() {
 /// and the class; with the policy registered, it launches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unregistered_policy_is_refused_at_launch() {
-    let spec = spec("by_model");
+    let spec = spec("by_shard");
     let directory = Resolving::new();
     let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let launch = |policies: PoolPolicies| {
@@ -330,11 +330,11 @@ async fn an_unregistered_policy_is_refused_at_launch() {
     let message = error.to_string();
     assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{message}");
     assert!(
-        message.contains("by_model") && message.contains("[pools.model]"),
+        message.contains("by_shard") && message.contains("[pools.model]"),
         "{message}"
     );
     let mut policies = PoolPolicies::new();
-    policies.add("by_model", ByModel).expect("registered");
+    policies.add("by_shard", ByShard).expect("registered");
     launch(policies)
         .await
         .expect("a registered policy launches");
@@ -377,7 +377,7 @@ async fn a_projection_of_another_type_is_refused_at_start() {
 }
 
 /// The frontend as a hand-written segment binary, which registers
-/// `by_model` in its `build` when `REGISTERS`, and whose serving body
+/// `by_shard` in its `build` when `REGISTERS`, and whose serving body
 /// returns at once.
 struct Frontend<const REGISTERS: bool>;
 
@@ -394,13 +394,13 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
         builder: &gdl_runtime::Builder,
     ) -> Result<(), gdl_runtime::Failure> {
         if REGISTERS {
-            builder.pool_policy("by_model", ByModel)?;
+            builder.pool_policy("by_shard", ByShard)?;
         }
         Ok(())
     }
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
-        Ok(spec("by_model"))
+        Ok(spec("by_shard"))
     }
 
     fn start(
@@ -409,7 +409,7 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
         roster: &gdl_runtime::Roster,
         runtime: gdl_runtime::RuntimeConfig,
     ) -> gdl::Result<gdl_runtime::Serving> {
-        let spec = spec("by_model");
+        let spec = spec("by_shard");
         let deployment = Deployment::new(node, &spec.graph, &spec.placement, "a", roster, runtime)?;
         let root = graph(&deployment, "frontend")?;
         let segment = deployment.start(root)?;
@@ -419,11 +419,11 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
 
 /// A segment binary hands the policies its `build` registers to the
 /// launch, which checks the placement's names against them: with
-/// `by_model` registered, the frontend launches and serves; without, it
+/// `by_shard` registered, the frontend launches and serves; without, it
 /// is refused at launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_segment_binary_registers_a_policy_before_its_launch() {
-    let spec = spec("by_model");
+    let spec = spec("by_shard");
     let directory = Resolving::new();
     let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()
@@ -455,7 +455,7 @@ async fn a_segment_binary_registers_a_policy_before_its_launch() {
         .expect_err("a policy nothing registers");
     let message = error.to_string();
     assert!(
-        message.contains("by_model") && message.contains("[pools.model]"),
+        message.contains("by_shard") && message.contains("[pools.model]"),
         "{message}"
     );
     global.shutdown().await.expect("valid test fixture");
@@ -465,7 +465,7 @@ async fn a_segment_binary_registers_a_policy_before_its_launch() {
 static ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GATE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-/// `ByModel`, whose `ready` waits for `GATE`.
+/// `ByShard`, whose `ready` waits for `GATE`.
 struct Gated;
 
 impl gdl::Build for Gated {
@@ -491,12 +491,12 @@ impl PoolPolicy for Gated {
         request: PoolRequest<'_, Self::Head>,
         pools: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        ByModel.choose(request, pools)
+        ByShard.choose(request, pools)
     }
 }
 
 /// The frontend as a generated segment binary builds a bound policy: from
-/// its settings table, registered as `by_model`, with its readiness kept.
+/// its settings table, registered as `by_shard`, with its readiness kept.
 struct GatedFrontend;
 
 impl gdl_runtime::SegmentBinary for GatedFrontend {
@@ -511,11 +511,11 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
         _: common::pools::Nothing,
         builder: &gdl_runtime::Builder,
     ) -> Result<(), gdl_runtime::Failure> {
-        builder.build_pool_policy::<Gated>("by_model", None).await
+        builder.build_pool_policy::<Gated>("by_shard", None).await
     }
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
-        Ok(spec("by_model"))
+        Ok(spec("by_shard"))
     }
 
     fn start(
@@ -534,7 +534,7 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
     use velo::discovery::ServiceDiscovery as _;
-    let spec = spec("by_model");
+    let spec = spec("by_shard");
     let directory = Resolving::new();
     let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()
@@ -608,7 +608,7 @@ impl gdl_runtime::SegmentBinary for Counting {
     }
 
     fn deployment() -> gdl::Result<DeploymentSpec> {
-        Ok(spec("by_model"))
+        Ok(spec("by_shard"))
     }
 
     fn start(
@@ -634,7 +634,7 @@ impl gdl_runtime::SegmentBinary for Counting {
 /// the pools' families in it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_segment_binary_records_its_pool_choices() {
-    let spec = spec("by_model");
+    let spec = spec("by_shard");
     let directory = Resolving::new();
     let (global, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let dir = tempfile::Builder::new()

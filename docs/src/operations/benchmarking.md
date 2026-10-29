@@ -429,7 +429,7 @@ The instruction counts are `perf stat -e instructions:u` on cores 16 to 23 over 
 | `hop` `chunks/request` | 2,120 | 2,052 | 2,093 | 2,054 | 2,011 |
 | `hop` `chunks/stream` | 17,311 | 17,298 | 17,591 | 17,015 | 17,282 |
 | `choose/home_first/every pool` | 108.4 | 109.4 | 110.0 | 109.8 | 101.7 |
-| `choose/home_first/one model` | 84.0 | 79.0 | 80.4 | 79.5 | 80.3 |
+| `choose/home_first/one shard` | 84.0 | 79.0 | 80.4 | 79.5 | 80.3 |
 | `choose/home_first/own thresholds` | 117.9 | 121.1 | 125.3 | 121.3 | 113.9 |
 | `choose/round_robin/every pool` | 30.4 | 31.1 | 33.2 | 33.9 | 19.1 |
 | `followed/model` | 82.8 | 84.0 | 79.2 | 77.8 | 89.7 |
@@ -475,23 +475,23 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 | User instructions per pick, before and after | A | B | C | D | E |
 |---|---|---|---|---|---|
 | `home_first`, every pool | 1,804 / 1,628 | 1,869 / 1,713 | 1,892 / 1,756 | 1,895 / 1,760 | 1,593 / 1,591 |
-| `home_first`, one model | 2,234 / 1,862 | 1,260 / 1,905 | 1,258 / 1,907 | 1,273 / 1,966 | 1,281 / 1,888 |
+| `home_first`, one shard | 2,234 / 1,862 | 1,260 / 1,905 | 1,258 / 1,907 | 1,273 / 1,966 | 1,281 / 1,888 |
 | `round_robin`, every pool | 803 / 628 | 809 / 638 | 889 / 703 | 842 / 660 | 365 / 368 |
 
 - **Fat LTO nearly makes the change to `home_first` and `round_robin` over every pool.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
-- **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one model then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
+- **Under every LTO config, the change costs a pick of one shard 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one shard then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
 
 **gb300 history.** Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
 
 | User cycles per pick, before and after | A | B | E |
 |---|---|---|---|
 | `home_first`, every pool | 383 / 353 | 387 / 358 | 349 / 332 |
-| `home_first`, one model | 325 / 280 | 163 / 269 | 170 / 252 |
+| `home_first`, one shard | 325 / 280 | 163 / 269 | 170 / 252 |
 | `round_robin`, every pool | 125 / 101 | 130 / 103 | 65 / 76 |
 
-- **Under B and E, the commit before the change is 82 to 106 cycles faster on a pick of one model.** Under A the change saves 45 cycles.
+- **Under B and E, the commit before the change is 82 to 106 cycles faster on a pick of one shard.** Under A the change saves 45 cycles.
 - **Under E, the change still saves 17 cycles on `home_first` over every pool**, although the two commits run within 2 instructions of each other. So fat LTO does not quite make this part of the change in time.
-- **Some measurements are less firm.** Across the rounds, the `round_robin` measurements after the change varied by 31% of the median under A and 19% under B. The one-model measurements before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other measurements varied by 6% or less.
+- **Some measurements are less firm.** Across the rounds, the `round_robin` measurements after the change varied by 31% of the median under A and 19% under B. The one-shard measurements before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other measurements varied by 6% or less.
 
 **Inline accessors of a pool policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Pool`, `Load`, and `PoolRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/cell-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
 

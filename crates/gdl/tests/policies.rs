@@ -13,7 +13,7 @@ use gdl::{
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-/// What a frontend sends into a model's class: the request it serves,
+/// What a frontend sends into a shard's class: the request it serves,
 /// and the hint a router reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Routed {
@@ -28,7 +28,7 @@ struct Internal {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Hint {
-    model: String,
+    shard: String,
     fingerprint: [u8; 16],
     first_turn: bool,
 }
@@ -40,12 +40,12 @@ struct Hinted {
     hint: Hint,
 }
 
-/// Sends a request to a pool whose name starts with its model, and,
-/// among those, as `home_first` would. It names a model that no pool
+/// Sends a request to a pool whose name starts with its shard, and,
+/// among those, as `home_first` would. It names a shard that no pool
 /// serves.
-struct ByModel;
+struct ByShard;
 
-impl PoolPolicy for ByModel {
+impl PoolPolicy for ByShard {
     type Head = Projected<Hinted>;
 
     fn choose(
@@ -53,10 +53,10 @@ impl PoolPolicy for ByModel {
         request: PoolRequest<'_, Projected<Hinted>>,
         pools: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        let model = request.head().hint.model.as_str();
-        let serves = |pool: &Pool| pool.name().starts_with(model);
+        let shard = request.head().hint.shard.as_str();
+        let serves = |pool: &Pool| pool.name().starts_with(shard);
         if !pools.iter().any(serves) {
-            return Err(NoPool::because(format!("no pool serves model `{model}`")));
+            return Err(NoPool::because(format!("no pool serves shard `{shard}`")));
         }
         HomeFirst
             .choose_where(request, pools, serves)
@@ -93,26 +93,26 @@ fn pool(name: &str, region: &str, now: Instant) -> Pool {
         .with_load(idle(now))
 }
 
-fn hinted(model: &str) -> Projected<Hinted> {
+fn hinted(shard: &str) -> Projected<Hinted> {
     Projected(Hinted {
         hint: Hint {
-            model: model.into(),
+            shard: shard.into(),
             fingerprint: [7; 16],
             first_turn: true,
         },
     })
 }
 
-/// Two requests that differ only in their hint's model reach different
+/// Two requests that differ only in their hint's shard reach different
 /// pools of one class.
 #[test]
 fn the_hint_chooses_the_pool() {
     let now = Instant::now();
     let pools = [pool("llama-1", HOME, now), pool("qwen-1", HOME, now)];
     let cx = Cx::new();
-    let chosen = |model: &str| {
-        let head = hinted(model);
-        ByModel
+    let chosen = |shard: &str| {
+        let head = hinted(shard);
+        ByShard
             .choose(PoolRequest::new(&cx, &head, HOME, now), &pools)
             .map(|choice| choice.at())
     };
@@ -120,7 +120,7 @@ fn the_hint_chooses_the_pool() {
     assert_eq!(chosen("qwen"), Ok(1));
     assert_eq!(
         chosen("mistral"),
-        Err(NoPool::because("no pool serves model `mistral`"))
+        Err(NoPool::because("no pool serves shard `mistral`"))
     );
 }
 
@@ -140,11 +140,11 @@ fn a_policy_sees_what_the_runtime_gives_it() {
     let request = PoolRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
     assert_eq!(request.region(), HOME);
     assert_eq!(request.now(), now);
-    assert_eq!(ByModel.choose(request, &pools).map(|c| c.at()), Ok(1));
+    assert_eq!(ByShard.choose(request, &pools).map(|c| c.at()), Ok(1));
     let excluded = [pools[0].id(), pools[1].id()];
     let request = PoolRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
     assert_eq!(
-        ByModel.choose(request, &pools).map(|c| c.at()),
+        ByShard.choose(request, &pools).map(|c| c.at()),
         Err(NoPool::new()),
         "a draining pool, with no reason"
     );
@@ -161,8 +161,8 @@ fn a_policy_sees_what_the_runtime_gives_it() {
 
 /// A policy that filters the pools chooses among the ones it keeps as
 /// `home_first` or `round_robin` would, and gets an index into all of
-/// them: the model's pool elsewhere while its home pool is saturated,
-/// never another model's pool, and the model's pools in turn.
+/// them: the shard's pool elsewhere while its home pool is saturated,
+/// never another shard's pool, and the shard's pools in turn.
 #[test]
 fn a_policy_chooses_as_gdls_own_among_the_pools_it_keeps() {
     let now = Instant::now();
@@ -182,12 +182,12 @@ fn a_policy_chooses_as_gdls_own_among_the_pools_it_keeps() {
         pool("qwen-2", AWAY, now),
     ];
     let cx = Cx::new();
-    let chosen = |model: &str| -> BTreeSet<usize> {
-        let head = hinted(model);
+    let chosen = |shard: &str| -> BTreeSet<usize> {
+        let head = hinted(shard);
         (0..64)
             .filter_map(|turn| {
                 let request = PoolRequest::new(&cx, &head, HOME, now).with_turn(turn);
-                ByModel
+                ByShard
                     .choose(request, &pools)
                     .ok()
                     .map(|choice| choice.at())
@@ -235,14 +235,14 @@ fn the_guide_fixture_works_with_home_first() {
 
     assert_eq!(
         pools.iter().position(|pool| {
-            pool.name().starts_with(request.head().hint.model.as_str())
+            pool.name().starts_with(request.head().hint.shard.as_str())
                 && pool.takes_work()
                 && !request.is_excluded(pool)
         }),
         Some(1),
         "the guide's first policy works with this fixture"
     );
-    assert_eq!(ByModel.choose(request, &pools).map(|c| c.at()), Ok(1));
+    assert_eq!(ByShard.choose(request, &pools).map(|c| c.at()), Ok(1));
 }
 
 /// gdl's own policies take the same inputs that a policy crate builds:
@@ -295,18 +295,18 @@ fn home_first_runs_on_inputs_a_policy_crate_builds() {
 #[test]
 fn a_policy_is_registered_by_name() {
     let mut policies = PoolPolicies::new();
-    policies.add("by_model", ByModel).expect("registered");
-    assert!(policies.contains("by_model"));
+    policies.add("by_shard", ByShard).expect("registered");
+    assert!(policies.contains("by_shard"));
     let twice = policies
-        .add("by_model", ByModel)
+        .add("by_shard", ByShard)
         .expect_err("registered twice");
-    assert!(twice.to_string().contains("by_model"), "{twice}");
+    assert!(twice.to_string().contains("by_shard"), "{twice}");
     for name in ["home_first", "round_robin"] {
-        let error = policies.add(name, ByModel).expect_err("a built-in name");
+        let error = policies.add(name, ByShard).expect_err("a built-in name");
         assert!(error.to_string().contains(name), "{error}");
     }
-    for name in ["ByModel", "by__model", "by_model_", ""] {
-        assert!(policies.add(name, ByModel).is_err(), "{name:?} was taken");
+    for name in ["ByShard", "by__shard", "by_shard_", ""] {
+        assert!(policies.add(name, ByShard).is_err(), "{name:?} was taken");
     }
 }
 
@@ -337,7 +337,7 @@ impl PoolPolicy for ByUnrenamed {
         request: PoolRequest<'_, Projected<Unrenamed>>,
         _: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        (!request.head().hint.model.is_empty())
+        (!request.head().hint.shard.is_empty())
             .then(|| PoolChoice::new(0))
             .ok_or_else(NoPool::new)
     }

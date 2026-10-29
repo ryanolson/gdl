@@ -1,7 +1,7 @@
-//! What gdl's own pool policies cost per pick, over 12 pools of 4 models
+//! What gdl's own pool policies cost per pick, over 12 pools of 4 shards
 //! in 2 regions, all `ready`, fresh, and under their limits, with no pool
 //! damped or gone: `home_first` over every pool, `home_first` over the 3
-//! pools of one model (as a policy that filters by model runs it, through
+//! pools of one shard (as a policy that filters by shard runs it, through
 //! `choose_where`), `home_first` at thresholds other than the defaults
 //! (`HomeFirstAt`, as a chooser with its own settings runs it), and
 //! `round_robin` over every pool. The table is the one
@@ -21,11 +21,11 @@ use tokio::time::Instant;
 const CLASS: &str = "sets";
 const HOME: &str = "us-east-1";
 
-/// 3 pools of each of 4 models, the third of each in another region, with
+/// 3 pools of each of 4 shards, the third of each in another region, with
 /// 0, 10, and 20 of 100 roots admitted, sorted by name.
 fn pools(now: Instant) -> Vec<Pool> {
     let mut pools = Vec::new();
-    for model in ["llama", "qwen", "c", "other"] {
+    for shard in ["llama", "qwen", "c", "other"] {
         for n in 0..3u64 {
             let region = if n == 2 { "eu-west-1" } else { HOME };
             let load = LoadSummary {
@@ -38,7 +38,7 @@ fn pools(now: Instant) -> Vec<Pool> {
             pools.push(
                 Pool::new(
                     CLASS,
-                    format!("{model}-{n:02}-{region}"),
+                    format!("{shard}-{n:02}-{region}"),
                     region,
                     PoolState::Ready,
                 )
@@ -66,13 +66,13 @@ fn choose(c: &mut Criterion) {
                 .map_or(usize::MAX, |choice| choice.at())
         });
     });
-    group.bench_function("home_first/one model", |b| {
+    group.bench_function("home_first/one shard", |b| {
         b.iter(|| {
             turn += 1;
             let request = PoolRequest::new(&cx, &Encoded, HOME, now).with_turn(turn);
-            let model = black_box("qwen-");
+            let shard = black_box("qwen-");
             HomeFirst.choose_where(request, black_box(&pools), |pool| {
-                pool.name().starts_with(model)
+                pool.name().starts_with(shard)
             })
         });
     });

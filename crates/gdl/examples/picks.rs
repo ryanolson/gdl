@@ -2,7 +2,7 @@
 //! `benches/choose.rs`, for `perf stat` to count a pick's instructions:
 //! run it at two counts and divide the difference by the difference in
 //! picks, so that the setup cancels. `<policy>` is `home_first`,
-//! `one_model` (`home_first` through `choose_where`, keeping one model's 3
+//! `one_shard` (`home_first` through `choose_where`, keeping one shard's 3
 //! pools), or `round_robin`.
 //!
 //! ```text
@@ -40,7 +40,7 @@ fn main() {
             "home_first" => HomeFirst
                 .choose(request, black_box(&pools))
                 .map_or(usize::MAX, |choice| choice.at()),
-            "one_model" => HomeFirst
+            "one_shard" => HomeFirst
                 .choose_where(request, black_box(&pools), |pool| {
                     pool.name().starts_with(black_box("qwen-"))
                 })
@@ -48,17 +48,17 @@ fn main() {
             "round_robin" => RoundRobin
                 .choose(request, black_box(&pools))
                 .map_or(usize::MAX, |choice| choice.at()),
-            other => panic!("no policy `{other}`: home_first, one_model, or round_robin"),
+            other => panic!("no policy `{other}`: home_first, one_shard, or round_robin"),
         });
     }
     println!("{}", black_box(sink));
 }
 
-/// The bench's pools: 3 of each of 4 models, the third of each in another
+/// The bench's pools: 3 of each of 4 shards, the third of each in another
 /// region, with 0, 10, and 20 of 100 roots admitted, sorted by name.
 fn pools(now: Instant) -> Vec<Pool> {
     let mut pools = Vec::new();
-    for model in ["llama", "qwen", "c", "other"] {
+    for shard in ["llama", "qwen", "c", "other"] {
         for n in 0..3u64 {
             let region = if n == 2 { "eu-west-1" } else { HOME };
             let load = LoadSummary {
@@ -71,7 +71,7 @@ fn pools(now: Instant) -> Vec<Pool> {
             pools.push(
                 Pool::new(
                     "sets",
-                    format!("{model}-{n:02}-{region}"),
+                    format!("{shard}-{n:02}-{region}"),
                     region,
                     PoolState::Ready,
                 )

@@ -26,7 +26,7 @@ struct Routed {
 
 #[derive(Serialize, Deserialize)]
 struct Internal {
-    model: String,
+    shard: String,
     messages: Vec<Message>,
     max_tokens: u32,
 }
@@ -39,7 +39,7 @@ struct Message {
 
 #[derive(Serialize, Deserialize)]
 struct Hint {
-    model: String,
+    shard: String,
     fingerprint: [u8; 16],
     first_turn: bool,
 }
@@ -61,10 +61,10 @@ impl PoolPolicy for Whole {
         request: PoolRequest<'_, Routed>,
         pools: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        let model = &request.head().hint.model;
+        let shard = &request.head().hint.shard;
         pools
             .iter()
-            .position(|pool| pool.name() == model)
+            .position(|pool| pool.name() == shard)
             .map(PoolChoice::new)
             .ok_or_else(NoPool::new)
     }
@@ -81,10 +81,10 @@ impl PoolPolicy for Hinting {
         request: PoolRequest<'_, Projected<Hinted>>,
         pools: &[Pool],
     ) -> Result<PoolChoice, NoPool> {
-        let model = &request.head().hint.model;
+        let shard = &request.head().hint.shard;
         pools
             .iter()
-            .position(|pool| pool.name() == model)
+            .position(|pool| pool.name() == shard)
             .map(PoolChoice::new)
             .ok_or_else(NoPool::new)
     }
@@ -94,7 +94,7 @@ impl PoolPolicy for Hinting {
 fn routed() -> Routed {
     Routed {
         request: Internal {
-            model: "llama".into(),
+            shard: "llama".into(),
             messages: (0..100)
                 .map(|at| Message {
                     role: if at % 2 == 0 { "user" } else { "assistant" }.into(),
@@ -104,7 +104,7 @@ fn routed() -> Routed {
             max_tokens: 512,
         },
         hint: Hint {
-            model: "llama".into(),
+            shard: "llama".into(),
             fingerprint: [7; 16],
             first_turn: false,
         },
