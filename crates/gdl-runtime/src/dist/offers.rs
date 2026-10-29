@@ -171,7 +171,7 @@ pub(crate) struct Refused {
 
 /// Why an entry refused a forward hand-off before it admitted anything,
 /// with the reason a chooser in another class reads: [`Decline::Full`]
-/// for every refusal but a gone pool's.
+/// unless the refusal says otherwise.
 pub(crate) struct Refusal {
     pub(crate) error: Error,
     pub(crate) decline: Decline,

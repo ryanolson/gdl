@@ -410,8 +410,9 @@ pub fn pool_id(class: &str, pool: &str) -> u64 {
 }
 
 /// What a pool policy sees of one attempt: the request's context and
-/// head, the chooser's region, the pools the request excluded, the pools
-/// the chooser damps, the chooser's clock, and the attempt's turn.
+/// head, the chooser's region, the pools the request excluded and why
+/// each that declined it did, the pools the chooser damps, the chooser's
+/// clock, and the attempt's turn.
 pub struct PoolRequest<'a, H> {
     cx: &'a Cx,
     head: &'a H,
