@@ -33,6 +33,10 @@ pub trait Want: Send + Sync + 'static {
     /// The kind's name.
     fn kind(&self) -> &'static str;
 
+    /// The type of the kind's keys it reads, which the graph's declaration
+    /// of the kind must name.
+    fn key(&self) -> (TypeId, &'static str);
+
     /// The head type it reads, if it reads one.
     fn edge(&self) -> Option<(TypeId, &'static str)>;
 
@@ -72,6 +76,10 @@ where
 {
     fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    fn key(&self) -> (TypeId, &'static str) {
+        (TypeId::of::<T>(), std::any::type_name::<T>())
     }
 
     fn edge(&self) -> Option<(TypeId, &'static str)> {

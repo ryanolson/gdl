@@ -371,3 +371,60 @@ fn a_want_of_a_misnamed_projection_is_refused() {
         .wants(&TEST, |asked: &crate::Projected<Named>| key(&asked.name))
         .expect("the control");
 }
+
+/// A want is held to the graph's declarations as a `set` is: once the
+/// runtime declares the kinds the segment provides, a want of another
+/// kind, or of a declared kind with another key type, is refused, and a
+/// want made before the declaration is held to it when it comes.
+#[test]
+fn a_want_is_held_to_the_kinds_its_segment_provides() {
+    use crate::PropertyType;
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    struct Named {
+        name: String,
+    }
+    let provided = || vec![PropertyType::of::<Test>("test")];
+
+    let properties = InstanceProperties::new();
+    properties.declare(provided()).expect("declared");
+    properties
+        .wants(&TEST, |asked: &Asked| key(&asked.name))
+        .expect("a provided kind, of its type");
+    let refused = properties
+        .wants(&OTHER, |asked: &Asked| key(&asked.name))
+        .expect_err("a kind the segment does not provide")
+        .to_string();
+    assert!(
+        refused.contains("property kind `other` is not one this segment's nodes provide"),
+        "{refused}"
+    );
+    let named = PropertyKind::<Named>::new("test");
+    let refused = properties
+        .wants(&named, |asked: &Asked| Named {
+            name: asked.name.clone(),
+        })
+        .expect_err("another key type")
+        .to_string();
+    assert!(
+        refused.contains("property kind `test` is declared with keys of type"),
+        "{refused}"
+    );
+    assert_eq!(
+        properties.wanted().len(),
+        1,
+        "only the fitting want is kept"
+    );
+
+    let early = InstanceProperties::new();
+    early
+        .wants(&named, |asked: &Asked| Named {
+            name: asked.name.clone(),
+        })
+        .expect("not declared yet");
+    let refused = early
+        .declare(provided())
+        .expect_err("a want of another key type")
+        .to_string();
+    assert!(refused.contains("declared with keys of type"), "{refused}");
+}

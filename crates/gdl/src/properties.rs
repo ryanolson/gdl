@@ -252,8 +252,9 @@ impl InstanceProperties {
 
     /// Hold the handle to `provided`, the kinds the segment's nodes
     /// provide, each with its declared type: refused, and nothing
-    /// declared, when a kind set already is not among them or was set with
-    /// another type, and when the handle was declared with other kinds.
+    /// declared, when a kind set or wanted already is not among them or was
+    /// set or wanted with another type, and when the handle was declared
+    /// with other kinds.
     /// The runtime calls it once, when the segment starts.
     #[doc(hidden)]
     pub fn declare(&self, provided: Vec<PropertyType>) -> Result<()> {
@@ -263,6 +264,16 @@ impl InstanceProperties {
                 return Err(Error::new(ErrorKind::Node, why));
             }
         }
+        let wanted = self.wanted.lock().unwrap_or_else(PoisonError::into_inner);
+        for want in wanted.iter() {
+            let kind = want.kind();
+            if let Some(why) =
+                PropertyType::misfit(&provided, kind, Some(want.key()), || unprovided(kind))
+            {
+                return Err(Error::new(ErrorKind::Node, why));
+            }
+        }
+        drop(wanted);
         let held = self.declared.get_or_init(|| provided.clone());
         if *held != provided {
             return Err(Error::new(
@@ -325,7 +336,10 @@ impl InstanceProperties {
     /// and reads the head of each offer of a hop whose edge is that type,
     /// once per want. Refused when the kind's name has not a settings
     /// key's shape, and when `H` is a projection with a field that crosses
-    /// under no name the edge type reads, as for a selector.
+    /// under no name the edge type reads, as for a selector. Once the
+    /// runtime declares the segment's kinds, refused as `set` is for a kind
+    /// that no node of the segment provides, or a key type other than the
+    /// declared one; a want made before is held to them then.
     pub fn wants<H, T>(
         &self,
         kind: &PropertyKind<T>,
@@ -343,6 +357,16 @@ impl InstanceProperties {
                 format!("the want of property kind `{}` {why}", kind.name()),
             )
         })?;
+        // Held to the declaration as `set` is: a want of a kind its segment
+        // does not provide would decline every offer.
+        let typed = (TypeId::of::<T>(), std::any::type_name::<T>());
+        if let Some(provided) = self.declared.get()
+            && let Some(why) = PropertyType::misfit(provided, kind.name(), Some(typed), || {
+                unprovided(kind.name())
+            })
+        {
+            return Err(Error::new(ErrorKind::Node, why));
+        }
         let want: Arc<dyn Want> = Arc::new(wanted::Typed {
             kind: kind.name(),
             key,

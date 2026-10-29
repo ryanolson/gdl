@@ -35,12 +35,15 @@ impl Selector for ByShard {
 }
 
 mod contract {
-    use super::Routed;
+    use super::{Routed, Shard};
 
+    // B provides the shard that the engine's want reads, so that only the
+    // edge's encoding refuses the want.
     gdl_runtime::graph! {
         name = "projection", schema = 1;
+        property shard: Shard;
         source A: Routed -> stream u64;
-        sink B: Routed -> stream u64;
+        sink B: Routed -> stream u64 provides shard;
         topology: A => B;
     }
 }
