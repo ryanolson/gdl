@@ -80,8 +80,8 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     drop(refused);
     let pool = PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
@@ -210,8 +210,8 @@ fn record() -> PoolRecord {
     drop(refused);
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
@@ -275,8 +275,8 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
     directory
         .publish(PoolRecord {
             presence: gdl_pools::Presence::Serving,
-            models: Vec::new(),
-            models_version: 0,
+            properties: Vec::new(),
+            properties_version: 0,
             revoked: Vec::new(),
             name: "model-x-07-us-east-1".into(),
             class: "model_x".into(),

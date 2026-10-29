@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use common::{GLOBAL, Records, WAIT, address, config, global_default, hub_of, spec, timing};
 use futures::StreamExt;
 use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
-use gdl_model::{ModelKey, PoolSettings};
+use gdl_model::PoolSettings;
 use gdl_pools::{
     DirectoryError, MemoryDirectory, PoolDirectory, PoolEvent, PoolRecord, PoolView, Presence,
 };
@@ -37,7 +37,10 @@ fn child(parent_hub: Option<&str>) -> PoolSettings {
     ))
     .expect("valid test fixture");
     PoolSettings {
-        models: vec![ModelKey::new("llama-70b")],
+        properties: vec![gdl_model::PropertyKey::new(
+            "test",
+            serde_json::json!({ "name": "llama-70b" }),
+        )],
         ..settings
     }
 }
@@ -91,21 +94,21 @@ async fn gone_child(directory: &MemoryDirectory) -> PoolRecord {
 }
 
 /// The parent withdraws its child whose hub is gone: the child's record
-/// and its models leave the directory, and a late record of the child's
+/// and its properties leave the directory, and a late record of the child's
 /// old epoch is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_withdraws_a_child_whose_hub_is_gone() {
     let directory = MemoryDirectory::new();
     let (parent, _readiness) = hub_of(global_default(), directory.clone(), timing()).await;
     let last = gone_child(&directory).await;
-    assert_eq!(last.models.len(), 1, "{last:?}");
+    assert_eq!(last.properties.len(), 1, "{last:?}");
 
     assert_eq!(command(&parent, &withdraw(CHILD)).await, 204);
     let now = Instant::now();
     let seen = view(&directory, now).await;
     assert!(seen.get(CHILD, now).is_none(), "withdrawn");
     assert!(
-        seen.records(now).all(|record| record.models.is_empty()),
+        seen.records(now).all(|record| record.properties.is_empty()),
         "no record lists llama-70b"
     );
     let late = PoolRecord {
@@ -127,7 +130,7 @@ async fn a_parent_withdraws_a_child_whose_hub_is_gone() {
 
 /// The parent says that its child whose hub is gone was scaled to 0: a
 /// reader shows the child scaled to 0 long after its lease, not missing,
-/// with its models; a late `serving` record of the old epoch is refused.
+/// with its properties; a late `serving` record of the old epoch is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_says_a_child_whose_hub_is_gone_was_scaled_to_zero() {
     let directory = MemoryDirectory::new();
@@ -151,7 +154,7 @@ async fn a_parent_says_a_child_whose_hub_is_gone_was_scaled_to_zero() {
         .expect("a pool scaled to 0 never lapses");
     assert_eq!(scaled.presence, Presence::ScaledToZero);
     assert!(scaled.version() > last.version());
-    assert_eq!(scaled.models, last.models);
+    assert_eq!(scaled.properties, last.properties);
     parent.shutdown().await.expect("the parent's hub stops");
 }
 
@@ -330,7 +333,7 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
 /// A child the parent followed, whose hub is gone, and which the operator
 /// then withdraws on the parent: the parent's relay says the child
 /// withdrew, as for a drained pool, so a node that reads the followed pools
-/// holds it withdrawn, and a gate answers 404 for a model no other set
+/// holds it withdrawn, and a gate answers 404 for a property no other set
 /// serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {

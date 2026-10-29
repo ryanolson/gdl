@@ -712,12 +712,12 @@ async fn a_streamed_request_declined_by_one_pool_is_answered_whole_by_another() 
         streamed::contract::assemble(deployment, streamed::bindings(&quiet))
     })
     .await;
-    let pool = |model: Model<'static>, events: &Arc<Events>| {
+    let pool = |property: Model<'static>, events: &Arc<Events>| {
         let events = Arc::clone(events);
         let directory = &directory;
         let spec = &spec;
         async move {
-            model_of(spec, directory, model, &|r| r, &move |deployment| {
+            model_of(spec, directory, property, &|r| r, &move |deployment| {
                 streamed::contract::assemble(deployment, streamed::bindings(&events))
             })
             .await

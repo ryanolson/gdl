@@ -77,6 +77,10 @@ pub(crate) fn follow(
     let watcher =
         PoolWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
     let address = hub_address(host, public_port);
+    // The kinds the segment's nodes registered in their builds, and those
+    // its pool policies read: the chooser decodes these.
+    let kinds = runtime.followed.kinds().clone();
+    runtime.pool_policies.register_properties(&kinds)?;
     let pools = Pools::new(
         region,
         wanted.iter().flat_map(|(class, segments)| {
@@ -85,6 +89,7 @@ pub(crate) fn follow(
                 .map(move |segment| (class.as_str(), segment.as_str()))
         }),
         Damping::new(runtime.pool_damping_first, runtime.pool_damping_max),
+        kinds,
     );
     // Registered once, as the follower starts: the process has one
     // chooser, and its registry one set of the pools' families.

@@ -31,8 +31,8 @@ impl PoolDirectory for Endless {
     fn watch(&self, class: &str, _: Option<ResumeToken>) -> Events {
         let record = PoolRecord {
             presence: gdl_pools::Presence::Serving,
-            models: Vec::new(),
-            models_version: 0,
+            properties: Vec::new(),
+            properties_version: 0,
             revoked: Vec::new(),
             name: "m1".into(),
             class: class.into(),

@@ -81,7 +81,7 @@ async fn retirement(watch: &mut gdl_hub::PoolWatch, instance: InstanceId) -> Poo
 async fn a_choosers_acknowledgement_reaches_the_retirees_pool() {
     let directory = Resolving::new();
     let (global, _) = pool_hub(global_hub(), &directory).await;
-    let (m1, model) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (m1, property) = pool_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let (mut retiring, staying, _d) = (
         Instance::ready(&m1, "f").await,
         Instance::ready(&m1, "f").await,
@@ -103,7 +103,7 @@ async fn a_choosers_acknowledgement_reaches_the_retirees_pool() {
         })
     })
     .await;
-    let mut watch = model.watch().await.expect("the pool's watch");
+    let mut watch = property.watch().await.expect("the pool's watch");
     retiring.announce(SegmentPhase::Retired).await;
     let id = retiring.id();
     assert_eq!(

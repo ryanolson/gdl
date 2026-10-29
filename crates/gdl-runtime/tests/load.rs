@@ -27,6 +27,18 @@ use gdl_runtime::{DeploymentSpec, PoolState, Pools, Register, RuntimeConfig};
 use gdl_watch::{FollowEvent, PoolWatchEvent};
 use velo_hub::Hub;
 
+/// The test property type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+struct Shard {
+    name: String,
+}
+
+const SHARD: gdl::PropertyKind<Shard> = gdl::PropertyKind::new("test");
+
+fn shard(name: &str) -> Shard {
+    Shard { name: name.into() }
+}
+
 const M1: &str = "model-x-01-us-east-1";
 
 /// Each entry instance admits this many roots at once.
@@ -402,22 +414,140 @@ async fn a_summary_keeps_its_age_when_the_chooser_watches_the_relay_again() {
     shut([global_hub, m1.hub]).await;
 }
 
-/// What an entry instance's nodes say of its models reaches its pool's
-/// record with its load reports: a model it can serve is `ready` there,
+/// A kind a node registers in its build reaches the chooser of its
+/// segment: the node reads an entry instance's property from the class's
+/// index, decoded to the kind's type, in the same read as the pool, once
+/// the property is `ready` in the pool's record. A kind registered with
+/// two types stops the chooser from starting, naming the kind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kind_a_node_registers_reaches_the_choosers_index() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let properties = gdl::InstanceProperties::new();
+    properties
+        .set(&SHARD, [(shard("a"), gdl::EntryState::Ready)])
+        .expect("a list");
+    let quiet = Events::quiet();
+    let given = properties.clone();
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        properties: given.clone(),
+        ..limited(runtime)
+    };
+    let pool = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        pool,
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let (hub, _readiness) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let extra = format!("{}{RUNTIME}", global_pool());
+    let mut config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let followed = gdl::FollowedPools::new();
+    followed
+        .scope(async { gdl::FollowedPools::current().register(&SHARD) })
+        .await
+        .expect("registered");
+    config.runtime.followed = followed.clone();
+    let chooser = run_graph(&config, "a", &spec, config.runtime.clone(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await
+    .expect("the chooser serves");
+    let read = || {
+        followed
+            .read("model_x", |pools| {
+                let index = pools.properties().get(&SHARD)?;
+                let listed = index.get(&shard("a")).first()?;
+                Some((
+                    listed.1.pool().to_string(),
+                    listed.1.state(),
+                    pools.pool(listed.1.pool()).is_some(),
+                ))
+            })
+            .flatten()
+    };
+    until(
+        &tables(&chooser),
+        "the property in the chooser's index",
+        |_| read().is_some_and(|(_, state, _)| state == gdl::PropertyState::Ready),
+    )
+    .await;
+    assert_eq!(
+        read(),
+        Some((M1.to_string(), gdl::PropertyState::Ready, true)),
+        "listed by the followed pool"
+    );
+
+    let conflicting = gdl::FollowedPools::new();
+    conflicting.register(&SHARD).expect("registered");
+    let mut config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    config.runtime.followed = conflicting;
+    struct Other;
+    impl gdl::PoolPolicy for Other {
+        type Head = gdl::Encoded;
+        fn choose(
+            &self,
+            _: gdl::PoolRequest<'_, gdl::Encoded>,
+            _: &[gdl::Pool],
+        ) -> Result<gdl::PoolChoice, gdl::NoPool> {
+            Err(gdl::NoPool::new())
+        }
+        fn properties(&self, kinds: &gdl::PropertyKinds) -> gdl::Result<()> {
+            kinds.register(&gdl::PropertyKind::<String>::new("test"))
+        }
+    }
+    config
+        .runtime
+        .pool_policies
+        .add("other", Other)
+        .expect("registered");
+    let refused = match run_graph(&config, "a", &spec, config.runtime.clone(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await
+    {
+        Ok(_) => panic!("a chooser whose kind has two types started"),
+        Err(refused) => refused.to_string(),
+    };
+    assert!(
+        refused.contains("property kind `test`") && refused.contains("`other`"),
+        "{refused}"
+    );
+    drop(chooser);
+    shut([hub, m1.hub]).await;
+}
+
+/// What an entry instance's nodes say of its properties reaches its pool's
+/// record with its load reports: a property it can serve is `ready` there,
 /// and one it says it is removing is `draining` as soon as it says so,
 /// without waiting for the next period.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_entry_instances_models_reach_the_pools_record() {
+async fn the_entry_instances_properties_reach_the_pools_record() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
-    let models = gdl::InstanceModels::new();
-    let said = |state| gdl::InstanceModel {
-        model: "llama-70b".into(),
-        routing_key: None,
-        state,
-    };
-    models
-        .set([said(gdl::InstanceModelState::Ready)])
+    let properties = gdl::InstanceProperties::new();
+    let said = |state| (shard("llama-70b"), state);
+    properties
+        .set(&SHARD, [said(gdl::EntryState::Ready)])
         .expect("a list");
     let mut records = directory.watch("model_x", None);
     let pool = Model {
@@ -427,9 +557,9 @@ async fn the_entry_instances_models_reach_the_pools_record() {
         entries: 1,
     };
     let quiet = Events::quiet();
-    let given = models.clone();
+    let given = properties.clone();
     let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
-        models: given.clone(),
+        properties: given.clone(),
         ..limited(runtime)
     };
     let m1 = model_summarized(
@@ -441,13 +571,13 @@ async fn the_entry_instances_models_reach_the_pools_record() {
         &|deployment| reference_graph(deployment, &quiet),
     )
     .await;
-    let mut until_state = async |state: gdl_pools::ModelState| {
+    let mut until_state = async |state: gdl_pools::PropertyState| {
         let recorded = tokio::time::timeout(WAIT, async {
             loop {
                 match records.next().await {
                     Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }))
                         if record.name == M1
-                            && record.models.iter().map(|m| m.state).eq([state]) =>
+                            && record.properties.iter().map(|m| m.state).eq([state]) =>
                     {
                         return;
                     }
@@ -462,12 +592,12 @@ async fn the_entry_instances_models_reach_the_pools_record() {
             "no record had the model {state:?} in time"
         );
     };
-    until_state(gdl_pools::ModelState::Ready).await;
-    models
-        .set([said(gdl::InstanceModelState::Draining)])
+    until_state(gdl_pools::PropertyState::Ready).await;
+    properties
+        .set(&SHARD, [said(gdl::EntryState::Draining)])
         .expect("a list");
     let asked = tokio::time::Instant::now();
-    until_state(gdl_pools::ModelState::Draining).await;
+    until_state(gdl_pools::PropertyState::Draining).await;
     assert!(
         asked.elapsed() < SUMMARY,
         "the change waited for the next period"
@@ -475,22 +605,18 @@ async fn the_entry_instances_models_reach_the_pools_record() {
     shut([m1.hub]).await;
 }
 
-/// A node that drains a model and drops it before its instance reports
-/// does not lose the drain: the instance reports the model `draining`,
+/// A node that drains a property and drops it before its instance reports
+/// does not lose the drain: the instance reports the property `draining`,
 /// then drops it, and the record shows it `draining`, then `drained`, not
 /// `unavailable`.
 #[tokio::test]
-async fn a_model_removed_without_yielding_finishes_its_drain() {
+async fn a_property_removed_without_yielding_finishes_its_drain() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
-    let models = gdl::InstanceModels::new();
-    let said = |state| gdl::InstanceModel {
-        model: "m".into(),
-        routing_key: None,
-        state,
-    };
-    models
-        .set([said(gdl::InstanceModelState::Ready)])
+    let properties = gdl::InstanceProperties::new();
+    let said = |state| (shard("m"), state);
+    properties
+        .set(&SHARD, [said(gdl::EntryState::Ready)])
         .expect("a list");
     let mut records = directory.watch("model_x", None);
     let pool = Model {
@@ -500,9 +626,9 @@ async fn a_model_removed_without_yielding_finishes_its_drain() {
         entries: 1,
     };
     let quiet = Events::quiet();
-    let given = models.clone();
+    let given = properties.clone();
     let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
-        models: given.clone(),
+        properties: given.clone(),
         ..limited(runtime)
     };
     let m1 = model_summarized(
@@ -514,14 +640,14 @@ async fn a_model_removed_without_yielding_finishes_its_drain() {
         &|deployment| reference_graph(deployment, &quiet),
     )
     .await;
-    let mut next_state = async |after: Option<gdl_pools::ModelState>| {
+    let mut next_state = async |after: Option<gdl_pools::PropertyState>| {
         tokio::time::timeout(WAIT, async {
             loop {
                 match records.next().await {
                     Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }))
-                        if record.name == M1 && record.models.len() == 1 =>
+                        if record.name == M1 && record.properties.len() == 1 =>
                     {
-                        let state = record.models[0].state;
+                        let state = record.properties[0].state;
                         if after != Some(state) {
                             return state;
                         }
@@ -534,21 +660,21 @@ async fn a_model_removed_without_yielding_finishes_its_drain() {
         .await
         .expect("a changed model state in time")
     };
-    assert_eq!(next_state(None).await, gdl_pools::ModelState::Ready);
+    assert_eq!(next_state(None).await, gdl_pools::PropertyState::Ready);
 
-    // An idle model can finish unloading without yielding to the reporter.
-    models
-        .set([said(gdl::InstanceModelState::Draining)])
+    // An idle property can finish unloading without yielding to the reporter.
+    properties
+        .set(&SHARD, [said(gdl::EntryState::Draining)])
         .expect("a list");
-    models.set([]).expect("an empty list");
-    let draining = next_state(Some(gdl_pools::ModelState::Ready)).await;
+    properties.set(&SHARD, []).expect("an empty list");
+    let draining = next_state(Some(gdl_pools::PropertyState::Ready)).await;
     let after = next_state(Some(draining)).await;
     shut([m1.hub]).await;
     assert_eq!(
         (draining, after),
         (
-            gdl_pools::ModelState::Draining,
-            gdl_pools::ModelState::Drained
+            gdl_pools::PropertyState::Draining,
+            gdl_pools::PropertyState::Drained
         )
     );
 }

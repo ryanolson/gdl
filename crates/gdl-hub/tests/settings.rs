@@ -86,7 +86,7 @@ fn a_pools_settings_are_read_from_the_environment() {
         assert_eq!(
             pool_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(PoolSettings {
-                models: Vec::new(),
+                properties: Vec::new(),
                 name: "model-x-01-us-east-1".into(),
                 layout: None,
                 class: "model_x".into(),
@@ -406,7 +406,7 @@ async fn status(hub: &Hub, path: &str) -> u16 {
 
 fn settings(directory: DirectoryBackend) -> PoolSettings {
     PoolSettings {
-        models: Vec::new(),
+        properties: Vec::new(),
         name: "model-x-01-us-east-1".into(),
         layout: None,
         class: "model_x".into(),
@@ -626,31 +626,32 @@ async fn a_pool_with_the_relay_backend_needs_its_parents_hub() {
     parent.shutdown().await.expect("the hub stops");
 }
 
-/// A hub reads its pool's declared models from one variable, a list of
-/// tables, `GDL_POOL__MODELS`; one it cannot read names the variable.
+/// A hub reads its pool's declared properties of each kind from one
+/// variable, a list of tables, `GDL_POOL__PROPERTIES__<KIND>`; one it
+/// cannot read names the variable.
 #[test]
-fn a_pools_declared_models_are_read_from_the_environment() {
+fn a_pools_declared_properties_are_read_from_the_environment() {
     Jail::expect_with(|jail| {
         model_pool(jail, "/srv/pools");
         jail.set_env(
-            "GDL_POOL__MODELS",
-            r#"[{model = "llama-70b"}, {model = "qwen-32b", routing_key = "a"}]"#,
+            "GDL_POOL__PROPERTIES__TEST",
+            r#"[{name = "a"}, {partition = "p", name = "b"}]"#,
         );
         let pool = pool_from_env(&spec()).map_err(|e| e.to_string())?;
         assert_eq!(
-            pool.map(|pool| pool.models),
+            pool.map(|pool| pool.properties),
             Some(vec![
-                gdl_model::ModelKey::new("llama-70b"),
-                gdl_model::ModelKey {
-                    model: "qwen-32b".into(),
-                    routing_key: Some("a".into()),
-                },
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "a" })),
+                gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": "b", "partition": "p" })
+                ),
             ])
         );
-        jail.set_env("GDL_POOL__MODELS", r#"[{model = ""}]"#);
-        let refused = pool_from_env(&spec()).expect_err("a model with no name");
+        jail.set_env("GDL_POOL__PROPERTIES__TEST", r#"["a"]"#);
+        let refused = pool_from_env(&spec()).expect_err("a key that is not an object");
         assert!(
-            refused.to_string().contains("GDL_POOL__MODELS"),
+            refused.to_string().contains("GDL_POOL__PROPERTIES"),
             "{refused}"
         );
         Ok(())

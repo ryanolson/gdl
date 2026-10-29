@@ -41,7 +41,7 @@ impl RoundRobin {
     /// the others were not there: the index of the chosen pool in
     /// `pools`, or `None` when no kept pool is eligible. The turn goes
     /// round the kept pools, and the damping cap counts only them. A
-    /// policy that filters the pools, by model for instance, takes turns
+    /// policy that filters the pools, by property for instance, takes turns
     /// over the rest with this, and allocates nothing. It reads no head,
     /// so it takes a request of any head.
     ///

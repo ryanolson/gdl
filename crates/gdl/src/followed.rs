@@ -1,7 +1,7 @@
 //! What a node reads of the pools its segment's choosers follow: the same
 //! table a pool policy chooses from, the pools the chooser holds gone, and
 //! the pools whose records were withdrawn after a drain. A node in a
-//! segment that sends into another class (a model gate in front of a set
+//! segment that sends into another class (a gate in front of a set
 //! router, say) reads it to tell a class that has no pool taking work
 //! (503) from one whose pools were all drained on purpose (404), from the
 //! state the chooser routes by.
@@ -14,8 +14,9 @@ use crate::policy::{Damped, Pool};
 
 mod index;
 
-pub(crate) use index::NO_MODELS;
-pub use index::{ModelIndex, ModelSet};
+pub(crate) use index::NO_PROPERTIES;
+pub use index::PropertyKindsNow;
+pub use index::{PropertyIndex, PropertyIndexes, PropertyKinds, PropertyPool};
 
 tokio::task_local! {
     /// The handle of the segment whose nodes are being built.
@@ -30,10 +31,13 @@ tokio::task_local! {
 /// [`FollowedPools::read`]. The runtime binds it when the segment's
 /// chooser launches, after the node is built: until then, and for a
 /// segment that sends into no other class or runs without a hub, it is
-/// not bound, and a read gives `None`.
+/// not bound, and a read gives `None`. A node that reads a kind of
+/// property registers it in its build ([`FollowedPools::register`]), so
+/// that the chooser decodes it.
 #[derive(Clone, Default)]
 pub struct FollowedPools {
     source: Arc<OnceLock<Arc<dyn PoolSource>>>,
+    kinds: PropertyKinds,
 }
 
 impl FollowedPools {
@@ -82,22 +86,22 @@ impl FollowedPools {
         G: Into<String>,
         M: Into<String>,
     {
-        Self::fixed_with_models(
+        Self::fixed_with_properties(
             pools,
             withdrawn,
             gone,
-            std::iter::empty::<(String, ModelIndex)>(),
+            std::iter::empty::<(String, PropertyIndexes)>(),
         )
     }
 
-    /// [`FollowedPools::fixed_with_gone`], with each class's model index
-    /// ([`ClassPools::models`]) from `models`. A class given no index has
-    /// [`ModelIndex::NONE`]: no model, not synced.
-    pub fn fixed_with_models<C, N, G, M, K>(
+    /// [`FollowedPools::fixed_with_gone`], with each class's property
+    /// indexes ([`ClassPools::properties`]) from `properties`. A class
+    /// given none has [`PropertyIndexes::NONE`]: no kind, not synced.
+    pub fn fixed_with_properties<C, N, G, M, K>(
         pools: impl IntoIterator<Item = Pool>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
         gone: impl IntoIterator<Item = (G, M)>,
-        models: impl IntoIterator<Item = (K, ModelIndex)>,
+        properties: impl IntoIterator<Item = (K, PropertyIndexes)>,
     ) -> Self
     where
         C: Into<String>,
@@ -126,11 +130,11 @@ impl FollowedPools {
             .into_iter()
             .map(|(class, name)| (class.into(), name.into()))
             .collect();
-        let mut models: BTreeMap<String, ModelIndex> = models
+        let mut properties: BTreeMap<String, PropertyIndexes> = properties
             .into_iter()
             .map(|(class, index)| (class.into(), index))
             .collect();
-        for class in models.keys() {
+        for class in properties.keys() {
             classes.entry(class.clone()).or_default();
         }
         let fixed = Fixed(
@@ -144,7 +148,7 @@ impl FollowedPools {
                         .iter()
                         .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
                         .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
-                    let index = models.remove(&class).unwrap_or_default();
+                    let index = properties.remove(&class).unwrap_or_default();
                     (class, (pools.into(), withdrawn.into(), damped, index))
                 })
                 .collect(),
@@ -203,6 +207,27 @@ impl FollowedPools {
         out
     }
 
+    /// Have the chooser decode the keys of `kind` into its type, for
+    /// [`ClassPools::properties`]: call it in
+    /// [`Build::build`](crate::Build::build), before the chooser reads the
+    /// class's pools. Registering a kind again with the same type changes
+    /// nothing; refused when the kind's name has not a settings key's
+    /// shape, or another node or pool policy registered it with another
+    /// type.
+    pub fn register<T>(&self, kind: &crate::PropertyKind<T>) -> crate::Result<()>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Ord + Send + Sync + 'static,
+    {
+        self.kinds.register(kind)
+    }
+
+    /// The kinds the segment's nodes and pool policies registered, which
+    /// the chooser decodes.
+    #[doc(hidden)]
+    pub fn kinds(&self) -> &PropertyKinds {
+        &self.kinds
+    }
+
     /// Bind the handle to `source`, unless it is bound already: whether
     /// this call bound it.
     #[doc(hidden)]
@@ -242,7 +267,7 @@ pub struct ClassPools<'a> {
     pools: &'a [Pool],
     withdrawn: &'a [Box<str>],
     damped: &'a Damped,
-    models: &'a ModelIndex,
+    properties: &'a PropertyIndexes,
 }
 
 /// What a view holds gone when its source says nothing of it.
@@ -257,7 +282,7 @@ impl<'a> ClassPools<'a> {
             pools,
             withdrawn,
             damped: &NONE_GONE,
-            models: &NO_MODELS,
+            properties: &NO_PROPERTIES,
         }
     }
 
@@ -268,38 +293,46 @@ impl<'a> ClassPools<'a> {
         Self { damped, ..self }
     }
 
-    /// The view with the class's model index, from the same table as its
-    /// pools.
+    /// The view with the class's property indexes, from the same table as
+    /// its pools.
     #[doc(hidden)]
-    pub fn with_models(self, models: &'a ModelIndex) -> Self {
-        Self { models, ..self }
+    pub fn with_properties(self, properties: &'a PropertyIndexes) -> Self {
+        Self { properties, ..self }
     }
 
-    /// The class's model index: for each model, every pool of the class
-    /// whose record lists it, followed or not, from the same table as
-    /// [`ClassPools::pools`]. A model gate reads it to tell a model no pool
+    /// The class's property indexes: for each kind a node or a pool policy
+    /// of the segment registered, every key a pool of the class lists,
+    /// with each pool that lists it, followed or not, from the same table
+    /// as [`ClassPools::pools`]. A gate reads it to tell a property no pool
     /// lists (404) from one whose pools cannot take work now (503):
     ///
     /// ```
-    /// # use gdl::{PoolCondition, ClassPools, ModelState};
-    /// fn answer(pools: ClassPools<'_>, model: &str) -> u16 {
-    ///     let index = pools.models();
-    ///     let Some(sets) = index.sets(model, None) else {
+    /// # use gdl::{ClassPools, PropertyKind, PropertyState};
+    /// # #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+    /// # struct Shard { name: String, partition: Option<String> }
+    /// const SHARD: PropertyKind<Shard> = PropertyKind::new("shard");
+    ///
+    /// fn answer(pools: ClassPools<'_>, name: &str) -> u16 {
+    ///     let indexes = pools.properties();
+    ///     let listed = indexes.get(&SHARD).map_or(&[][..], |index| {
+    ///         index.range_by(|key| (key.name.as_str(), key.partition.as_deref()).cmp(&(name, None)))
+    ///     });
+    ///     if listed.is_empty() {
     ///         // Not listed: unknown once the directory was read.
-    ///         return if index.is_synced() { 404 } else { 503 };
-    ///     };
-    ///     let routed = sets.iter().any(|set| {
-    ///         set.state() == ModelState::Ready
-    ///             && set.is_offered()
-    ///             && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
+    ///         return if indexes.is_synced() { 404 } else { 503 };
+    ///     }
+    ///     let routed = listed.iter().any(|(_, listing)| {
+    ///         listing.state() == PropertyState::Ready
+    ///             && listing.is_offered()
+    ///             && pools.pool(listing.pool()).is_some_and(gdl::Pool::takes_work)
     ///     });
     ///     if routed { 200 } else { 503 }
     /// }
-    /// # let _ = (answer, PoolCondition::Live);
+    /// # let _ = answer;
     /// ```
     #[inline]
-    pub fn models(&self) -> &'a ModelIndex {
-        self.models
+    pub fn properties(&self) -> &'a PropertyIndexes {
+        self.properties
     }
 
     /// The followed pools, by name: what the class's pool policy chooses
@@ -347,18 +380,18 @@ impl<'a> ClassPools<'a> {
 }
 
 /// Fixed tables: per class, its pools by name, its withdrawn pools, its
-/// gone pools, and its model index.
-type Tables = BTreeMap<String, (Box<[Pool]>, Box<[Box<str>]>, Damped, ModelIndex)>;
+/// gone pools, and its property indexes.
+type Tables = BTreeMap<String, (Box<[Pool]>, Box<[Box<str>]>, Damped, PropertyIndexes)>;
 
 struct Fixed(Tables);
 
 impl PoolSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>)) {
-        if let Some((pools, withdrawn, damped, models)) = self.0.get(class) {
+        if let Some((pools, withdrawn, damped, properties)) = self.0.get(class) {
             read(
                 ClassPools::new(pools, withdrawn)
                     .with_damped(damped)
-                    .with_models(models),
+                    .with_properties(properties),
             );
         }
     }
@@ -380,6 +413,25 @@ mod tests {
         assert!(segment.bind(Arc::new(Fixed(Tables::new()))));
         assert!(taken.is_bound(), "another handle");
         assert!(!segment.bind(Arc::new(Fixed(Tables::new()))), "bound twice");
+    }
+
+    /// A node registers a kind on the handle it takes in its build, which
+    /// is the segment's: the runtime's chooser decodes the kinds the
+    /// segment's handle holds.
+    #[tokio::test]
+    async fn a_kind_a_node_registers_is_the_segments() {
+        const TEST: crate::PropertyKind<String> = crate::PropertyKind::new("test");
+        let segment = FollowedPools::new();
+        let before = segment.kinds().changes();
+        segment
+            .scope(async { FollowedPools::current().register(&TEST) })
+            .await
+            .expect("registered");
+        assert_eq!(segment.kinds().changes(), before + 1);
+        FollowedPools::current()
+            .register(&TEST)
+            .expect("outside a build, a handle of its own");
+        assert_eq!(segment.kinds().changes(), before + 1);
     }
 
     /// Fixed tables read by class: each class's pools by name, and its
@@ -427,20 +479,29 @@ mod tests {
         );
     }
 
-    /// Fixed tables give each class the model index they were given, from
-    /// the same read as its pools; a class given none reads `NONE`, and a
-    /// class given only an index is read as followed with no pool.
+    /// Fixed tables give each class the property indexes they were given,
+    /// from the same read as its pools; a class given none reads `NONE`,
+    /// and a class given only indexes is read as followed with no pool.
     #[test]
-    fn fixed_tables_read_each_classs_model_index() {
-        use gdl_pools::{ModelState, PoolCondition};
-        let index = ModelIndex::new(
-            true,
-            [(
-                gdl_model::ModelKey::new("qwen"),
-                ModelSet::new("m2", "eu-west", ModelState::Ready, PoolCondition::Missing),
-            )],
-        );
-        let followed = FollowedPools::fixed_with_models(
+    fn fixed_tables_read_each_classs_property_indexes() {
+        use crate::{PropertyKind, PropertyState};
+        use gdl_pools::PoolCondition;
+        const TEST: PropertyKind<String> = PropertyKind::new("test");
+        let index = || {
+            PropertyIndexes::new(true).with(
+                &TEST,
+                PropertyIndex::new([(
+                    "qwen".to_string(),
+                    PropertyPool::new(
+                        "m2",
+                        "eu-west",
+                        PropertyState::Ready,
+                        PoolCondition::Missing,
+                    ),
+                )]),
+            )
+        };
+        let followed = FollowedPools::fixed_with_properties(
             [
                 Pool::new("model_x", "m1", "r", PoolState::Ready).with_entries(1),
                 Pool::new("model_y", "y1", "r", PoolState::Ready),
@@ -448,37 +509,44 @@ mod tests {
             std::iter::empty::<(String, String)>(),
             std::iter::empty::<(String, String)>(),
             [
-                ("model_x", index.clone()),
-                ("model_z", ModelIndex::new(true, [])),
+                ("model_x", index()),
+                ("model_z", PropertyIndexes::new(true)),
             ],
         );
         let x = followed
             .read("model_x", |pools| {
-                let sets = pools.models().sets("qwen", None).expect("listed");
+                let index = pools.properties().get(&TEST).expect("registered");
+                let listed = &index.get(&"qwen".to_string())[0].1;
                 (
                     pools.pools().len(),
-                    sets[0].pool().to_string(),
-                    sets[0].condition(),
-                    pools.pool(sets[0].pool()).is_some(),
+                    listed.pool().to_string(),
+                    listed.condition(),
+                    pools.pool(listed.pool()).is_some(),
+                    index.is_synced(),
                 )
             })
             .expect("model_x");
-        assert_eq!(x, (1, "m2".to_string(), PoolCondition::Missing, false));
         assert_eq!(
-            followed.read("model_y", |pools| pools.models().is_synced()),
+            x,
+            (1, "m2".to_string(), PoolCondition::Missing, false, true)
+        );
+        assert_eq!(
+            followed.read("model_y", |pools| pools.properties().is_synced()),
             Some(false),
             "no index given"
         );
         assert_eq!(
             followed.read("model_z", |pools| (
                 pools.pools().len(),
-                pools.models().is_synced()
+                pools.properties().is_synced(),
+                pools.properties().get(&TEST).is_none()
             )),
-            Some((0, true))
+            Some((0, true, true))
         );
         assert_eq!(
             FollowedPools::fixed(std::iter::empty::<Pool>(), [("model_x", "m3")])
-                .read("model_x", |pools| *pools.models() == ModelIndex::NONE),
+                .read("model_x", |pools| !pools.properties().is_synced()
+                    && pools.properties().get(&TEST).is_none()),
             Some(true)
         );
     }

@@ -11,9 +11,21 @@ use std::time::Duration;
 use common::WAIT;
 use common::pools::{Instance, Resolving, model_hub, model_pool, pool_hub, settings};
 use common::proxy::Proxy;
-use gdl::{InstanceModel, InstanceModelState};
+use gdl::EntryState;
 use gdl_runtime::{Drains, SegmentLoad};
 use tokio::sync::oneshot;
+
+/// The test property type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+struct Shard {
+    name: String,
+}
+
+const SHARD: gdl::PropertyKind<Shard> = gdl::PropertyKind::new("test");
+
+fn shard(name: &str) -> Shard {
+    Shard { name: name.into() }
+}
 
 struct Working(Arc<AtomicUsize>);
 
@@ -51,8 +63,8 @@ async fn the_serving_body_progresses_while_a_stopping_instance_reports_its_drain
                 model_pool(POOL),
             ),
         );
-        config.runtime.models = gdl::InstanceModels::new();
-        let models = config.runtime.models.clone();
+        config.runtime.properties = gdl::InstanceProperties::new();
+        let properties = config.runtime.properties.clone();
         let (process, launch) = common::pools::launch(&config, "f")
             .await
             .expect("the entry launches");
@@ -83,13 +95,9 @@ async fn the_serving_body_progresses_while_a_stopping_instance_reports_its_drain
 
         if pending_drain {
             control.hold(b"\"draining\"");
-            models
-                .set([InstanceModel {
-                    model: "m".into(),
-                    routing_key: None,
-                    state: InstanceModelState::Draining,
-                }])
-                .expect("the node drains its model");
+            properties
+                .set(&SHARD, [(shard("m"), EntryState::Draining)])
+                .expect("the node drains its property");
             tokio::time::timeout(WAIT, control.holding())
                 .await
                 .expect("a drain report is awaiting its answer");

@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// An image request's head: base64 text, then a field after it, as
-    /// a chat request has its model and its limits after its messages.
+    /// a chat request has its property and its limits after its messages.
     #[derive(Serialize, Deserialize)]
     struct Image {
         url: String,

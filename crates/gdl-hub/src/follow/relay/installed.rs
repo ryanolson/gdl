@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gdl_pools::{LoadSummary, PoolState};
-use gdl_watch::{FollowEvent, Listing, ModelList, PoolWatchEvent};
+use gdl_watch::{FollowEvent, Listing, PoolWatchEvent, PropertyList};
 use tokio::time::Instant;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
@@ -32,9 +32,9 @@ pub(crate) struct Installed {
     /// Whether the pool is withheld: its watch sent an event of a kind
     /// this build does not know, and it has not been read again since.
     pub(super) withheld: bool,
-    /// The pool's model entries as its watch last sent them: `None` from a
+    /// The pool's property entries as its watch last sent them: `None` from a
     /// hub of an earlier build.
-    models: Option<ModelList>,
+    properties: Option<PropertyList>,
 }
 
 impl Installed {
@@ -59,19 +59,19 @@ impl Installed {
             ready: HashMap::new(),
             sent: HashSet::new(),
             withheld: false,
-            models: None,
+            properties: None,
         }
     }
 
-    /// The pool with the model entries its watch's first event carried.
-    pub(crate) fn with_models(mut self, models: Option<ModelList>) -> Self {
-        self.models = models;
+    /// The pool with the property entries its watch's first event carried.
+    pub(crate) fn with_properties(mut self, properties: Option<PropertyList>) -> Self {
+        self.properties = properties;
         self
     }
 
-    /// The pool's model entries as its watch last sent them.
-    pub(super) fn models(&self) -> Option<&ModelList> {
-        self.models.as_ref()
+    /// The pool's property entries as its watch last sent them.
+    pub(super) fn properties(&self) -> Option<&PropertyList> {
+        self.properties.as_ref()
     }
 
     /// The state the relay shows: the one the pool last sent, or
@@ -179,8 +179,8 @@ impl Installed {
         // The pool's hub sent the summary again in the reading, so it is
         // as new as the reading even when it has not changed.
         self.received = fresh.received;
-        if fresh.models.is_some() {
-            self.models = fresh.models;
+        if fresh.properties.is_some() {
+            self.properties = fresh.properties;
         }
         self.withheld = false;
         self.state = fresh.state;
@@ -295,10 +295,10 @@ impl Installed {
                     });
                 }
             }
-            // The relay lists the pool's models from the version it holds
+            // The relay lists the pool's properties from the version it holds
             // ([`super::Shared::relist`]); a chooser sees nothing of the
             // follow change.
-            PoolWatchEvent::Models { models } => self.models = Some(models),
+            PoolWatchEvent::Properties { properties } => self.properties = Some(properties),
             // A watch has one snapshot, which the link reads before it
             // installs the pool.
             PoolWatchEvent::Pool { .. } | PoolWatchEvent::Synced => {}

@@ -136,10 +136,10 @@ enum Serves {
     /// Declines every request, for this reason.
     None(Decline),
     /// Takes a request whose payload is this key, and declines any other
-    /// as the instance's own: it serves one key of the model.
+    /// as the instance's own: it serves one key of the property.
     Key(&'static str),
-    /// Declines a request whose payload is this model as the instance's
-    /// own, and takes any other: it does not serve that model.
+    /// Declines a request whose payload is this property as the instance's
+    /// own, and takes any other: it does not serve that property.
     Not(&'static str),
 }
 
@@ -185,6 +185,7 @@ impl Fleet {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let mut offers = Vec::new();
         let mut each = entries.iter();
@@ -318,9 +319,9 @@ fn answer(serves: Serves, message: &[u8]) -> Vec<u8> {
                 declined(Decline::Instance)
             }
         }
-        Serves::Not(model) => {
+        Serves::Not(property) => {
             let forward: Forward = decode(message).expect("a forward hand-off");
-            if forward.payload[..] == *model.as_bytes() {
+            if forward.payload[..] == *property.as_bytes() {
                 declined(Decline::Instance)
             } else {
                 accepted()
@@ -363,7 +364,7 @@ fn withins() -> [(Within, Option<Arc<AtomicUsize>>); 2] {
     ]
 }
 
-/// A pool whose entry instances A and B each serve one key of the model:
+/// A pool whose entry instances A and B each serve one key of the property:
 /// a request for B's key is offered to A first, A declines it as its own,
 /// and B serves it, in the same pool. The pool is not damped, and the
 /// other pool gets nothing. Under `round_robin` the next request, for A's
@@ -456,14 +457,14 @@ async fn a_pool_whose_every_instance_declines_is_left_for_another() {
     }
 }
 
-/// A set that serves two models, where every entry instance declines one
-/// of them as its own, is left only by the requests for that model: an
+/// A set that serves two properties, where every entry instance declines one
+/// of them as its own, is left only by the requests for that property: an
 /// `acme-legal` request is offered to each of its instances once, then
 /// taken by the other set, and the set is neither damped nor held gone,
 /// so the `llama-70b` requests right after still reach it, in turn with
 /// the other set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_model_one_set_cannot_serve_leaves_its_other_models_there() {
+async fn a_property_one_pool_cannot_serve_leaves_its_other_properties_there() {
     let without = Serves::Not("acme-legal");
     for (within, _) in withins() {
         let fleet = Fleet::new(

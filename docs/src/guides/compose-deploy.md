@@ -95,7 +95,7 @@ docker compose up --build
 
 The hub starts first. Every segment starts once the hub's health check passes, and `depends_on` nothing else. No segment waits on another's health: segments whose paths return wait for each other, and an order over them deadlocks. [Segment lifecycle](../concepts/lifecycle.md) describes the barrier.
 
-Each segment's health check runs `segment --healthcheck /etc/gdl/config` every 5 s, with a start period of 1800 s to cover loading models. The hub's health check asks its own `/v1/health` every 2 s.
+Each segment's health check runs `segment --healthcheck /etc/gdl/config` every 5 s, with a start period of 1800 s to cover a slow load. The hub's health check asks its own `/v1/health` every 2 s.
 
 ### A source that reads stdin
 

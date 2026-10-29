@@ -41,7 +41,7 @@ mod followers;
 mod health;
 mod judge;
 mod load;
-mod models;
+mod properties;
 mod publish;
 mod retiring;
 mod timing;
@@ -152,7 +152,7 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// instance that is not ready, has retired, or has left, or one fenced off
 /// by a later registration of the instance, is refused with 409, which
 /// costs the reporter nothing of its registration. A report that carries a
-/// model its instance drains is answered once a record that carries the
+/// property its instance drains is answered once a record that carries the
 /// drain is stored, or with 503 after half a summary period. Once a period the hub
 /// sums the latest report of each usable entry instance, dropping those
 /// older than three periods, into the pool's [`LoadSummary`]: the roots
@@ -162,11 +162,11 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// watch sends it as a `load` event every period while there is one,
 /// changed or not, so that a watcher's age of it says how fresh it is,
 /// and once when there is none; the record carries it on its next write.
-/// A report may carry the instance's models
-/// ([`gdl_watch::LoadReport::models`]): from what its usable entry
-/// instances last said, or the models its settings declare
-/// (`[pool] models`) for one that says none, the hub makes the record's
-/// model entries, each with a state that keeps its history, and writes the
+/// A report may carry the instance's properties
+/// ([`gdl_watch::LoadReport::properties`]): from what its usable entry
+/// instances last said, or the properties its settings declare
+/// (`[pool] properties`) for one that says none, the hub makes the record's
+/// property entries, each with a state that keeps its history, and writes the
 /// record on each change of them.
 ///
 /// The record says whether the pool serves or is scaled to 0 on purpose
@@ -175,7 +175,7 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// process), answered once the directory has stored a record that says
 /// so. Before its first write, the hub reads the pool's last record, from
 /// its parent's hub under the `relay` backend, so that a restart keeps the
-/// models' history.
+/// properties' history.
 ///
 /// The pool drains when asked, on the control listener: `POST drain`, or
 /// [`PoolReadiness::drain`] in process. From then its state is `draining`
@@ -337,8 +337,8 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         let entered = sender.is_some();
         let record = PoolRecord {
             presence: gdl_pools::Presence::Serving,
-            models: Vec::new(),
-            models_version: 0,
+            properties: Vec::new(),
+            properties_version: 0,
             revoked: Vec::new(),
             name: pool.name.clone(),
             class: pool.class.clone(),
@@ -377,7 +377,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
             pool.summary,
             timing.watch_buffer,
             timing.lease,
-            pool.models.clone(),
+            pool.properties.clone(),
         );
         let sends: BTreeSet<String> = layout
             .boundaries()
@@ -594,18 +594,22 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         }
     }
 
-    /// Revoke the pool's model `key`, or lift its revocation when
-    /// `revoked` is false, as `POST models/revoke` and `POST models/lift`
+    /// Revoke the pool's property `key`, or lift its revocation when
+    /// `revoked` is false, as `POST properties/revoke` and `POST properties/lift`
     /// on the control listener do, and return once the directory has
-    /// stored a record that says so. A revoked model leaves the record's
-    /// models at once, whatever the instances say, until it is lifted; the
+    /// stored a record that says so. A revoked property leaves the record's
+    /// properties at once, whatever the instances say, until it is lifted; the
     /// record keeps the revocation, so a restarted hub keeps it too. A
-    /// lifted model is listed again as the instances say, starting afresh.
-    /// Refused for a malformed model, and when the directory has not stored
+    /// lifted property is listed again as the instances say, starting afresh.
+    /// Refused for a malformed property, and when the directory has not stored
     /// such a record within 5 s, or a later request replaced it, or the hub
     /// has stopped: the revocation holds all the same, and the next write
     /// carries it.
-    pub async fn revoke(&self, key: gdl_model::ModelKey, revoked: bool) -> Result<(), PoolError> {
+    pub async fn revoke(
+        &self,
+        key: gdl_model::PropertyKey,
+        revoked: bool,
+    ) -> Result<(), PoolError> {
         key.check().map_err(PoolError::new)?;
         let mut stored = self.stored.subscribe();
         // Taken at once: before the pool's last record is read, the table
@@ -616,13 +620,13 @@ impl<D: PoolDirectory> PoolReadiness<D> {
                 .wait_for(|stored| {
                     stored
                         .as_ref()
-                        .is_some_and(|stored| stored.models.version >= version)
+                        .is_some_and(|stored| stored.properties.version >= version)
                 })
                 .await
                 .map(|stored| {
                     stored
                         .as_ref()
-                        .is_some_and(|stored| stored.models.revoked.contains(&key) == revoked)
+                        .is_some_and(|stored| stored.properties.revoked.contains(&key) == revoked)
                 })
                 .map_err(drop)
         })
@@ -631,12 +635,14 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         match answered {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(PoolError::new(format!(
-                "a later request replaced {doing} model `{}` before it was stored",
-                key.model
+                "a later request replaced {doing} property `{}` of kind `{}` before it was stored",
+                key.key(),
+                key.kind()
             ))),
             _ => Err(PoolError::new(format!(
-                "the directory has not stored the pool's record {doing} model `{}` in time",
-                key.model
+                "the directory has not stored the pool's record {doing} property `{}` of kind `{}` in time",
+                key.key(),
+                key.kind()
             ))),
         }
     }
@@ -735,7 +741,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     }
 
     /// Take an entry instance's load report, as `POST
-    /// instances/{instance_id}/load` does. A report that carries a model the
+    /// instances/{instance_id}/load` does. A report that carries a property the
     /// instance drains is answered only once a record that carries what it
     /// said is stored: the instance forgets the drain on the answer, and a
     /// hub that restarted before the write would read a record without it.
@@ -766,7 +772,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         let wait = stored.wait_for(|stored| {
             stored
                 .as_ref()
-                .is_some_and(|stored| stored.models.version >= version)
+                .is_some_and(|stored| stored.properties.version >= version)
         });
         match tokio::time::timeout(bound, wait).await {
             Ok(Ok(_)) => {
@@ -846,7 +852,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                     states: written,
                     presence: self.presence.subscribe(),
                     loads: summaries,
-                    models: self.feed.models(),
+                    properties: self.feed.properties(),
                 },
                 cancel.clone(),
             ),
@@ -1150,13 +1156,13 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
             )
             .route(
                 gdl_watch::REVOKE_ROUTE,
-                post(move |Json(key): Json<gdl_model::ModelKey>| async move {
+                post(move |Json(key): Json<gdl_model::PropertyKey>| async move {
                     revoke(&revoking, key, true).await
                 }),
             )
             .route(
                 gdl_watch::LIFT_ROUTE,
-                post(move |Json(key): Json<gdl_model::ModelKey>| async move {
+                post(move |Json(key): Json<gdl_model::PropertyKey>| async move {
                     revoke(&lifting, key, false).await
                 }),
             )
@@ -1287,11 +1293,11 @@ async fn command_child<D: PoolDirectory>(
 }
 
 /// Revoke `key` on `pool`, or lift its revocation, and answer: a
-/// malformed model is the caller's (400), and anything else is the
+/// malformed property is the caller's (400), and anything else is the
 /// directory's (503).
 async fn revoke<D: PoolDirectory>(
     pool: &PoolReadiness<D>,
-    key: gdl_model::ModelKey,
+    key: gdl_model::PropertyKey,
     revoked: bool,
 ) -> Response {
     if let Err(why) = key.check() {

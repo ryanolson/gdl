@@ -22,7 +22,7 @@ use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
 use gdl::{
-    Affinity, FollowedPools, HubRecords, InstanceModels, LeastLoaded, PoolPolicies, PoolPolicy,
+    Affinity, FollowedPools, HubRecords, InstanceProperties, LeastLoaded, PoolPolicies, PoolPolicy,
     Selector, Selectors,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
@@ -148,7 +148,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // names against these before it registers.
     config.runtime.pool_policies = builder.pool_policies();
     config.runtime.followed = builder.followed.clone();
-    config.runtime.models = builder.models.clone();
+    config.runtime.properties = builder.properties.clone();
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
     // the launch, where a chooser's follower registers the pools' figures.
@@ -223,9 +223,9 @@ pub struct Builder {
     /// tables from ([`gdl::PoolRecords::current`]): the runtime's own,
     /// bound at the launch.
     records: HubRecords,
-    /// What every node it builds says the instance's models are through
-    /// ([`InstanceModels::current`]).
-    models: InstanceModels,
+    /// What every node it builds says the instance's properties are through
+    /// ([`InstanceProperties::current`]).
+    properties: InstanceProperties,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -248,7 +248,7 @@ impl Builder {
             readiness: Mutex::new(Vec::new()),
             followed: FollowedPools::new(),
             records,
-            models: InstanceModels::new(),
+            properties: InstanceProperties::new(),
         })
     }
 
@@ -324,7 +324,7 @@ impl Builder {
         let providers = Figment::from(Serialized::defaults(table));
         let built = self
             .followed
-            .scope(self.records.scope(self.models.scope(build_node::<S>(
+            .scope(self.records.scope(self.properties.scope(build_node::<S>(
                 &providers,
                 &GraphConfig::new(),
                 metrics,
@@ -380,7 +380,7 @@ impl Builder {
         self.followed
             .scope(
                 self.records.scope(
-                    self.models
+                    self.properties
                         .scope(build_node::<T>(&providers, graph, metrics)),
                 ),
             )

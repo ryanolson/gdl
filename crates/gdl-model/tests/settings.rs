@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gdl_model::{
-    DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, ModelKey, NodeInfo, Placement,
-    PoolSettings, Role, TypeInfo, WatchCaps, layout,
+    DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, NodeInfo, Placement, PoolSettings,
+    PropertyKey, Role, TypeInfo, WatchCaps, layout,
 };
 
 /// `S => F { D }`: F's own hop crosses from `global` into `model_x`.
@@ -85,7 +85,7 @@ fn a_pools_settings_are_read_whole() {
             hub: Some("model-x-01-hub:1337".into()),
             summary: Duration::from_secs(10),
             timing: Default::default(),
-            models: Vec::new(),
+            properties: Vec::new(),
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -215,8 +215,8 @@ fn a_pools_hub_checks_its_settings_against_the_class() {
         ),
         (
             classed(),
-            "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/s'\nmodels = [{ model = 'x' }]\n",
-            "[pool] models: no class sends to class `global`, so its pool serves no models to another",
+            "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/s'\nproperties = { test = [{ name = 'x' }] }\n",
+            "[pool] properties: no class sends to class `global`, so its pool serves no properties to another",
         ),
     ];
     for (layout, text, expected) in cases {
@@ -754,48 +754,52 @@ fn a_relay_pool_refuses_a_lease_its_reports_cannot_cover() {
     }
 }
 
-/// A pool whose instances report no models declares the models it
-/// serves: each a name, and a routing key when the pool has partitions.
-/// A model without a name, an empty routing key, a model declared twice,
-/// and a key an entry does not have are refused, each naming `models`.
+/// A pool whose instances report no properties of a kind declares the
+/// ones of that kind it serves: each a key of the kind's type, in its
+/// canonical form. A kind that is not a settings key, a key that is not
+/// an object, and a key declared twice, also in another encoding, are
+/// refused, each naming `properties`.
 #[test]
-fn a_pool_declares_the_models_it_serves() {
+fn a_pool_declares_the_properties_it_serves() {
     let base = "name = 'm'\nclass = 'model_x'\nregion = 'r'\n";
     let declared = settings(&format!(
-        "{base}models = [{{ model = 'llama-70b' }}, {{ model = 'qwen-32b', routing_key = 'a' }}]\n"
+        "{base}[properties]\ntest = [{{ name = 'b' }}, {{ partition = 'a', name = 'c' }}]\nother = [{{ name = 'a' }}]\n"
     ));
     assert_eq!(
-        declared.models,
+        declared.properties,
         [
-            ModelKey::new("llama-70b"),
-            ModelKey {
-                model: "qwen-32b".into(),
-                routing_key: Some("a".into()),
-            },
+            PropertyKey::new("other", serde_json::json!({ "name": "a" })),
+            PropertyKey::new("test", serde_json::json!({ "name": "b" })),
+            PropertyKey::new("test", serde_json::json!({ "name": "c", "partition": "a" })),
         ]
     );
     let text = toml::to_string(&declared).expect("toml");
     assert_eq!(settings(&text), declared, "{text}");
-    assert!(settings(base).models.is_empty());
+    assert!(settings(base).properties.is_empty());
     let unsaid = toml::to_string(&settings(base)).expect("toml");
-    assert!(!unsaid.contains("models"), "{unsaid}");
+    assert!(!unsaid.contains("properties"), "{unsaid}");
 
     for (bad, why) in [
-        ("models = [{ model = '' }]", "name is empty"),
         (
-            "models = [{ model = 'x', routing_key = '' }]",
-            "routing key is empty",
+            "properties = { Test = [{ name = 'x' }] }",
+            "property kind name",
         ),
+        ("properties = { test = ['x'] }", "must be an object"),
         (
-            "models = [{ model = 'x' }, { model = 'x' }]",
+            "properties = { test = [{ name = 'x', partition = 'p' }, { partition = 'p', name = 'x' }] }",
             "declared twice",
         ),
-        ("models = [{ model = 'x', weight = 2 }]", "unknown field"),
+        ("models = [{ model = 'x' }]", "unknown field"),
     ] {
         let text = format!("{base}{bad}\n");
         let table: toml::Value = toml::from_str(&text).expect("toml");
         let refused = PoolSettings::read(table).expect_err(&text).to_string();
-        assert!(refused.contains("models"), "{text}: {refused}");
+        let named = if why == "unknown field" {
+            "models"
+        } else {
+            "properties"
+        };
+        assert!(refused.contains(named), "{text}: {refused}");
         assert!(refused.contains(why), "{text}: {refused}");
     }
 }

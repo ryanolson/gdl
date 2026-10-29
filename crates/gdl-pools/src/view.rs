@@ -93,7 +93,7 @@ impl PoolView {
     /// The record of `pool`, whether or not its lease has passed, with when
     /// this view saw its `seq` change, from which its lease runs: `None`
     /// once it is withdrawn, or dropped by a completed snapshot, or never
-    /// seen. For a reader that keeps a silent pool in view, as a model
+    /// seen. For a reader that keeps a silent pool in view, as a property
     /// index does, where [`PoolView::get`] hides it.
     pub fn seen(&self, pool: &str) -> Option<(&PoolRecord, Instant)> {
         self.pools

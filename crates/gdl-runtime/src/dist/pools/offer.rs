@@ -396,6 +396,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let id = entry.instance_id();
         pools.store(
@@ -539,6 +540,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let tables = entries
             .iter()
@@ -671,6 +673,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         // `m0`'s entry is no peer of the chooser's velo node.
         let ids = std::iter::once(velo::InstanceId::new_v4())
@@ -817,6 +820,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let tables = [
             ("m0", velo::InstanceId::new_v4()),
@@ -992,6 +996,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let tables = entries
             .iter()
@@ -1111,6 +1116,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let tables = names
             .iter()
@@ -1534,6 +1540,7 @@ mod tests {
             "home",
             [("model_x", "d")],
             super::super::damping::Damping::default(),
+            gdl::PropertyKinds::new(),
         );
         let id = entry.instance_id();
         pools.store(

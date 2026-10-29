@@ -375,7 +375,7 @@ async fn a_segment_no_other_class_reaches_is_not_watched() {
 #[tokio::test]
 async fn a_report_does_not_outlive_its_registration() {
     let load = LoadReport {
-        models: None,
+        properties: gdl_model::PropertyLists::new(),
         admitted: 3,
         limit: 8,
         refusals: 0,
@@ -454,9 +454,9 @@ async fn a_watch_waits_for_the_epoch() {
 /// but no drain ends on its silence until it reports in the new
 /// registration.
 #[test]
-fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
-    use gdl_model::{InstanceModel, InstanceModelState};
-    use gdl_pools::ModelState;
+fn a_property_drain_waits_for_a_report_from_a_renewed_registration() {
+    use gdl_model::EntryState;
+    use gdl_pools::PropertyState;
 
     let feed = feed();
     feed.restore(None, 100);
@@ -478,15 +478,17 @@ fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
         epoch: b_epoch,
     };
     let empty = LoadReport {
-        models: Some(Vec::new()),
+        properties: gdl_model::PropertyLists::from([("test".to_string(), Vec::new())]),
         ..LoadReport::default()
     };
     let draining = LoadReport {
-        models: Some(vec![InstanceModel {
-            model: "m".into(),
-            routing_key: None,
-            state: InstanceModelState::Draining,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                EntryState::Draining,
+            )],
+        )]),
         ..LoadReport::default()
     };
     let now = Instant::now();
@@ -495,16 +497,16 @@ fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
     feed.report(b_id, b_lease, empty.clone(), now)
         .expect("the second instance reports an empty list");
     assert_eq!(
-        feed.models().borrow().entries[0].state,
-        ModelState::Draining
+        feed.properties().borrow().entries[0].state,
+        PropertyState::Draining
     );
 
     feed.joined("f", Incarnation::from_u64(2), RegistrationEpoch::new(), b);
     feed.report(a_id, a_lease, empty, now)
         .expect("the first instance finishes its drain");
     assert_eq!(
-        feed.models().borrow().entries[0].state,
-        ModelState::Draining
+        feed.properties().borrow().entries[0].state,
+        PropertyState::Draining
     );
 }
 
@@ -514,13 +516,12 @@ fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
 /// reports sent after the read end it.
 #[test]
 fn a_drain_reported_before_the_restart_snapshot_is_kept() {
-    use gdl_model::{InstanceModel, InstanceModelState};
-    use gdl_pools::{ModelEntry, ModelState};
+    use gdl_model::EntryState;
+    use gdl_pools::{PoolProperty, PropertyState};
 
-    let snapshot = [ModelEntry {
-        model: "m".into(),
-        routing_key: None,
-        state: ModelState::Ready,
+    let snapshot = [PoolProperty {
+        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+        state: PropertyState::Ready,
         since: 7,
     }];
     let feed = feed();
@@ -533,15 +534,17 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
     let lease = Lease { incarnation, epoch };
     let now = Instant::now();
     let draining = LoadReport {
-        models: Some(vec![InstanceModel {
-            model: "m".into(),
-            routing_key: None,
-            state: InstanceModelState::Draining,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                EntryState::Draining,
+            )],
+        )]),
         ..LoadReport::default()
     };
     let empty = LoadReport {
-        models: Some(Vec::new()),
+        properties: gdl_model::PropertyLists::from([("test".to_string(), Vec::new())]),
         ..LoadReport::default()
     };
     assert!(
@@ -554,5 +557,8 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
     feed.report(id, lease, empty, now)
         .expect("the hub takes the empty list after the drain");
     feed.summarize(now);
-    assert_eq!(feed.models().borrow().entries[0].state, ModelState::Drained);
+    assert_eq!(
+        feed.properties().borrow().entries[0].state,
+        PropertyState::Drained
+    );
 }

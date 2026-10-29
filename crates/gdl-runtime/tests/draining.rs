@@ -772,8 +772,8 @@ async fn the_last_gone_decline_at_the_failover_limit_is_routing() {
         ],
     )
     .await;
-    for model in [&m1, &m2, &m3] {
-        model.entries[0].segment.decline_offers_as(Decline::Gone);
+    for property in [&m1, &m2, &m3] {
+        property.entries[0].segment.decline_offers_as(Decline::Gone);
     }
     let first = ask(&chooser.segment)
         .await

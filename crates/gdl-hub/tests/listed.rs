@@ -1,8 +1,8 @@
-//! What a hub lists, for its choosers' model index: every record of a
+//! What a hub lists, for its choosers' property index: every record of a
 //! class it sends to, followed or not, with the pool's region, condition,
-//! and models, until the pool withdraws. Silence never removes a pool: a
+//! and properties, until the pool withdraws. Silence never removes a pool: a
 //! record whose lease passed reads missing, and so does a followed pool
-//! whose link was lost. A followed pool's models come from its link too,
+//! whose link was lost. A followed pool's properties come from its link too,
 //! whichever has the higher version. A watch of the relay begun before the
 //! hub has read the directory waits for it, and one that still has not is
 //! ended once it has. Every hub runs in process on OS-assigned ports;
@@ -20,17 +20,22 @@ use common::{
     serve_pool, spec, timing,
 };
 use futures::{Stream, StreamExt};
-use gdl_model::{InstanceModel, InstanceModelState};
+use gdl_model::EntryState;
 use gdl_pools::{
-    DirDirectory, DirectoryError, MemoryDirectory, ModelEntry, ModelState, PoolCondition,
-    PoolDirectory, PoolEvent, PoolRecord, PoolState, Presence, ResumeToken, Withdrawal,
+    DirDirectory, DirectoryError, MemoryDirectory, PoolCondition, PoolDirectory, PoolEvent,
+    PoolProperty, PoolRecord, PoolState, Presence, PropertyState, ResumeToken, Withdrawal,
 };
 use gdl_watch::{FollowEvent, Listing, LoadReport};
 use tokio::sync::watch;
 
 /// A record of the model pool `pool`, of [`spec`]'s deployment unless
-/// `placement` is given, a child of `home`, listing `models`.
-fn record(pool: &str, home: &str, models: &[(&str, ModelState)], lease: Duration) -> PoolRecord {
+/// `placement` is given, a child of `home`, listing `properties`.
+fn record(
+    pool: &str,
+    home: &str,
+    properties: &[(&str, PropertyState)],
+    lease: Duration,
+) -> PoolRecord {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     PoolRecord {
@@ -47,27 +52,34 @@ fn record(pool: &str, home: &str, models: &[(&str, ModelState)], lease: Duration
         lease,
         load: None,
         presence: Presence::Serving,
-        models: models
+        properties: properties
             .iter()
-            .map(|(model, state)| ModelEntry {
-                model: (*model).into(),
-                routing_key: None,
+            .map(|(property, state)| PoolProperty {
+                property: gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": *property }),
+                ),
                 state: *state,
                 since: 7,
             })
             .collect(),
-        models_version: 7,
+        properties_version: 7,
         revoked: Vec::new(),
     }
 }
 
-/// The models of a listing, by name, with their states.
-fn models(listing: &Listing) -> Vec<(&str, ModelState)> {
+/// The properties of a listing, by name, with their states.
+fn properties(listing: &Listing) -> Vec<(&str, PropertyState)> {
     listing
-        .models
+        .properties
         .entries
         .iter()
-        .map(|entry| (entry.model.as_str(), entry.state))
+        .map(|entry| {
+            (
+                entry.property.key()["name"].as_str().unwrap_or_default(),
+                entry.state,
+            )
+        })
         .collect()
 }
 
@@ -136,14 +148,14 @@ async fn listed_until(
     found.unwrap_or_else(|_| panic!("{pool}: {what} in time"))
 }
 
-/// A new hub knows a model whose only pool is silent: it lists every
-/// record of the class it reads, a child or not, with its models, and
+/// A new hub knows a property whose only pool is silent: it lists every
+/// record of the class it reads, a child or not, with its properties, and
 /// the pool's condition. A pool scaled to 0 reads so, and never lapses;
 /// a serving one whose lease passes reads missing, and stays listed. A
 /// record of another deployment is not listed. Under `dir`, which keeps
 /// every record until its pool withdraws.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_new_hub_lists_a_silent_pool_with_its_models() {
+async fn a_new_hub_lists_a_silent_pool_with_its_properties() {
     let root = tempfile::Builder::new()
         .prefix("gdl-listed-")
         .tempdir()
@@ -153,7 +165,7 @@ async fn a_new_hub_lists_a_silent_pool_with_its_models() {
     let silent = record(
         "model-x-02-eu-west-1",
         "global-02-eu-west-1",
-        &[("qwen-32b", ModelState::Ready)],
+        &[("qwen-32b", PropertyState::Ready)],
         lease,
     );
     let scaled = PoolRecord {
@@ -161,7 +173,7 @@ async fn a_new_hub_lists_a_silent_pool_with_its_models() {
         ..record(
             "model-x-03-eu-west-1",
             GLOBAL,
-            &[("llama-70b", ModelState::Unavailable)],
+            &[("llama-70b", PropertyState::Unavailable)],
             lease,
         )
     };
@@ -170,7 +182,7 @@ async fn a_new_hub_lists_a_silent_pool_with_its_models() {
         ..record(
             "model-x-09-eu-west-1",
             GLOBAL,
-            &[("mistral", ModelState::Ready)],
+            &[("mistral", PropertyState::Ready)],
             lease,
         )
     };
@@ -186,14 +198,14 @@ async fn a_new_hub_lists_a_silent_pool_with_its_models() {
     let names: Vec<&str> = shown.iter().map(|(pool, _)| pool.as_str()).collect();
     assert_eq!(names, ["model-x-02-eu-west-1", "model-x-03-eu-west-1"]);
     let first = shown[0].1.as_ref().expect("listed");
-    assert_eq!(models(first), [("qwen-32b", ModelState::Ready)]);
+    assert_eq!(properties(first), [("qwen-32b", PropertyState::Ready)]);
     assert_eq!(first.region, "eu-west-1");
-    assert_eq!(first.models.version, 7);
+    assert_eq!(first.properties.version, 7);
     let scaled_listing = shown[1].1.as_ref().expect("listed");
     assert_eq!(scaled_listing.condition, PoolCondition::ScaledToZero);
     assert_eq!(
-        models(scaled_listing),
-        [("llama-70b", ModelState::Unavailable)]
+        properties(scaled_listing),
+        [("llama-70b", PropertyState::Unavailable)]
     );
 
     // A busy host may build the snapshot after the lease has passed.
@@ -206,7 +218,7 @@ async fn a_new_hub_lists_a_silent_pool_with_its_models() {
             .await
         }
     };
-    assert_eq!(models(&missing), [("qwen-32b", ModelState::Ready)]);
+    assert_eq!(properties(&missing), [("qwen-32b", PropertyState::Ready)]);
     // Silent since the hub first saw the write, a lease before it lapsed.
     let age = |listing: &Listing| listing.missing_age_ms.map(Duration::from_millis);
     assert!(
@@ -289,27 +301,29 @@ impl PoolDirectory for Freezing {
     }
 }
 
-fn says(model: &str, state: InstanceModelState) -> LoadReport {
+fn says(property: &str, state: EntryState) -> LoadReport {
     LoadReport {
         admitted: 0,
         limit: 8,
         refusals: 0,
-        models: Some(vec![InstanceModel {
-            model: model.into(),
-            routing_key: None,
-            state,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property })),
+                state,
+            )],
+        )]),
     }
 }
 
-/// A followed pool's models reach its parent's relay over the follow link
+/// A followed pool's properties reach its parent's relay over the follow link
 /// when the directory holds an older list: the link's list has the higher
 /// version. A new watch of the relay gives a followed pool's listing on
 /// its follow, not apart. And a followed pool whose link is lost reads
 /// missing while its record is still fresh, and live again once followed
 /// anew.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_followed_pools_models_come_over_its_link() {
+async fn a_followed_pools_properties_come_over_its_link() {
     let resolving = Resolving::new();
     let directory = Freezing {
         inner: resolving.clone(),
@@ -322,7 +336,7 @@ async fn a_followed_pools_models_come_over_its_link() {
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let entry: &Instance = &instances[0];
     entry
-        .report(says("qwen-32b", InstanceModelState::Starting))
+        .report(says("qwen-32b", EntryState::Starting))
         .await
         .expect("taken");
 
@@ -330,7 +344,7 @@ async fn a_followed_pools_models_come_over_its_link() {
     let mut watch = global.follows();
     let (events, _) = snapshot(&mut watch).await;
     let starting = |listing: &Listing| {
-        models(listing) == [("qwen-32b", ModelState::Starting)]
+        properties(listing) == [("qwen-32b", PropertyState::Starting)]
             && listing.condition == PoolCondition::Live
     };
     let shown = listings(&events);
@@ -358,11 +372,11 @@ async fn a_followed_pools_models_come_over_its_link() {
 
     directory.frozen.store(true, Ordering::SeqCst);
     entry
-        .report(says("qwen-32b", InstanceModelState::Ready))
+        .report(says("qwen-32b", EntryState::Ready))
         .await
         .expect("taken");
     let ready = listed_until(&mut watch, POOL, "ready, from the link", |listing| {
-        models(listing) == [("qwen-32b", ModelState::Ready)]
+        properties(listing) == [("qwen-32b", PropertyState::Ready)]
     })
     .await;
     let held = resolving
@@ -378,7 +392,7 @@ async fn a_followed_pools_models_come_over_its_link() {
         .await
         .expect("a record");
     assert!(
-        held.models_version < ready.models.version,
+        held.properties_version < ready.properties.version,
         "the directory holds the older list"
     );
 
@@ -391,8 +405,8 @@ async fn a_followed_pools_models_come_over_its_link() {
         })
         .expect("the follow");
     assert_eq!(
-        follow.as_ref().map(models),
-        Some(vec![("qwen-32b", ModelState::Ready)])
+        follow.as_ref().map(properties),
+        Some(vec![("qwen-32b", PropertyState::Ready)])
     );
     assert!(
         !events
@@ -409,7 +423,11 @@ async fn a_followed_pools_models_come_over_its_link() {
         |listing| listing.condition == PoolCondition::Missing,
     )
     .await;
-    assert_eq!(models(&lost), [("qwen-32b", ModelState::Ready)], "kept");
+    assert_eq!(
+        properties(&lost),
+        [("qwen-32b", PropertyState::Ready)],
+        "kept"
+    );
     assert!(
         lost.missing_age_ms
             .is_some_and(|age| Duration::from_millis(age) < WAIT),
@@ -454,7 +472,7 @@ impl PoolDirectory for Held {
 /// Until the hub's watch of the directory has read a snapshot, a watch of
 /// its relay waits a little, then says the listings are not whole, and
 /// it ends once they are; the next one says they are. A reader so tells
-/// a model not known yet from one that no pool lists. The test waits out
+/// a property not known yet from one that no pool lists. The test waits out
 /// the relay's bound on that wait, 2 s, by design.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_before_the_directory_is_read_says_so_and_ends_once_it_is() {
@@ -476,22 +494,22 @@ async fn a_watch_before_the_directory_is_read_says_so_and_ends_once_it_is() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A record may start its model list at version 0. A synced listing must
-/// keep that list, so a known model does not read as unknown.
+/// A record may start its property list at version 0. A synced listing must
+/// keep that list, so a known property does not read as unknown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_record_at_model_version_zero_keeps_its_models() {
+async fn a_record_at_property_version_zero_keeps_its_properties() {
     let directory = MemoryDirectory::new();
     let mut initial = record(
         "model-x-02-eu-west-1",
         "global-02-eu-west-1",
-        &[("qwen-32b", ModelState::Starting)],
+        &[("qwen-32b", PropertyState::Starting)],
         Duration::from_secs(30),
     );
-    initial.models_version = 0;
-    initial.models[0].since = 0;
+    initial.properties_version = 0;
+    initial.properties[0].since = 0;
     let control = PoolRecord {
         name: "model-x-03-eu-west-1".into(),
-        models_version: 1,
+        properties_version: 1,
         ..initial.clone()
     };
     for record in [&initial, &control] {
@@ -512,13 +530,13 @@ async fn a_record_at_model_version_zero_keeps_its_models() {
             .expect("the pool is listed")
     };
     assert_eq!(
-        models(get(&control.name)),
-        [("qwen-32b", ModelState::Starting)],
+        properties(get(&control.name)),
+        [("qwen-32b", PropertyState::Starting)],
         "the positive version reaches the relay"
     );
     assert_eq!(
-        models(get(&initial.name)),
-        [("qwen-32b", ModelState::Starting)],
+        properties(get(&initial.name)),
+        [("qwen-32b", PropertyState::Starting)],
         "version 0 is a list too"
     );
     hub.shutdown().await.expect("the hub stops");
@@ -526,7 +544,7 @@ async fn a_record_at_model_version_zero_keeps_its_models() {
 
 /// `POST` `path` on `hub`'s control listener, with `body` if any: the
 /// status.
-async fn control(hub: &velo_hub::Hub, path: &str, body: Option<gdl_model::ModelKey>) -> u16 {
+async fn control(hub: &velo_hub::Hub, path: &str, body: Option<gdl_model::PropertyKey>) -> u16 {
     let url = format!(
         "http://127.0.0.1:{}/v1/ext/gdl-pool{path}",
         hub.control_addr().port()
@@ -544,16 +562,16 @@ async fn control(hub: &velo_hub::Hub, path: &str, body: Option<gdl_model::ModelK
         .as_u16()
 }
 
-/// A model an operator revokes on a pool leaves that pool's listing, so a
+/// A property an operator revokes on a pool leaves that pool's listing, so a
 /// chooser's index no longer lists the pool for it, while the pool's
-/// other models stay. The record and the link both drop it.
+/// other properties stay. The record and the link both drop it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revoked_model_leaves_the_pools_listing() {
+async fn a_revoked_property_leaves_the_pools_listing() {
     let directory = Resolving::new();
     let settings = gdl_model::PoolSettings {
-        models: vec![
-            gdl_model::ModelKey::new("acme-legal"),
-            gdl_model::ModelKey::new("llama-70b"),
+        properties: vec![
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "acme-legal" })),
+            gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "llama-70b" })),
         ],
         ..model(POOL, "us-east-1", "model-x-01-hub:1337")
     };
@@ -564,10 +582,15 @@ async fn a_revoked_model_leaves_the_pools_listing() {
     let (events, _) = snapshot(&mut watch).await;
     let names = |listing: &Listing| -> Vec<String> {
         listing
-            .models
+            .properties
             .entries
             .iter()
-            .map(|entry| entry.model.clone())
+            .map(|entry| {
+                entry.property.key()["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect()
     };
     let both = |listing: &Listing| names(listing) == ["acme-legal", "llama-70b"];
@@ -575,14 +598,17 @@ async fn a_revoked_model_leaves_the_pools_listing() {
         .iter()
         .any(|(pool, listing)| pool == POOL && listing.as_ref().is_some_and(both))
     {
-        listed_until(&mut watch, POOL, "both models listed", both).await;
+        listed_until(&mut watch, POOL, "both properties listed", both).await;
     }
 
     assert_eq!(
         control(
             &model_hub,
             gdl_watch::REVOKE_ROUTE,
-            Some(gdl_model::ModelKey::new("acme-legal"))
+            Some(gdl_model::PropertyKey::new(
+                "test",
+                serde_json::json!({ "name": "acme-legal" })
+            ))
         )
         .await,
         204
@@ -592,8 +618,11 @@ async fn a_revoked_model_leaves_the_pools_listing() {
     })
     .await;
     assert_eq!(
-        revoked.models.revoked,
-        [gdl_model::ModelKey::new("acme-legal")]
+        revoked.properties.revoked,
+        [gdl_model::PropertyKey::new(
+            "test",
+            serde_json::json!({ "name": "acme-legal" })
+        )]
     );
     let (events, _) = snapshot(&mut global.follows()).await;
     let shown = listings(&events);
@@ -608,7 +637,7 @@ async fn a_revoked_model_leaves_the_pools_listing() {
 }
 
 /// An operator's withdrawal of a child whose hub is gone, given on its
-/// parent's hub, unlists the child: its models leave the index, as after
+/// parent's hub, unlists the child: its properties leave the index, as after
 /// the child's own drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_operators_withdrawal_unlists_the_pool() {

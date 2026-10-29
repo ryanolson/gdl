@@ -24,8 +24,8 @@
 //! ([`super::load`]), under the same lock, so that a report is taken only
 //! from an instance that is usable when it arrives, and the summary made
 //! of them is sent to the watchers in order with the rest. So too what
-//! each instance says of its models, and the pool's model entries made of
-//! what the usable ones say ([`super::models`]): those go to the record,
+//! each instance says of its properties, and the pool's property entries made of
+//! what the usable ones say ([`super::properties`]): those go to the record,
 //! not to the watch.
 //!
 //! The `ready` and `retired` watches are two streams that velo-hub does
@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
+use gdl_model::{EntryState, PropertyKey, PropertyLists};
 use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
@@ -57,7 +57,7 @@ use velo_hub::velo::{InstanceId, PeerInfo};
 use super::count::Watched;
 use super::followers::{Followers, Following, Key, WatchKey};
 use super::load::Reports;
-use super::models::{ModelList, Models, Offer};
+use super::properties::{Offer, Properties, PropertyList};
 use super::retiring::Retiring;
 use crate::fanout::Watchers;
 use gdl_watch::{PoolWatchError, PoolWatchEvent};
@@ -69,8 +69,8 @@ pub(super) struct Feed {
     shared: Mutex<Shared>,
     /// The record's epoch, once a write is stored under it.
     epoch: watch::Sender<Option<u64>>,
-    /// The pool's model entries, as they change.
-    models: watch::Sender<Arc<ModelList>>,
+    /// The pool's property entries, as they change.
+    properties: watch::Sender<Arc<PropertyList>>,
     watchers: Watchers,
 }
 
@@ -80,7 +80,7 @@ impl Feed {
     /// load summary period is `period`. A watcher that falls more than
     /// `buffer` events behind is ended. A follower's watch closed without
     /// a release counts for `lease` after it closes. Its instances that
-    /// report no models of their own serve `declared`.
+    /// report no properties of their own serve `declared`.
     pub(super) fn new(
         name: String,
         class: String,
@@ -88,7 +88,7 @@ impl Feed {
         period: Duration,
         buffer: usize,
         lease: Duration,
-        declared: Vec<ModelKey>,
+        declared: Vec<PropertyKey>,
     ) -> Self {
         Self {
             name,
@@ -99,7 +99,7 @@ impl Feed {
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
-                models: Models::new(declared),
+                properties: Properties::new(declared),
                 followers: Followers::new(lease),
                 retiring: Retiring::default(),
                 events: broadcast::channel(buffer).0,
@@ -107,72 +107,73 @@ impl Feed {
                 work: Default::default(),
             }),
             epoch: watch::Sender::new(None),
-            models: watch::Sender::new(Arc::default()),
+            properties: watch::Sender::new(Arc::default()),
             watchers: Watchers::new(),
         }
     }
 
-    /// The pool's model entries, as they change: none until the pool's
+    /// The pool's property entries, as they change: none until the pool's
     /// last record has been read ([`Feed::restore`]).
-    pub(super) fn models(&self) -> watch::Receiver<Arc<ModelList>> {
-        self.models.subscribe()
+    pub(super) fn properties(&self) -> watch::Receiver<Arc<PropertyList>> {
+        self.properties.subscribe()
     }
 
     /// The writer moved to a later epoch, whose versions count from
     /// `floor`: the list's version rises to it if it is below.
     pub(super) fn raise_floor(&self, floor: u64) {
         let mut shared = self.lock();
-        if shared.models.raise_floor(floor) {
-            self.models_changed(&shared);
+        if shared.properties.raise_floor(floor) {
+            self.properties_changed(&shared);
         }
     }
 
-    /// Take the model entries of the pool's last record, `held` with their
-    /// version and the revoked models, or none, and count later versions
+    /// Take the property entries of the pool's last record, `held` with their
+    /// version and the revoked properties, or none, and count later versions
     /// from at least `floor`: from then on, what the instances say of
-    /// their models makes the entries.
-    pub(super) fn restore(&self, held: Option<super::models::Held<'_>>, floor: u64) {
+    /// their properties makes the entries.
+    pub(super) fn restore(&self, held: Option<super::properties::Held<'_>>, floor: u64) {
         let mut shared = self.lock();
-        shared.models.restore(held, floor);
-        shared.update_models();
-        self.models_changed(&shared);
+        shared.properties.restore(held, floor);
+        shared.update_properties();
+        self.properties_changed(&shared);
     }
 
-    /// Revoke the model `key`, or lift its revocation when `revoked` is
+    /// Revoke the property `key`, or lift its revocation when `revoked` is
     /// false: the list's version once it says so, which a record must
     /// carry to say it.
-    pub(super) fn revoke(&self, key: ModelKey, revoked: bool) -> u64 {
+    pub(super) fn revoke(&self, key: PropertyKey, revoked: bool) -> u64 {
         let mut shared = self.lock();
         let changed = if revoked {
-            shared.models.revoke(key)
+            shared.properties.revoke(key)
         } else {
-            // A lifted model is listed at once as the instances say.
-            shared.models.lift(&key) && {
-                shared.update_models();
+            // A lifted property is listed at once as the instances say.
+            shared.properties.lift(&key) && {
+                shared.update_properties();
                 true
             }
         };
         // Before the last record is read the table only keeps it: the list
         // is sent once the record is read.
-        if changed && shared.models.restored() {
-            self.models.send_replace(Arc::new(shared.models.list()));
+        if changed && shared.properties.restored() {
+            self.properties
+                .send_replace(Arc::new(shared.properties.list()));
         }
-        shared.models.list().version
+        shared.properties.list().version
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The pool's model entries changed: for the record, and for each
+    /// The pool's property entries changed: for the record, and for each
     /// pool that follows this one, under the lock that orders the watch's
     /// events.
-    fn models_changed(&self, shared: &Shared) {
-        let list = shared.models.list();
-        shared.send(PoolWatchEvent::Models {
-            models: list.clone(),
+    fn properties_changed(&self, shared: &Shared) {
+        let list = shared.properties.list();
+        shared.send(PoolWatchEvent::Properties {
+            properties: list.clone(),
         });
-        self.models.send_replace(Arc::new(list));
+        self.properties.send_replace(Arc::new(list));
     }
 
     /// A watch of the pool: its snapshot, then each change. It begins once
@@ -389,14 +390,14 @@ impl Feed {
     /// `owner`, holding `lease`, reported `load` at `now`: taken only from
     /// a usable entry instance in the registration the lease is of, since
     /// a report of an earlier one, or of an instance that retired, would
-    /// count work the pool no longer offers. What it says of its models
-    /// stands until it says otherwise, or is no longer usable; a model
+    /// count work the pool no longer offers. What it says of its properties
+    /// stands until it says otherwise, or is no longer usable; a property
     /// with no name is left out. Refused before the pool's last record is
     /// read, since what it says could not be kept: the instance sends it
     /// again. The reason, when refused.
     ///
-    /// A report that carries a model the instance drains is
-    /// [`Taken::Draining`]: its models and its admission are taken at once,
+    /// A report that carries a property the instance drains is
+    /// [`Taken::Draining`]: its properties and its admission are taken at once,
     /// but its refusals are counted only once it is answered
     /// ([`Feed::count`]).
     pub(super) fn report(
@@ -407,7 +408,7 @@ impl Feed {
         now: Instant,
     ) -> Result<Taken, String> {
         let mut shared = self.lock();
-        if !shared.models.restored() {
+        if !shared.properties.restored() {
             return Err("the pool's hub has not read its pool's last record yet".into());
         }
         match shared.entries.get_mut(&owner) {
@@ -415,25 +416,28 @@ impl Feed {
                 "instance {owner}'s registration is not the one the report's credential is of"
             )),
             Some(entry) if entry.usable() => {
-                let said = match load.models.take() {
-                    Some(mut models) => {
-                        models.retain(|model| model.key().check().is_ok());
-                        Said::Listed(models, lease.epoch)
+                let mut lists = std::mem::take(&mut load.properties);
+                let said = if lists.is_empty() {
+                    Said::Silent(lease.epoch)
+                } else {
+                    for entries in lists.values_mut() {
+                        entries.retain(|entry| entry.property().check().is_ok());
                     }
-                    None => Said::Silent(lease.epoch),
+                    Said::Listed(lists, lease.epoch)
                 };
-                let draining: Vec<ModelKey> = match &said {
-                    Said::Listed(models, _) => models
-                        .iter()
-                        .filter(|model| model.state == InstanceModelState::Draining)
-                        .map(InstanceModel::key)
+                let draining: Vec<PropertyKey> = match &said {
+                    Said::Listed(lists, _) => lists
+                        .values()
+                        .flatten()
+                        .filter(|entry| entry.state() == EntryState::Draining)
+                        .map(|entry| entry.property().clone())
                         .collect(),
                     Said::Silent(_) | Said::Unknown => Vec::new(),
                 };
                 let changed = entry.said != said;
                 entry.said = said;
-                if changed && shared.update_models() {
-                    self.models_changed(&shared);
+                if changed && shared.update_properties() {
+                    self.properties_changed(&shared);
                 }
                 if !draining.is_empty() {
                     // Its admission replaces the last report's, so it counts
@@ -443,7 +447,7 @@ impl Feed {
                         ..load.clone()
                     };
                     shared.loads.put(owner, lease.epoch, admission, now);
-                    let version = shared.models.settled(&draining);
+                    let version = shared.properties.settled(&draining);
                     return Ok(Taken::Draining { version, load });
                 }
                 shared.loads.put(owner, lease.epoch, load, now);
@@ -493,9 +497,9 @@ impl Feed {
             shared.send(PoolWatchEvent::Load { load });
         }
         // An instance that is no longer usable no longer serves its
-        // models: seen here, once a period, as its report is dropped.
-        if shared.update_models() {
-            self.models_changed(&shared);
+        // properties: seen here, once a period, as its report is dropped.
+        if shared.update_properties() {
+            self.properties_changed(&shared);
         }
         // The summary's period paces the followers' leases too, so a watch
         // is marked lost up to a period after its lease; that is never a
@@ -540,9 +544,9 @@ struct Shared {
     unresolved: HashMap<InstanceId, (usize, Held)>,
     /// The entry instances' load reports.
     loads: Reports,
-    /// The pool's model entries, made of what its usable entry instances
+    /// The pool's property entries, made of what its usable entry instances
     /// say.
-    models: Models,
+    properties: Properties,
     events: broadcast::Sender<PoolWatchEvent>,
     #[cfg(test)]
     work: crate::fanout::Work,
@@ -566,21 +570,21 @@ struct Entry {
     held: Held,
     /// Whether the hub removed it.
     departed: bool,
-    /// What it last said of its models, in the registration it said it
+    /// What it last said of its properties, in the registration it said it
     /// in: a renewal keeps it, but no drain ends on it until the instance
     /// reports in its new registration.
     said: Said,
 }
 
-/// What an entry instance last said of its models.
+/// What an entry instance last said of its properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Said {
     /// Nothing yet.
     Unknown,
-    /// A report without models, in a registration.
+    /// A report without properties, in a registration.
     Silent(RegistrationEpoch),
-    /// Its list, in a registration.
-    Listed(Vec<InstanceModel>, RegistrationEpoch),
+    /// Its lists, in a registration.
+    Listed(PropertyLists, RegistrationEpoch),
 }
 
 impl Entry {
@@ -617,10 +621,10 @@ impl Held {
 pub(super) enum Taken {
     /// Its load is counted: it is answered at once.
     Counted,
-    /// It carries a model its instance drains. The instance forgets a
+    /// It carries a property its instance drains. The instance forgets a
     /// drain once a report that carries it is answered, so the answer
-    /// waits for a stored record whose models' version is at least
-    /// `version`, the version at which those models' entries last changed,
+    /// waits for a stored record whose properties' version is at least
+    /// `version`, the version at which those properties' entries last changed,
     /// which a restarted hub reads back. The refusals of `load`
     /// are counted only then, since a report not answered is sent again
     /// with them.
@@ -628,11 +632,13 @@ pub(super) enum Taken {
 }
 
 impl Shared {
-    /// Make the model entries from what the usable entry instances say.
+    /// Make the property entries from what the usable entry instances say.
     /// Whether they changed.
-    fn update_models(&mut self) -> bool {
+    fn update_properties(&mut self) -> bool {
         let Self {
-            entries, models, ..
+            entries,
+            properties,
+            ..
         } = self;
         let offers = entries
             .values()
@@ -640,11 +646,13 @@ impl Shared {
             .map(|entry| match &entry.said {
                 Said::Unknown => Offer::Unknown,
                 Said::Silent(epoch) if *epoch == entry.epoch => Offer::Silent,
-                Said::Listed(models, epoch) if *epoch == entry.epoch => Offer::Listed(models),
+                Said::Listed(properties, epoch) if *epoch == entry.epoch => {
+                    Offer::Listed(properties)
+                }
                 Said::Silent(_) => Offer::Earlier(None),
-                Said::Listed(models, _) => Offer::Earlier(Some(models)),
+                Said::Listed(properties, _) => Offer::Earlier(Some(properties)),
             });
-        models.update(offers)
+        properties.update(offers)
     }
 
     fn entry_index(&self, segment: &str) -> Option<usize> {
@@ -814,7 +822,7 @@ impl Shared {
             epoch,
             state: self.state,
             load: self.loads.summary(),
-            models: Some(self.models.list()),
+            properties: Some(self.properties.list()),
         });
         if self.followers.unfollowed() {
             events.push(unfollowed());

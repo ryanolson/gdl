@@ -162,7 +162,7 @@ const NAME_LIMIT: usize = 64;
 /// `__` separates keys, so a name is lowercase ASCII letters and digits in
 /// words joined by single `_`s, starting with a letter. `kind` names what
 /// the name is for in the refusal.
-fn check_name_shape(kind: &str, name: &str) -> Result<(), String> {
+pub(crate) fn check_name_shape(kind: &str, name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let shaped = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')

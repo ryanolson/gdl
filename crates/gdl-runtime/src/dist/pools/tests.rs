@@ -5,8 +5,8 @@ mod avoided;
 mod bounded;
 mod counted;
 mod declines;
-mod models;
 mod offered;
+mod properties;
 mod reread;
 mod rewatch;
 mod withdrawn;
@@ -114,7 +114,9 @@ fn follower_counted(
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
-    let pools = Pools::new("r", [("model_x", "f")], Damping::default());
+    let kinds = gdl::PropertyKinds::new();
+    kinds.register(&properties::TEST).expect("registered");
+    let pools = Pools::new("r", [("model_x", "f")], Damping::default(), kinds);
     let recorded = Recorded {
         pools: pools.clone(),
         calls: Arc::default(),

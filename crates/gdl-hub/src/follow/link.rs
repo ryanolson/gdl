@@ -173,7 +173,7 @@ async fn snapshot(events: &mut Events, record: &PoolRecord) -> Option<Snapshot> 
             epoch,
             state,
             load,
-            models,
+            properties,
         }) if name == record.name && class == record.class && epoch == record.epoch => {
             Installed::new(
                 name,
@@ -183,7 +183,7 @@ async fn snapshot(events: &mut Events, record: &PoolRecord) -> Option<Snapshot> 
                 state,
                 load,
             )
-            .with_models(models)
+            .with_properties(properties)
         }
         Watched::Event(PoolWatchEvent::Pool { name, epoch, .. }) => {
             tracing::info!(

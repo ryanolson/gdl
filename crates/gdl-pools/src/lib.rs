@@ -39,8 +39,8 @@ pub use directory::{DirectoryError, PoolDirectory, PoolEvent, ResumeToken};
 pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
 pub use operator::{CommandWrite, PoolCommand, last_record};
 pub use record::{
-    LoadSummary, ModelEntry, ModelState, PoolCondition, PoolRecord, PoolState, Presence, Version,
-    Withdrawal,
+    LoadSummary, PoolCondition, PoolProperty, PoolRecord, PoolState, Presence, PropertyState,
+    Version, Withdrawal,
 };
 pub use relay::RelayDirectory;
 pub use view::PoolView;

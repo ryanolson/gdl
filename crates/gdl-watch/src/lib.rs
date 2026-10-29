@@ -165,7 +165,7 @@ pub fn followed_path(class: &str, pool: &str) -> String {
 /// The load report's route, under the extension's, on the hub's control
 /// listener: `POST` with a [`LoadReport`], carrying the credential of the
 /// instance the path names, which must be a usable entry instance of the
-/// pool. A report that carries a `draining` model is answered once a
+/// pool. A report that carries a `draining` property is answered once a
 /// record that carries the drain is stored, or with 503 after half a
 /// summary period; the instance forgets the drain only on the answer.
 pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
@@ -282,7 +282,7 @@ pub struct Unoffered {
 }
 
 /// What an entry instance reports of its admission to its pool's hub,
-/// once a load summary period, and of its models, which it also reports
+/// once a load summary period, and of its properties, which it also reports
 /// as soon as they change. A field a later build adds is ignored, so the
 /// instances and their hub roll one at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -294,30 +294,31 @@ pub struct LoadReport {
     /// The hand-offs it declined (no room, or retired) since the last
     /// report its hub took.
     pub refusals: u64,
-    /// The models the instance has, each with whether it can serve it
-    /// now: `None` when its nodes report none, so that it serves the
-    /// models its pool's settings declare. An instance of a build from
-    /// before models sends none, which a hub never reads as an instance
-    /// that serves nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub models: Option<Vec<gdl_model::InstanceModel>>,
+    /// The properties the instance has, each with whether it can serve it
+    /// now, in one list for each kind its nodes set: of a kind it has no
+    /// list of, it serves the properties its pool's settings declare. An
+    /// instance whose nodes set none, or of a build from before
+    /// properties, sends none, which a hub never reads as an instance that
+    /// serves nothing.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub properties: gdl_model::PropertyLists,
 }
 
-/// A pool's model entries, in the order of their keys, and the version of
-/// the list ([`gdl_pools::PoolRecord::models_version`]): a reader that
+/// A pool's property entries, in the order of their keys, and the version of
+/// the list ([`gdl_pools::PoolRecord::properties_version`]): a reader that
 /// has the list from more than one path keeps the higher version.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ModelList {
+pub struct PropertyList {
     /// The entries.
     #[serde(default)]
-    pub entries: Vec<gdl_pools::ModelEntry>,
+    pub entries: Vec<gdl_pools::PoolProperty>,
     /// The list's version.
     #[serde(default)]
     pub version: u64,
-    /// The models an operator revoked on the pool: none of them is in
+    /// The properties an operator revoked on the pool: none of them is in
     /// `entries` ([`gdl_pools::PoolRecord::revoked`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub revoked: Vec<gdl_model::ModelKey>,
+    pub revoked: Vec<gdl_model::PropertyKey>,
 }
 
 /// One event of a pool's watch, `GET /v1/ext/gdl-pool/watch` on the pool
@@ -371,22 +372,22 @@ pub enum PoolWatchEvent {
         /// record: `None` while no usable entry instance has a report the
         /// hub counts, and always for a class that no hop enters.
         load: Option<LoadSummary>,
-        /// The pool's model entries and their version, as in its record.
+        /// The pool's property entries and their version, as in its record.
         /// A field of a known event, so that a follower of an earlier
         /// build ignores it and reads the pool as it did: a kind of its
         /// own in every snapshot would withhold the pool from it on every
         /// watch. `None` from a hub of an earlier build.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        models: Option<ModelList>,
+        properties: Option<PropertyList>,
     },
-    /// The pool's model entries changed: the whole list, at its new
+    /// The pool's property entries changed: the whole list, at its new
     /// version, as the pool's record will carry it. A follower of an
     /// earlier build does not know this kind, and fails closed for the
     /// pool until it has read it again, from a snapshot, which carries the
     /// list as a field of [`PoolWatchEvent::Pool`] instead.
-    Models {
+    Properties {
         /// The list.
-        models: ModelList,
+        properties: PropertyList,
     },
     /// The snapshot is complete: the events before this one are the pool
     /// as the watch began.

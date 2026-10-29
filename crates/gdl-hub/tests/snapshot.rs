@@ -109,7 +109,7 @@ impl Watch {
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
         self.write(head.as_bytes()).await;
         self.send(&PoolWatchEvent::Pool {
-            models: None,
+            properties: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: record.epoch,

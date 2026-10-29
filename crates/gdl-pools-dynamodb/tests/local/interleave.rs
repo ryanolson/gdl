@@ -421,7 +421,7 @@ fn at(first: &PoolRecord, epoch: u64, seq: u64) -> CommandWrite {
     }))
 }
 
-/// `first`'s pool at a higher `models_version`.
+/// `first`'s pool at a higher `properties_version`.
 fn higher(first: &PoolRecord, epoch: u64, seq: u64) -> CommandWrite {
     CommandWrite::Record(Box::new(PoolRecord {
         epoch,
@@ -431,8 +431,8 @@ fn higher(first: &PoolRecord, epoch: u64, seq: u64) -> CommandWrite {
 }
 
 /// The command, and a hub's writes at `hub_epoch`: one at the first
-/// record's `models_version`, `heartbeats` more of the same list, and one
-/// at a higher `models_version`, which expires the list it moves past.
+/// record's `properties_version`, `heartbeats` more of the same list, and one
+/// at a higher `properties_version`, which expires the list it moves past.
 fn command_and_hub(
     first: &PoolRecord,
     hub_epoch: impl Fn(&CommandWrite) -> u64,
@@ -634,9 +634,9 @@ const VARIANTS: [Variant; 6] = [
         reaches: &[Branch::Expiry, Branch::Lost, Branch::LateRefused],
     },
     // Two handles at one epoch: the first keeps its list, and the second
-    // writes between at a higher models_version, which expires that list.
+    // writes between at a higher properties_version, which expires that list.
     Variant {
-        name: "epoch-models",
+        name: "epoch-properties",
         writers: |first| {
             vec![
                 plan("a", vec![at(first, 2, 1), at(first, 2, 3)]),
@@ -700,7 +700,7 @@ async fn every_order_of_a_pools_writers_and_ttl_leaves_a_live_list() {
     let directory = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
     let (records, _) = snapshot(&mut watch(&directory, None)).await;
     assert!(
-        records.iter().all(|record| !record.models.is_empty()),
+        records.iter().all(|record| !record.properties.is_empty()),
         "every record is joined to its list: {records:?}"
     );
 }

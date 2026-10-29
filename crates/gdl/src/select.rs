@@ -194,7 +194,7 @@ pub(crate) mod sealed {
 /// #[derive(serde::Deserialize)]
 /// pub struct Routed { pub request: String, pub hint: Hint }
 /// #[derive(serde::Deserialize)]
-/// pub struct Hint { pub model: String }
+/// pub struct Hint { pub property: String }
 ///
 /// /// The part of `Routed` a router reads.
 /// #[derive(serde::Deserialize, gdl::Projection)]

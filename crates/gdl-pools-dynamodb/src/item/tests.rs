@@ -2,14 +2,15 @@ use std::time::Duration;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use gdl_pools::{
-    DirectoryError, ModelEntry, ModelState, PoolRecord, PoolState, Presence, Version, Withdrawal,
+    DirectoryError, PoolProperty, PoolRecord, PoolState, Presence, PropertyState, Version,
+    Withdrawal,
 };
 
 use super::{
     BODY, Entry, Held, LIST_KEY, POOL, StoredHeld, decode, decode_list, record, withdrawal,
 };
 
-fn pool(models: usize, models_version: u64) -> PoolRecord {
+fn pool(properties: usize, properties_version: u64) -> PoolRecord {
     PoolRecord {
         name: "model-x-01".into(),
         class: "model_x".into(),
@@ -24,15 +25,17 @@ fn pool(models: usize, models_version: u64) -> PoolRecord {
         lease: Duration::from_secs(30),
         load: None,
         presence: Presence::Serving,
-        models: (0..models)
-            .map(|n| ModelEntry {
-                model: format!("qwen-32b-lora-{n}"),
-                routing_key: None,
-                state: ModelState::Ready,
-                since: models_version,
+        properties: (0..properties)
+            .map(|n| PoolProperty {
+                property: gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": format!("shard-{n}") }),
+                ),
+                state: PropertyState::Ready,
+                since: properties_version,
             })
             .collect(),
-        models_version,
+        properties_version,
         revoked: Vec::new(),
     }
 }
@@ -60,7 +63,7 @@ fn read_back(published: &PoolRecord) -> PoolRecord {
 }
 
 #[test]
-fn a_record_with_models_is_whole_once_its_list_is_joined() {
+fn a_record_with_properties_is_whole_once_its_list_is_joined() {
     let published = pool(3, 12);
     let encoded = record(&published, 1).expect("encodes");
     let AttributeValue::S(body) = &encoded.item[BODY] else {
@@ -73,26 +76,26 @@ fn a_record_with_models_is_whole_once_its_list_is_joined() {
     assert_eq!(read_back(&published), published);
 }
 
-/// A list is kept apart whenever the record has models, whatever its
-/// `models_version`: a record at version 0 can carry models too.
+/// A list is kept apart whenever the record has properties, whatever its
+/// `properties_version`: a record at version 0 can carry properties too.
 #[test]
-fn a_record_at_models_version_zero_keeps_its_models() {
+fn a_record_at_properties_version_zero_keeps_its_properties() {
     let published = pool(1, 0);
     assert!(record(&published, 1).expect("encodes").list.is_some());
     assert_eq!(read_back(&published), published);
 }
 
 #[test]
-fn a_record_without_models_or_revocations_has_no_list() {
+fn a_record_without_properties_or_revocations_has_no_list() {
     let published = pool(0, 4);
     assert!(record(&published, 1).expect("encodes").list.is_none());
     assert_eq!(read_back(&published), published);
 
     let revoked = PoolRecord {
-        revoked: vec![gdl_model::ModelKey {
-            model: "qwen-32b".into(),
-            routing_key: None,
-        }],
+        revoked: vec![gdl_model::PropertyKey::new(
+            "test",
+            serde_json::json!({ "name": "qwen-32b" }),
+        )],
         ..pool(0, 5)
     };
     assert!(record(&revoked, 1).expect("encodes").list.is_some());
@@ -107,7 +110,7 @@ fn a_list_of_another_version_is_not_joined() {
     let second = record(&pool(3, 12), 2).expect("encodes");
     let (first_key, first_item) = first.list.expect("a list");
     let (second_key, _) = second.list.expect("a list");
-    assert_ne!(first_key, second_key, "one models_version, two lists");
+    assert_ne!(first_key, second_key, "one properties_version, two lists");
     let mut swapped = first_item.clone();
     swapped.insert(LIST_KEY.into(), AttributeValue::S(second_key.sort_key()));
     assert_eq!(decode_list(second_key, &swapped), None);
@@ -144,19 +147,19 @@ fn a_withdrawal_is_a_tombstone_at_its_version() {
 }
 
 /// A list past DynamoDB's item limit fails every write the same way, so
-/// it is refused before any write: 10,000 models of about 60 bytes each.
+/// it is refused before any write: 10,000 properties of about 80 bytes each.
 #[test]
 fn a_list_past_the_item_limit_is_refused() {
     let big = pool(10_000, 1);
     assert!(matches!(
         record(&big, 1),
-        Err(DirectoryError::Refused(problem)) if problem.contains("model list")
+        Err(DirectoryError::Refused(problem)) if problem.contains("property list")
     ));
-    assert!(record(&pool(1_000, 1), 1).is_ok(), "1,000 models fit");
+    assert!(record(&pool(1_000, 1), 1).is_ok(), "1,000 properties fit");
 }
 
 #[test]
-fn list_keys_sort_by_models_version() {
+fn list_keys_sort_by_properties_version() {
     let low = record(&pool(1, 9), 1)
         .expect("encodes")
         .list
@@ -171,10 +174,10 @@ fn list_keys_sort_by_models_version() {
 }
 
 /// What a query reads per pool is the cost of a scan, and the book's
-/// numbers come from here: a record item, with a load summary and a model
-/// list, stays near 442 bytes, and only the list grows with the models.
+/// numbers come from here: a record item, with a load summary and a property
+/// list, stays near 442 bytes, and only the list grows with the properties.
 #[test]
-fn a_records_item_stays_small_whatever_its_models() {
+fn a_records_item_stays_small_whatever_its_properties() {
     let size = |item: &super::Item| -> usize {
         item.iter()
             .map(|(name, value)| {
@@ -186,7 +189,7 @@ fn a_records_item_stays_small_whatever_its_models() {
             })
             .sum()
     };
-    let loaded = |models| PoolRecord {
+    let loaded = |properties| PoolRecord {
         load: Some(gdl_pools::LoadSummary {
             admitted: 12,
             limit: 64,
@@ -194,12 +197,12 @@ fn a_records_item_stays_small_whatever_its_models() {
             refusals: 0,
             period_ms: 10_000,
         }),
-        ..pool(models, 4_294_967_297)
+        ..pool(properties, 4_294_967_297)
     };
     let one = record(&loaded(1), u64::MAX).expect("encodes");
     let many = record(&loaded(1_000), u64::MAX).expect("encodes");
     assert!(size(&one.item) <= 450, "{}", size(&one.item));
     assert_eq!(size(&many.item), size(&one.item), "the list is apart");
     let list = size(&many.list.expect("a list").1);
-    assert!((60_000..70_000).contains(&list), "{list}");
+    assert!((70_000..80_000).contains(&list), "{list}");
 }

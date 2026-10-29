@@ -1,23 +1,25 @@
 //! The routes of an operator's commands, under the `gdl-pool` extension's
 //! routes, on a pool hub's control listener: revoking one of the pool's
-//! models, on the pool's own hub, and withdrawing or scaling to 0 a child
-//! pool whose hub is gone, on its parent's hub.
+//! properties, on the pool's own hub, and withdrawing or scaling to 0 a
+//! child pool whose hub is gone, on its parent's hub.
 
-/// The revoke route: `POST` with a [`gdl_model::ModelKey`] revokes the
-/// model on the pool. The model leaves the pool's record at once, whatever
-/// its instances say, and stays out until the revocation is lifted
-/// ([`LIFT_ROUTE`]), also across a restart of the hub. Answered
-/// `204 No Content` once the directory has stored a record that leaves the
-/// model out, `400 Bad Request` for a malformed model name, and
-/// `503 Service Unavailable` when no such record is stored within 5 s, or
-/// a later request lifted the revocation first.
-pub const REVOKE_ROUTE: &str = "/models/revoke";
+/// The revoke route: `POST` with a [`gdl_model::PropertyKey`], `{ "kind":
+/// ..., "key": { ... } }`, revokes the property on the pool. The property
+/// leaves the pool's record at once, whatever its instances say, and stays
+/// out until the revocation is lifted ([`LIFT_ROUTE`]), also across a
+/// restart of the hub. The key is compared in its canonical form, so its
+/// fields can be written in any order. Answered `204 No Content` once the
+/// directory has stored a record that leaves the property out, `400 Bad
+/// Request` for a malformed property, and `503 Service Unavailable` when
+/// no such record is stored within 5 s, or a later request lifted the
+/// revocation first.
+pub const REVOKE_ROUTE: &str = "/properties/revoke";
 
-/// The lift route: `POST` with a [`gdl_model::ModelKey`] lifts the
-/// model's revocation, and the pool's record lists the model again as its
-/// instances say, starting afresh. Answered as [`REVOKE_ROUTE`] is, once a
-/// record that no longer revokes the model is stored.
-pub const LIFT_ROUTE: &str = "/models/lift";
+/// The lift route: `POST` with a [`gdl_model::PropertyKey`] lifts the
+/// property's revocation, and the pool's record lists the property again
+/// as its instances say, starting afresh. Answered as [`REVOKE_ROUTE`] is,
+/// once a record that no longer revokes the property is stored.
+pub const LIFT_ROUTE: &str = "/properties/lift";
 
 /// The route by which an operator withdraws a child pool whose hub is
 /// gone, on the parent's hub: `POST`, with no body. The parent writes the

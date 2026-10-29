@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use gdl_pools::{
-    CommandWrite, DirDirectory, DirectoryError, MemoryDirectory, ModelEntry, ModelState,
-    PoolCommand, PoolDirectory, PoolEvent, PoolRecord, PoolState, PoolView, Presence, Version,
+    CommandWrite, DirDirectory, DirectoryError, MemoryDirectory, PoolCommand, PoolDirectory,
+    PoolEvent, PoolProperty, PoolRecord, PoolState, PoolView, Presence, PropertyState, Version,
 };
 use tempfile::TempDir;
 
@@ -17,7 +17,7 @@ const CLASS: &str = "model_x";
 const POOL: &str = "model-x-02-us-east-1";
 
 /// The last record the pool's hub wrote before it went: `ready`, with two
-/// models.
+/// properties.
 fn last(epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
         name: POOL.into(),
@@ -33,21 +33,14 @@ fn last(epoch: u64, seq: u64) -> PoolRecord {
         lease: Duration::from_millis(300),
         load: None,
         presence: Presence::Serving,
-        models: vec![
-            ModelEntry {
-                model: "acme-legal".into(),
-                routing_key: None,
-                state: ModelState::Ready,
+        properties: ["a", "b"]
+            .map(|name| PoolProperty {
+                property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })),
+                state: PropertyState::Ready,
                 since: 7,
-            },
-            ModelEntry {
-                model: "llama-70b".into(),
-                routing_key: None,
-                state: ModelState::Ready,
-                since: 7,
-            },
-        ],
-        models_version: 7,
+            })
+            .to_vec(),
+        properties_version: 7,
         revoked: Vec::new(),
     }
 }
@@ -91,7 +84,7 @@ async fn view(directory: &impl PoolDirectory, now: Instant) -> PoolView {
 
 /// The write carries an epoch past the last record's, also when the
 /// operator's clock is behind the hub's, and keeps the rest of the record
-/// as it was: its models and their version stay, so that a hub that
+/// as it was: its properties and their version stay, so that a hub that
 /// starts again keeps their history.
 #[test]
 fn a_command_writes_at_an_epoch_past_the_last_record() {
@@ -136,9 +129,9 @@ fn a_command_writes_at_an_epoch_past_the_last_record() {
     );
 }
 
-/// Withdrawn by the operator, the pool's models leave every reader's list,
-/// and a late record from the hub's old epoch, a heartbeat that was on its
-/// way, is refused and never brings it back.
+/// Withdrawn by the operator, the pool's properties leave every reader's
+/// list, and a late record from the hub's old epoch, a heartbeat that was
+/// on its way, is refused and never brings it back.
 async fn a_withdrawal_holds_against_a_late_record(directory: impl PoolDirectory) {
     let held = last(millis(SystemTime::now()), 40);
     directory
@@ -161,10 +154,10 @@ async fn a_withdrawal_holds_against_a_late_record(directory: impl PoolDirectory)
     assert!(seen.get(POOL, now).is_none(), "the record is gone");
     assert!(
         seen.records(now).all(|record| record
-            .models
+            .properties
             .iter()
-            .all(|entry| entry.model != "acme-legal")),
-        "no record lists the pool's models"
+            .all(|entry| entry.property.key()["name"] != "a")),
+        "no record lists the pool's properties"
     );
 
     let late = PoolRecord {
@@ -230,7 +223,10 @@ async fn a_scale_to_zero_holds_against_a_late_record(directory: impl PoolDirecto
         .expect("a pool scaled to 0 never lapses");
     assert_eq!(record.presence, Presence::ScaledToZero);
     assert_eq!(record.version(), version);
-    assert_eq!(record.models, held.models, "its models are kept");
+    assert_eq!(
+        record.properties, held.properties,
+        "its properties are kept"
+    );
 }
 
 #[tokio::test]

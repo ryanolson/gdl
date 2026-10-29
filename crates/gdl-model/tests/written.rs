@@ -70,7 +70,7 @@ fn a_fleet_reads_back_what_it_writes() {
 #[test]
 fn a_pools_settings_read_back_what_they_write() {
     let every = PoolSettings {
-        models: Vec::new(),
+        properties: Vec::new(),
         name: "model-x-01-us-east-1".into(),
         layout: Some("regional".into()),
         class: "model_x".into(),

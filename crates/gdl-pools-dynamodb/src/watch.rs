@@ -586,7 +586,7 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
             };
             let joined = match before.filter(|before| before.list == Some(key)) {
                 Some(before) => before.record().map(|record| item::List {
-                    models: record.models.clone(),
+                    properties: record.properties.clone(),
                     revoked: record.revoked.clone(),
                 }),
                 None => read_list(shared, name, &stored.pool, key).await?,
@@ -632,7 +632,7 @@ async fn read_list(
         .await
         .map_err(|error| {
             unavailable(
-                &format!("reading the model list of pool `{pool}` of class `{class}`"),
+                &format!("reading the property list of pool `{pool}` of class `{class}`"),
                 error,
             )
         })?;
@@ -642,7 +642,7 @@ async fn read_list(
             class,
             pool,
             list = key.sort_key(),
-            "a record's model list has not arrived: its pool keeps its earlier record"
+            "a record's property list has not arrived: its pool keeps its earlier record"
         );
     }
     Ok(list)
@@ -751,7 +751,7 @@ fn unsynced(name: &str, missing: &[String], first_sync: Duration) -> DirectoryEr
         format!("class `{name}`: a snapshot did not complete within {first_sync:?}")
     } else {
         format!(
-            "class `{name}`: the model lists of {} have not arrived in this region within {first_sync:?}",
+            "class `{name}`: the property lists of {} have not arrived in this region within {first_sync:?}",
             missing.join(", ")
         )
     })

@@ -85,7 +85,14 @@ impl Classify for PoolWatchEvent {
     type Unknown = UnknownEvent;
 
     const KINDS: &'static [&'static str] = &[
-        "pool", "synced", "state", "load", "ready", "retired", "left", "models",
+        "pool",
+        "synced",
+        "state",
+        "load",
+        "ready",
+        "retired",
+        "left",
+        "properties",
     ];
 
     fn unknown(data: &str) -> Option<UnknownEvent> {
@@ -167,7 +174,7 @@ mod tests {
         // added, until it is listed here.
         let pool: Vec<PoolWatchEvent> = vec![
             PoolWatchEvent::Pool {
-                models: None,
+                properties: None,
                 name: "m".into(),
                 class: "c".into(),
                 epoch: 1,
@@ -193,8 +200,8 @@ mod tests {
                 segment: "f".into(),
                 instance,
             },
-            PoolWatchEvent::Models {
-                models: crate::ModelList::default(),
+            PoolWatchEvent::Properties {
+                properties: crate::PropertyList::default(),
             },
         ];
         for event in &pool {
@@ -206,7 +213,7 @@ mod tests {
                 | PoolWatchEvent::Ready { .. }
                 | PoolWatchEvent::Retired { .. }
                 | PoolWatchEvent::Left { .. }
-                | PoolWatchEvent::Models { .. } => {}
+                | PoolWatchEvent::Properties { .. } => {}
             }
         }
         let tags: Vec<String> = pool.iter().map(tag).collect();
@@ -385,7 +392,7 @@ mod tests {
         );
     }
 
-    /// A reader of an earlier build reads the model index's fields of known
+    /// A reader of an earlier build reads the property index's fields of known
     /// events as the events it knew, and the new kinds as kinds it does not
     /// know: the relay's names its follow, so the reader fails closed for
     /// that pool alone, and reads it again.
@@ -409,7 +416,7 @@ mod tests {
             epoch: 3,
             state: PoolState::Ready,
             load: None,
-            models: Some(crate::ModelList {
+            properties: Some(crate::PropertyList {
                 entries: Vec::new(),
                 version: 9,
                 revoked: Vec::new(),
@@ -426,7 +433,7 @@ mod tests {
         let listing = crate::Listing {
             region: "r".into(),
             condition: gdl_pools::PoolCondition::Missing,
-            models: crate::ModelList::default(),
+            properties: crate::PropertyList::default(),
             missing_age_ms: Some(4000),
         };
         // A listing's age is a field a reader of an earlier build ignores.

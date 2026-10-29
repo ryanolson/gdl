@@ -90,10 +90,10 @@ async fn the_pool_publishes_its_record_and_each_change_of_state() {
         first,
         PoolRecord {
             presence: gdl_pools::Presence::Serving,
-            models: Vec::new(),
+            properties: Vec::new(),
             // With no record before it, the list counts from the epoch,
             // in the high bits.
-            models_version: first.epoch << 20,
+            properties_version: first.epoch << 20,
             revoked: Vec::new(),
             name: POOL.into(),
             class: "model_x".into(),

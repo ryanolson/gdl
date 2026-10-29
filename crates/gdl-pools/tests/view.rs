@@ -22,8 +22,8 @@ fn record(name: &str, epoch: u64, seq: u64) -> PoolRecord {
         lease: LEASE,
         load: None,
         presence: Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
     }
 }

@@ -120,8 +120,8 @@ impl Backend for Store {
 fn record(seq: u64) -> PoolRecord {
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m2".into(),
         class: "model_x".into(),

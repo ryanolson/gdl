@@ -647,7 +647,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         let grace = bundle.segment_image(Path::new(""), segment, &package, Some("hub"), source)?;
         // Health is reported, never waited on: no segment depends on another's, since segments
         // whose paths return wait for each other, and an order over them deadlocks. The start
-        // period covers loading models.
+        // period covers a slow load.
         let build = bundle.build(&Path::new(segment).join("Dockerfile"));
         let mut service = json!({"build":build,"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)});
         if hosts(nodes, stdin.as_ref()) {

@@ -91,8 +91,8 @@ fn temp() -> TempDir {
 fn record(pool: &str, epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: pool.into(),
         class: MODEL.into(),
@@ -653,10 +653,10 @@ async fn a_directory_it_cannot_use_is_an_error() {
     assert!(next(&mut seen).await.is_none());
 }
 
-/// A record's presence and models are stored with it: another process
-/// reads them back whole.
+/// A record's presence and properties are stored with it: another
+/// process reads them back whole.
 #[tokio::test]
-async fn a_record_keeps_its_presence_and_models_in_its_file() {
+async fn a_record_keeps_its_presence_and_properties_in_its_file() {
     let root = temp();
     let (writer, reader) = (
         DirDirectory::new(root.path()),
@@ -664,13 +664,15 @@ async fn a_record_keeps_its_presence_and_models_in_its_file() {
     );
     let published = PoolRecord {
         presence: gdl_pools::Presence::ScaledToZero,
-        models: vec![gdl_pools::ModelEntry {
-            model: "llama-70b".into(),
-            routing_key: Some("a".into()),
-            state: gdl_pools::ModelState::Unavailable,
+        properties: vec![gdl_pools::PoolProperty {
+            property: gdl_model::PropertyKey::new(
+                "test",
+                serde_json::json!({ "name": "x", "partition": "a" }),
+            ),
+            state: gdl_pools::PropertyState::Unavailable,
             since: 4,
         }],
-        models_version: 4,
+        properties_version: 4,
         revoked: Vec::new(),
         ..record("m1", 1, 1)
     };

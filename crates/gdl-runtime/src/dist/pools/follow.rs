@@ -43,7 +43,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use gdl::Load;
-use gdl::ModelIndex;
+use gdl::{PropertyIndexes, PropertyPool};
 use gdl_pools::{LoadSummary, PoolCondition, PoolState};
 use gdl_watch::{FollowEvent, Listing, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
@@ -135,14 +135,14 @@ pub(crate) struct Follows<R> {
     /// arrive late on another watch, also after a snapshot that no longer
     /// shows the pool.
     newest: BTreeMap<Key, u64>,
-    /// Each class's model index as last made, with what it was made from:
-    /// the count of the listings' changes, and each followed pool with
-    /// whether it is offered.
+    /// Each class's property indexes as last made, with what they were
+    /// made from: the count of the listings' changes, each followed pool
+    /// with whether it is offered, and the count of the kinds' changes.
     indexes: HashMap<String, IndexMade>,
 }
 
-/// A class's model index, and what it was made from.
-type IndexMade = ((u64, Vec<(String, bool)>), Arc<ModelIndex>);
+/// A class's property indexes, and what they were made from.
+type IndexMade = ((u64, Vec<(String, bool)>, u64), Arc<PropertyIndexes>);
 
 impl<R: Registry> Follows<R> {
     pub(crate) fn new(
@@ -654,30 +654,39 @@ impl<R: Registry> Follows<R> {
             .filter(|(of, _)| *of == class)
             .map(|(_, pool)| Box::from(pool.as_str()))
             .collect();
-        let models = self.index(&class);
+        let properties = self.index(&class);
         self.pools.store(
             segment,
             EntryTable::new(pools)
                 .with_withdrawn(withdrawn)
-                .with_models(models),
+                .with_properties(properties),
         );
     }
 
-    /// `class`'s model index: the one made last, unless what it is made
-    /// from changed since. A table is stored on every summary a pool
-    /// sends, and the index changes far less often.
-    fn index(&mut self, class: &str) -> Arc<ModelIndex> {
+    /// `class`'s property indexes: the ones made last, unless what they
+    /// are made from changed since. A table is stored on every summary a
+    /// pool sends, and the indexes change far less often.
+    fn index(&mut self, class: &str) -> Arc<PropertyIndexes> {
         let offers = self.followed.offers(class);
         let changed = self.followed.listings_changed;
+        let kinds = self.pools.kinds().changes();
         if let Some((made, index)) = self.indexes.get(class)
             && made.0 == changed
             && made.1 == offers
+            && made.2 == kinds
         {
             return Arc::clone(index);
         }
-        let index = Arc::new(self.followed.index(class));
-        self.indexes
-            .insert(class.to_string(), ((changed, offers), Arc::clone(&index)));
+        let (kinds, now) = self.pools.kinds().snapshot();
+        let index = Arc::new(PropertyIndexes::decode(
+            &now,
+            self.followed.listed,
+            &self.followed.listed(class),
+        ));
+        self.indexes.insert(
+            class.to_string(),
+            ((changed, offers, kinds), Arc::clone(&index)),
+        );
         index
     }
 
@@ -731,7 +740,7 @@ struct Followed {
     /// Where each pool's offers are counted, if the chooser records them.
     meters: Option<PoolMeters>,
     /// What the hub lists of each pool of the classes sent to, followed or
-    /// not, for the model index, with since when a missing pool has been
+    /// not, for the property index, with since when a missing pool has been
     /// silent, dated back on arrival: a snapshot holds every listed pool,
     /// so it replaces them whole.
     listings: BTreeMap<Key, (Listing, Option<Instant>)>,
@@ -1037,31 +1046,31 @@ impl Followed {
         self.listings_changed += 1;
     }
 
-    /// The model index of `class`'s pools as this view lists them, each
-    /// with whether this instance offers it work.
-    fn index(&self, class: &str) -> ModelIndex {
-        let sets = self
-            .listings
+    /// Every property `class`'s pools list, as this view lists them, each
+    /// with its pool and whether this instance offers that pool work: what
+    /// the class's indexes decode.
+    fn listed(&self, class: &str) -> Vec<(gdl_model::PropertyKey, PropertyPool)> {
+        self.listings
             .iter()
             .filter(|((of, _), _)| of == class)
             .flat_map(|(key, (listing, silent))| {
                 let offered = self.follows.get(key).is_some_and(Follow::offers);
-                listing.models.entries.iter().map(move |entry| {
-                    let set = gdl::ModelSet::new(
+                listing.properties.entries.iter().map(move |entry| {
+                    let pool = PropertyPool::new(
                         key.1.clone(),
                         listing.region.clone(),
                         entry.state,
                         listing.condition,
                     )
                     .with_offered(offered);
-                    let set = match silent {
-                        Some(since) => set.with_missing_since(*since),
-                        None => set,
+                    let pool = match silent {
+                        Some(since) => pool.with_missing_since(*since),
+                        None => pool,
                     };
-                    (entry.key(), set)
+                    (entry.property.clone(), pool)
                 })
-            });
-        ModelIndex::new(self.listed, sets)
+            })
+            .collect()
     }
 
     /// What `class`'s index is made from, beside the listings: each

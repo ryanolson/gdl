@@ -102,8 +102,8 @@ fn record(pool: &str, seq: u64, lease: Duration) -> PoolRecord {
         lease,
         load: None,
         presence: Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
     }
 }

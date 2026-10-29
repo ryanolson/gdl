@@ -25,8 +25,8 @@ use aws_sdk_dynamodb::{
 };
 use futures::StreamExt;
 use gdl_pools::{
-    DirectoryError, ModelEntry, ModelState, PoolDirectory, PoolEvent, PoolRecord, PoolState,
-    Presence, ResumeToken, Version, Withdrawal,
+    DirectoryError, PoolDirectory, PoolEvent, PoolProperty, PoolRecord, PoolState, Presence,
+    PropertyState, ResumeToken, Version, Withdrawal,
     conformance::{self, Backend},
 };
 use gdl_pools_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
@@ -133,19 +133,21 @@ async fn the_dynamodb_directory_conforms() {
 
 type Watch = Pin<Box<<DynamoDirectory as PoolDirectory>::Watch>>;
 
-fn record(pool: &str, epoch: u64, seq: u64, models: &[&str]) -> PoolRecord {
+fn record(pool: &str, epoch: u64, seq: u64, properties: &[&str]) -> PoolRecord {
     PoolRecord {
         presence: Presence::Serving,
-        models: models
+        properties: properties
             .iter()
-            .map(|model| ModelEntry {
-                model: (*model).into(),
-                routing_key: None,
-                state: ModelState::Ready,
+            .map(|property| PoolProperty {
+                property: gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": *property }),
+                ),
+                state: PropertyState::Ready,
                 since: epoch << 32,
             })
             .collect(),
-        models_version: (epoch << 32) + models.len() as u64,
+        properties_version: (epoch << 32) + properties.len() as u64,
         revoked: Vec::new(),
         name: pool.into(),
         class: MODEL.into(),
@@ -397,7 +399,7 @@ async fn a_record_waits_for_its_list() {
         .expect("the first record");
     put(&mut live, &first).await;
 
-    // Its models change, and this region gets the record before the list.
+    // Its properties change, and this region gets the record before the list.
     let second = record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"]);
     let (record_item, list_item) = items(&client, second.clone()).await;
     put_item(&client, &tables.records, record_item).await;
@@ -466,7 +468,10 @@ async fn a_superseded_list_expires_and_the_named_one_stays() {
     );
 
     let latest = record("model-x-01", 1, 3, &["qwen-32b", "llama-70b"]);
-    directory.publish(latest.clone()).await.expect("new models");
+    directory
+        .publish(latest.clone())
+        .await
+        .expect("new properties");
     let lists_now = lists(&client, &tables, "model-x-01").await;
     let expiring = lists_now.iter().filter(|list| list.1.is_some()).count();
     assert_eq!(
@@ -1375,11 +1380,11 @@ async fn overlapping_publishes_of_a_pool_leave_its_list_unexpired() {
 }
 
 /// A list expires only when its pool's record is stored at a higher
-/// `models_version`, which only the pool's hub raises: a heartbeat, an
+/// `properties_version`, which only the pool's hub raises: a heartbeat, an
 /// operator's command at a new epoch that copies the record, a record at
 /// a lower version, and a withdrawal expire nothing.
 #[tokio::test]
-async fn a_list_expires_only_past_its_models_version() {
+async fn a_list_expires_only_past_its_properties_version() {
     let client = client();
     let tables = tables(&client).await;
     let directory = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
@@ -1400,7 +1405,7 @@ async fn a_list_expires_only_past_its_models_version() {
         .await
         .expect("a heartbeat");
     assert_eq!(expiring().await, 0, "a heartbeat");
-    // A command copies the record at a new epoch, models and all.
+    // A command copies the record at a new epoch, properties and all.
     let command = PoolRecord {
         epoch: 7,
         seq: 1,
@@ -1408,26 +1413,34 @@ async fn a_list_expires_only_past_its_models_version() {
         ..first.clone()
     };
     directory.publish(command.clone()).await.expect("a command");
-    assert_eq!(expiring().await, 0, "a command at the same models_version");
-    // A newer write whose models_version is lower names its own list, and
+    assert_eq!(
+        expiring().await,
+        0,
+        "a command at the same properties_version"
+    );
+    // A newer write whose properties_version is lower names its own list, and
     // moves the pool past none.
     let lower = PoolRecord {
         epoch: 8,
         seq: 1,
-        models_version: first.models_version - 1,
+        properties_version: first.properties_version - 1,
         ..record("model-x-01", 8, 1, &["qwen-32b"])
     };
     directory
         .publish(lower)
         .await
-        .expect("a lower models_version");
-    assert_eq!(expiring().await, 0, "a record at a lower models_version");
+        .expect("a lower properties_version");
+    assert_eq!(
+        expiring().await,
+        0,
+        "a record at a lower properties_version"
+    );
     let higher = record("model-x-01", 9, 1, &["qwen-32b"]);
-    assert!(higher.models_version > first.models_version);
+    assert!(higher.properties_version > first.properties_version);
     directory
         .publish(higher)
         .await
-        .expect("a higher models_version");
+        .expect("a higher properties_version");
     assert_eq!(expiring().await, 1, "the list the record replaced expires");
     directory
         .withdraw(Withdrawal {
@@ -1524,7 +1537,7 @@ async fn a_same_region_command_keeps_its_list_after_delayed_expiry() {
     tokio::time::timeout(WAIT, paused)
         .await
         .expect("expiry begins within the bound")
-        .expect("the higher model version is stored");
+        .expect("the higher properties version is stored");
 
     // A fresh command handle rewrites the list, clearing any earlier TTL.
     let command_handle = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
@@ -1681,7 +1694,7 @@ async fn a_cached_command_handle_keeps_the_list_it_names_again() {
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
     })
     .await
-    .expect("the hub advances the model list after the command reads it");
+    .expect("the hub advances the property list after the command reads it");
     assert_eq!(
         lists(&client, &tables, &first.name)
             .await
@@ -1798,7 +1811,7 @@ async fn a_fresh_command_keeps_its_list_when_another_put_overtakes_it() {
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
     })
     .await
-    .expect("the hub stores a higher models_version");
+    .expect("the hub stores a higher properties_version");
     assert_eq!(
         lists(&client, &tables, &first.name)
             .await
@@ -2096,7 +2109,7 @@ async fn a_delayed_second_list_put_cannot_restore_an_expiry_token() {
     tokio::time::timeout(WAIT, expiry_paused)
         .await
         .expect("expiry begins within the bound")
-        .expect("the higher model version is stored");
+        .expect("the higher properties version is stored");
 
     command.to(&operator).await.expect("the command is stored");
     assert!(
@@ -2259,7 +2272,7 @@ async fn a_command_keeps_an_overtaking_put_after_its_delayed_expiry() {
     tokio::time::timeout(WAIT, expiry_paused)
         .await
         .expect("expiry begins within the bound")
-        .expect("the higher model version is stored");
+        .expect("the higher properties version is stored");
     assert!(
         lists(&client, &tables, &first.name)
             .await
@@ -2385,7 +2398,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
         ..record("model-x-01", 1, 2, &["qwen-32b", "llama-70b"])
     })
     .await
-    .expect("the hub stores a higher models_version and expires its prior list");
+    .expect("the hub stores a higher properties_version and expires its prior list");
     let expiring = lists(&client, &tables, &first.name)
         .await
         .into_iter()
@@ -2394,7 +2407,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
     assert_eq!(expiring.len(), 1, "only the superseded list can expire");
     let (list, expiry) = &expiring[0];
 
-    // Model TTL deletion after the superseded list's one-hour retention.
+    // Property TTL deletion after the superseded list's one-hour retention.
     client
         .delete_item()
         .table_name(&tables.lists)
@@ -2415,7 +2428,7 @@ async fn a_command_reinstalls_its_list_after_ttl_removes_an_overtaking_put() {
     assert_eq!(
         named(&client, &tables, &first.name).await.1,
         None,
-        "the higher model version's list stays"
+        "the higher properties version's list stays"
     );
 
     release.send(()).expect("release the command record");

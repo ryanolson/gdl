@@ -605,7 +605,7 @@ impl<H> ProcessConfig<H> {
             #[cfg(feature = "hub")]
             reports,
             #[cfg(feature = "hub")]
-            models: self.runtime.models.clone(),
+            properties: self.runtime.properties.clone(),
             #[cfg(feature = "hub")]
             pool_drain,
             #[cfg(feature = "hub")]
@@ -680,10 +680,10 @@ pub struct Launch {
     /// admission to its hub.
     #[cfg(feature = "hub")]
     reports: Option<Duration>,
-    /// What the segment's nodes say of the instance's models, which its
+    /// What the segment's nodes say of the instance's properties, which its
     /// load reports carry.
     #[cfg(feature = "hub")]
-    models: gdl::InstanceModels,
+    properties: gdl::InstanceProperties,
     /// For an instance in a pool under a hub, its part in its pool's
     /// drain.
     #[cfg(feature = "hub")]
@@ -974,8 +974,8 @@ impl Launch {
                         let segment = Arc::clone(&segment);
                         let read = move || segment.load();
                         let me = self.node.instance_id();
-                        let models = self.models.clone();
-                        Some(session.report_load(me, period, read, models))
+                        let properties = self.properties.clone();
+                        Some(session.report_load(me, period, read, properties))
                     }
                     _ => None,
                 };

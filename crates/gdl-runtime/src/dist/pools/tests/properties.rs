@@ -1,33 +1,68 @@
-//! The model index a chooser keeps for each class it sends to: every pool
-//! its hub lists, followed or not, with each model's state, the pool's
+//! The property index a chooser keeps for each class it sends to: every pool
+//! its hub lists, followed or not, with each property's state, the pool's
 //! condition, and whether this chooser offers it work. A node reads it
-//! with `ClassPools::models`, and a pool policy with
-//! `PoolRequest::models`, from the same table as the pools. Until the
+//! with `ClassPools::properties`, and a pool policy with
+//! `PoolRequest::properties`, from the same table as the pools. Until the
 //! hub's snapshot says its listings are whole, the index is not synced,
-//! so a reader tells a model not known yet from one no pool lists.
+//! so a reader tells a property not known yet from one no pool lists.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl::{FollowedPools, ModelState, PoolCondition, PoolState};
-use gdl_pools::{LoadSummary, ModelEntry};
-use gdl_watch::{FollowEvent, Listing, ModelList};
+use gdl::{FollowedPools, PoolCondition, PoolState, PropertyState};
+use gdl_pools::{LoadSummary, PoolProperty};
+use gdl_watch::{FollowEvent, Listing, PropertyList};
 use tokio::time::Instant;
 
 use super::super::Pools;
 use super::{M1, M2, follow, follower};
 use crate::dist::counting::{counted, counting};
 
-fn listing(condition: PoolCondition, models: &[(&str, ModelState)], version: u64) -> Listing {
+/// The test property type: a name, then a partition and a version.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub(super) struct Test {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// The kind the follower's tests register.
+pub(super) const TEST: gdl::PropertyKind<Test> = gdl::PropertyKind::new("test");
+
+/// The test property named `name`, in no partition and of no version.
+fn test(name: &str) -> Test {
+    Test {
+        name: name.into(),
+        partition: None,
+        version: None,
+    }
+}
+
+/// The pools that list the test property `name`, in `indexes`.
+fn listed<'a>(indexes: &'a gdl::PropertyIndexes, name: &str) -> &'a [(Test, gdl::PropertyPool)] {
+    indexes
+        .get(&TEST)
+        .map_or(&[][..], |index| index.get(&test(name)))
+}
+
+fn listing(
+    condition: PoolCondition,
+    properties: &[(&str, PropertyState)],
+    version: u64,
+) -> Listing {
     Listing {
         region: "eu-west-1".into(),
         condition,
-        models: ModelList {
-            entries: models
+        properties: PropertyList {
+            entries: properties
                 .iter()
-                .map(|(model, state)| ModelEntry {
-                    model: (*model).into(),
-                    routing_key: None,
+                .map(|(property, state)| PoolProperty {
+                    property: gdl_model::PropertyKey::new(
+                        "test",
+                        serde_json::json!({ "name": *property }),
+                    ),
                     state: *state,
                     since: version,
                 })
@@ -40,14 +75,14 @@ fn listing(condition: PoolCondition, models: &[(&str, ModelState)], version: u64
 }
 
 /// `listing`, missing for `age_ms` when the hub sent it.
-fn missing(models: &[(&str, ModelState)], version: u64, age_ms: Option<u64>) -> Listing {
+fn missing(properties: &[(&str, PropertyState)], version: u64, age_ms: Option<u64>) -> Listing {
     Listing {
         missing_age_ms: age_ms,
-        ..listing(PoolCondition::Missing, models, version)
+        ..listing(PoolCondition::Missing, properties, version)
     }
 }
 
-fn listed(pool: &str, listing: Option<Listing>) -> FollowEvent {
+fn listed_event(pool: &str, listing: Option<Listing>) -> FollowEvent {
     FollowEvent::Listed {
         class: "model_x".into(),
         pool: pool.into(),
@@ -62,20 +97,18 @@ fn handle(pools: &Pools) -> FollowedPools {
     handle
 }
 
-/// What a node reads of `model`: whether the index is synced, and each
-/// pool that lists it, with the model's state, the pool's condition, and
+/// What a node reads of `property`: whether the index is synced, and each
+/// pool that lists it, with the property's state, the pool's condition, and
 /// whether it is offered.
 fn sets(
     node: &FollowedPools,
-    model: &str,
-) -> (bool, Vec<(String, ModelState, PoolCondition, bool)>) {
+    property: &str,
+) -> (bool, Vec<(String, PropertyState, PoolCondition, bool)>) {
     node.read("model_x", |pools| {
-        let index = pools.models();
-        let sets = index
-            .sets(model, None)
-            .unwrap_or_default()
+        let indexes = pools.properties();
+        let sets = listed(indexes, property)
             .iter()
-            .map(|set| {
+            .map(|(_, set)| {
                 (
                     set.pool().to_string(),
                     set.state(),
@@ -84,7 +117,7 @@ fn sets(
                 )
             })
             .collect();
-        (index.is_synced(), sets)
+        (indexes.is_synced(), sets)
     })
     .expect("the chooser sends to model_x")
 }
@@ -92,7 +125,7 @@ fn sets(
 /// A snapshot's listings make the index: a followed pool's from its
 /// follow, another's from its own event, the marker's flag whether it is
 /// synced. Before any snapshot the index is not synced; after one that
-/// says the hub's listings are whole, a model no pool lists is unknown.
+/// says the hub's listings are whole, a property no pool lists is unknown.
 #[test]
 fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     let (mut follows, pools, _, _) = follower();
@@ -105,19 +138,19 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     if let FollowEvent::Follow { listing: shown, .. } = &mut first {
         *shown = Some(listing(
             PoolCondition::Live,
-            &[("qwen-32b", ModelState::Ready)],
+            &[("qwen-32b", PropertyState::Ready)],
             3,
         ));
     }
     snapshot.apply(first, now);
     snapshot.apply(
-        listed(
+        listed_event(
             M2,
             Some(listing(
                 PoolCondition::Missing,
                 &[
-                    ("qwen-32b", ModelState::Ready),
-                    ("llama-70b", ModelState::Unavailable),
+                    ("qwen-32b", PropertyState::Ready),
+                    ("llama-70b", PropertyState::Unavailable),
                 ],
                 5,
             )),
@@ -131,10 +164,15 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     assert_eq!(
         qwen,
         [
-            (M1.to_string(), ModelState::Ready, PoolCondition::Live, true),
+            (
+                M1.to_string(),
+                PropertyState::Ready,
+                PoolCondition::Live,
+                true
+            ),
             (
                 M2.to_string(),
-                ModelState::Ready,
+                PropertyState::Ready,
                 PoolCondition::Missing,
                 false
             ),
@@ -153,11 +191,11 @@ fn a_snapshot_makes_the_index_and_says_whether_it_is_synced() {
     assert_eq!(sets(&node, "mistral"), (true, vec![]), "unknown");
 }
 
-/// A model that moves: pool A drains it before pool B is `ready`. The
+/// A property that moves: pool A drains it before pool B is `ready`. The
 /// index shows A's `drained` and B's `starting`, so a gate answers 503,
 /// not 404, through the move.
 #[test]
-fn a_model_that_moves_shows_both_pools() {
+fn a_property_that_moves_shows_both_pools() {
     let (mut follows, pools, _, _) = follower();
     let node = handle(&pools);
     let now = Instant::now();
@@ -165,33 +203,33 @@ fn a_model_that_moves_shows_both_pools() {
     snapshot.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(snapshot, now);
     follows.apply(
-        listed(
+        listed_event(
             M1,
             Some(listing(
                 PoolCondition::Live,
-                &[("qwen-32b", ModelState::Draining)],
+                &[("qwen-32b", PropertyState::Draining)],
                 2,
             )),
         ),
         now,
     );
     follows.apply(
-        listed(
+        listed_event(
             M1,
             Some(listing(
                 PoolCondition::Live,
-                &[("qwen-32b", ModelState::Drained)],
+                &[("qwen-32b", PropertyState::Drained)],
                 3,
             )),
         ),
         now,
     );
     follows.apply(
-        listed(
+        listed_event(
             M2,
             Some(listing(
                 PoolCondition::Live,
-                &[("qwen-32b", ModelState::Starting)],
+                &[("qwen-32b", PropertyState::Starting)],
                 1,
             )),
         ),
@@ -204,24 +242,24 @@ fn a_model_that_moves_shows_both_pools() {
         [
             (
                 M1.to_string(),
-                ModelState::Drained,
+                PropertyState::Drained,
                 PoolCondition::Live,
                 false
             ),
             (
                 M2.to_string(),
-                ModelState::Starting,
+                PropertyState::Starting,
                 PoolCondition::Live,
                 false
             ),
         ]
     );
-    follows.apply(listed(M1, None), now);
+    follows.apply(listed_event(M1, None), now);
     assert_eq!(
         sets(&node, "qwen-32b").1,
         [(
             M2.to_string(),
-            ModelState::Starting,
+            PropertyState::Starting,
             PoolCondition::Live,
             false
         )],
@@ -240,17 +278,14 @@ fn a_missing_pools_silence_is_dated_back_by_its_age() {
     let node = handle(&pools);
     let since = |node: &FollowedPools, pool: &str| {
         node.read("model_x", |pools| {
-            pools
-                .models()
-                .sets("qwen-32b", None)
-                .unwrap_or_default()
+            listed(pools.properties(), "qwen-32b")
                 .iter()
-                .find(|set| set.pool() == pool)
-                .map(|set| (set.condition(), set.missing_since()))
+                .find(|(_, set)| set.pool() == pool)
+                .map(|(_, set)| (set.condition(), set.missing_since()))
         })
         .expect("the chooser sends to model_x")
     };
-    let qwen = [("qwen-32b", ModelState::Ready)];
+    let qwen = [("qwen-32b", PropertyState::Ready)];
     let now = Instant::now();
 
     let mut snapshot = follows.snapshot();
@@ -259,7 +294,7 @@ fn a_missing_pools_silence_is_dated_back_by_its_age() {
         *shown = Some(missing(&qwen, 3, Some(12_000)));
     }
     snapshot.apply(first, now);
-    snapshot.apply(listed(M2, Some(missing(&qwen, 1, None))), now);
+    snapshot.apply(listed_event(M2, Some(missing(&qwen, 1, None))), now);
     snapshot.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(snapshot, now);
     let lapsed = now - Duration::from_secs(12);
@@ -276,7 +311,10 @@ fn a_missing_pools_silence_is_dated_back_by_its_age() {
 
     // A listing that arrives later is dated back from its own arrival.
     let later = now + Duration::from_secs(5);
-    follows.apply(listed(M2, Some(missing(&qwen, 1, Some(3_000)))), later);
+    follows.apply(
+        listed_event(M2, Some(missing(&qwen, 1, Some(3_000)))),
+        later,
+    );
     assert_eq!(
         since(&node, M2),
         Some((PoolCondition::Missing, Some(later - Duration::from_secs(3))))
@@ -300,7 +338,7 @@ fn a_missing_pools_silence_is_dated_back_by_its_age() {
 
     // Live again: no silence.
     follows.apply(
-        listed(M1, Some(listing(PoolCondition::Live, &qwen, 4))),
+        listed_event(M1, Some(listing(PoolCondition::Live, &qwen, 4))),
         later,
     );
     assert_eq!(since(&node, M1), Some((PoolCondition::Live, None)));
@@ -315,23 +353,19 @@ fn the_index_is_made_again_only_when_it_may_have_changed() {
     let now = Instant::now();
     follows.apply(follow(M1, 1, PoolState::Ready), now);
     follows.apply(
-        listed(
+        listed_event(
             M1,
             Some(listing(
                 PoolCondition::Live,
-                &[("qwen-32b", ModelState::Ready)],
+                &[("qwen-32b", PropertyState::Ready)],
                 1,
             )),
         ),
         now,
     );
-    let index = || Arc::clone(&pools.table("f").expect("a table").models);
+    let index = || Arc::clone(&pools.table("f").expect("a table").properties);
     let before = index();
-    assert!(
-        before
-            .sets("qwen-32b", None)
-            .is_some_and(|sets| sets[0].is_offered())
-    );
+    assert!(listed(&before, "qwen-32b")[0].1.is_offered());
     follows.apply(
         FollowEvent::Load {
             class: "model_x".into(),
@@ -354,11 +388,7 @@ fn the_index_is_made_again_only_when_it_may_have_changed() {
     );
     let after = index();
     assert!(!Arc::ptr_eq(&before, &after));
-    assert!(
-        after
-            .sets("qwen-32b", None)
-            .is_some_and(|sets| !sets[0].is_offered())
-    );
+    assert!(!listed(&after, "qwen-32b")[0].1.is_offered());
 }
 
 /// A listing the relay sends while the pool is read from a watch of its
@@ -377,11 +407,11 @@ fn a_listing_reaches_a_pool_read_from_its_own_watch() {
     });
     assert!(!follows.asked().is_empty(), "read from a watch of its own");
     follows.take(
-        listed(
+        listed_event(
             M1,
             Some(listing(
                 PoolCondition::Live,
-                &[("qwen-32b", ModelState::Ready)],
+                &[("qwen-32b", PropertyState::Ready)],
                 1,
             )),
         ),
@@ -391,7 +421,7 @@ fn a_listing_reaches_a_pool_read_from_its_own_watch() {
         sets(&node, "qwen-32b").1,
         [(
             M1.to_string(),
-            ModelState::Ready,
+            PropertyState::Ready,
             PoolCondition::Live,
             false
         )],
@@ -399,21 +429,21 @@ fn a_listing_reaches_a_pool_read_from_its_own_watch() {
     );
 }
 
-/// Looking a model up in the index allocates nothing.
+/// Looking a property up in the index allocates nothing.
 #[test]
-fn a_model_lookup_allocates_nothing() {
+fn a_property_lookup_allocates_nothing() {
     let (mut follows, pools, _, _) = follower();
     let node = handle(&pools);
     let now = Instant::now();
     follows.apply(follow(M1, 1, PoolState::Ready), now);
     follows.apply(
-        listed(
+        listed_event(
             M1,
             Some(listing(
                 PoolCondition::Live,
                 &[
-                    ("qwen-32b", ModelState::Ready),
-                    ("llama-70b", ModelState::Starting),
+                    ("qwen-32b", PropertyState::Ready),
+                    ("llama-70b", PropertyState::Starting),
                 ],
                 1,
             )),
@@ -423,21 +453,30 @@ fn a_model_lookup_allocates_nothing() {
     // Once, uncounted: the first load of a thread may take arc-swap's
     // per-thread slot.
     let _ = sets(&node, "qwen-32b");
+    // The exact key is the request's own, made before the lookup.
+    let exact = test("qwen-32b");
     counting(true);
     let before = counted();
     let mut found = 0;
     for _ in 0..100 {
         found += node
             .read("model_x", |pools| {
-                let index = pools.models();
-                usize::from(
-                    index.sets("qwen-32b", None).is_some_and(|sets| {
-                        sets.iter().any(|set| {
-                            set.is_offered()
-                                && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
-                        })
-                    }) || index.sets("mistral", None).is_none(),
-                )
+                let Some(index) = pools.properties().get(&TEST) else {
+                    return 0;
+                };
+                let served = |listed: &[(Test, gdl::PropertyPool)]| {
+                    listed.iter().any(|(_, set)| {
+                        set.is_offered()
+                            && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
+                    })
+                };
+                let by_name = index.range_by(|key| {
+                    (key.name.as_str(), key.partition.as_deref()).cmp(&("qwen-32b", None))
+                });
+                let exact = index.get(&exact);
+                let unknown = index.range_by(|key| key.name.as_str().cmp("mistral"));
+                std::hint::black_box(served(exact));
+                usize::from(exact.len() == 1 && by_name.len() == 1 && unknown.is_empty())
             })
             .unwrap_or(0);
     }

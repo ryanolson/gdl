@@ -3,11 +3,18 @@
 
 use std::time::Duration;
 
+use gdl_model::PropertyKey;
 use gdl_pools::{
-    DirectoryError, LoadSummary, ModelEntry, ModelState, PoolRecord, PoolState, Presence, Version,
-    Withdrawal,
+    DirectoryError, LoadSummary, PoolProperty, PoolRecord, PoolState, Presence, PropertyState,
+    Version, Withdrawal,
 };
 use serde::Deserialize;
+use serde_json::json;
+
+/// A key of the test property type, `{ name, partition }`.
+fn key(name: &str, partition: Option<&str>) -> PropertyKey {
+    PropertyKey::new("test", json!({ "name": name, "partition": partition }))
+}
 
 fn record() -> PoolRecord {
     PoolRecord {
@@ -30,21 +37,19 @@ fn record() -> PoolRecord {
             period_ms: 10_000,
         }),
         presence: Presence::Serving,
-        models: vec![
-            ModelEntry {
-                model: "llama-70b".into(),
-                routing_key: None,
-                state: ModelState::Ready,
+        properties: vec![
+            PoolProperty {
+                property: key("x", None),
+                state: PropertyState::Ready,
                 since: 2,
             },
-            ModelEntry {
-                model: "qwen-32b".into(),
-                routing_key: Some("a".into()),
-                state: ModelState::Drained,
+            PoolProperty {
+                property: key("y", Some("a")),
+                state: PropertyState::Drained,
                 since: 3,
             },
         ],
-        models_version: 3,
+        properties_version: 3,
         revoked: Vec::new(),
     }
 }
@@ -255,72 +260,66 @@ fn a_publishable_record_keeps_its_lease_through_json() {
     }
 }
 
-/// The record's presence and models, on the wire: a record with none of
-/// them leaves them out, and reads back the same.
+/// The record's presence and properties, on the wire: a record with none
+/// of them leaves them out, and reads back the same.
 #[test]
-fn a_record_carries_its_presence_and_models() {
+fn a_record_carries_its_presence_and_properties() {
     let text = serde_json::to_string(&record()).expect("json");
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(value["presence"], "serving", "{text}");
-    assert_eq!(value["models_version"], 3, "{text}");
+    assert_eq!(value["properties_version"], 3, "{text}");
     assert_eq!(
-        value["models"],
-        serde_json::json!([
-            {"model": "llama-70b", "state": "ready", "since": 2},
-            {"model": "qwen-32b", "routing_key": "a", "state": "drained", "since": 3},
+        value["properties"],
+        json!([
+            {"kind": "test", "key": {"name": "x"}, "state": "ready", "since": 2},
+            {"kind": "test", "key": {"name": "y", "partition": "a"}, "state": "drained", "since": 3},
         ]),
         "{text}"
     );
     let scaled = PoolRecord {
         presence: Presence::ScaledToZero,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         ..record()
     };
     let text = serde_json::to_string(&scaled).expect("json");
     assert!(text.contains(r#""presence":"scaled_to_zero""#), "{text}");
-    assert!(!text.contains("models"), "{text}");
+    assert!(!text.contains("properties"), "{text}");
     assert_eq!(
         serde_json::from_str::<PoolRecord>(&text).expect("a record"),
         scaled
     );
     for state in [
-        ModelState::Starting,
-        ModelState::Ready,
-        ModelState::Unavailable,
-        ModelState::Draining,
-        ModelState::Drained,
+        PropertyState::Starting,
+        PropertyState::Ready,
+        PropertyState::Unavailable,
+        PropertyState::Draining,
+        PropertyState::Drained,
     ] {
         let text = serde_json::to_string(&state).expect("json");
         assert_eq!(
-            serde_json::from_str::<ModelState>(&text).expect("a state"),
+            serde_json::from_str::<PropertyState>(&text).expect("a state"),
             state
         );
     }
 }
 
-/// The models an operator revoked go on the wire beside the models, and
-/// a record with none leaves the field out. A record of a build from
-/// before revocation reads as revoking none.
+/// The properties an operator revoked go on the wire beside the
+/// properties, and a record with none leaves the field out. A record of a
+/// build from before revocation reads as revoking none.
 #[test]
-fn a_record_carries_the_models_an_operator_revoked() {
+fn a_record_carries_the_properties_an_operator_revoked() {
     let revoked = PoolRecord {
-        revoked: vec![
-            gdl_model::ModelKey::new("acme-legal"),
-            gdl_model::ModelKey {
-                model: "llama-70b".into(),
-                routing_key: Some("b".into()),
-            },
-        ],
+        revoked: vec![key("z", None), key("x", Some("b"))],
         ..record()
     };
     let text = serde_json::to_string(&revoked).expect("json");
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(
         value["revoked"],
-        serde_json::json!([
-            {"model": "acme-legal"},
-            {"model": "llama-70b", "routing_key": "b"},
+        json!([
+            {"kind": "test", "key": {"name": "z"}},
+            {"kind": "test", "key": {"name": "x", "partition": "b"}},
         ]),
         "{text}"
     );
@@ -336,13 +335,13 @@ fn a_record_carries_the_models_an_operator_revoked() {
     );
 }
 
-/// A record as a build from before presence and models writes it reads
-/// as a serving pool with no models.
+/// A record as a build from before presence and properties writes it
+/// reads as a serving pool with no properties.
 #[test]
-fn a_record_without_presence_or_models_reads_as_serving_with_none() {
+fn a_record_without_presence_or_properties_reads_as_serving_with_none() {
     let mut value = serde_json::to_value(record()).expect("json");
     let fields = value.as_object_mut().expect("an object");
-    for field in ["presence", "models", "models_version"] {
+    for field in ["presence", "properties", "properties_version"] {
         fields.remove(field);
     }
     let read: PoolRecord = serde_json::from_value(value).expect("a record");
@@ -350,16 +349,16 @@ fn a_record_without_presence_or_models_reads_as_serving_with_none() {
         read,
         PoolRecord {
             presence: Presence::Serving,
-            models: Vec::new(),
-            models_version: 0,
+            properties: Vec::new(),
+            properties_version: 0,
             ..record()
         }
     );
 }
 
-/// The record as a hub of the build before presence and models reads it:
-/// every field it knows, and nothing else. Frozen here, so that a change
-/// to the record that such a hub could not read fails this test.
+/// The record as a hub of the build before presence and properties reads
+/// it: every field it knows, and nothing else. Frozen here, so that a
+/// change to the record that such a hub could not read fails this test.
 #[derive(Debug, Deserialize)]
 struct EarlierRecord {
     name: String,
@@ -378,13 +377,14 @@ struct EarlierRecord {
     load: Option<LoadSummary>,
 }
 
-/// A hub of the earlier build reads a record with presence and models,
-/// whatever they hold, as the record it was: builds roll pool by pool.
+/// A hub of the earlier build reads a record with presence and
+/// properties, whatever they hold, as the record it was: builds roll pool
+/// by pool.
 #[test]
-fn an_earlier_reader_reads_a_record_with_presence_and_models() {
+fn an_earlier_reader_reads_a_record_with_presence_and_properties() {
     let published = PoolRecord {
         presence: Presence::ScaledToZero,
-        revoked: vec![gdl_model::ModelKey::new("acme-legal")],
+        revoked: vec![key("z", None)],
         ..record()
     };
     let text = serde_json::to_string(&published).expect("json");
@@ -435,19 +435,18 @@ fn only_a_serving_record_has_a_lease() {
     );
 }
 
-/// The models are not checked with the record: a parent that refused a
-/// record for one malformed model would drop the whole pool.
+/// The properties are not checked with the record: a parent that refused
+/// a record for one malformed property would drop the whole pool.
 #[test]
-fn a_record_is_not_refused_for_its_models() {
+fn a_record_is_not_refused_for_its_properties() {
     PoolRecord {
-        models: vec![ModelEntry {
-            model: String::new(),
-            routing_key: Some(String::new()),
-            state: ModelState::Ready,
+        properties: vec![PoolProperty {
+            property: PropertyKey::new("", json!("not an object")),
+            state: PropertyState::Ready,
             since: 1,
         }],
         ..record()
     }
     .check()
-    .expect("a record with a malformed model");
+    .expect("a record with a malformed property");
 }

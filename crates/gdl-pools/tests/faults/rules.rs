@@ -281,8 +281,8 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
     ));
     let record = |seq| PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m1".into(),
         class: "model_x".into(),
@@ -335,8 +335,8 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
     };
     let record = |seq| PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m1".into(),
         class: "model_x".into(),
@@ -414,8 +414,8 @@ async fn a_backend_that_loses_a_record_part_on_restart_fails() {
     let [directory] = Fault::RestartPart.fresh().await;
     let published = PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m1".into(),
         class: "model_x".into(),
@@ -453,8 +453,8 @@ async fn a_backend_that_loses_its_load_on_restart_fails() {
     let [directory] = Fault::RestartLoad.fresh().await;
     let published = PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m1".into(),
         class: "model_x".into(),

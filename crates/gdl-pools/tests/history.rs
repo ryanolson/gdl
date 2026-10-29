@@ -43,8 +43,8 @@ impl Backend for ShortHistory {
 fn record(seq: u64) -> PoolRecord {
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "model-a".into(),
         class: "model".into(),

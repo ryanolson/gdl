@@ -85,7 +85,7 @@ A chooser damps a full pool for a short window, because room comes back on its o
 
 ## An instance's own decline
 
-A pool's entry instances need not serve the same requests. Two instances may hold different models, or one may not have loaded its model yet. A refusal from one of them says nothing of the pool, so it has a third reason: the instance's own. The chooser then offers the request to the pool's other entry instances, once each, before another pool.
+A pool's entry instances need not serve the same requests. Two instances may hold different properties, or one may not have loaded a property yet. A refusal from one of them says nothing of the pool, so it has a third reason: the instance's own. The chooser then offers the request to the pool's other entry instances, once each, before another pool.
 
 - **The walk is a counter over the pool's table.** The chooser keeps the pool's table from when the decline landed, its place in the table's instances, and how many are left. It offers each instance of that table at most once, it is three words for a pool of any size, and it allocates nothing. **Rejected: a set of the instances tried.** A bitmap caps the pool's size, and a list allocates on a decline. **Rejected: asking the selector to choose among the rest.** It needs the instances tried as a list, which allocates, and the selector may choose a declined instance again, as it may inside a class. The selector is asked for one instance at a time instead, so that it still holds its lease and gives its metadata for the instance the request goes to.
 - **The pool policy is not asked again.** The pool is still its choice, and its lease on the choice passes to the next instance's offer. **Rejected: running the policy again with the pool not excluded.** A policy that chooses by turn or at random could leave the pool, and its lease would end without learning that the pool took the request.
@@ -150,27 +150,43 @@ An entry stopped outside the drain, which then learns of it, says `drained` whil
 
 **Rejected: let each reader tell a source's `drained` from an entry's.** Both are the same hub service, and an entry of an earlier build still says the early one.
 
-## A model's state keeps its history
+## A property is a typed key that the middle carries as JSON
 
-A pool's record lists its models, and each entry's state comes from what the pool's usable entry instances say and from the state before it. A model that was `ready` and that no instance can serve now is `unavailable`, never `starting`. An entry leaves the record only once `drained`. So a reader can tell a model that served from one that never did, and a crash from a removal.
+A pool's record lists the properties the pool serves. A property is a key of a type the application defines, under a kind name. The node that provides a kind encodes its keys, and the hub, the relay, `gdl-watch` and every directory backend carry them as JSON objects. Only a node or a pool policy that registered the kind decodes the keys, when the chooser builds the class's property index, off the request path. So gdl knows nothing of what a pool serves, and a new kind needs no change to the hub or to a backend.
 
-**Rejected: a state taken from the current union of reports.** When the last instance that served a model fails, and another still loads it, the union says `starting`. A reader would then answer 404 for a model that served a moment ago, where 503 is right.
+Every field of a key is part of its identity. Each layer puts a key in a canonical form when it reads it: fields sorted by name, and a `null` field left out, as a missing optional field is. So two builds that write a key's fields in another order name one entry, and the record, the DynamoDB list digest, and a revocation agree on it.
 
-**Rejected: a model that leaves every list counts as removed.** A crash, or a hub that restarts and has no reports yet, would look like a removal. Only a drain removes a model.
+**Rejected: a typed key in the hub.** The stock hub binary cannot link an application's types, so it could not read them.
 
-**Rejected: models only in the load summary's payload, on the follow link.** The payload has no history, and only a hub that follows the pool would see it.
+**Rejected: a key of string parts.** A key's parts would need an order and a count that nothing checks, and a type that adds a field would need a new key format. A typed object adds fields the way a message does.
 
-A drain ends only once every usable entry instance has reported in its current registration, and none has the model. An instance not heard from may still be draining it. A drain read from the last record after a restart ends only once an instance reports.
+**Rejected: properties as events on the pool's watch.** The list needs a durable record, a history, and a drain handshake, which an event whose newest value wins does not give.
 
-An instance forgets a drain once the hub answers a report that carries it. So the hub answers only once a stored record holds the version at which the drained models' entries last changed. A later change of another model does not hold the answer back. A record that holds the drain is what a restarted hub reads back. The report's refusals are counted only when it is answered, since the instance sends a report again, refusals included, until one is answered. Its admission replaces the one before, so it counts at once.
+The index sorts each kind's keys by the type's `Ord`, the order of its fields. So the keys that share leading fields are one stretch of the index. A binary search finds its start, and doubling steps from there find its end, with no allocation. A range keeps each pool's entries with their own states: gdl merges no states, since a merged state loses the history that tells 404 from 503.
 
-**Rejected: an instance that reports a drained model for a while after the answer.** No fixed time covers a hub whose writes are slow, and the model would stay `draining` in the record for that time after every drain.
+**Rejected: one entry per pool for each range, with the strongest state.** `unavailable` beside `starting` would read as `starting`, and a reader would answer 404, not 503.
 
-A new state is not additive. A hub of an earlier build refuses a record, or a load report, whose model state it does not know, and a refused load report drops that instance's load from the summary too. So a build that adds a state must reach every reader first.
+## A property's state keeps its history
 
-A model loaded again while it drains starts afresh, as it does after `drained`, so a state alone is the whole history the record has to keep.
+Each entry's state comes from what the pool's usable entry instances say and from the state before it. A property that was `ready` and that no instance can serve now is `unavailable`, never `starting`. An entry leaves the record only once `drained`. So a reader can tell a property that served from one that never did, and a crash from a removal.
 
-**Rejected: a record written before the last one is read.** A read that failed would look like a pool with no record, and the write would drop the models no instance has reported yet.
+**Rejected: a state taken from the current union of reports.** When the last instance that served a property fails, and another still loads it, the union says `starting`. A reader would then answer 404 for a property that served a moment ago, where 503 is right.
+
+**Rejected: a property that leaves every list counts as removed.** A crash, or a hub that restarts and has no reports yet, would look like a removal. Only a drain removes a property.
+
+**Rejected: properties only in the load summary's payload, on the follow link.** The payload has no history, and only a hub that follows the pool would see it.
+
+A drain ends only once every usable entry instance has reported in its current registration, and none has the property. An instance not heard from may still be draining it. A drain read from the last record after a restart ends only once an instance reports.
+
+An instance forgets a drain once the hub answers a report that carries it. So the hub answers only once a stored record holds the version at which the drained properties' entries last changed. A later change of another property does not hold the answer back. A record that holds the drain is what a restarted hub reads back. The report's refusals are counted only when it is answered, since the instance sends a report again, refusals included, until one is answered. Its admission replaces the one before, so it counts at once.
+
+**Rejected: an instance that reports a drained property for a while after the answer.** No fixed time covers a hub whose writes are slow, and the property would stay `draining` in the record for that time after every drain.
+
+A new state is not additive. A hub of an earlier build refuses a record, or a load report, whose property state it does not know, and a refused load report drops that instance's load from the summary too. So a build that adds a state must reach every reader first.
+
+A property loaded again while it drains starts afresh, as it does after `drained`, so a state alone is the whole history the record has to keep.
+
+**Rejected: a record written before the last one is read.** A read that failed would look like a pool with no record, and the write would drop the properties no instance has reported yet.
 
 The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A hub that reads no record, as from a relay parent that restarted, still publishes versions above any its predecessor did, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version.
 
@@ -196,13 +212,13 @@ A pool whose hub is gone is withdrawn, or said to be scaled to 0, by an operator
 
 **Rejected: a command only in the parent's memory.** A reader of the directory, such as a parent's restarted hub or another backend's watch, would never see it. A write through the directory is seen by every reader, under every backend, by the rules a publish already keeps.
 
-## A revocation is a list beside the models
+## A revocation is a list beside the properties
 
-A revoked model leaves the record's models, and the record lists it in `revoked`. The pool's own hub writes it, at its own epoch, so the hub keeps serving the pool's other models.
+A revoked property leaves the record's properties, and the record lists it in `revoked`. The pool's own hub writes it, at its own epoch, so the hub keeps serving the pool's other properties.
 
-**Rejected: a `revoked` state of a model entry.** A new state is not additive ([A model's state keeps its history](#a-models-state-keeps-its-history)): a hub of an earlier build refuses the record. A new field is ignored by such a hub, and the model is still gone from the list it reads.
+**Rejected: a `revoked` state of a property entry.** A new state is not additive ([A property's state keeps its history](#a-propertys-state-keeps-its-history)): a hub of an earlier build refuses the record. A new field is ignored by such a hub, and the property is still gone from the list it reads.
 
-**Rejected: a revocation written by the parent at a new epoch.** It would fence the pool's live hub, whose next write is then older, and the pool would stop publishing its other models.
+**Rejected: a revocation written by the parent at a new epoch.** It would fence the pool's live hub, whose next write is then older, and the pool would stop publishing its other properties.
 
 ## Unknown events fail closed for one pool
 
@@ -226,15 +242,15 @@ Ingress instances share which set each session went to through their pool's hub.
 
 ## The DynamoDB directory queries one class, and keeps lists apart
 
-The DynamoDB backend keys its records table by class, so a watch reads its class with one query, not a scan of every class. Model lists live in a second table, keyed by the record's `models_version`, a digest of the list, and a random token that one put mints for itself. A query then reads a few hundred bytes per pool, and a list is read only when it changes. A reader joins a record only to the list whose digest the record names, so it never sees a part of another version (rule 4).
+The DynamoDB backend keys its records table by class, so a watch reads its class with one query, not a scan of every class. Property lists live in a second table, keyed by the record's `properties_version`, a digest of the list, and a random token that one put mints for itself. A query then reads a few hundred bytes per pool, and a list is read only when it changes. A reader joins a record only to the list whose digest the record names, so it never sees a part of another version (rule 4).
 
-**Rejected: lists in the records table.** Every query would read every list: more than 3 MB per query of 50 pools with 1,000 models each, where apart it reads about 20 KB.
+**Rejected: lists in the records table.** Every query would read every list: more than 3 MB per query of 50 pools with 1,000 properties each, where apart it reads about 20 KB.
 
 **Rejected: a watch built on DynamoDB Streams.** Each region's table has its own stream, which keeps 24 hours of changes in shards that split. A watch would still query for its snapshot, and would have to follow the shards. A query once per period is one call, and its cost is set by the period.
 
-**Rejected: TTL on records or tombstones.** TTL deletes the item and replicates the delete, so a silent pool would vanish from every region, and its models would answer 404.
+**Rejected: TTL on records or tombstones.** TTL deletes the item and replicates the delete, so a silent pool would vanish from every region, and its properties would answer 404.
 
-A list expires only when its pool's record is stored at a higher `models_version`. **Rejected: expire every list a write moves past, guarded by checks that the record does not name it, and repaired by the writer.** A withdrawal, or a command, through another handle or region could still expire a list that a later record named, and each repair had a failure path of its own. The rule leaves a withdrawn pool's last list, the lists of refused writes, and the list each command or same-version write replaced in the table, which is bounded ([Limitations](../operations/limitations.md#a-dynamodb-model-list-can-outlive-the-record-that-named-it)).
+A list expires only when its pool's record is stored at a higher `properties_version`. **Rejected: expire every list a write moves past, guarded by checks that the record does not name it, and repaired by the writer.** A withdrawal, or a command, through another handle or region could still expire a list that a later record named, and each repair had a failure path of its own. The rule leaves a withdrawn pool's last list, the lists of refused writes, and the list each command or same-version write replaced in the table, which is bounded ([Limitations](../operations/limitations.md#a-dynamodb-property-list-can-outlive-the-record-that-named-it)).
 
 Each put of a list makes an item that no other put can replace, and the property that a stored record names a list that is there and not set to expire follows from four facts, each from the construction alone:
 
@@ -243,9 +259,9 @@ Each put of a list makes an item that no other put can replace, and the property
 3. The records that name a list are stored in one unbroken run. The first is the record written after the list. Each later one keeps the list with the condition that the pool's item names it already. Once an item that does not name the list replaces the run's last record, no record names the list again: a write that keeps it fails its condition and puts a list of its own, and a late attempt of an earlier write of the run is refused as not newer.
 4. A list is set to expire only by a writer whose record put returned, as the item it replaced, a record naming that list. That ends the run, so however late the expiry lands, no record names the list after it. TTL removes a list only after its expiry.
 
-The rule on `models_version` only limits which ended runs lead to an expiry; the safety argument does not need it. The four facts hold in one region whose records item never goes back to a lower version, which the newer-than condition gives for the writes the region takes. Global tables settle two regions' writes of one item by the last writer, so a write from another region can put an older version back, and then a late attempt of an earlier write can pass the condition again and name a list set to expire ([Limitations](../operations/limitations.md#a-dynamodb-write-from-another-region-can-lose-to-the-pools-own)). `crates/gdl-pools-dynamodb/tests/local/interleave.rs` runs every order of the calls of a command, a hub's writes, their expiry, TTL, and a late attempt, and checks the property after each call.
+The rule on `properties_version` only limits which ended runs lead to an expiry; the safety argument does not need it. The four facts hold in one region whose records item never goes back to a lower version, which the newer-than condition gives for the writes the region takes. Global tables settle two regions' writes of one item by the last writer, so a write from another region can put an older version back, and then a late attempt of an earlier write can pass the condition again and name a list set to expire ([Limitations](../operations/limitations.md#a-dynamodb-write-from-another-region-can-lose-to-the-pools-own)). `crates/gdl-pools-dynamodb/tests/local/interleave.rs` runs every order of the calls of a command, a hub's writes, their expiry, TTL, and a late attempt, and checks the property after each call.
 
-**Rejected: one list item per `models_version` and digest, shared by every writer.** Two writers of one pool that wrote the same list at the same version wrote the same item, and each put replaced the other's. Every guard on that overwrite (a token per put, a condition on the expiry, a second put after the record, a condition on that put) closed one interleaving and opened another: a writer's delayed expiry, or TTL, reached the item that another writer's record named.
+**Rejected: one list item per `properties_version` and digest, shared by every writer.** Two writers of one pool that wrote the same list at the same version wrote the same item, and each put replaced the other's. Every guard on that overwrite (a token per put, a condition on the expiry, a second put after the record, a condition on that put) closed one interleaving and opened another: a writer's delayed expiry, or TTL, reached the item that another writer's record named.
 
 ## What stays fixed
 

@@ -1,6 +1,6 @@
 # Deploy a fleet of pools
 
-This guide deploys one graph as three pools on one Docker host: a global pool that runs the frontend, and two model pools that run the engine. It uses the `api` example. [Classes and pools](../concepts/pools.md) explains the terms. [Deploy with Docker Compose](compose-deploy.md) covers a bundle without pools.
+This guide deploys one graph as three pools on one Docker host: a global pool that runs the frontend, and two pools of class `model_x` that run the engine. It uses the `api` example. [Classes and pools](../concepts/pools.md) explains the terms. [Deploy with Docker Compose](compose-deploy.md) covers a bundle without pools.
 
 You need Docker with Compose, and a spec whose node and message crates come from Git or crates.io, as `examples/api/deploy.toml` does. To run crates that are not pushed, see [Run local sources](#run-local-sources). The bundle is one Compose project, so it runs on one host. Its hubs share no volume: each child pool's hub reports its record to its parent's hub over the bundle's network ([The relay backend](../concepts/pools.md#the-relay-backend)).
 
@@ -140,14 +140,14 @@ docker run --rm --network fleet_default curlimages/curl:8.10.1 -s -X POST \
 
 The parent answers 204 once it has written the withdrawal, and its choosers hold the pool withdrawn. If the pool was scaled to 0 on purpose and will come back, say that instead, with `.../children/model_x/model-x-02/scale-to-zero`: the pool then reads as scaled to 0, not missing. A late record from the pool's old hub cannot undo either. A new hub of the pool writes past both ([A pool whose hub is gone](../concepts/pools.md#a-pool-whose-hub-is-gone)).
 
-## Revoke a model
+## Revoke a property
 
-Revoke one model of a pool on the pool's own hub. The pool's other models serve on:
+Revoke one property of a pool on the pool's own hub. The pool's other properties serve on. The body names the property's kind and its key:
 
 ```bash
 docker run --rm --network fleet_default curlimages/curl:8.10.1 -s -X POST \
-  -H 'content-type: application/json' -d '{"model": "acme-legal"}' \
-  http://model-x-02:8337/v1/ext/gdl-pool/models/revoke
+  -H 'content-type: application/json' -d '{"kind": "shard", "key": {"name": "a"}}' \
+  http://model-x-02:8337/v1/ext/gdl-pool/properties/revoke
 ```
 
-The hub answers 204 once the pool's record leaves the model out. It stays out, whatever the pool's instances say and across a restart of the hub, until you lift it with `.../models/lift` and the same body ([Revoking a model](../concepts/pools.md#revoking-a-model)).
+The hub answers 204 once the pool's record leaves the property out. It stays out, whatever the pool's instances say and across a restart of the hub, until you lift it with `.../properties/lift` and the same body ([Revoking a property](../concepts/pools.md#revoking-a-property)).

@@ -253,13 +253,13 @@ A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` 
 The step that finds a pool's tier is a function out of line, as it was before the thresholds became settings. Two designs were rejected:
 
 - **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 pools.
-- **The tier step inlined into the pass.** It cut those instructions in a pick over every pool. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
+- **The tier step inlined into the pass.** It cut those instructions in a pick over every pool. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by shard then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
 
 The pass calls the filter before the tier step, so a pool the filter drops costs no call to it. With the tier step first, a pick of one shard under thin or fat LTO ran more instructions than before the thresholds became constants. There, LTO had inlined the tier step into the filtered pass, and `#[inline(never)]` stopped that. Marking the step `#[inline]` again brings a pick of one shard back to within 3 instructions of its count before under fat LTO, and within 91 under thin LTO, where a pick over every pool then runs 133 more. Under Cargo's defaults it costs the 309 instructions above. So the filter goes first instead ([The filter before the tier step](#the-filter-before-the-tier-step)). The filter now runs for every pool, eligible or not, so a costly filter over many pools that are not eligible runs more often than before. The choice does not change, since a filter answers for a pool from that pool alone.
 
 A pool that is gone is checked in each policy's pass by `Damped::is_gone` ([A pool that is gone](#a-pool-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any pool is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each pool.
 
-Measured with `crates/gdl/benches/choose.rs`: 12 pools of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 pools that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (history; aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
+Measured with `crates/gdl/benches/choose.rs`: 12 pools of 4 shards in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One shard" is `home_first` through `choose_where` over the 3 pools that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. The tables from here to the next heading are gb300 history, under Cargo's defaults, with the tier step before the filter. They do not compare with the brev rows in [The filter before the tier step](#the-filter-before-the-tier-step). On the gb300 runner (history; aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -320,7 +320,7 @@ cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_p
 
 #### The filter before the tier step
 
-The one-model pick, with the filter first, on the brev bench host: x86_64, 8 cores, a VM with no hardware counters, so no cycle counts. rustc 1.93.1, valgrind 3.18.1, core 7, load average 0.6 to 2.3. One job built each commit under B and E and ran them in alternating order. `cf2b60d` is the commit before the thresholds became constants, with the program and the bench added. "Tier step inlined" is main with `#[inline]` for `#[inline(never)]` on the tier step.
+The one-shard pick, with the filter first, on the brev bench host: x86_64, 8 cores, a VM with no hardware counters, so no cycle counts. rustc 1.93.1, valgrind 3.18.1, core 7, load average 0.6 to 2.3. One job built each commit under B and E and ran them in alternating order. `cf2b60d` is the commit before the thresholds became constants, with the program and the bench added. "Tier step inlined" is main with `#[inline]` for `#[inline(never)]` on the tier step.
 
 Instructions are callgrind Ir per pick: the difference between 1,000 and 2,000 picks, divided by 1,000, in two rounds that repeat exactly. These are their own series, not comparable with `perf stat` counts. Each binary is built in the release profile, set to B or E through the environment. rustix uses its libc backend, because its vDSO setup crashes under valgrind:
 
@@ -375,7 +375,7 @@ The load of the damping costs about 21 ns per read. It is what lets a gone mark 
 
 At `d133902`, on the same host at load average 3.7, `followed/read` took 48.4 ns and 47.7 ns.
 
-With the model index ([The model index](../concepts/pool-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two pools, and its first pool checked. On gb300 (history), core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
+With the property index ([The property index](../concepts/pool-routing.md#the-property-index)), the read also passes the class's indexes, and `followed/property` is a gate's decision: the index of one kind found, the range of keys that share a name and no partition found among 100 keys, each listed by two pools, and its pools checked. Its earlier form, `followed/model`, looked up one key by one binary search. On gb300 (history), core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8, that earlier form measured:
 
 | Read | Base | Change |
 |---|---|---|
@@ -385,6 +385,23 @@ With the model index ([The model index](../concepts/pool-routing.md#the-model-in
 | not bound | 0.82 ns, 0.84 ns | 0.82 ns, 0.83 ns |
 
 The index adds no cost to a read that does not use it. A lookup in it costs about 10 ns over `followed/gone`.
+
+The typed index runs more instructions per decision than the exact lookup it replaced. Callgrind Ir per decision, from `crates/gdl/examples/followed.rs` (the bench's decision as a program), the difference between 1,000 and 2,000 decisions divided by 1,000, on the shared aarch64 host, rustc 1.93.1, valgrind 3.22.0, release profile, both builds in one target directory:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example followed
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/followed 1000   # and 2000
+```
+
+| Decision | Ir | Allocations |
+|---|---|---|
+| exact key, one binary search over 100 keys (the program's earlier form) | 837 | 0 |
+| typed index, both searches binary | 1,246 | 0 |
+| typed index, the range's end found by doubling steps | 1,035 | 0 |
+
+The rest of the difference is the search to the range's start, which probes one entry for each key and pool, 200 here, not one for each key, and the kind's index found by its type and name. A range is most often a few entries, so the doubling steps probe 3 entries here, where a second binary search probed 8.
+
+
 
 On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages from 10 to 24, without the filter, at `03be278` with the change:
 

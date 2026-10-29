@@ -1,15 +1,16 @@
 //! What a node pays to read the pools its chooser follows
 //! (`FollowedPools::read`): a class looked up by name, one load of the
 //! table the chooser routes by and one of the chooser's damping, then a
-//! pool found by name and its withdrawal looked up, as a model gate does
-//! per request; and, in `followed/gone`, whether the chooser holds the
-//! pool gone too; and, in `followed/model`, a model gate's decision from
-//! the class's model index: a model looked up, and whether one of its
+//! pool found by name and its withdrawal looked up, as a gate does per
+//! request; and, in `followed/gone`, whether the chooser holds the pool
+//! gone too; and, in `followed/property`, a gate's decision from the
+//! class's property index: the index of one kind found, the range of keys
+//! that share a name and no partition found, and whether one of their
 //! pools is offered and takes work. The source here has the runtime's
 //! shape (`gdl_runtime::Pools`: a map from class to an `ArcSwap` of the
-//! table and its model index, beside one `ArcSwap` of the damping), with
-//! four followed pools, one withdrawn, one other pool gone, and 100
-//! models, each listed by two pools.
+//! table and its property indexes, beside one `ArcSwap` of the damping),
+//! with four followed pools, one withdrawn, one other pool gone, and 100
+//! properties, each listed by two pools.
 
 #![allow(missing_docs)]
 
@@ -21,14 +22,25 @@ use arc_swap::ArcSwap;
 use criterion::{Criterion, criterion_group, criterion_main};
 use gdl::__runtime::PoolSource;
 use gdl::{
-    ClassPools, Damped, FollowedPools, ModelIndex, ModelKey, ModelSet, ModelState, Pool,
-    PoolCondition, PoolState,
+    ClassPools, Damped, FollowedPools, Pool, PoolCondition, PoolState, PropertyIndex,
+    PropertyIndexes, PropertyKind, PropertyPool, PropertyState,
 };
+use serde::{Deserialize, Serialize};
+
+/// The bench's property type: a name, then a partition and a version.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct Shard {
+    name: String,
+    partition: Option<String>,
+    version: Option<String>,
+}
+
+const SHARD: PropertyKind<Shard> = PropertyKind::new("shard");
 
 struct Table {
     views: Box<[Pool]>,
     withdrawn: Box<[Box<str>]>,
-    models: Arc<ModelIndex>,
+    properties: Arc<PropertyIndexes>,
 }
 
 struct Tables(BTreeMap<String, Arc<ArcSwap<Table>>>, ArcSwap<Damped>);
@@ -41,7 +53,7 @@ impl PoolSource for Tables {
             read(
                 ClassPools::new(&table.views, &table.withdrawn)
                     .with_damped(&damped)
-                    .with_models(&table.models),
+                    .with_properties(&table.properties),
             );
         }
     }
@@ -60,27 +72,28 @@ fn followed() -> FollowedPools {
         })
         .collect::<Box<[Pool]>>();
     let damped = Damped::EMPTY.with_gone(&views[0]);
-    let models = ModelIndex::new(
-        true,
-        (0..100).flat_map(|model| {
-            (1..=2).map(move |pool| {
-                (
-                    ModelKey::new(format!("model-{model:03}")),
-                    ModelSet::new(
-                        format!("model-x-0{}-us-east-1", pool + 2 * (model % 2)),
-                        "us-east-1",
-                        ModelState::Ready,
-                        PoolCondition::Live,
-                    )
-                    .with_offered(true),
+    let index = PropertyIndex::new((0..100).flat_map(|shard| {
+        (1..=2).map(move |pool| {
+            (
+                Shard {
+                    name: format!("shard-{shard:03}"),
+                    partition: None,
+                    version: None,
+                },
+                PropertyPool::new(
+                    format!("model-x-0{}-us-east-1", pool + 2 * (shard % 2)),
+                    "us-east-1",
+                    PropertyState::Ready,
+                    PoolCondition::Live,
                 )
-            })
-        }),
-    );
+                .with_offered(true),
+            )
+        })
+    }));
     let table = Table {
         views,
         withdrawn: Box::new([Box::from("model-x-09-us-east-1")]),
-        models: Arc::new(models),
+        properties: Arc::new(PropertyIndexes::new(true).with(&SHARD, index)),
     };
     let tables = Tables(
         BTreeMap::from([
@@ -89,7 +102,7 @@ fn followed() -> FollowedPools {
                 Arc::new(ArcSwap::from_pointee(Table {
                     views: Box::new([]),
                     withdrawn: Box::new([]),
-                    models: Arc::default(),
+                    properties: Arc::default(),
                 })),
             ),
             (
@@ -128,18 +141,24 @@ fn read(c: &mut Criterion) {
             })
         });
     });
-    c.bench_function("followed/model", |b| {
+    c.bench_function("followed/property", |b| {
         b.iter(|| {
             black_box(&handle).read(black_box("model_x"), |pools| {
-                let index = pools.models();
-                match index.sets(black_box("model-057"), None) {
-                    Some(sets) => sets.iter().any(|set| {
-                        set.state() == ModelState::Ready
-                            && set.is_offered()
-                            && pools.pool(set.pool()).is_some_and(Pool::takes_work)
-                    }),
-                    None => !index.is_synced(),
+                let indexes = pools.properties();
+                let name = black_box("shard-057");
+                let listed = indexes.get(&SHARD).map_or(&[][..], |index| {
+                    index.range_by(|key| {
+                        (key.name.as_str(), key.partition.as_deref()).cmp(&(name, None))
+                    })
+                });
+                if listed.is_empty() {
+                    return !indexes.is_synced();
                 }
+                listed.iter().any(|(_, listing)| {
+                    listing.state() == PropertyState::Ready
+                        && listing.is_offered()
+                        && pools.pool(listing.pool()).is_some_and(Pool::takes_work)
+                })
             })
         });
     });

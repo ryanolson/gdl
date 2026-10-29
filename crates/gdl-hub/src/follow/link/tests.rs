@@ -62,8 +62,8 @@ fn relay() -> Arc<Relay> {
 fn record(hub: String) -> PoolRecord {
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m".into(),
         class: "model_x".into(),
@@ -127,7 +127,7 @@ async fn linked(
         .await
         .expect("the link reads");
     let pool = PoolWatchEvent::Pool {
-        models: None,
+        properties: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

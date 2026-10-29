@@ -16,7 +16,7 @@ use common::{
 };
 use futures::{Stream, StreamExt};
 use gdl_hub::{PoolTiming, PoolWatch};
-use gdl_model::{InstanceModel, InstanceModelState, PoolSettings, SegmentPhase};
+use gdl_model::{EntryState, PoolSettings, SegmentPhase};
 use gdl_pools::{LoadSummary, MemoryDirectory};
 use gdl_watch::{FollowEvent, LoadReport, PoolWatchEvent};
 use velo_hub::client::ClientError;
@@ -44,7 +44,7 @@ fn beating() -> PoolTiming {
 
 fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
     LoadReport {
-        models: None,
+        properties: gdl_model::PropertyLists::new(),
         admitted,
         limit,
         refusals,
@@ -291,7 +291,7 @@ async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
 /// A report that carries a drain is answered only once a record that
 /// carries it is stored, within half a period, and until then counts none
 /// of its refusals: the instance sends them again with its next report,
-/// and they count once. Its admission and its models are taken at once.
+/// and they count once. Its admission and its properties are taken at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     let directory = common::Gated::new();
@@ -305,11 +305,13 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     let (a, b) = (join_ready(&hub, "f").await, join_ready(&hub, "f").await);
     ready(&mut watch, 2).await;
     let draining = LoadReport {
-        models: Some(vec![InstanceModel {
-            model: "m".into(),
-            routing_key: None,
-            state: InstanceModelState::Draining,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                EntryState::Draining,
+            )],
+        )]),
         ..report(1, 8, 3)
     };
 
@@ -353,11 +355,11 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// Unrelated model writes must not keep dropping an instance's load once
+/// Unrelated property writes must not keep dropping an instance's load once
 /// a record already stores its drain. Each held write completes before
 /// the next summary, so the directory keeps making progress.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes() {
+async fn a_stored_drain_keeps_reporting_load_while_another_properties_record_changes() {
     let directory = common::Gated::new();
     let (hub, readiness) = hub_of(
         pool(common::POOL, "model-x-01-hub:1337"),
@@ -370,18 +372,20 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
     let (a, b) = (join_ready(&hub, "f").await, join_ready(&hub, "f").await);
     ready(&mut watch, 2).await;
     let listed = |name: &str, state, admitted| LoadReport {
-        models: Some(vec![InstanceModel {
-            model: name.into(),
-            routing_key: None,
-            state,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })),
+                state,
+            )],
+        )]),
         ..report(admitted, 8, 0)
     };
-    let draining = listed("m", InstanceModelState::Draining, 3);
+    let draining = listed("m", EntryState::Draining, 3);
     a.report(draining.clone())
         .await
         .expect("the drain is already stored and answered");
-    b.report(listed("other", InstanceModelState::Starting, 2))
+    b.report(listed("other", EntryState::Starting, 2))
         .await
         .expect("the other instance reports");
     load(&mut watch, summary(5, 16, 2, 0), WAIT).await;
@@ -390,17 +394,14 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
     let mut summaries = Vec::new();
     for n in 0..4 {
         let (said, stored) = if n % 2 == 0 {
-            (InstanceModelState::Ready, gdl_pools::ModelState::Ready)
+            (EntryState::Ready, gdl_pools::PropertyState::Ready)
         } else {
-            (
-                InstanceModelState::Starting,
-                gdl_pools::ModelState::Unavailable,
-            )
+            (EntryState::Starting, gdl_pools::PropertyState::Unavailable)
         };
         directory.close();
         b.report(listed("other", said, 2))
             .await
-            .expect("an unrelated model changes");
+            .expect("an unrelated property changes");
         directory.holding().await;
         answers.push(a.report(draining.clone()).await.is_ok());
         directory.open();
@@ -408,12 +409,13 @@ async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes
             loop {
                 let record = records.next().await;
                 if record
-                    .models
+                    .properties
                     .iter()
-                    .any(|entry| entry.model == "other" && entry.state == stored)
+                    .any(|entry| entry.property.key()["name"] == "other" && entry.state == stored)
                 {
-                    assert!(record.models.iter().any(|entry| {
-                        entry.model == "m" && entry.state == gdl_pools::ModelState::Draining
+                    assert!(record.properties.iter().any(|entry| {
+                        entry.property.key()["name"] == "m"
+                            && entry.state == gdl_pools::PropertyState::Draining
                     }));
                     break;
                 }
@@ -489,13 +491,13 @@ async fn follow_event(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_following_hub_relays_the_summary() {
     let directory = Resolving::new();
-    let (model_hub, model) = serve_pool(
+    let (model_hub, property) = serve_pool(
         pool(common::POOL, "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let mut pool_watch = watch(&model).await;
+    let mut pool_watch = watch(&property).await;
     let mut instances = Vec::new();
     for segment in ["f", "d", "d"] {
         instances.push(join_ready(&model_hub, segment).await);
@@ -570,13 +572,13 @@ async fn a_following_hub_relays_the_summary() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiet_pools_summary_is_sent_every_period() {
     let directory = Resolving::new();
-    let (model_hub, model) = serve_pool(
+    let (model_hub, property) = serve_pool(
         pool(common::POOL, "model-x-01-hub:1337"),
         &directory,
         timing(),
     )
     .await;
-    let mut pool_watch = watch(&model).await;
+    let mut pool_watch = watch(&property).await;
     let mut instances = Vec::new();
     for segment in ["f", "d", "d"] {
         instances.push(join_ready(&model_hub, segment).await);

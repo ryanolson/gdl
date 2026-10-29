@@ -1063,18 +1063,18 @@ impl Shared {
     }
 
     /// Send the listing of the pool `pool` of `class` if it changed, with
-    /// the models its current follow's link sent, if newer.
+    /// the properties its current follow's link sent, if newer.
     fn relist(&mut self, class: &str, pool: &str) {
         let Shared {
             follows, listings, ..
         } = self;
-        if let Some(models) = follows
+        if let Some(properties) = follows
             .get(class)
             .and_then(|pools| pools.get(pool))
             .and_then(|follow| follow.installed.as_ref())
-            .and_then(Installed::models)
+            .and_then(Installed::properties)
         {
-            listings.link_models(class, pool, models);
+            listings.link_properties(class, pool, properties);
         }
         if let Some(listing) = self
             .listings

@@ -389,7 +389,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### Only Docker Compose is generated, and the composer applies only on its own host
 - **What:** `cargo gdl compose` writes a Compose bundle and no Kubernetes manifests. The Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.
 - **Apply:** **Build and apply** runs `docker compose up --build --detach` on the host that runs `gdl-web`, with that host's Docker, and only when the server started with `--docker`. A second apply while one runs is refused. The page shows the output of the build and start, not the segments' health. The segments can still be loading when the command returns.
-- **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health would hold the request for the segments' start period (30 minutes, to cover model loading).
+- **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health would hold the request for the segments' start period (30 minutes, to cover a slow load).
 - **Scaling:** a segment that publishes a fixed, nonzero host port cannot scale, since two containers cannot bind one port. A port Docker chooses scales. See [Deploy with Docker Compose](../guides/compose-deploy.md).
 - **Workaround:** for another Docker host, download the bundle and run it there. Follow a started project with `docker compose -p gdl-<graph> logs -f` and stop it with `docker compose -p gdl-<graph> down`.
 
@@ -471,10 +471,10 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Why:** the report route and the read of a child's record trust the private network, as an instance's registration and velo's traffic do. No credential crosses pools until the private CA exists.
 - **Lifts:** hub TLS with client certificates and authenticated names, from the private CA.
 
-### Under `relay`, the model index lists only the hub's own children
-- **What:** a hub builds its choosers' model index from what its watch of the directory gives. Under `relay`, that is only the records its own children report ([The relay directory has no mesh](#the-relay-directory-has-no-mesh)). So a model that only another parent's children serve is not listed, and a gate answers 404 for it, not 503. A parent's hub lists each of its children, silent or not, until the child withdraws.
+### Under `relay`, the property index lists only the hub's own children
+- **What:** a hub builds its choosers' property index from what its watch of the directory gives. Under `relay`, that is only the records its own children report ([The relay directory has no mesh](#the-relay-directory-has-no-mesh)). So a property that only another parent's children serve is not listed, and a gate answers 404 for it, not 503. A parent's hub lists each of its children, silent or not, until the child withdraws.
 - **Why:** the index takes whatever the backend yields. No backend that every region reads is built yet.
-- **Test:** `a_parent_lists_its_childrens_models_and_no_other_pools` in `crates/gdl-hub/tests/relay.rs`.
+- **Test:** `a_parent_lists_its_childrens_properties_and_no_other_pools` in `crates/gdl-hub/tests/relay.rs`.
 - **Workaround:** a backend that keeps every rule, such as `dir` on one host.
 - **Lifts:** a directory backend that every region reads, or the relay mesh among parent hubs.
 
@@ -482,29 +482,29 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **What:** a hub dates a record from when it first sees its `seq`, on its own clock. So a hub that starts reads a pool that went silent before as `live` for up to one lease (30 s by default), then as `missing`.
 - **Impact:** a reader that goes by the condition alone reads the pool as live. A gate that also requires an offered pool answers 503 all the same: a pool its hub cannot reach is never offered, and a child whose link fails reads `missing` at once. The silence a missing listing gives (`missing_age_ms`) also counts from when the new hub first saw the record, so it is short by the time the pool was silent before the hub started.
 - **Why:** a reader never trusts a time in the record: clocks across regions differ.
-- **Test:** `a_new_hub_lists_a_silent_pool_with_its_models` in `crates/gdl-hub/tests/listed.rs`.
+- **Test:** `a_new_hub_lists_a_silent_pool_with_its_properties` in `crates/gdl-hub/tests/listed.rs`.
 
 ### A withdrawal missed by the hub keeps the pool listed
-- **What:** a hub removes a pool from its listings only at a withdrawal that its watch of the directory shows. A withdrawal made while the watch was down reaches the hub as a snapshot that no longer holds the record, and the pool stays listed as `missing`, so a gate answers 503 for its models, not 404, until the hub restarts.
+- **What:** a hub removes a pool from its listings only at a withdrawal that its watch of the directory shows. A withdrawal made while the watch was down reaches the hub as a snapshot that no longer holds the record, and the pool stays listed as `missing`, so a gate answers 503 for its properties, not 404, until the hub restarts.
 - **Why:** silence never removes a pool. A record missing from a snapshot may have been lost for any reason.
 - **Workaround:** restart the hub, whose new watch's snapshot no longer holds the record.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
 ### A drain not stored while its instance stops can be lost
-- **What:** an instance that stops waits while it drains, before it retires, until its hub has stored each drain it reported: for at most two summary periods, and never past its drain bound. If the hub's writes take longer than that, and the hub restarts before it stores the drain, the restarted hub reads the record from before the drain: the model is `unavailable`, not `drained`, until the pool withdraws. An instance that loses its lease does not wait.
-- **Impact:** it fails safe. The model stays listed, and nothing is removed.
+- **What:** an instance that stops waits while it drains, before it retires, until its hub has stored each drain it reported: for at most two summary periods, and never past its drain bound. If the hub's writes take longer than that, and the hub restarts before it stores the drain, the restarted hub reads the record from before the drain: the property is `unavailable`, not `drained`, until the pool withdraws. An instance that loses its lease does not wait.
+- **Impact:** it fails safe. The property stays listed, and nothing is removed.
 - **Why:** an instance that retired cannot report, and until it retires, peers still route work to it.
-- **Workaround:** withdraw the pool, or drain the model again.
+- **Workaround:** withdraw the pool, or drain the property again.
 
-### A revoked model's drain report waits for the pool's latest write
-- **What:** an instance that still reports a revoked model as `draining` is answered only once the record of the list's latest version is stored. While other models change and each write takes more than half a summary period, its reports are refused with 503, and their refusals count only once one is answered.
-- **Why:** the hub does not keep the version at which it revoked a model.
+### A revoked property's drain report waits for the pool's latest write
+- **What:** an instance that still reports a revoked property as `draining` is answered only once the record of the list's latest version is stored. While other properties change and each write takes more than half a summary period, its reports are refused with 503, and their refusals count only once one is answered.
+- **Why:** the hub does not keep the version at which it revoked a property.
 - **Workaround:** none needed: the report is answered once the writes keep up, and the instance's admission counts meanwhile.
 
-### A declared model cannot be drained
-- **What:** a model from `[pool] models` is `ready` while the pool has a usable entry instance that reports no list of its own, and `unavailable` while it has none. Removing it from the settings leaves it `unavailable` in the record, never `drained`, until the pool withdraws.
-- **Why:** a declared model has no instance that says it removes it.
-- **Workaround:** report the models from a node with `gdl::InstanceModels`, which can drain one.
+### A declared property cannot be drained
+- **What:** a property from `[pool.properties]` is `ready` while the pool has a usable entry instance that reports no list of its own, and `unavailable` while it has none. Removing it from the settings leaves it `unavailable` in the record, never `drained`, until the pool withdraws.
+- **Why:** a declared property has no instance that says it removes it.
+- **Workaround:** report the properties from a node with `gdl::InstanceProperties`, which can drain one.
 
 ### A pool is told it is scaled to 0 by hand, and a hub starts serving
 - **What:** nothing in gdl calls `POST /v1/ext/gdl-pool/presence`: an operator, or the tool that scales the pool, calls it before the pool's instances stop. When the hub is already gone, the operator says it on the parent's hub ([A pool whose hub is gone](../concepts/pools.md#a-pool-whose-hub-is-gone)). A hub that restarts starts `serving`, whatever its last record said, and its heartbeat makes it read as missing if it then stops.
@@ -519,10 +519,10 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **No parent:** a top pool, such as a global pool, has no parent's hub to take the command. A tool of the deployment gives it through the backend with `gdl_pools::PoolCommand::give`. Under `relay`, nothing holds a top pool's record, so there is nothing to command.
 - **Workaround:** for a pool whose hub answers, use its own `/drain` or `/presence`.
 
-### A revoked model loses its history, and a parent of an earlier build drops the revocation
-- **What:** a revoked model leaves the record with its history. Once lifted, it starts afresh, as `starting` until an instance reports it. Under the `relay` backend, a parent's hub of an earlier build keeps the record without its `revoked` list, so a child's hub that restarts under it reads no revocation, and lists the model again as its instances say.
+### A revoked property loses its history, and a parent of an earlier build drops the revocation
+- **What:** a revoked property leaves the record with its history. Once lifted, it starts afresh, as `starting` until an instance reports it. Under the `relay` backend, a parent's hub of an earlier build keeps the record without its `revoked` list, so a child's hub that restarts under it reads no revocation, and lists the property again as its instances say.
 - **Why:** the record's fields are optional on the wire, so a reader of an earlier build ignores the list.
-- **Workaround:** revoke the model again after the restart, or roll the parents' hubs first.
+- **Workaround:** revoke the property again after the restart, or roll the parents' hubs first.
 
 ### A pool's settings without a fleet file are not checked against the other pools
 - **What:** a fleet file refuses a pool of a class that is sent to without a `home`, a `home` that names no pool or a pool of a class that does not send to this one, a `home` on a pool of a class nothing sends to, and a parent without a child of each class its class sends to. It cannot judge a parent's children in a layout whose classes it does not know, and says so. Pool settings given without a fleet file are not checked: a pool of a class that is sent to with no `home`, or with a `home` that names no pool, is followed by no hub and never chosen. A hub publishes no `home` for a pool of a class nothing sends to.  A hub follows its children only. Region plays no part in following, and no round trip is measured.
@@ -535,7 +535,7 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 
 ### An instance's own decline walks the pool in table order
 - **What:** after an entry instance declines a request as its own (`Decline::Instance`), the chooser offers it to the pool's other entry instances in the order of the pool's table when the decline landed, from the one after the decliner. It does not rank them by load, and a selector is asked about one instance at a time, so it cannot either. An instance that joined the pool after the decline is not offered the request. Each instance that declines costs one round trip, so a pool where only its last instance serves a request costs the request a round trip per instance before it.
-- **Per request:** a segment declines as its own for every offer, with one switch (`Segment::decline_offers_as`). A check that reads each request, for example its model, before admission is not built yet.
+- **Per request:** a segment declines as its own for every offer, with one switch (`Segment::decline_offers_as`). A check that reads each request, for example what it asks for, before admission is not built yet.
 - **Old choosers:** a chooser built before the reason reads it as full: it damps the pool for one window and offers the request to another pool.
 - **Lifts:** an entry check per request, and a pool policy that knows which instances serve which requests, so that the first offer goes to one that can.
 
@@ -578,9 +578,9 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Lifts:** a hub that tells a lost lease from a departure.
 
 ### A pool's withdrawal reaches only the choosers that saw it
-- **What:** a chooser reads a pool as withdrawn ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)) only if its hub's watch of the pool directory showed the withdrawal while the chooser watched the relay. The relay's snapshot holds no withdrawal, and a directory snapshot holds only current records. So a chooser that starts after the withdrawal, a chooser whose hub restarted since, and a hub whose directory watch was down at that moment, read the pool as neither followed nor withdrawn. A model gate then answers 503 for a model whose sets were all drained, not 404, and two gate instances can answer differently until the one that saw the withdrawal restarts.
+- **What:** a chooser reads a pool as withdrawn ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)) only if its hub's watch of the pool directory showed the withdrawal while the chooser watched the relay. The relay's snapshot holds no withdrawal, and a directory snapshot holds only current records. So a chooser that starts after the withdrawal, a chooser whose hub restarted since, and a hub whose directory watch was down at that moment, read the pool as neither followed nor withdrawn. A property gate then answers 503 for a property whose sets were all drained, not 404, and two gate instances can answer differently until the one that saw the withdrawal restarts.
 - **Why:** silence is never a decommission. A record missing from a snapshot may have expired or been lost, so only an explicit withdrawal counts. Keeping withdrawals in the relay's snapshot would only move the gap to a hub restart.
-- **Workaround:** a gate reads the model index instead ([The model index](../concepts/pool-routing.md#the-model-index)): a pool that withdrew is no longer listed, and a model whose every pool drained shows only `drained` entries.
+- **Workaround:** a gate reads the property index instead ([The property index](../concepts/pool-routing.md#the-property-index)): a pool that withdrew is no longer listed, and a key whose every pool drained shows only `drained` entries.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
@@ -600,7 +600,7 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 
 ### A watch event of a kind a reader does not know withholds its pool
 - **What:** a reader of a pool's watch or a hub's relay that meets an event kind it does not know fails closed for the pool the event concerns. A hub withholds the pool: its relay shows it `unavailable`, no chooser chooses it, and no requirement counts it, until the hub reads the pool again from a new watch. A pool whose every reading carries such an event stays withheld while the link lives, so its follow never closes by acknowledgement and a drain waits out its bound. A chooser leaves the pool unread until it reads it from a watch of the follow alone. An event of an unknown kind that names no follow ends the watch, as does an event that is not JSON or does not parse.
-- **The model index:** a chooser of an earlier build under a hub of this build fails closed at each `listed` event. It reads the pool again from a watch of its follow alone, also for a pool it never followed. So it opens one such watch for each listed pool it does not follow, on every watch of the relay, and one for each change of a listing. Each counts against the cap on watches of one follow (16384 by default). A parent's hub of an earlier build withholds a child of this build at each `models` event, until it reads the child again, so a pool whose models change often is withheld often.
+- **The property index:** a chooser of an earlier build under a hub of this build fails closed at each `listed` event. It reads the pool again from a watch of its follow alone, also for a pool it never followed. So it opens one such watch for each listed pool it does not follow, on every watch of the relay, and one for each change of a listing. Each counts against the cap on watches of one follow (16384 by default). A parent's hub of an earlier build withholds a child of this build at each `properties` event, until it reads the child again, so a pool whose properties change often is withheld often.
 - **Why:** an event a reader cannot read may say what keeps it from the pool, such as a retirement, so skipping it is unsafe. The cost falls only on readers of earlier builds, and only for the pools such an event names.
 - **Workaround:** add new information to a known event as an optional field, which earlier readers ignore. Add a kind of event rarely, since each new kind costs each earlier reader its pool until it has read it again. See [Pool hub routes and watch events](../appendix/hub-api.md).
 
@@ -646,25 +646,25 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 
 ### A DynamoDB write from another region can lose to the pool's own
 - **What:** MREC global tables check that a write is newer only in the region that takes it, and settle two writes of one item in two regions by the last writer. An operator's command for a pool, given through a handle in another region while the pool's hub writes in its own, can be lost, or an older write can replace a newer one. A reader never goes back to a version it has seen. A reader that starts later reads what the table kept.
-- **Model lists:** a command names a list of its own, so the hub's expiry of its own list never reaches the command's. But once an older write has replaced a newer one in a region, a late attempt of an earlier write of the hub can pass the newer-than check there again. For example: the hub's record put is answered too late and the hub moves on, a higher `models_version` sets its earlier list to expire, a command from another region replaces the hub's record by the last writer, and then the delayed attempt lands and names the expiring list. Once TTL removes that list an hour later, every new watch of the class waits 30 s and ends `Unavailable` until the pool's hub writes again.
+- **Property lists:** a command names a list of its own, so the hub's expiry of its own list never reaches the command's. But once an older write has replaced a newer one in a region, a late attempt of an earlier write of the hub can pass the newer-than check there again. For example: the hub's record put is answered too late and the hub moves on, a higher `properties_version` sets its earlier list to expire, a command from another region replaces the hub's record by the last writer, and then the delayed attempt lands and names the expiring list. Once TTL removes that list an hour later, every new watch of the class waits 30 s and ends `Unavailable` until the pool's hub writes again.
 - **Workaround:** give a command for a pool through a handle in the pool's region. Each hub writes only its own pool's record, from its own region.
 - **Lifts:** nothing in gdl.
 
-### A model list over DynamoDB's item limit is refused
-- **What:** the DynamoDB backend refuses a record whose model list, as JSON, passes 400 KB, with `DirectoryError::Refused`. That is about 6,000 models with names such as `qwen-32b-lora-1234`. The pool's hub logs the error at each write, and readers keep its last record until its lease ends.
+### A property list over DynamoDB's item limit is refused
+- **What:** the DynamoDB backend refuses a record whose property list, as JSON, passes 400 KB, with `DirectoryError::Refused`. That is about 5,000 properties of about 80 bytes each. The pool's hub logs the error at each write, and readers keep its last record until its lease ends.
 - **Why:** DynamoDB limits each item to 400 KB.
 - **Lifts:** a list split across several items.
 
 ### A record whose list has not arrived holds a new watch's snapshot
-- **What:** a reader of the DynamoDB backend installs a record only with its model list. While the list has not reached the reader's region, the reader keeps the pool's earlier record, and a new watch's snapshot waits. After 30 s (`DynamoLimits::first_sync`) the watch ends with `Unavailable`, and the hub watches again after its backoff. A list deleted by hand holds every new snapshot of its class until the pool's models change or its hub restarts, since a hub writes each list once.
-- **Why:** a snapshot that completed without the pool would drop it, and its models would answer 404 rather than 503.
-- **Workaround:** none needed for replication lag. Never delete a list that a record names. The writer sets a list to expire only once its pool's record is stored at a higher `models_version`.
+- **What:** a reader of the DynamoDB backend installs a record only with its property list. While the list has not reached the reader's region, the reader keeps the pool's earlier record, and a new watch's snapshot waits. After 30 s (`DynamoLimits::first_sync`) the watch ends with `Unavailable`, and the hub watches again after its backoff. A list deleted by hand holds every new snapshot of its class until the pool's properties change or its hub restarts, since a hub writes each list once.
+- **Why:** a snapshot that completed without the pool would drop it, and its properties would answer 404 rather than 503.
+- **Workaround:** none needed for replication lag. Never delete a list that a record names. The writer sets a list to expire only once its pool's record is stored at a higher `properties_version`.
 
-### A DynamoDB model list can outlive the record that named it
-- **What:** the DynamoDB backend sets a list to expire only when its pool's record is stored at a higher `models_version`, and each put of a list makes an item of its own. Three kinds of list stay in the lists table for good:
-  - A withdrawn pool's last list: one per withdrawn pool, about 65 KB for 1,000 models and at most 400 KB.
+### A DynamoDB property list can outlive the record that named it
+- **What:** the DynamoDB backend sets a list to expire only when its pool's record is stored at a higher `properties_version`, and each put of a list makes an item of its own. Three kinds of list stay in the lists table for good:
+  - A withdrawn pool's last list: one per withdrawn pool, about 78 KB for 1,000 properties of about 80 bytes each, and at most 400 KB.
   - The list of a write that was refused as not newer, or that failed after its list was written, when no later write of the pool names it: one per such write.
-  - The list replaced by a write at the same or a lower `models_version` that names a list of its own, such as a command that copied the record, a restarted hub whose models did not change, or a heartbeat after another writer's write: one per such write.
+  - The list replaced by a write at the same or a lower `properties_version` that names a list of its own, such as a command that copied the record, a restarted hub whose properties did not change, or a heartbeat after another writer's write: one per such write.
 - **Why:** a rule that expired more raced with writes of the same pool through other handles and other regions, and could expire the list that a live record names.
-- **Workaround:** none needed: each is bounded by the pool's withdrawals, refused or failed writes, and writes at the same or a lower `models_version` that name a list of their own (commands, restarts that kept the models, heartbeats after another writer's write), which are rare. No sweeper removes them.
+- **Workaround:** none needed: each is bounded by the pool's withdrawals, refused or failed writes, and writes at the same or a lower `properties_version` that name a list of their own (commands, restarts that kept the properties, heartbeats after another writer's write), which are rare. No sweeper removes them.
 - **Lifts:** a sweeper that deletes the lists that no record names.

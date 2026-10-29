@@ -390,7 +390,7 @@ impl Crossing {
             .with_damped(damped)
             .with_turn(turn)
             .with_random(&self.random)
-            .with_models(&table.models);
+            .with_properties(&table.properties);
         let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
             Ok(choice) => choice.into_parts(),
             Err(no) => return Ok(Err(no)),
@@ -755,7 +755,7 @@ mod tests {
             _: PoolRequest<'_, gdl::Encoded>,
             _: &[gdl::Pool],
         ) -> std::result::Result<gdl::PoolChoice, gdl::NoPool> {
-            Err(gdl::NoPool::because("no set serves model `mistral`"))
+            Err(gdl::NoPool::because("no pool serves shard `a`"))
         }
     }
 
@@ -786,13 +786,13 @@ mod tests {
             panic!("a pool");
         };
         for no in [picked, chosen] {
-            assert_eq!(no.reason(), Some("no set serves model `mistral`"));
+            assert_eq!(no.reason(), Some("no pool serves shard `a`"));
             let error = crossing.no_pool(no);
             assert_eq!(error.kind(), gdl::ErrorKind::Routing);
             assert_eq!(
                 error.to_string(),
                 "routing error: pool policy `refusing` of class `model_x` chose no pool for segment `f`: \
-                 no set serves model `mistral`"
+                 no pool serves shard `a`"
             );
         }
     }
@@ -815,8 +815,8 @@ mod tests {
         ) -> std::result::Result<gdl::PoolChoice, NoPool> {
             Err(match self {
                 Self::None => NoPool::new(),
-                Self::Fixed => NoPool::because("no set serves the model"),
-                Self::Built(model) => NoPool::because(format!("no set serves model `{model}`")),
+                Self::Fixed => NoPool::because("no pool serves the shard"),
+                Self::Built(shard) => NoPool::because(format!("no pool serves shard `{shard}`")),
             })
         }
     }
@@ -836,7 +836,7 @@ mod tests {
         for (name, policy) in [
             ("no reason", Reasoning::None),
             ("a fixed reason", Reasoning::Fixed),
-            ("a built reason", Reasoning::Built("mistral")),
+            ("a built reason", Reasoning::Built("a")),
         ] {
             let mut crossing = crossing(
                 vec![pool("m", PoolState::Ready, &ids)],
@@ -1154,11 +1154,19 @@ mod tests {
         assert_eq!(chosen, ids[0]);
     }
 
-    /// Chooses the first pool the model index lists `qwen-32b` in, as
-    /// offered: what a policy that routes by model does.
-    struct ByModel;
+    /// The test property type.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+    struct Shard {
+        name: String,
+    }
 
-    impl gdl::PoolPolicy for ByModel {
+    const SHARD: gdl::PropertyKind<Shard> = gdl::PropertyKind::new("shard");
+
+    /// Chooses the first pool the property index lists shard `a` in, as
+    /// offered: what a policy that routes by a property does.
+    struct ByShard;
+
+    impl gdl::PoolPolicy for ByShard {
         type Head = gdl::Encoded;
 
         fn choose(
@@ -1166,25 +1174,28 @@ mod tests {
             request: PoolRequest<'_, gdl::Encoded>,
             pools: &[gdl::Pool],
         ) -> std::result::Result<gdl::PoolChoice, NoPool> {
-            let sets = request
-                .models()
-                .sets("qwen-32b", None)
-                .ok_or_else(|| NoPool::because("no pool lists qwen-32b"))?;
+            let listed = request
+                .properties()
+                .get(&SHARD)
+                .map(|index| index.get(&Shard { name: "a".into() }))
+                .filter(|listed| !listed.is_empty())
+                .ok_or_else(|| NoPool::because("no pool lists shard `a`"))?;
             pools
                 .iter()
                 .position(|pool| {
-                    sets.iter()
-                        .any(|set| set.is_offered() && set.pool() == pool.name())
+                    listed
+                        .iter()
+                        .any(|(_, listing)| listing.is_offered() && listing.pool() == pool.name())
                 })
                 .map(gdl::PoolChoice::new)
-                .ok_or_else(|| NoPool::because("no offered pool serves qwen-32b"))
+                .ok_or_else(|| NoPool::because("no offered pool serves shard `a`"))
         }
     }
 
-    /// A pool policy reads the class's model index from the table it
+    /// A pool policy reads the class's property indexes from the table it
     /// chooses from, as a node does.
     #[tokio::test]
-    async fn a_policy_reads_the_model_index_of_its_table() {
+    async fn a_policy_reads_the_property_indexes_of_its_table() {
         let ids = ids(2);
         let mut crossing = crossing(
             vec![
@@ -1193,20 +1204,23 @@ mod tests {
             ],
             Within::Policy(Policy::RoundRobin),
         );
-        crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(ByModel)));
-        let set = |pool: &str| {
-            gdl::ModelSet::new(
+        crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(ByShard)));
+        let listing = |pool: &str| {
+            gdl::PropertyPool::new(
                 pool,
                 "home",
-                gdl::ModelState::Ready,
+                gdl::PropertyState::Ready,
                 gdl::PoolCondition::Live,
             )
             .with_offered(true)
         };
-        let index = gdl::ModelIndex::new(true, [(gdl::ModelKey::new("qwen-32b"), set("m2"))]);
+        let index = gdl::PropertyIndexes::new(true).with(
+            &SHARD,
+            gdl::PropertyIndex::new([(Shard { name: "a".into() }, listing("m2"))]),
+        );
         let table = crossing.target.table.load_full();
         crossing.target.table.store(Arc::new(
-            EntryTable::new(table.pools.clone()).with_models(Arc::new(index)),
+            EntryTable::new(table.pools.clone()).with_properties(Arc::new(index)),
         ));
         let selector = gdl::__runtime::Typed(Arc::new(Reading));
         let head = serde_json::to_vec(&Prompt {

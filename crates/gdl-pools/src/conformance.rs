@@ -188,18 +188,20 @@ trait Events: Stream<Item = Result<PoolEvent, DirectoryError>> + Unpin {}
 
 impl<S: Stream<Item = Result<PoolEvent, DirectoryError>> + Unpin> Events for S {}
 
-/// A record with a model, so that a backend is held to keeping a record
-/// whole, its models with it.
+/// A record with a property, so that a backend is held to keeping a
+/// record whole, its properties with it.
 fn record(class: &str, pool: &str, epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
         presence: crate::Presence::Serving,
-        models: vec![crate::ModelEntry {
-            model: format!("{pool}-model"),
-            routing_key: Some("a".into()),
-            state: crate::ModelState::Ready,
+        properties: vec![crate::PoolProperty {
+            property: gdl_model::PropertyKey::new(
+                "test",
+                serde_json::json!({ "name": format!("{pool}-property"), "partition": "a" }),
+            ),
+            state: crate::PropertyState::Ready,
             since: seq,
         }],
-        models_version: seq,
+        properties_version: seq,
         revoked: Vec::new(),
         name: pool.into(),
         class: class.into(),
@@ -855,8 +857,8 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
 fn whole(seq: u64) -> PoolRecord {
     PoolRecord {
         presence: crate::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: "m1".into(),
         class: MODEL.into(),

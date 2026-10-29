@@ -101,7 +101,7 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `lost_chooser_ms` | 30000 (`HubTiming::DEFAULT_LOST_CHOOSER`) | how long a chooser may have no watch of the hub's relay open before the hub stops waiting for its acknowledgements ([Closing a follow](../concepts/pool-routing.md#closing-a-follow)). At least 1. An instance ignores it |
 | `[pool.watch_caps]` | `pool` 2048, `relay` 2048, `follow` 16384 (`WatchCaps::DEFAULT_*`) | how many watches each of the hub's watch routes serves at once. Each at least 1. An instance ignores it |
 | `keyed_capacity` | 1000000 (`HubTiming::DEFAULT_KEYED_CAPACITY`) | how many records the hub's keyed record table holds before it evicts the least recently used. At least 1. An instance ignores it |
-| `models` | none | the models the pool serves when its entry instances report none of their own, each `{ model = "<name>", routing_key = "<key>" }` with `routing_key` optional. Refused for a class that nothing sends to. An instance ignores it |
+| `[properties]` | none | the properties the pool serves when its entry instances report none of a kind: for each kind, a list of keys, each a table of the kind's fields ([Properties](../concepts/pools.md#properties)). Refused for a class that nothing sends to. An instance ignores it |
 
 Every problem with `[pool]` names the file and key, or the variable, that set it.
 

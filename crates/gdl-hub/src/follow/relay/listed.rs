@@ -1,11 +1,11 @@
 //! What the relay lists of the pools of the classes it sends to, for its
-//! choosers' model index: every pool whose record the follower has read,
-//! followed or not, with its region, its condition, and its models, until
+//! choosers' property index: every pool whose record the follower has read,
+//! followed or not, with its region, its condition, and its properties, until
 //! the pool withdraws its record. Silence never removes a pool: a record
 //! whose lease passed, one a directory snapshot no longer holds, and a
 //! follow whose link was lost each leave the pool listed, missing.
 //!
-//! A pool's models come from its record and from its follow link,
+//! A pool's properties come from its record and from its follow link,
 //! whichever has the higher version, since the two race, and the version
 //! never goes down, also across a restart of the pool's hub.
 //!
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use gdl_pools::{PoolCondition, PoolRecord, Presence};
-use gdl_watch::{Listing, ModelList};
+use gdl_watch::{Listing, PropertyList};
 use tokio_util::sync::CancellationToken;
 
 /// The relay's listings, by class, then by pool, and how far the
@@ -46,14 +46,14 @@ struct Listed {
     /// no later follow has been installed: when it ended.
     lost: Option<Instant>,
     /// The newest list seen, from the record or the link.
-    models: ModelList,
+    properties: PropertyList,
     /// What the relay last sent of the pool after a snapshot, with no age,
     /// and since when it was silent then.
     sent: Option<(Listing, Option<Instant>)>,
     /// Whether anything above changed since `sent`: a heartbeat or a
     /// summary changes nothing, and is not compared, or copied.
     dirty: bool,
-    /// Whether `models` is a list taken from the record or the link.
+    /// Whether `properties` is a list taken from the record or the link.
     taken: bool,
 }
 
@@ -70,7 +70,7 @@ impl Listed {
         Listing {
             region: self.region.clone(),
             condition,
-            models: self.models.clone(),
+            properties: self.properties.clone(),
             missing_age_ms: None,
         }
     }
@@ -97,11 +97,11 @@ impl Listed {
         listing
     }
 
-    /// Take `models` if they are newer than the list held, or the first
+    /// Take `properties` if they are newer than the list held, or the first
     /// list: a writer may begin its versions at 0.
-    fn take_models(&mut self, models: &ModelList) {
-        if !self.taken || models.version > self.models.version {
-            self.models = models.clone();
+    fn take_properties(&mut self, properties: &PropertyList) {
+        if !self.taken || properties.version > self.properties.version {
+            self.properties = properties.clone();
             self.taken = true;
             self.dirty = true;
         }
@@ -157,7 +157,7 @@ impl Listings {
                 presence: record.presence,
                 lapsed,
                 lost: None,
-                models: ModelList::default(),
+                properties: PropertyList::default(),
                 sent: None,
                 dirty: true,
                 taken: false,
@@ -168,10 +168,10 @@ impl Listings {
         }
         Listed::set(&mut listed.presence, record.presence, &mut listed.dirty);
         Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
-        if !listed.taken || record.models_version > listed.models.version {
-            listed.models = ModelList {
-                entries: record.models.clone(),
-                version: record.models_version,
+        if !listed.taken || record.properties_version > listed.properties.version {
+            listed.properties = PropertyList {
+                entries: record.properties.clone(),
+                version: record.properties_version,
                 revoked: record.revoked.clone(),
             };
             listed.taken = true;
@@ -196,10 +196,10 @@ impl Listings {
         }
     }
 
-    /// The pool's follow link sent `models`.
-    pub(super) fn link_models(&mut self, class: &str, pool: &str, models: &ModelList) {
+    /// The pool's follow link sent `properties`.
+    pub(super) fn link_properties(&mut self, class: &str, pool: &str, properties: &PropertyList) {
         if let Some(listed) = self.get_mut(class, pool) {
-            listed.take_models(models);
+            listed.take_properties(properties);
         }
     }
 

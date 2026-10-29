@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::followed::{ModelIndex, NO_MODELS};
+use crate::followed::{NO_PROPERTIES, PropertyIndexes, PropertyKinds};
 use crate::select::{Head, sealed::Sealed};
 
 mod damped;
@@ -29,7 +29,7 @@ mod home_first;
 mod round_robin;
 
 pub use damped::{Damped, Window};
-pub use gdl_pools::{LoadSummary, ModelState, PoolCondition, PoolState};
+pub use gdl_pools::{LoadSummary, PoolCondition, PoolState, PropertyState};
 pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;
 
@@ -68,6 +68,16 @@ pub trait PoolPolicy: Send + Sync + 'static {
     fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool {
         let _ = (region, now);
         pool.takes_work()
+    }
+
+    /// Register in `kinds` each property kind the policy reads from
+    /// [`PoolRequest::properties`], so that the chooser decodes it
+    /// ([`PropertyKinds::register`]). The runtime calls it once, before the
+    /// chooser reads the class's pools; a refusal fails the segment's
+    /// start. By default, none.
+    fn properties(&self, kinds: &PropertyKinds) -> Result<()> {
+        let _ = kinds;
+        Ok(())
     }
 }
 
@@ -143,7 +153,7 @@ impl fmt::Debug for PoolChoice {
 /// A pool policy chose no pool for this attempt, with a short reason or
 /// none. The first attempt's `NoPool` fails the request with `Routing`,
 /// and its reason follows the class and the segment in the error, so a
-/// policy can name what no pool serves: "no set serves model `mistral`".
+/// policy can name what no pool serves: "no pool serves shard `a`".
 /// A failover attempt's `NoPool` ends the failover, and the request fails
 /// with the last pool's refusal, which says more than the policy can.
 ///
@@ -164,8 +174,8 @@ impl NoPool {
         Self { reason: None }
     }
 
-    /// No pool, because of `reason`: a short phrase, such as "no set
-    /// serves model `mistral`", that the request's `Routing` error carries.
+    /// No pool, because of `reason`: a short phrase, such as "no pool
+    /// serves shard `a`", that the request's `Routing` error carries.
     pub fn because(reason: impl Into<Cow<'static, str>>) -> Self {
         Self {
             reason: Some(reason.into()),
@@ -410,7 +420,7 @@ pub struct PoolRequest<'a, H> {
     now: Instant,
     turn: u64,
     random: Option<&'a RandomState>,
-    models: &'a ModelIndex,
+    properties: &'a PropertyIndexes,
 }
 
 impl<H> Clone for PoolRequest<'_, H> {
@@ -439,7 +449,7 @@ impl<'a, H> PoolRequest<'a, H> {
             now,
             turn: 0,
             random: None,
-            models: &NO_MODELS,
+            properties: &NO_PROPERTIES,
         }
     }
 
@@ -481,23 +491,25 @@ impl<'a, H> PoolRequest<'a, H> {
         self
     }
 
-    /// The request with the class's model index: the runtime gives the
-    /// index of the table the policy chooses from, and a policy's test
-    /// builds one with [`ModelIndex::new`].
+    /// The request with the class's property indexes: the runtime gives
+    /// the indexes of the table the policy chooses from, and a policy's
+    /// test builds them with [`PropertyIndexes::new`].
     #[inline]
-    pub fn with_models(mut self, models: &'a ModelIndex) -> Self {
-        self.models = models;
+    pub fn with_properties(mut self, properties: &'a PropertyIndexes) -> Self {
+        self.properties = properties;
         self
     }
 
-    /// The class's model index, from the same table as the pools the
-    /// policy chooses from: for each model, every pool of the class that
-    /// lists it ([`ModelIndex`]). [`ModelIndex::NONE`] for a request built
-    /// without one. A policy that sends a request only to the pools that
-    /// serve its model keeps them with `choose_where`.
+    /// The class's property indexes, from the same table as the pools the
+    /// policy chooses from: for each kind the policy registered
+    /// ([`PoolPolicy::properties`]), every key a pool of the class lists,
+    /// with the pools that list it ([`PropertyIndexes`]).
+    /// [`PropertyIndexes::NONE`] for a request built without them. A
+    /// policy that sends a request only to the pools that serve what it
+    /// asks for keeps them with `choose_where`.
     #[inline]
-    pub fn models(&self) -> &'a ModelIndex {
-        self.models
+    pub fn properties(&self) -> &'a PropertyIndexes {
+        self.properties
     }
 
     /// The same attempt, with `head` read from its bytes.
@@ -515,7 +527,7 @@ impl<'a, H> PoolRequest<'a, H> {
             now: self.now,
             turn: self.turn,
             random: self.random,
-            models: self.models,
+            properties: self.properties,
         }
     }
 
@@ -607,6 +619,9 @@ pub trait ErasedPolicy: Send + Sync + 'static {
     /// Whether it reads the head's fields by name, which a positional
     /// encoding cannot give.
     fn by_name(&self) -> bool;
+
+    /// Register the property kinds it reads.
+    fn properties(&self, kinds: &PropertyKinds) -> Result<()>;
 }
 
 /// A typed pool policy behind [`ErasedPolicy`].
@@ -634,6 +649,10 @@ impl<P: PoolPolicy> ErasedPolicy for TypedPolicy<P> {
 
     fn by_name(&self) -> bool {
         <P::Head as Sealed>::by_name()
+    }
+
+    fn properties(&self, kinds: &PropertyKinds) -> Result<()> {
+        self.0.properties(kinds)
     }
 }
 
@@ -683,6 +702,17 @@ impl PoolPolicies {
         self.named
             .insert(name.to_string(), Arc::new(TypedPolicy(policy)));
         Ok(())
+    }
+
+    /// Register in `kinds` the property kinds each registered policy
+    /// reads ([`PoolPolicy::properties`]), for the runtime's chooser.
+    #[doc(hidden)]
+    pub fn register_properties(&self, kinds: &PropertyKinds) -> Result<()> {
+        self.named.iter().try_for_each(|(name, policy)| {
+            policy
+                .properties(kinds)
+                .map_err(|e| Error::new(ErrorKind::Placement, format!("pool policy `{name}`: {e}")))
+        })
     }
 
     /// Whether `name` is registered here.
@@ -808,7 +838,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct Hint {
-        model: String,
+        target: String,
     }
 
     #[derive(Deserialize, gdl::Projection)]
@@ -817,7 +847,7 @@ mod tests {
         hint: Hint,
     }
 
-    /// The index of the pool named as the hint's model.
+    /// The index of the pool the hint names.
     struct ByHint;
 
     impl PoolPolicy for ByHint {
@@ -828,10 +858,10 @@ mod tests {
             request: PoolRequest<'_, Projected<Hinted>>,
             pools: &[Pool],
         ) -> std::result::Result<PoolChoice, NoPool> {
-            let model = &request.head().hint.model;
+            let target = &request.head().hint.target;
             pools
                 .iter()
-                .position(|pool| pool.name() == model)
+                .position(|pool| pool.name() == target)
                 .map(PoolChoice::new)
                 .ok_or_else(NoPool::new)
         }
@@ -886,9 +916,9 @@ mod tests {
         assert_eq!(NoPool::default(), NoPool::new());
         let fixed = NoPool::because("draining");
         assert!(matches!(fixed.reason, Some(Cow::Borrowed("draining"))));
-        let model = "mistral";
-        let built = NoPool::because(format!("no set serves model `{model}`"));
-        assert_eq!(built.reason(), Some("no set serves model `mistral`"));
+        let shard = "a";
+        let built = NoPool::because(format!("no pool serves shard `{shard}`"));
+        assert_eq!(built.reason(), Some("no pool serves shard `a`"));
     }
 
     /// A projection reads its fields from the whole request in either
@@ -903,7 +933,7 @@ mod tests {
         ];
         let routed = Routed {
             request: vec!["x".repeat(100); 10],
-            hint: Hint { model: "b".into() },
+            hint: Hint { target: "b".into() },
         };
         let cx = Cx::new();
         for encoding in [Encoding::Msgpack, Encoding::Json] {

@@ -1,13 +1,13 @@
 //! An entry instance's load reports to its own pool's hub: once a summary
 //! period, what its admission holds, through velo-hub's extension client
-//! with the instance's own credential, with the models its nodes say it
+//! with the instance's own credential, with the properties its nodes say it
 //! has; and at once when those change. A report reads counters the
 //! admission and the forward entries already keep, so a request's path
 //! gains nothing.
 
 use std::time::Duration;
 
-use gdl::InstanceModels;
+use gdl::InstanceProperties;
 use gdl_watch::LoadReport;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
@@ -26,21 +26,21 @@ impl HubSession {
     /// that went unanswered, loses none. A refusal is no failure of the
     /// instance's: it is logged once, until a report is taken again. `read`
     /// gives `None` when there is nothing to report. Each report carries
-    /// the list `models` holds, if a node set one, and a change of it is
+    /// the list `properties` holds, if a node set one, and a change of it is
     /// reported at once; once the hub answers a report, which it does for
     /// one that carries a drain once a record that carries the drain is
-    /// stored, `models` hears what it carried, so that a drain it carried
+    /// stored, `properties` hears what it carried, so that a drain it carried
     /// can leave the list.
     pub(crate) fn report_load(
         &self,
         instance: InstanceId,
         period: Duration,
         read: impl Fn() -> Option<SegmentLoad> + Send + 'static,
-        models: InstanceModels,
+        properties: InstanceProperties,
     ) -> Reporter {
         let ext = self.client.ext(gdl_watch::EXTENSION);
         let path = gdl_watch::load_path(instance);
-        let task = tokio::spawn(report(period, read, models.clone(), move |report| {
+        let task = tokio::spawn(report(period, read, properties.clone(), move |report| {
             let (ext, path) = (ext.clone(), path.clone());
             async move {
                 ext.control_post::<_, ()>(&path, &report)
@@ -48,14 +48,14 @@ impl HubSession {
                     .map_err(|error: ClientError| error.to_string())
             }
         }));
-        Reporter { task, models }
+        Reporter { task, properties }
     }
 }
 
 /// An entry instance's load reports, which end when it is dropped.
 pub(crate) struct Reporter {
     task: JoinHandle<()>,
-    models: InstanceModels,
+    properties: InstanceProperties,
 }
 
 impl Reporter {
@@ -65,7 +65,7 @@ impl Reporter {
     /// its hub takes no report from it after: a drain its hub took but had
     /// not stored would be lost if the hub restarted.
     pub(crate) async fn finish(self, deadline: tokio::time::Instant) {
-        let _ = tokio::time::timeout_at(deadline, self.models.reported()).await;
+        let _ = tokio::time::timeout_at(deadline, self.properties.reported()).await;
     }
 }
 
@@ -80,7 +80,7 @@ impl Drop for Reporter {
 async fn report<F, Fut>(
     period: Duration,
     read: impl Fn() -> Option<SegmentLoad>,
-    models: InstanceModels,
+    properties: InstanceProperties,
     mut send: F,
 ) where
     F: FnMut(LoadReport) -> Fut,
@@ -93,7 +93,7 @@ async fn report<F, Fut>(
     // started is the first report's.
     let mut taken = 0;
     let mut refused: Option<String> = None;
-    let mut said = models.watch();
+    let mut said = properties.watch();
     loop {
         tokio::select! {
             _ = ticks.tick() => {}
@@ -104,7 +104,7 @@ async fn report<F, Fut>(
         };
         let carried = said.borrow_and_update().clone();
         let report = LoadReport {
-            models: carried.as_deref().map(<[_]>::to_vec),
+            properties: (*carried).clone(),
             admitted: wide(load.admitted),
             limit: wide(load.limit),
             refusals: wide(load.declined.saturating_sub(taken)),
@@ -118,9 +118,7 @@ async fn report<F, Fut>(
         match answer {
             Ok(()) => {
                 taken = load.declined;
-                if let Some(carried) = &carried {
-                    models.taken(carried);
-                }
+                properties.taken(&carried);
                 if refused.take().is_some() {
                     tracing::info!("the pool's hub takes this instance's load reports again");
                 }
@@ -142,7 +140,7 @@ fn wide(count: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{LoadReport, SegmentLoad, report};
-    use gdl::InstanceModels;
+    use gdl::InstanceProperties;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -157,14 +155,14 @@ mod tests {
         mpsc::UnboundedReceiver<LoadReport>,
         tokio::task::JoinHandle<()>,
     ) {
-        reporting_models(load, taken, &InstanceModels::new())
+        reporting_properties(load, taken, &InstanceProperties::new())
     }
 
-    /// [`reporting`], with the models the instance's nodes set on `models`.
-    fn reporting_models(
+    /// [`reporting`], with the properties the instance's nodes set on `properties`.
+    fn reporting_properties(
         load: SegmentLoad,
         taken: bool,
-        models: &InstanceModels,
+        properties: &InstanceProperties,
     ) -> (
         mpsc::UnboundedReceiver<LoadReport>,
         tokio::task::JoinHandle<()>,
@@ -173,7 +171,7 @@ mod tests {
         let task = tokio::spawn(report(
             PERIOD,
             move || Some(load),
-            models.clone(),
+            properties.clone(),
             move |report| {
                 let _ = sent.send(report);
                 async move {
@@ -208,7 +206,7 @@ mod tests {
         assert_eq!(
             next(&mut reports).await,
             LoadReport {
-                models: None,
+                properties: gdl_model::PropertyLists::new(),
                 admitted: 1,
                 limit: 4,
                 refusals: 3,
@@ -235,9 +233,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod models {
+mod properties {
     use super::{LoadReport, Reporter, SegmentLoad, report};
-    use gdl::{InstanceModel, InstanceModelState, InstanceModels};
+    use gdl::{EntryState, InstanceProperties, PropertyEntry};
+    use gdl_model::PropertyLists;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -245,21 +244,23 @@ mod models {
 
     const PERIOD: Duration = Duration::from_secs(10);
 
-    fn ready(name: &str) -> InstanceModel {
-        InstanceModel {
-            model: name.into(),
-            routing_key: None,
-            state: InstanceModelState::Ready,
-        }
+    fn ready(name: &str) -> PropertyEntry {
+        let key = gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }));
+        PropertyEntry::new(key, EntryState::Ready)
     }
 
-    /// A change of the instance's models is reported at once, not at the
+    /// `entries` as the instance's list of kind `test`.
+    fn lists(entries: Vec<PropertyEntry>) -> PropertyLists {
+        PropertyLists::from([("test".to_string(), entries)])
+    }
+
+    /// A change of the instance's properties is reported at once, not at the
     /// next period, and every report after it carries the list, so that a
     /// hub that lost it, by a restart or a refused report, has it again
     /// within a period. With no list set, a report carries none.
     #[tokio::test(start_paused = true)]
-    async fn a_change_of_models_is_reported_at_once_and_every_period() {
-        let models = InstanceModels::new();
+    async fn a_change_of_properties_is_reported_at_once_and_every_period() {
+        let properties = InstanceProperties::new();
         let (sent, mut reports) = mpsc::unbounded_channel::<(LoadReport, tokio::time::Instant)>();
         let load = SegmentLoad {
             admitted: 0,
@@ -270,7 +271,7 @@ mod models {
         let task = tokio::spawn(report(
             PERIOD,
             move || Some(load),
-            models.clone(),
+            properties.clone(),
             move |report| {
                 let _ = sent.send((report, tokio::time::Instant::now()));
                 async { Ok(()) }
@@ -283,16 +284,18 @@ mod models {
                 .expect("the reports go on")
         };
         let (first, at) = next().await;
-        assert_eq!(first.models, None);
+        assert!(first.properties.is_empty());
         assert_eq!(at - start, PERIOD);
 
         tokio::time::advance(PERIOD / 2).await;
-        models.set([ready("m")]).expect("a list");
+        properties
+            .set_entries("test", vec![ready("m")])
+            .expect("a list");
         let (changed, at) = next().await;
-        assert_eq!(changed.models, Some(vec![ready("m")]));
+        assert_eq!(changed.properties, lists(vec![ready("m")]));
         assert_eq!(at - start, PERIOD + PERIOD / 2, "at once");
         let (later, _) = next().await;
-        assert_eq!(later.models, Some(vec![ready("m")]));
+        assert_eq!(later.properties, lists(vec![ready("m")]));
         task.abort();
     }
 
@@ -311,21 +314,21 @@ mod models {
         // The hub refuses the first `refused` reports, then answers: how
         // long the stop waited, and whether each report up to the answered
         // one carried the drain.
-        let stop = async |models: &InstanceModels, refused: usize| {
+        let stop = async |properties: &InstanceProperties, refused: usize| {
             let sent = Arc::new(AtomicUsize::new(0));
             let (carried, mut carries) = mpsc::unbounded_channel();
             let counted = Arc::clone(&sent);
             let task = tokio::spawn(report(
                 PERIOD,
                 move || Some(load),
-                models.clone(),
+                properties.clone(),
                 move |report: LoadReport| {
                     let n = counted.fetch_add(1, Ordering::SeqCst);
-                    let draining = report.models.is_some_and(|models| {
-                        models
-                            .iter()
-                            .any(|model| model.state == InstanceModelState::Draining)
-                    });
+                    let draining = report
+                        .properties
+                        .values()
+                        .flatten()
+                        .any(|entry| entry.state() == EntryState::Draining);
                     if n <= refused {
                         let _ = carried.send(draining);
                     }
@@ -340,7 +343,7 @@ mod models {
             ));
             let reporter = Reporter {
                 task,
-                models: models.clone(),
+                properties: properties.clone(),
             };
             let start = tokio::time::Instant::now();
             reporter.finish(start + deadline).await;
@@ -351,27 +354,35 @@ mod models {
             }
             (waited, all)
         };
-        let draining = InstanceModel {
-            state: InstanceModelState::Draining,
-            ..ready("m")
-        };
+        let draining = ready("m").with_state(EntryState::Draining);
 
-        let models = InstanceModels::new();
-        models.set([draining.clone()]).expect("a list");
-        models.set([]).expect("the node drops the model");
+        let properties = InstanceProperties::new();
+        properties
+            .set_entries("test", vec![draining.clone()])
+            .expect("a list");
+        properties
+            .set_entries("test", vec![])
+            .expect("the node drops the property");
         assert_eq!(
-            stop(&models, 2).await,
+            stop(&properties, 2).await,
             (PERIOD * 3, vec![true; 3]),
             "answered at the third"
         );
 
-        let models = InstanceModels::new();
-        models.set([draining]).expect("a list");
-        let (waited, _) = stop(&models, usize::MAX).await;
+        let properties = InstanceProperties::new();
+        properties
+            .set_entries("test", vec![draining])
+            .expect("a list");
+        let (waited, _) = stop(&properties, usize::MAX).await;
         assert_eq!(waited, deadline, "never answered: held to the deadline");
 
-        let models = InstanceModels::new();
-        models.set([ready("m")]).expect("a list");
-        assert_eq!(stop(&models, usize::MAX).await, (Duration::ZERO, vec![]));
+        let properties = InstanceProperties::new();
+        properties
+            .set_entries("test", vec![ready("m")])
+            .expect("a list");
+        assert_eq!(
+            stop(&properties, usize::MAX).await,
+            (Duration::ZERO, vec![])
+        );
     }
 }

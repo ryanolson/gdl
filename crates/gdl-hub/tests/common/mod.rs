@@ -534,7 +534,7 @@ pub fn model(name: &str, region: &str, hub: &str) -> PoolSettings {
 pub const GLOBAL: &str = "global-01-us-east-1";
 
 /// The global pool in us-east-1, whose class runs `a` and sends to
-/// `model_x`, with `requires` unsaid: its health requires one ready model
+/// `model_x`, with `requires` unsaid: its health requires one ready property
 /// pool, the default.
 pub fn global_default() -> PoolSettings {
     toml::from_str(&format!(
@@ -607,9 +607,9 @@ pub fn address(hub: &Hub) -> String {
     format!("127.0.0.1:{}", hub.public_addr().port())
 }
 
-/// `event` as a hub without the model index sent it: the follow without
+/// `event` as a hub without the property index sent it: the follow without
 /// its listing, and the marker without its flag. `None` for a `listed`
-/// event, which only the model index reads ([`crate`]'s `listed` tests).
+/// event, which only the property index reads ([`crate`]'s `listed` tests).
 pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEvent> {
     use gdl_watch::FollowEvent;
     match event {
@@ -638,12 +638,12 @@ pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEv
     }
 }
 
-/// `event` as a hub without the model index sent it: the pool without its
-/// models. `None` for a `models` event.
+/// `event` as a hub without the property index sent it: the pool without its
+/// properties. `None` for a `properties` event.
 pub fn plain_pool(event: gdl_watch::PoolWatchEvent) -> Option<gdl_watch::PoolWatchEvent> {
     use gdl_watch::PoolWatchEvent;
     match event {
-        PoolWatchEvent::Models { .. } => None,
+        PoolWatchEvent::Properties { .. } => None,
         PoolWatchEvent::Pool {
             name,
             class,
@@ -657,7 +657,7 @@ pub fn plain_pool(event: gdl_watch::PoolWatchEvent) -> Option<gdl_watch::PoolWat
             epoch,
             state,
             load,
-            models: None,
+            properties: None,
         }),
         event => Some(event),
     }

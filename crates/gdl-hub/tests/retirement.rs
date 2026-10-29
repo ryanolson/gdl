@@ -384,7 +384,7 @@ async fn a_follower_that_starts_after_the_retirement_is_not_waited_for() {
 /// global's relay, and the global's hub and extension, with the follow's
 /// generation.
 struct Followed {
-    model: (Hub, std::sync::Arc<PoolReadiness<Resolving>>),
+    property: (Hub, std::sync::Arc<PoolReadiness<Resolving>>),
     retiring: Instance,
     _others: Vec<Instance>,
     global: (Hub, std::sync::Arc<PoolReadiness<Resolving>>),
@@ -422,7 +422,7 @@ async fn followed(choosers: usize) -> (Followed, Vec<Instance>) {
         }
     }
     let followed = Followed {
-        model: (model_hub, model_pool),
+        property: (model_hub, model_pool),
         retiring,
         _others: others,
         global: (global_hub, global_pool),
@@ -443,10 +443,10 @@ impl Followed {
     }
 
     /// Retire `retiring`, and wait until the global's hub waits for its
-    /// choosers to avoid it, or, with `waits` false, does not: the model
+    /// choosers to avoid it, or, with `waits` false, does not: the property
     /// pool's watch from before the retirement, past it.
     async fn retire(&mut self, waits: bool) -> PoolWatch {
-        let mut watch = watching(&self.model.1).await;
+        let mut watch = watching(&self.property.1).await;
         self.retiring.announce(SegmentPhase::Retired).await;
         assert_eq!(
             next_change(&mut watch).await,
@@ -485,7 +485,7 @@ impl Followed {
 
     async fn shutdown(self) {
         self.global.0.shutdown().await.expect("the hub stops");
-        self.model.0.shutdown().await.expect("the hub stops");
+        self.property.0.shutdown().await.expect("the hub stops");
     }
 }
 

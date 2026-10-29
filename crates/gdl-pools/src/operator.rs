@@ -22,13 +22,13 @@ use crate::{DirectoryError, PoolDirectory, PoolEvent, PoolRecord, Presence, Vers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PoolCommand {
     /// Remove the pool's record, and leave a tombstone at the command's
-    /// version: its models leave every reader's list, and its parent's
+    /// version: its properties leave every reader's list, and its parent's
     /// choosers hold it withdrawn.
     Withdraw,
     /// Write the pool's last record again, saying that it was scaled to 0
     /// on purpose ([`Presence::ScaledToZero`]): it has no lease, so a
-    /// reader shows it as scaled to 0, not missing. Its state, models, and
-    /// load stay as the last record said.
+    /// reader shows it as scaled to 0, not missing. Its state, properties,
+    /// and load stay as the last record said.
     ScaleToZero,
 }
 

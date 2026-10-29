@@ -18,7 +18,7 @@ const WITHIN: Duration = Duration::from_millis(300);
 
 fn pool(state: PoolState) -> PoolWatchEvent {
     PoolWatchEvent::Pool {
-        models: None,
+        properties: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

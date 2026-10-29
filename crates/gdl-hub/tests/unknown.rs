@@ -128,7 +128,7 @@ impl Watch {
     ) {
         self.answer().await;
         self.send(&PoolWatchEvent::Pool {
-            models: None,
+            properties: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: record.epoch,
@@ -492,7 +492,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_pool_withheld() {
     first.answer().await;
     first
         .send(&PoolWatchEvent::Pool {
-            models: None,
+            properties: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: like.epoch,
@@ -732,7 +732,7 @@ async fn an_unknown_event_in_the_reading_keeps_the_pool_withheld() {
     second.answer().await;
     second
         .send(&PoolWatchEvent::Pool {
-            models: None,
+            properties: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: setup.like.epoch,

@@ -1,10 +1,10 @@
-//! The items of the two tables, and how a pool's write and its model list
+//! The items of the two tables, and how a pool's write and its property list
 //! become them. Pure: nothing here calls DynamoDB.
 //!
 //! The records table holds one item per pool, keyed by `class` and
-//! `pool`: the record without its model list, or a withdrawal's
-//! tombstone. The lists table holds each model list a record names, keyed
-//! by `owner` (`<class>/<pool>`) and `list`: the record's `models_version`,
+//! `pool`: the record without its property list, or a withdrawal's
+//! tombstone. The lists table holds each property list a record names, keyed
+//! by `owner` (`<class>/<pool>`) and `list`: the record's `properties_version`,
 //! a digest of the list, and the token of the put that made it. Each put
 //! makes an item of its own, so no put replaces another's and an expiry
 //! names one put's item; a reader that checks the digest never joins a
@@ -18,7 +18,7 @@ use std::{
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use gdl_pools::{
-    DirectoryError, ModelEntry, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal,
+    DirectoryError, PoolEvent, PoolProperty, PoolRecord, ResumeToken, Version, Withdrawal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -69,25 +69,25 @@ pub(crate) fn newer(version: Version) -> (HashMap<String, String>, Item) {
     )
 }
 
-/// The key of a model list in the lists table: the record's
-/// `models_version`, a digest of the list's stored body, and the token of
+/// The key of a property list in the lists table: the record's
+/// `properties_version`, a digest of the list's stored body, and the token of
 /// the put that made the item, which no other put shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ListKey {
-    models_version: u64,
+    properties_version: u64,
     digest: u64,
     token: u64,
 }
 
 impl ListKey {
-    /// The `models_version` of the record that names the list.
-    pub(crate) fn models_version(&self) -> u64 {
-        self.models_version
+    /// The `properties_version` of the record that names the list.
+    pub(crate) fn properties_version(&self) -> u64 {
+        self.properties_version
     }
 
     /// Whether `other` keys the same list, whatever put made it.
     pub(crate) fn same_list(&self, other: &Self) -> bool {
-        self.models_version == other.models_version && self.digest == other.digest
+        self.properties_version == other.properties_version && self.digest == other.digest
     }
 
     /// The sort key: zero-padded, so that a class's lists sort by version,
@@ -95,14 +95,14 @@ impl ListKey {
     pub(crate) fn sort_key(&self) -> String {
         format!(
             "{:020}.{:016x}.{:016x}",
-            self.models_version, self.digest, self.token
+            self.properties_version, self.digest, self.token
         )
     }
 
     fn parse(key: &str) -> Option<Self> {
         let mut parts = key.split('.');
         let key = Self {
-            models_version: parts.next()?.parse().ok()?,
+            properties_version: parts.next()?.parse().ok()?,
             digest: u64::from_str_radix(parts.next()?, 16).ok()?,
             token: u64::from_str_radix(parts.next()?, 16).ok()?,
         };
@@ -111,13 +111,13 @@ impl ListKey {
 }
 
 /// What the lists table holds of a record: the two fields of a record
-/// that grow with its models.
+/// that grow with its properties.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct List {
     #[serde(default)]
-    pub(crate) models: Vec<ModelEntry>,
+    pub(crate) properties: Vec<PoolProperty>,
     #[serde(default)]
-    pub(crate) revoked: Vec<gdl_model::ModelKey>,
+    pub(crate) revoked: Vec<gdl_model::PropertyKey>,
 }
 
 /// A pool's write, as the two tables hold it.
@@ -126,7 +126,7 @@ pub(crate) struct Encoded {
     /// The records table's item.
     pub(crate) item: Item,
     /// The record's list, with its key and the lists table's item, when
-    /// the record has models or revocations. The key has a new token, and
+    /// the record has properties or revocations. The key has a new token, and
     /// [`Encoded::item`] names it.
     pub(crate) list: Option<(ListKey, Item)>,
 }
@@ -135,16 +135,16 @@ pub(crate) struct Encoded {
 /// list. A record whose list or whose own item would pass DynamoDB's item
 /// limit is refused.
 pub(crate) fn record(record: &PoolRecord, order: u64) -> Result<Encoded, DirectoryError> {
-    let list = (!record.models.is_empty() || !record.revoked.is_empty()).then(|| List {
-        models: record.models.clone(),
+    let list = (!record.properties.is_empty() || !record.revoked.is_empty()).then(|| List {
+        properties: record.properties.clone(),
         revoked: record.revoked.clone(),
     });
     let list = match list {
         None => None,
         Some(list) => {
-            let body = serde_json::to_string(&list).expect("a model list serializes");
+            let body = serde_json::to_string(&list).expect("a property list serializes");
             let key = ListKey {
-                models_version: record.models_version,
+                properties_version: record.properties_version,
                 digest: digest(body.as_bytes()),
                 token: new_token(),
             };
@@ -156,12 +156,12 @@ pub(crate) fn record(record: &PoolRecord, order: u64) -> Result<Encoded, Directo
                 (LIST_KEY.into(), AttributeValue::S(key.sort_key())),
                 (BODY.into(), AttributeValue::S(body)),
             ]);
-            fits(&item, &record.name, "model list")?;
+            fits(&item, &record.name, "property list")?;
             Some((key, item))
         }
     };
     let bare = PoolRecord {
-        models: Vec::new(),
+        properties: Vec::new(),
         revoked: Vec::new(),
         ..record.clone()
     };
@@ -235,7 +235,7 @@ pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
             let belongs = record.name == pool
                 && record.class == class
                 && record.version() == version
-                && record.models.is_empty()
+                && record.properties.is_empty()
                 && record.revoked.is_empty()
                 && record.check().is_ok();
             if !belongs {
@@ -246,7 +246,7 @@ pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
                 Some(AttributeValue::S(key)) => Some(ListKey::parse(key)?),
                 Some(_) => return None,
             };
-            if list.is_some_and(|list| list.models_version != record.models_version) {
+            if list.is_some_and(|list| list.properties_version != record.properties_version) {
                 return None;
             }
             StoredHeld::Record {
@@ -339,7 +339,7 @@ impl Entry {
                 list: key,
             } => {
                 if let Some(list) = list {
-                    record.models = list.models;
+                    record.properties = list.properties;
                     record.revoked = list.revoked;
                 }
                 (Held::Record(record), key)

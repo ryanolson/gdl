@@ -1,4 +1,4 @@
-//! Model versions when a relay parent cannot return the last record.
+//! Property versions when a relay parent cannot return the last record.
 
 mod common;
 
@@ -8,16 +8,16 @@ use std::time::Duration;
 use common::{WAIT, config, millis_now, spec};
 use gdl_hub::{GraphAdmission, HubDirectory, PoolReadiness, PoolTiming};
 use gdl_model::{DirectoryBackend, PoolSettings};
-use gdl_pools::{ModelEntry, ModelState, PoolRecord, Presence};
+use gdl_pools::{PoolProperty, PoolRecord, Presence, PropertyState};
 use gdl_watch::{Report, ReportRefusal, ReportReply};
 use tokio::sync::mpsc;
 use velo_hub::Hub;
 use velo_hub::axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
 
-/// A 409 can raise the writer's epoch after the restart read. The model
+/// A 409 can raise the writer's epoch after the restart read. The property
 /// version must rise with it, also when the parent has no read route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_recovered_writer_epoch_raises_the_models_version() {
+async fn a_recovered_writer_epoch_raises_the_properties_version() {
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let epoch = millis_now() + 60_000;
@@ -35,13 +35,12 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
         lease: Duration::from_secs(30),
         load: None,
         presence: Presence::Serving,
-        models: vec![ModelEntry {
-            model: "m".into(),
-            routing_key: None,
-            state: ModelState::Ready,
+        properties: vec![PoolProperty {
+            property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+            state: PropertyState::Ready,
             since: epoch * (1 << 20) + 1,
         }],
-        models_version: epoch * (1 << 20) + 1,
+        properties_version: epoch * (1 << 20) + 1,
         revoked: Vec::new(),
     };
 
@@ -130,27 +129,27 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
             "the writer recovers its epoch"
         );
         if readable {
-            assert_eq!(record.models.len(), 1, "the history is retained");
-            assert_eq!(record.models[0].state, ModelState::Unavailable);
+            assert_eq!(record.properties.len(), 1, "the history is retained");
+            assert_eq!(record.properties[0].state, PropertyState::Unavailable);
         } else {
-            assert_ne!(record.models, previous.models, "different lists");
+            assert_ne!(record.properties, previous.properties, "different lists");
         }
         assert!(
-            record.models_version > previous.models_version,
-            "a newer writer lowered models_version (readable={readable}): before=({}, {}), after=({}, {})",
+            record.properties_version > previous.properties_version,
+            "a newer writer lowered properties_version (readable={readable}): before=({}, {}), after=({}, {})",
             previous.epoch,
-            previous.models_version,
+            previous.properties_version,
             record.epoch,
-            record.models_version,
+            record.properties_version,
         );
     }
 }
 
 /// When a parent has no restart read route, its retained epoch can equal
 /// the new writer's millisecond clock value. Catching up its sequence
-/// must not lower the model version. A greater retained epoch is a control.
+/// must not lower the property version. A greater retained epoch is a control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
+async fn a_repeated_writer_epoch_keeps_property_versions_increasing() {
     for equal in [false, true] {
         let held = Arc::new(std::sync::Mutex::new(None::<PoolRecord>));
         let (sent, mut accepted) = mpsc::unbounded_channel();
@@ -172,13 +171,15 @@ async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
                         PoolRecord {
                             epoch,
                             seq: 10,
-                            models: vec![ModelEntry {
-                                model: "m".into(),
-                                routing_key: None,
-                                state: ModelState::Ready,
+                            properties: vec![PoolProperty {
+                                property: gdl_model::PropertyKey::new(
+                                    "test",
+                                    serde_json::json!({ "name": "m" }),
+                                ),
+                                state: PropertyState::Ready,
                                 since: version,
                             }],
-                            models_version: version,
+                            properties_version: version,
                             ..record.clone()
                         }
                     });
@@ -241,16 +242,16 @@ async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
         server.abort();
 
         assert!(record.version() > previous.version(), "the record is newer");
-        assert_ne!(record.models, previous.models, "the lists differ");
+        assert_ne!(record.properties, previous.properties, "the lists differ");
         assert!(
-            record.models_version > previous.models_version,
-            "sequence recovery lowered models_version (equal={equal}): before=({}, {}, {}), after=({}, {}, {})",
+            record.properties_version > previous.properties_version,
+            "sequence recovery lowered properties_version (equal={equal}): before=({}, {}, {}), after=({}, {}, {})",
             previous.epoch,
             previous.seq,
-            previous.models_version,
+            previous.properties_version,
             record.epoch,
             record.seq,
-            record.models_version,
+            record.properties_version,
         );
     }
 }

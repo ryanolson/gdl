@@ -103,7 +103,7 @@ pub enum Decline {
     /// follow changes.
     Gone,
     /// This instance cannot serve the request, and another entry instance
-    /// of its pool may: for example, it does not have the request's model.
+    /// of its pool may: for example, it does not have the request's property.
     /// The chooser offers the request to each other entry instance of the
     /// pool once, and to another pool only when every one declined. It
     /// damps nothing, since the decline says nothing of the pool's room.

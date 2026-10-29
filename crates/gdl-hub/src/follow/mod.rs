@@ -239,7 +239,7 @@ impl<D: PoolDirectory> Follows<'_, D> {
     }
 
     /// List `pool` from the record the view holds of it, if any, whatever
-    /// its parent, region, or state: what its choosers' model index
+    /// its parent, region, or state: what its choosers' property index
     /// knows. A record of another deployment is not listed. One the view
     /// no longer holds, after a snapshot that dropped it, stays listed as
     /// it was: silence never removes a pool, and only a withdrawal does.

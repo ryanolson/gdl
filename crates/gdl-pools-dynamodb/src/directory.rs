@@ -26,8 +26,8 @@ use crate::{
 /// each write to every region, and each hub reads its own region's copy.
 ///
 /// The records table holds one item per pool: its record without the
-/// model list, or the tombstone of its withdrawal. The lists table holds
-/// each model list a record names, keyed by the record's `models_version`,
+/// property list, or the tombstone of its withdrawal. The lists table holds
+/// each property list a record names, keyed by the record's `properties_version`,
 /// a digest of the list, and the token of the put that made it, so a scan
 /// reads a few hundred bytes per pool and fetches a list only when a
 /// pool's list changes. A write is a conditional put that holds only if it
@@ -39,7 +39,7 @@ use crate::{
 /// withdraws it, and a reader applies the lease on its own clock
 /// ([`gdl_pools::PoolView`]). The lists table's TTL removes only a list
 /// that no record of its pool names again: an hour after a write replaced
-/// the record that named it, at a higher `models_version`.
+/// the record that named it, at a higher `properties_version`.
 ///
 /// A watch is polled: while a class has watches through this handle, one
 /// task queries the class's items every [`DynamoLimits::period`], and the
@@ -67,7 +67,7 @@ pub struct DynamoDirectory {
 pub struct Tables {
     /// One item per pool, keyed by `class` (partition) and `pool` (sort).
     pub records: String,
-    /// One item per model list, keyed by `owner` (partition) and `list`
+    /// One item per property list, keyed by `owner` (partition) and `list`
     /// (sort), with TTL on `expires_at`.
     pub lists: String,
 }
@@ -314,7 +314,7 @@ impl DynamoDirectory {
     }
 
     /// Mark `key`'s list of `pool` to expire: a write replaced the record
-    /// that named it, at a higher `models_version`. Only the writer that put
+    /// that named it, at a higher `properties_version`. Only the writer that put
     /// the list names it, and only while the pool's item names it already,
     /// so no record of the pool names it again
     /// (`docs/src/development/pools-design.md`). Best effort: a list left in
@@ -340,7 +340,7 @@ impl DynamoDirectory {
             .send()
             .await;
         if let Err(error) = updated {
-            tracing::debug!(class, pool, error = %DisplayErrorContext(error), "a superseded model list was not marked to expire");
+            tracing::debug!(class, pool, error = %DisplayErrorContext(error), "a superseded property list was not marked to expire");
         }
     }
 
@@ -351,7 +351,7 @@ impl DynamoDirectory {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Put a model list.
+    /// Put a property list.
     async fn put_list(&self, pool: &str, list: Item) -> Result<(), DirectoryError> {
         self.shared
             .client
@@ -362,26 +362,29 @@ impl DynamoDirectory {
             .await
             .map(drop)
             .map_err(|error| {
-                unavailable(&format!("writing the model list of pool `{pool}`"), error)
+                unavailable(
+                    &format!("writing the property list of pool `{pool}`"),
+                    error,
+                )
             })
     }
 
     /// Write a pool's item, as [`Self::put`] does, and then mark the list
     /// of the item it replaced to expire, if the new item is a record at a
-    /// higher `models_version`. A withdrawal expires nothing.
+    /// higher `properties_version`. A withdrawal expires nothing.
     async fn write(
         &self,
         class: &str,
         pool: &str,
         version: Version,
         item: Item,
-        models_version: Option<u64>,
+        properties_version: Option<u64>,
         kept: Option<ListKey>,
     ) -> Result<(), Refusal> {
         let before = self.put(class, pool, version, item, kept).await?;
-        if let Some(before) =
-            before.filter(|before| models_version.is_some_and(|now| now > before.models_version()))
-        {
+        if let Some(before) = before.filter(|before| {
+            properties_version.is_some_and(|now| now > before.properties_version())
+        }) {
             self.supersede(class, pool, before).await;
         }
         Ok(())
@@ -433,10 +436,10 @@ impl PoolDirectory for DynamoDirectory {
         // dropped part way leaves the next one to put its list.
         let cached = self.written().remove(&owner);
         let version = record.version();
-        let models_version = Some(record.models_version);
+        let properties_version = Some(record.properties_version);
         let Some((key, list)) = encoded.list.take() else {
             return Ok(self
-                .write(class, pool, version, encoded.item, models_version, None)
+                .write(class, pool, version, encoded.item, properties_version, None)
                 .await?);
         };
         // A write at the epoch of the handle's last write of the pool, with
@@ -451,7 +454,14 @@ impl PoolDirectory for DynamoDirectory {
             let mut kept = encoded.item.clone();
             item::name(&mut kept, cached.key);
             match self
-                .write(class, pool, version, kept, models_version, Some(cached.key))
+                .write(
+                    class,
+                    pool,
+                    version,
+                    kept,
+                    properties_version,
+                    Some(cached.key),
+                )
                 .await
             {
                 Err(Refusal::Elsewhere(_)) => {}
@@ -462,7 +472,7 @@ impl PoolDirectory for DynamoDirectory {
             }
         }
         self.put_list(pool, list).await?;
-        self.write(class, pool, version, encoded.item, models_version, None)
+        self.write(class, pool, version, encoded.item, properties_version, None)
             .await?;
         self.written().insert(
             owner,

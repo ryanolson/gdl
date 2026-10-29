@@ -255,7 +255,7 @@ impl Drop for Running {
 
 /// Build and start the deployment in `dir` as `project`, detached: the
 /// command ends once the containers are started, without waiting for the
-/// segments to be healthy, whose start period covers loading models. Its
+/// segments to be healthy, whose start period covers a slow load. Its
 /// output arrives as `{line}` events, then one `{done, ok, code}` or
 /// `{done, ok, problem}`. The command runs to its end, and holds `running`
 /// until then, even when the receiver is dropped: a page that leaves

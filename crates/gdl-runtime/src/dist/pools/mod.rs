@@ -89,15 +89,20 @@ struct Shared {
     draining: Mutex<HashSet<InstanceId>>,
     /// The events of a kind this build does not know the relay has sent.
     unknown: std::sync::atomic::AtomicU64,
+    /// The property kinds the segment's nodes and pool policies read,
+    /// which the chooser decodes into each class's indexes.
+    kinds: gdl::PropertyKinds,
 }
 
 impl Pools {
     /// Empty tables for `entries`, each an entry segment and its class, of
-    /// a chooser in `region` that damps the pools by `damping`.
+    /// a chooser in `region` that damps the pools by `damping`, and decodes
+    /// the property kinds in `kinds`.
     pub(crate) fn new<'a>(
         region: &str,
         entries: impl IntoIterator<Item = (&'a str, &'a str)>,
         damping: Damping,
+        kinds: gdl::PropertyKinds,
     ) -> Self {
         let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for (class, segment) in entries {
@@ -128,6 +133,7 @@ impl Pools {
                 registered: watch::Sender::new(HashSet::new()),
                 draining: Mutex::default(),
                 unknown: std::sync::atomic::AtomicU64::new(0),
+                kinds,
             }),
         }
     }
@@ -203,6 +209,11 @@ impl Pools {
     /// it on every request without looking it up.
     pub(crate) fn slot(&self, segment: &str) -> Option<Slot> {
         self.shared.segments.get(segment).map(Arc::clone)
+    }
+
+    /// The property kinds the chooser decodes.
+    pub(crate) fn kinds(&self) -> &gdl::PropertyKinds {
+        &self.shared.kinds
     }
 
     /// The region of the chooser's own pool.
@@ -306,9 +317,9 @@ impl Pools {
 }
 
 /// What a node reads of the tables: the table an entry segment's pool
-/// policy chooses from, with the class's withdrawn pools and its model
-/// index, in one load, and
-/// the pools the chooser holds gone, in one more. No table is made for a
+/// policy chooses from, with the class's withdrawn pools and its property
+/// indexes, in one load, and the pools the chooser holds gone, in one
+/// more. No table is made for a
 /// gone mark: the next read sees the damping the chooser's choices read.
 /// The two loads are not one moment, but a mark holds the follow it was
 /// made in, so a table newer than the mark reads the pool as not gone, as
@@ -331,7 +342,7 @@ impl gdl::__runtime::PoolSource for Pools {
         read(
             gdl::ClassPools::new(&table.views, &table.withdrawn)
                 .with_damped(&damped)
-                .with_models(&table.models),
+                .with_properties(&table.properties),
         );
     }
 }
@@ -421,9 +432,10 @@ pub(crate) struct EntryTable {
     /// so that a node reads both from one snapshot. A withdrawn pool may
     /// still be in `pools` until its follow is dropped.
     pub(crate) withdrawn: Box<[Box<str>]>,
-    /// The class's model index, shared by the tables of each of its entry
-    /// segments, and made again only when what it lists changes.
-    pub(crate) models: Arc<gdl::ModelIndex>,
+    /// The class's property indexes, shared by the tables of each of its
+    /// entry segments, and made again only when what they list, or the
+    /// kinds they decode, change.
+    pub(crate) properties: Arc<gdl::PropertyIndexes>,
 }
 
 impl EntryTable {
@@ -434,7 +446,7 @@ impl EntryTable {
             pools,
             views,
             withdrawn: Box::default(),
-            models: Arc::default(),
+            properties: Arc::default(),
         }
     }
 
@@ -444,9 +456,9 @@ impl EntryTable {
         self
     }
 
-    /// The table with the class's model index.
-    pub(crate) fn with_models(mut self, models: Arc<gdl::ModelIndex>) -> Self {
-        self.models = models;
+    /// The table with the class's property indexes.
+    pub(crate) fn with_properties(mut self, properties: Arc<gdl::PropertyIndexes>) -> Self {
+        self.properties = properties;
         self
     }
 }

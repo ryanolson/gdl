@@ -376,3 +376,102 @@ fn a_projection_of_a_field_the_wire_names_otherwise_is_refused() {
     assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{error}");
     assert!(error.to_string().contains("`hint`"), "{error}");
 }
+
+/// The test property type.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct Test {
+    name: String,
+}
+
+/// Chooses a pool that lists the test property `a` ready, from the
+/// class's property index of its kind, which it registers under `kind`.
+struct ByProperty {
+    kind: gdl::PropertyKind<Test>,
+}
+
+impl PoolPolicy for ByProperty {
+    type Head = gdl::Encoded;
+
+    fn choose(
+        &self,
+        request: PoolRequest<'_, gdl::Encoded>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
+        let index = request
+            .properties()
+            .get(&self.kind)
+            .ok_or_else(NoPool::new)?;
+        let listed = index.get(&Test { name: "a".into() });
+        pools
+            .iter()
+            .position(|pool| {
+                listed.iter().any(|(_, listing)| {
+                    listing.state() == gdl::PropertyState::Ready && listing.pool() == pool.name()
+                })
+            })
+            .map(PoolChoice::new)
+            .ok_or_else(|| NoPool::because("no pool lists `a` ready"))
+    }
+
+    fn properties(&self, kinds: &gdl::PropertyKinds) -> gdl::Result<()> {
+        kinds.register(&self.kind)
+    }
+}
+
+/// A policy registers the property kinds it reads, and chooses by the
+/// index of its kind in the request; a second policy that registers the
+/// kind with another type is refused, naming the policy.
+#[test]
+fn a_policy_registers_the_kinds_it_reads_and_chooses_by_them() {
+    const TEST: gdl::PropertyKind<Test> = gdl::PropertyKind::new("test");
+    let mut policies = PoolPolicies::new();
+    policies
+        .add("by_property", ByProperty { kind: TEST })
+        .expect("registered");
+    let kinds = gdl::PropertyKinds::new();
+    policies.register_properties(&kinds).expect("one type");
+    let listing =
+        |pool: &str, state| gdl::PropertyPool::new(pool, "r", state, gdl::PoolCondition::Live);
+    let indexes = gdl::PropertyIndexes::new(true).with(
+        &TEST,
+        gdl::PropertyIndex::new([
+            (
+                Test { name: "a".into() },
+                listing("p1", gdl::PropertyState::Starting),
+            ),
+            (
+                Test { name: "a".into() },
+                listing("p2", gdl::PropertyState::Ready),
+            ),
+        ]),
+    );
+    let pools = [
+        Pool::new("c", "p1", "r", PoolState::Ready),
+        Pool::new("c", "p2", "r", PoolState::Ready),
+    ];
+    let cx = Cx::new();
+    let request =
+        PoolRequest::new(&cx, &gdl::Encoded, "r", Instant::now()).with_properties(&indexes);
+    let policy = ByProperty { kind: TEST };
+    assert_eq!(policy.choose(request, &pools).map(|c| c.at()), Ok(1));
+
+    struct Other;
+    impl PoolPolicy for Other {
+        type Head = gdl::Encoded;
+        fn choose(
+            &self,
+            _: PoolRequest<'_, gdl::Encoded>,
+            _: &[Pool],
+        ) -> Result<PoolChoice, NoPool> {
+            Err(NoPool::new())
+        }
+        fn properties(&self, kinds: &gdl::PropertyKinds) -> gdl::Result<()> {
+            kinds.register(&gdl::PropertyKind::<String>::new("test"))
+        }
+    }
+    policies.add("other", Other).expect("registered");
+    let error = policies
+        .register_properties(&kinds)
+        .expect_err("another type under `test`");
+    assert!(error.to_string().contains("`other`"), "{error}");
+}

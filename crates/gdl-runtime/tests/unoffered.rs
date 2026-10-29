@@ -388,7 +388,7 @@ async fn a_held_offer_keeps_the_follow_open_until_its_response_ends() {
     }
 }
 
-/// A follow whose link is lost, here at a proxy in front of the model
+/// A follow whose link is lost, here at a proxy in front of the property
 /// pool's hub that cuts every connection, is marked not offered at once.
 /// The chooser keeps the entry instance registered while it holds an offer
 /// to it, however long that takes, and the request is answered; then the
@@ -562,7 +562,7 @@ async fn the_bound_ends_a_drain_whose_follower_holds_an_offer() {
     }
 }
 
-/// A follower whose watch is lost, here at a proxy in front of the model
+/// A follower whose watch is lost, here at a proxy in front of the property
 /// pool's hub that cuts every connection, has not let go of the pool: its
 /// chooser still holds an offer to it. The draining pool's entry keeps
 /// taking work, as its bound allows; once the offer has ended and the

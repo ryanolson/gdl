@@ -25,7 +25,7 @@ pub const REPORT_ROUTE: &str = "/report";
 /// [`gdl_pools::PoolRecord`] it holds for the pool `pool` of `class`,
 /// expired or not, or `404 Not Found` when it holds none. A child's hub
 /// that restarts reads its pool's last record here before its first
-/// report, so that its models keep their history. Like the report, it
+/// report, so that its properties keep their history. Like the report, it
 /// trusts the private network.
 pub const HELD_ROUTE: &str = "/report/{class}/{pool}";
 

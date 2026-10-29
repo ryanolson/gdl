@@ -56,7 +56,7 @@ const PAST_BOUND: Duration = Duration::from_secs(3 + 5);
 /// The longest a test waits for a whole response held open for a while.
 const ANSWER: Duration = Duration::from_secs(30);
 
-/// The model part with C apart: `f` runs B, E, and F; `c` runs C, which
+/// The property part with C apart: `f` runs B, E, and F; `c` runs C, which
 /// only passes the request on, so no response passes through it; `d`
 /// runs D.
 fn request_only() -> Placement {
@@ -72,7 +72,7 @@ fn request_only() -> Placement {
 /// Every segment of [`request_only`].
 const REQUEST_ONLY: &[&str] = &["a", "f", "c", "d"];
 
-/// The model part with the response path apart: `f` runs B and C; `p`
+/// The property part with the response path apart: `f` runs B and C; `p`
 /// runs F and E, which B opens before it sends the request to `d`; `d`
 /// runs D.
 fn response_path() -> Placement {

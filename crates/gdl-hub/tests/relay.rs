@@ -311,8 +311,8 @@ fn child_record(pool: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     PoolRecord {
         presence: gdl_pools::Presence::Serving,
-        models: Vec::new(),
-        models_version: 0,
+        properties: Vec::new(),
+        properties_version: 0,
         revoked: Vec::new(),
         name: pool.into(),
         class: "model_x".into(),
@@ -451,28 +451,32 @@ fn a_parent_whose_directory_keeps_nothing_is_refused() {
 }
 
 /// A child's hub that restarts reads its last record from its parent's
-/// hub, with its models' history. The parent keeps that record across its
+/// hub, with its properties' history. The parent keeps that record across its
 /// own restart, so the read still finds it after both hubs restarted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_reads_back_its_record_after_its_parent_restarts() {
     let state = state();
     let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
     let record = PoolRecord {
-        models: vec![
-            gdl_pools::ModelEntry {
-                model: "llama-70b".into(),
-                routing_key: None,
-                state: gdl_pools::ModelState::Ready,
+        properties: vec![
+            gdl_pools::PoolProperty {
+                property: gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": "llama-70b" }),
+                ),
+                state: gdl_pools::PropertyState::Ready,
                 since: 2,
             },
-            gdl_pools::ModelEntry {
-                model: "qwen-32b".into(),
-                routing_key: None,
-                state: gdl_pools::ModelState::Drained,
+            gdl_pools::PoolProperty {
+                property: gdl_model::PropertyKey::new(
+                    "test",
+                    serde_json::json!({ "name": "qwen-32b" }),
+                ),
+                state: gdl_pools::PropertyState::Drained,
                 since: 3,
             },
         ],
-        models_version: 3,
+        properties_version: 3,
         revoked: Vec::new(),
         ..child_record("model-x-01", &nowhere(), (4, 9), Duration::from_secs(30))
     };
@@ -1111,8 +1115,8 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
 }
 
 /// A child's hub that restarts reads its pool's last record from its
-/// parent's hub before its first report, so its models keep their
-/// history: a model that was `ready` is `unavailable` until an instance
+/// parent's hub before its first report, so its properties keep their
+/// history: a property that was `ready` is `unavailable` until an instance
 /// reports, never `starting`. The parent answers what it holds for a
 /// child, and nothing for a pool it holds no record of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1145,23 +1149,29 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
         admitted: 0,
         limit: 4,
         refusals: 0,
-        models: Some(vec![gdl_model::InstanceModel {
-            model: "m".into(),
-            routing_key: None,
-            state: gdl_model::InstanceModelState::Ready,
-        }]),
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![gdl_model::PropertyEntry::new(
+                gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+                gdl_model::EntryState::Ready,
+            )],
+        )]),
     };
     entry[0].report(report).await.expect("the hub takes it");
     let state = |records: &BTreeMap<String, PoolRecord>| {
         records.get("model-x-01").map(|record| {
             (
                 record.epoch,
-                record.models.iter().map(|m| m.state).collect::<Vec<_>>(),
+                record
+                    .properties
+                    .iter()
+                    .map(|m| m.state)
+                    .collect::<Vec<_>>(),
             )
         })
     };
     let before = holds(&parent.directory, "model_x", "the model ready", |records| {
-        state(records).is_some_and(|(_, states)| states == [gdl_pools::ModelState::Ready])
+        state(records).is_some_and(|(_, states)| states == [gdl_pools::PropertyState::Ready])
     })
     .await;
     let (epoch, _) = state(&before).expect("held");
@@ -1185,9 +1195,9 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
     .await;
     assert_eq!(
         state(&after).map(|(_, states)| states),
-        Some(vec![gdl_pools::ModelState::Unavailable])
+        Some(vec![gdl_pools::PropertyState::Unavailable])
     );
-    assert!(after["model-x-01"].models_version > before["model-x-01"].models_version);
+    assert!(after["model-x-01"].properties_version > before["model-x-01"].properties_version);
     child.hub.shutdown().await.expect("the child's hub stops");
     parent.hub.shutdown().await.expect("the parent's hub stops");
 }
@@ -1195,7 +1205,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
 /// A child's hub that cannot read its last record from its parent, which
 /// answers 503 the first time, does not take that for a pool with no
 /// record: it reads again before it reports, and its first report keeps
-/// the models' history. A model that was `ready` is `unavailable`, not
+/// the properties' history. A property that was `ready` is `unavailable`, not
 /// gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
@@ -1205,13 +1215,12 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
         (5, 9),
         Duration::from_secs(30),
     );
-    held.models = vec![gdl_pools::ModelEntry {
-        model: "m".into(),
-        routing_key: None,
-        state: gdl_pools::ModelState::Ready,
+    held.properties = vec![gdl_pools::PoolProperty {
+        property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
+        state: gdl_pools::PropertyState::Ready,
         since: 3,
     }];
-    held.models_version = 3;
+    held.properties_version = 3;
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (arrivals, mut arrived) = watch::channel(Vec::<PoolRecord>::new());
     let arrivals = Arc::new(Mutex::new(arrivals));
@@ -1268,22 +1277,25 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
     assert!(first.epoch > 5, "{first:?}");
     assert_eq!(
         first
-            .models
+            .properties
             .iter()
-            .map(|m| (m.model.as_str(), m.state))
+            .map(|m| (
+                m.property.key()["name"].as_str().unwrap_or_default(),
+                m.state
+            ))
             .collect::<Vec<_>>(),
-        [("m", gdl_pools::ModelState::Unavailable)]
+        [("m", gdl_pools::PropertyState::Unavailable)]
     );
-    assert!(first.models_version > 3);
+    assert!(first.properties_version > 3);
     child.hub.shutdown().await.expect("the child's hub stops");
 }
 
-/// Under `relay`, a parent's hub lists its children's models for its
-/// choosers' model index, from the records they report, and only theirs:
+/// Under `relay`, a parent's hub lists its children's properties for its
+/// choosers' property index, from the records they report, and only theirs:
 /// it holds no other pool's record, so a pool of another parent, which
 /// reports elsewhere, is never listed here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_parent_lists_its_childrens_models_and_no_other_pools() {
+async fn a_parent_lists_its_childrens_properties_and_no_other_pools() {
     let spec = spec();
     let parent = relay_pool(&spec, global(), quiet_timing()).await;
     let elsewhere = relay_pool(
@@ -1296,11 +1308,13 @@ async fn a_parent_lists_its_childrens_models_and_no_other_pools() {
         quiet_timing(),
     )
     .await;
-    let declared = |model: &str| gdl_model::ModelKey::new(model);
+    let declared = |property: &str| {
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": property }))
+    };
     let _child = relay_pool(
         &spec,
         PoolSettings {
-            models: vec![declared("qwen-32b")],
+            properties: vec![declared("qwen-32b")],
             ..model("model-x-01", &address(&parent.hub))
         },
         quiet_timing(),
@@ -1309,7 +1323,7 @@ async fn a_parent_lists_its_childrens_models_and_no_other_pools() {
     let _other = relay_pool(
         &spec,
         PoolSettings {
-            models: vec![declared("mistral-24b")],
+            properties: vec![declared("mistral-24b")],
             home: Some("global-02".into()),
             ..model("model-x-02", &address(&elsewhere.hub))
         },
@@ -1350,11 +1364,11 @@ async fn a_parent_lists_its_childrens_models_and_no_other_pools() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     let (pool, listing) = &listed[0];
     assert_eq!(pool, "model-x-01");
-    let models: Vec<&str> = listing
-        .models
+    let properties: Vec<&str> = listing
+        .properties
         .entries
         .iter()
-        .map(|entry| entry.model.as_str())
+        .map(|entry| entry.property.key()["name"].as_str().unwrap_or_default())
         .collect();
-    assert_eq!(models, ["qwen-32b"]);
+    assert_eq!(properties, ["qwen-32b"]);
 }

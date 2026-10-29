@@ -329,6 +329,7 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
         "r",
         [("model_x", "f"), ("model_x", "g")],
         super::super::damping::Damping::default(),
+        gdl::PropertyKinds::new(),
     );
     let node = handle(&pools);
     let mut follows = Follows::new(

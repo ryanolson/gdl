@@ -22,7 +22,7 @@ struct Token {
 struct Chunk {
     id: String,
     created: u64,
-    model: String,
+    property: String,
     choices: Vec<Choice>,
 }
 
@@ -77,7 +77,7 @@ fn bench(c: &mut Criterion) {
         &Chunk {
             id: "chatcmpl-123".into(),
             created: 1_700_000_000,
-            model: "llama-3-70b".into(),
+            property: "llama-3-70b".into(),
             choices: vec![Choice {
                 index: 0,
                 delta: Delta {

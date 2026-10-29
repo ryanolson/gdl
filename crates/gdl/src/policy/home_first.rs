@@ -126,7 +126,7 @@ impl HomeFirstAt {
     /// the others were not there: the index of the chosen pool in
     /// `pools`, or `None` when no kept pool is eligible. The tiers, the
     /// two pools drawn, and the damping cap count only the kept pools. A
-    /// policy that filters the pools, by model for instance, runs
+    /// policy that filters the pools, by property for instance, runs
     /// `home_first` over the rest with this, and allocates nothing. It
     /// reads no head, so it takes a request of any head.
     ///
@@ -199,8 +199,8 @@ trait Thresholds: Copy {
     /// `pool`'s tier, lower first, with its summary, or `None` when it is
     /// not eligible. Out of line: inlined into a pass whose `keep` is a
     /// call, it keeps more values live across that call, and a pick that
-    /// filters by model took 8 ns more. The pass calls it only for the
-    /// pools `keep` keeps, so a pick that filters by model pays the call
+    /// filters by property took 8 ns more. The pass calls it only for the
+    /// pools `keep` keeps, so a pick that filters by property pays the call
     /// for those alone (`docs/src/operations/feature-costs.md`).
     #[inline(never)]
     fn tier<'c>(

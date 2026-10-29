@@ -32,7 +32,7 @@ fn sent(event: &PoolWatchEvent) -> Vec<u8> {
 
 fn pool() -> PoolWatchEvent {
     PoolWatchEvent::Pool {
-        models: None,
+        properties: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

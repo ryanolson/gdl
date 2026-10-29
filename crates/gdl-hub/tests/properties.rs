@@ -1,9 +1,9 @@
-//! A pool's models and presence in its record: each usable entry instance
-//! says what it has of its models in its load reports, and the hub makes
-//! each model's state from what they say, with its history, and writes it
+//! A pool's properties and presence in its record: each usable entry instance
+//! says what it has of its properties in its load reports, and the hub makes
+//! each property's state from what they say, with its history, and writes it
 //! on each change, not only at the heartbeat. A hub that restarts keeps
 //! the history of its pool's last record. A pool whose instances report no
-//! models serves the ones its settings declare. A pool told it is scaled to
+//! properties serves the ones its settings declare. A pool told it is scaled to
 //! 0 says so in its record before the call returns. Every hub runs in
 //! process on OS-assigned ports; every wait is for something observed.
 
@@ -14,13 +14,13 @@ use std::time::Duration;
 use common::{Instance, Records, WAIT, hub_of, model, timing};
 use futures::StreamExt;
 use gdl_hub::PoolTiming;
-use gdl_model::{InstanceModel, InstanceModelState, ModelKey, PoolSettings, SegmentPhase};
-use gdl_pools::{MemoryDirectory, ModelEntry, ModelState, PoolRecord, Presence};
+use gdl_model::{EntryState, PoolSettings, PropertyEntry, PropertyKey, SegmentPhase};
+use gdl_pools::{MemoryDirectory, PoolProperty, PoolRecord, Presence, PropertyState};
 use gdl_watch::{LoadReport, PoolWatchEvent};
 use velo_hub::Hub;
 
 /// The summary period, at which the hub sees an instance that is no
-/// longer usable stop serving its models.
+/// longer usable stop serving its properties.
 const PERIOD: Duration = Duration::from_secs(1);
 
 /// The model pool with the shortest summary period.
@@ -37,20 +37,19 @@ fn quiet() -> PoolTiming {
     timing()
 }
 
-fn says(model: &str, state: InstanceModelState) -> InstanceModel {
-    InstanceModel {
-        model: model.into(),
-        routing_key: None,
-        state,
-    }
+fn says(name: &str, state: EntryState) -> PropertyEntry {
+    PropertyEntry::new(key(name), state)
 }
 
-fn report(models: Option<Vec<InstanceModel>>) -> LoadReport {
+/// A report whose list of kind `test` is `list`, or with no list.
+fn report(list: Option<Vec<PropertyEntry>>) -> LoadReport {
     LoadReport {
         admitted: 0,
         limit: 8,
         refusals: 0,
-        models,
+        properties: list
+            .map(|list| gdl_model::PropertyLists::from([("test".to_string(), list)]))
+            .unwrap_or_default(),
     }
 }
 
@@ -89,17 +88,22 @@ async fn send(instance: &Instance, load: LoadReport) {
     instance.report(load).await.expect("the hub takes it");
 }
 
-/// Each model's state in `record`, by model.
-fn states(record: &PoolRecord) -> Vec<(&str, ModelState)> {
+/// Each property's state in `record`, by property.
+fn states(record: &PoolRecord) -> Vec<(&str, PropertyState)> {
     record
-        .models
+        .properties
         .iter()
-        .map(|entry| (entry.model.as_str(), entry.state))
+        .map(|entry| {
+            (
+                entry.property.key()["name"].as_str().unwrap_or_default(),
+                entry.state,
+            )
+        })
         .collect()
 }
 
-/// The next record whose models are in `expected` states.
-async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> PoolRecord {
+/// The next record whose properties are in `expected` states.
+async fn until(records: &mut Records, expected: &[(&str, PropertyState)]) -> PoolRecord {
     loop {
         let record = records.next().await;
         if states(&record) == expected {
@@ -108,91 +112,95 @@ async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> PoolRe
     }
 }
 
-/// A model that served once is `unavailable` when the instance that
+/// A property that served once is `unavailable` when the instance that
 /// served it leaves, though another instance still loads it: never
 /// `starting` again. The record says so at once, without a heartbeat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_model_that_served_is_unavailable_once_its_server_leaves() {
+async fn a_property_that_served_is_unavailable_once_its_server_leaves() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a, b] = entries(&hub, &readiness).await;
-    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
-    send(
-        &b,
-        report(Some(vec![says("m", InstanceModelState::Starting)])),
-    )
-    .await;
-    let ready = until(&mut records, &[("m", ModelState::Ready)]).await;
+    send(&a, report(Some(vec![says("m", EntryState::Ready)]))).await;
+    send(&b, report(Some(vec![says("m", EntryState::Starting)]))).await;
+    let ready = until(&mut records, &[("m", PropertyState::Ready)]).await;
 
     a.leave().await;
-    let unavailable = until(&mut records, &[("m", ModelState::Unavailable)]).await;
-    assert!(unavailable.models_version > ready.models_version);
-    assert_eq!(unavailable.models[0].since, unavailable.models_version);
+    let unavailable = until(&mut records, &[("m", PropertyState::Unavailable)]).await;
+    assert!(unavailable.properties_version > ready.properties_version);
+    assert_eq!(
+        unavailable.properties[0].since,
+        unavailable.properties_version
+    );
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A model an instance drains leaves the `draining` state for `drained`
+/// A property an instance drains leaves the `draining` state for `drained`
 /// once no usable instance has it, and stays in the record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drained_model_stays_in_the_record() {
+async fn a_drained_property_stays_in_the_record() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
-        says("kept", InstanceModelState::Ready),
-        says("gone", InstanceModelState::Ready),
+        says("kept", EntryState::Ready),
+        says("gone", EntryState::Ready),
     ];
     send(&a, report(Some(both))).await;
     until(
         &mut records,
-        &[("gone", ModelState::Ready), ("kept", ModelState::Ready)],
+        &[
+            ("gone", PropertyState::Ready),
+            ("kept", PropertyState::Ready),
+        ],
     )
     .await;
     let draining = vec![
-        says("kept", InstanceModelState::Ready),
-        says("gone", InstanceModelState::Draining),
+        says("kept", EntryState::Ready),
+        says("gone", EntryState::Draining),
     ];
     send(&a, report(Some(draining))).await;
     until(
         &mut records,
-        &[("gone", ModelState::Draining), ("kept", ModelState::Ready)],
+        &[
+            ("gone", PropertyState::Draining),
+            ("kept", PropertyState::Ready),
+        ],
     )
     .await;
-    send(
-        &a,
-        report(Some(vec![says("kept", InstanceModelState::Ready)])),
-    )
-    .await;
+    send(&a, report(Some(vec![says("kept", EntryState::Ready)]))).await;
     until(
         &mut records,
-        &[("gone", ModelState::Drained), ("kept", ModelState::Ready)],
+        &[
+            ("gone", PropertyState::Drained),
+            ("kept", PropertyState::Ready),
+        ],
     )
     .await;
     hub.shutdown().await.expect("the hub stops");
 }
 
 /// A hub that restarts reads its pool's last record before its first
-/// write: a model that was `ready` is `unavailable` until an instance
+/// write: a property that was `ready` is `unavailable` until an instance
 /// reports, one being drained is still `draining`, and the version goes on
 /// rising.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restarted_hub_keeps_its_models_history() {
+async fn a_restarted_hub_keeps_its_properties_history() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
-    let models = vec![
-        says("served", InstanceModelState::Ready),
-        says("leaving", InstanceModelState::Draining),
+    let properties = vec![
+        says("served", EntryState::Ready),
+        says("leaving", EntryState::Draining),
     ];
-    send(&a, report(Some(models))).await;
+    send(&a, report(Some(properties))).await;
     let before = until(
         &mut records,
         &[
-            ("leaving", ModelState::Draining),
-            ("served", ModelState::Ready),
+            ("leaving", PropertyState::Draining),
+            ("served", PropertyState::Ready),
         ],
     )
     .await;
@@ -208,43 +216,45 @@ async fn a_restarted_hub_keeps_its_models_history() {
     assert_eq!(
         states(&after),
         [
-            ("leaving", ModelState::Draining),
-            ("served", ModelState::Unavailable)
+            ("leaving", PropertyState::Draining),
+            ("served", PropertyState::Unavailable)
         ],
         "the first write after the restart: {after:?}"
     );
-    assert!(after.models_version > before.models_version);
+    assert!(after.properties_version > before.properties_version);
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A pool whose instances report no models of their own serves the models
+/// A pool whose instances report no properties of their own serves the properties
 /// its settings declare: `starting` until an entry instance is usable,
 /// then `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pool_publishes_the_models_its_settings_declare() {
+async fn a_pool_publishes_the_properties_its_settings_declare() {
     let directory = MemoryDirectory::new();
     let settings = PoolSettings {
-        models: vec![ModelKey {
-            model: "llama-70b".into(),
-            routing_key: Some("a".into()),
-        }],
+        properties: vec![gdl_model::PropertyKey::new(
+            "test",
+            serde_json::json!({ "name": "llama-70b", "partition": "a" }),
+        )],
         ..pool()
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
-    let first = until(&mut records, &[("llama-70b", ModelState::Starting)]).await;
+    let first = until(&mut records, &[("llama-70b", PropertyState::Starting)]).await;
     assert_eq!(
-        first.models,
-        [ModelEntry {
-            model: "llama-70b".into(),
-            routing_key: Some("a".into()),
-            state: ModelState::Starting,
-            since: first.models_version,
+        first.properties,
+        [PoolProperty {
+            property: gdl_model::PropertyKey::new(
+                "test",
+                serde_json::json!({ "name": "llama-70b", "partition": "a" })
+            ),
+            state: PropertyState::Starting,
+            since: first.properties_version,
         }]
     );
     let [a] = entries(&hub, &readiness).await;
     send(&a, report(None)).await;
-    until(&mut records, &[("llama-70b", ModelState::Ready)]).await;
+    until(&mut records, &[("llama-70b", PropertyState::Ready)]).await;
     hub.shutdown().await.expect("the hub stops");
 }
 
@@ -299,10 +309,10 @@ async fn held_newer(directory: &MemoryDirectory, than: &PoolRecord) -> PoolRecor
 
 /// A restarted hub whose first read of its pool's last record fails does
 /// not take that for a pool with no record: it reads again before its
-/// first write, so the models keep their history and the version goes on
+/// first write, so the properties keep their history and the version goes on
 /// rising. Waits out one re-read, 1 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
+async fn a_restart_keeps_the_properties_version_when_its_snapshot_fails() {
     /// A directory whose first watch fails.
     struct SnapshotUnavailable(MemoryDirectory, std::sync::atomic::AtomicBool);
 
@@ -340,9 +350,9 @@ async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
-    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
-    let before = until(&mut records, &[("m", ModelState::Ready)]).await;
-    assert!(before.models_version > 0);
+    send(&a, report(Some(vec![says("m", EntryState::Ready)]))).await;
+    let before = until(&mut records, &[("m", PropertyState::Ready)]).await;
+    assert!(before.properties_version > 0);
     hub.shutdown().await.expect("the hub stops");
 
     // Keep the writer's clock ahead, so clock skew cannot cause the regression.
@@ -364,14 +374,14 @@ async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
     hub.shutdown().await.expect("the restarted hub stops");
     assert_eq!(
         states(&after),
-        [("m", ModelState::Unavailable)],
+        [("m", PropertyState::Unavailable)],
         "{after:?}"
     );
     assert!(
-        after.models_version > before.models_version,
+        after.properties_version > before.properties_version,
         "a changed list went from version {} to {} in a newer epoch",
-        before.models_version,
-        after.models_version
+        before.properties_version,
+        after.properties_version
     );
 }
 
@@ -471,52 +481,48 @@ async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
     }
 }
 
-/// A pool declares that it serves each model on its own: when acme-legal
+/// A pool declares that it serves each property on its own: when acme-legal
 /// drains and goes, llama-70b stays `ready` in the record and the pool
 /// stays `serving`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn one_model_going_away_leaves_the_other_and_the_pool_serving() {
+async fn one_property_going_away_leaves_the_other_and_the_pool_serving() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("acme-legal", InstanceModelState::Ready),
+        says("llama-70b", EntryState::Ready),
+        says("acme-legal", EntryState::Ready),
     ];
     send(&a, report(Some(both))).await;
     until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Ready),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Ready),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
     let draining = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("acme-legal", InstanceModelState::Draining),
+        says("llama-70b", EntryState::Ready),
+        says("acme-legal", EntryState::Draining),
     ];
     send(&a, report(Some(draining))).await;
     let record = until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Draining),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Draining),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
     assert_eq!(record.presence, Presence::Serving);
-    send(
-        &a,
-        report(Some(vec![says("llama-70b", InstanceModelState::Ready)])),
-    )
-    .await;
+    send(&a, report(Some(vec![says("llama-70b", EntryState::Ready)]))).await;
     let record = until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Drained),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Drained),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
@@ -524,8 +530,14 @@ async fn one_model_going_away_leaves_the_other_and_the_pool_serving() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// Ask the hub to revoke `model`, or to lift its revocation: the status.
-async fn revoke(hub: &Hub, model: &str, revoked: bool) -> u16 {
+/// Ask the hub to revoke `property`, or to lift its revocation: the status.
+async fn revoke(hub: &Hub, name: &str, revoked: bool) -> u16 {
+    let body = serde_json::to_string(&key(name)).expect("json");
+    revoke_written(hub, &body, revoked).await
+}
+
+/// [`revoke`] of a body as an operator wrote it.
+async fn revoke_written(hub: &Hub, body: &str, revoked: bool) -> u16 {
     let route = if revoked {
         gdl_watch::REVOKE_ROUTE
     } else {
@@ -535,16 +547,23 @@ async fn revoke(hub: &Hub, model: &str, revoked: bool) -> u16 {
         "http://127.0.0.1:{}/v1/ext/gdl-pool{route}",
         hub.control_addr().port()
     );
-    let body = ModelKey::new(model);
-    let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).json(&body).send())
-        .await
-        .expect("the hub answers in time")
-        .expect("the hub answers");
+    let response = tokio::time::timeout(
+        WAIT,
+        reqwest::Client::new()
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send(),
+    )
+    .await
+    .expect("the hub answers in time")
+    .expect("the hub answers");
     response.status().as_u16()
 }
 
-fn key(model: &str) -> ModelKey {
-    ModelKey::new(model)
+/// The key of the test property `{ name }`.
+fn key(name: &str) -> PropertyKey {
+    gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name }))
 }
 
 /// A set serving llama-70b and acme-legal: revoking acme-legal takes it
@@ -553,45 +572,45 @@ fn key(model: &str) -> ModelKey {
 /// still name acme-legal, never bring it back, until the operator lifts
 /// the revocation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
+async fn a_revoked_property_leaves_the_record_while_the_others_serve() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("acme-legal", InstanceModelState::Ready),
+        says("llama-70b", EntryState::Ready),
+        says("acme-legal", EntryState::Ready),
     ];
     send(&a, report(Some(both.clone()))).await;
     let serving = until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Ready),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Ready),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
 
     assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
     let revoked = held_newer(&directory, &serving).await;
-    assert_eq!(states(&revoked), [("llama-70b", ModelState::Ready)]);
+    assert_eq!(states(&revoked), [("llama-70b", PropertyState::Ready)]);
     assert_eq!(revoked.revoked, [key("acme-legal")]);
-    assert!(revoked.models_version > serving.models_version);
+    assert!(revoked.properties_version > serving.properties_version);
     assert_eq!(
         (revoked.state, revoked.presence),
         (serving.state, serving.presence),
-        "the pool serves its other models as before"
+        "the pool serves its other properties as before"
     );
 
     // The instance still has acme-legal, and says so with a change of its
     // own: the record takes the change and leaves acme-legal out.
-    let more = [both, vec![says("qwen-32b", InstanceModelState::Starting)]].concat();
+    let more = [both, vec![says("qwen-32b", EntryState::Starting)]].concat();
     send(&a, report(Some(more.clone()))).await;
     let reported = until(
         &mut records,
         &[
-            ("llama-70b", ModelState::Ready),
-            ("qwen-32b", ModelState::Starting),
+            ("llama-70b", PropertyState::Ready),
+            ("qwen-32b", PropertyState::Starting),
         ],
     )
     .await;
@@ -602,9 +621,9 @@ async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
     assert_eq!(
         states(&lifted),
         [
-            ("acme-legal", ModelState::Ready),
-            ("llama-70b", ModelState::Ready),
-            ("qwen-32b", ModelState::Starting),
+            ("acme-legal", PropertyState::Ready),
+            ("llama-70b", PropertyState::Ready),
+            ("qwen-32b", PropertyState::Starting),
         ],
         "listed again as the instance says"
     );
@@ -613,7 +632,7 @@ async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
 }
 
 /// A revocation holds across a restart of the hub: the restarted hub reads
-/// it from the pool's last record, and leaves the model out though the
+/// it from the pool's last record, and leaves the property out though the
 /// instance reports it `ready`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revocation_survives_a_hub_restart() {
@@ -621,8 +640,8 @@ async fn a_revocation_survives_a_hub_restart() {
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let [a] = entries(&hub, &readiness).await;
     let both = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("acme-legal", InstanceModelState::Ready),
+        says("llama-70b", EntryState::Ready),
+        says("acme-legal", EntryState::Ready),
     ];
     send(&a, report(Some(both.clone()))).await;
     assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
@@ -636,7 +655,7 @@ async fn a_revocation_survives_a_hub_restart() {
     send(&a, report(Some(both))).await;
     let after = loop {
         let record = records.next().await;
-        if record.epoch > before.epoch && states(&record) == [("llama-70b", ModelState::Ready)] {
+        if record.epoch > before.epoch && states(&record) == [("llama-70b", PropertyState::Ready)] {
             break record;
         }
     };
@@ -644,27 +663,27 @@ async fn a_revocation_survives_a_hub_restart() {
     hub.shutdown().await.expect("the restarted hub stops");
 }
 
-/// Draining a model is not revoking it: a model its instance drains stays
+/// Draining a property is not revoking it: a property its instance drains stays
 /// in the record as `draining`, then `drained`, where a reader answers 503
-/// until it clears, while a revoked model leaves the record at once.
+/// until it clears, while a revoked property leaves the record at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_draining_model_stays_listed_where_a_revoked_one_leaves() {
+async fn a_draining_property_stays_listed_where_a_revoked_one_leaves() {
     let directory = MemoryDirectory::new();
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory);
     let [a] = entries(&hub, &readiness).await;
     let three = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("acme-legal", InstanceModelState::Draining),
-        says("qwen-32b", InstanceModelState::Ready),
+        says("llama-70b", EntryState::Ready),
+        says("acme-legal", EntryState::Draining),
+        says("qwen-32b", EntryState::Ready),
     ];
     send(&a, report(Some(three))).await;
     until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Draining),
-            ("llama-70b", ModelState::Ready),
-            ("qwen-32b", ModelState::Ready),
+            ("acme-legal", PropertyState::Draining),
+            ("llama-70b", PropertyState::Ready),
+            ("qwen-32b", PropertyState::Ready),
         ],
     )
     .await;
@@ -672,35 +691,88 @@ async fn a_draining_model_stays_listed_where_a_revoked_one_leaves() {
     until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Draining),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Draining),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
     let rest = vec![
-        says("llama-70b", InstanceModelState::Ready),
-        says("qwen-32b", InstanceModelState::Ready),
+        says("llama-70b", EntryState::Ready),
+        says("qwen-32b", EntryState::Ready),
     ];
     send(&a, report(Some(rest))).await;
     until(
         &mut records,
         &[
-            ("acme-legal", ModelState::Drained),
-            ("llama-70b", ModelState::Ready),
+            ("acme-legal", PropertyState::Drained),
+            ("llama-70b", PropertyState::Ready),
         ],
     )
     .await;
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A model name that is not one is refused, and revokes nothing.
+/// A property that is not one, a kind that is not a settings key or a key
+/// that is not an object, is refused, and revokes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_model_is_not_revoked() {
+async fn a_malformed_property_is_not_revoked() {
     let directory = MemoryDirectory::new();
     let (hub, _pool) = hub_of(pool(), directory.clone(), quiet()).await;
     held(&directory).await;
-    assert_eq!(revoke(&hub, "", true).await, 400);
+    for body in [
+        r#"{"kind":"Test","key":{"name":"m"}}"#,
+        r#"{"kind":"test","key":"m"}"#,
+    ] {
+        assert_eq!(revoke_written(&hub, body, true).await, 400, "{body}");
+    }
     assert!(held(&directory).await.revoked.is_empty());
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// Two builds that write a key's fields in another order, or a missing
+/// optional field as `null`, name one property: two instances that report
+/// it so make one entry, and an operator who writes it a third way
+/// revokes that entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_encodings_of_a_key_name_one_property() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a, b] = entries(&hub, &readiness).await;
+    let written = |text: &str| {
+        let key = serde_json::from_str(text).expect("json");
+        PropertyEntry::new(PropertyKey::new("test", key), EntryState::Ready)
+    };
+    send(
+        &a,
+        report(Some(vec![written(r#"{"name":"m","partition":"p"}"#)])),
+    )
+    .await;
+    send(
+        &b,
+        report(Some(vec![written(
+            r#"{"version":null,"partition":"p","name":"m"}"#,
+        )])),
+    )
+    .await;
+    let listed = until(&mut records, &[("m", PropertyState::Ready)]).await;
+    assert_eq!(
+        serde_json::to_value(&listed.properties[0].property).expect("json"),
+        serde_json::json!({ "kind": "test", "key": { "name": "m", "partition": "p" } }),
+        "one entry, in the canonical form"
+    );
+    assert_eq!(
+        revoke_written(
+            &hub,
+            r#"{"key":{"partition":"p","version":null,"name":"m"},"kind":"test"}"#,
+            true
+        )
+        .await,
+        204
+    );
+    let revoked = held_newer(&directory, &listed).await;
+    assert!(revoked.properties.is_empty(), "{revoked:?}");
+    assert_eq!(revoked.revoked, [listed.properties[0].property.clone()]);
     hub.shutdown().await.expect("the hub stops");
 }
 
@@ -711,7 +783,7 @@ async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
     let directory = common::Gated::new();
     directory.close();
     let settings = PoolSettings {
-        models: vec![key("acme-legal")],
+        properties: vec![key("acme-legal")],
         ..pool()
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
@@ -742,18 +814,18 @@ async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
     );
     assert!(
         recovered
-            .models
+            .properties
             .iter()
-            .all(|entry| entry.model != "acme-legal")
+            .all(|entry| entry.property.key()["name"] != "acme-legal")
     );
 }
 
-/// A declared model needs no usable instance to stay listed as starting.
+/// A declared property needs no usable instance to stay listed as starting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lifted_declared_model_is_listed_without_instances() {
+async fn a_lifted_declared_property_is_listed_without_instances() {
     let directory = MemoryDirectory::new();
     let settings = PoolSettings {
-        models: vec![key("acme-legal"), key("llama-70b")],
+        properties: vec![key("acme-legal"), key("llama-70b")],
         ..pool()
     };
     let (hub, _pool) = hub_of(settings, directory.clone(), quiet()).await;
@@ -761,38 +833,38 @@ async fn a_lifted_declared_model_is_listed_without_instances() {
     assert_eq!(
         states(&before),
         [
-            ("acme-legal", ModelState::Starting),
-            ("llama-70b", ModelState::Starting),
+            ("acme-legal", PropertyState::Starting),
+            ("llama-70b", PropertyState::Starting),
         ],
-        "both declared models start without instances"
+        "both declared properties start without instances"
     );
 
     assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
     let revoked = held_newer(&directory, &before).await;
     assert_eq!(revoked.revoked, [key("acme-legal")]);
-    assert_eq!(states(&revoked), [("llama-70b", ModelState::Starting)]);
+    assert_eq!(states(&revoked), [("llama-70b", PropertyState::Starting)]);
 
     assert_eq!(revoke(&hub, "acme-legal", false).await, 204);
     let lifted = held_newer(&directory, &revoked).await;
     hub.shutdown().await.expect("the hub stops");
     assert!(lifted.revoked.is_empty());
-    assert!(lifted.models_version > revoked.models_version);
+    assert!(lifted.properties_version > revoked.properties_version);
     assert_eq!(
         states(&lifted),
         states(&before),
-        "lifting a declared model restores its starting entry without an instance report"
+        "lifting a declared property restores its starting entry without an instance report"
     );
 }
 
 /// An instance forgets a drain once its hub answers a report that
-/// carries it, as `gdl::InstanceModels` does, and then drops the model
+/// carries it, as `gdl::InstanceProperties` does, and then drops the property
 /// from its reports. So the hub answers such a report only once a record
 /// that carries the drain is stored: a hub that restarts before the write
 /// reads the record from before the drain, and an instance that had
-/// forgotten the drain could never end it, leaving the model
+/// forgotten the drain could never end it, leaving the property
 /// `unavailable`. With the write held, the report is not answered, the
-/// instance still says the model drains to the restarted hub, and the
-/// model ends `drained`. A write that is not held is the control.
+/// instance still says the property drains to the restarted hub, and the
+/// property ends `drained`. A write that is not held is the control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() {
     use std::sync::Arc;
@@ -810,10 +882,12 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
 
         async fn publish(&self, record: PoolRecord) -> Result<(), gdl_pools::DirectoryError> {
             if self.blocked
-                && record
-                    .models
-                    .iter()
-                    .any(|entry| matches!(entry.state, ModelState::Draining | ModelState::Drained))
+                && record.properties.iter().any(|entry| {
+                    matches!(
+                        entry.state,
+                        PropertyState::Draining | PropertyState::Drained
+                    )
+                })
             {
                 self.arrived.notify_one();
                 tokio::time::timeout(WAIT, std::future::pending::<()>())
@@ -844,10 +918,10 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
         let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
         let mut records = Records::new(&directory.records);
         let [a] = entries(&hub, &readiness).await;
-        send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
-        until(&mut records, &[("m", ModelState::Ready)]).await;
+        send(&a, report(Some(vec![says("m", EntryState::Ready)]))).await;
+        until(&mut records, &[("m", PropertyState::Ready)]).await;
 
-        let draining = report(Some(vec![says("m", InstanceModelState::Draining)]));
+        let draining = report(Some(vec![says("m", EntryState::Draining)]));
         let answered = a.report(draining.clone()).await.is_ok();
         if block {
             tokio::time::timeout(WAIT, directory.arrived.notified())
@@ -855,7 +929,7 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
                 .expect("the drain's record write is pending");
             assert_eq!(
                 states(&held(&directory.records).await),
-                [("m", ModelState::Ready)],
+                [("m", PropertyState::Ready)],
                 "the record has not stored the drain"
             );
             assert!(
@@ -864,9 +938,9 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
             );
         } else {
             assert!(answered, "the hub answers once the drain is stored");
-            until(&mut records, &[("m", ModelState::Draining)]).await;
+            until(&mut records, &[("m", PropertyState::Draining)]).await;
         }
-        // The node drops the model: a drain no answer acknowledged stays in
+        // The node drops the property: a drain no answer acknowledged stays in
         // the instance's reports.
         let dropped = if answered {
             report(Some(vec![]))
@@ -884,12 +958,12 @@ async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() 
         readiness
             .set_presence(Presence::ScaledToZero)
             .await
-            .expect("the current model list is stored");
+            .expect("the current property list is stored");
         let after = held(&directory.records).await;
         hub.shutdown().await.expect("the restarted hub stops");
         assert_eq!(
             states(&after),
-            [("m", ModelState::Drained)],
+            [("m", PropertyState::Drained)],
             "the drain survives the restart (block={block})"
         );
     }
@@ -903,24 +977,21 @@ async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
     let (hub, readiness) = hub_of(pool(), directory.clone(), quiet()).await;
     let mut records = Records::new(&directory.inner);
     let [a] = entries(&hub, &readiness).await;
-    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
-    until(&mut records, &[("m", ModelState::Ready)]).await;
+    send(&a, report(Some(vec![says("m", EntryState::Ready)]))).await;
+    until(&mut records, &[("m", PropertyState::Ready)]).await;
 
     directory.close();
     let revoking = readiness.revoke(
-        ModelKey {
-            model: "m".into(),
-            routing_key: None,
-        },
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })),
         true,
     );
     tokio::pin!(revoking);
     assert!(futures::poll!(&mut revoking).is_pending());
     directory.holding().await;
-    let draining = report(Some(vec![says("m", InstanceModelState::Draining)]));
+    let draining = report(Some(vec![says("m", EntryState::Draining)]));
     let answered = a.report(draining.clone()).await.is_ok();
     let last = held(&directory.inner).await;
-    assert_eq!(states(&last), [("m", ModelState::Ready)]);
+    assert_eq!(states(&last), [("m", PropertyState::Ready)]);
     assert!(last.revoked.is_empty(), "neither change is stored");
     let dropped = if answered {
         report(Some(vec![]))
@@ -938,12 +1009,12 @@ async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
     readiness
         .set_presence(Presence::ScaledToZero)
         .await
-        .expect("the current model list is stored");
+        .expect("the current property list is stored");
     let after = held(&directory.inner).await;
     hub.shutdown().await.expect("the restarted hub stops");
     assert_eq!(
         states(&after),
-        [("m", ModelState::Drained)],
+        [("m", PropertyState::Drained)],
         "the drain was answered={answered} before the revocation was stored"
     );
 }

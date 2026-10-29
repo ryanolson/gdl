@@ -479,7 +479,7 @@ impl Fleet {
             .unwrap_or_default();
         ready.extend(pool.ready.iter().map(|(s, n)| (s.clone(), *n)));
         Some(PoolSettings {
-            models: Vec::new(),
+            properties: Vec::new(),
             name: name.to_string(),
             layout: pool.layout.clone(),
             class: pool.class.clone(),

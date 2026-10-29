@@ -53,24 +53,25 @@ pub struct PoolRecord {
     /// and sends none. `serving` when a record does not say.
     #[serde(default)]
     pub presence: Presence,
-    /// The models the pool serves, each with its state. An entry stays
-    /// until the pool withdraws, unless it is `drained`: at most
-    /// [`PoolRecord::MAX_DRAINED`] of those are kept, the oldest dropped
-    /// first. Not checked with the record, so that one malformed model
-    /// never costs the pool its record.
+    /// The properties the pool serves, each with its state, sorted by
+    /// kind, then key. An entry stays until the pool withdraws, unless it
+    /// is `drained`: at most [`PoolRecord::MAX_DRAINED`] of those are kept,
+    /// the oldest dropped first. Not checked with the record, so that one
+    /// malformed property never costs the pool its record. A directory
+    /// stores the keys as they are, and never reads a kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<ModelEntry>,
-    /// Raised on every change of `models`, and never lowered, also across
-    /// a restart of the pool's hub, which counts from its epoch in the high
-    /// bits: a reader that holds this version holds this list.
+    pub properties: Vec<PoolProperty>,
+    /// Raised on every change of `properties`, and never lowered, also
+    /// across a restart of the pool's hub, which counts from its epoch in
+    /// the high bits: a reader that holds this version holds this list.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub models_version: u64,
-    /// The models an operator revoked on this pool: none of them is in
-    /// `models`, whatever the pool's instances say, until the operator
+    pub properties_version: u64,
+    /// The properties an operator revoked on this pool: none of them is in
+    /// `properties`, whatever the pool's instances say, until the operator
     /// lifts the revocation. Kept in the record, so that a hub that
-    /// restarts keeps them, and counted in `models_version`.
+    /// restarts keeps them, and counted in `properties_version`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub revoked: Vec<gdl_model::ModelKey>,
+    pub revoked: Vec<gdl_model::PropertyKey>,
 }
 
 impl PoolRecord {
@@ -78,7 +79,7 @@ impl PoolRecord {
     /// lease, three of its default heartbeats.
     pub const DEFAULT_LEASE: Duration = gdl_model::HubTiming::DEFAULT_LEASE;
 
-    /// The most `drained` model entries a record keeps.
+    /// The most `drained` property entries a record keeps.
     pub const MAX_DRAINED: usize = 1_000;
 
     /// The record's place in its writer's order of writes.
@@ -151,8 +152,8 @@ pub enum Presence {
 }
 
 /// Whether a pool is expected to answer, as a reader judges it from the
-/// pool's record and its follow: what a model gate tells a model whose
-/// pools are all silent (503) from one decommissioned (404) by.
+/// pool's record and its follow: what a gate tells a property whose pools
+/// are all silent (503) from one decommissioned (404) by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolCondition {
@@ -167,37 +168,57 @@ pub enum PoolCondition {
     Missing,
 }
 
-/// One model a pool serves, in its record.
+/// One property a pool serves, in its record: the property, and what the
+/// pool can do with it, with its history.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModelEntry {
-    /// The name a client sends.
-    pub model: String,
-    /// The serving partition, when the pool has more than one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_key: Option<String>,
-    /// What the pool can do with the model, with its history.
-    pub state: ModelState,
-    /// The record's `models_version` at which the entry took its state:
-    /// it orders the `drained` entries, oldest first.
+#[serde(from = "PropertyWire", into = "PropertyWire")]
+pub struct PoolProperty {
+    /// The property: its kind and its key, as the pool's instances or its
+    /// settings named it.
+    pub property: gdl_model::PropertyKey,
+    /// What the pool can do with the property, with its history.
+    pub state: PropertyState,
+    /// The record's `properties_version` at which the entry took its
+    /// state: it orders the `drained` entries, oldest first.
     pub since: u64,
 }
 
-impl ModelEntry {
-    /// The entry's key.
-    pub fn key(&self) -> gdl_model::ModelKey {
-        gdl_model::ModelKey {
-            model: self.model.clone(),
-            routing_key: self.routing_key.clone(),
+/// A record's entry as it is written: the key's fields beside the state.
+#[derive(Serialize, Deserialize)]
+struct PropertyWire {
+    kind: String,
+    key: serde_json::Value,
+    state: PropertyState,
+    since: u64,
+}
+
+impl From<PropertyWire> for PoolProperty {
+    fn from(wire: PropertyWire) -> Self {
+        Self {
+            property: gdl_model::PropertyKey::new(wire.kind, wire.key),
+            state: wire.state,
+            since: wire.since,
         }
     }
 }
 
-/// What a pool can do with one model, as its hub computes it from its
-/// entry instances: a state keeps what came before it, so that a model
+impl From<PoolProperty> for PropertyWire {
+    fn from(entry: PoolProperty) -> Self {
+        Self {
+            kind: entry.property.kind().to_string(),
+            key: entry.property.key().clone(),
+            state: entry.state,
+            since: entry.since,
+        }
+    }
+}
+
+/// What a pool can do with one property, as its hub computes it from its
+/// entry instances: a state keeps what came before it, so that a property
 /// that served once never reads as one that never did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelState {
+pub enum PropertyState {
     /// Registered, and never `ready` in this pool.
     Starting,
     /// A usable entry instance can serve it now.

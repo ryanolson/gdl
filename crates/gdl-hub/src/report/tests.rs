@@ -43,8 +43,8 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 lease: Duration::from_secs(30),
                 load: None,
                 presence: Default::default(),
-                models: Vec::new(),
-                models_version: 0,
+                properties: Vec::new(),
+                properties_version: 0,
                 revoked: Vec::new(),
             };
             let record = PoolRecord {

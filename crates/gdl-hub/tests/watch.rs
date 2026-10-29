@@ -103,7 +103,7 @@ fn state(state: PoolState) -> PoolWatchEvent {
 /// The model pool's first event, in `state`, under `epoch`.
 fn pool(epoch: u64, state: PoolState) -> PoolWatchEvent {
     PoolWatchEvent::Pool {
-        models: None,
+        properties: None,
         name: POOL.into(),
         class: "model_x".into(),
         epoch,
@@ -155,7 +155,7 @@ impl View {
             }
             PoolWatchEvent::Synced
             | PoolWatchEvent::Load { .. }
-            | PoolWatchEvent::Models { .. } => {}
+            | PoolWatchEvent::Properties { .. } => {}
         }
     }
 }
@@ -353,7 +353,7 @@ async fn a_class_no_hop_enters_is_watched_for_its_state_alone() {
         snapshot(&mut watch).await,
         [
             PoolWatchEvent::Pool {
-                models: None,
+                properties: None,
                 name: GLOBAL.into(),
                 class: "global".into(),
                 epoch: published.epoch,

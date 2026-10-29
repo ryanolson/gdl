@@ -241,7 +241,7 @@ pub struct Model<'a> {
     pub entries: usize,
 }
 
-/// [`model`] for any graph of `spec`, whose root `assemble` builds, with
+/// [`property`] for any graph of `spec`, whose root `assemble` builds, with
 /// each entry instance's runtime settings changed by `entry`. Its load
 /// summary period is the shortest, [`SUMMARY`]: a `home_first` chooser
 /// sends only to a pool whose summary it has.
@@ -255,7 +255,7 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
     model_summarized(spec, directory, pool, RUNTIME, entry, assemble).await
 }
 
-/// [`model`] with the default load summary period, 10 s, so that its
+/// [`property`] with the default load summary period, 10 s, so that its
 /// hub makes no summary within a test, and a chooser has none to choose
 /// it by.
 pub async fn model_unsummarized(
@@ -316,7 +316,7 @@ pub async fn model_in(
     .await
 }
 
-/// [`model`], with its hub's timing changed by `change`.
+/// [`property`], with its hub's timing changed by `change`.
 pub async fn model_timed(
     spec: &DeploymentSpec,
     directory: &Resolving,
@@ -521,7 +521,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
     }
 }
 
-/// A model pool whose class splits the model part of the reference graph
+/// A model pool whose class splits the property part of the reference graph
 /// over the entry `f` and other segments: its hub, its entry instances,
 /// and one instance of each other segment, in the order they were named.
 pub struct Spread<H> {

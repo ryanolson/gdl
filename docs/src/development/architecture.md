@@ -4,9 +4,9 @@ The root workspace has thirteen crates. Each example is its own workspace, outsi
 
 | Crate | Depends on | Contents |
 |---|---|---|
-| `gdl` | `gdl-model`, `gdl-pools`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, pool policies, the followed pools' view (`FollowedPools`), the pool hub's record tables (`PoolRecords`), metrics, the derives, and local composition |
+| `gdl` | `gdl-model`, `gdl-pools`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, pool policies, the followed pools' view (`FollowedPools`) and its typed property index (`PropertyKind`, `PropertyIndex`), what a node says of its instance's properties (`InstanceProperties`), the pool hub's record tables (`PoolRecords`), metrics, the derives, and local composition |
 | `gdl-runtime` | `gdl`, `gdl-model`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
-| `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a pool's settings, and the names of a segment's hub services. It builds for wasm |
+| `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a pool's settings, a property's key in its canonical form (`PropertyKey`, `PropertyEntry`), and the names of a segment's hub services. It builds for wasm |
 | `gdl-syntax` | `gdl-model` | The graph parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract. It builds for wasm |
 | `gdl-message` | `gdl-model` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue |
 | `gdl-macros` | `gdl-model`, `gdl-syntax` | `graph!`, `segment!` (a generated segment crate's library), `derive(Message)`, `derive(Node)`, `derive(Config)`, `derive(Metrics)`, `derive(Endpoints)`, and `#[export]` |

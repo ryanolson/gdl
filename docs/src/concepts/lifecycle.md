@@ -48,7 +48,7 @@ The steps, in order:
 2. **Signals and the system listener.** The binary takes SIGINT and SIGTERM and binds its system listener before it builds anything. A stop while the nodes load ends the launch with "stopped while starting" and exit code 1. It does not kill the process the default way. `live` answers from here on ([Health and metrics](../operations/observability.md)).
 3. **Build.** Each hosted node is built through `gdl::Build` with its settings table and its metrics. A bad table fails here, before any peer waits for this instance.
 4. **Register.** Under a hub, the instance registers now, so the hub knows that it is live while its nodes load. The hub admits only a binary built for its graph and placement.
-5. **Loaded.** The instance waits for `Build::ready` of every hosted node. That is immediate by default. A node that loads a model after construction resolves it when the model is loaded. Then the instance announces `loaded`.
+5. **Loaded.** The instance waits for `Build::ready` of every hosted node. That is immediate by default. A node that loads data after construction resolves it when the data is loaded. Then the instance announces `loaded`.
 6. **Roster.** The instance waits for enough loaded instances of each segment. Under a hub that is at least `[min_replicas]` of each (1 by default), not counting retired ones. In a roster directory it is exactly `[instances]` of each (1 by default). These instances are its roster: the instances it routes to.
 7. **Serving.** The instance starts its segment, installs its handlers, and announces `serving`.
 8. **Barrier.** The instance waits until every instance in its roster of the segments it sends to has announced `serving`. Then it releases the roster.

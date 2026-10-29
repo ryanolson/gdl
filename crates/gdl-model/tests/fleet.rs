@@ -170,7 +170,7 @@ fn a_pools_settings_have_its_quorum_resolved() {
     assert_eq!(
         larger,
         PoolSettings {
-            models: Vec::new(),
+            properties: Vec::new(),
             name: "model-x-02-us-east-1".into(),
             layout: None,
             class: "model_x".into(),

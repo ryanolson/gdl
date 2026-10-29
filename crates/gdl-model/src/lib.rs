@@ -18,10 +18,10 @@ mod fleet;
 mod hash;
 mod manifest;
 mod metrics;
-mod models;
 mod placement;
 mod pool;
 mod problem;
+mod properties;
 
 use std::fmt;
 
@@ -39,7 +39,6 @@ pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
     RUNTIME_METRICS, WORKER_LABEL,
 };
-pub use models::{InstanceModel, InstanceModelState, ModelKey};
 pub use placement::{
     ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
     PlacementErrors, Placements, PoolPolicy, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge,
@@ -52,6 +51,7 @@ pub use pool::{
     missing_state_dir, pool_variable,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
+pub use properties::{EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

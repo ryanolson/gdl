@@ -1,9 +1,9 @@
 //! The pool's record, published on each change of the judged state, of
-//! its presence, and of its models, and on the heartbeat, with the load
+//! its presence, and of its properties, and on the heartbeat, with the load
 //! summary as it is when it is written, and withdrawn once the pool's
 //! drain has ended. Under the `relay` backend the heartbeat is the cadence
 //! the parent last answered with. Before its first write, the hub reads
-//! the pool's last record, whose models keep their history.
+//! the pool's last record, whose properties keep their history.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::drain::Drain;
 use super::feed::Feed;
-use super::models::ModelList;
+use super::properties::PropertyList;
 use crate::HubDirectory;
 
 /// The longest one read of the pool's last record may take before the
@@ -49,7 +49,7 @@ pub(super) struct Publisher<D> {
 }
 
 impl<D: PoolDirectory> Publisher<D> {
-    /// Publish the judged state, the presence, and the model entries,
+    /// Publish the judged state, the presence, and the property entries,
     /// with the summary `loads` holds when each record is written, until
     /// `cancel`, or until the judgment ends. A change of the summary is
     /// not a write of its own: the heartbeat carries it, so that the
@@ -62,12 +62,12 @@ impl<D: PoolDirectory> Publisher<D> {
     }
 
     /// Publish at once, then each state the judgment changes to, each
-    /// presence, and each change of the model entries, and, while none
+    /// presence, and each change of the property entries, and, while none
     /// changes, on every heartbeat. A change while a write is in flight
     /// is written once that write ends; one replaced meanwhile by a later
     /// change is not written at all, since a reader keeps only the newest
     /// record. The first write waits for the pool's last record to be read,
-    /// bounded, so that its models keep their history. Once the pool's drain has ended, the
+    /// bounded, so that its properties keep their history. Once the pool's drain has ended, the
     /// record is withdrawn, after a last write that says it is `draining`
     /// if the last did not, and nothing is written again: a heartbeat
     /// after the withdrawal would bring the record back. The pool's
@@ -75,7 +75,7 @@ impl<D: PoolDirectory> Publisher<D> {
     async fn publish_until(&self, sources: &mut Sources) {
         let directory = &*self.directory;
         // A record written before the last one is read would lose the
-        // history of the pool's models, so the hub writes none until it
+        // history of the pool's properties, so the hub writes none until it
         // has read it. Under the `relay` backend, a write could not land
         // while the parent cannot be read either.
         let (mut writer, held) = loop {
@@ -90,10 +90,14 @@ impl<D: PoolDirectory> Publisher<D> {
         };
         let stored = &self.stored;
         let feed = &*self.feed;
-        let held = held
-            .as_ref()
-            .map(|held| (&held.models[..], held.models_version, &held.revoked[..]));
-        feed.restore(held, super::models::floor(writer.epoch));
+        let held = held.as_ref().map(|held| {
+            (
+                &held.properties[..],
+                held.properties_version,
+                &held.revoked[..],
+            )
+        });
+        feed.restore(held, super::properties::floor(writer.epoch));
         let mut written = sources.take();
         let mut state = written.state;
         writer
@@ -113,7 +117,7 @@ impl<D: PoolDirectory> Publisher<D> {
                     heartbeat.reset();
                 }
                 Ok(()) = sources.presence.changed() => heartbeat.reset(),
-                Ok(()) = sources.models.changed() => heartbeat.reset(),
+                Ok(()) = sources.properties.changed() => heartbeat.reset(),
                 () = &mut ended => break,
                 period = answered(&mut cadence) => {
                     // A new cadence counts from the write it answered, and
@@ -146,13 +150,13 @@ impl<D: PoolDirectory> Publisher<D> {
 }
 
 /// What the record last stored says of the pool's state, presence, and
-/// models, and the latest request for a presence that it carries.
+/// properties, and the latest request for a presence that it carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Stored {
     pub(super) state: PoolState,
     pub(super) presence: Presence,
     pub(super) request: u64,
-    pub(super) models: Arc<ModelList>,
+    pub(super) properties: Arc<PropertyList>,
 }
 
 /// The presence the hub was last told, and the number of that request:
@@ -170,16 +174,16 @@ struct Written {
     state: PoolState,
     presence: Asked,
     load: Option<LoadSummary>,
-    models: Arc<ModelList>,
+    properties: Arc<PropertyList>,
 }
 
 /// The sources of what each write says: the judged state, the presence
-/// the hub was told, the load summary, and the model entries.
+/// the hub was told, the load summary, and the property entries.
 pub(super) struct Sources {
     pub(super) states: watch::Receiver<PoolState>,
     pub(super) presence: watch::Receiver<Asked>,
     pub(super) loads: watch::Receiver<Option<LoadSummary>>,
-    pub(super) models: watch::Receiver<Arc<ModelList>>,
+    pub(super) properties: watch::Receiver<Arc<PropertyList>>,
 }
 
 impl Sources {
@@ -189,7 +193,7 @@ impl Sources {
             state: *self.states.borrow_and_update(),
             presence: *self.presence.borrow_and_update(),
             load: *self.loads.borrow(),
-            models: Arc::clone(&self.models.borrow_and_update()),
+            properties: Arc::clone(&self.properties.borrow_and_update()),
         }
     }
 }
@@ -285,15 +289,15 @@ impl Writer {
             state,
             presence,
             load,
-            ref models,
+            ref properties,
         } = *written;
         let record = PoolRecord {
             state,
             load,
             presence: presence.presence,
-            models: models.entries.clone(),
-            models_version: models.version,
-            revoked: models.revoked.clone(),
+            properties: properties.entries.clone(),
+            properties_version: properties.version,
+            revoked: properties.revoked.clone(),
             epoch: self.epoch,
             seq: self.seq,
             ..record.clone()
@@ -311,7 +315,7 @@ impl Writer {
                     state,
                     presence: presence.presence,
                     request: presence.request,
-                    models: Arc::clone(models),
+                    properties: Arc::clone(properties),
                 }));
                 self.stored = true;
             }
@@ -322,15 +326,15 @@ impl Writer {
                 } else if held.epoch >= self.epoch && !self.stored {
                     // Nothing has been stored under this epoch, so no reader
                     // knows it: it can still move past the one held. The
-                    // models' versions follow it, so they stay above the
+                    // properties' versions follow it, so they stay above the
                     // ones published under the epoch held. An equal epoch
                     // is a predecessor's that started in the same
-                    // millisecond, whose models' versions count from the
+                    // millisecond, whose properties' versions count from the
                     // same floor: catching up its sequence alone would
                     // publish a lower version than it did.
                     self.epoch = held.epoch.saturating_add(1);
                     self.seq = 0;
-                    feed.raise_floor(super::models::floor(self.epoch));
+                    feed.raise_floor(super::properties::floor(self.epoch));
                 } else {
                     tracing::error!(
                         %held,

@@ -18,7 +18,7 @@ Every segment binary repeats one lifecycle: the arguments and `--healthcheck`, t
 
 Under a hub, an instance registers before its nodes are ready, and keeps the lease while they load.
 
-**Why:** the hub then knows that the process is live while a model loads. A node that loads for longer than the hub's lease is not reaped meanwhile.
+**Why:** the hub then knows that the process is live while a node loads. A node that loads for longer than the hub's lease is not reaped meanwhile.
 
 ## The readiness order
 

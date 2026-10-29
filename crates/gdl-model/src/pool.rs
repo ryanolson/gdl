@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Layout, ModelKey, Problem, Problems, check_layout_name};
+use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 
 /// A pool's own settings: the `[pool]` table of a segment's settings
 /// (`GDL_POOL__NAME`, `GDL_POOL__READY__<SEGMENT>`, and so on), which tells
@@ -38,11 +38,13 @@ use crate::{Layout, ModelKey, Problem, Problems, check_layout_name};
 /// model_y = 1
 /// ```
 ///
-/// A pool whose instances report no models of their own declares, for its
-/// hub alone, the models it serves:
+/// A pool whose instances report no properties of a kind declares, for
+/// its hub alone, the properties of that kind it serves, each a key of
+/// the kind's own type:
 ///
 /// ```toml
-/// models = [{ model = "llama-70b" }, { model = "qwen-32b", routing_key = "a" }]
+/// [properties]
+/// shard = [{ name = "a" }, { name = "b", partition = "p" }]
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Table", into = "Table")]
@@ -100,10 +102,12 @@ pub struct PoolSettings {
     /// and how many watches it serves at once. Only the pool's hub reads
     /// it.
     pub timing: HubTiming,
-    /// The models the pool serves when its entry instances report none of
-    /// their own (`models`): each usable entry instance that reports no
-    /// list serves them. Only the pool's hub reads it.
-    pub models: Vec<ModelKey>,
+    /// The properties the pool serves when its entry instances report
+    /// none of their kind (`[properties]`, a list of keys for each kind):
+    /// each usable entry instance that reports no list of a kind serves
+    /// the kind's. Sorted by kind, then in the order written. Only the
+    /// pool's hub reads it.
+    pub properties: Vec<PropertyKey>,
 }
 
 /// How a pool's hub paces its judgment, its record, and its watches, and
@@ -486,20 +490,21 @@ impl PoolSettings {
                 ),
                 _ => (None, None),
             };
-            let models = (!self.models.is_empty() && sent_to(layout, class).is_none()).then(|| {
-                at(
-                    "models".into(),
-                    format!(
-                        "no class sends to class `{class}`, so its pool serves no models to another"
-                    ),
-                )
-            });
+            let properties = (!self.properties.is_empty() && sent_to(layout, class).is_none())
+                .then(|| {
+                    at(
+                        "properties".into(),
+                        format!(
+                            "no class sends to class `{class}`, so its pool serves no properties to another"
+                        ),
+                    )
+                });
             own.into_iter()
                 .chain(strays)
                 .chain(requires)
                 .chain(reports)
                 .chain(keeps)
-                .chain(models)
+                .chain(properties)
                 .collect()
         }
     }
@@ -703,8 +708,8 @@ struct Table {
     watch_caps: Caps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keyed_capacity: Option<usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    models: Vec<ModelKey>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    properties: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 /// The `[watch_caps]` table as written: each cap that is set.
@@ -832,14 +837,22 @@ impl TryFrom<Table> for PoolSettings {
         }
         let summary = Duration::from_millis(table.summary_ms);
         check_summary(summary).map_err(|why| at("summary_ms", why))?;
+        let mut properties = Vec::new();
         let mut declared = BTreeSet::new();
-        for model in &table.models {
-            model.check().map_err(|why| at("models", why))?;
-            if !declared.insert(model) {
-                return Err(at(
-                    "models",
-                    format!("model `{}` is declared twice", model.model),
-                ));
+        for (kind, keys) in table.properties {
+            for key in keys {
+                let property = PropertyKey::new(kind.clone(), key);
+                property.check().map_err(|why| at("properties", why))?;
+                if !declared.insert(property.clone()) {
+                    return Err(at(
+                        "properties",
+                        format!(
+                            "property `{}` of kind `{kind}` is declared twice",
+                            property.key()
+                        ),
+                    ));
+                }
+                properties.push(property);
             }
         }
         Ok(Self {
@@ -854,7 +867,7 @@ impl TryFrom<Table> for PoolSettings {
             hub: table.hub,
             summary,
             timing,
-            models: table.models,
+            properties,
         })
     }
 }
@@ -1016,7 +1029,16 @@ impl From<PoolSettings> for Table {
                 settings.timing.keyed_capacity,
                 HubTiming::DEFAULT_KEYED_CAPACITY,
             ),
-            models: settings.models,
+            properties: settings.properties.into_iter().fold(
+                BTreeMap::new(),
+                |mut kinds: BTreeMap<String, Vec<serde_json::Value>>, property| {
+                    kinds
+                        .entry(property.kind().to_string())
+                        .or_default()
+                        .push(property.key().clone());
+                    kinds
+                },
+            ),
         }
     }
 }

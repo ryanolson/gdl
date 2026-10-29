@@ -30,8 +30,8 @@ mod items;
 #[doc(hidden)]
 mod meter;
 mod metrics;
-mod models;
 mod policy;
+mod properties;
 mod records;
 mod role;
 mod select;
@@ -43,24 +43,26 @@ pub use compose::{
 };
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
-pub use followed::{ClassPools, FollowedPools, ModelIndex, ModelSet};
+pub use followed::{
+    ClassPools, FollowedPools, PropertyIndex, PropertyIndexes, PropertyKinds, PropertyPool,
+};
 pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{
-    ConfigField, ConfigSchema, ConfigValue, Encoding, InstanceModel, InstanceModelState,
-    MetricField, MetricKind, ModelKey,
+    ConfigField, ConfigSchema, ConfigValue, Encoding, EntryState, MetricField, MetricKind,
+    PropertyEntry, PropertyKey,
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
-pub use models::InstanceModels;
 pub use policy::{
-    ChoiceLease, Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, ModelState, NoPool, Pool,
-    PoolChoice, PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, RoundRobin,
+    ChoiceLease, Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool, PoolChoice,
+    PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, PropertyState, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime
 /// registers and serves.
 pub use prometheus;
+pub use properties::{InstanceProperties, PropertyKind};
 pub use records::{
     Checked, Expected, HubRecords, PoolRecords, Record, RecordsUnavailable, Written,
 };
@@ -141,7 +143,7 @@ pub use gdl_macros::Projection;
 pub mod __runtime {
     pub use crate::codec::{decoder, encoder, encoder_into, encoder_sized};
     pub use crate::cx::wall_now_nanos;
-    pub use crate::followed::PoolSource;
+    pub use crate::followed::{PoolSource, PropertyKindsNow};
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,

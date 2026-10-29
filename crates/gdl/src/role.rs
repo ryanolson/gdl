@@ -158,7 +158,7 @@ pub trait Build: Sized + Send + Sync + 'static {
         metrics: Self::Metrics,
     ) -> impl Future<Output = Result<Self>> + Send;
 
-    /// Resolve once the implementation can take work: a model is loaded, a
+    /// Resolve once the implementation can take work: a property is loaded, a
     /// connection is open. The segment announces itself as loaded, and takes
     /// requests, only after every node it hosts has. Ready at once by
     /// default.

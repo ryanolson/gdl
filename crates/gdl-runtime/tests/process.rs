@@ -332,7 +332,7 @@ fn a_pool_table_is_read_from_a_file() {
     assert_eq!(
         config.pool(),
         Some(&PoolSettings {
-            models: Vec::new(),
+            properties: Vec::new(),
             name: "global-us-east-1".into(),
             layout: None,
             class: "global".into(),
@@ -369,7 +369,7 @@ fn a_pool_table_is_read_from_the_environment() {
         assert_eq!(
             config.pool(),
             Some(&PoolSettings {
-                models: Vec::new(),
+                properties: Vec::new(),
                 name: "global-us-east-1".into(),
                 layout: Some("regional".into()),
                 class: "global".into(),
@@ -450,7 +450,7 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_pool() {
         assert_eq!(
             config.pool(),
             Some(&PoolSettings {
-                models: Vec::new(),
+                properties: Vec::new(),
                 name: "model-x-02-us-east-1".into(),
                 layout: None,
                 class: "model_x".into(),

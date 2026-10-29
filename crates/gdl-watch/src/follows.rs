@@ -117,7 +117,7 @@ pub enum FollowEvent {
     Synced {
         /// Whether the hub's watch of the pool directory had completed its
         /// first snapshot of every class it sends to when this watch
-        /// began: until then, a model the listings do not name may still
+        /// began: until then, a property the listings do not name may still
         /// be listed by a record the hub has not read. A hub ends each
         /// watch whose snapshot said `false` once it has, so that a reader
         /// learns it from the next watch's snapshot. `false` from a hub of
@@ -224,7 +224,7 @@ pub enum FollowEvent {
         generation: u64,
     },
     /// What the hub knows of a pool's record changed: its region, its
-    /// condition, and its models, for its choosers' model index. The hub
+    /// condition, and its properties, for its choosers' property index. The hub
     /// lists every pool of a class it sends to whose record it has read
     /// and whose hashes are its own, followed or not, until the pool
     /// withdraws its record; `listing` is `None` once it has. A snapshot
@@ -284,8 +284,8 @@ impl FollowEvent {
     }
 }
 
-/// What a hub knows of one pool's record, for its choosers' model index:
-/// the pool's region and condition, and its models, from the record or
+/// What a hub knows of one pool's record, for its choosers' property index:
+/// the pool's region and condition, and its properties, from the record or
 /// the follow link, whichever has the higher version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
@@ -293,9 +293,9 @@ pub struct Listing {
     pub region: String,
     /// Whether the pool is live, scaled to 0, or missing.
     pub condition: PoolCondition,
-    /// The pool's model entries, with their version.
+    /// The pool's property entries, with their version.
     #[serde(default)]
-    pub models: crate::ModelList,
+    pub properties: crate::PropertyList,
     /// How long the pool had been silent when the hub sent this, in
     /// milliseconds, while it is missing: since its record's last write
     /// when its lease passed, or since its follow's link was lost,

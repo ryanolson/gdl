@@ -14,8 +14,8 @@ A parent's hub learns about a child over two links with different jobs.
 
 | Link | Carries | If it fails |
 |---|---|---|
-| The pool directory | which pools exist: name, class, region, parent, hashes, state, epoch, hub address, presence, models | no new child is found; a child already followed stays followed |
-| The follow link: the parent's hub watches the child's hub (`GET /v1/ext/gdl-pool/watch`) | the child's state and epoch, its load summary each period, its models when they change, and its entry instances, ready and retired, with their velo `PeerInfo` | the follow is not offered from that moment: this is the liveness signal |
+| The pool directory | which pools exist: name, class, region, parent, hashes, state, epoch, hub address, presence, properties | no new child is found; a child already followed stays followed |
+| The follow link: the parent's hub watches the child's hub (`GET /v1/ext/gdl-pool/watch`) | the child's state and epoch, its load summary each period, its properties when they change, and its entry instances, ready and retired, with their velo `PeerInfo` | the follow is not offered from that moment: this is the liveness signal |
 
 The directory is off the routing path. A record that expires or is withdrawn ends no follow and does not change whether a follow is offered. A newer epoch in the directory ends the follow of the hub it replaces.
 
@@ -52,7 +52,7 @@ A pool's instances are exposed only while the state it last sent is `ready` or `
 
 When the hub's watch of the pool directory shows that a pool it followed withdrew its record, the relay sends `withdrawn`, naming the pool's latest follow. It may come after that follow's `dropped`. Only an explicit withdrawal sends it: a record that expires, a link that fails, and a directory snapshot that no longer holds the record send nothing. A snapshot of the relay holds no `withdrawn`.
 
-The relay also lists every pool whose record the hub has read, followed or not, for the choosers' model index ([The model index](#the-model-index)). The snapshot gives a followed pool's listing on its `follow`, and sends a `listed` event for each other pool before `synced`. After that it sends `listed` for each change. `synced` says whether the hub's watch of the directory had read its first snapshot of every class the hub sends to.
+The relay also lists every pool whose record the hub has read, followed or not, for the choosers' property index ([The property index](#the-property-index)). The snapshot gives a followed pool's listing on its `follow`, and sends a `listed` event for each other pool before `synced`. After that it sends `listed` for each change. `synced` says whether the hub's watch of the directory had read its first snapshot of every class the hub sends to.
 
 `GET /v1/ext/gdl-pool/follows/{class}/{pool}` watches one pool's follows alone. It sends no `listed` event. A chooser uses it to read one pool again after an event it does not know (see [unknown events](#an-event-of-an-unknown-kind)).
 
@@ -92,7 +92,7 @@ For each entry segment its hops enter, and each followed pool, the chooser keeps
 - its exposed entry instances;
 - its retired entry instances, which are never routed to again.
 
-Beside the pools, each table holds the class's model index ([The model index](#the-model-index)), which every table of the class shares.
+Beside the pools, each table holds the class's property indexes ([The property index](#the-property-index)), which every table of the class shares.
 
 A newer generation replaces a pool's table at once. The older generation keeps its instances until the hub drops it. `Launch::pools` reads the tables (`gdl_runtime::Pools`).
 
@@ -102,7 +102,7 @@ Beside the pools, each table keeps the class's withdrawn pools: those the relay 
 
 ## What a node reads
 
-A node in a chooser's segment reads the same tables, through a `gdl::FollowedPools` handle. A model gate in front of a set router is the case it serves: the gate answers 404 for a model whose sets were all drained on purpose, and the router answers 503 when no set takes work. If they read different sources, they can disagree. A node that reads the chooser's tables cannot.
+A node in a chooser's segment reads the same tables, through a `gdl::FollowedPools` handle. A gate in front of a router is the case it serves: the gate answers 404 for a key whose pools were all drained on purpose, and the router answers 503 when no pool takes work. If they read different sources, they can disagree. A node that reads the chooser's tables cannot.
 
 ```rust,ignore
 impl gdl::Build for Gate {
@@ -153,13 +153,13 @@ Silence is never a decommission. A pool's record is withdrawn only by its own hu
 
 Each entry instance is registered with the chooser's velo node before a table holds it. It is unregistered `drain_ms` after no follow holds it, unless the chooser's own membership still routes to it or is still draining it. The membership, in turn, does not unregister a peer that a table holds. So a velo peer in both is unregistered by whichever lets go of it last.
 
-## The model index
+## The property index
 
-The model index says, for each model and routing key, which pools of the class list it in their records. A model gate in front of a set router reads it to answer 404 for a model that no pool lists, and 503 for a model whose pools cannot take work now. The router reads the same index from the same table, so the two never disagree.
+The property index says, for each property kind a node or a pool policy registered, which pools of the class list each key in their records ([Properties](pools.md#properties)). A gate in front of a router reads it to answer 404 for a key that no pool lists, and 503 for a key whose pools cannot take work now. The router reads the same index from the same table, so the two never disagree.
 
 ### What the hub lists
 
-The parent's hub lists every record of each class it sends to, a child or not, in any region, if the record has the hub's contract and placement hashes. For each pool it keeps the region, the condition, and the models. A pool stays listed until it withdraws its record. Nothing else removes it: not a lease that passes, not a directory snapshot that no longer holds the record, and not a lost link.
+The parent's hub lists every record of each class it sends to, a child or not, in any region, if the record has the hub's contract and placement hashes. For each pool it keeps the region, the condition, and the properties. A pool stays listed until it withdraws its record. Nothing else removes it: not a lease that passes, not a directory snapshot that no longer holds the record, and not a lost link.
 
 | Condition | When |
 |---|---|
@@ -167,7 +167,7 @@ The parent's hub lists every record of each class it sends to, a child or not, i
 | `scaled_to_zero` | the record says the pool was scaled to 0 on purpose ([Presence](pools.md#presence)). It never lapses |
 | `missing` | the record is `serving`, and its lease passed without a new write, or the follow's link ended and no later follow is installed yet |
 
-The hub learns a followed pool's models from its record and from the follow link. The child's hub sends its list in the `pool` event of its watch's snapshot, and a `models` event each time the list changes. The parent keeps the list with the higher `models_version`, since the two paths race. The version never goes down, also across a restart of the child's hub.
+The hub learns a followed pool's properties from its record and from the follow link. The child's hub sends its list in the `pool` event of its watch's snapshot, and a `properties` event each time the list changes. The parent keeps the list with the higher `properties_version`, since the two paths race. The version never goes down, also across a restart of the child's hub. The hub keeps each key as JSON and reads no kind.
 
 A hub reads a record's lease on its own clock, from when it first saw the record's `seq`. So a new hub reads a silent pool as `live` for up to one lease, then as `missing`.
 
@@ -175,39 +175,68 @@ A `missing` listing also says how long the pool has been silent, in `missing_age
 
 ### The relay's marker
 
-Until the hub's watch of the directory has read its first snapshot of every class the hub sends to, the listings are not whole: a record the hub has not read may still list a model. The relay's `synced` says so with `listed`. A watch of the relay that begins before then waits up to 2 s for it. A watch whose snapshot still says `listed: false` is ended once the listings are whole, so its reader learns it from its next snapshot. A hub of an earlier build sends no `listed`, so its choosers read the index as not synced.
+Until the hub's watch of the directory has read its first snapshot of every class the hub sends to, the listings are not whole: a record the hub has not read may still list a property. The relay's `synced` says so with `listed`. A watch of the relay that begins before then waits up to 2 s for it. A watch whose snapshot still says `listed: false` is ended once the listings are whole, so its reader learns it from its next snapshot. A hub of an earlier build sends no `listed`, so its choosers read the index as not synced.
+
+### Registering a kind
+
+The chooser decodes only the kinds that the segment reads. A kind is a `gdl::PropertyKind<T>`: a name, and a key type `T` that serde encodes and decodes, and that `Ord` sorts. A node registers a kind in its build, with `FollowedPools::register`. A pool policy registers the kinds it reads in `PoolPolicy::properties`, which the runtime calls once before the chooser reads the class's pools. One name has one type: a second type under a registered name is refused, and the segment does not start.
+
+```rust,ignore
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Shard {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    partition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+const SHARD: gdl::PropertyKind<Shard> = gdl::PropertyKind::new("shard");
+
+// In the gate's build:
+let followed = gdl::FollowedPools::current();
+followed.register(&SHARD)?;
+```
 
 ### What the chooser builds
 
-The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. When a missing pool's listing arrives, the chooser dates its silence back by the age, once, to an instant on its own clock. For each class it builds a `gdl::ModelIndex` from the listings and its own follows: each model's state in each pool, the pool's condition, since when a missing pool has been silent, and whether the chooser offers the pool work. It builds the index again only when a listing or a follow's offered state changes. A pool's load summary arrives each period, and does not rebuild it.
+The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. When a missing pool's listing arrives, the chooser dates its silence back by the age, once, to an instant on its own clock. For each class it builds a `gdl::PropertyIndexes` from the listings and its own follows: for each registered kind, a `gdl::PropertyIndex<T>` of every key some pool lists, decoded to `T`. Each entry is a key and a `gdl::PropertyPool`: the key's state in that pool, the pool's condition, since when a missing pool has been silent, and whether the chooser offers the pool work. The entries are sorted by `T`'s order, then by pool name. The chooser builds the indexes again only when a listing, a follow's offered state, or the registered kinds change. A pool's load summary arrives each period, and does not rebuild them. A registered kind that no pool lists has an empty index.
+
+A key that does not decode to `T` is left out of the index and counted in `PropertyIndex::undecoded`. A build that adds a field to `T` that an older type refuses, or another application's type under the same kind name, shows there.
 
 ```rust,ignore
 // Per request, in a gate: one load of the class's table.
 let answer = self.followed.read("model_x", |pools| {
-    let index = pools.models();
-    let Some(sets) = index.sets(model, None) else {
+    let indexes = pools.properties();
+    // Every version of the shard, in no partition.
+    let listed = indexes.get(&SHARD).map_or(&[][..], |index| {
+        index.range_by(|key| (key.name.as_str(), key.partition.as_deref()).cmp(&(name, None)))
+    });
+    if listed.is_empty() {
         // No pool lists it. Unknown only once the directory was read.
-        return if index.is_synced() { NotFound } else { Unavailable };
+        return if indexes.is_synced() { NotFound } else { Unavailable };
+    }
+    let routed = |(_, listing): &(Shard, gdl::PropertyPool)| {
+        listing.state() == gdl::PropertyState::Ready
+            && listing.is_offered()
+            && pools.pool(listing.pool()).is_some_and(gdl::Pool::takes_work)
+            && !pools.is_gone(listing.pool())
     };
-    let routed = |set: &gdl::ModelSet| {
-        set.state() == gdl::ModelState::Ready
-            && set.is_offered()
-            && pools.pool(set.pool()).is_some_and(gdl::Pool::takes_work)
-            && !pools.is_gone(set.pool())
-    };
-    if sets.iter().any(routed) { Pass } else { Unavailable }
+    if listed.iter().any(routed) { Pass } else { Unavailable }
 });
 ```
 
-- `ClassPools::models()` gives the index of the table the read loaded. A pool policy reads the same index with `PoolRequest::models()`.
-- `ModelIndex::sets(model, routing_key)` gives the pools that list the model, by name, or `None` when no pool does. It is one binary search, with no lock and no allocation.
-- `ModelIndex::is_synced()` tells a model that is not known yet from one that no pool lists.
-- `ModelSet::missing_since()` gives the instant a missing pool went silent, on the chooser's clock. A gate takes `Instant::now()` once and subtracts, to say "no heartbeat for 40 s". It is `None` for a pool that is not missing, and for one whose hub, of an earlier build, sends no age.
-- A pool of another parent, or in a region the chooser does not follow, is listed and not offered. So a model that only another region serves is listed, and the gate answers 503 until this pool may route there.
-- A model that moves from one pool to another shows both: the old pool's `drained` entry and the new pool's `starting` entry.
-- A model an operator revoked on a pool is not in that pool's list ([Revoking a model](pools.md#revoking-a-model)), so the index does not list the pool for it. With no other pool, the model is unknown. An operator's withdrawal of a pool unlists it, as the pool's own withdrawal does.
-- A test of a node builds a handle with `FollowedPools::fixed_with_models`, with a `ModelIndex::new` for each class.
-- A gate's read of the index, a model looked up among 100 and one of its pools checked, costs about 81 ns on a quiet host (see [Feature costs](../operations/feature-costs.md#reading-the-followed-pools)).
+- `ClassPools::properties()` gives the indexes of the table the read loaded. A pool policy reads the same indexes with `PoolRequest::properties()`.
+- `PropertyIndexes::get(&kind)` gives the kind's index: a type check and a borrow. It is `None` for a kind that the segment did not register with this type.
+- `PropertyIndex::get(&key)` gives the pools that list one key, by name: empty when no pool does. `PropertyIndex::range_by` gives the keys whose leading fields match, as the order of `T` puts them: a binary search to the range's start, then doubling steps to its end, with no lock and no allocation. A range keeps every entry with its own state: gdl merges no states.
+- The order of `T` is the order of its fields. Put a field that a request may leave out after the fields it always names. With `partition` before `version`, a request with no partition never reaches a partitioned key, whatever its version.
+- `PropertyIndexes::is_synced()` tells a key that is not known yet from one that no pool lists.
+- `PropertyPool::missing_since()` gives the instant a missing pool went silent, on the chooser's clock. A gate takes `Instant::now()` once and subtracts, to say "no heartbeat for 40 s". It is `None` for a pool that is not missing, and for one whose hub, of an earlier build, sends no age.
+- A pool of another parent, or in a region the chooser does not follow, is listed and not offered. So a key that only another region serves is listed, and the gate answers 503 until this pool may route there.
+- A key that moves from one pool to another shows both: the old pool's `drained` entry and the new pool's `starting` entry.
+- A property an operator revoked on a pool is not in that pool's list ([Revoking a property](pools.md#revoking-a-property)), so the index does not list the pool for it. With no other pool, the key is unknown. An operator's withdrawal of a pool unlists it, as the pool's own withdrawal does.
+- A test of a node builds a handle with `FollowedPools::fixed_with_properties`, with a `PropertyIndexes::new(synced).with(&kind, PropertyIndex::new(entries))` for each class.
+- A gate's read of the index allocates nothing (`a_property_lookup_allocates_nothing` in `crates/gdl-runtime/src/dist/pools/tests/properties.rs`). Its cost is in [Feature costs](../operations/feature-costs.md#reading-the-followed-pools).
 
 ## Choosing a pool
 
@@ -246,11 +275,11 @@ A registered policy implements `gdl::PoolPolicy`. It runs in the chooser, once p
 - the chooser's region, the clock, the pools that declined this request, and the pools the chooser damps or holds gone;
 - the attempt's turn, and a random draw made from it when the policy asks.
 
-It returns a choice of one pool, by its index, or a `gdl::NoPool`, which fails the request with `Routing`. A `NoPool` may carry a short reason, such as the model that no pool serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a pool declined fails with the last refusal, which names that pool. The exception is a request whose every declining pool the chooser now holds gone, when the policy then chooses no other pool: it fails with `Routing` and the reason, as the requests after it do ([A pool that is gone](#a-pool-that-is-gone)). A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that pool took the request. The runtime calls the lease's `accepted` when the pool accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the pool declines, when the offer never left, and when the outcome is unknown. It also drops it when the choice is the check after every declining pool is gone, which offers that pool nothing. An instance's own decline is not the pool's: the lease passes to the offer to the pool's next instance, and learns of its acceptance. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no pool is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a pool policy](../guides/write-a-pool-policy.md#1-read-only-what-you-route-by)).
+It returns a choice of one pool, by its index, or a `gdl::NoPool`, which fails the request with `Routing`. A `NoPool` may carry a short reason, such as the key that no pool serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a pool declined fails with the last refusal, which names that pool. The exception is a request whose every declining pool the chooser now holds gone, when the policy then chooses no other pool: it fails with `Routing` and the reason, as the requests after it do ([A pool that is gone](#a-pool-that-is-gone)). A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that pool took the request. The runtime calls the lease's `accepted` when the pool accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the pool declines, when the offer never left, and when the outcome is unknown. It also drops it when the choice is the check after every declining pool is gone, which offers that pool nothing. An instance's own decline is not the pool's: the lease passes to the offer to the pool's next instance, and learns of its acceptance. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no pool is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a pool policy](../guides/write-a-pool-policy.md#1-read-only-what-you-route-by)).
 
 The inputs are plain `gdl` types (`Pool`, `PoolRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
 
-A registered policy can run either of them over only the pools it keeps, with `choose_where`: for example, the pools that serve the request's model. The choice is the one the policy would make over a copy of those pools, and its index is into all of them. Nothing is allocated. Their tiers, turns, and damping cap count only the kept pools. A policy that chooses as `home_first` does should also check a pool with `HomeFirst::eligible`.
+A registered policy can run either of them over only the pools it keeps, with `choose_where`: for example, the pools that list the request's key. The choice is the one the policy would make over a copy of those pools, and its index is into all of them. Nothing is allocated. Their tiers, turns, and damping cap count only the kept pools. A policy that chooses as `home_first` does should also check a pool with `HomeFirst::eligible`.
 
 ### Damping
 
@@ -273,7 +302,7 @@ The reason crosses in the entry's reply, after the refusal. A build without it r
 
 ### An instance that cannot serve the request
 
-An entry instance can decline an offer as its own: it cannot serve this request, and another entry instance of its pool may. For example, it does not have the request's model. The chooser then offers the request to the pool's other entry instances, each once, before it offers it to another pool.
+An entry instance can decline an offer as its own: it cannot serve this request, and another entry instance of its pool may. For example, it does not have what the request asks for. The chooser then offers the request to the pool's other entry instances, each once, before it offers it to another pool.
 
 - The other instances are offered it in the order of the pool's table when the decline landed, from the instance after the one that declined, around to the one before it. The chooser keeps only its place in that order and a count, so the walk allocates nothing, whatever the pool's size. An instance that joined the pool after the decline is not offered the request.
 - Each instance is offered it only while the chooser's current table still offers it, and the pool policy still takes the pool (`PoolPolicy::eligible`). The pool policy does not choose again, since the pool is still its choice. Its lease on the choice passes to the offer to the next instance.
@@ -358,7 +387,7 @@ An entry of an earlier build never says that it detached. Each interior instance
 
 A segment can decline offers from other pools by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)`, `Segment::decline_offers_as(Decline::Full)`, or `Segment::decline_offers_as(Decline::Instance)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the pool are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
 
-- `Decline::Gone` says that this pool takes no work from other pools until its state changes: for example, when it cannot serve the model its class serves. Each chooser that hears it passes the whole pool over, every entry instance of it, until the relay changes its follow. `take_offers` does not bring them back. Call it on every entry instance, for a reason that holds for the pool.
+- `Decline::Gone` says that this pool takes no work from other pools until its state changes: for example, when it cannot serve what its class serves. Each chooser that hears it passes the whole pool over, every entry instance of it, until the relay changes its follow. `take_offers` does not bring them back. Call it on every entry instance, for a reason that holds for the pool.
 - `Decline::Full` says that the pool has no room now. Choosers damp the pool, and offer it work again after the window.
 - `Decline::Instance` says that this instance cannot serve work from other pools now, and the pool's other entry instances may. Choosers offer each request it declines to the pool's other entry instances ([An instance that cannot serve the request](#an-instance-that-cannot-serve-the-request)), and the pool is not damped. It is one switch for the instance, not a choice per request.
 - A drain's refusal (`Segment::decline_offers`) outlasts the segment's own. `decline_offers_as` does not replace it, and `take_offers` does not end it.
@@ -376,7 +405,7 @@ A segment can decline offers from other pools by its own policy, before it admit
 A reader ignores a field it does not know in a known event. An event of a kind it does not know makes it fail closed for the pool that the event names, until it has read that pool again.
 
 - **A parent's hub** withholds the pool. The relay shows it `unavailable` at once, which hides its instances and keeps it out of the `requires` count, and not offered at the follow's next revision. The follow does not close while the pool is withheld. The hub reads the pool again from a new watch of the child's hub. If the new watch's snapshot also has an unknown event, the pool stays withheld, and the hub tries again after the refollow wait.
-- A parent's hub of an earlier build does not know `models`, so it withholds the pool until it reads it again. The new snapshot carries the models as a field of `pool`, which it ignores.
+- A parent's hub of an earlier build does not know `properties`, so it withholds the pool until it reads it again. The new snapshot carries the properties as a field of `pool`, which it ignores.
 - A chooser of an earlier build does not know `listed`. It leaves the pool unread, and reads it again from the watch of its follow alone, which sends no `listed`.
 - **A chooser** leaves the pool unread (`FollowedPool::unread`). The pool is not offered, its tables show none of its instances, and its follow refuses new leases. The chooser opens `GET /v1/ext/gdl-pool/follows/{class}/{pool}` at once and reads the pool from it until its next relay watch. Meanwhile it still applies a `withdrawn` for the pool from the relay watch, since no snapshot carries one. The relay watch and every other pool go on. Being unread is not acknowledged to the hub: it has no revision.
 - An unknown relay event that names no pool, an event that is not JSON, or a known event whose fields do not parse, ends the watch.
