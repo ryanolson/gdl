@@ -39,6 +39,7 @@ fn record(
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     PoolRecord {
+        dropped: Vec::new(),
         name: pool.into(),
         class: "model_x".into(),
         region: "eu-west-1".into(),
@@ -304,6 +305,7 @@ impl PoolDirectory for Freezing {
 
 fn says(property: &str, state: EntryState) -> LoadReport {
     LoadReport {
+        dropped: Vec::new(),
         admitted: 0,
         limit: 8,
         refusals: 0,

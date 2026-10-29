@@ -25,6 +25,7 @@ fn key(name: &str, partition: Option<&str>) -> PropertyKey {
 
 fn record() -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: "model-x-01-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -442,13 +443,40 @@ fn only_a_serving_record_has_a_lease() {
     );
 }
 
-/// A property is checked when it is read, as when it is made, so a record
-/// whose stored property does not check, a float in its key, does not
-/// read: no record holds a property that could not be published.
+/// A property is checked when it is read, as when it is made, but a
+/// record does not fail as a whole for one that does not check: a pool
+/// whose record did not read would vanish, and every property it serves
+/// would read as unknown. The record keeps the properties and the
+/// revocations that check, and counts the kind of each it dropped.
 #[test]
-fn a_record_with_a_malformed_property_does_not_read() {
-    let mut value = serde_json::to_value(record()).expect("json");
-    value["properties"][0]["key"]["ratio"] = json!(0.5);
-    let refused = serde_json::from_value::<PoolRecord>(value).expect_err("a float in a key");
-    assert!(refused.to_string().contains("not an integer"), "{refused}");
+fn a_record_drops_a_malformed_property_and_keeps_the_rest() {
+    let revoked = PoolRecord {
+        revoked: vec![key("z", None)],
+        ..record()
+    };
+    let mut value = serde_json::to_value(&revoked).expect("json");
+    value["properties"].as_array_mut().expect("a list").insert(
+        1,
+        json!({"kind": "test", "key": {"ratio": 0.5}, "state": "ready", "since": 1}),
+    );
+    value["revoked"]
+        .as_array_mut()
+        .expect("a list")
+        .push(json!({"kind": "Bad", "key": {"name": "y"}}));
+    let read: PoolRecord = serde_json::from_value(value).expect("a record");
+    assert_eq!(
+        read.dropped,
+        ["test", "Bad"],
+        "one property, one revocation"
+    );
+    assert_eq!(
+        PoolRecord {
+            dropped: Vec::new(),
+            ..read
+        },
+        revoked,
+        "the rest kept"
+    );
+    let text = serde_json::to_string(&revoked).expect("json");
+    assert!(!text.contains("dropped"), "not on the wire: {text}");
 }

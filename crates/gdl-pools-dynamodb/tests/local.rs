@@ -135,6 +135,7 @@ type Watch = Pin<Box<<DynamoDirectory as PoolDirectory>::Watch>>;
 
 fn record(pool: &str, epoch: u64, seq: u64, properties: &[&str]) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: Presence::Serving,
         properties: properties
             .iter()

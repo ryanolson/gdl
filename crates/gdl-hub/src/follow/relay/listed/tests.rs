@@ -9,6 +9,7 @@ const POOL: &str = "model-x-02-eu-west-1";
 
 fn record(seq: u64, presence: Presence) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: POOL.into(),
         class: CLASS.into(),
         region: "eu-west-1".into(),

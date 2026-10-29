@@ -1033,6 +1033,14 @@ impl Followed {
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
             Some(listing) => {
+                if !listing.properties.dropped.is_empty() {
+                    tracing::debug!(
+                        class = %key.0,
+                        pool = %key.1,
+                        kinds = ?listing.properties.dropped,
+                        "a listing holds properties that do not check: they are left out"
+                    );
+                }
                 let silent = listing
                     .missing_age_ms
                     .filter(|_| listing.condition == PoolCondition::Missing)

@@ -286,6 +286,7 @@ pub struct Unoffered {
 /// as soon as they change. A field a later build adds is ignored, so the
 /// instances and their hub roll one at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "ReportWire")]
 pub struct LoadReport {
     /// The roots the instance holds admitted now.
     pub admitted: u64,
@@ -302,12 +303,51 @@ pub struct LoadReport {
     /// serves nothing.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub properties: gdl_model::PropertyLists,
+    /// The kind of each property that did not check when the report was
+    /// read, and that it left out, so that the hub still takes the rest of
+    /// the report. Not on the wire.
+    #[serde(skip)]
+    pub dropped: Vec<String>,
+}
+
+/// A report as it is read: each property read on its own
+/// ([`gdl_model::read_each`]).
+#[derive(Deserialize)]
+struct ReportWire {
+    admitted: u64,
+    limit: u64,
+    refusals: u64,
+    #[serde(default)]
+    properties: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+}
+
+impl From<ReportWire> for LoadReport {
+    fn from(wire: ReportWire) -> Self {
+        let mut dropped = Vec::new();
+        let properties = wire
+            .properties
+            .into_iter()
+            .map(|(kind, entries)| {
+                let (entries, unread) = gdl_model::read_each(entries);
+                dropped.extend(unread);
+                (kind, entries)
+            })
+            .collect();
+        Self {
+            admitted: wire.admitted,
+            limit: wire.limit,
+            refusals: wire.refusals,
+            properties,
+            dropped,
+        }
+    }
 }
 
 /// A pool's property entries, in the order of their keys, and the version of
 /// the list ([`gdl_pools::PoolRecord::properties_version`]): a reader that
 /// has the list from more than one path keeps the higher version.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "ListWire")]
 pub struct PropertyList {
     /// The entries.
     #[serde(default)]
@@ -319,6 +359,36 @@ pub struct PropertyList {
     /// `entries` ([`gdl_pools::PoolRecord::revoked`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<gdl_model::PropertyKey>,
+    /// The kind of each entry or revocation that did not check when the
+    /// list was read, and that it left out. Not on the wire.
+    #[serde(skip)]
+    pub dropped: Vec<String>,
+}
+
+/// A list as it is read: each entry and revocation read on its own
+/// ([`gdl_model::read_each`]).
+#[derive(Deserialize)]
+struct ListWire {
+    #[serde(default)]
+    entries: Vec<serde_json::Value>,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    revoked: Vec<serde_json::Value>,
+}
+
+impl From<ListWire> for PropertyList {
+    fn from(wire: ListWire) -> Self {
+        let (entries, mut dropped) = gdl_model::read_each(wire.entries);
+        let (revoked, unrevoked) = gdl_model::read_each(wire.revoked);
+        dropped.extend(unrevoked);
+        Self {
+            entries,
+            version: wire.version,
+            revoked,
+            dropped,
+        }
+    }
 }
 
 /// One event of a pool's watch, `GET /v1/ext/gdl-pool/watch` on the pool

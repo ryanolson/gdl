@@ -11,6 +11,7 @@ use crate::DirectoryError;
 /// of an older build still reads the record of a newer one while builds
 /// roll pool by pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RecordWire")]
 pub struct PoolRecord {
     /// The pool's name, a DNS label.
     pub name: String,
@@ -57,9 +58,11 @@ pub struct PoolRecord {
     /// kind, then key. An entry stays until the pool withdraws, unless it
     /// is `drained`: at most [`PoolRecord::MAX_DRAINED`] of those are kept,
     /// the oldest dropped first. Each key is checked when it is made or
-    /// read ([`gdl_model::PropertyKey::new`]), so a record that reads holds
-    /// no malformed property. A directory stores the keys as they are, and
-    /// never reads a kind.
+    /// read ([`gdl_model::PropertyKey::new`]). A record read with a
+    /// property that does not check leaves it out, and keeps the rest
+    /// ([`PoolRecord::dropped`]), so that one malformed property never
+    /// costs the pool its record. A directory stores the keys as they
+    /// are, and never reads a kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<PoolProperty>,
     /// Raised on every change of `properties`, and never lowered, also
@@ -73,6 +76,68 @@ pub struct PoolRecord {
     /// restarts keeps them, and counted in `properties_version`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<gdl_model::PropertyKey>,
+    /// The kind of each property or revocation that did not check when
+    /// the record was read, and that it left out: empty for a record made
+    /// in code. Not on the wire.
+    #[serde(skip)]
+    pub dropped: Vec<String>,
+}
+
+/// A record as it is read: its properties and revocations read one by
+/// one ([`gdl_model::read_each`]). Each other field is the record's own,
+/// read as the record reads it.
+#[derive(Deserialize)]
+struct RecordWire {
+    name: String,
+    class: String,
+    region: String,
+    #[serde(default)]
+    home: Option<String>,
+    contract: u64,
+    placement: u64,
+    state: PoolState,
+    epoch: u64,
+    seq: u64,
+    hub: String,
+    #[serde(rename = "lease_ms", with = "millis", default = "default_lease")]
+    lease: Duration,
+    #[serde(default)]
+    load: Option<LoadSummary>,
+    #[serde(default)]
+    presence: Presence,
+    #[serde(default)]
+    properties: Vec<serde_json::Value>,
+    #[serde(default)]
+    properties_version: u64,
+    #[serde(default)]
+    revoked: Vec<serde_json::Value>,
+}
+
+impl From<RecordWire> for PoolRecord {
+    fn from(wire: RecordWire) -> Self {
+        let (properties, mut dropped) = gdl_model::read_each(wire.properties);
+        let (revoked, unrevoked) = gdl_model::read_each(wire.revoked);
+        dropped.extend(unrevoked);
+        Self {
+            name: wire.name,
+            class: wire.class,
+            region: wire.region,
+            home: wire.home,
+            contract: wire.contract,
+            placement: wire.placement,
+            state: wire.state,
+            epoch: wire.epoch,
+            seq: wire.seq,
+            hub: wire.hub,
+            lease: wire.lease,
+            load: wire.load,
+            presence: wire.presence,
+            properties,
+            properties_version: wire.properties_version,
+            revoked,
+            dropped,
+        }
+    }
 }
 
 impl PoolRecord {

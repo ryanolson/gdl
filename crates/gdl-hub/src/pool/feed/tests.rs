@@ -375,6 +375,7 @@ async fn a_segment_no_other_class_reaches_is_not_watched() {
 #[tokio::test]
 async fn a_report_does_not_outlive_its_registration() {
     let load = LoadReport {
+        dropped: Vec::new(),
         properties: gdl_model::PropertyLists::new(),
         admitted: 3,
         limit: 8,

@@ -416,6 +416,13 @@ impl Feed {
                 "instance {owner}'s registration is not the one the report's credential is of"
             )),
             Some(entry) if entry.usable() => {
+                if !load.dropped.is_empty() {
+                    tracing::debug!(
+                        instance = %owner,
+                        kinds = ?load.dropped,
+                        "a load report holds properties that do not check: they are left out"
+                    );
+                }
                 let lists = std::mem::take(&mut load.properties);
                 let said = if lists.is_empty() {
                     Said::Silent(lease.epoch)

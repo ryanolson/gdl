@@ -79,6 +79,7 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
     let pool = PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,
@@ -209,6 +210,7 @@ fn record() -> PoolRecord {
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
     PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,
@@ -274,6 +276,7 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
     let directory = MemoryDirectory::new();
     directory
         .publish(PoolRecord {
+            dropped: Vec::new(),
             presence: gdl_pools::Presence::Serving,
             properties: Vec::new(),
             properties_version: 0,

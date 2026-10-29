@@ -417,6 +417,7 @@ mod tests {
             state: PoolState::Ready,
             load: None,
             properties: Some(crate::PropertyList {
+                dropped: Vec::new(),
                 entries: Vec::new(),
                 version: 9,
                 revoked: Vec::new(),

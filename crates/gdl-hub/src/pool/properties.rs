@@ -267,6 +267,7 @@ impl Properties {
             })
             .collect();
         PropertyList {
+            dropped: Vec::new(),
             entries,
             version: self.version,
             revoked: self.revoked.iter().cloned().collect(),

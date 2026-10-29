@@ -42,6 +42,7 @@ impl Backend for ShortHistory {
 
 fn record(seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,

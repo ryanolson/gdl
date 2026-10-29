@@ -51,7 +51,9 @@ pub use pool::{
     missing_state_dir, pool_variable,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
-pub use properties::{EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind};
+pub use properties::{
+    EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind, read_each,
+};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

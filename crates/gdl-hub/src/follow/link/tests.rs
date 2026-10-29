@@ -61,6 +61,7 @@ fn relay() -> Arc<Relay> {
 
 fn record(hub: String) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,

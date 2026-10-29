@@ -30,6 +30,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 RelayDirectory::new()
             };
             let parent = PoolRecord {
+                dropped: Vec::new(),
                 name: "global-us".into(),
                 class: "global".into(),
                 region: "us-east-1".into(),

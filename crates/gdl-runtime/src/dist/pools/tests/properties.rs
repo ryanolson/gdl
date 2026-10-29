@@ -56,6 +56,7 @@ fn listing(
         region: "eu-west-1".into(),
         condition,
         properties: PropertyList {
+            dropped: Vec::new(),
             entries: properties
                 .iter()
                 .map(|(property, state)| PoolProperty {

@@ -18,6 +18,7 @@ struct EarlierReport {
 
 fn report() -> LoadReport {
     LoadReport {
+        dropped: Vec::new(),
         admitted: 3,
         limit: 8,
         refusals: 1,
@@ -71,4 +72,24 @@ fn a_report_without_properties_says_nothing_of_them() {
     )
     .expect("a report");
     assert_eq!(read.properties["test"][0].key()["name"], "m");
+}
+
+/// A report does not fail as a whole for one property that does not
+/// check: the hub takes the rest of the instance's lists, and counts the
+/// kind of each it dropped. The report is not refused, so the instance's
+/// admission still counts.
+#[test]
+fn a_report_drops_a_malformed_property_and_keeps_the_rest() {
+    let read: LoadReport = serde_json::from_str(
+        r#"{"admitted":3,"limit":8,"refusals":1,"properties":{"test":[{"kind":"test","key":{"name":"x","partition":"a"},"state":"ready"},{"kind":"test","key":{"ratio":0.5},"state":"ready"}]}}"#,
+    )
+    .expect("a report");
+    assert_eq!(read.dropped, ["test"]);
+    assert_eq!(
+        LoadReport {
+            dropped: Vec::new(),
+            ..read
+        },
+        report()
+    );
 }

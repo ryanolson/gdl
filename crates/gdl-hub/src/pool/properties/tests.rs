@@ -174,6 +174,7 @@ fn the_version_rises_on_each_change_and_only_then() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("a", Ready, 101), entry("b", Ready, 102)],
             version: 102,
             revoked: Vec::new(),
@@ -247,6 +248,7 @@ fn a_restart_keeps_a_starting_entry_starting() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("m", Starting, 7)],
             version: 7,
             revoked: Vec::new(),
@@ -277,6 +279,7 @@ fn a_restart_goes_on_draining_a_draining_entry() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("m", Drained, 50)],
             version: 50,
             revoked: Vec::new(),
@@ -292,6 +295,7 @@ fn a_restart_makes_a_ready_entry_unavailable() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("m", Unavailable, 50)],
             version: 50,
             revoked: Vec::new(),
@@ -313,6 +317,7 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("m", Unavailable, 7)],
             version: 7,
             revoked: Vec::new(),
@@ -335,6 +340,7 @@ fn a_restart_that_changes_nothing_keeps_the_version() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: held.to_vec(),
             version: 4,
             revoked: Vec::new(),
@@ -350,6 +356,7 @@ fn a_restart_that_changes_nothing_keeps_the_version() {
     assert_eq!(
         unread.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("a", Ready, 71)],
             version: 71,
             revoked: Vec::new(),
@@ -404,6 +411,7 @@ fn declared_properties_are_served_by_every_instance_that_reports_none() {
     assert_eq!(
         properties.list(),
         PropertyList {
+            dropped: Vec::new(),
             entries: vec![entry("x", Starting, 11), entry("y", Starting, 11)],
             version: 11,
             revoked: Vec::new(),

@@ -104,6 +104,7 @@ async fn report<F, Fut>(
         };
         let carried = said.borrow_and_update().clone();
         let report = LoadReport {
+            dropped: Vec::new(),
             properties: (*carried).clone(),
             admitted: wide(load.admitted),
             limit: wide(load.limit),
@@ -206,6 +207,7 @@ mod tests {
         assert_eq!(
             next(&mut reports).await,
             LoadReport {
+                dropped: Vec::new(),
                 properties: gdl_model::PropertyLists::new(),
                 admitted: 1,
                 limit: 4,

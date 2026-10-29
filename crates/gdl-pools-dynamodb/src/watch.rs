@@ -586,6 +586,7 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
             };
             let joined = match before.filter(|before| before.list == Some(key)) {
                 Some(before) => before.record().map(|record| item::List {
+                    dropped: Vec::new(),
                     properties: record.properties.clone(),
                     revoked: record.revoked.clone(),
                 }),

@@ -22,6 +22,7 @@ async fn a_recovered_writer_epoch_raises_the_properties_version() {
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     let epoch = millis_now() + 60_000;
     let previous = PoolRecord {
+        dropped: Vec::new(),
         name: common::POOL.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),

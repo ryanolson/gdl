@@ -164,6 +164,10 @@ A key's numbers must be integers. JSON reads a float back as a near value, not a
 
 **Rejected: a check at each place a key enters.** Settings built in code, not read, skipped it, and a hub took a float key from them.
 
+A list of properties, in a record, a load report, a listing, or a DynamoDB list's body, reads each property on its own, and leaves out one that does not check.
+
+**Rejected: refusing the record whole.** The pool would vanish from every reader, and a gate would answer 404 for every property it serves. A later build that loosens the key rules would do that to every reader of an earlier build.
+
 **Rejected: reading floats exactly (`serde_json`'s `float_roundtrip`).** The feature unifies into every `serde_json` of the process, the JSON edge codec on the request path included.
 
 **Rejected: a typed key in the hub.** The stock hub binary cannot link an application's types, so it could not read them.

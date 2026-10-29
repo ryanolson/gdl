@@ -89,6 +89,7 @@ fn temp() -> TempDir {
 
 fn record(pool: &str, seq: u64, lease: Duration) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: pool.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),

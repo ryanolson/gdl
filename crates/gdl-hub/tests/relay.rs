@@ -310,6 +310,7 @@ fn child_record(pool: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,
@@ -1148,6 +1149,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
     .await;
     assert!(usable.is_ok(), "the entry instance ready in time");
     let report = gdl_watch::LoadReport {
+        dropped: Vec::new(),
         admitted: 0,
         limit: 4,
         refusals: 0,

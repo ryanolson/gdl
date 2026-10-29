@@ -192,6 +192,7 @@ impl<S: Stream<Item = Result<PoolEvent, DirectoryError>> + Unpin> Events for S {
 /// record whole, its properties with it.
 fn record(class: &str, pool: &str, epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: crate::Presence::Serving,
         properties: vec![crate::PoolProperty {
             property: gdl_model::PropertyKey::new(
@@ -857,6 +858,7 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
 /// version with the rest of another equals neither.
 fn whole(seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: crate::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,

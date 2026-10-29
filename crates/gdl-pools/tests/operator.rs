@@ -20,6 +20,7 @@ const POOL: &str = "model-x-02-us-east-1";
 /// properties.
 fn last(epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: POOL.into(),
         class: CLASS.into(),
         region: "us-east-1".into(),

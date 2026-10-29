@@ -44,6 +44,7 @@ fn says(name: &str, state: EntryState) -> PropertyEntry {
 /// A report whose list of kind `test` is `list`, or with no list.
 fn report(list: Option<Vec<PropertyEntry>>) -> LoadReport {
     LoadReport {
+        dropped: Vec::new(),
         admitted: 0,
         limit: 8,
         refusals: 0,

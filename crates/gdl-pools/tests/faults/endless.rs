@@ -30,6 +30,7 @@ impl PoolDirectory for Endless {
 
     fn watch(&self, class: &str, _: Option<ResumeToken>) -> Events {
         let record = PoolRecord {
+            dropped: Vec::new(),
             presence: gdl_pools::Presence::Serving,
             properties: Vec::new(),
             properties_version: 0,

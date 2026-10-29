@@ -44,6 +44,7 @@ fn beating() -> PoolTiming {
 
 fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
     LoadReport {
+        dropped: Vec::new(),
         properties: gdl_model::PropertyLists::new(),
         admitted,
         limit,

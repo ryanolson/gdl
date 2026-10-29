@@ -90,6 +90,7 @@ fn temp() -> TempDir {
 
 fn record(pool: &str, epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         presence: gdl_pools::Presence::Serving,
         properties: Vec::new(),
         properties_version: 0,

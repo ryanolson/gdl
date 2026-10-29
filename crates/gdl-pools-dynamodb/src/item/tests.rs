@@ -7,11 +7,13 @@ use gdl_pools::{
 };
 
 use super::{
-    BODY, Entry, Held, LIST_KEY, POOL, StoredHeld, decode, decode_list, record, withdrawal,
+    BODY, Entry, Held, LIST_KEY, ListKey, POOL, Stored, StoredHeld, decode, decode_list, digest,
+    record, text, withdrawal,
 };
 
 fn pool(properties: usize, properties_version: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: "model-x-01".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -206,4 +208,45 @@ fn a_records_item_stays_small_whatever_its_properties() {
     assert_eq!(size(&many.item), size(&one.item), "the list is apart");
     let list = size(&many.list.expect("a list").1);
     assert!((70_000..80_000).contains(&list), "{list}");
+}
+
+/// A list body does not fail as a whole for one property that does not
+/// check: the record joined to it keeps the properties that check, and
+/// counts the kind of each it dropped.
+#[test]
+fn a_list_drops_a_malformed_property_and_keeps_the_rest() {
+    let published = pool(2, 4);
+    let encoded = record(&published, 1).expect("encodes");
+    let stored = decode("model_x", &encoded.item).expect("a pool's item");
+    let (written, item) = encoded.list.clone().expect("a list item");
+    let mut body: serde_json::Value =
+        serde_json::from_str(text(&item, BODY).expect("a body")).expect("json");
+    body["properties"].as_array_mut().expect("a list").push(
+        serde_json::json!({"kind": "test", "key": {"ratio": 0.5}, "state": "ready", "since": 4}),
+    );
+    let body = body.to_string();
+    let key = ListKey {
+        digest: digest(body.as_bytes()),
+        ..written
+    };
+    let mut item = item;
+    item.insert(BODY.into(), AttributeValue::S(body));
+    item.insert(LIST_KEY.into(), AttributeValue::S(key.sort_key()));
+    let stored = match stored.held {
+        StoredHeld::Record { record, .. } => Stored {
+            held: StoredHeld::Record {
+                record,
+                list: Some(key),
+            },
+            ..stored
+        },
+        StoredHeld::Withdrawn => panic!("a record, not a tombstone"),
+    };
+    let list = decode_list(key, &item).expect("the list reads");
+    assert_eq!(list.dropped, ["test"]);
+    let Held::Record(joined) = Entry::new("model_x", stored, Some(list)).held else {
+        panic!("a record");
+    };
+    assert_eq!(joined.dropped, ["test"]);
+    assert_eq!(joined.properties, published.properties, "the rest kept");
 }

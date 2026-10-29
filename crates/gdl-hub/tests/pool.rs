@@ -89,6 +89,7 @@ async fn the_pool_publishes_its_record_and_each_change_of_state() {
     assert_eq!(
         first,
         PoolRecord {
+            dropped: Vec::new(),
             presence: gdl_pools::Presence::Serving,
             properties: Vec::new(),
             // With no record before it, the list counts from the epoch,

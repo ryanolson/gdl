@@ -336,6 +336,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
             .map(|boundary| boundary.from.clone());
         let entered = sender.is_some();
         let record = PoolRecord {
+            dropped: Vec::new(),
             presence: gdl_pools::Presence::Serving,
             properties: Vec::new(),
             properties_version: 0,

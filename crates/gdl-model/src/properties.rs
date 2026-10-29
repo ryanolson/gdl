@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 
@@ -173,6 +174,23 @@ pub enum EntryState {
     /// It is removing the property on purpose, and takes no new work for
     /// it.
     Draining,
+}
+
+/// Each of `values` that reads as `T`, and the kind of each that does
+/// not: its `kind` field, or nothing when it has none. A list of
+/// properties, in a record, a report, or a listing, reads each on its own,
+/// so that one property that does not check never costs a reader the
+/// rest, nor the pool its record.
+pub fn read_each<T: DeserializeOwned>(values: Vec<Value>) -> (Vec<T>, Vec<String>) {
+    let mut dropped = Vec::new();
+    let read = values
+        .into_iter()
+        .filter_map(|value| {
+            let kind = value["kind"].as_str().unwrap_or_default().to_string();
+            T::deserialize(value).map_err(|_| dropped.push(kind)).ok()
+        })
+        .collect();
+    (read, dropped)
 }
 
 /// Whether `name` can name a property kind. A kind is a TOML key in a

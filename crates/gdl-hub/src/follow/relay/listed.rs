@@ -170,6 +170,7 @@ impl Listings {
         Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
         if !listed.taken || record.properties_version > listed.properties.version {
             listed.properties = PropertyList {
+                dropped: Vec::new(),
                 entries: record.properties.clone(),
                 version: record.properties_version,
                 revoked: record.revoked.clone(),

@@ -9,6 +9,7 @@ const LEASE: Duration = Duration::from_secs(30);
 
 fn record(name: &str, epoch: u64, seq: u64) -> PoolRecord {
     PoolRecord {
+        dropped: Vec::new(),
         name: name.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),

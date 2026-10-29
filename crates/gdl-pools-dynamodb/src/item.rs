@@ -113,11 +113,39 @@ impl ListKey {
 /// What the lists table holds of a record: the two fields of a record
 /// that grow with its properties.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "ListWire")]
 pub(crate) struct List {
     #[serde(default)]
     pub(crate) properties: Vec<PoolProperty>,
     #[serde(default)]
     pub(crate) revoked: Vec<gdl_model::PropertyKey>,
+    /// The kind of each property or revocation that did not check when
+    /// the body was read, and that it left out. Not stored.
+    #[serde(skip)]
+    pub(crate) dropped: Vec<String>,
+}
+
+/// A list's body as it is read: each property and revocation read on its
+/// own, so that one that does not check never costs the pool its list.
+#[derive(Deserialize)]
+struct ListWire {
+    #[serde(default)]
+    properties: Vec<serde_json::Value>,
+    #[serde(default)]
+    revoked: Vec<serde_json::Value>,
+}
+
+impl From<ListWire> for List {
+    fn from(wire: ListWire) -> Self {
+        let (properties, mut dropped) = gdl_model::read_each(wire.properties);
+        let (revoked, unrevoked) = gdl_model::read_each(wire.revoked);
+        dropped.extend(unrevoked);
+        Self {
+            properties,
+            revoked,
+            dropped,
+        }
+    }
 }
 
 /// A pool's write, as the two tables hold it.
@@ -136,6 +164,7 @@ pub(crate) struct Encoded {
 /// limit is refused.
 pub(crate) fn record(record: &PoolRecord, order: u64) -> Result<Encoded, DirectoryError> {
     let list = (!record.properties.is_empty() || !record.revoked.is_empty()).then(|| List {
+        dropped: Vec::new(),
         properties: record.properties.clone(),
         revoked: record.revoked.clone(),
     });
@@ -339,8 +368,17 @@ impl Entry {
                 list: key,
             } => {
                 if let Some(list) = list {
+                    if !list.dropped.is_empty() {
+                        tracing::debug!(
+                            class,
+                            pool = %record.name,
+                            kinds = ?list.dropped,
+                            "a pool's list holds properties that do not check: they are left out"
+                        );
+                    }
                     record.properties = list.properties;
                     record.revoked = list.revoked;
+                    record.dropped.extend(list.dropped);
                 }
                 (Held::Record(record), key)
             }

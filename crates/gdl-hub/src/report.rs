@@ -233,6 +233,14 @@ impl Reports {
         let offered = match &report {
             Report::Record(record) => {
                 record.check()?;
+                if !record.dropped.is_empty() {
+                    tracing::debug!(
+                        class,
+                        pool,
+                        kinds = ?record.dropped,
+                        "a child's record holds properties that do not check: they are left out"
+                    );
+                }
                 if record.home.as_deref() != Some(self.pool.as_str()) {
                     return Err(DirectoryError::Refused(format!(
                         "pool `{pool}` names {} as its parent, not this pool, `{}`",
