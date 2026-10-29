@@ -18,6 +18,7 @@ NOTE: gdl is experimental. Its design and tests are still in progress, and its A
 - **Dynamo-shaped health and metrics.** A segment binary and the hub binary also write their logs to stderr, at the level `RUST_LOG` sets. See [Health and metrics](docs/src/operations/observability.md).
 - **Pools.** One graph across several deployments, each with its own hub. A pool policy chooses the pool for each request: gdl's, or one from your crate that the spec binds or your code registers. A node beside the chooser can read the same pools, which were drained on purpose, and which pools list each property. An entry whose nodes say which property each request wants declines a request for one it does not have, and the chooser offers it to another pool. See [Classes and pools](docs/src/concepts/pools.md), [Write a pool policy](docs/src/guides/write-a-pool-policy.md), [What a node reads](docs/src/concepts/pool-routing.md#what-a-node-reads), and [The property index](docs/src/concepts/pool-routing.md#the-property-index).
 - **Docker Compose bundles.** `cargo gdl compose` writes a hub and a service per segment, and mounts the file secrets a spec names without reading them. See [Deploy with Docker Compose](docs/src/guides/compose-deploy.md).
+- **Kubernetes objects.** `cargo gdl k8s` writes a fleet's objects, one directory per cluster: a hub and a Deployment per segment for each pool, with the Kubernetes Secrets a cluster names mounted, never read. See [Deploy a fleet on Kubernetes](docs/src/guides/kubernetes.md).
 - **A composer.** Draw a graph in a browser, place it, and deploy it with Compose. See [Compose in the browser](docs/src/guides/composer.md).
 
 ## Crates
@@ -33,7 +34,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-message` | Authors of messages | `derive(Message)` and the message catalogue, without the runtime |
 | `gdl-macros` | Internal | `graph!`, the generated segments' `segment!`, and the derives |
 | `gdl-extract` | Tools | The source reader and the working catalogue |
-| `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `export` |
+| `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `k8s`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-pools` | `gdl`, hub, and runtime | The pool plane's shared types: the pool record, a pool's state, load summary, presence, and properties, the `PoolDirectory` backends, and an operator's commands for a pool whose hub is gone. No velo |
 | `gdl-pools-dynamodb` | Deployments across regions | A pool directory in DynamoDB global tables, for a hub built with `gdl_hub::hub_builder_with` |

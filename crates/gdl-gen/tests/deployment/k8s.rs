@@ -1,0 +1,637 @@
+//! A fleet's Kubernetes objects, per cluster: pinned file for file, read
+//! against the fleet's Compose bundle, and refused, with the reason named,
+//! where the fleet cannot run on Kubernetes.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use super::{Mirror, SPLIT, placed};
+
+/// The api example's fleet over two clusters, each a parent pool and its
+/// child: under the relay directory a child's hub reaches its parent's by
+/// a Service name, which resolves only in its own cluster.
+const FLEET: &str = "tests/fixtures/k8s/fleet.toml";
+
+/// The pinned objects of [`FLEET`], one directory per cluster.
+const PINNED: &str = "tests/fixtures/k8s/out";
+
+/// A file whose text is [`MARKER`]: the fleet's secret on the host, which
+/// no generated file may hold.
+const SECRET: &str = "tests/fixtures/k8s/secret";
+
+/// The text of [`SECRET`].
+const MARKER: &str = "gdl-k8s-secret-marker-5f1c";
+
+/// The tag the pinned objects name: the default tag is the contract hash,
+/// which the test's mirror can move.
+const TAG: &str = "pinned";
+
+fn manifest_dir() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn fleet_text() -> String {
+    std::fs::read_to_string(manifest_dir().join(FLEET)).expect("the fleet")
+}
+
+fn fleet(text: &str) -> gdl_model::Fleet {
+    gdl_model::Fleet::from_toml(text).expect("a fleet")
+}
+
+/// The api example in [`SPLIT`]'s two classes, with what a Kubernetes
+/// deployment of it reads from the spec: a published port, a secret, and
+/// a drain bound.
+fn spec(mirror: &Mirror) -> gdl_gen::Spec {
+    let secret = manifest_dir().join(SECRET);
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("the secret").trim(),
+        MARKER
+    );
+    let deployment = format!(
+        "[deployment.secrets.fingerprint]\nfile = {:?}\n\
+         [deployment.segment.front]\nports = [\"8080\"]\nsecrets = [\"fingerprint\"]\n\
+         [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n",
+        secret.display().to_string()
+    );
+    placed(mirror, &format!("{SPLIT}{deployment}"))
+}
+
+/// The objects of `fleet` for `spec`, tagged [`TAG`].
+fn render(
+    mirror: &Mirror,
+    spec: &gdl_gen::Spec,
+    fleet: &gdl_model::Fleet,
+) -> Result<gdl_gen::Files, gdl_gen::Error> {
+    gdl_gen::k8s_files(spec, fleet, &mirror.target(), Some(TAG))
+}
+
+/// The objects of a file the render writes: one JSON document each, in a
+/// YAML stream.
+fn documents(text: &str) -> Vec<Value> {
+    text.split("---\n")
+        .filter(|doc| !doc.trim().is_empty())
+        .map(|doc| serde_json::from_str(doc).expect("a JSON object"))
+        .collect()
+}
+
+/// Every object of `files`, by its kind and name. A pool's objects are
+/// named for it, and so for one cluster; each cluster's base objects are
+/// named `<cluster>/<name>` here.
+fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Value> {
+    let mut objects = BTreeMap::new();
+    for (path, text) in files {
+        if path.extension().is_none_or(|e| e != "yaml") {
+            continue;
+        }
+        let cluster = path.iter().next().expect("a cluster").to_string_lossy();
+        for object in documents(text) {
+            let kind = object["kind"].as_str().expect("a kind").to_string();
+            let name = object["metadata"]["name"].as_str().expect("a name");
+            let name = match kind.as_str() {
+                "Namespace" | "ServiceAccount" => format!("{cluster}/{name}"),
+                _ => name.to_string(),
+            };
+            let key = (kind, name);
+            assert!(
+                objects.insert(key.clone(), object).is_none(),
+                "{key:?} twice"
+            );
+        }
+    }
+    objects
+}
+
+/// A container's literal variables, by name; one taken from the pod has
+/// its field path as its value.
+fn env(container: &Value) -> BTreeMap<String, String> {
+    container["env"]
+        .as_array()
+        .expect("env")
+        .iter()
+        .map(|var| {
+            let value = match var.get("value") {
+                Some(value) => value.as_str().expect("a string").to_string(),
+                None => format!(
+                    "fieldRef:{}",
+                    var["valueFrom"]["fieldRef"]["fieldPath"]
+                        .as_str()
+                        .expect("a field")
+                ),
+            };
+            (var["name"].as_str().expect("a name").to_string(), value)
+        })
+        .collect()
+}
+
+/// The one container of a Deployment.
+fn container(deployment: &Value) -> &Value {
+    let containers = deployment["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .expect("containers");
+    assert_eq!(containers.len(), 1, "{deployment}");
+    &containers[0]
+}
+
+/// The render's files as the pinned directory holds them: the test
+/// mirror's URL and commit, which move, as `<url>` and `<rev>`.
+fn pinned_text(mirror: &Mirror, text: &str) -> String {
+    text.replace(&mirror.url, "<url>")
+        .replace(&mirror.rev, "<rev>")
+}
+
+/// Every file the render writes for [`FLEET`] is pinned, so that a change
+/// to any object is seen in review. `GDL_UPDATE_FIXTURES=1` writes them
+/// again.
+#[test]
+fn a_fleets_objects_are_pinned() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
+    let pinned = manifest_dir().join(PINNED);
+    if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
+        let _ = std::fs::remove_dir_all(&pinned);
+        for (path, text) in &files {
+            let path = pinned.join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+            std::fs::write(path, pinned_text(&mirror, text)).expect("a pinned file");
+        }
+        return;
+    }
+    let mut on_disk = Vec::new();
+    let mut pending = vec![pinned.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the pinned objects") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                on_disk.push(path.strip_prefix(&pinned).expect("inside").to_path_buf());
+            }
+        }
+    }
+    on_disk.sort();
+    let written: Vec<PathBuf> = files.keys().cloned().collect();
+    assert_eq!(written, on_disk, "the files differ from {PINNED}");
+    for (path, text) in &files {
+        let expected = std::fs::read_to_string(pinned.join(path)).expect("a pinned file");
+        let found = pinned_text(&mirror, text);
+        for (found, expected) in found.lines().zip(expected.lines()) {
+            assert_eq!(found, expected, "{} differs", path.display());
+        }
+        assert_eq!(found, expected, "{} differs", path.display());
+    }
+    // One directory per cluster, each with its base and one file per pool.
+    for path in [
+        "README.md",
+        "euw1/base.yaml",
+        "euw1/pools/global-eu.yaml",
+        "euw1/pools/model-x-eu.yaml",
+        "use1/base.yaml",
+        "use1/pools/global-us.yaml",
+        "use1/pools/model-x-us.yaml",
+    ] {
+        assert!(files.contains_key(Path::new(path)), "{path}");
+    }
+}
+
+/// Each object carries the fleet's label, and each of a pool's objects
+/// its pool's, class's, and segment's; a Deployment's selector picks its
+/// own pods only, and a hub's is never a segment's.
+#[test]
+fn every_object_is_labelled_and_selects_its_own_pods() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
+    let objects = objects(&files);
+    let mut selectors = Vec::new();
+    for ((kind, name), object) in &objects {
+        let labels = &object["metadata"]["labels"];
+        assert_eq!(labels["gdl.dev/fleet"], "api", "{kind} {name}");
+        if matches!(kind.as_str(), "Namespace" | "ServiceAccount") {
+            continue;
+        }
+        for key in ["gdl.dev/pool", "gdl.dev/class"] {
+            assert!(labels[key].is_string(), "{kind} {name}: {key}");
+        }
+        // A pool's settings are all its segments'.
+        assert_eq!(
+            labels["gdl.dev/segment"].is_string(),
+            kind != "ConfigMap",
+            "{kind} {name}"
+        );
+        if kind == "Deployment" {
+            let selector = &object["spec"]["selector"]["matchLabels"];
+            assert_eq!(
+                selector, &object["spec"]["template"]["metadata"]["labels"],
+                "{name}"
+            );
+            selectors.push((
+                object["metadata"]["namespace"].clone(),
+                selector["gdl.dev/pool"].clone(),
+                selector["gdl.dev/segment"].clone(),
+            ));
+        }
+    }
+    let unique: std::collections::BTreeSet<String> =
+        selectors.iter().map(|s| format!("{s:?}")).collect();
+    assert_eq!(unique.len(), selectors.len(), "{selectors:?}");
+}
+
+/// A pool's hub and segments get the variables its Compose service gets,
+/// from the same function: they differ only in the addresses each network
+/// spells, and a hub advertises its pod's IP.
+#[test]
+fn the_pool_variables_are_composes_except_addresses() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let fleet = fleet(&fleet_text());
+    let objects = objects(&render(&mirror, &spec, &fleet).expect("objects"));
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-k8s-compose-")
+        .tempdir()
+        .expect("a directory");
+    let compose = gdl_gen::compose_files(
+        &spec,
+        Some(&fleet),
+        temp.path(),
+        &mirror.target(),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
+    let compose: Value =
+        serde_json::from_str(&compose[Path::new("compose.yaml")]).expect("compose.yaml");
+    let addresses = ["GDL_POOL__HUB", "GDL_POOL__PARENT_HUB", "GDL_HUB__HOST"];
+    // Set by the cluster, which Compose does not read.
+    let cluster = ["RUST_LOG"];
+    let mut compared = 0;
+    for (service, settings) in compose["services"].as_object().expect("services") {
+        let deployment = service.replace('_', "-");
+        let object = &objects[&("Deployment".to_string(), deployment.clone())];
+        let ours = env(container(object));
+        let theirs: BTreeMap<String, String> = settings["environment"]
+            .as_object()
+            .expect("environment")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().expect("a string").to_string()))
+            .collect();
+        let strip = |vars: &BTreeMap<String, String>| {
+            vars.iter()
+                .filter(|(name, _)| {
+                    name.as_str() != "GDL_POD_IP" && !cluster.contains(&name.as_str())
+                })
+                .map(|(name, value)| {
+                    let value = match addresses.contains(&name.as_str()) {
+                        true => "<address>".to_string(),
+                        false => value.clone(),
+                    };
+                    (name.clone(), value)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(strip(&ours), strip(&theirs), "{service}");
+        compared += 1;
+        let is_hub = !service.contains('_');
+        if is_hub {
+            // The hub's record names the hub at its pod's IP, which only
+            // the pod knows.
+            assert_eq!(ours["GDL_POD_IP"], "fieldRef:status.podIP", "{service}");
+            assert_eq!(ours["GDL_POOL__HUB"], "$(GDL_POD_IP):1337", "{service}");
+            let names: Vec<&str> = container(object)["env"]
+                .as_array()
+                .expect("env")
+                .iter()
+                .map(|v| v["name"].as_str().expect("a name"))
+                .collect();
+            let ip = names.iter().position(|n| *n == "GDL_POD_IP");
+            let hub = names.iter().position(|n| *n == "GDL_POOL__HUB");
+            assert!(ip < hub, "{names:?}: a $(VAR) reads only what is above it");
+        } else {
+            let pool = service.split_once('_').expect("a pool").0;
+            assert_eq!(ours["GDL_HUB__HOST"], pool, "{service}");
+            assert_eq!(ours["GDL_POOL__HUB"], format!("{pool}:1337"), "{service}");
+        }
+        if let Some(parent) = ours.get("GDL_POOL__PARENT_HUB") {
+            // A child's parent's hub, by its Service, in its own cluster.
+            assert_eq!(
+                Some(parent),
+                theirs.get("GDL_POOL__PARENT_HUB"),
+                "{service}"
+            );
+        }
+    }
+    assert_eq!(compared, 8, "four pools, each a hub and one segment");
+}
+
+/// The fleet's secret is named, never read: the file that the spec names
+/// holds a marker, and no file the render writes holds it.
+#[test]
+fn a_secrets_value_appears_in_no_object() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
+    for (path, text) in &files {
+        assert!(!text.contains(MARKER), "{}", path.display());
+        assert!(
+            !text.contains(SECRET),
+            "{}: names the host file",
+            path.display()
+        );
+    }
+    // The secret is mounted where Compose mounts it, from the Secret that
+    // the cluster names, under the spec's name for it.
+    let objects = objects(&files);
+    let front = &objects[&("Deployment".to_string(), "global-us-front".to_string())];
+    let pod = &front["spec"]["template"]["spec"];
+    let volume = pod["volumes"]
+        .as_array()
+        .expect("volumes")
+        .iter()
+        .find(|v| v["name"] == "secrets")
+        .expect("the secrets volume");
+    assert_eq!(
+        volume["projected"]["sources"],
+        serde_json::json!([{"secret": {"name": "api-fingerprint", "items": [{"key": "fingerprint", "path": "fingerprint"}]}}])
+    );
+    let mount = container(front)["volumeMounts"]
+        .as_array()
+        .expect("mounts")
+        .iter()
+        .find(|m| m["name"] == "secrets")
+        .expect("the secrets mount")
+        .clone();
+    assert_eq!(mount["mountPath"], "/run/secrets");
+    // The engine mounts none.
+    let engine = &objects[&("Deployment".to_string(), "model-x-us-engine".to_string())];
+    assert!(!engine.to_string().contains("api-fingerprint"), "{engine}");
+}
+
+/// What a pool's pods are told: replicas from the pool's quorum, the
+/// drain bound's grace, probes on the system port, a hub of one replica
+/// that is never two at once, and a ready probe on the hub's own health,
+/// never the pool's, which a parent answers 503 until its children are
+/// ready.
+#[test]
+fn a_pools_pods_are_sized_and_probed_as_its_settings_say() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
+    assert!(!files.values().any(|text| text.contains("gdl-pool/health")));
+    let objects = objects(&files);
+    let deployment = |name: &str| &objects[&("Deployment".to_string(), name.to_string())];
+    for (name, replicas, grace) in [
+        ("global-us-front", 2, 630),
+        ("global-eu-front", 2, 630),
+        ("model-x-us-engine", 2, 120),
+        ("model-x-eu-engine", 1, 120),
+    ] {
+        let object = deployment(name);
+        assert_eq!(object["spec"]["replicas"], replicas, "{name}");
+        let pod = &object["spec"]["template"]["spec"];
+        assert_eq!(pod["terminationGracePeriodSeconds"], grace, "{name}");
+        let container = container(object);
+        assert_eq!(container["livenessProbe"]["httpGet"]["path"], "/live");
+        assert_eq!(container["livenessProbe"]["httpGet"]["port"], 9090);
+        assert_eq!(container["readinessProbe"]["httpGet"]["path"], "/health");
+        assert_eq!(container["readinessProbe"]["httpGet"]["port"], 9090);
+        let segment = name.rsplit_once('-').expect("a segment").1;
+        assert_eq!(
+            container["command"],
+            serde_json::json!([
+                "/usr/local/bin/segment",
+                format!("/etc/gdl/fleet/{segment}.toml")
+            ]),
+            "{name}: the pool's ConfigMap is what the pod reads"
+        );
+    }
+    for pool in ["global-us", "model-x-us", "global-eu", "model-x-eu"] {
+        let hub = deployment(pool);
+        assert_eq!(hub["spec"]["replicas"], 1, "{pool}");
+        assert_eq!(hub["spec"]["strategy"]["type"], "Recreate", "{pool}");
+        let container = container(hub);
+        for probe in ["livenessProbe", "readinessProbe"] {
+            assert_eq!(container[probe]["httpGet"]["path"], "/v1/health", "{pool}");
+            assert_eq!(container[probe]["httpGet"]["port"], 1337, "{pool}");
+        }
+        let config = &objects[&("ConfigMap".to_string(), pool.to_string())];
+        assert!(config["data"]["deployment.json"].is_string(), "{pool}");
+    }
+    // Only a parent keeps state, on a claim of its own, writable by the
+    // image's user.
+    let claims: Vec<&String> = objects
+        .keys()
+        .filter(|(kind, _)| kind == "PersistentVolumeClaim")
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(claims, ["global-eu-state", "global-us-state"]);
+    let parent = &deployment("global-us")["spec"]["template"]["spec"];
+    assert_eq!(parent["securityContext"]["fsGroup"], 65532);
+    assert_eq!(
+        env(container(deployment("global-us")))["GDL_POOL__STATE_DIR"],
+        "/var/lib/gdl-hub"
+    );
+    // A cluster's platform picks its nodes, and its registry its images.
+    let eu = &deployment("global-eu-front")["spec"]["template"]["spec"];
+    assert_eq!(
+        eu["nodeSelector"],
+        serde_json::json!({"kubernetes.io/arch": "arm64", "kubernetes.io/os": "linux"})
+    );
+    assert_eq!(
+        container(deployment("global-eu-front"))["image"],
+        "registry.example/gdl-eu/api-front:pinned"
+    );
+    assert_eq!(
+        container(deployment("global-us"))["image"],
+        "registry.example/gdl/api-hub:pinned"
+    );
+    // The entry port is a ClusterIP Service of each pool that runs it.
+    for pool in ["global-us", "global-eu"] {
+        let service = &objects[&("Service".to_string(), format!("{pool}-front"))];
+        assert_eq!(service["spec"]["type"], "ClusterIP");
+        assert_eq!(service["spec"]["ports"][0]["port"], 8080);
+    }
+    assert!(!objects.contains_key(&("Service".to_string(), "model-x-us-engine".to_string())));
+    // The cluster's role reaches its pods through the service account.
+    let account = &objects[&("ServiceAccount".to_string(), "use1/api".to_string())];
+    assert_eq!(account["metadata"]["namespace"], "gdl-api");
+}
+
+/// Without `--tag`, each image is tagged with its layout's contract and
+/// placement hashes.
+#[test]
+fn the_default_tag_is_the_contract_and_placement_hash() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let files =
+        gdl_gen::k8s_files(&spec, &fleet(&fleet_text()), &mirror.target(), None).expect("objects");
+    let objects = objects(&files);
+    let config = &objects[&("ConfigMap".to_string(), "global-us".to_string())];
+    let deployment: gdl_model::DeploymentSpec =
+        serde_json::from_str(config["data"]["deployment.json"].as_str().expect("text"))
+            .expect("a deployment");
+    let layout = gdl_model::layout(&deployment.graph, &deployment.placement).expect("a layout");
+    let tag = format!(
+        "{:016x}-{:016x}",
+        layout.contract_hash(),
+        layout.placement_hash()
+    );
+    let front = &objects[&("Deployment".to_string(), "global-us-front".to_string())];
+    assert_eq!(
+        container(front)["image"],
+        format!("registry.example/gdl/api-front:{tag}")
+    );
+}
+
+/// `k8s` writes the objects into a fresh directory, and refuses one that
+/// exists.
+#[test]
+fn the_objects_are_written_into_a_fresh_directory() {
+    let mirror = Mirror::new();
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-k8s-out-")
+        .tempdir()
+        .expect("a directory");
+    let out = temp.path().join("k8s");
+    let spec = spec(&mirror);
+    let fleet = fleet(&fleet_text());
+    gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG)).expect("written");
+    assert!(out.join("use1/base.yaml").is_file());
+    assert!(out.join("euw1/pools/model-x-eu.yaml").is_file());
+    let again = gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG))
+        .expect_err("the directory exists");
+    assert!(again.to_string().contains("already exists"), "{again}");
+}
+
+/// The render's refusal of `fleet`, which it names.
+fn refused(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: &str) -> String {
+    render(mirror, spec, &self::fleet(fleet))
+        .expect_err("refused")
+        .to_string()
+}
+
+/// Each fleet that cannot run on Kubernetes is refused, with what is
+/// missing named at its table. `check` accepts each: it does not see the
+/// spec's secrets, and a fleet for Compose needs none of these.
+#[test]
+fn a_fleet_that_cannot_run_on_kubernetes_is_refused() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let base = fleet_text();
+    let cases: Vec<(String, &[&str])> = vec![
+        (
+            base.replace("[fleet]\nname = \"api\"\n", ""),
+            &["`[fleet] name`"],
+        ),
+        (
+            base.replace("registry = \"registry.example/gdl-eu\"\n", ""),
+            &["[cluster.euw1]", "`registry`"],
+        ),
+        (
+            base.replace("platform = \"linux/arm64\"\n", ""),
+            &["[cluster.euw1]", "`platform`"],
+        ),
+        (
+            base.replace(
+                "class = \"model_x\"\ncluster = \"euw1\"\n",
+                "class = \"model_x\"\nregion = \"eu-west-1\"\n",
+            ),
+            &["[pool.model-x-eu]", "`cluster`"],
+        ),
+        (
+            base.replace(
+                "secrets = { fingerprint = \"api-fingerprint\" }",
+                "secrets = { fingerprint = \"api-fingerprint\", other = \"api-other\" }",
+            ),
+            &["[cluster.use1]", "`other`", "[deployment.secrets"],
+        ),
+        (
+            base.replace("RUST_LOG = \"info\"", "GDL_POOL__NAME = \"x\""),
+            &["[cluster.use1]", "`GDL_POOL__NAME`"],
+        ),
+        (
+            base.replace("RUST_LOG = \"info\"", "gdl_hub__host = \"x\""),
+            &["[cluster.use1]", "`gdl_hub__host`"],
+        ),
+        (
+            base.replace("RUST_LOG = \"info\"", "GDL_POD_IP = \"x\""),
+            &["[cluster.use1]", "`GDL_POD_IP`"],
+        ),
+        (
+            base.replace("platform = \"linux/arm64\"", "platform = \"arm64\""),
+            &["[cluster.euw1]", "`arm64`"],
+        ),
+    ];
+    for (fleet, named) in cases {
+        let checked = gdl_model::Fleet::from_toml(&fleet)
+            .expect("a fleet")
+            .check(None);
+        assert!(checked.is_ok(), "{checked:?}\n{fleet}");
+        let refusal = refused(&mirror, &spec, &fleet);
+        for name in named {
+            assert!(refusal.contains(name), "{name} in {refusal}");
+        }
+    }
+}
+
+/// Under the relay directory a child's hub reaches its parent's by its
+/// Service name, which does not resolve in another cluster: a fleet whose
+/// child and parent are in two clusters is refused, naming both pools.
+#[test]
+fn a_relay_fleet_across_clusters_is_refused() {
+    let mirror = Mirror::new();
+    let crossed = fleet_text()
+        .replace("home = \"global-us\"", "home = \"global-xx\"")
+        .replace("home = \"global-eu\"", "home = \"global-us\"")
+        .replace("home = \"global-xx\"", "home = \"global-eu\"");
+    let refusal = refused(&mirror, &spec(&mirror), &crossed);
+    for name in [
+        "[pool.model-x-eu]",
+        "`global-us`",
+        "`use1`",
+        "`euw1`",
+        "[pool.model-x-us]",
+        "`global-eu`",
+        "relay",
+    ] {
+        assert!(refusal.contains(name), "{name} in {refusal}");
+    }
+}
+
+/// A pool's segment that mounts a secret its cluster does not map could
+/// never start: refused, naming the pool, the segment, and the cluster.
+#[test]
+fn a_secret_the_cluster_does_not_map_is_refused() {
+    let mirror = Mirror::new();
+    let unmapped = fleet_text().replace("secrets = { fingerprint = \"api-fingerprint-eu\" }\n", "");
+    let refusal = refused(&mirror, &spec(&mirror), &unmapped);
+    for name in [
+        "[pool.global-eu]",
+        "`front`",
+        "`fingerprint`",
+        "[cluster.euw1]",
+    ] {
+        assert!(refusal.contains(name), "{name} in {refusal}");
+    }
+}
+
+/// What a Kubernetes object cannot name or publish is refused rather than
+/// renamed: a segment whose name is not a DNS label, and a port range.
+#[test]
+fn a_segment_kubernetes_cannot_name_or_publish_is_refused() {
+    let mirror = Mirror::new();
+    let fleet = fleet_text();
+    // No secrets: these specs mount none.
+    let fleet = fleet
+        .replace("secrets = { fingerprint = \"api-fingerprint\" }\n", "")
+        .replace("secrets = { fingerprint = \"api-fingerprint-eu\" }\n", "");
+    let underscored = placed(&mirror, &SPLIT.replace("engine", "big_engine"));
+    let refusal = refused(
+        &mirror,
+        &underscored,
+        &fleet.replace("engine = ", "big_engine = "),
+    );
+    assert!(refusal.contains("`big_engine`"), "{refusal}");
+    let ranged = placed(
+        &mirror,
+        &format!("{SPLIT}[deployment.segment.front]\nports = [\"8080-8081:8080-8081\"]\n"),
+    );
+    let refusal = refused(&mirror, &ranged, &fleet);
+    assert!(refusal.contains("`8080-8081:8080-8081`"), "{refusal}");
+}

@@ -58,7 +58,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use build::{Build, build};
-pub use deployment::{ComposeBundle, Sources, compose, compose_bundle, compose_files};
+pub use deployment::{
+    ComposeBundle, Sources, compose, compose_bundle, compose_files, k8s, k8s_files,
+};
 use emit::MARKER;
 pub use export::export;
 pub use extract::{Crate, Extracted, add_to_catalog, extract, probe, verify};

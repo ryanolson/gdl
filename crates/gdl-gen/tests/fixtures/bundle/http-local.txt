@@ -5,7 +5,7 @@ Run `docker compose up --build` from this directory. The hub starts first; every
 
 Configure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.
 
-Each segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.
+Each segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. `cargo gdl k8s` writes a fleet's Kubernetes objects; srt-slurm is not generated.
 
 This bundle builds local sources: its images build from a context outside the bundle, which holds every crate it builds from by path. It builds only on the machine that wrote it, and every change to those crates rebuilds its images.
 

@@ -102,10 +102,10 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[cluster.<name>] context` | the kube context that reaches the cluster, not empty | required |
 | `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
 | `[cluster.<name>] region` | the region of every pool in the cluster | required |
-| `[cluster.<name>] registry` | the registry the cluster pulls images from | none |
-| `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64` | none |
+| `[cluster.<name>] registry` | the registry the cluster pulls images from; `cargo gdl k8s` requires it | none |
+| `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64`; `cargo gdl k8s` requires it | none |
 | `[cluster.<name>] service_account_annotations` | annotations of the pools' service account, such as a cloud role | none |
-| `[cluster.<name>] secrets` | spec secret name to the name of an existing Kubernetes Secret that holds it in this cluster | none |
+| `[cluster.<name>] secrets` | spec secret name to the name of an existing Kubernetes Secret that holds it in this cluster, under a key of the spec secret's name | none |
 | `[cluster.<name>] env` | variables that every container of the cluster's pools gets | none |
 | `[cluster.<name>] pins_local` | whether the cluster's pin table runs in a DynamoDB Local of its own | `false` |
 | `[class.<name>] ready` | segment to the usable instances a pool of the class needs to be ready | 1 per segment |
@@ -122,8 +122,9 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 - A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. So are the fleet's name and a cluster's name. A cluster's `namespace` is a Kubernetes namespace, an RFC 1123 label: lowercase letters, digits, and `-`, starting and ending with a letter or digit, at most 63 characters.
 - A pool's `cluster` names a `[cluster.<name>]` table, and the pool takes the cluster's region. A pool may still write `region`, and then it must be the cluster's. A pool without a cluster writes its `region`.
 - No two clusters have the same `context` and `namespace`.
-- The fleet file holds no secret value and no credential. A cluster's `secrets` holds only Kubernetes Secret names: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters. Its keys are not checked against the spec's `[deployment.secrets]` tables. A kube context's credentials stay in the kubeconfig. Do not put a secret value in `env`. An `env` key is letters, digits, and `_`, not starting with a digit.
+- The fleet file holds no secret value and no credential. A cluster's `secrets` holds only Kubernetes Secret names: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters. `check` does not judge its keys against the spec's `[deployment.secrets]` tables. `cargo gdl k8s` refuses a key that no such table declares, and a secret that a pool's segment mounts and the pool's cluster does not map. A kube context's credentials stay in the kubeconfig. Do not put a secret value in `env`. An `env` key is letters, digits, and `_`, not starting with a digit.
 - A `service_account_annotations` key is a Kubernetes annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit.
+- `cargo gdl k8s` requires `[fleet] name`, a `cluster` for every pool, and a `registry` and `platform` for every cluster. It refuses an `env` key that is `GDL_POD_IP`, or starts with `GDL_POOL__` or `GDL_HUB__` in any case, and a child in another cluster than its parent. See [Deploy a fleet on Kubernetes](../guides/kubernetes.md).
 - `cargo gdl compose` reads only a cluster's region. A fleet whose pools take their regions from clusters writes the same bundle as one whose pools write the same regions.
 - A `home` names a pool of a parent class that runs the same layout. Every pool whose class sends to another class needs a child of each class it sends to, in its layout.
 - A `ready` key must be a segment of the class, and a count is at least 1.

@@ -1,0 +1,48 @@
+# The api example's fleet over two clusters: in each, a global pool and
+# its child. Under the relay directory a child's hub reaches its parent's
+# hub by a Service name, which resolves only in its own cluster.
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+service_account_annotations = { "eks.amazonaws.com/role-arn" = "arn:aws:iam::000000000000:role/gdl-api" }
+secrets = { fingerprint = "api-fingerprint" }
+env = { RUST_LOG = "info" }
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+secrets = { fingerprint = "api-fingerprint-eu" }
+
+[class.global]
+ready = { front = 2 }
+
+[class.model_x]
+ready = { engine = 1 }
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+ready = { engine = 2 }
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.model-x-eu]
+class = "model_x"
+cluster = "euw1"
+home = "global-eu"

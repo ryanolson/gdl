@@ -11,7 +11,7 @@ Each pool's hub publishes its record under the `relay` directory backend: a chil
 
 Each image is built once, from one Dockerfile per layout and segment, and every pool of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.
 
-Each segment takes its roster from its pool's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <pool>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one pool; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.
+Each segment takes its roster from its pool's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <pool>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one pool; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. `cargo gdl k8s` writes a fleet's Kubernetes objects instead; srt-slurm is not generated.
 
 ==> compose.yaml <==
 {

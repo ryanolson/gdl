@@ -1,0 +1,342 @@
+---
+{
+  "apiVersion": "v1",
+  "data": {
+    "deployment.json": "{\n  \"graph\": {\n    \"name\": \"api\",\n    \"schema\": 1,\n    \"nodes\": [\n      {\n        \"name\": \"Http\",\n        \"role\": \"source\",\n        \"binding\": null\n      },\n      {\n        \"name\": \"Engine\",\n        \"role\": \"sink\",\n        \"binding\": \"engine\"\n      }\n    ],\n    \"hops\": [\n      {\n        \"outer\": \"Http\",\n        \"forward\": [],\n        \"inner\": \"Engine\",\n        \"backward\": [],\n        \"forward_types\": [\n          {\n            \"name\": \":: api_frontend :: Prompt\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ],\n        \"backward_types\": [\n          {\n            \"name\": \":: api_frontend :: Chunk\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ]\n      }\n    ]\n  },\n  \"placement\": {\n    \"segment\": {\n      \"engine\": {\n        \"nodes\": [\n          \"Engine\"\n        ]\n      },\n      \"front\": {\n        \"nodes\": [\n          \"Http\"\n        ]\n      }\n    },\n    \"class\": {\n      \"global\": {\n        \"segments\": [\n          \"front\"\n        ]\n      },\n      \"model_x\": {\n        \"segments\": [\n          \"engine\"\n        ]\n      }\n    }\n  }\n}",
+    "engine.toml": "listen = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[runtime]\ndrain_ms = 90000\n\n[system]\nport = 9090\n"
+  },
+  "kind": "ConfigMap",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "model-x-eu"
+    },
+    "name": "model-x-eu",
+    "namespace": "gdl-api"
+  }
+}
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "model-x-eu",
+      "gdl.dev/segment": "hub"
+    },
+    "name": "model-x-eu",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "gdl.dev/class": "model_x",
+        "gdl.dev/fleet": "api",
+        "gdl.dev/pool": "model-x-eu",
+        "gdl.dev/segment": "hub"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "gdl.dev/config": "b94666b55573ee76"
+        },
+        "labels": {
+          "gdl.dev/class": "model_x",
+          "gdl.dev/fleet": "api",
+          "gdl.dev/pool": "model-x-eu",
+          "gdl.dev/segment": "hub"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "/usr/local/bin/segment",
+              "/etc/gdl/fleet/deployment.json"
+            ],
+            "env": [
+              {
+                "name": "GDL_POD_IP",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "status.podIP"
+                  }
+                }
+              },
+              {
+                "name": "GDL_POOL__CLASS",
+                "value": "model_x"
+              },
+              {
+                "name": "GDL_POOL__DIRECTORY",
+                "value": "relay"
+              },
+              {
+                "name": "GDL_POOL__HOME",
+                "value": "global-eu"
+              },
+              {
+                "name": "GDL_POOL__HUB",
+                "value": "$(GDL_POD_IP):1337"
+              },
+              {
+                "name": "GDL_POOL__NAME",
+                "value": "model-x-eu"
+              },
+              {
+                "name": "GDL_POOL__PARENT_HUB",
+                "value": "global-eu:1337"
+              },
+              {
+                "name": "GDL_POOL__READY__ENGINE",
+                "value": "1"
+              },
+              {
+                "name": "GDL_POOL__REGION",
+                "value": "eu-west-1"
+              },
+              {
+                "name": "GDL_POOL__SUMMARY_MS",
+                "value": "10000"
+              }
+            ],
+            "image": "registry.example/gdl-eu/api-hub:pinned",
+            "livenessProbe": {
+              "failureThreshold": 30,
+              "httpGet": {
+                "path": "/v1/health",
+                "port": 1337
+              },
+              "periodSeconds": 2,
+              "timeoutSeconds": 2
+            },
+            "name": "hub",
+            "ports": [
+              {
+                "containerPort": 1337,
+                "name": "public"
+              },
+              {
+                "containerPort": 8337,
+                "name": "control"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/v1/health",
+                "port": 1337
+              },
+              "periodSeconds": 2,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/gdl/fleet",
+                "name": "config",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/arch": "arm64",
+          "kubernetes.io/os": "linux"
+        },
+        "serviceAccountName": "api",
+        "volumes": [
+          {
+            "configMap": {
+              "name": "model-x-eu"
+            },
+            "name": "config"
+          }
+        ]
+      }
+    }
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "model-x-eu",
+      "gdl.dev/segment": "hub"
+    },
+    "name": "model-x-eu",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "ports": [
+      {
+        "name": "public",
+        "port": 1337,
+        "targetPort": 1337
+      },
+      {
+        "name": "control",
+        "port": 8337,
+        "targetPort": 8337
+      }
+    ],
+    "selector": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "model-x-eu",
+      "gdl.dev/segment": "hub"
+    },
+    "type": "ClusterIP"
+  }
+}
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "model-x-eu",
+      "gdl.dev/segment": "engine"
+    },
+    "name": "model-x-eu-engine",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "gdl.dev/class": "model_x",
+        "gdl.dev/fleet": "api",
+        "gdl.dev/pool": "model-x-eu",
+        "gdl.dev/segment": "engine"
+      }
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "gdl.dev/config": "b94666b55573ee76"
+        },
+        "labels": {
+          "gdl.dev/class": "model_x",
+          "gdl.dev/fleet": "api",
+          "gdl.dev/pool": "model-x-eu",
+          "gdl.dev/segment": "engine"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "/usr/local/bin/segment",
+              "/etc/gdl/fleet/engine.toml"
+            ],
+            "env": [
+              {
+                "name": "GDL_HUB__HOST",
+                "value": "model-x-eu"
+              },
+              {
+                "name": "GDL_POOL__CLASS",
+                "value": "model_x"
+              },
+              {
+                "name": "GDL_POOL__DIRECTORY",
+                "value": "relay"
+              },
+              {
+                "name": "GDL_POOL__HOME",
+                "value": "global-eu"
+              },
+              {
+                "name": "GDL_POOL__HUB",
+                "value": "model-x-eu:1337"
+              },
+              {
+                "name": "GDL_POOL__NAME",
+                "value": "model-x-eu"
+              },
+              {
+                "name": "GDL_POOL__PARENT_HUB",
+                "value": "global-eu:1337"
+              },
+              {
+                "name": "GDL_POOL__READY__ENGINE",
+                "value": "1"
+              },
+              {
+                "name": "GDL_POOL__REGION",
+                "value": "eu-west-1"
+              },
+              {
+                "name": "GDL_POOL__SUMMARY_MS",
+                "value": "10000"
+              }
+            ],
+            "image": "registry.example/gdl-eu/api-engine:pinned",
+            "livenessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/live",
+                "port": 9090
+              },
+              "periodSeconds": 10,
+              "timeoutSeconds": 3
+            },
+            "name": "segment",
+            "ports": [
+              {
+                "containerPort": 9090,
+                "name": "system"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/health",
+                "port": 9090
+              },
+              "periodSeconds": 5,
+              "timeoutSeconds": 3
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/gdl/fleet",
+                "name": "config",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/arch": "arm64",
+          "kubernetes.io/os": "linux"
+        },
+        "serviceAccountName": "api",
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "configMap": {
+              "name": "model-x-eu"
+            },
+            "name": "config"
+          }
+        ]
+      }
+    }
+  }
+}

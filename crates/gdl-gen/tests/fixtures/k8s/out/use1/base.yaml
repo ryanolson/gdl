@@ -1,0 +1,26 @@
+---
+{
+  "apiVersion": "v1",
+  "kind": "Namespace",
+  "metadata": {
+    "labels": {
+      "gdl.dev/fleet": "api"
+    },
+    "name": "gdl-api"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "ServiceAccount",
+  "metadata": {
+    "annotations": {
+      "eks.amazonaws.com/role-arn": "arn:aws:iam::000000000000:role/gdl-api"
+    },
+    "labels": {
+      "gdl.dev/fleet": "api"
+    },
+    "name": "api",
+    "namespace": "gdl-api"
+  }
+}

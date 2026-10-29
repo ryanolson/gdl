@@ -9,6 +9,7 @@
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
+//! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -42,7 +43,10 @@
 //! first, and writes nothing if it fails. With `--local` its images build
 //! the crates the spec names by path, and gdl and its hub from `[gdl]
 //! path`, from a build context that holds them and the bundle, so the
-//! bundle builds only on this machine. `export` writes the generated crates as a `.tar.gz` with
+//! bundle builds only on this machine. `k8s` writes a fleet's Kubernetes
+//! objects, one directory per cluster, after the same check; each image
+//! is tagged `--tag`, else with its layout's contract and placement
+//! hashes. It needs no Docker and no cluster. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
@@ -59,6 +63,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
+       cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
@@ -69,6 +74,11 @@ enum Command {
     },
     Check {
         fleet: Option<PathBuf>,
+    },
+    K8s {
+        out: PathBuf,
+        fleet: PathBuf,
+        tag: Option<String>,
     },
     Extract {
         krate: gdl_gen::Crate,
@@ -110,7 +120,7 @@ fn args() -> Result<Args, String> {
         .ok_or_else(|| USAGE.to_string())?;
     let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
         (None, None, None, None, None, None);
-    let mut fleet = None;
+    let (mut fleet, mut tag) = (None, None);
     let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
     let mut release = false;
     while let Some(arg) = args.next() {
@@ -126,6 +136,12 @@ fn args() -> Result<Args, String> {
             Some("--target-dir") => target = Some(value()?),
             Some("--format") => format = Some(value()?),
             Some("--fleet") => fleet = Some(value()?),
+            Some("--tag") => {
+                let given = value()?;
+                tag = Some(given.into_os_string().into_string().map_err(|given| {
+                    format!("--tag takes an image tag, not {given:?}\n{USAGE}")
+                })?);
+            }
             Some("--check") => check = true,
             Some("--verify") => verify = true,
             Some("--probe") => probe = true,
@@ -163,6 +179,11 @@ fn args() -> Result<Args, String> {
         "check" => Command::Check {
             fleet: fleet.take(),
         },
+        "k8s" => Command::K8s {
+            out: out.ok_or_else(|| USAGE.to_string())?,
+            fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+            tag: tag.take(),
+        },
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
         },
@@ -178,9 +199,9 @@ fn args() -> Result<Args, String> {
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
-    // `--fleet`, `--local`, and `--release` are for the commands that took
-    // them above.
-    if (needs_spec && spec.is_none()) || fleet.is_some() || local || release {
+    // `--fleet`, `--tag`, `--local`, and `--release` are for the commands
+    // that took them above.
+    if (needs_spec && spec.is_none()) || fleet.is_some() || tag.is_some() || local || release {
         return Err(USAGE.to_string());
     }
     Ok(Args {
@@ -304,6 +325,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     root.display()
                 );
             }
+        }
+        Command::K8s { out, fleet, tag } => {
+            let file = args.spec.as_ref().ok_or(USAGE)?;
+            let problems = gdl_gen::check_files(file, Some(fleet), &target(beside(file)));
+            if !problems.is_empty() {
+                return Ok(report(&problems));
+            }
+            // The check read it.
+            let text =
+                std::fs::read_to_string(fleet).map_err(|e| format!("{}: {e}", fleet.display()))?;
+            let fleet = gdl_model::Fleet::from_toml(&text)
+                .map_err(|problems| problems.in_file(fleet.display()).to_string())?;
+            let spec = spec()?;
+            let target = target(spec.dir());
+            gdl_gen::k8s(&spec, &fleet, out, &target, tag.as_deref())?;
         }
         Command::Export { out } => {
             let spec = spec()?;

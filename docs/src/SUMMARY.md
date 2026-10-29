@@ -32,6 +32,7 @@
 - [Compose in the browser](guides/composer.md)
 - [Deploy with Docker Compose](guides/compose-deploy.md)
 - [Deploy a fleet of pools](guides/fleet.md)
+- [Deploy a fleet on Kubernetes](guides/kubernetes.md)
 - [Run the examples](guides/examples.md)
 
 # Operations

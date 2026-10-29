@@ -32,6 +32,11 @@ impl Settings {
         self.segment.keys().map(String::as_str)
     }
 
+    /// The secrets that `[deployment.secrets.<name>]` tables declare.
+    pub(crate) fn secret_names(&self) -> impl Iterator<Item = &str> {
+        self.secrets.keys().map(String::as_str)
+    }
+
     /// What is wrong with the secrets the settings declare and the
     /// segments name, each with its table.
     pub(crate) fn secret_problems(&self) -> Vec<String> {
@@ -128,9 +133,12 @@ use crate::{
 };
 
 pub(crate) mod context;
+mod k8s;
 pub(crate) mod locks;
 mod pools;
 mod variables;
+
+pub use k8s::{k8s, k8s_files};
 
 /// Where a bundle's images take the crates they build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,11 +579,7 @@ impl Bundle {
     /// Mount the secrets segment `segment` names in `service`, and note in
     /// `used` that the segment mounts them.
     fn mount_secrets(&self, segment: &str, service: &mut serde_json::Value, used: &mut Secrets) {
-        let names = self
-            .settings
-            .segment
-            .get(segment)
-            .map_or(&[][..], |s| s.secrets.as_slice());
+        let names = self.secrets(segment);
         if names.is_empty() {
             return;
         }
@@ -616,6 +620,14 @@ impl Bundle {
         }
         text.push_str("\nThe bundle names each file and holds none of them. Each file must exist on the Docker host before `docker compose up`. Compose mounts it with its owner and mode on the host, and ignores `uid` and `mode` outside Swarm, so the user a container runs as must be able to read it. The default image runs as uid 65532: let that user read a file only you can read with `setfacl -m u:65532:r <file>`.\n");
         text
+    }
+
+    /// The secrets segment `segment` mounts.
+    fn secrets(&self, segment: &str) -> &[String] {
+        self.settings
+            .segment
+            .get(segment)
+            .map_or(&[], |s| s.secrets.as_slice())
     }
 
     /// The ports segment `segment` publishes.
@@ -686,7 +698,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         serde_json::to_string_pretty(&compose).map_err(|e| Error::new(e.to_string()))?,
     );
     let mut readme = String::from(
-        "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n",
+        "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. `cargo gdl k8s` writes a fleet's Kubernetes objects; srt-slurm is not generated.\n",
     );
     if let Some(source) = reads_stdin {
         readme.push_str(&stdin_readme(source));

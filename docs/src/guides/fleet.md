@@ -65,7 +65,7 @@ class = "global"
 cluster = "use1"                  # region = "us-east-1", from the cluster
 ```
 
-`check` refuses a cluster that the fleet does not have, a pool `region` that is not its cluster's, and two clusters with the same context and namespace. The bundle uses only each cluster's region. So this fleet writes the same bundle as one whose pools write `region = "us-east-1"`.
+`check` refuses a cluster that the fleet does not have, a pool `region` that is not its cluster's, and two clusters with the same context and namespace. The bundle uses only each cluster's region. So this fleet writes the same bundle as one whose pools write `region = "us-east-1"`. `cargo gdl k8s` reads the rest of a cluster's table and writes the fleet's Kubernetes objects ([Deploy a fleet on Kubernetes](kubernetes.md)).
 
 ## 3. Check and write the bundle
 
