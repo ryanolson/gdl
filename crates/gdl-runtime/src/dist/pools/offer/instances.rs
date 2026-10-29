@@ -516,6 +516,139 @@ async fn a_full_or_gone_instance_still_leaves_its_pool() {
     }
 }
 
+/// A pool that declines a request as not present is left for that request
+/// at once: the chooser offers it to no other entry instance of the pool,
+/// and another pool takes it. The pool is neither damped nor held gone, so
+/// the next request is offered to it again. The decline uses one of
+/// `pool_failovers`: with none, the request fails with the refusal, not
+/// with `Routing`, since the pool is not gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_without_the_property_is_left_for_that_request_alone() {
+    let without = Serves::None(Decline::NotPresent);
+    for (within, _) in withins() {
+        let fleet = Fleet::new(
+            &[("m1", &[without; 2]), ("m2", &[Serves::All])],
+            RuntimeConfig::default(),
+        )
+        .await;
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
+        fleet.send(&router, "model").await.expect("m2 took it");
+        let taken = fleet.taken();
+        assert_eq!(
+            (taken[0].iter().sum::<usize>(), taken[1][0]),
+            (1, 1),
+            "one instance of m1, then m2: {taken:?}"
+        );
+        assert_eq!(fleet.damped("m1"), (false, false));
+        for _ in 0..4 {
+            fleet.send(&router, "model").await.expect("m2 took it");
+        }
+        let taken = fleet.taken();
+        assert_eq!(
+            (taken[0].iter().sum::<usize>(), taken[1][0]),
+            (4, 4),
+            "m1 was passed over after it declined as not present: {taken:?}"
+        );
+    }
+    for (within, _) in withins() {
+        let fleet = Fleet::new(
+            &[("m1", &[without]), ("m2", &[Serves::All])],
+            RuntimeConfig {
+                pool_failovers: 0,
+                ..RuntimeConfig::default()
+            },
+        )
+        .await;
+        let router = fleet.router("round_robin", &gdl::PoolPolicies::new(), within);
+        let error = fleet.send(&router, "model").await.expect_err("no failover");
+        assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+        assert_eq!(fleet.taken(), [vec![1], vec![0]]);
+    }
+}
+
+/// The declines one choice saw.
+type Seen = Vec<(u64, Decline)>;
+
+/// Chooses the first pool the request may be offered, and keeps the
+/// declines each choice saw.
+#[derive(Clone, Default)]
+struct Recording {
+    seen: Arc<std::sync::Mutex<Vec<Seen>>>,
+}
+
+impl gdl::PoolPolicy for Recording {
+    type Head = gdl::Encoded;
+
+    fn choose(
+        &self,
+        request: gdl::PoolRequest<'_, gdl::Encoded>,
+        pools: &[gdl::Pool],
+    ) -> std::result::Result<gdl::PoolChoice, NoPool> {
+        self.seen
+            .lock()
+            .expect("not poisoned")
+            .push(request.declines().to_vec());
+        for pool in pools {
+            if let Some(decline) = request.declined(pool) {
+                assert!(request.is_excluded(pool), "{decline:?} but not excluded");
+            }
+        }
+        pools
+            .iter()
+            .position(|pool| pool.takes_work() && !request.is_excluded(pool))
+            .map(gdl::PoolChoice::new)
+            .ok_or_else(NoPool::new)
+    }
+}
+
+/// A pool policy reads why each pool it left declined the request, in the
+/// order they declined: not present, the instance's own once every
+/// instance of the pool declined, and full. The first choice reads none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_policy_reads_why_each_pool_declined_the_request() {
+    for (within, _) in withins() {
+        let fleet = Fleet::new(
+            &[
+                ("m1", &[Serves::None(Decline::NotPresent)]),
+                ("m2", &[Serves::None(Decline::Instance); 2]),
+                ("m3", &[Serves::None(Decline::Full)]),
+                ("m4", &[Serves::All]),
+            ],
+            RuntimeConfig {
+                pool_failovers: 3,
+                ..RuntimeConfig::default()
+            },
+        )
+        .await;
+        let recording = Recording::default();
+        let mut policies = gdl::PoolPolicies::new();
+        policies
+            .add("recording", recording.clone())
+            .expect("registered");
+        let router = fleet.router("recording", &policies, within);
+        fleet.send(&router, "model").await.expect("m4 took it");
+        assert_eq!(fleet.taken(), [vec![1], vec![1, 1], vec![1], vec![1]]);
+        let id = |pool| pool_id("model_x", pool);
+        let seen = recording.seen.lock().expect("not poisoned").clone();
+        assert_eq!(
+            seen,
+            [
+                vec![],
+                vec![(id("m1"), Decline::NotPresent)],
+                vec![
+                    (id("m1"), Decline::NotPresent),
+                    (id("m2"), Decline::Instance)
+                ],
+                vec![
+                    (id("m1"), Decline::NotPresent),
+                    (id("m2"), Decline::Instance),
+                    (id("m3"), Decline::Full),
+                ],
+            ]
+        );
+    }
+}
+
 /// A pool policy's lease that counts its acceptances and its drops.
 struct Counting {
     accepted: Arc<AtomicUsize>,

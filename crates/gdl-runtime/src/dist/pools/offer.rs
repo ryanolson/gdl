@@ -20,7 +20,7 @@ use gdl::__runtime::ChoiceHeld;
 use gdl::{Cx, NoPool, Result};
 use velo::InstanceId;
 
-use super::crossing::Walk;
+use super::crossing::{Left, Walk};
 use super::meter::Outcome;
 use super::{Crossing, PoolLease};
 use crate::dist::envelope::{Forward, WireCx};
@@ -58,7 +58,7 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, pool: u64, held: &mu
 
 impl Runtime {
     /// Choose, for `envelope`, a pool of the class `crossing` enters that
-    /// is not in `offered`, by the class's pool policy, then an instance
+    /// the request has not `left`, by the class's pool policy, then an instance
     /// of it by the hop's router: the instance, the pool's
     /// [`id`](super::PoolTable::id), and what the offer holds while the
     /// request is held, a selector's lease and the lease on the pool's
@@ -69,17 +69,17 @@ impl Runtime {
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
-        offered: &[u64],
+        left: Left<'_>,
     ) -> Result<Result<(InstanceId, u64, Held), NoPool>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
-                .pick(cx, &envelope.payload, *policy, self.random(), offered)?
+                .pick(cx, &envelope.payload, *policy, self.random(), left)?
                 .map(|(instance, pool, lease)| (instance, pool, Held::pool(None, lease)))),
             Within::Selector {
                 selector, encoding, ..
             } => {
                 let chosen = crossing
-                    .choose(&**selector, cx, &envelope.payload, *encoding, offered)
+                    .choose(&**selector, cx, &envelope.payload, *encoding, left)
                     .await?;
                 Ok(chosen.map(|(instance, pool, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
@@ -98,7 +98,9 @@ impl Runtime {
     /// to another pool, and those offers use none of `pool_failovers`.
     /// The pool policy's lease on the choice of that pool passes to each
     /// of those offers, so that it learns of an acceptance by any of them.
-    /// Any other miss leaves the pool at once. When no pool may take it
+    /// Any other miss leaves the pool at once. The pool policy reads why
+    /// each pool it left declined the request, if it did
+    /// ([`gdl::PoolRequest::declines`]). When no pool may take it
     /// any more, or no failover is left, the request fails with the last
     /// refusal, or, when no pool refused it, with the last hand-off that
     /// never left. When the chooser holds every pool it left gone and its
@@ -128,6 +130,9 @@ impl Runtime {
         } = declined;
         let mut last = reason(&missed);
         let mut offered = Vec::new();
+        // Beside `offered`, not in it: a pool whose hand-off never left
+        // said nothing, and the policy reads only the pools that declined.
+        let mut declines = Vec::new();
         let mut walk: Option<Walk> = None;
         loop {
             if let Within::Selector { .. } = crossing.within() {
@@ -152,11 +157,14 @@ impl Runtime {
                     walk = None;
                     drop(choice.take());
                     offered.push(pool);
+                    if let Some(decline) = last {
+                        declines.push((pool, decline));
+                    }
                     if offered.len() > self.config.pool_failovers {
                         break;
                     }
-                    let Ok(chosen) = self.choose_pool(crossing, cx, envelope, &offered).await?
-                    else {
+                    let left = Left::new(&offered, &declines);
+                    let Ok(chosen) = self.choose_pool(crossing, cx, envelope, left).await? else {
                         break;
                     };
                     chosen
@@ -191,7 +199,8 @@ impl Runtime {
         // this request than the policy's reason for no pool. When every
         // pool it left is gone, the requests after it meet the policy's
         // `Routing`, and so does this one.
-        if let Some(no) = crossing.gone_only(cx, &envelope.payload, &offered)? {
+        let left = Left::new(&offered, &declines);
+        if let Some(no) = crossing.gone_only(cx, &envelope.payload, left)? {
             return Err(crossing.no_pool(no));
         }
         Err(missed.into_error())
@@ -750,6 +759,7 @@ mod tests {
             "declined_full",
             "declined_gone",
             "declined_instance",
+            "declined_not_present",
             "unsent",
             "outcome_unknown",
             "failed",
@@ -888,6 +898,7 @@ mod tests {
             "declined_full",
             "declined_gone",
             "declined_instance",
+            "declined_not_present",
             "unsent",
             "outcome_unknown",
             "failed",
@@ -1168,7 +1179,7 @@ mod tests {
         let random = std::hash::RandomState::new();
         let (lone, pools) = followed_over(&["m1"]);
         let pick = || {
-            lone.pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            lone.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("a lone pool is always chosen")
                 .1
@@ -1249,7 +1260,7 @@ mod tests {
         let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("a pool")
         };
@@ -1312,13 +1323,13 @@ mod tests {
 
         let (lone, _pools) = followed_over(&["m1"]);
         let (_, pool, lease) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
             .expect("a pick")
             .expect("a lone pool");
         lone.declined(pool, Decline::Gone, Some(&lease));
         drop(lease);
         let no = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
             .expect("a pick")
             .expect_err("a lone gone pool was chosen");
         assert_eq!(no, NoPool::new());
@@ -1333,7 +1344,7 @@ mod tests {
         let (crossing, pools) = followed_over(&["m1"]);
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
         };
         let (_, pool, first) = pick().expect("the first offer");
@@ -1369,7 +1380,7 @@ mod tests {
         let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("a pool")
         };
@@ -1428,7 +1439,7 @@ mod tests {
         counting(true);
         for _ in 0..1000 {
             let (_, chosen, _) = crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("a pool");
             crossing.accepted(chosen);
@@ -1439,20 +1450,20 @@ mod tests {
 
         let lone = crossing_over(&["m1"]);
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
             .expect("a pick")
             .expect("a pool");
         lone.declined(chosen, Decline::Full, None);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
         // A lone pool is never damped out of the choice.
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
             .expect("a pick")
             .expect("a pool");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
             .expect("a pick")
             .expect("a pool");
         lone.accepted(chosen);
@@ -1483,7 +1494,7 @@ mod tests {
                 for _ in 0..PICKS {
                     let _ = std::hint::black_box(
                         crossing
-                            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                             .expect("a pick"),
                     );
                 }
@@ -1679,7 +1690,13 @@ mod tests {
             counting(true);
             for _ in 0..1000 {
                 let (_, pool, _) = crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, &excluded)
+                    .pick(
+                        &cx,
+                        &[],
+                        Policy::RoundRobin,
+                        &random,
+                        Left::excluding(&excluded),
+                    )
                     .expect("a pick")
                     .expect("a pool");
                 chosen.push(pool);
@@ -1698,7 +1715,13 @@ mod tests {
             let before = counted();
             counting(true);
             let no = crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &every)
+                .pick(
+                    &cx,
+                    &[],
+                    Policy::RoundRobin,
+                    &random,
+                    Left::excluding(&every),
+                )
                 .expect("a pick")
                 .expect_err("no pool");
             counting(false);
@@ -1753,7 +1776,7 @@ mod tests {
         counting(true);
         for _ in 0..1000 {
             let (_, pool, lease) = crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("a pool");
             crossing.accepted(pool);

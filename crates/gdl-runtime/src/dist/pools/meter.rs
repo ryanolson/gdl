@@ -51,6 +51,9 @@ pub(crate) enum Outcome {
     /// The entry declined it, saying that it cannot serve it and another
     /// entry instance of its pool may.
     DeclinedInstance,
+    /// The entry declined it, saying that it does not have the property
+    /// the request wants.
+    DeclinedNotPresent,
     /// velo refused to send it: no entry said anything.
     Unsent,
     /// The send failed after velo took it, or no answer came in time: the
@@ -63,11 +66,12 @@ pub(crate) enum Outcome {
 
 impl Outcome {
     /// Every outcome, in the order of their counts in a shard.
-    const ALL: [Outcome; 7] = [
+    const ALL: [Outcome; 8] = [
         Outcome::Accepted,
         Outcome::DeclinedFull,
         Outcome::DeclinedGone,
         Outcome::DeclinedInstance,
+        Outcome::DeclinedNotPresent,
         Outcome::Unsent,
         Outcome::Unknown,
         Outcome::Failed,
@@ -80,6 +84,7 @@ impl Outcome {
             Answer::Missed(Missed::Declined(_, Decline::Full)) => Outcome::DeclinedFull,
             Answer::Missed(Missed::Declined(_, Decline::Gone)) => Outcome::DeclinedGone,
             Answer::Missed(Missed::Declined(_, Decline::Instance)) => Outcome::DeclinedInstance,
+            Answer::Missed(Missed::Declined(_, Decline::NotPresent)) => Outcome::DeclinedNotPresent,
             Answer::Missed(Missed::Unsent(_)) => Outcome::Unsent,
             Answer::Failed(error) if error.kind() == ErrorKind::OutcomeUnknown => Outcome::Unknown,
             Answer::Failed(_) => Outcome::Failed,
@@ -93,6 +98,7 @@ impl Outcome {
             Outcome::DeclinedFull => "declined_full",
             Outcome::DeclinedGone => "declined_gone",
             Outcome::DeclinedInstance => "declined_instance",
+            Outcome::DeclinedNotPresent => "declined_not_present",
             Outcome::Unsent => "unsent",
             Outcome::Unknown => "outcome_unknown",
             Outcome::Failed => "failed",
@@ -368,6 +374,13 @@ pub(crate) mod tests {
                     Decline::Instance,
                 )),
                 Outcome::DeclinedInstance,
+            ),
+            (
+                Answer::Missed(Missed::Declined(
+                    error(ErrorKind::Overloaded),
+                    Decline::NotPresent,
+                )),
+                Outcome::DeclinedNotPresent,
             ),
             (
                 Answer::Missed(Missed::Unsent(error(ErrorKind::Transport))),

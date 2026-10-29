@@ -14,8 +14,9 @@
 //! reading of an answer.
 //!
 //! An entry that declines says why, as a chooser in another class reads
-//! it ([`Decline`]): its pool is full, its pool is gone, or this instance
-//! cannot serve the request and another of its pool may. The reason
+//! it ([`Decline`]): its pool is full, its pool is gone, this instance
+//! cannot serve the request and another of its pool may, or it does not
+//! have the property the request wants. The reason
 //! follows the refusal in the reply, where a build that does not know it
 //! never reads it ([`refusal`]).
 //!
@@ -90,20 +91,22 @@ pub(crate) fn declines(error: &Error) -> bool {
 /// The reasons as they follow a refusal in the reply.
 const GONE: &str = "gone";
 const INSTANCE: &str = "instance";
+const NOT_PRESENT: &str = "not_present";
 
 /// What an entry that declined a forward hand-off answers: the refusal,
 /// encoded as every build reads it, then, for any reason but
 /// [`Decline::Full`], the reason. A build that does not know the reason
 /// reads the refusal and stops there, as `rmp_serde` reads one value and
 /// leaves the bytes after it, so it takes the refusal as a full pool's:
-/// a chooser before [`Decline::Instance`] damps the pool for one window
-/// and offers the request to another pool.
+/// a chooser before [`Decline::Instance`] or [`Decline::NotPresent`]
+/// damps the pool for one window and offers the request to another pool.
 pub(crate) fn refusal(error: &Error, decline: Decline) -> Result<Vec<u8>> {
     let mut reply = envelope::encode(&Err::<Accepted, &Error>(error))?;
     match decline {
         Decline::Full => {}
         Decline::Gone => reply.extend(envelope::encode(&GONE)?),
         Decline::Instance => reply.extend(envelope::encode(&INSTANCE)?),
+        Decline::NotPresent => reply.extend(envelope::encode(&NOT_PRESENT)?),
     }
     Ok(reply)
 }
@@ -120,6 +123,7 @@ fn decline(reply: &[u8]) -> Decline {
     match rmp_serde::from_slice::<&str>(after) {
         Ok(GONE) => Decline::Gone,
         Ok(INSTANCE) => Decline::Instance,
+        Ok(NOT_PRESENT) => Decline::NotPresent,
         _ => Decline::Full,
     }
 }
@@ -537,6 +541,58 @@ mod tests {
         assert!(matches!(read(accepted), Answer::Accepted(None)));
         let deadline = refusal(&Error::deadline_exceeded(), Decline::Gone).expect("encode");
         assert!(matches!(read(deadline), Answer::Failed(_)));
+    }
+
+    /// A refusal as not present is the refusal every build reads, then the
+    /// msgpack string `not_present`, byte for byte. A build that knows gone
+    /// and the instance's reason, and not this one, reads it as a full
+    /// pool's; this build reads it as not present. The other reasons' bytes
+    /// are the control: they did not change.
+    #[test]
+    fn a_not_present_refusal_reads_as_full_to_an_older_build() {
+        let error = Error::new(ErrorKind::Overloaded, "no `model` property `m`");
+        let before = encode(&Err::<Accepted, Error>(error.clone())).expect("encode");
+        let after = |decline| {
+            let reply = refusal(&error, decline).expect("encode");
+            assert!(reply.starts_with(&before));
+            reply[before.len()..].to_vec()
+        };
+        // A fixstr of 11 bytes, then the bytes.
+        let mut not_present = vec![0xab];
+        not_present.extend(b"not_present");
+        assert_eq!(after(Decline::NotPresent), not_present);
+        assert_eq!(after(Decline::Gone), [&[0xa4][..], b"gone"].concat());
+        assert_eq!(
+            after(Decline::Instance),
+            [&[0xa8][..], b"instance"].concat()
+        );
+        assert_eq!(after(Decline::Full), Vec::<u8>::new());
+
+        let reply = refusal(&error, Decline::NotPresent).expect("encode");
+        let older: Result<Accepted, Error> = decode(&reply).expect("an older build reads it");
+        assert_eq!(older.expect_err("a refusal"), error);
+        // The reader of the build before this reason, as it was.
+        let known = |reply: &[u8]| {
+            let mut after = reply;
+            if rmp_serde::decode::from_read::<_, serde::de::IgnoredAny>(&mut after).is_err() {
+                return Decline::Full;
+            }
+            match rmp_serde::from_slice::<&str>(after) {
+                Ok("gone") => Decline::Gone,
+                Ok("instance") => Decline::Instance,
+                _ => Decline::Full,
+            }
+        };
+        assert_eq!(known(&reply), Decline::Full);
+        assert_eq!(
+            known(&refusal(&error, Decline::Instance).expect("encode")),
+            Decline::Instance,
+            "the control"
+        );
+        assert_eq!(
+            declined(read(reply)),
+            (ErrorKind::Overloaded, Decline::NotPresent)
+        );
     }
 
     /// A boundary that counts each time its hop is read.

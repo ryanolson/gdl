@@ -27,7 +27,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crossing::{Crossing, Target, targets};
+pub(crate) use crossing::{Crossing, Left, Target, targets};
 pub(crate) use lease::PoolLease;
 pub(crate) use meter::PoolMeters;
 pub(crate) use offer::{Declined, answer};

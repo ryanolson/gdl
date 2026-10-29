@@ -1,5 +1,6 @@
 /// Why an entry declined an offer: what the chooser that sent it from
-/// another class does next.
+/// another class does next, and what a pool policy reads of the pools that
+/// declined a request ([`PoolRequest::declined`](super::PoolRequest::declined)).
 /// The runtime sends it after the refusal in the entry's reply, so that a
 /// build that does not know a reason reads the refusal as
 /// [`Decline::Full`]. A segment declines every offer by its own policy
@@ -21,4 +22,10 @@ pub enum Decline {
     /// declined. It damps nothing, since the decline says nothing of the
     /// pool's room.
     Instance,
+    /// The entry does not have the property the request wants: the
+    /// chooser chose the pool from a view of its properties that is out of
+    /// date. The chooser offers the request to another pool, not to this
+    /// pool's other entry instances, and damps nothing, so that the pool
+    /// still takes the requests it serves.
+    NotPresent,
 }

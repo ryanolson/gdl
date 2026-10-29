@@ -418,6 +418,7 @@ pub struct PoolRequest<'a, H> {
     bytes: &'a [u8],
     region: &'a str,
     excluded: &'a [u64],
+    declines: &'a [(u64, Decline)],
     damped: &'a Damped,
     now: Instant,
     turn: u64,
@@ -447,6 +448,7 @@ impl<'a, H> PoolRequest<'a, H> {
             bytes: &[],
             region,
             excluded: &[],
+            declines: &[],
             damped: &UNDAMPED,
             now,
             turn: 0,
@@ -460,6 +462,15 @@ impl<'a, H> PoolRequest<'a, H> {
     #[inline]
     pub fn with_excluded(mut self, excluded: &'a [u64]) -> Self {
         self.excluded = excluded;
+        self
+    }
+
+    /// The request with `declines`, each pool that declined it and why,
+    /// in the order they declined: each is also among
+    /// [`excluded`](PoolRequest::excluded).
+    #[inline]
+    pub fn with_declines(mut self, declines: &'a [(u64, Decline)]) -> Self {
+        self.declines = declines;
         self
     }
 
@@ -525,6 +536,7 @@ impl<'a, H> PoolRequest<'a, H> {
             bytes: self.bytes,
             region: self.region,
             excluded: self.excluded,
+            declines: self.declines,
             damped: self.damped,
             now: self.now,
             turn: self.turn,
@@ -562,6 +574,29 @@ impl<'a, H> PoolRequest<'a, H> {
     #[inline]
     pub fn excluded(&self) -> &'a [u64] {
         self.excluded
+    }
+
+    /// Each pool that declined this request and why, by
+    /// [`id`](Pool::id), in the order they declined: empty for the first
+    /// attempt. A pool that the chooser left for an instance's own decline
+    /// is here once every entry instance it offered the request to
+    /// declined, with the last one's reason. A pool whose hand-off never
+    /// left is excluded, and is not here: it said nothing.
+    #[inline]
+    pub fn declines(&self) -> &'a [(u64, Decline)] {
+        self.declines
+    }
+
+    /// Why `pool` declined this request, if it did
+    /// ([`declines`](PoolRequest::declines)): a policy that keeps a request
+    /// with one pool can tell a pool that is full from one that no longer
+    /// has what the request wants ([`Decline::NotPresent`]).
+    #[inline]
+    pub fn declined(&self, pool: &Pool) -> Option<Decline> {
+        self.declines
+            .iter()
+            .find(|(id, _)| *id == pool.id)
+            .map(|(_, decline)| *decline)
     }
 
     /// Whether `pool` may not be chosen for this request: it declined

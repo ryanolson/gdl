@@ -910,6 +910,76 @@ async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_pool() {
     }
 }
 
+/// An entry instance declines offers as not present, by its segment's own
+/// policy: each request goes to the other pool, and no work runs in the
+/// first. The pool is neither damped nor held gone, so every request is
+/// offered to it first again, and the instance's load report counts no
+/// refusal, which would read as a saturated pool under `home_first`. The
+/// chooser offers no request to the pool's other entry instance: the pool
+/// does not have the property. Once the instance takes offers again, it
+/// takes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_that_declines_as_not_present_sends_each_request_to_another_pool() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = pool(
+        &spec,
+        &directory,
+        Model {
+            entries: 2,
+            ..ready(M1, "m1-hub:1337")
+        },
+        &quiet,
+    )
+    .await;
+    let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let pools = tables(&chooser);
+    until(&pools, "the model pools followed", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 2)
+            && followed(pools, "f", M2).is_some_and(|m| m.state == PoolState::Degraded)
+    })
+    .await;
+
+    for entry in &m1.entries {
+        entry.segment.decline_offers_as(Decline::NotPresent);
+    }
+    for _ in 0..4 {
+        ask(&chooser.segment)
+            .await
+            .expect("the other pool answered");
+    }
+    assert_eq!((m1.forwards(), m2.forwards()), (0, 4));
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (4, 4),
+        "the pool was damped, or its other instance offered the request"
+    );
+    let m = followed(&pools, "f", M1).expect("followed");
+    assert!(!m.gone && m.damped.is_none(), "{m:?}");
+    for entry in &m1.entries {
+        assert_eq!(
+            entry.segment.load().declined,
+            0,
+            "a decline as not present counts as its pool's refusal in its load report"
+        );
+    }
+
+    for entry in &m1.entries {
+        entry.segment.take_offers();
+    }
+    for _ in 0..2 {
+        ask(&chooser.segment).await.expect("the pool answered");
+    }
+    assert_eq!((m1.forwards(), m2.forwards()), (2, 4));
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// An entry instance stops taking new work at its bound even when its
 /// serving body is slow to finish once told to stop: the offer of a stale
 /// chooser after the bound is declined, and the other pool answers it.

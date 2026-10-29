@@ -549,6 +549,8 @@ const GONE: u8 = 0b0100;
 const INSTANCE: u8 = 0b0010;
 /// The segment's own refusal, as full.
 const FULL: u8 = 0b0001;
+/// The segment's own refusal, as not present.
+const NOT_PRESENT: u8 = 0b1_0000;
 
 /// Velo handler names for one deployment.
 pub(crate) struct Names {
@@ -697,6 +699,7 @@ impl Runtime {
     pub(crate) fn decline_offers_as(&self, decline: Decline) {
         let policy = match decline {
             Decline::Full => FULL,
+            Decline::NotPresent => NOT_PRESENT,
             Decline::Gone => GONE,
             Decline::Instance => INSTANCE,
         };
@@ -748,6 +751,11 @@ impl Runtime {
             (
                 "the instance cannot serve work from another pool by its own policy; another instance of its pool may",
                 Decline::Instance,
+            )
+        } else if declining & NOT_PRESENT != 0 {
+            (
+                "the instance's segment does not have what work from another pool wants, by its own policy",
+                Decline::NotPresent,
             )
         } else {
             (
@@ -900,7 +908,7 @@ impl Runtime {
                 #[cfg(feature = "hub")]
                 Router::Pools(crossing) => {
                     let (instance, pool, mut held) = self
-                        .choose_pool(crossing, cx, &mut envelope, &[])
+                        .choose_pool(crossing, cx, &mut envelope, super::pools::Left::NONE)
                         .await?
                         .map_err(|no| crossing.no_pool(no))?;
                     let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;

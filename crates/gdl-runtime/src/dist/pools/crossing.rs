@@ -63,7 +63,7 @@ impl Crossing {
     /// chosen pool's [`id`](PoolTable::id) and a lease on its follow,
     /// which holds the pool policy's lease on the choice, if it gave one, or
     /// [`NoPool`], with the policy's reason if it gave one, when no pool
-    /// but those in `excluded` may take it: one load
+    /// but those `left` holds may take it: one load
     /// of the table, a read of the clock, two counter increments, the pool
     /// policy's read of the head and its passes over the followed pools,
     /// and the lease, with no lock and no allocation of the runtime's. A
@@ -76,11 +76,11 @@ impl Crossing {
         head: &[u8],
         policy: Policy,
         random: &RandomState,
-        excluded: &[u64],
+        left: Left<'_>,
     ) -> Result<Result<(InstanceId, u64, PoolLease), NoPool>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let (pool, choice) = match self.pool(&table, cx, head, excluded)? {
+            let (pool, choice) = match self.pool(&table, cx, head, left)? {
                 Ok(chosen) => chosen,
                 Err(no) => return Ok(Err(no)),
             };
@@ -99,7 +99,7 @@ impl Crossing {
 
     /// Choose a pool for one attempt, then ask `selector` to choose among
     /// that pool's eligible entry instances alone; [`NoPool`] when no pool
-    /// but those in `excluded` may take it. A selector may wait, so the choice
+    /// but those `left` holds may take it. A selector may wait, so the choice
     /// is checked when it returns: if the instance is no
     /// longer eligible in the pool's current table, or the pool itself no
     /// longer is by the pool policy (it stopped taking work, or, under
@@ -115,12 +115,12 @@ impl Crossing {
         cx: &'a Cx,
         head: &'a [u8],
         encoding: gdl_model::Encoding,
-        excluded: &'a [u64],
+        left: Left<'a>,
     ) -> BoxFuture<'a, Result<Result<Chosen, NoPool>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let (pool, choice) = match self.pool(&table, cx, head, excluded)? {
+                let (pool, choice) = match self.pool(&table, cx, head, left)? {
                     Ok(chosen) => chosen,
                     Err(no) => return Ok(Err(no)),
                 };
@@ -188,8 +188,8 @@ impl Crossing {
 
     /// The pool `pool` declined an offer, made under `lease`, for
     /// `decline`: the chooser damps it, or, when it said it is gone,
-    /// passes it over until its follow changes. An instance's own decline
-    /// changes neither. Gone holds the follow as
+    /// passes it over until its follow changes. An instance's own decline,
+    /// and a decline as not present, change neither. Gone holds the follow as
     /// the pool's current table shows it, and only while that table is of
     /// the follow the offer was made under: a decline that lands after a
     /// newer generation replaced it says nothing of the newer one, which
@@ -198,8 +198,10 @@ impl Crossing {
     pub(crate) fn declined(&self, pool: u64, decline: Decline, lease: Option<&PoolLease>) {
         // An instance's own decline says nothing of its pool's room or
         // state: damping the pool would turn away requests its other
-        // instances serve.
-        if decline == Decline::Instance {
+        // instances serve. Not present says only that the pool lacks this
+        // request's property: damping it would turn away the requests for
+        // the properties it has.
+        if matches!(decline, Decline::Instance | Decline::NotPresent) {
             return;
         }
         let damping = &self.target.damping;
@@ -221,23 +223,18 @@ impl Crossing {
         }
     }
 
-    /// The pool policy's [`NoPool`] for a request whose every pool in
-    /// `offered` the chooser holds gone, when the policy chooses no other
+    /// The pool policy's [`NoPool`] for a request whose every pool it
+    /// `left` the chooser holds gone, when the policy chooses no other
     /// pool for it: what the requests after it meet, since no choice
-    /// takes a gone pool. `None` when a pool in `offered` is not gone or
+    /// takes a gone pool. `None` when a pool it left is not gone or
     /// the policy chooses a pool. The marks and the choice read one load
     /// of the table and one of the damping, so that they are of one
     /// moment. Read only once a request can be offered no more pools.
     /// Fails when the pool policy cannot read the head.
-    pub(crate) fn gone_only(
-        &self,
-        cx: &Cx,
-        head: &[u8],
-        offered: &[u64],
-    ) -> Result<Option<NoPool>> {
+    pub(crate) fn gone_only(&self, cx: &Cx, head: &[u8], left: Left<'_>) -> Result<Option<NoPool>> {
         let table = self.target.table.load();
         let damped = self.target.damping.view();
-        let gone = offered.iter().all(|id| {
+        let gone = left.excluded.iter().all(|id| {
             table
                 .pools
                 .iter()
@@ -248,7 +245,7 @@ impl Crossing {
         if !gone {
             return Ok(None);
         }
-        Ok(self.pool_by(&table, &damped, cx, head, offered)?.err())
+        Ok(self.pool_by(&table, &damped, cx, head, left)?.err())
     }
 
     /// The pool `pool` accepted an offer: its damping, as the chooser has
@@ -357,8 +354,8 @@ impl Crossing {
     }
 
     /// The pool the policy chooses from `table` for one attempt of the
-    /// request with context `cx` and head `head`, of those not in
-    /// `excluded`, by the summaries' ages now, with the policy's lease on
+    /// request with context `cx` and head `head`, of those not `left`, by
+    /// the summaries' ages now, with the policy's lease on
     /// the choice, if it gave one, or the policy's [`NoPool`]: one relaxed
     /// increment of the attempts' count, which a policy that draws at
     /// random hashes when it asks. Fails when the policy cannot read the
@@ -368,9 +365,9 @@ impl Crossing {
         table: &'t EntryTable,
         cx: &Cx,
         head: &[u8],
-        excluded: &[u64],
+        left: Left<'_>,
     ) -> Result<Result<Pooled<'t>, NoPool>> {
-        self.pool_by(table, &self.target.damping.view(), cx, head, excluded)
+        self.pool_by(table, &self.target.damping.view(), cx, head, left)
     }
 
     /// [`Crossing::pool`], with the chooser's damping as `damped` holds it.
@@ -380,13 +377,14 @@ impl Crossing {
         damped: &Damped,
         cx: &Cx,
         head: &[u8],
-        excluded: &[u64],
+        left: Left<'_>,
     ) -> Result<Result<Pooled<'t>, NoPool>> {
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
         let request = PoolRequest::new(cx, &(), &target.region, tokio::time::Instant::now())
             .with_bytes(head)
-            .with_excluded(excluded)
+            .with_excluded(left.excluded)
+            .with_declines(left.declines)
             .with_damped(damped)
             .with_turn(turn)
             .with_random(&self.random)
@@ -490,6 +488,36 @@ impl Walk {
         self.left = self.left.checked_sub(1)?;
         self.at = (self.at + 1) % self.pool.eligible.len();
         Some(self.pool.eligible[self.at])
+    }
+}
+
+/// The pools a request left before an attempt, as its pool policy reads
+/// them: every pool it was offered to, and why each that declined it did
+/// ([`gdl::PoolRequest::declines`]). Two borrowed slices of the failover's
+/// own lists, so that the first attempt, which left none, copies nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Left<'a> {
+    excluded: &'a [u64],
+    declines: &'a [(u64, Decline)],
+}
+
+impl<'a> Left<'a> {
+    /// No pool left: the first attempt.
+    pub(crate) const NONE: Left<'static> = Left {
+        excluded: &[],
+        declines: &[],
+    };
+
+    /// The pools in `excluded` left, of which those in `declines` declined
+    /// the request, for the reasons given.
+    pub(crate) fn new(excluded: &'a [u64], declines: &'a [(u64, Decline)]) -> Self {
+        Self { excluded, declines }
+    }
+
+    /// The pools in `excluded` left, with no reason known.
+    #[cfg(test)]
+    pub(crate) fn excluding(excluded: &'a [u64]) -> Self {
+        Self::new(excluded, &[])
     }
 }
 
@@ -709,7 +737,7 @@ mod tests {
         let random = RandomState::new();
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                 .expect("a pick")
                 .expect("one")
                 .0
@@ -732,7 +760,13 @@ mod tests {
             Within::Policy(Policy::RoundRobin),
         );
         let no = crossing
-            .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
+            .pick(
+                &cx,
+                &[],
+                Policy::RoundRobin,
+                &RandomState::new(),
+                Left::NONE,
+            )
             .expect("a pick")
             .expect_err("no pool");
         assert_eq!(no, gdl::NoPool::new());
@@ -774,12 +808,18 @@ mod tests {
         crossing.target.name = Arc::from("refusing");
         let cx = Cx::new();
         let picked = crossing
-            .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
+            .pick(
+                &cx,
+                &[],
+                Policy::RoundRobin,
+                &RandomState::new(),
+                Left::NONE,
+            )
             .expect("a pick")
             .expect_err("no pool");
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let Err(chosen) = crossing
-            .choose(&selector, &cx, &[], Default::default(), &[])
+            .choose(&selector, &cx, &[], Default::default(), Left::NONE)
             .await
             .expect("a choice")
         else {
@@ -848,7 +888,7 @@ mod tests {
                 let start = Instant::now();
                 for _ in 0..PICKS {
                     let picked = crossing
-                        .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                        .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                         .expect("a pick");
                     let Err(no) = picked else { panic!("a pool") };
                     std::hint::black_box(crossing.no_pool(no));
@@ -880,7 +920,13 @@ mod tests {
         let m2 = super::super::pool_id("model_x", "m2");
         let pick = |excluded: &[u64]| {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, excluded)
+                .pick(
+                    &cx,
+                    &[],
+                    Policy::RoundRobin,
+                    &random,
+                    Left::excluding(excluded),
+                )
                 .expect("a pick")
                 .map(|(id, pool, _)| (id, pool))
         };
@@ -890,13 +936,25 @@ mod tests {
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let cx = Cx::new();
         let chosen = crossing
-            .choose(&selector, &cx, &[], Default::default(), &[m1])
+            .choose(
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                Left::excluding(&[m1]),
+            )
             .await
             .expect("a choice")
             .map(|(id, pool, _, _)| (id, pool));
         assert_eq!(chosen, Ok((ids[1], m2)));
         let none = crossing
-            .choose(&selector, &cx, &[], Default::default(), &[m1, m2])
+            .choose(
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                Left::excluding(&[m1, m2]),
+            )
             .await
             .expect("no error");
         assert!(none.is_err());
@@ -964,7 +1022,7 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], Default::default(), &[])
+                    .choose(&selector, &cx, &[], Default::default(), Left::NONE)
                     .await
                     .map(|chosen| chosen.map(|(id, _, picked, _)| (id, picked.lease)))
             }
@@ -1024,7 +1082,7 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], Default::default(), &[])
+                    .choose(&selector, &cx, &[], Default::default(), Left::NONE)
                     .await
                     .map(|chosen| chosen.ok().map(|(id, pool, _, _)| (id, pool)))
             }
@@ -1100,7 +1158,7 @@ mod tests {
         let selector = gdl::__runtime::Typed(Arc::new(Cancelling(Arc::clone(&leases))));
         let cx = Cx::new();
         let error = crossing
-            .choose(&selector, &cx, &[], Default::default(), &[])
+            .choose(&selector, &cx, &[], Default::default(), Left::NONE)
             .await
             .map(|chosen| chosen.map(|(id, ..)| id))
             .expect_err("a cancelled request was given an instance");
@@ -1147,7 +1205,13 @@ mod tests {
         })
         .expect("encoded");
         let (chosen, ..) = crossing
-            .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json, &[])
+            .choose(
+                &selector,
+                &Cx::new(),
+                &head,
+                gdl_model::Encoding::Json,
+                Left::NONE,
+            )
             .await
             .expect("the selector read a JSON head")
             .expect("a pool");
@@ -1228,7 +1292,13 @@ mod tests {
         })
         .expect("encoded");
         let (chosen, ..) = crossing
-            .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json, &[])
+            .choose(
+                &selector,
+                &Cx::new(),
+                &head,
+                gdl_model::Encoding::Json,
+                Left::NONE,
+            )
             .await
             .expect("chosen")
             .expect("a pool");
@@ -1290,7 +1360,7 @@ mod tests {
             });
             let boundary = time(&|| {
                 crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                     .expect("a pick")
                     .expect("one")
                     .0
@@ -1306,7 +1376,7 @@ mod tests {
             });
             let accepted = time(&|| {
                 let (id, pool, _) = crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
                     .expect("a pick")
                     .expect("one");
                 crossing.accepted(pool);

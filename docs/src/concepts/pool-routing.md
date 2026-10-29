@@ -272,7 +272,7 @@ A registered policy implements `gdl::PoolPolicy`. It runs in the chooser, once p
 
 - the request's context, and its head as the policy's `Head` reads it: the edge's type, `gdl::Encoded` bytes, or a `gdl::Projected` part that decodes only the fields it declares;
 - the class's followed pools: each pool's name, region, state, load summary, and number of entry instances;
-- the chooser's region, the clock, the pools that declined this request, and the pools the chooser damps or holds gone;
+- the chooser's region, the clock, the pools that declined this request and why each did (`request.declines()`, `request.declined(pool)`), and the pools the chooser damps or holds gone;
 - the attempt's turn, and a random draw made from it when the policy asks.
 
 It returns a choice of one pool, by its index, or a `gdl::NoPool`, which fails the request with `Routing`. A `NoPool` may carry a short reason, such as the key that no pool serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a pool declined fails with the last refusal, which names that pool. The exception is a request whose every declining pool the chooser now holds gone, when the policy then chooses no other pool: it fails with `Routing` and the reason, as the requests after it do ([A pool that is gone](#a-pool-that-is-gone)). A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that pool took the request. The runtime calls the lease's `accepted` when the pool accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the pool declines, when the offer never left, and when the outcome is unknown. It also drops it when the choice is the check after every declining pool is gone, which offers that pool nothing. An instance's own decline is not the pool's: the lease passes to the offer to the pool's next instance, and learns of its acceptance. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no pool is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a pool policy](../guides/write-a-pool-policy.md#1-read-only-what-you-route-by)).
@@ -289,7 +289,7 @@ At most half of the otherwise eligible pools, rounded down, are damped at once. 
 
 ### A pool that is gone
 
-An entry's refusal says why: its pool is full, its pool is gone, or the instance cannot serve the request ([below](#an-instance-that-cannot-serve-the-request)). A full pool is damped, as above. A gone pool is passed over until the relay changes its follow: a new generation, a new state, or a new offered state. Time alone does not end it, and neither does a new load summary. An offer the pool accepts ends it too. A draining pool's entry says gone ([Draining a pool](#draining-a-pool)). So does a segment that declines as gone by its own policy ([A pool's own refusal](#a-pools-own-refusal)). Every other refusal says full: admission or egress full, a retired instance, or a hand-off of another deployment.
+An entry's refusal says why: its pool is full, its pool is gone, the instance cannot serve the request ([below](#an-instance-that-cannot-serve-the-request)), or it does not have the property the request wants ([below](#a-pool-without-the-property)). A full pool is damped, as above. A gone pool is passed over until the relay changes its follow: a new generation, a new state, or a new offered state. Time alone does not end it, and neither does a new load summary. An offer the pool accepts ends it too. A draining pool's entry says gone ([Draining a pool](#draining-a-pool)). So does a segment that declines as gone by its own policy ([A pool's own refusal](#a-pools-own-refusal)). Every other refusal says full: admission or egress full, a retired instance, or a hand-off of another deployment.
 
 - `round_robin` and `home_first` never choose a gone pool, and a gone pool does not count in the cap on damping. So a lone gone pool is not chosen, and a request with no other pool fails with `Routing`, not `Overloaded`. That holds also for the request that hears the last gone refusal: when the chooser holds every pool it was offered gone, and the pool policy chooses no other pool, it fails with the `Routing` error the next request gets. The marks and that choice read one table and one damping view, so they are of one moment. This holds also when `pool_failovers` is used up. A request that a pool refused as full still fails with `Overloaded`, since that pool takes work again once it has room.
 - A registered policy sees gone pools through `request.is_excluded(pool)`, which is true for them, and `request.damped().is_gone(pool)`. `choose_where` skips them.
@@ -312,6 +312,17 @@ An entry instance can decline an offer as its own: it cannot serve this request,
 
 A chooser built before this reason reads it as unknown, so as full: it damps the pool for one window, and offers the request to another pool. That is the old behaviour, so a fleet can roll its choosers in any order.
 
+### A pool without the property
+
+An entry can decline an offer as not present: it does not have the property the request wants. The chooser chose the pool from a view of its properties that was out of date, as when the pool dropped a model after the chooser's last summary. The chooser then offers the request to another pool.
+
+- The request leaves the pool at once. The chooser does not offer it to the pool's other entry instances, since every entry instance of a pool is taken to list the same properties. A pool whose instances differ declines as the instance's own instead ([above](#an-instance-that-cannot-serve-the-request)).
+- The pool is left for this request only. It is neither damped nor held gone, so the next request is offered to it again, and the instance's load report does not count the decline as a refusal. The pool still serves the requests for the properties it has.
+- The decline uses one of `pool_failovers`, as a full one does. With none left, the request fails with the refusal, `Overloaded`, not with `Routing`, since the pool is not gone.
+- The pool policy reads it: `request.declined(pool)` is `Some(Decline::NotPresent)` for the next choice of the same request ([A registered policy](#a-registered-policy)). So a policy that keeps a session with one pool can move it once, and keep it with a pool that is only full.
+
+A chooser built before this reason reads it as full: it damps the pool for one window, and offers the request to another pool.
+
 ## A hand-off is an offer
 
 A child pool may decline the hand-off. The chooser then offers the request to another pool in the same call. Nothing of a declined offer is sent again: the entry started no work and holds nothing, and a streamed request's input goes only to the pool that accepts it. A selector's lease and metadata from a declined choice are released before the next choice.
@@ -320,6 +331,7 @@ A child pool may decline the hand-off. The chooser then offers the request to an
 |---|---|
 | The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the pool declines offers (a drain, or its own policy) | another pool is offered the request |
 | The entry answers `Overloaded` as its own decline: it cannot serve the request | the pool's next entry instance is offered the request, then another pool |
+| The entry answers `Overloaded` as not present: it does not have the property the request wants | another pool is offered the request; the pool is not damped |
 | The entry answers `Placement`: the hand-off is not of its deployment | another pool is offered the request |
 | velo refuses the send before it leaves: the instance is not registered, or its handshake fails | another pool is offered the request |
 | No answer within the setup timeout, or the send fails after velo took it | the request fails at once with `OutcomeUnknown`; no other pool is offered it |
@@ -385,11 +397,12 @@ An entry of an earlier build never says that it detached. Each interior instance
 
 ## A pool's own refusal
 
-A segment can decline offers from other pools by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)`, `Segment::decline_offers_as(Decline::Full)`, or `Segment::decline_offers_as(Decline::Instance)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the pool are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
+A segment can decline offers from other pools by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)`, `Segment::decline_offers_as(Decline::Full)`, `Segment::decline_offers_as(Decline::Instance)`, or `Segment::decline_offers_as(Decline::NotPresent)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the pool are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
 
 - `Decline::Gone` says that this pool takes no work from other pools until its state changes: for example, when it cannot serve what its class serves. Each chooser that hears it passes the whole pool over, every entry instance of it, until the relay changes its follow. `take_offers` does not bring them back. Call it on every entry instance, for a reason that holds for the pool.
 - `Decline::Full` says that the pool has no room now. Choosers damp the pool, and offer it work again after the window.
 - `Decline::Instance` says that this instance cannot serve work from other pools now, and the pool's other entry instances may. Choosers offer each request it declines to the pool's other entry instances ([An instance that cannot serve the request](#an-instance-that-cannot-serve-the-request)), and the pool is not damped. It is one switch for the instance, not a choice per request.
+- `Decline::NotPresent` says that this instance does not have what work from other pools wants. Choosers offer each request it declines to another pool, and the pool is not damped ([A pool without the property](#a-pool-without-the-property)).
 - A drain's refusal (`Segment::decline_offers`) outlasts the segment's own. `decline_offers_as` does not replace it, and `take_offers` does not end it.
 
 ## When a pool fails

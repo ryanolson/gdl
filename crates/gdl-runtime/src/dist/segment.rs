@@ -302,8 +302,11 @@ impl<H> Segment<H> {
     /// reason that holds for the pool. [`Decline::Instance`] is about this
     /// instance alone: a chooser that hears it offers the request to the
     /// pool's other entry instances, each once, before another pool, and
-    /// damps nothing. A call replaces the reason an earlier one gave. Costs nothing per request beyond the one load an
-    /// offer already makes.
+    /// damps nothing. [`Decline::NotPresent`] says that the instance does
+    /// not have what the request wants: a chooser that hears it offers the
+    /// request to another pool, and damps nothing. A call replaces the
+    /// reason an earlier one gave. Costs nothing per request beyond the one
+    /// load an offer already makes.
     pub fn decline_offers_as(&self, decline: Decline) {
         self.rt.decline_offers_as(decline);
     }

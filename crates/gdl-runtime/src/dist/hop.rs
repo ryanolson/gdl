@@ -490,11 +490,12 @@ where
                         let hop = Arc::clone(&hop);
                         Box::pin(async move {
                             let accepted = hop.accept_forward(envelope).await;
-                            // An instance's own decline says nothing of its
-                            // pool's room, so its load does not report it.
+                            // An instance's own decline, and a decline as not
+                            // present, say nothing of its pool's room, so its
+                            // load does not report them.
                             if let Err(refused) = &accepted
                                 && refused.error.kind() == ErrorKind::Overloaded
-                                && refused.decline != Decline::Instance
+                                && matches!(refused.decline, Decline::Full | Decline::Gone)
                             {
                                 hop.rt
                                     .served
