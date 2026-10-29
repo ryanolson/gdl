@@ -14,7 +14,8 @@ use super::{Mirror, SPLIT, placed};
 /// a Service name, which resolves only in its own cluster.
 const FLEET: &str = "tests/fixtures/k8s/fleet.toml";
 
-/// The pinned objects of [`FLEET`], one directory per cluster.
+/// The pinned objects of [`FLEET`], one directory per cluster: what
+/// `scripts/kubeconform.sh` validates by default.
 const PINNED: &str = "tests/fixtures/k8s/out";
 
 /// A file whose text is [`MARKER`]: the fleet's secret on the host, which

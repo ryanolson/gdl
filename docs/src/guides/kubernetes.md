@@ -132,3 +132,13 @@ The `README.md` in the output lists these commands for each cluster, and the Sec
 kubectl --context kind-use1 -n gdl-api port-forward service/global-us-front 8080
 ```
 
+## Validate the objects
+
+`scripts/kubeconform.sh` validates objects with kubeconform 0.8.0, in strict mode, against the schemas of Kubernetes 1.35.0. It runs offline. `INSTALL_TOOLS=1` downloads kubeconform and the schemas into `TOOLS_DIR`, which is `.k8s-tools` at the repository's root by default. Without a directory, it validates the pinned objects:
+
+```bash
+INSTALL_TOOLS=1 bash scripts/kubeconform.sh
+bash scripts/kubeconform.sh target/k8s
+```
+
+A kind that has no schema there fails the run.

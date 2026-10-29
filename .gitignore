@@ -2,3 +2,4 @@ target/
 .book-tools/
 agent-docs/
 __pycache__/
+.k8s-tools/

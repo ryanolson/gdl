@@ -105,6 +105,7 @@ timeout 60 cargo test --workspace --doc             # doctests: nextest does not
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
 bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, python3
 bash scripts/dynamodb-local.sh                      # the DynamoDB directory against DynamoDB Local; needs Docker
+bash scripts/kubeconform.sh                         # the pinned Kubernetes objects against pinned schemas; INSTALL_TOOLS=1 fetches them
 ```
 
 The tests start velo nodes in one process on ports that the OS assigns. The example workspaces are outside the root workspace, so run their tests from their directories. See [Testing](docs/src/development/testing.md).

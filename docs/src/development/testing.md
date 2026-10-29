@@ -14,11 +14,12 @@ timeout <limit> cargo test --workspace --doc        # doctests: nextest does not
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page, outside cargo
 (cd examples/http && timeout <limit> cargo nextest run)   # the example workspaces are outside the root workspace
 (cd examples/api && timeout <limit> cargo nextest run)
+bash scripts/kubeconform.sh                          # the pinned Kubernetes objects, outside cargo
 ```
 
 The suite runs under [cargo-nextest](https://nexte.st), which runs each test in its own process. Its settings are in `.config/nextest.toml`. `crates/gdl-runtime/tests/allocs.rs` has its own `main`, so that no other thread changes its allocation count. It answers nextest's `--list` with one test, `allocations`. A test that counts the allocations of a velo call warms the sender first. velo's table of response slots allocates once for each of its shards, and the shard count grows with the host's cores (`warm` in `crates/gdl-runtime/src/dist/offers/failover.rs`).
 
-The tests of `gdl-gen` build the other examples in `target/examples`. `crates/gdl-gen/tests/deployment/k8s.rs` pins every file that `cargo gdl k8s` writes for one fleet in `crates/gdl-gen/tests/fixtures/k8s/out`, and `GDL_UPDATE_FIXTURES=1` writes them again. The `editor.cjs` test runs the composer's `assets/app.js` in a Node `vm` context with a stub DOM. It needs a Node with the built-in test runner (`node --test`) and nothing from npm.
+The tests of `gdl-gen` build the other examples in `target/examples`. `crates/gdl-gen/tests/deployment/k8s.rs` pins every file that `cargo gdl k8s` writes for one fleet in `crates/gdl-gen/tests/fixtures/k8s/out`, and `GDL_UPDATE_FIXTURES=1` writes them again. `scripts/kubeconform.sh` validates those files against the Kubernetes API's schemas, offline ([Validate the objects](../guides/kubernetes.md#validate-the-objects)). The `editor.cjs` test runs the composer's `assets/app.js` in a Node `vm` context with a stub DOM. It needs a Node with the built-in test runner (`node --test`) and nothing from npm.
 
 ## Put a time limit on each run
 
