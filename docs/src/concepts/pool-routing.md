@@ -316,6 +316,28 @@ A chooser built before this reason reads it as unknown, so as full: it damps the
 
 An entry can decline an offer as not present: it does not have the property the request wants. The chooser chose the pool from a view of its properties that was out of date, as when the pool dropped a model after the chooser's last summary. The chooser then offers the request to another pool.
 
+An entry declines this way when its nodes say which property each request wants. A node calls `InstanceProperties::wants` in its build, with the kind and a function that reads the key from the request's head, as the hop that enters the segment carries it: the head's own type, or a `gdl::Projected` part of it.
+
+```rust,ignore
+let properties = gdl::InstanceProperties::current();
+properties.set(&MODEL, [(model.clone(), gdl::EntryState::Starting)])?;
+properties.wants(&MODEL, |request: &gdl::Projected<Wanted>| request.model.clone())?;
+```
+
+For each offer, before admission, the entry reads the head and looks the key up in its instance's own list of the kind:
+
+| The instance lists the key | The entry |
+|---|---|
+| `ready` | takes the offer |
+| `starting` | declines it as full: it can serve the request once the key is ready |
+| `draining`, or not at all | declines it as not present, naming the kind |
+
+- A draining pool's refusal comes first, as gone, since it holds for every request.
+- The entry reads its own instance's list, not its pool's record, which lags the instance. So a segment that wants a kind sets that kind's list too. An instance that never sets it declines every offer.
+- A head that the function cannot read fails the request with `Codec`. No other pool could read it either.
+- The segment refuses to start when a want reads a head type that no offer into the segment carries, naming the kind, or reads fields by name on an edge encoded as `msgpack_array`.
+- The list the node last set replaces a copy that each offer reads with no lock. An entry with no want reads nothing. A want costs an offer the allocations of reading its head and of making its key: two for a `String` head and key.
+
 - The request leaves the pool at once. The chooser does not offer it to the pool's other entry instances, since every entry instance of a pool is taken to list the same properties. A pool whose instances differ declines as the instance's own instead ([above](#an-instance-that-cannot-serve-the-request)).
 - The pool is left for this request only. It is neither damped nor held gone, so the next request is offered to it again, and the instance's load report does not count the decline as a refusal. The pool still serves the requests for the properties it has.
 - The decline uses one of `pool_failovers`, as a full one does. With none left, the request fails with the refusal, `Overloaded`, not with `Routing`, since the pool is not gone.

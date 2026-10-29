@@ -17,6 +17,7 @@ use super::offers::Answer;
 use super::offers::{Offer, Refusal, Refused};
 use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
+use gdl::__runtime::Want;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
 use gdl::Decline;
@@ -525,6 +526,10 @@ pub(crate) struct Runtime {
     /// Whether each hop's hand-offs to this segment are offers, worked out
     /// once.
     offers: Vec<bool>,
+    /// What the segment's nodes said the offers want, each with whether a
+    /// hop's offers read it, so that the start can refuse one that none
+    /// reads ([`Runtime::unread_want`]).
+    wants: Box<[(Arc<dyn Want>, AtomicBool)]>,
     /// Whether the instance counts the requests it holds that may still
     /// send work onward ([`Admission::senders`]): only in a class that a
     /// hop enters, whose pools drain segment by segment. Elsewhere no drain
@@ -609,6 +614,12 @@ impl Runtime {
                 .first()
                 .is_some_and(|inner| inner.segment == segment)
         });
+        let wants = config
+            .properties
+            .wanted()
+            .into_iter()
+            .map(|want| (want, AtomicBool::new(false)))
+            .collect();
         let counts_senders = layout
             .class_of(&segment)
             .is_some_and(|class| !layout.entry_segments(class).is_empty());
@@ -630,6 +641,7 @@ impl Runtime {
             closed_at: std::sync::OnceLock::new(),
             declining: AtomicU8::new(0),
             offers,
+            wants,
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -767,6 +779,26 @@ impl Runtime {
             error: Error::new(ErrorKind::Overloaded, why),
             decline,
         })
+    }
+
+    /// What the segment's nodes said the offers want, each with whether a
+    /// hop's offers read it: a hop sets it as it is built.
+    pub(crate) fn wants(&self) -> &[(Arc<dyn Want>, AtomicBool)] {
+        &self.wants
+    }
+
+    /// A want that no hop's offers read, once every hop is built, when
+    /// the segment takes offers at all: it would check nothing. A segment
+    /// that takes none, as outside a pool, reads none, and that is no
+    /// mistake.
+    pub(crate) fn unread_want(&self) -> Option<&dyn Want> {
+        if !self.offers.iter().any(|offered| *offered) {
+            return None;
+        }
+        self.wants
+            .iter()
+            .find(|(_, read)| !read.load(Ordering::Relaxed))
+            .map(|(want, _)| &**want)
     }
 
     /// Whether the forward hand-offs of hop `hop` that reach this segment

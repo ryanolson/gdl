@@ -134,6 +134,8 @@ gdl does not read a key's fields. The hub, the relay, `gdl-watch` and each direc
 
 A node in an entry segment says which properties its instance has, with `gdl::InstanceProperties`. It takes the handle in its build with `InstanceProperties::current()`. Then it calls `set` with a `gdl::PropertyKind<T>`, a kind name and the key type, and each key with whether the instance can serve it now (`starting`, `ready`, or `draining`). Each kind has its own list: `set` for one kind leaves the others as they are. The instance sends the lists with each load report, and at once when one changes. A pool whose instances report no list of a kind declares the properties of that kind in its settings (`[pool.properties]`, a list of keys for each kind). Every usable entry instance that reports no list of that kind serves them.
 
+The node can also say which property of a kind each request wants, with `InstanceProperties::wants`: the kind, and a function from the request's head to the key. The entry then declines an offer from another pool, before it admits it, when the instance does not list that key or lists it as `draining`, and the chooser offers the request to another pool ([A pool without the property](pool-routing.md#a-pool-without-the-property)). It declines a key that is `starting` as full, and takes one that is `ready`. The entry reads only its own instance's list, so a segment that wants a kind also sets that kind's list.
+
 ```toml
 [pool.properties]
 shard = [{ name = "a" }, { name = "b", partition = "p" }]

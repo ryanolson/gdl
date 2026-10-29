@@ -6,6 +6,12 @@
 //! ([`crate::PropertyIndex`]). The runtime sends what the node said to the
 //! hub with the instance's load reports, and as soon as it changes, never
 //! on a request's path.
+//!
+//! A node may also say which property of a kind each offer wants, read
+//! from the request's head ([`InstanceProperties::wants`]). The runtime
+//! declines an offer from another class whose property the instance does
+//! not have, before it admits anything, and reads the instance's keys from
+//! a copy that the node's last list replaced, with no lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,7 +23,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 
+use crate::select::Head;
 use crate::{Error, ErrorKind, Result};
+
+mod wanted;
+
+pub use wanted::{Presence, Want};
 
 tokio::task_local! {
     /// The handle of the segment whose nodes are being built.
@@ -112,6 +123,10 @@ pub struct InstanceProperties {
     drains: Arc<Mutex<Drains>>,
     /// Whether a drain awaits a report that carries it being taken.
     unreported: Arc<watch::Sender<bool>>,
+    /// What the instance's offers want, each holding the instance's keys
+    /// of its kind. Locked only to register a want and to set a list,
+    /// after the drains, never by an offer.
+    wanted: Arc<Mutex<Vec<Arc<dyn Want>>>>,
 }
 
 /// The drains a report has yet to carry.
@@ -151,6 +166,7 @@ impl InstanceProperties {
             said: Arc::new(watch::Sender::new(Arc::default())),
             drains: Arc::default(),
             unreported: Arc::new(watch::Sender::new(false)),
+            wanted: Arc::default(),
         }
     }
 
@@ -180,6 +196,64 @@ impl InstanceProperties {
             .map(|(key, state)| Ok(PropertyEntry::new(kind.encode(&key)?, state)))
             .collect::<Result<Vec<_>>>()?;
         self.set_entries(kind.name(), entries)
+    }
+
+    /// Say that each offer from another class wants the property of `kind`
+    /// whose key `key` reads from the request's head, as the hop that
+    /// crosses into this segment carries it: the head's own type, or a
+    /// [`Projected`](crate::Projected) part of it. The runtime then
+    /// declines an offer, before it admits anything, when this instance
+    /// does not list that key or lists it as `draining`, saying that the
+    /// property is not present: the chooser offers the request to another
+    /// pool, and the pool still takes the requests it serves. It declines
+    /// an offer whose key is `starting` as full, since the instance can
+    /// serve it once it is ready, and takes one whose key is `ready`.
+    ///
+    /// The runtime reads only this instance's own list of the kind, which
+    /// a node sets with [`InstanceProperties::set`]. So a segment that
+    /// wants a kind provides it too: an instance that never sets the
+    /// kind's list declines every offer. Every entry instance of a pool is
+    /// taken to list the same keys; a pool whose instances differ declines
+    /// by its own policy instead.
+    ///
+    /// Call it in [`Build::build`](crate::Build::build). The runtime checks
+    /// the head type against the crossing's edge when the segment starts,
+    /// and reads the head of each offer of a hop whose edge is that type,
+    /// once per want. Refused when the kind's name has not a settings
+    /// key's shape.
+    pub fn wants<H, T>(
+        &self,
+        kind: &PropertyKind<T>,
+        key: impl Fn(&H) -> T + Send + Sync + 'static,
+    ) -> Result<()>
+    where
+        H: Head,
+        T: Serialize + DeserializeOwned + Ord + Send + Sync + 'static,
+    {
+        gdl_model::check_property_kind(kind.name())
+            .map_err(|why| Error::new(ErrorKind::Node, why))?;
+        let want: Arc<dyn Want> = Arc::new(wanted::Typed {
+            kind: kind.name(),
+            key,
+            held: Default::default(),
+            head: std::marker::PhantomData::<fn(&H)>,
+        });
+        let drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
+        want.hold(&drains.lists());
+        self.wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(want);
+        Ok(())
+    }
+
+    /// What the instance's offers want, for the runtime.
+    #[doc(hidden)]
+    pub fn wanted(&self) -> Vec<Arc<dyn Want>> {
+        self.wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// [`InstanceProperties::set`] of entries encoded already, for a
@@ -270,6 +344,11 @@ impl InstanceProperties {
     fn publish(&self, drains: &Drains) {
         self.note(drains);
         let lists = drains.lists();
+        let wanted = self.wanted.lock().unwrap_or_else(PoisonError::into_inner);
+        for want in wanted.iter() {
+            want.hold(&lists);
+        }
+        drop(wanted);
         self.said.send_if_modified(|said| {
             let changed = **said != lists;
             if changed {

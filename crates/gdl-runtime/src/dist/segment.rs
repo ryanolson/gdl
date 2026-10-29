@@ -91,6 +91,17 @@ impl Deployment {
     /// Register the entries the graph rooted at `root` serves here, and start
     /// serving them.
     pub fn start<H: Register>(self, root: H) -> Result<Segment<H>> {
+        if let Some(want) = self.rt.unread_want() {
+            let reads = want.edge().map_or("its bytes", |(_, name)| name);
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{}`: the want of property kind `{}` reads the head as `{reads}`, but no request that crosses into the segment from another class carries it",
+                    self.rt.segment,
+                    want.kind()
+                ),
+            ));
+        }
         let mut entries = Entries::default();
         root.register(&mut entries);
         let entries = Arc::new(entries);

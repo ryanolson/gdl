@@ -980,6 +980,104 @@ async fn an_entry_that_declines_as_not_present_sends_each_request_to_another_poo
     }
 }
 
+/// The model a request wants, as a property.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+struct Served {
+    name: String,
+}
+
+const SERVED: gdl::PropertyKind<Served> = gdl::PropertyKind::new("served");
+
+/// A model pool of the reference graph whose entry instances want the
+/// property named by each request's text, and list `properties` of it.
+async fn wanting(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    pool: Model<'_>,
+    properties: &gdl::InstanceProperties,
+    events: &Arc<Events>,
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    properties
+        .wants(&SERVED, |prompt: &Prompt| Served {
+            name: prompt.text.clone(),
+        })
+        .expect("registered");
+    let given = properties.clone();
+    let entry = move |runtime: RuntimeConfig| RuntimeConfig {
+        properties: given.clone(),
+        ..runtime
+    };
+    model_of(spec, directory, pool, &entry, &|deployment| {
+        reference_graph(deployment, events)
+    })
+    .await
+}
+
+/// An entry instance whose offers want a property declines each offer for
+/// one it does not have as not present, before any work runs: the request
+/// goes to the pool that has it, and the first pool is neither damped nor
+/// held gone, so the next request is offered to it again. A property that
+/// is `draining` is not present either. Once it is `ready`, the pool takes the
+/// request. One that is `starting` declines as full, and damps the pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_declines_an_offer_for_a_property_it_does_not_have() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let across = || Served {
+        name: "across".into(),
+    };
+    let (p1, p2) = (
+        gdl::InstanceProperties::new(),
+        gdl::InstanceProperties::new(),
+    );
+    p1.set(&SERVED, [(across(), gdl::EntryState::Ready)])
+        .expect("a list");
+    p2.set(&SERVED, [(across(), gdl::EntryState::Ready)])
+        .expect("a list");
+    let m1 = wanting(&spec, &directory, ready(M1, "m1-hub:1337"), &p1, &quiet).await;
+    let m2 = wanting(&spec, &directory, degraded(M2, "m2-hub:1337"), &p2, &quiet).await;
+    let pools = tables(&chooser);
+    following(&pools, &[(M1, PoolState::Ready), (M2, PoolState::Degraded)]).await;
+
+    for listed in [vec![], vec![(across(), gdl::EntryState::Draining)]] {
+        p1.set(&SERVED, listed).expect("a list");
+        for _ in 0..2 {
+            ask(&chooser.segment)
+                .await
+                .expect("the other pool answered");
+        }
+    }
+    assert_eq!((m1.forwards(), m2.forwards()), (0, 4), "work ran on m1");
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (4, 4),
+        "m1 was passed over after it declined as not present"
+    );
+    let m = followed(&pools, "f", M1).expect("followed");
+    assert!(!m.gone && m.damped.is_none(), "{m:?}");
+    assert_eq!(m1.entries[0].segment.load().declined, 0);
+
+    p1.set(&SERVED, [(across(), gdl::EntryState::Ready)])
+        .expect("a list");
+    ask(&chooser.segment).await.expect("m1 answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 4));
+
+    p1.set(&SERVED, [(across(), gdl::EntryState::Starting)])
+        .expect("a list");
+    ask(&chooser.segment)
+        .await
+        .expect("the other pool answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 5));
+    let m = followed(&pools, "f", M1).expect("followed");
+    assert!(m.damped.is_some(), "starting declines as full: {m:?}");
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// An entry instance stops taking new work at its bound even when its
 /// serving body is slow to finish once told to stop: the offer of a stale
 /// chooser after the bound is declined, and the other pool answers it.

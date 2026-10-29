@@ -13,10 +13,11 @@ use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
 use super::fabric::{Canceller, EncodedItem, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
 use super::offers::{Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
-use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
+use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit, HeadInfo};
 use gdl::__runtime as meter;
 use gdl::__runtime::{CHECK_INTERVAL, bound_measured};
 use gdl::__runtime::{END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
+use gdl::__runtime::{Presence, Want};
 use gdl::Decline;
 use gdl::Next;
 use gdl::{Cx, Deadline};
@@ -92,6 +93,107 @@ struct HopCore<F, I, B> {
     /// Whether the hop's hand-offs to this segment are offers from another
     /// class, which a draining pool's entry declines.
     offer: bool,
+    /// The properties those offers want, when the segment's nodes said
+    /// which ([`gdl::InstanceProperties::wants`]): boxed, and only then, so
+    /// that a hop with none checks one pointer per offer.
+    wanted: Option<Box<Wanted>>,
+}
+
+/// The properties a hop's offers into this segment want, at each forward
+/// position where one enters from another class.
+struct Wanted {
+    at: Box<[Entering]>,
+}
+
+/// Where offers enter: the forward position, the encoding of the head
+/// that crosses there, and the wants that read that edge's head.
+struct Entering {
+    pos: usize,
+    encoding: gdl_model::Encoding,
+    wants: Box<[Arc<dyn Want>]>,
+}
+
+impl Wanted {
+    /// The wants of `rt`'s nodes that read the heads of the offers that
+    /// enter this segment on `forward`, whose heads are `heads`, or `None`
+    /// when none does. Only a hand-off from another class is an offer: one
+    /// from inside the pool carries a request the pool already took. Marks
+    /// each want that a head reads. Refuses a want that reads the head's
+    /// fields by name where the edge's encoding is positional.
+    fn of(
+        rt: &Runtime,
+        index: u16,
+        forward: &[(String, String)],
+        heads: &[HeadInfo],
+    ) -> Result<Option<Box<Self>>> {
+        let wants = rt.wants();
+        if wants.is_empty() {
+            return Ok(None);
+        }
+        let class = rt.layout.class_of(&rt.segment);
+        let mut at = Vec::new();
+        for pos in 1..forward.len() {
+            if forward[pos].0 != rt.segment || rt.layout.class_of(&forward[pos - 1].0) == class {
+                continue;
+            }
+            let head = &heads[pos - 1];
+            let mut reading = Vec::new();
+            for (want, read) in wants {
+                if want.edge().is_some_and(|(id, _)| id != head.id) {
+                    continue;
+                }
+                read.store(true, std::sync::atomic::Ordering::Relaxed);
+                if want.by_name() && head.encoding == gdl_model::Encoding::MsgpackArray {
+                    return Err(Error::new(
+                        ErrorKind::Placement,
+                        format!(
+                            "segment `{}`: the want of property kind `{}` reads the head's fields by name, but the request that crosses into `{}` (hop {index}) is encoded as `msgpack_array`, which carries no names",
+                            rt.segment,
+                            want.kind(),
+                            forward[pos].1
+                        ),
+                    ));
+                }
+                reading.push(Arc::clone(want));
+            }
+            if !reading.is_empty() {
+                at.push(Entering {
+                    pos,
+                    encoding: head.encoding,
+                    wants: reading.into(),
+                });
+            }
+        }
+        Ok((!at.is_empty()).then(|| Box::new(Self { at: at.into() })))
+    }
+
+    /// Refuse the offer that enters at `pos` with `head` when the instance
+    /// does not have a property it wants: as not present when it does not
+    /// list it or drains it, and as full while it starts. A head a want
+    /// cannot read is the request's own error.
+    fn check(&self, pos: usize, head: &[u8]) -> std::result::Result<(), Refusal> {
+        let Some(entering) = self.at.iter().find(|entering| entering.pos == pos) else {
+            return Ok(());
+        };
+        for want in &entering.wants {
+            let (why, decline) = match want.presence(head, entering.encoding)? {
+                Presence::Ready => continue,
+                Presence::Absent => ("does not have", Decline::NotPresent),
+                Presence::Starting => ("is still loading", Decline::Full),
+            };
+            return Err(Refusal {
+                error: Error::new(
+                    ErrorKind::Overloaded,
+                    format!(
+                        "the instance {why} the `{}` property the request wants",
+                        want.kind()
+                    ),
+                ),
+                decline,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The figures of a hop's entries in one segment: where a visit to the
@@ -382,9 +484,15 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             None => HopFigures::default(),
         };
         let offer = rt.offered(usize::from(index));
+        let wanted = if offer {
+            Wanted::of(&rt, index, &forward, &heads)?
+        } else {
+            None
+        };
         Ok(Self(
             Arc::new(HopCore {
                 offer,
+                wanted,
                 rt,
                 index,
                 fwd,
@@ -986,6 +1094,13 @@ where
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
         let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        // Before admission, so that an offer the instance cannot serve
+        // takes no permit and waits for none; after a drain's refusal,
+        // which says more, since it holds for every request.
+        if let Some(wanted) = &self.wanted {
+            rt.check_offer()?;
+            wanted.check(pos, &envelope.payload)?;
+        }
         let mut share = match setup(
             &cx,
             rt.config.setup_timeout,

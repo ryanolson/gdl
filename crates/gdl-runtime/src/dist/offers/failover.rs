@@ -55,7 +55,7 @@ fn layout() -> gdl_model::Layout {
     gdl_model::layout(&manifest(), &placement()).expect("valid test fixture")
 }
 
-fn placement() -> gdl_model::Placement {
+pub(super) fn placement() -> gdl_model::Placement {
     gdl_model::Placement::new()
         .segment("a", ["S"])
         .segment("d", ["D"])
@@ -66,7 +66,7 @@ fn placement() -> gdl_model::Placement {
 /// OS, and a sender that reaches whatever node binds it next must find no
 /// handler of its deployment there (see
 /// `an_address_another_deployment_holds_is_not_offered_to`).
-fn manifest() -> gdl_model::Manifest {
+pub(super) fn manifest() -> gdl_model::Manifest {
     static GRAPHS: AtomicUsize = AtomicUsize::new(0);
     gdl_model::Manifest {
         name: format!(
@@ -764,7 +764,7 @@ async fn a_first_offer_is_no_larger_than_a_hand_off_was() {
 }
 
 /// Answers with its request.
-struct Echo;
+pub(super) struct Echo;
 
 impl gdl::Sink for Echo {
     type Req = String;

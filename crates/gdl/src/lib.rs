@@ -150,6 +150,7 @@ pub mod __runtime {
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
     };
     pub use crate::policy::{ChoiceHeld, ErasedPolicy, TypedPolicy, Window, pool_id};
+    pub use crate::properties::{Presence, Want};
     pub use crate::select::{Erased, Lease, Picked, Typed};
 }
 

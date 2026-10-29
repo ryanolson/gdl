@@ -17,7 +17,6 @@ pub struct Routed {
 #[derive(Deserialize, Projection)]
 #[gdl(of = Routed)]
 struct Hint {
-    #[allow(dead_code, reason = "startup must refuse before a head is read")]
     shard: u64,
 }
 
@@ -84,4 +83,61 @@ async fn a_projected_selector_refuses_a_positional_edge_at_start() {
     };
     assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{error}");
     assert!(error.message().contains("msgpack_array"), "{error}");
+}
+
+/// The engine for [`contract`]: answers nothing.
+struct Engine;
+
+impl gdl::Sink for Engine {
+    type Req = Routed;
+    type Item = u64;
+
+    async fn generate(&self, _: gdl::Cx, _: Routed) -> gdl::Result<gdl::Items<u64>> {
+        Ok(gdl::items(futures::stream::empty()))
+    }
+}
+
+/// The shard a request wants, as a property.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct Shard {
+    shard: u64,
+}
+
+/// An entry segment whose nodes want a property read by a projection
+/// refuses to start when the edge its offers cross on is `msgpack_array`,
+/// which carries no field names: every offer would fail to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_projected_want_refuses_a_positional_edge_at_start() {
+    let node = common::velo_node().await;
+    let placement = Placement::new()
+        .segment("front", ["A"])
+        .segment("engine", ["B"])
+        .class("global", ["front"])
+        .class("model_x", ["engine"]);
+    let runtime = RuntimeConfig::default();
+    runtime
+        .properties
+        .wants(
+            &gdl::PropertyKind::new("shard"),
+            |hint: &Projected<Hint>| Shard { shard: hint.shard },
+        )
+        .expect("registered");
+    let deployment = Deployment::new(
+        node,
+        &contract::manifest(),
+        &placement,
+        "engine",
+        &Roster::new(),
+        runtime,
+    )
+    .expect("a deployment");
+    let assembled = contract::assemble(&deployment, contract::Bindings::new().b(Engine));
+    let Err(error) = assembled else {
+        panic!("a projected want accepted msgpack_array at startup");
+    };
+    assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{error}");
+    assert!(
+        error.message().contains("msgpack_array") && error.message().contains("`shard`"),
+        "{error}"
+    );
 }

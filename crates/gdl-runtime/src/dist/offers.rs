@@ -433,6 +433,8 @@ pub(crate) fn offered_hops<'a, B: Boundary + 'a>(
 
 #[cfg(test)]
 mod failover;
+#[cfg(test)]
+mod wants;
 
 #[cfg(test)]
 mod tests {

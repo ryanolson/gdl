@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gdl_model::{EntryState, PropertyEntry, PropertyLists};
 use serde::{Deserialize, Serialize};
 
-use super::{InstanceProperties, PropertyKind};
+use super::{InstanceProperties, Presence, PropertyKind, Want};
 
 /// The test property type: its fields are its identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -202,4 +202,136 @@ fn the_same_list_again_is_no_change() {
     set(&properties, &[("m", EntryState::Ready)]);
     assert!(!read.has_changed().expect("open"));
     let _: Arc<PropertyLists> = read.borrow().clone();
+}
+
+/// A request's head, of which an offer wants the property named `name`.
+#[derive(Serialize, Deserialize)]
+struct Asked {
+    name: String,
+    text: String,
+}
+
+/// `name`'s head, as it crosses.
+fn asked(name: &str) -> Vec<u8> {
+    let head = Asked {
+        name: name.into(),
+        text: "hello".into(),
+    };
+    crate::codec::encoder::<Asked>(gdl_model::Encoding::Msgpack)(&head).expect("encode")
+}
+
+/// The one want `properties` holds.
+fn want(properties: &InstanceProperties) -> Arc<dyn Want> {
+    let mut wanted = properties.wanted();
+    assert_eq!(wanted.len(), 1);
+    wanted.pop().expect("one")
+}
+
+/// An offer finds the property it wants as the instance lists it: ready
+/// when it can serve it now, starting while it loads, and absent when it
+/// is draining or not listed, as when the list was never set. Each list
+/// the node sets is read from then on, and another kind's list changes
+/// nothing. A property that leaves while its drain is not yet reported
+/// stays absent.
+#[test]
+fn an_offer_reads_the_wanted_property_as_the_instance_lists_it() {
+    let properties = InstanceProperties::new();
+    properties
+        .wants(&TEST, |asked: &Asked| key(&asked.name))
+        .expect("registered");
+    let want = want(&properties);
+    assert_eq!(want.kind(), "test");
+    let presence = |name| {
+        want.presence(&asked(name), gdl_model::Encoding::Msgpack)
+            .expect("read")
+    };
+    assert_eq!(presence("a"), Presence::Absent, "never set");
+    set(
+        &properties,
+        &[
+            ("a", EntryState::Ready),
+            ("b", EntryState::Starting),
+            ("c", EntryState::Draining),
+        ],
+    );
+    assert_eq!(
+        ["a", "b", "c", "d"].map(presence),
+        [
+            Presence::Ready,
+            Presence::Starting,
+            Presence::Absent,
+            Presence::Absent
+        ]
+    );
+    set(&properties, &[("b", EntryState::Ready)]);
+    assert_eq!(
+        ["a", "b", "c"].map(presence),
+        [Presence::Absent, Presence::Ready, Presence::Absent],
+        "a dropped, b ready, c leaving while its drain is unreported"
+    );
+    properties
+        .set(&OTHER, [(key("a"), EntryState::Ready)])
+        .expect("a list");
+    assert_eq!(presence("a"), Presence::Absent, "another kind's list");
+}
+
+/// A want registered after its kind's list was set reads that list, and
+/// the instance's other wants read their own kinds.
+#[test]
+fn a_want_registered_after_its_list_reads_it() {
+    let properties = InstanceProperties::new();
+    set(&properties, &[("a", EntryState::Ready)]);
+    properties
+        .wants(&TEST, |asked: &Asked| key(&asked.name))
+        .expect("registered");
+    properties
+        .wants(&OTHER, |asked: &Asked| key(&asked.name))
+        .expect("registered");
+    let wanted = properties.wanted();
+    let presence = |want: &Arc<dyn Want>| {
+        want.presence(&asked("a"), gdl_model::Encoding::Msgpack)
+            .expect("read")
+    };
+    assert_eq!(
+        wanted
+            .iter()
+            .map(|want| (want.kind(), presence(want)))
+            .collect::<Vec<_>>(),
+        [("test", Presence::Ready), ("other", Presence::Absent)]
+    );
+}
+
+/// A head the want cannot read is the request's error, of the kind
+/// `Codec`, not a decline: no other pool could read it either.
+#[test]
+fn a_head_a_want_cannot_read_is_the_requests_error() {
+    let properties = InstanceProperties::new();
+    properties
+        .wants(&TEST, |asked: &Asked| key(&asked.name))
+        .expect("registered");
+    let error = want(&properties)
+        .presence(&[0xc1], gdl_model::Encoding::Msgpack)
+        .expect_err("unreadable");
+    assert_eq!(error.kind(), crate::ErrorKind::Codec, "{error}");
+}
+
+/// A node registers a want in its build, through the handle the runtime
+/// gives it; a kind whose name has not a settings key's shape is refused.
+#[tokio::test]
+async fn a_node_registers_a_want_in_its_build() {
+    let properties = InstanceProperties::new();
+    properties
+        .scope(async {
+            InstanceProperties::current().wants(&TEST, |asked: &Asked| key(&asked.name))
+        })
+        .await
+        .expect("registered");
+    assert_eq!(want(&properties).kind(), "test");
+    let refused = properties
+        .wants(&PropertyKind::<Test>::new("Bad Kind"), |asked: &Asked| {
+            key(&asked.name)
+        })
+        .expect_err("a bad kind name");
+    assert_eq!(refused.kind(), crate::ErrorKind::Node, "{refused}");
+    assert_eq!(properties.wanted().len(), 1, "nothing changed");
 }
