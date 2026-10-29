@@ -85,7 +85,8 @@ impl Header {
 }
 
 /// What is wrong with the fleet's clusters, each at its own table: their
-/// names, contexts, regions, namespaces, Secret names, and variables, and two that
+/// names, contexts, regions, namespaces, annotation keys, Secret names,
+/// and variables, and two that
 /// share a context and a namespace, reported at the later in name order.
 pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut Vec<FleetError>) {
     let mut first: BTreeMap<(&str, &str), &str> = BTreeMap::new();
@@ -117,13 +118,23 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
             });
         }
         for (secret, holder) in &cluster.secrets {
-            if !secret_name(holder) {
+            if !subdomain(holder) {
                 errors.push(FleetError::InvalidSecretName {
                     cluster: name.clone(),
                     secret: secret.clone(),
                     name: holder.clone(),
                 });
             }
+        }
+        for key in cluster
+            .service_account_annotations
+            .keys()
+            .filter(|key| !annotation_key(key))
+        {
+            errors.push(FleetError::InvalidAnnotation {
+                cluster: name.clone(),
+                key: key.clone(),
+            });
         }
         for variable in cluster.env.keys().filter(|v| !variable_name(v)) {
             errors.push(FleetError::InvalidVariable {
@@ -158,10 +169,31 @@ fn namespace_name(name: &str) -> bool {
     name.len() <= NAMESPACE_LIMIT && rfc_label(name)
 }
 
-/// Whether `name` can name a Kubernetes Secret: a DNS subdomain, RFC 1123
-/// labels joined by `.`.
-fn secret_name(name: &str) -> bool {
+/// Whether `name` is a DNS subdomain, RFC 1123 labels joined by `.`: the
+/// name of a Kubernetes Secret, or an annotation key's prefix.
+fn subdomain(name: &str) -> bool {
     name.len() <= SUBDOMAIN_LIMIT && name.split('.').all(rfc_label)
+}
+
+/// The longest name of an annotation key, after its prefix.
+const ANNOTATION_NAME_LIMIT: usize = 63;
+
+/// Whether `key` is a Kubernetes annotation key: an optional DNS subdomain
+/// and `/`, then a name of letters, digits, `-`, `_`, and `.`, starting and
+/// ending with a letter or digit.
+fn annotation_key(key: &str) -> bool {
+    let (prefix, name) = match key.split_once('/') {
+        Some((prefix, name)) => (Some(prefix), name),
+        None => (None, key),
+    };
+    let alnum = |c: char| c.is_ascii_alphanumeric();
+    prefix.is_none_or(subdomain)
+        && name.len() <= ANNOTATION_NAME_LIMIT
+        && name.starts_with(alnum)
+        && name.ends_with(alnum)
+        && name
+            .chars()
+            .all(|c| alnum(c) || matches!(c, '-' | '_' | '.'))
 }
 
 /// Whether `label` is lowercase letters, digits, and `-`, starting and

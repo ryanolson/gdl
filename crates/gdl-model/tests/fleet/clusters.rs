@@ -264,6 +264,54 @@ fn a_namespace_is_an_rfc_1123_label() {
     }
 }
 
+/// A service account annotation's key is Kubernetes' annotation key: an
+/// optional DNS subdomain and `/`, then a name of at most 63 characters.
+#[test]
+fn an_annotation_key_is_a_kubernetes_annotation_key() {
+    let with = |key: &str| {
+        format!(
+            "{TWO}{G_IN_A}[cluster.c]\ncontext = 'c'\nnamespace = 'gdl'\nregion = 'r'\n\
+             service_account_annotations = {{ \"{key}\" = 'v' }}\n"
+        )
+    };
+    let longest = format!("A{}", "_b".repeat(31));
+    assert_eq!(longest.len(), 63);
+    let prefixed = format!("eks.amazonaws.com/{longest}");
+    for good in [
+        "eks.amazonaws.com/role-arn",
+        "role-arn",
+        "a/B_c.d-e",
+        "0.example/9",
+        longest.as_str(),
+        prefixed.as_str(),
+    ] {
+        fleet(&with(good)).check(Some(&laid())).expect(good);
+    }
+    let too_long = format!("{longest}b");
+    let long_prefix = format!("{}/x", "a".repeat(254));
+    for bad in [
+        "",
+        "/x",
+        "x/",
+        "Eks.com/x",
+        "a/b/c",
+        "-x",
+        "x-",
+        "has space",
+        "a_b.com/x",
+        too_long.as_str(),
+        long_prefix.as_str(),
+    ] {
+        assert_eq!(
+            problems(&with(bad)),
+            [format!(
+                "[cluster.c] service_account_annotations.{bad}: not an annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit"
+            )],
+            "{bad}"
+        );
+    }
+}
+
 /// The controls: a pool may write its cluster's region out, and pools of
 /// one fleet may name a cluster or a region alone.
 #[test]

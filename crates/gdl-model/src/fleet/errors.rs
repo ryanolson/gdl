@@ -139,6 +139,14 @@ pub enum FleetError {
         /// The name given for its Kubernetes Secret.
         name: String,
     },
+    /// A cluster's `service_account_annotations` key is not an annotation
+    /// key.
+    InvalidAnnotation {
+        /// The cluster.
+        cluster: String,
+        /// The key.
+        key: String,
+    },
     /// A cluster's `env` key is not a variable's name.
     InvalidVariable {
         /// The cluster.
@@ -395,6 +403,11 @@ impl FleetError {
                 format!(
                     "`{holder}` is not a Kubernetes Secret's name: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters"
                 ),
+            ),
+            Self::InvalidAnnotation { cluster: name, key } => (
+                cluster(name),
+                Some(format!("service_account_annotations.{key}")),
+                "not an annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit".into(),
             ),
             Self::InvalidVariable {
                 cluster: name,
