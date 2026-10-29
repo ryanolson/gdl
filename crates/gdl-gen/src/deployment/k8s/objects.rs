@@ -151,7 +151,7 @@ pub(super) struct Pod<'a> {
     pub(super) fleet: &'a str,
     pub(super) pool: &'a PoolSettings,
     pub(super) cluster: &'a Cluster,
-    pub(super) tag: &'a str,
+    pub(super) naming: &'a super::Naming<'a>,
 }
 
 impl Pod<'_> {
@@ -461,20 +461,32 @@ impl Pod<'_> {
         env
     }
 
-    /// The image of `repository` in the cluster's registry.
+    /// The image of `repository` in the cluster's registry, for its
+    /// platform.
     fn image(&self, repository: &str) -> Result<String, Error> {
         let registry = self.cluster.registry.as_deref().unwrap_or_default();
-        let image = image(registry, repository, self.tag);
+        let platform = self.cluster.platform.as_deref().unwrap_or_default();
+        let image = self.naming.image(registry, repository, platform)?;
         crate::deployment::validate_image(&image)?;
         Ok(image)
     }
 }
 
-/// The image `repository` at `tag` in `registry`. Every image that the
-/// objects run is named here, so that naming them by digest changes one
-/// place.
-fn image(registry: &str, repository: &str, tag: &str) -> String {
-    format!("{}/{repository}:{tag}", registry.trim_end_matches('/'))
+/// The image `repository` at `tag` in `registry`, and at `digest` when it
+/// is known. Every image is named here: each the objects run, and each
+/// that `images` builds and pushes.
+pub(in crate::deployment) fn image(
+    registry: &str,
+    repository: &str,
+    tag: &str,
+    digest: Option<&str>,
+) -> String {
+    let mut image = format!("{}/{repository}:{tag}", registry.trim_end_matches('/'));
+    if let Some(digest) = digest {
+        image.push('@');
+        image.push_str(digest);
+    }
+    image
 }
 
 fn config_mount() -> Value {
@@ -727,7 +739,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
             ));
         }
     }
-    text.push_str("\nEach image must be in its cluster's registry before its pods start. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
+    text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
     text
 }
 

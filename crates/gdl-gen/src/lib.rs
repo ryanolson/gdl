@@ -59,7 +59,8 @@ use std::path::{Path, PathBuf};
 
 pub use build::{Build, build};
 pub use deployment::{
-    ComposeBundle, Sources, compose, compose_bundle, compose_files, k8s, k8s_files,
+    Buildx, Built, ComposeBundle, Digests, Docker, Outcome, Sources, compose, compose_bundle,
+    compose_files, images, k8s, k8s_files,
 };
 use emit::MARKER;
 pub use export::export;

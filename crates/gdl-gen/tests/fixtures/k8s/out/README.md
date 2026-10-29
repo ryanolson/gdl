@@ -18,4 +18,4 @@ kubectl --context kind-use1 apply --server-side -R -f use1/pools
 
 Before its pods start, namespace `gdl-api` of cluster `use1` must hold: Secret `api-fingerprint`, with key `fingerprint`. The objects name each Secret and hold no value.
 
-Each image must be in its cluster's registry before its pods start. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.
+Each image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.

@@ -9,7 +9,8 @@
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
-//! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--target-dir <dir>]
+//! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
+//! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -45,8 +46,14 @@
 //! path`, from a build context that holds them and the bundle, so the
 //! bundle builds only on this machine. `k8s` writes a fleet's Kubernetes
 //! objects, one directory per cluster, after the same check; each image
-//! is tagged `--tag`, else with its layout's contract and placement
-//! hashes. It needs no Docker and no cluster. `export` writes the generated crates as a `.tar.gz` with
+//! is tagged `--tag`, else with the sha256 of what it is built from, and
+//! with `--images`, the file `images` writes, also named by its digest. It
+//! needs no Docker and no cluster. `images` builds the hub's image and one
+//! per layout and segment that the fleet's pools run, for each cluster's
+//! platform, with `docker buildx`; with `--push` it pushes each to each
+//! cluster's registry, unless the registry already holds its tag, and
+//! writes each image's digest to `--out`. It prints each image by
+//! reference and digest. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
@@ -63,7 +70,8 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
-       cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--target-dir <dir>]
+       cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
+       cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
@@ -79,6 +87,12 @@ enum Command {
         out: PathBuf,
         fleet: PathBuf,
         tag: Option<String>,
+        images: Option<PathBuf>,
+    },
+    Images {
+        fleet: PathBuf,
+        push: bool,
+        out: Option<PathBuf>,
     },
     Extract {
         krate: gdl_gen::Crate,
@@ -120,8 +134,9 @@ fn args() -> Result<Args, String> {
         .ok_or_else(|| USAGE.to_string())?;
     let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
         (None, None, None, None, None, None);
-    let (mut fleet, mut tag) = (None, None);
+    let (mut fleet, mut tag, mut images) = (None, None, None);
     let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
+    let mut push = false;
     let mut release = false;
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -136,6 +151,8 @@ fn args() -> Result<Args, String> {
             Some("--target-dir") => target = Some(value()?),
             Some("--format") => format = Some(value()?),
             Some("--fleet") => fleet = Some(value()?),
+            Some("--images") => images = Some(value()?),
+            Some("--push") => push = true,
             Some("--tag") => {
                 let given = value()?;
                 tag = Some(given.into_os_string().into_string().map_err(|given| {
@@ -183,7 +200,22 @@ fn args() -> Result<Args, String> {
             out: out.ok_or_else(|| USAGE.to_string())?,
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
             tag: tag.take(),
+            images: images.take(),
         },
+        "images" => {
+            // The digests file names images in their registries, which a
+            // run without `--push` does not reach.
+            if out.is_some() && !push {
+                return Err(format!(
+                    "images: --out writes the digests of pushed images: give --push\n{USAGE}"
+                ));
+            }
+            Command::Images {
+                fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+                push: std::mem::take(&mut push),
+                out: out.take(),
+            }
+        }
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
         },
@@ -199,9 +231,16 @@ fn args() -> Result<Args, String> {
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
-    // `--fleet`, `--tag`, `--local`, and `--release` are for the commands
-    // that took them above.
-    if (needs_spec && spec.is_none()) || fleet.is_some() || tag.is_some() || local || release {
+    // `--fleet`, `--tag`, `--images`, `--push`, `--local`, and `--release`
+    // are for the commands that took them above.
+    if (needs_spec && spec.is_none())
+        || fleet.is_some()
+        || tag.is_some()
+        || images.is_some()
+        || push
+        || local
+        || release
+    {
         return Err(USAGE.to_string());
     }
     Ok(Args {
@@ -326,20 +365,63 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 );
             }
         }
-        Command::K8s { out, fleet, tag } => {
-            let file = args.spec.as_ref().ok_or(USAGE)?;
-            let problems = gdl_gen::check_files(file, Some(fleet), &target(beside(file)));
-            if !problems.is_empty() {
-                return Ok(report(&problems));
+        Command::K8s {
+            out,
+            fleet,
+            tag,
+            images,
+        } => {
+            let Some(Deployed {
+                spec,
+                fleet,
+                target,
+            }) = fleet_and_spec(&args, fleet, &target)?
+            else {
+                return Ok(ExitCode::FAILURE);
+            };
+            let digests = match images {
+                None => None,
+                Some(path) => {
+                    let text = std::fs::read_to_string(path)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    Some(
+                        gdl_gen::Digests::from_json(&text)
+                            .map_err(|e| format!("{}: {e}", path.display()))?,
+                    )
+                }
+            };
+            gdl_gen::k8s(
+                &spec,
+                &fleet,
+                out,
+                &target,
+                tag.as_deref(),
+                digests.as_ref(),
+            )?;
+        }
+        Command::Images { fleet, push, out } => {
+            let Some(Deployed {
+                spec,
+                fleet,
+                target,
+            }) = fleet_and_spec(&args, fleet, &target)?
+            else {
+                return Ok(ExitCode::FAILURE);
+            };
+            let built = gdl_gen::images(&spec, &fleet, &target, *push, &mut gdl_gen::Buildx)?;
+            for image in &built {
+                let what = match image.outcome {
+                    gdl_gen::Outcome::Pushed => "pushed",
+                    gdl_gen::Outcome::Present => "already in its registry",
+                    gdl_gen::Outcome::Loaded => "built into the local image store",
+                };
+                eprintln!("cargo gdl: {}: {what}", image.reference);
+                println!("{}@{}", image.reference, image.digest);
             }
-            // The check read it.
-            let text =
-                std::fs::read_to_string(fleet).map_err(|e| format!("{}: {e}", fleet.display()))?;
-            let fleet = gdl_model::Fleet::from_toml(&text)
-                .map_err(|problems| problems.in_file(fleet.display()).to_string())?;
-            let spec = spec()?;
-            let target = target(spec.dir());
-            gdl_gen::k8s(&spec, &fleet, out, &target, tag.as_deref())?;
+            if let Some(out) = out {
+                std::fs::write(out, gdl_gen::Digests::of(&built).to_json())
+                    .map_err(|e| format!("{}: {e}", out.display()))?;
+            }
         }
         Command::Export { out } => {
             let spec = spec()?;
@@ -379,6 +461,40 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A spec, the fleet that deploys it, and the target directory to build in.
+struct Deployed {
+    spec: gdl_gen::Spec,
+    fleet: gdl_model::Fleet,
+    target: PathBuf,
+}
+
+/// The spec, the fleet at `path`, and the target directory, once `check`
+/// finds no problem in either file; `None`, with the problems printed,
+/// when it finds some.
+fn fleet_and_spec(
+    args: &Args,
+    path: &Path,
+    target: &dyn Fn(&Path) -> PathBuf,
+) -> Result<Option<Deployed>, Box<dyn std::error::Error>> {
+    let file = args.spec.as_ref().ok_or(USAGE)?;
+    let problems = gdl_gen::check_files(file, Some(path), &target(beside(file)));
+    if !problems.is_empty() {
+        report(&problems);
+        return Ok(None);
+    }
+    // The check read it.
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let fleet = gdl_model::Fleet::from_toml(&text)
+        .map_err(|problems| problems.in_file(path.display()).to_string())?;
+    let spec = gdl_gen::Spec::load(file).map_err(|e| e.in_file(file.display()))?;
+    let target = target(spec.dir());
+    Ok(Some(Deployed {
+        spec,
+        fleet,
+        target,
+    }))
 }
 
 /// The directory of the spec `file`, which its relative paths are read

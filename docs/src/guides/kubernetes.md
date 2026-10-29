@@ -1,6 +1,6 @@
 # Deploy a fleet on Kubernetes
 
-This guide writes the Kubernetes objects of a fleet: plain Namespaces, ServiceAccounts, ConfigMaps, Deployments, Services, and PersistentVolumeClaims, one directory per cluster. It uses the `api` example's fleet of [Deploy a fleet of pools](fleet.md), over two clusters. `cargo gdl k8s` needs no Docker and no cluster. It does not build or push images, and it does not apply the objects.
+This guide writes the Kubernetes objects of a fleet: plain Namespaces, ServiceAccounts, ConfigMaps, Deployments, Services, and PersistentVolumeClaims, one directory per cluster. It uses the `api` example's fleet of [Deploy a fleet of pools](fleet.md), over two clusters. `cargo gdl images` builds the images for each cluster's platform and pushes them to each cluster's registry. `cargo gdl k8s` needs no Docker and no cluster. Neither command applies the objects.
 
 ## 1. Name the clusters
 
@@ -53,10 +53,22 @@ home = "global-eu"
 
 Each child runs in its parent's cluster. The hubs publish under the `relay` directory: a child's hub reports to its parent's hub by the parent's Service name, and that name does not resolve in another cluster.
 
-## 2. Write the objects
+## 2. Build and push the images
 
 ```bash
-cargo gdl k8s --spec gdl.toml --fleet fleet.toml --out target/k8s
+cargo gdl images --spec gdl.toml --fleet fleet.toml --push --out target/images.json
+```
+
+`images` makes the same checks as `k8s` (step 3). Then it builds the hub's image, and one image for each layout and segment that a pool runs, with `docker buildx build --platform <platform>`. Each cluster gets the images of its own pools, for its `platform`, in its `registry`. Two clusters with the same registry and platform share each image. An image's tag is the sha256 of what it is built from (see [Images](#images)). Before it builds an image, `images` asks the registry for its tag. When the registry has it, `images` does not build or push that image again. So a second run with no change pushes nothing.
+
+`images` prints each image as `<registry>/<repository>:<tag>@sha256:<digest>`, and says on stderr whether it pushed the image or found it in the registry. `--out` writes the digests to a JSON file, keyed by reference, for `k8s --images`. Without `--push`, it asks no registry: it builds each image into the local image store, and `--out` is refused.
+
+The command uses the Docker login you already have. It never reads, writes, or prints a registry credential. Log in to each registry first, for example with `docker login` or a credential helper. A registry that makes no repository on push, such as Amazon ECR, must already have each repository: `<graph>-hub`, and each segment's package.
+
+## 3. Write the objects
+
+```bash
+cargo gdl k8s --spec gdl.toml --fleet fleet.toml --images target/images.json --out target/k8s
 ```
 
 `k8s` runs the same check as `cargo gdl check --fleet` first, and then refuses a fleet that cannot run on Kubernetes. It names each problem at its table:
@@ -117,9 +129,22 @@ Every object carries `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/class`. Every
 
 ## Images
 
-Each image is `<registry>/<repository>:<tag>`, in its cluster's registry. A segment's repository is its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts). The hub's is `<graph>-hub` for every layout, since its pod reads the deployment from the ConfigMap. `--tag <tag>` gives the tag. Without it, each layout's images are tagged `<contract hash>-<placement hash>`, each 16 hex digits. That tag does not change when a node crate changes. The images must be in each registry before the pods start: `k8s` does not build or push them.
+An image holds only its binary, at `/usr/local/bin/segment`. It holds no settings: each pod reads them from its pool's ConfigMap. So a change to the settings alone changes no image.
 
-## 3. Apply the objects
+| Image | Repository | Built from |
+|---|---|---|
+| hub | `<graph>-hub` | `cargo install gdl-hub`, from the spec's `[gdl]` Git revision or version, with `--locked` |
+| segment | its package: `<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts | the contract crate and the segment's crate, as `cargo gdl generate` writes them |
+
+One hub image serves every layout, because its pod reads the deployment from the ConfigMap.
+
+- **Tag.** An image's tag is the sha256, as 64 hex digits, of its platform and of every file of its build context, its `Dockerfile` included. `k8s` computes the same tags with no Docker, so its objects name the images that `images` pushes. `--tag <tag>` gives every image that tag instead, for images built some other way.
+- **Digest.** With `--images <images.json>`, each container names its image as `<registry>/<repository>:<tag>@sha256:<digest>`, so a node pulls exactly the pushed image. `k8s` refuses an image that the file does not name.
+- **Platform.** The build stage runs on the build host's platform, and cargo builds for the image's platform with `--target`. When the two differ, the build stage installs the target's Rust standard library and Debian's C cross compiler for it, which links the binary and builds mimalloc. Only the final stage, which copies the binary and runs nothing, is of the image's platform. So no compiler runs under emulation. `images` builds for `linux/amd64` and `linux/arm64`, and refuses any other platform.
+- **Allocator.** Each segment links mimalloc. jemalloc fixes the page size when it is built, so a binary built on a host of 4 KB pages does not start on a node of 64 KB pages. mimalloc reads the page size when it runs. `images` and `k8s` refuse a spec that sets `[binary] allocator = "jemalloc"`, and use mimalloc when it sets `system` or nothing. The hub uses the system allocator, as `gdl-hub` builds it.
+- **Base images.** The build stage uses `[deployment] build_image`, and the final stage `base_image`, or `hub_image` for the hub. A build image of your own must be Debian, with `apt-get` and `rustup`, as the default one is.
+
+## 4. Apply the objects
 
 Apply each cluster's base first, since every other object is in its Namespace:
 
@@ -144,3 +169,14 @@ bash scripts/kubeconform.sh target/k8s
 ```
 
 A kind that has no schema there fails the run.
+
+## Test the images on one host
+
+`scripts/images-local.sh` runs `cargo gdl images` against a local `registry:2`, outside the default suite. It needs Docker with buildx, and network access for the builds. It writes the `api` example in two classes, and a fleet of one cluster whose registry is the local one and whose platform is `PLATFORM` (`linux/amd64` by default, so an aarch64 host cross-builds):
+
+```bash
+bash scripts/images-local.sh
+PLATFORM=linux/arm64 TIMEOUT=1200 bash scripts/images-local.sh
+```
+
+It checks that the first run pushes the hub's image and each segment's, and that each printed digest is the one the registry serves. It checks that each image and its binary are of `PLATFORM`, that each segment links mimalloc, that each binary starts when `PLATFORM` is the host's own, and that `k8s --images` names exactly the pushed images, by digest. A second run must find every image in the registry, build nothing, and leave the registry's files unchanged. `TIMEOUT` bounds each run of `images`, in seconds.

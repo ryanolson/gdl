@@ -11,76 +11,46 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use gdl_model::{Fleet, Layout, PoolSettings, Problem};
+use gdl_model::{Fleet, PoolSettings, Problem};
 
+use super::images::{self, Digests, Image};
 use super::{Bundle, Sources, check_segment_name, io, pools, stdin_source};
+use crate::spec::Allocator;
 use crate::{Error, Files, Offers, Spec, export::image_problem};
 
 mod objects;
 mod refusals;
 mod relay;
 
+pub(super) use objects::image;
 use objects::{Names, Pod, Port, Segment};
 
 /// The objects of `fleet`'s pools, which run `spec`, by path from the
 /// output directory: `<cluster>/base.yaml`, `<cluster>/pools/<pool>.yaml`
 /// and a `README.md`. Each image is named in its cluster's registry,
-/// tagged `tag`, or else with its layout's contract and placement hashes.
-/// Refused, with every problem named, unless the fleet passes
+/// tagged `tag`, or else with the sha256 of what it is built from, which
+/// [`super::images`] tags it with; with `digests`, from a run of `images`,
+/// each is also named by its digest there, and an image they do not hold
+/// is refused. Refused, with every problem named, unless the fleet passes
 /// [`Fleet::check`] against the spec and every pool can run on
 /// Kubernetes: the fleet has a name, every pool a cluster, every cluster
 /// a registry and a platform, its `secrets` only the spec's secrets and
 /// every one a segment there mounts, and its `env` no variable the
-/// render sets; and under the relay directory each child is in its
-/// parent's cluster.
+/// render sets; under the relay directory each child is in its parent's
+/// cluster; and the spec does not choose jemalloc.
 pub fn k8s_files(
     spec: &Spec,
     fleet: &Fleet,
     target: &Path,
     tag: Option<&str>,
+    digests: Option<&Digests>,
 ) -> Result<Files, Error> {
-    if pools::by_pool(spec).is_none() {
-        return Err(Error::new(
-            "`k8s` deploys a spec by pool: give its placement classes, and the fleet its pools",
-        ));
-    }
     if let Some(tag) = tag {
         objects::check_tag(tag)?;
     }
-    // What needs no layout is judged first, so that a refusal below never
-    // stands for a problem of the fleet itself, such as an unknown cluster.
-    fleet
-        .check(None)
-        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-    let settings = spec.deployment.clone().unwrap_or_default();
-    let problems = refusals::fleet(fleet, &settings);
-    if !problems.is_empty() {
-        return Err(Error::all(problems));
-    }
-    // The generated crates are not written: only their settings are read.
-    let scratch = tempfile::Builder::new()
-        .prefix("gdl-k8s-")
-        .tempdir()
-        .map_err(io)?;
-    let (spec, bundle) = Bundle::prepare(spec, scratch.path(), target, Sources::Fetched)?;
-    let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
-    let checked = checked?;
-    fleet
-        .check(Some(&layouts))
-        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-    if let Some(source) = stdin_source(&spec, &checked.manifest)? {
-        return Err(Error::new(format!(
-            "source `{source}` reads its requests on stdin, which a pod has no way to: pin a frontend on it to deploy on Kubernetes"
-        )));
-    }
-    Render {
-        fleet,
-        bundle,
-        names: Names::default(),
-        problems: Vec::new(),
-        files: Files::new(),
-    }
-    .run(&spec, &checked.manifest, &layouts, tag)
+    let prepared = prepare(spec, fleet, target)?;
+    let plan = images::plan(&prepared, fleet)?;
+    render(prepared, fleet, &Naming::new(tag, &plan, digests))
 }
 
 /// Write `fleet`'s objects ([`k8s_files`]) into `out`, which must not
@@ -91,12 +61,13 @@ pub fn k8s(
     out: &Path,
     target: &Path,
     tag: Option<&str>,
+    digests: Option<&Digests>,
 ) -> Result<(), Error> {
     let exists = || Error::new("Kubernetes output already exists; choose a fresh directory");
     if out.exists() {
         return Err(exists());
     }
-    let files = k8s_files(spec, fleet, target, tag)?;
+    let files = k8s_files(spec, fleet, target, tag, digests)?;
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
@@ -113,14 +84,150 @@ pub fn k8s(
     Ok(())
 }
 
-/// The tag of a layout's images when `--tag` gives none: its contract and
-/// placement hashes, which change with what its segments are built for.
-fn default_tag(layout: &Layout) -> String {
-    format!(
-        "{:016x}-{:016x}",
-        layout.contract_hash(),
-        layout.placement_hash()
+/// The images of `fleet`'s pools, once the fleet's objects are judged as
+/// [`k8s_files`] judges them, so that no image is built for a fleet that
+/// cannot run.
+pub(super) fn judged(spec: &Spec, fleet: &Fleet, target: &Path) -> Result<Vec<Image>, Error> {
+    let prepared = prepare(spec, fleet, target)?;
+    let plan = images::plan(&prepared, fleet)?;
+    render(prepared, fleet, &Naming::new(None, &plan, None))?;
+    Ok(plan)
+}
+
+/// A spec as its fleet's images and objects are made from: its generated
+/// crates, its manifest, and its layouts, every segment with mimalloc.
+pub(super) struct Prepared {
+    pub(super) spec: Spec,
+    pub(super) bundle: Bundle,
+    pub(super) manifest: gdl_model::Manifest,
+    pub(super) layouts: crate::validate::Layouts,
+}
+
+/// `spec` prepared for `fleet`, refused as [`k8s_files`] says.
+fn prepare(spec: &Spec, fleet: &Fleet, target: &Path) -> Result<Prepared, Error> {
+    if pools::by_pool(spec).is_none() {
+        return Err(Error::new(
+            "a fleet on Kubernetes deploys a spec by pool: give its placement classes, and the fleet its pools",
+        ));
+    }
+    // What needs no layout is judged first, so that a refusal below never
+    // stands for a problem of the fleet itself, such as an unknown cluster.
+    fleet
+        .check(None)
+        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+    let settings = spec.deployment.clone().unwrap_or_default();
+    let problems = refusals::fleet(fleet, &settings);
+    if !problems.is_empty() {
+        return Err(Error::all(problems));
+    }
+    // An image is built on one host and runs on nodes whose page size
+    // may differ: jemalloc fixes the page size when it is built, mimalloc
+    // reads it when it runs.
+    let mut spec = spec.clone();
+    spec.allocator = match spec.allocator {
+        Allocator::Jemalloc => {
+            return Err(Error::new(
+                "[binary] allocator: jemalloc fixes the page size when it is built, so an image built on one host may not start on nodes of a larger page size; images link mimalloc, so choose `mimalloc` or leave it unset",
+            ));
+        }
+        Allocator::System | Allocator::Mimalloc => Allocator::Mimalloc,
+    };
+    // The generated crates are not written: only their files are read.
+    let scratch = tempfile::Builder::new()
+        .prefix("gdl-k8s-")
+        .tempdir()
+        .map_err(io)?;
+    let (spec, bundle) = Bundle::prepare(&spec, scratch.path(), target, Sources::Fetched)?;
+    let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
+    let checked = checked?;
+    fleet
+        .check(Some(&layouts))
+        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+    if let Some(source) = stdin_source(&spec, &checked.manifest)? {
+        return Err(Error::new(format!(
+            "source `{source}` reads its requests on stdin, which a pod has no way to: pin a frontend on it to deploy on Kubernetes"
+        )));
+    }
+    Ok(Prepared {
+        spec,
+        bundle,
+        manifest: checked.manifest,
+        layouts,
+    })
+}
+
+/// The objects of `fleet` from `prepared`, each image named by `naming`.
+fn render(prepared: Prepared, fleet: &Fleet, naming: &Naming<'_>) -> Result<Files, Error> {
+    Render {
+        fleet,
+        bundle: prepared.bundle,
+        names: Names::default(),
+        problems: Vec::new(),
+        files: Files::new(),
+    }
+    .run(
+        &prepared.spec,
+        &prepared.manifest,
+        &prepared.layouts,
+        naming,
     )
+}
+
+/// How the objects name each image: by `--tag`, else by its own tag, and
+/// by its digest when a run of `images` recorded them.
+pub(super) struct Naming<'a> {
+    tag: Option<&'a str>,
+    /// Each image's own tag, by its repository and platform.
+    tags: BTreeMap<(String, String), String>,
+    digests: Option<&'a Digests>,
+}
+
+impl<'a> Naming<'a> {
+    fn new(tag: Option<&'a str>, plan: &[Image], digests: Option<&'a Digests>) -> Self {
+        let tags = plan
+            .iter()
+            .map(|image| {
+                (
+                    (image.repository.clone(), image.platform.clone()),
+                    image.tag.clone(),
+                )
+            })
+            .collect();
+        Self { tag, tags, digests }
+    }
+
+    /// The image of `repository` for `platform` in `registry`.
+    pub(super) fn image(
+        &self,
+        registry: &str,
+        repository: &str,
+        platform: &str,
+    ) -> Result<String, Error> {
+        let tag = match self.tag {
+            Some(tag) => tag,
+            None => self
+                .tags
+                .get(&(repository.to_string(), platform.to_string()))
+                .map(String::as_str)
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "no image of `{repository}` is built for `{platform}`"
+                    ))
+                })?,
+        };
+        let digest = match self.digests {
+            None => None,
+            Some(digests) => {
+                let reference = objects::image(registry, repository, tag, None);
+                Some(digests.get(&reference).ok_or_else(|| {
+                    Error::new(format!(
+                        "image `{reference}` has no digest in the digests file: run `cargo gdl images --push` with this spec and fleet, and pass the file it writes"
+                    ))
+                })?)
+            }
+        };
+        Ok(objects::image(registry, repository, tag, digest))
+    }
 }
 
 /// One render of a fleet: what is written so far, and what is wrong.
@@ -139,7 +246,7 @@ impl Render<'_> {
         spec: &Spec,
         manifest: &gdl_model::Manifest,
         layouts: &crate::validate::Layouts,
-        tag: Option<&str>,
+        naming: &Naming<'_>,
     ) -> Result<Files, Error> {
         let pools: Vec<PoolSettings> = self.fleet.pools().collect();
         if pools.is_empty() {
@@ -167,7 +274,6 @@ impl Render<'_> {
                 gdl_model::DeploymentSpec::new(manifest.clone(), laid.placement.clone())
                     .map_err(io)?;
             let deployment = serde_json::to_string_pretty(&deployment).map_err(io)?;
-            let tag = tag.map_or_else(|| default_tag(layout), str::to_string);
             // Each segment that a pool of the layout runs, read once.
             let mut segments = BTreeMap::new();
             for (segment, _) in laid.placement.segments() {
@@ -191,7 +297,7 @@ impl Render<'_> {
                     &deployment,
                     &members,
                     &hub_repository,
-                    &tag,
+                    naming,
                 )?;
             }
         }
@@ -285,7 +391,7 @@ impl Render<'_> {
         deployment: &str,
         segments: &[&Segment],
         hub_repository: &str,
-        tag: &str,
+        naming: &Naming<'_>,
     ) -> Result<(), Error> {
         let (cluster_name, cluster) = self
             .fleet
@@ -295,7 +401,7 @@ impl Render<'_> {
             fleet: self.fleet.name().expect("refusals::fleet requires a name"),
             pool,
             cluster,
-            tag,
+            naming,
         };
         // A pod's mount of a secret its cluster does not map could never
         // be filled.

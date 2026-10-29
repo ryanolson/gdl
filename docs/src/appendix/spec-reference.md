@@ -83,7 +83,7 @@ A `[deployment]` table, or the `compose` command, makes the generated crates ask
 |---|---|---|
 | `[binary] allocator` | each segment binary's global allocator: `"system"`, `"mimalloc"`, or `"jemalloc"` | `"system"` |
 
-The generated `main.rs` sets `#[global_allocator]` to the chosen allocator, and the segment's manifest depends on its crate and on no other allocator's: `mimalloc` 0.1, or `tikv-jemallocator` 0.6. A segment's lock therefore holds only the chosen crate. `"system"` sets nothing, so a spec that names it generates the same crates as a spec that does not. Only the binary sets the allocator. A program that deploys a segment through its library keeps its own, since a library that set one would not link into a program that sets another. A node crate may not take the chosen crate's package or library name. The setting is not part of the placement or its hash: it changes how a binary is built, not what crosses a cut. The hub's binary keeps the system allocator.
+The generated `main.rs` sets `#[global_allocator]` to the chosen allocator, and the segment's manifest depends on its crate and on no other allocator's: `mimalloc` 0.1, or `tikv-jemallocator` 0.6. A segment's lock therefore holds only the chosen crate. `"system"` sets nothing, so a spec that names it generates the same crates as a spec that does not. Only the binary sets the allocator. A program that deploys a segment through its library keeps its own, since a library that set one would not link into a program that sets another. A node crate may not take the chosen crate's package or library name. The setting is not part of the placement or its hash: it changes how a binary is built, not what crosses a cut. The hub's binary keeps the system allocator. The images that `cargo gdl images` builds, and that `cargo gdl k8s` names, link mimalloc into each segment when the spec sets `"system"`, `"mimalloc"`, or nothing, and refuse `"jemalloc"`: jemalloc fixes the page size when it is built, and an image runs on nodes whose page size the build host does not know ([Deploy a fleet on Kubernetes](../guides/kubernetes.md#images)).
 
 Both crates build C code with the build image's compiler.
 
@@ -102,8 +102,8 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[cluster.<name>] context` | the kube context that reaches the cluster, not empty | required |
 | `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
 | `[cluster.<name>] region` | the region of every pool in the cluster | required |
-| `[cluster.<name>] registry` | the registry the cluster pulls images from, as `host[:port][/path]` with no scheme, tag, or digest; `cargo gdl k8s` requires it | none |
-| `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64`; `cargo gdl k8s` requires it | none |
+| `[cluster.<name>] registry` | the registry the cluster pulls images from, as `host[:port][/path]` with no scheme, tag, or digest, which `cargo gdl images --push` pushes to; `cargo gdl k8s` requires it | none |
+| `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64`; `cargo gdl k8s` requires it, and `cargo gdl images` builds for `linux/amd64` and `linux/arm64` | none |
 | `[cluster.<name>] service_account_annotations` | annotations of the pools' service account, such as a cloud role | none |
 | `[cluster.<name>] secrets` | spec secret name to the name of an existing Kubernetes Secret that holds it in this cluster, under a key of the spec secret's name | none |
 | `[cluster.<name>] env` | variables that every container of the cluster's pools gets | none |

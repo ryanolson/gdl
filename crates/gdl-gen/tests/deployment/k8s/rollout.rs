@@ -7,7 +7,7 @@ fn changing_an_image_keeps_deployment_selectors() {
     let fleet = fleet(&unsecret());
     let before = objects(&render(&mirror, &spec, &fleet).expect("objects"));
     let after = objects(
-        &gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), Some("replacement"))
+        &gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), Some("replacement"), None)
             .expect("objects with another image tag"),
     );
     let mut compared = 0;

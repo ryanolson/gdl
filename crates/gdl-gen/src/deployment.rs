@@ -133,11 +133,13 @@ use crate::{
 };
 
 pub(crate) mod context;
+mod images;
 mod k8s;
 pub(crate) mod locks;
 mod pools;
 mod variables;
 
+pub use images::{Buildx, Built, Digests, Docker, Outcome, images};
 pub use k8s::{k8s, k8s_files};
 
 /// Where a bundle's images take the crates they build.

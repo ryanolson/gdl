@@ -25,38 +25,42 @@ const SECRET: &str = "tests/fixtures/k8s/secret";
 /// The text of [`SECRET`].
 const MARKER: &str = "gdl-k8s-secret-marker-5f1c";
 
-/// The tag the pinned objects name: the default tag is the contract hash,
-/// which the test's mirror can move.
+/// The tag the pinned objects name: the default tag digests what each
+/// image is built from, which holds the test mirror's URL and commit.
 const TAG: &str = "pinned";
 
 fn manifest_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn fleet_text() -> String {
+pub(super) fn fleet_text() -> String {
     std::fs::read_to_string(manifest_dir().join(FLEET)).expect("the fleet")
 }
 
-fn fleet(text: &str) -> gdl_model::Fleet {
+pub(super) fn fleet(text: &str) -> gdl_model::Fleet {
     gdl_model::Fleet::from_toml(text).expect("a fleet")
 }
 
 /// The api example in [`SPLIT`]'s two classes, with what a Kubernetes
 /// deployment of it reads from the spec: a published port, a secret, and
 /// a drain bound.
-fn spec(mirror: &Mirror) -> gdl_gen::Spec {
+pub(super) fn spec(mirror: &Mirror) -> gdl_gen::Spec {
+    placed(mirror, &format!("{SPLIT}{}", deployment()))
+}
+
+/// The `[deployment]` tables of [`spec`].
+pub(super) fn deployment() -> String {
     let secret = manifest_dir().join(SECRET);
     assert_eq!(
         std::fs::read_to_string(&secret).expect("the secret").trim(),
         MARKER
     );
-    let deployment = format!(
+    format!(
         "[deployment.secrets.fingerprint]\nfile = {:?}\n\
          [deployment.segment.front]\nports = [\"8080\"]\nsecrets = [\"fingerprint\"]\n\
          [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n",
         secret.display().to_string()
-    );
-    placed(mirror, &format!("{SPLIT}{deployment}"))
+    )
 }
 
 /// The objects of `fleet` for `spec`, tagged [`TAG`].
@@ -65,7 +69,7 @@ fn render(
     spec: &gdl_gen::Spec,
     fleet: &gdl_model::Fleet,
 ) -> Result<gdl_gen::Files, gdl_gen::Error> {
-    gdl_gen::k8s_files(spec, fleet, &mirror.target(), Some(TAG))
+    gdl_gen::k8s_files(spec, fleet, &mirror.target(), Some(TAG), None)
 }
 
 /// The objects of a file the render writes: one JSON document each, in a
@@ -80,7 +84,7 @@ fn documents(text: &str) -> Vec<Value> {
 /// Every object of `files`, by its kind and name. A pool's objects are
 /// named for it, and so for one cluster; each cluster's base objects are
 /// named `<cluster>/<name>` here.
-fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Value> {
+pub(super) fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Value> {
     let mut objects = BTreeMap::new();
     for (path, text) in files {
         if path.extension().is_none_or(|e| e != "yaml") {
@@ -127,7 +131,7 @@ fn env(container: &Value) -> BTreeMap<String, String> {
 }
 
 /// The one container of a Deployment.
-fn container(deployment: &Value) -> &Value {
+pub(super) fn container(deployment: &Value) -> &Value {
     let containers = deployment["spec"]["template"]["spec"]["containers"]
         .as_array()
         .expect("containers");
@@ -467,32 +471,6 @@ fn a_pools_pods_are_sized_and_probed_as_its_settings_say() {
     assert_eq!(account["metadata"]["namespace"], "gdl-api");
 }
 
-/// Without `--tag`, each image is tagged with its layout's contract and
-/// placement hashes.
-#[test]
-fn the_default_tag_is_the_contract_and_placement_hash() {
-    let mirror = Mirror::new();
-    let spec = spec(&mirror);
-    let files =
-        gdl_gen::k8s_files(&spec, &fleet(&fleet_text()), &mirror.target(), None).expect("objects");
-    let objects = objects(&files);
-    let config = &objects[&("ConfigMap".to_string(), "global-us".to_string())];
-    let deployment: gdl_model::DeploymentSpec =
-        serde_json::from_str(config["data"]["deployment.json"].as_str().expect("text"))
-            .expect("a deployment");
-    let layout = gdl_model::layout(&deployment.graph, &deployment.placement).expect("a layout");
-    let tag = format!(
-        "{:016x}-{:016x}",
-        layout.contract_hash(),
-        layout.placement_hash()
-    );
-    let front = &objects[&("Deployment".to_string(), "global-us-front".to_string())];
-    assert_eq!(
-        container(front)["image"],
-        format!("registry.example/gdl/api-front:{tag}")
-    );
-}
-
 /// `k8s` writes the objects into a fresh directory, and refuses one that
 /// exists.
 #[test]
@@ -505,10 +483,10 @@ fn the_objects_are_written_into_a_fresh_directory() {
     let out = temp.path().join("k8s");
     let spec = spec(&mirror);
     let fleet = fleet(&fleet_text());
-    gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG)).expect("written");
+    gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG), None).expect("written");
     assert!(out.join("use1/base.yaml").is_file());
     assert!(out.join("euw1/pools/model-x-eu.yaml").is_file());
-    let again = gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG))
+    let again = gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG), None)
         .expect_err("the directory exists");
     assert!(again.to_string().contains("already exists"), "{again}");
 }
