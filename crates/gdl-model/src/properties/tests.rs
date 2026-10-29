@@ -153,14 +153,38 @@ fn a_key_is_encoded_from_its_type() {
     assert_eq!(key.kind(), "test");
 }
 
+/// JSON reads a float back as a near value, not always the same one, so
+/// a key that holds a float is refused, at any depth: it would not name
+/// its property after a report or a stored record. A key of integers,
+/// the largest and the smallest too, reads back as the same property.
 #[test]
-#[ignore = "F1: JSON decoding changes a finite float key and its property identity"]
-fn a_float_property_keeps_its_identity_after_a_json_round_trip() {
-    for number in [json!(1), json!(1.5), json!(1.5801779765215413)] {
-        let key = PropertyKey::new("test", json!({ "ratio": number }));
+fn a_key_of_integers_keeps_its_identity_and_a_float_is_refused() {
+    for number in [
+        json!(1.5),
+        json!(1.5801779765215413),
+        json!(-0.0),
+        json!(2.0),
+    ] {
+        for key in [
+            json!({ "ratio": number }),
+            json!({ "deep": { "list": [1, number] } }),
+        ] {
+            let refused = PropertyKey::new("test", key.clone())
+                .check()
+                .expect_err("a float");
+            assert!(
+                refused.contains("property kind `test`") && refused.contains("not an integer"),
+                "{key}: {refused}"
+            );
+        }
+    }
+    for number in [json!(1), json!(0), json!(i64::MIN), json!(u64::MAX)] {
+        let key = PropertyKey::new("test", json!({ "count": number, "list": [number] }));
+        key.check().expect("integers");
         let wire = serde_json::to_string(&key).expect("encoded");
         let read: PropertyKey = serde_json::from_str(&wire).expect("read");
-        assert_eq!(key, read, "a report or stored record must keep {wire}");
+        assert_eq!(key, read, "a report or stored record keeps {wire}");
         assert_eq!(key.cmp(&read), Ordering::Equal);
+        assert_eq!(serde_json::to_string(&read).expect("encoded"), wire);
     }
 }

@@ -757,8 +757,8 @@ fn a_relay_pool_refuses_a_lease_its_reports_cannot_cover() {
 /// A pool whose instances report no properties of a kind declares the
 /// ones of that kind it serves: each a key of the kind's type, in its
 /// canonical form. A kind that is not a settings key, a key that is not
-/// an object, and a key declared twice, also in another encoding, are
-/// refused, each naming `properties`.
+/// an object or that holds a float, and a key declared twice, also in
+/// another encoding, are refused, each naming `properties`.
 #[test]
 fn a_pool_declares_the_properties_it_serves() {
     let base = "name = 'm'\nclass = 'model_x'\nregion = 'r'\n";
@@ -785,6 +785,10 @@ fn a_pool_declares_the_properties_it_serves() {
             "property kind name",
         ),
         ("properties = { test = ['x'] }", "must be an object"),
+        (
+            "properties = { test = [{ name = 'x', ratio = 0.5 }] }",
+            "not an integer",
+        ),
         (
             "properties = { test = [{ name = 'x', partition = 'p' }, { partition = 'p', name = 'x' }] }",
             "declared twice",

@@ -56,13 +56,22 @@ impl PropertyKey {
 
     /// Whether the property can be published: a kind name of its shape
     /// ([`check_property_kind`]), and a key that is an object, as the
-    /// encoding of a message type is.
+    /// encoding of a message type is, and holds no number that is not an
+    /// integer. JSON reads a float back as a near value, not always the
+    /// same one, so a key with a float would not name its property after
+    /// a report or a stored record.
     pub fn check(&self) -> Result<(), String> {
         check_property_kind(&self.kind)?;
         if !self.key.is_object() {
             return Err(format!(
                 "a key of property kind `{}` must be an object, not `{}`",
                 self.kind, self.key
+            ));
+        }
+        if let Some(number) = fraction(&self.key) {
+            return Err(format!(
+                "a key of property kind `{}` holds `{number}`, a number that is not an integer: a property's numbers must be integers",
+                self.kind
             ));
         }
         Ok(())
@@ -157,6 +166,16 @@ pub enum EntryState {
 /// settings key's shape.
 pub fn check_property_kind(name: &str) -> Result<(), String> {
     crate::placement::check_name_shape("property kind", name)
+}
+
+/// The first number in `value`, at any depth, that is not an integer.
+fn fraction(value: &Value) -> Option<&Number> {
+    match value {
+        Value::Number(number) if !number.is_i64() && !number.is_u64() => Some(number),
+        Value::Array(items) => items.iter().find_map(fraction),
+        Value::Object(fields) => fields.values().find_map(fraction),
+        _ => None,
+    }
 }
 
 /// `value` in its canonical form: each object's fields sorted by name,
