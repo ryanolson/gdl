@@ -453,8 +453,16 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// parent's hub for a pool of a class that another sends to, which
     /// would have nowhere to report its record, and one with no state
     /// directory for a pool of a class that sends to another, which would
-    /// lose its children's records when it restarts.
+    /// lose its children's records when it restarts. Refuses a shared pool,
+    /// whose parents are every pool of a class: it would report its record
+    /// to one parent's hub, which refuses it, so no parent would find it
+    /// ([`gdl_model::shared_under_relay`]).
     pub fn with_reports(mut self, directory: &HubDirectory) -> Result<Self, PoolError> {
+        if let Some(gdl_model::Parent::Class(parents)) = &self.record.parent {
+            return Err(PoolError::new(
+                gdl_model::shared_under_relay(parents).to_string(),
+            ));
+        }
         if let (Some(sender), false) = (&self.sender, directory.reports_up()) {
             return Err(PoolError::new(
                 gdl_model::missing_parent_hub(sender, &self.record.class).to_string(),

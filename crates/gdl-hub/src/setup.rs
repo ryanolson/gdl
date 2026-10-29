@@ -90,11 +90,6 @@ pub fn hub_builder(
             parent_hub,
             state_dir,
         } => {
-            if let Some(gdl_model::Parent::Class(parents)) = &pool.parent {
-                return Err(PoolError::new(
-                    gdl_model::shared_under_relay(parents).to_string(),
-                ));
-            }
             let directory = HubDirectory::new(parent_hub.clone(), state_dir.clone())?;
             let (builder, timing) = pool_hub(config, &spec, &pool)?;
             let readiness = PoolReadiness::new(&spec, pool, directory.clone(), timing)?
