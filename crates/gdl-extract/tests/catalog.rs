@@ -34,6 +34,57 @@ fn scratch(name: &str) -> tempfile::TempDir {
 }
 
 #[test]
+fn a_policy_catalogue_without_needs_requires_reextraction() {
+    let workspace = workspace();
+    let extracted = published(entry(&workspace, "read-policies", "2026-10-29T00:00:00Z"));
+    let policy = extracted
+        .offer
+        .policies
+        .iter()
+        .find(|policy| policy.name == "Whole")
+        .expect("policy");
+    assert_eq!(policy.needs, ["model", "region"]);
+
+    let temp = scratch("policy-needs");
+    let mut catalog = Catalog::load(temp.path()).expect("empty catalogue");
+    let (_, file) = catalog.add(extracted.clone()).expect("current entry");
+    let file = file.clone();
+    let text = std::fs::read_to_string(&file).expect("entry");
+    assert!(text.lines().any(|line| line.starts_with("needs =")));
+    let incomplete = text
+        .lines()
+        .filter(|line| !line.starts_with("needs ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&file, incomplete).expect("entry written before NEEDS was extracted");
+
+    let loaded = Catalog::load(temp.path());
+    let inferred = loaded.as_ref().ok().and_then(|catalog| {
+        catalog
+            .entries()
+            .flat_map(|entry| &entry.offer.policies)
+            .find(|policy| policy.name == "Whole")
+            .map(|policy| policy.needs.clone())
+    });
+    assert!(
+        loaded.is_err(),
+        "the catalogue accepts Whole as needing {inferred:?}, although its source needs model and region"
+    );
+    let Err(error) = loaded else {
+        unreachable!("refused above");
+    };
+    let error = error.to_string();
+    for expected in [
+        "missing field `needs`",
+        file.to_str().expect("UTF-8"),
+        "Remove this entry",
+        "cargo gdl extract",
+    ] {
+        assert!(error.contains(expected), "missing {expected:?}: {error}");
+    }
+}
+
+#[test]
 fn entries_without_encodings_require_reextraction_with_a_recovery_path() {
     let workspace = workspace();
     for (package, source) in [

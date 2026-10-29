@@ -142,11 +142,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the check reads `NEEDS` from the source of the crates the spec binds. It cannot see a policy that only code names.
 - **Workaround:** bind the policy in the spec.
 
-### A catalogue entry read before `NEEDS` reads as needing nothing
-- **What:** a working-catalogue entry that the reader wrote before it read `NEEDS` has no `needs` for its pool policies. A check from that catalogue, the composer's included, holds no class to a supply for them.
-- **Why:** the field is left out when it is empty, so an entry without it reads as a policy that needs nothing. An entry carries no version of the reader that wrote it.
-- **Recovery:** extract the policy's crate again with `cargo gdl extract`, or import it again in the composer.
-
 ### A graph assembled hop by hop is not held to its declarations
 - **What:** a program that builds a segment's hops with `Deployment::hop` itself, not through the contract's `assemble`, as some of the runtime's tests do, sets and reads any property kind with any type.
 - **Why:** the contract's `assemble` holds the deployment to its `property_types()`. `Deployment::new` and `Deployment::hop` have no types to hold it to.
@@ -181,6 +176,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a saved message or export without `encoding` stops the catalogue from loading. Adding a crate loads the catalogue first.
 - **Why:** an absent field does not prove the default encoding. An extractor from before codec selection can miss a newer annotation.
 - **Recovery:** remove the entry the error names. Add directory or registry crates again with `cargo gdl extract` and the same `--catalog` directory. Import Git crates again through the composer. See [The catalogue and the source reader](../concepts/catalogue.md).
+
+### A pool policy's catalogue entry without `needs` requires re-extraction
+- **What:** a saved pool policy without `needs` stops the catalogue from loading, and the error names the file.
+- **Why:** an entry that the reader wrote before it read `NEEDS` would read as a policy that needs nothing, and a check from the catalogue would hold no class to a supply for it. So the field is always written, and an entry without it is refused.
+- **Recovery:** remove the entry the error names, then add the crate again as for an entry without encoding metadata, above.
 
 ### A `Streamed` named through a type alias cannot cross segments
 - **What:** the graph macro treats the alias as an ordinary type, so the edge gets no streaming codec and cannot be split.

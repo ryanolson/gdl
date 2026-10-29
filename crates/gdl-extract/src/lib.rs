@@ -667,11 +667,11 @@ pub struct PolicyEntry {
     pub ty: String,
     /// What it reads of the request's head.
     pub head: PolicyHead,
-    /// The property kinds it reads, as its `NEEDS` names them: each must
-    /// be supplied by the class it chooses for. Left out when it names
-    /// none, so an entry written before they were read reads and writes
-    /// the same.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The property kinds a pool policy reads, as its `NEEDS` names them:
+    /// each must be supplied by the class it chooses for. Always written,
+    /// and required: an entry written before they were read cannot say
+    /// that its policy needs nothing, so it is refused, and its crate is
+    /// read again. A selector names none.
     pub needs: Vec<String>,
 }
 
