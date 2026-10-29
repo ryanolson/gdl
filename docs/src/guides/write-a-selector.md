@@ -92,7 +92,7 @@ type = "my_routers::ByLength"
 
 In a hand-written `SegmentBinary`, call `builder.selector::<ByLength>("by_length").await?` in `build`. The `Builder` builds it from the segment's `[selector.by_length]` table, as a generated segment does.
 
-In an in-process deployment, add it with `config.selectors.add("by_length", ByLength)?` on a `RuntimeConfig`. Here it needs no `Build`. A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, has at most 64 characters, and is not `round_robin` or `random`.
+In an in-process deployment, add it with `config.selectors.add("by_length", ByLength)?` on a `RuntimeConfig`. A program that deploys a generated segment through its library's `start` does this too: only the segment's binary registers a bound selector. Here it needs no `Build`. A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, has at most 64 characters, and is not `round_robin` or `random`.
 
 ## 5. Name it in the placement
 

@@ -2792,3 +2792,37 @@ fn a_symlinked_patch_keeps_its_relative_dependencies() {
         helpers[0]
     );
 }
+
+/// A spec that binds a selector by path: with `--local`, the image of the
+/// segment that sends through it builds the selector's crate from the
+/// context, and only that segment depends on it; without, the bundle is
+/// refused and names the crate, as a pool policy's crate by path is.
+#[test]
+fn a_local_bundle_builds_a_bound_selector_into_its_sender() {
+    let spec = spec("crates/gdl-gen/tests/fixtures/selector/gdl.toml");
+    let compose = |sources| {
+        gdl_gen::compose_files(
+            &spec,
+            None,
+            &root().join("target/gdl-local-selector"),
+            &target("gdl-gen-tests"),
+            sources,
+        )
+    };
+    let files = compose(gdl_gen::Sources::Local).expect("a bundle");
+    let manifest = &files[Path::new("front/Cargo.toml")];
+    assert!(
+        manifest.contains(
+            "selector-router = { path = \"../../../crates/gdl-gen/tests/fixtures/selector/router\" }"
+        ),
+        "{manifest}"
+    );
+    assert!(
+        files[Path::new("front/src/lib.rs")].contains("\"by_text\" = ::selector_router::ByText;")
+    );
+    assert!(!files[Path::new("model/Cargo.toml")].contains("selector-router"));
+    let refused = compose(gdl_gen::Sources::Fetched)
+        .expect_err("a crate by path")
+        .to_string();
+    assert!(refused.contains("selector-router"), "{refused}");
+}
