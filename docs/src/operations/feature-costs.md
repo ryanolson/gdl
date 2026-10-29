@@ -337,7 +337,7 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 | tier step inlined | 2,178.8 / 1,891.2 | 1,305.0 / 1,238.0 | 649.5 / 358.5 |
 | filter first | 2,046.8 / 1,890.2 | 941.0 / 958.0 | 650.5 / 359.5 |
 
-Time is the `choose` bench in the bench profile, set to B or E, three rounds. Each pool gives the range of the three medians:
+Time is the `choose` bench in the bench profile, set to B or E, three rounds. Each value gives the range of the three medians:
 
 ```bash
 export CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1   # fat for E

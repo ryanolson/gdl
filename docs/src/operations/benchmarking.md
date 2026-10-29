@@ -491,9 +491,9 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 
 - **Under B and E, the commit before the change is 82 to 106 cycles faster on a pick of one model.** Under A the change saves 45 cycles.
 - **Under E, the change still saves 17 cycles on `home_first` over every pool**, although the two commits run within 2 instructions of each other. So fat LTO does not quite make this part of the change in time.
-- **Some pools are less firm.** Across the rounds, the `round_robin` pools after the change varied by 31% of the median under A and 19% under B. The one-model pools before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other pools varied by 6% or less.
+- **Some measurements are less firm.** Across the rounds, the `round_robin` measurements after the change varied by 31% of the median under A and 19% under B. The one-model measurements before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other measurements varied by 6% or less.
 
-**Inline accessors of a pool policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Pool`, `Load`, and `PoolRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/pool-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
+**Inline accessors of a pool policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Pool`, `Load`, and `PoolRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/cell-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
 
 ```bash
 cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignored --nocapture --test-threads=1

@@ -18,7 +18,7 @@ cargo bench -p gdl-hub --bench keyed
 
 ## Results
 
-**gb300 history.** Measured on the gb300 bench host (Neoverse-V2), pinned to cores 0 to 15, at commit `5ed1e835`, load average 3.6 to 3.9. Three runs. Each pool is the median of the three runs, with their range. The hub and its eight instances share the same 16 cores, so the rate is what one process of both sustains, not the hub alone.
+**gb300 history.** Measured on the gb300 bench host (Neoverse-V2), pinned to cores 0 to 15, at commit `5ed1e835`, load average 3.6 to 3.9. Three runs. Each value is the median of the three runs, with their range. The hub and its eight instances share the same 16 cores, so the rate is what one process of both sustains, not the hub alone.
 
 | Round trip, one at a time | p50 | p99 | p99.9 |
 |---|---|---|---|
@@ -40,7 +40,7 @@ cargo bench -p gdl-hub --bench keyed
 
 On a host whose cores sleep deeply, a get that follows a pause costs 6 to 15 times as much as a get that follows another get. The pause lets the threads that serve the request park, and the cores they ran on go idle. The next request wakes them first. The hub's health route, which runs no keyed code and no gdl code, shows the same cost.
 
-**gb300 history.** The gb300 bench host's cores have one idle state, with an exit latency of 1 µs. There, a pause adds only 3 to 17 µs. Commit `2447e8e1`, pinned to cores 0 to 15, load average 3.7 to 3.9, three runs; each pool is the median p50, with the range:
+**gb300 history.** The gb300 bench host's cores have one idle state, with an exit latency of 1 µs. There, a pause adds only 3 to 17 µs. Commit `2447e8e1`, pinned to cores 0 to 15, load average 3.7 to 3.9, three runs; each value is the median p50, with the range:
 
 | Row | Back to back | After 1 ms | After 5 ms |
 |---|---|---|---|

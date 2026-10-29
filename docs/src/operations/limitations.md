@@ -133,6 +133,13 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Large items:** an item larger than velo's eager budget (256 KiB by default) leaves the node as a handle, and its bytes stay staged until the consumer pulls them. velo reports such a stream `Sent` before the pull, so a drain can end, and the shutdown cut the item, while it is still staged.
 - **Lifts:** velo waiting for staged payloads at shutdown. See [velo](../development/velo.md).
 
+### A fleet does not mix builds from before and after the pool rename
+- **What:** a hub of a build from before pools were named pools serves its routes under `/v1/ext/gdl-cell/...`. A hub of this build serves `/v1/ext/gdl-pool/...` and refuses the old path. The two builds cannot follow, watch, or drain each other, and an instance of one cannot join a hub of the other.
+- **When:** a fleet runs both builds at once, for example while one pool upgrades first.
+- **Why:** the contract and placement hashes do not change with the rename, so an envelope between the two builds is accepted. Only the hub's routes, the `GDL_POOL__*` variables, and the stored records differ. The records are not converted. See [Pools design](../development/pools-design.md).
+- **Workaround:** move the whole fleet in one step. Stop every pool, empty each hub's state directory, start the new build, and give revocations again by hand.
+- **Lifts:** nothing to lift. Delete this entry when no fleet runs an earlier build.
+
 ## Graphs and types
 
 ### Positional MessagePack checks only the message's own fields for omissions
