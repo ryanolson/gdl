@@ -215,3 +215,34 @@ fn compose_ignores_the_directorys_cluster() {
     let (clustered, _) = fleet_bundle(&mirror, &spec, &clustered);
     assert_eq!(plain, clustered);
 }
+
+/// The tables step reads its variables as the hub does: a table name that
+/// Compose quotes, because it would read as a number bare, reaches the
+/// step as the name the fleet gives.
+#[test]
+fn the_tables_step_reads_a_quoted_table_name_as_the_fleet_gives_it() {
+    let mirror = Mirror::new();
+    let spec = placed(&mirror, SPLIT);
+    let fleet = gdl_model::Fleet::from_toml(&format!(
+        "{ONE_FLEET}{}",
+        DIRECTORY.replace("\"gdl-pools\"", "\"123\"")
+    ))
+    .expect("a fleet");
+    let (_, compose) = fleet_bundle(&mirror, &spec, &fleet);
+    let step = compose["services"]["dynamodb-tables"]["environment"]
+        .as_object()
+        .expect("the step's variables");
+    let vars = step
+        .iter()
+        .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
+    let read = gdl_hub::directory_from_vars(vars).unwrap_or_else(|error| {
+        panic!(
+            "{error}: the step reads {:?}",
+            step["GDL_POOL__RECORDS_TABLE"]
+        )
+    });
+    let gdl_model::DirectoryBackend::DynamoDb { records_table, .. } = read else {
+        panic!("{read:?}");
+    };
+    assert_eq!(records_table, "123");
+}

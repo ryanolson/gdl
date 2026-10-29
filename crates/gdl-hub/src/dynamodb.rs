@@ -10,7 +10,7 @@ use aws_sdk_dynamodb::{
     config::{Credentials, Region},
 };
 use aws_smithy_http_client::tls::{Provider, rustls_provider::CryptoMode};
-use gdl_model::{DirectoryBackend, Origin, Problems, pool_variable};
+use gdl_model::DirectoryBackend;
 use gdl_pools::DirectoryError;
 use gdl_pools_dynamodb::{DynamoDirectory, TableOutcome, Tables};
 
@@ -82,10 +82,8 @@ const REACH: Duration = Duration::from_secs(60);
 /// The tables step, `gdl-hub --tables`: make the directory's tables that
 /// are absent, and check the keys of those that exist
 /// ([`DynamoDirectory::ensure_tables`]), from the `dynamodb` backend's
-/// variables in `vars`: `GDL_POOL__RECORDS_TABLE`, `GDL_POOL__LISTS_TABLE`,
-/// `GDL_POOL__AWS_REGION`, and, for DynamoDB Local, `GDL_POOL__ENDPOINT`,
-/// as a pool's hub reads them. Any other `GDL_POOL__` variable is ignored,
-/// so the step can share a pool's variables. A call that cannot reach
+/// variables in `vars`, as [`crate::directory_from_vars`] reads them. A
+/// call that cannot reach
 /// DynamoDB is tried again for up to a minute. Returns a line for each
 /// table, saying what was done.
 ///
@@ -96,28 +94,14 @@ const REACH: Duration = Duration::from_secs(60);
 pub async fn ensure_tables_from_vars(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Vec<String>, PoolError> {
-    let mut given = std::collections::BTreeMap::new();
-    for variable in crate::setup::variables(vars) {
-        given.insert(variable.key, (variable.name, variable.value));
-    }
-    let mut take = |key: &str| given.remove(key);
-    let required = |key: &str, value: Option<(String, String)>| {
-        value
-            .map(|(_, value)| value)
-            .ok_or_else(|| PoolError::new(format!("{}: missing", pool_variable(key))))
-    };
-    let records = required("records_table", take("records_table"))?;
-    let lists = required("lists_table", take("lists_table"))?;
-    let region = required("aws_region", take("aws_region"))?;
-    let endpoint = take("endpoint").map(|(_, value)| value);
     let DirectoryBackend::DynamoDb {
         records_table,
         lists_table,
         aws_region,
         endpoint,
-    } = DirectoryBackend::dynamodb(records, lists, region, endpoint).map_err(named)?
+    } = crate::directory_from_vars(vars)?
     else {
-        unreachable!("DirectoryBackend::dynamodb makes the dynamodb backend");
+        unreachable!("directory_from_vars gives the dynamodb backend");
     };
     let client = client(&aws_region, endpoint.as_deref()).await;
     let tables = Tables {
@@ -145,19 +129,4 @@ pub async fn ensure_tables_from_vars(
         said(&tables.records, records),
         said(&tables.lists, lists),
     ])
-}
-
-/// `problems`, each naming the variable of its key.
-fn named(problems: Problems) -> PoolError {
-    let named = problems.0.into_iter().map(|mut problem| {
-        if let Some(key) = problem
-            .path()
-            .as_deref()
-            .and_then(|path| path.strip_prefix("pool."))
-        {
-            problem.origin = Some(Origin::Variable(pool_variable(key)));
-        }
-        problem
-    });
-    PoolError::new(Problems(named.collect()).to_string())
 }

@@ -187,6 +187,58 @@ fn pool_hub(
     Ok((builder, PoolTiming::from_settings(&pool.timing)))
 }
 
+/// The `dynamodb` backend that the tables step (`gdl-hub --tables`) reads
+/// from `vars`: `GDL_POOL__RECORDS_TABLE`, `GDL_POOL__LISTS_TABLE`,
+/// `GDL_POOL__AWS_REGION`, and, for DynamoDB Local, `GDL_POOL__ENDPOINT`,
+/// read and checked as a pool's hub reads and checks them. Any other `GDL_POOL__` variable is
+/// ignored, so the step can share a pool's variables. It needs no AWS
+/// SDK, so that a generator's test can read what it writes for the step.
+///
+/// # Errors
+///
+/// A variable that is missing or does not fit, naming it.
+pub fn directory_from_vars(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<DirectoryBackend, PoolError> {
+    // Each value as the hub reads it: through figment, which decodes a
+    // value that a generator quoted so that it reads as a string, such as
+    // a table named `"123"`.
+    let mut given = std::collections::BTreeMap::new();
+    for variable in variables(vars) {
+        given.insert(variable.key.clone(), variable);
+    }
+    let mut take = |key: &str| -> Result<Option<String>, PoolError> {
+        let Some(variable) = given.remove(key) else {
+            return Ok(None);
+        };
+        let Ok(value) = variable.value.parse::<Value>();
+        value
+            .deserialize::<String>()
+            .map(Some)
+            .map_err(|error| PoolError::new(format!("{}: {error}", variable.name)))
+    };
+    let required = |key: &str, value: Option<String>| {
+        value.ok_or_else(|| PoolError::new(format!("{}: missing", pool_variable(key))))
+    };
+    let records = required("records_table", take("records_table")?)?;
+    let lists = required("lists_table", take("lists_table")?)?;
+    let region = required("aws_region", take("aws_region")?)?;
+    let endpoint = take("endpoint")?;
+    DirectoryBackend::dynamodb(records, lists, region, endpoint).map_err(|problems| {
+        let named = problems.0.into_iter().map(|mut problem| {
+            if let Some(key) = problem
+                .path()
+                .as_deref()
+                .and_then(|path| path.strip_prefix("pool."))
+            {
+                problem.origin = Some(Origin::Variable(pool_variable(key)));
+            }
+            problem
+        });
+        PoolError::new(Problems(named.collect()).to_string())
+    })
+}
+
 /// The `GDL_POOL__` variables of `vars`, one provider to each, in their
 /// order, so that a later variable overrides an earlier one as within one
 /// provider: the keys after the prefix, matched without regard to case,

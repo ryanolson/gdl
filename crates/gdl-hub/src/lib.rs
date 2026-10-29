@@ -62,7 +62,9 @@ pub use pool::{
 };
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
-pub use setup::{hub_builder, hub_builder_with, pool_from_env, pool_from_vars};
+pub use setup::{
+    directory_from_vars, hub_builder, hub_builder_with, pool_from_env, pool_from_vars,
+};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};
