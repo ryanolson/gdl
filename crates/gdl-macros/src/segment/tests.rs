@@ -166,3 +166,38 @@ fn disabled_service_clients_keep_their_expansion_check() {
         "no disabled service client is checked against a frozen expansion; the migrated responses: None and anthropic: None assertions only check the macro input"
     );
 }
+
+/// A service whose entries read property kinds says so in the call, and
+/// both the binary and the library's `start` give them to the runtime, so
+/// its adapters may register them.
+#[test]
+fn a_services_entry_needs_reach_the_runtime() {
+    let thin = fixtures().join("api/front.thin.rs");
+    let text = std::fs::read_to_string(&thin)
+        .expect("the library")
+        .replacen(
+            "        ];\n    };\n}",
+            "        ];\n        needs: [\"model\", \"region\"];\n    };\n}",
+            1,
+        );
+    let library = syn::parse_file(&text).expect("a library that parses");
+    let call = library
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Macro(item) => Some(item.mac.tokens.clone()),
+            _ => None,
+        })
+        .expect("a segment! call");
+    let segment: Segment = syn::parse2(call).expect("the call parses");
+    let expansion = expand(&segment, &quote!(gdl_runtime)).to_string();
+    assert!(
+        expansion
+            .contains("const ENTRY_NEEDS : & 'static [& 'static str] = & [\"model\" , \"region\"]"),
+        "{expansion}"
+    );
+    assert!(
+        expansion.contains("& contract :: property_types () , & [\"model\" , \"region\"] ,"),
+        "{expansion}"
+    );
+}

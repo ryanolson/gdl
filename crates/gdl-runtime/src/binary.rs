@@ -77,6 +77,10 @@ pub trait SegmentBinary {
     /// the contract's `property_types()`.
     fn property_types() -> Vec<PropertyType>;
 
+    /// The property kinds the segment's entry adapters read: their
+    /// entries' `needs`. Its nodes' needs are in the graph.
+    const ENTRY_NEEDS: &'static [&'static str];
+
     /// Start the segment's graph on `node`, with every instance in
     /// `roster`, and say what it serves once every segment is ready.
     fn start(
@@ -137,6 +141,7 @@ pub async fn run_segment<B: SegmentBinary>(
         &deployment.placement,
         B::SEGMENT,
         &B::property_types(),
+        B::ENTRY_NEEDS,
         &builder.properties,
         &builder.followed,
     )?;

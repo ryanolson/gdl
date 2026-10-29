@@ -7,6 +7,7 @@
 
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -393,6 +394,9 @@ struct Registered {
     changes: u64,
     /// The graph's kinds, once the runtime declares them.
     declared: Option<Vec<PropertyType>>,
+    /// The kinds the segment's nodes and entry adapters say they need, of
+    /// the declared ones: what a node may register.
+    needed: BTreeSet<String>,
 }
 
 /// One registered kind, with the function that decodes its keys.
@@ -402,6 +406,9 @@ struct Kind {
     key: TypeId,
     key_name: &'static str,
     decode: Decode,
+    /// Whether a node registered it, not only a pool policy through its
+    /// `NEEDS`: a node may read only a kind its segment needs.
+    by_node: bool,
 }
 
 /// What makes one kind's index, its type erased, from the kind's name,
@@ -438,19 +445,26 @@ impl PropertyKinds {
                 format!("{reader} reads property kind `{name}`, which its `NEEDS` does not name"),
             ));
         }
+        let by_node = self.limit.is_none();
         let mut registered = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(declared) = &registered.declared
-            && let Some(why) = PropertyType::misfit(
+        if let Some(declared) = &registered.declared {
+            if let Some(why) = PropertyType::misfit(
                 declared,
                 name,
                 Some((TypeId::of::<T>(), std::any::type_name::<T>())),
                 || undeclared(name),
-            )
-        {
-            return Err(Error::new(ErrorKind::Node, why));
+            ) {
+                return Err(Error::new(ErrorKind::Node, why));
+            }
+            if by_node && !registered.needed.contains(name) {
+                return Err(Error::new(ErrorKind::Node, unneeded(name)));
+            }
         }
-        match registered.kinds.iter().find(|kind| kind.name == name) {
-            Some(kind) if kind.key == TypeId::of::<T>() => Ok(()),
+        match registered.kinds.iter_mut().find(|kind| kind.name == name) {
+            Some(kind) if kind.key == TypeId::of::<T>() => {
+                kind.by_node |= by_node;
+                Ok(())
+            }
             Some(kind) => Err(Error::new(
                 ErrorKind::Node,
                 format!(
@@ -465,6 +479,7 @@ impl PropertyKinds {
                     key: TypeId::of::<T>(),
                     key_name: std::any::type_name::<T>(),
                     decode: decode::<T>,
+                    by_node,
                 });
                 registered.changes += 1;
                 Ok(())
@@ -472,14 +487,28 @@ impl PropertyKinds {
         }
     }
 
-    /// Hold the kinds to `declared`, the graph's: refused, and nothing
-    /// declared, when a kind registered already is not among them or was
-    /// registered with another type, and when the kinds were declared
-    /// before with others. The runtime calls it once, when the segment
-    /// starts.
+    /// Hold the kinds to `declared`, the graph's, and the kinds a node
+    /// registers to `needed` as well, the kinds the segment's nodes and
+    /// entry adapters say they need: refused, and nothing declared, when a
+    /// kind registered already is not declared, was registered with
+    /// another type, or was registered by a node and is not needed, and
+    /// when the graph's kinds were declared before with others. The
+    /// runtime declares when the segment starts. Another declaration of the
+    /// same kinds adds its needs to those held.
     #[doc(hidden)]
-    pub fn declare(&self, declared: Vec<PropertyType>) -> Result<()> {
+    pub fn declare(&self, declared: Vec<PropertyType>, needed: &[&str]) -> Result<()> {
         let mut registered = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        if registered
+            .declared
+            .as_ref()
+            .is_some_and(|held| *held != declared)
+        {
+            return Err(Error::new(
+                ErrorKind::Node,
+                "the graph's property kinds are declared twice, with other kinds",
+            ));
+        }
+        let needs = |kind: &str| needed.contains(&kind) || registered.needed.contains(kind);
         for kind in &registered.kinds {
             let key = Some((kind.key, kind.key_name));
             if let Some(why) =
@@ -487,17 +516,15 @@ impl PropertyKinds {
             {
                 return Err(Error::new(ErrorKind::Node, why));
             }
-        }
-        match &registered.declared {
-            Some(held) if *held != declared => Err(Error::new(
-                ErrorKind::Node,
-                "the graph's property kinds are declared twice, with other kinds",
-            )),
-            _ => {
-                registered.declared = Some(declared);
-                Ok(())
+            if kind.by_node && !needs(kind.name) {
+                return Err(Error::new(ErrorKind::Node, unneeded(kind.name)));
             }
         }
+        registered.declared = Some(declared);
+        registered
+            .needed
+            .extend(needed.iter().map(|kind| kind.to_string()));
+        Ok(())
     }
 
     /// A handle on the same kinds that registers only `needs`, for
@@ -556,6 +583,15 @@ impl fmt::Debug for PropertyKinds {
 fn undeclared(kind: &str) -> String {
     format!(
         "property kind `{kind}` is not declared in the graph: it says `property {kind}: <Type>;`"
+    )
+}
+
+/// Why a node cannot register kind `kind`, which no node or entry adapter
+/// of its segment says it needs: the supply check would not hold the
+/// class it reads to a supply of it.
+fn unneeded(kind: &str) -> String {
+    format!(
+        "property kind `{kind}` is not one this segment's nodes or entry adapters need: the graph says `needs {kind} from <class>` on the node that reads it, or an entry's table says `needs`"
     )
 }
 

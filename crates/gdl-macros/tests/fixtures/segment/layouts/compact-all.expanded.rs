@@ -67,6 +67,7 @@ pub fn start(
         &placement,
         SEGMENT,
         &contract::property_types(),
+        &[],
         &config.properties,
         &config.followed,
     )?;
@@ -192,6 +193,8 @@ impl gdl_runtime::SegmentBinary for Binary {
     fn property_types() -> ::std::vec::Vec<gdl_runtime::gdl::PropertyType> {
         contract::property_types()
     }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
 
     fn start(
         hosts: Nodes,

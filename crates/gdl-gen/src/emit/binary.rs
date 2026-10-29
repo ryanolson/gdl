@@ -302,6 +302,16 @@ impl Unit<'_> {
             })
             .collect();
         nested(&mut text, "entries", &entries);
+        // Said only when an entry needs a kind, so that a service with none
+        // writes the call it did before properties were declared.
+        if !service.needs.is_empty() {
+            let kinds: Vec<String> = service
+                .needs
+                .iter()
+                .map(|kind| format!("{kind:?}"))
+                .collect();
+            let _ = writeln!(text, "        needs: [{}];", kinds.join(", "));
+        }
         let _ = writeln!(text, "    }};");
         text
     }

@@ -139,12 +139,12 @@ fn a_kind_set_before_the_declaration_is_held_to_it() {
 fn readers_register_only_the_graphs_kinds_with_their_types() {
     let kinds = PropertyKinds::new();
     kinds.register(&OTHER).expect("not declared yet");
-    let wrong = refusal(kinds.declare(vec![PropertyType::of::<Tagged>("tagged")]));
+    let wrong = refusal(kinds.declare(vec![PropertyType::of::<Tagged>("tagged")], &["tagged"]));
     assert!(wrong.contains("declared with keys of type"), "{wrong}");
 
     let kinds = PropertyKinds::new();
     kinds
-        .declare(vec![PropertyType::of::<Tagged>("tagged")])
+        .declare(vec![PropertyType::of::<Tagged>("tagged")], &["tagged"])
         .expect("declared");
     kinds
         .register(&TAGGED)
@@ -153,4 +153,32 @@ fn readers_register_only_the_graphs_kinds_with_their_types() {
         "property kind `region` is not declared in the graph: it says `property region: <Type>;`"
     ));
     assert!(refusal(kinds.register(&OTHER)).contains("declared with keys of type"));
+}
+
+/// A node registers only a kind its segment needs: one a node or an entry
+/// adapter of the segment says it reads, which the supply check holds to a
+/// supply. A pool policy is held to its own `NEEDS` instead. A later
+/// declaration of the same kinds adds its needs.
+#[test]
+fn a_node_registers_only_a_kind_its_segment_needs() {
+    let declared = || vec![PropertyType::of::<Tagged>("tagged")];
+    let kinds = PropertyKinds::new();
+    kinds.declare(declared(), &[]).expect("declared");
+    assert!(
+        refusal(kinds.register(&TAGGED)).contains(
+            "property kind `tagged` is not one this segment's nodes or entry adapters need"
+        )
+    );
+    kinds
+        .limited(&["tagged"], "the policy")
+        .register(&TAGGED)
+        .expect("a policy that needs it");
+    kinds
+        .declare(declared(), &["tagged"])
+        .expect("a need added");
+    kinds.register(&TAGGED).expect("a needed kind");
+
+    let early = PropertyKinds::new();
+    early.register(&TAGGED).expect("not declared yet");
+    assert!(refusal(early.declare(declared(), &[])).contains("need"));
 }

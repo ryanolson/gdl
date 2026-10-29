@@ -48,7 +48,7 @@ topology: Front => Gate { Engine };
 
 An entry adapter or a pool policy reads a kind too. It says so outside the graph: an adapter in its `[entry.<name>]` table, and a policy in its Rust type ([Write a pool policy](write-a-pool-policy.md#2-implement-gdlpoolpolicy)). A class whose pools serve a kind from their settings, not from a node, says so in its `[pools.<class>]` table ([Spec reference](../appendix/spec-reference.md#placement)).
 
-`cargo gdl check` and `cargo gdl build` then check, in each layout, that each kind a node, an adapter, or a policy needs from a class is supplied: a node in an entry segment of the class provides it, or `[pools.<class>] provides` names it. Otherwise they fail, naming the kind, the reader, and the class. When a segment starts, each node that sets or reads a kind must use the declared type, and a node may set only a kind that a node of its segment provides.
+`cargo gdl check` and `cargo gdl build` then check, in each layout, that each kind a node, an adapter, or a policy needs from a class is supplied: a node in an entry segment of the class provides it, or `[pools.<class>] provides` names it. Otherwise they fail, naming the kind, the reader, and the class. When a segment starts, each node that sets or reads a kind must use the declared type. A node may set only a kind that a node of its segment provides, and read only a kind that a node or an entry adapter of its segment needs.
 
 ## Offer the messages
 

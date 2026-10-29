@@ -409,6 +409,8 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
         Vec::new()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         _: (),
         node: gdl_runtime::velo::Velo,
@@ -528,6 +530,8 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
         Vec::new()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         (): (),
         node: gdl_runtime::velo::Velo,
@@ -624,6 +628,8 @@ impl gdl_runtime::SegmentBinary for Counting {
     fn property_types() -> Vec<gdl::PropertyType> {
         Vec::new()
     }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
 
     fn start(
         (): (),

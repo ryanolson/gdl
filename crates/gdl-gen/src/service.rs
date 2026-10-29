@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 pub(crate) struct ServiceBinding {
     pub(crate) clients: String,
     pub(crate) entries: Vec<EntryBinding>,
+    /// The property kinds the entries' adapters read, each once, in name
+    /// order: the runtime lets them register these.
+    pub(crate) needs: Vec<String>,
 }
 impl ServiceBinding {
     pub(crate) fn nodes(&self) -> Vec<&EntryNode> {
@@ -373,9 +376,16 @@ pub(crate) fn bind(
             .problems
             .push("a service must have at least one enabled, wired entry".into());
     }
+    let needs: std::collections::BTreeSet<String> = binder
+        .spec
+        .entry
+        .values()
+        .flat_map(|entry| entry.needs.keys().cloned())
+        .collect();
     binder.spec.service = Some(ServiceBinding {
         clients: clients.clone(),
         entries,
+        needs: needs.into_iter().collect(),
     });
 }
 

@@ -95,6 +95,9 @@ pub(crate) struct Service {
     pub(crate) pipelines: Vec<(Ident, usize)>,
     /// Each entry's field, and its pipeline unless it is off.
     pub(crate) entries: Vec<(Ident, Option<Expr>)>,
+    /// The property kinds the entries' adapters read: `needs: ["model"];`,
+    /// left out when they read none.
+    pub(crate) needs: Vec<LitStr>,
 }
 
 /// An entry adapter: its name in the settings, its variable, its type.
@@ -323,6 +326,14 @@ impl Parse for Service {
             Ok((field, Some(input.parse()?)))
         })?;
         end()?;
+        let needs = if input.is_empty() {
+            Vec::new()
+        } else {
+            key(input, "needs")?;
+            let needs = list(input)?;
+            end()?;
+            needs
+        };
         Ok(Self {
             frontend,
             frontend_ty,
@@ -330,6 +341,7 @@ impl Parse for Service {
             adapters,
             pipelines,
             entries,
+            needs,
         })
     }
 }

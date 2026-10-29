@@ -298,6 +298,8 @@ impl<const SETS: u8> gdl_runtime::SegmentBinary for Providing<SETS> {
         shards::property_types()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         serve: Serve<SETS>,
         node: gdl_runtime::velo::Velo,
@@ -356,6 +358,8 @@ impl gdl_runtime::SegmentBinary for Adder {
         Vec::new()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         add: Add,
         node: gdl_runtime::velo::Velo,
@@ -412,6 +416,8 @@ impl gdl_runtime::SegmentBinary for Stopping {
         Vec::new()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         _add: Add,
         _node: gdl_runtime::velo::Velo,
@@ -447,6 +453,8 @@ impl gdl_runtime::SegmentBinary for Conflicting {
     fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
         Vec::new()
     }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
 
     fn start(
         _add: Add,
@@ -484,6 +492,8 @@ impl<First: Named, Second: Named> gdl_runtime::SegmentBinary for Clashing<First,
     fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
         Vec::new()
     }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
 
     fn start(
         _add: Add,
@@ -762,6 +772,8 @@ impl gdl_runtime::SegmentBinary for Selecting {
         Vec::new()
     }
 
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
     fn start(
         add: Add,
         node: gdl_runtime::velo::Velo,
@@ -814,6 +826,8 @@ impl gdl_runtime::SegmentBinary for Plain {
     fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
         Vec::new()
     }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
 
     fn start(
         add: Add,

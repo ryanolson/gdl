@@ -10,14 +10,17 @@ use gdl_model::{Manifest, Placement};
 /// for `segment` under `placement`, each kind with its type in `types`,
 /// the contract's `property_types()`: `properties` sets only the kinds a
 /// node of the segment provides, and `followed` registers only the
-/// graph's kinds, each with its declared type. What either took before is
-/// held to them too. A segment binary calls it before it builds its nodes,
-/// and a generated `start` before it deploys.
+/// graph's kinds, each with its declared type, and for a node only those
+/// that a node of the segment or one of `entry_needs`, what its entry
+/// adapters need, says it needs. What either took before is held to them
+/// too. A segment binary calls it before it builds its nodes, and a
+/// generated `start` before it deploys.
 pub fn declare_properties(
     manifest: &Manifest,
     placement: &Placement,
     segment: &str,
     types: &[PropertyType],
+    entry_needs: &[&str],
     properties: &InstanceProperties,
     followed: &FollowedPools,
 ) -> Result<()> {
@@ -39,14 +42,22 @@ pub fn declare_properties(
         .flat_map(|(_, nodes)| nodes)
         .collect();
     let mut provided = Vec::new();
+    let mut needed: Vec<&str> = entry_needs.to_vec();
     let mut declared = Vec::with_capacity(manifest.properties.len());
     for property in &manifest.properties {
         let ty = typed(&property.kind)?;
         if property.providers.iter().any(|node| hosted.contains(&node)) {
             provided.push(ty);
         }
+        if property
+            .needs
+            .iter()
+            .any(|need| hosted.contains(&&need.node))
+        {
+            needed.push(&property.kind);
+        }
         declared.push(ty);
     }
     properties.declare(provided)?;
-    followed.kinds().declare(declared)
+    followed.kinds().declare(declared, &needed)
 }

@@ -951,6 +951,7 @@ fn entry_nodes_cannot_shadow_generated_dependencies() {
                 backward: vec![],
             }),
         }],
+        needs: Vec::new(),
     });
     let error = check(&spec, &manifest())
         .expect_err("entry dependency collision")

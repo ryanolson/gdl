@@ -137,12 +137,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** bump the graph's `schema` when a property type's fields or serde attributes change, as for an edge type. The contract hash then changes, and pools of the two builds do not follow or offer to each other.
 - **Lifts:** a fingerprint of each message's fields in the contract hash, for edge and property types alike.
 
-### A node that reads a kind without saying `needs` escapes the supply check
-- **What:** a node can register a declared kind with `FollowedPools::register` and read it, though the graph does not say `needs <kind> from <class>` on it. `cargo gdl check` then does not hold its class to a supply of the kind.
-- **Why:** the runtime holds a reader to the graph's declared kinds and their types, not to the needs of its own segment. A registration does not say which node made it.
-- **Workaround:** say `needs` on each node that reads a kind.
-- **Lifts:** a registration that names its reader, held to that reader's needs.
-
 ### A pool policy registered in code is not checked for supply
 - **What:** a policy that a binary registers with `Builder::pool_policy`, not through a spec's `[pool_policy.<name>]` table, is not held to its `NEEDS` by `cargo gdl check`. At start the runtime still refuses a kind it reads that `NEEDS` does not name.
 - **Why:** the check reads `NEEDS` from the source of the crates the spec binds. It cannot see a policy that only code names.

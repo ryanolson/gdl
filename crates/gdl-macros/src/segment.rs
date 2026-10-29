@@ -144,8 +144,18 @@ fn root_type(root: &Ident, krate: &TokenStream) -> TokenStream {
     }
 }
 
+/// The property kinds the segment's entry adapters read.
+fn entry_needs(segment: &Segment) -> &[LitStr] {
+    segment
+        .serve
+        .hosts()
+        .1
+        .map_or(&[][..], |service| service.needs.as_slice())
+}
+
 fn start(segment: &Segment, krate: &TokenStream) -> TokenStream {
     let roots = &segment.roots;
+    let needs = entry_needs(segment);
     let root = if roots.len() == 1 {
         root_type(&roots[0], krate)
     } else {
@@ -181,6 +191,7 @@ fn start(segment: &Segment, krate: &TokenStream) -> TokenStream {
                 &placement,
                 SEGMENT,
                 &contract::property_types(),
+                &[#(#needs),*],
                 &config.properties,
                 &config.followed,
             )?;
@@ -277,6 +288,7 @@ fn binary(segment: &Segment, krate: &TokenStream) -> TokenStream {
         }
     });
     let start = start_fn(segment, krate, &built, frontend.is_some());
+    let entry_needs = entry_needs(segment);
     quote! {
         #settings
         #hosts
@@ -300,6 +312,7 @@ fn binary(segment: &Segment, krate: &TokenStream) -> TokenStream {
             fn property_types() -> ::std::vec::Vec<#krate::gdl::PropertyType> {
                 contract::property_types()
             }
+            const ENTRY_NEEDS: &'static [&'static str] = &[#(#entry_needs),*];
             #start
         }
     }
