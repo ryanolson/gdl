@@ -103,3 +103,49 @@ fn check_refuses_a_selector_library_that_shadows_the_runtime() {
         "the diagnostic must name the colliding library"
     );
 }
+
+#[test]
+#[ignore = "F2: the limitations chapter omits the root-name restriction for policies and selectors"]
+fn the_book_explains_which_router_reexports_can_be_bound() {
+    let policy = r#"
+impl gdl::PoolPolicy for ByText {
+    type Head = gdl::Encoded;
+    fn choose(&self, _: gdl::PoolRequest<'_, Self::Head>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
+    }
+}
+"#;
+    for name in ["ByText", "PublicSelector"] {
+        let source = format!(
+            "mod implementation {{\n{}\n{policy}\n}}\npub use implementation::ByText as {name};\n",
+            fixture_text("router/src/lib.rs")
+        );
+        let router = router(&source, "selector_router");
+        let workspace = gdl_extract::Workspace::load(
+            &router.path().join("Cargo.toml"),
+            &gdl_extract::Cargo::trusted(),
+        )
+        .expect("the compiled crate can be read");
+        let extracted = workspace.extract("selector-router").expect("the package");
+        assert!(extracted.problems.is_empty(), "{:?}", extracted.problems);
+        for entries in [&extracted.offer.policies, &extracted.offer.selectors] {
+            assert_eq!(
+                entries.iter().any(|entry| entry.name == name),
+                name == "ByText"
+            );
+        }
+    }
+
+    let book = std::fs::read_to_string(root().join("docs/src/operations/limitations.md"))
+        .expect("limitations chapter");
+    let explained = book.split("\n\n").any(|paragraph| {
+        paragraph.contains("pool polic")
+            && paragraph.contains("selector")
+            && paragraph.contains("root")
+            && (paragraph.contains("re-export") || paragraph.contains("reexport"))
+    });
+    assert!(
+        explained,
+        "both renamed root re-exports build and are intentionally refused, but the limitations chapter does not explain this type-name restriction for pool policies and selectors"
+    );
+}
