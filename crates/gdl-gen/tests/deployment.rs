@@ -219,9 +219,9 @@ fn deployment_rejects_local_node_and_message_crates() {
 }
 
 /// The chat example with its crates from the mirror at the pinned
-/// commit: a source with no pinned frontend, whose binary reads JSON
-/// requests on stdin.
-fn chat_spec(mirror: &Mirror) -> gdl_gen::Spec {
+/// commit, and `extra` after its tables: a source with no pinned
+/// frontend, whose binary reads JSON requests on stdin.
+fn chat_spec(mirror: &Mirror, extra: &str) -> gdl_gen::Spec {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("examples/chat/gdl.toml"))
         .expect("the chat spec")
@@ -238,7 +238,8 @@ fn chat_spec(mirror: &Mirror) -> gdl_gen::Spec {
                 mirror.dep("chat-post-nodes")
             ),
         )
-        .replace("path = \"../../crates/gdl-runtime\"", &mirror.gdl());
+        .replace("path = \"../../crates/gdl-runtime\"", &mirror.gdl())
+        + extra;
     let graph = std::fs::read_to_string(root.join("examples/chat/chat.gdl")).expect("the graph");
     gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/chat")).expect("a spec")
 }
@@ -255,7 +256,7 @@ fn a_source_that_reads_stdin_keeps_it_open() {
         .tempdir()
         .expect("a directory");
     let files = gdl_gen::compose_files(
-        &chat_spec(&mirror),
+        &chat_spec(&mirror, ""),
         None,
         temp.path(),
         &mirror.target(),

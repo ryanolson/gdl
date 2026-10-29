@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{Mirror, SPLIT, placed};
+use super::{Mirror, SPLIT, chat_spec, placed};
 
 /// The api example's fleet over two clusters, each a parent pool and its
 /// child: under the relay directory a child's hub reaches its parent's by
@@ -635,4 +635,84 @@ fn a_segment_kubernetes_cannot_name_or_publish_is_refused() {
     );
     let refusal = refused(&mirror, &ranged, &fleet);
     assert!(refusal.contains("`8080-8081:8080-8081`"), "{refusal}");
+}
+
+/// [`FLEET`] with no secrets, for a spec that mounts none.
+fn unsecret() -> String {
+    fleet_text()
+        .replace("secrets = { fingerprint = \"api-fingerprint\" }\n", "")
+        .replace("secrets = { fingerprint = \"api-fingerprint-eu\" }\n", "")
+}
+
+/// A pod's probes ask the segment's system listener, so a segment whose
+/// settings turn it off is refused at the key that does.
+#[test]
+fn a_segment_without_a_system_port_is_refused() {
+    let mirror = Mirror::new();
+    let off = placed(
+        &mirror,
+        &format!("{SPLIT}[deployment.segment.engine.config.system]\nport = -1\n"),
+    );
+    let refusal = refused(&mirror, &off, &unsecret());
+    assert!(
+        refusal.contains("[deployment.segment.engine.config.system] port"),
+        "{refusal}"
+    );
+}
+
+/// A Service's name is a DNS label: a pool whose entry Service would be
+/// longer is refused, naming the Service, rather than renamed.
+#[test]
+fn a_service_name_longer_than_a_label_is_refused() {
+    let mirror = Mirror::new();
+    // A pool name of 59 characters, and a Service name of 65.
+    let long = format!("global-{}", "u".repeat(52));
+    let fleet = unsecret().replace("global-us", &long);
+    let spec = placed(
+        &mirror,
+        &format!("{SPLIT}[deployment.segment.front]\nports = [\"8080\"]\n"),
+    );
+    let refusal = refused(&mirror, &spec, &fleet);
+    assert!(refusal.contains(&format!("[pool.{long}]")), "{refusal}");
+    assert!(refusal.contains(&format!("`{long}-front`")), "{refusal}");
+}
+
+/// Two pools' objects of one kind never share a name in a cluster: pool
+/// `global`'s segment `us` and pool `global-us`'s hub would both be
+/// Deployment `global-us`.
+#[test]
+fn two_objects_of_one_name_are_refused() {
+    let mirror = Mirror::new();
+    let spec = placed(&mirror, &SPLIT.replace("front", "us"));
+    let fleet = "[fleet]\nname = \"api\"\n\
+        [cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\n\
+        registry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n\
+        [pool.global]\nclass = \"global\"\ncluster = \"use1\"\n\
+        [pool.global-us]\nclass = \"global\"\ncluster = \"use1\"\n\
+        [pool.model-a]\nclass = \"model_x\"\ncluster = \"use1\"\nhome = \"global\"\n\
+        [pool.model-b]\nclass = \"model_x\"\ncluster = \"use1\"\nhome = \"global-us\"\n";
+    let refusal = refused(&mirror, &spec, fleet);
+    for name in ["Deployment `global-us`", "`global`", "[pool.global-us]"] {
+        assert!(refusal.contains(name), "{name} in {refusal}");
+    }
+}
+
+/// A source that reads its requests on stdin has none in a pod: refused,
+/// naming the source.
+#[test]
+fn a_source_that_reads_stdin_is_refused() {
+    let mirror = Mirror::new();
+    let spec = chat_spec(
+        &mirror,
+        "\n[class.chat]\nsegments = [\"front\", \"engine\", \"post\"]\n",
+    );
+    let fleet = "[fleet]\nname = \"chat\"\n\
+        [cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-chat\"\nregion = \"us-east-1\"\n\
+        registry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n\
+        [pool.chat]\nclass = \"chat\"\ncluster = \"use1\"\n";
+    let refusal = refused(&mirror, &spec, fleet);
+    assert!(
+        refusal.contains("source `Frontend` reads its requests on stdin"),
+        "{refusal}"
+    );
 }
