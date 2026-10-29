@@ -62,6 +62,7 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `pool_failovers` | 2 | how many other pools a chooser offers a request to after the first declines; an instance's own decline, which goes to the pool's other instances, uses none |
 | `pool_damping_first_ms` | 1000 | how long a chooser passes over a pool after its first decline. At least 1 |
 | `pool_damping_max_ms` | 30000 | the longest a chooser passes over a pool that keeps declining. From `pool_damping_first_ms` to 3600000 |
+| `pool_requeue_backoff_ms` | 50 | the longest a chooser waits before it offers a request again to the pool its pool policy re-queued it for, when no offer to that pool ends first. From 1 to 3600000 |
 | `pool_fresh_periods` | 3 | how many of its periods a pool's load summary stays fresh after it reached the chooser's hub (a summary the hub relayed late counts from then). From 1 to 100 |
 | `home_first_saturated_percent` | 100 | the chooser's `home_first`: a pool is saturated once its admitted roots reach this share of its admission limit. From 1 to 100 |
 | `home_first_spill_percent` | 80 | the chooser's `home_first`: a pool in another region is a candidate only while its admitted roots are under this share. 0 keeps every request in the chooser's region. At most `home_first_saturated_percent` |

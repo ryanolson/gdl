@@ -59,7 +59,7 @@ A chooser registers two more families: what became of each offer it made to a po
 | Name | Type | Extra labels | Meaning |
 |---|---|---|---|
 | `pool_offers_total` | counter | `class`, `pool`, `outcome` | Offers this chooser made to the pool, by how each ended. |
-| `pool_failovers_total` | counter | `class`, `pool` | Offers this chooser made to the pool after another offer of the request missed: another pool's, or another of this pool's instances' own decline. |
+| `pool_failovers_total` | counter | `class`, `pool` | Offers this chooser made to the pool after another offer of the request missed: another pool's, or another of this pool's instances' own decline. An offer of a request that the pool policy re-queued for the pool is not one. |
 
 `outcome` has one series for each of these eight values:
 
@@ -74,7 +74,7 @@ A chooser registers two more families: what became of each offer it made to a po
 | `outcome_unknown` | The send failed after velo took it, or no answer came within the setup timeout. The request fails with `OutcomeUnknown`. |
 | `failed` | The entry answered with another error of the request's own, or with an answer the chooser could not read. |
 
-- Each offer counts once, under the pool it went to. So a pool's eight series add up to the offers made to it. Each request's first offer is not a failover, so over all pools, `pool_failovers_total` is the sum of `pool_offers_total` less the requests that reached an offer.
+- Each offer counts once, under the pool it went to. So a pool's eight series add up to the offers made to it. Each request's first offer is not a failover, and neither is an offer of a re-queued request to its pool, so over all pools, `pool_failovers_total` is the sum of `pool_offers_total` less the requests that reached an offer, less those re-queued offers.
 - An offer counts only when the chooser reads its answer. A request that no pool may take (`Routing`), a request whose pool policy or selector fails, and a request dropped while it waits for the answer count nothing.
 - A pool's series appear at zero when the chooser first follows the pool. They are kept by the pool's name, not its follow, so every generation of the pool counts into the same series. They stay for the life of the process, also after the pool's follow is dropped ([limitations](../operations/limitations.md#a-choosers-pool-series-stay-for-the-life-of-its-process)).
 - The pools bound the series: eight and one for each pool of each class the chooser sends to that its hub followed.

@@ -246,6 +246,22 @@ cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_p
 
 A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the pools', so they show no change.
 
+### Re-queue for the same pool
+
+A pool policy can re-queue a request for the pool that declined it as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). Every offer into another class pays for it whether or not a request waits: the end of the offer's lease on the pool's follow reads the follow's count of waiters, and the lease checks that it was not ended as a decline. Measured with callgrind on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average about 30, rustc 1.93.1, release profile. Base `8b909c95` with the same test added, change `86775e35`, two rounds each, which gave identical totals:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo test --release -p gdl-runtime --all-features --lib --no-run
+GDL_LEASES=100000 valgrind --tool=callgrind --callgrind-out-file=/dev/null <lib test binary> --exact dist::pools::lease::tests::cost_of_a_lease --ignored
+GDL_LEASES=200000 valgrind ...   # per lease: (Ir at 200,000 - Ir at 100,000) / 100,000
+```
+
+| Measure | Base | Change |
+|---|---|---|
+| a lease taken and ended, no request waiting | 59.0 Ir | 66.0 Ir |
+
+What a re-queued request allocates, against a failover, is counted by `a_wait_allocates_nothing_beyond_its_timer`: a timer allocates 0, an accepted first offer 7, a request that fails over once 19 and twice 28, and a request re-queued once 19, twice 28, and four times 46. So each round of a re-queue, a wait and an offer to the same pool again, costs the 9 allocations of one more failover offer, and the wait costs none. A policy whose `Head` decodes, such as a `Projected` one, decodes it once more on each full decline, to be asked whether to re-queue, whether or not it overrides `requeue`.
+
 ### Thresholds as constants in a pick
 
 `home_first` reads two thresholds: the share of its limit at which a pool is saturated, and the spill bound for a pool in another region. `HomeFirst` has the defaults as constants, and `HomeFirstAt` has them as fields, set from a chooser's `[runtime]` settings. The pass over the pools is generic, and the compiler builds it once for each. In `HomeFirst`'s build, the saturated test is one compare of admitted roots with the limit. In `HomeFirstAt`'s build, it is two 128-bit products for each pool. `HomeFirstAt` at the default thresholds runs `HomeFirst`'s build, so a chooser at its default settings pays one branch per pick for them.

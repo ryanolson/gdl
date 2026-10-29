@@ -133,8 +133,28 @@ Ok(PoolChoice::new(at).with_lease(Record { store, fingerprint, pool: pools[at].n
 
 - The runtime calls `accepted` once if the chosen pool accepts the offer. Then it holds the lease while the sending segment holds the request, as it holds a selector's lease, and drops it.
 - It drops the lease without calling `accepted` when the pool declines the offer, when the offer never left, and when the outcome is unknown. An unknown outcome means no answer came, so the pool may have run the request, but it did not say that it took it. A request that no pool accepts tells none of its leases.
-- Each attempt has its own lease. After a decline, the first attempt's lease is dropped before the next choice is made.
+- Each attempt has its own lease. After a decline, the first attempt's lease is dropped before the next choice is made. A request re-queued for its pool (below) keeps its lease through each offer to that pool.
 - A choice without a lease allocates nothing. A lease allocates twice, so give one only to the choices that need it. A router that records a session's pool needs one on a first turn, on a turn that finds no record, and on a failover (`request.excluded()` is not empty). It does not need one on a turn that goes to its recorded pool.
+
+### Keep a request with a full pool
+
+A router that pins a session to a pool should wait for that pool when it is full, rather than move the session and lose its prefix cache. Answer `true` from `requeue` for that pool when it declined as full:
+
+```rust
+use gdl::Decline;
+
+// In `impl PoolPolicy for ByShard`, beside `choose`:
+fn requeue(&self, request: PoolRequest<'_, Projected<Hinted>>, pool: &Pool) -> bool {
+    // Wait for the pool that serves the shard when it is only full.
+    pool.name().starts_with(&request.head().hint.shard)
+        && request.declined(pool) == Some(Decline::Full)
+}
+```
+
+- The runtime asks `requeue` once per pool and request, only after the pool declined the request as full. `true` makes the chooser wait for room in that pool and offer the request to it again, until it takes it. Its deadline fails it with `DeadlineExceeded`. `false`, the default, sends it to another pool, as before.
+- The pool is not damped, and the waits count no failover. The choice's lease is kept, and learns of the acceptance.
+- When the pool declines the request for another reason, such as `Decline::NotPresent`, or no longer takes work as `eligible` sees it, as when it drains, the runtime calls `choose` again, and does not ask `requeue` about that pool again. `request.declined(pool)` then gives the pool's last reason: `Decline::NotPresent` after such a decline, and still `Decline::Full` for a pool that stopped taking work.
+- `requeue` reads the head as `choose` does, and runs only on a full decline's path.
 
 ## 3. Test it without a runtime
 

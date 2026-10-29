@@ -277,13 +277,15 @@ A registered policy implements `gdl::PoolPolicy`. It runs in the chooser, once p
 
 It returns a choice of one pool, by its index, or a `gdl::NoPool`, which fails the request with `Routing`. A `NoPool` may carry a short reason, such as the key that no pool serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a pool declined fails with the last refusal, which names that pool. The exception is a request whose every declining pool the chooser now holds gone, when the policy then chooses no other pool: it fails with `Routing` and the reason, as the requests after it do ([A pool that is gone](#a-pool-that-is-gone)). A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that pool took the request. The runtime calls the lease's `accepted` when the pool accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the pool declines, when the offer never left, and when the outcome is unknown. It also drops it when the choice is the check after every declining pool is gone, which offers that pool nothing. An instance's own decline is not the pool's: the lease passes to the offer to the pool's next instance, and learns of its acceptance. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no pool is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a pool policy](../guides/write-a-pool-policy.md#1-read-only-what-you-route-by)).
 
+A policy may also keep a request with a pool that declined it as full, rather than send it to another pool: its `requeue` method answers `true` for that pool ([A request re-queued for its pool](#a-request-re-queued-for-its-pool)). By default it answers `false`.
+
 The inputs are plain `gdl` types (`Pool`, `PoolRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
 
 A registered policy can run either of them over only the pools it keeps, with `choose_where`: for example, the pools that list the request's key. The choice is the one the policy would make over a copy of those pools, and its index is into all of them. Nothing is allocated. Their tiers, turns, and damping cap count only the kept pools. A policy that chooses as `home_first` does should also check a pool with `HomeFirst::eligible`.
 
 ### Damping
 
-Under every policy, the chooser damps a pool that declined a request as full. `round_robin` and `home_first` pass a damped pool over as this section says. A registered policy sees the damped pools and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] pool_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`pool_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
+Under every policy, the chooser damps a pool that declined a request as full, unless the pool policy re-queued the request for that pool ([below](#a-request-re-queued-for-its-pool)). `round_robin` and `home_first` pass a damped pool over as this section says. A registered policy sees the damped pools and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] pool_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`pool_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
 
 At most half of the otherwise eligible pools, rounded down, are damped at once. When more are, the pools whose windows end soonest are chosen as if they were not damped. So a lone pool is never damped out.
 
@@ -329,7 +331,7 @@ For each offer, before admission, the entry reads the head and looks the key up 
 | The instance lists the key | The entry |
 |---|---|
 | `ready` | takes the offer |
-| `starting` | declines it as full: it can serve the request once the key is ready |
+| `starting` | declines it as full: it can serve the request once the key is ready, and a policy that re-queues the request waits for it |
 | `draining`, or not at all | declines it as not present, naming the kind |
 
 - A draining pool's refusal comes first, as gone, since it holds for every request.
@@ -347,13 +349,42 @@ For each offer, before admission, the entry reads the head and looks the key up 
 
 A chooser built before this reason reads it as full: it damps the pool for one window, and offers the request to another pool.
 
+### A request re-queued for its pool
+
+A pool policy can keep a request with the pool that declined it as full. A set router does this for a session pinned to a pool: the pool holds the session's prefix cache, and will have room again soon. The policy's `requeue` method answers `true` for that pool, and reads why it declined from `request.declined(pool)`, which is `Some(Decline::Full)`. The chooser then waits for room in the pool, and offers the request to the same pool again:
+
+```mermaid
+sequenceDiagram
+    participant R as Request (chooser)
+    participant P as Pool policy
+    participant E as Entry of the pinned pool
+    R->>E: offer
+    E-->>R: declined, full
+    R->>P: requeue(request, pool)?
+    P-->>R: true
+    loop until the pool takes it, or the deadline
+        R->>R: wait: an offer to the pool ends, or the backoff
+        R->>E: offer again, to an instance from the pool's current table
+        E-->>R: declined, full, or accepted
+    end
+```
+
+- The policy is asked once per pool and request, only after a full decline. With `false`, the default, the request goes to another pool, as before.
+- A wait ends when an offer that this chooser made to the pool ends: a request it held there was answered. The request whose wait began first is woken first. Each wait also ends after `[runtime] pool_requeue_backoff_ms` (50 ms by default), which sees room that another chooser frees and a property that turns `ready`. A declined offer wakes no one, since it freed no room.
+- The wake comes when the chooser's response stream ends, which can be a moment before the pool's entry releases the request's admission permit. The entry's `admission_wait_ms` (100 ms by default) covers that moment: the offer waits for the permit. With `admission_wait_ms = 0`, a woken offer can be declined again, and the request waits for its backoff.
+- "First in line" is weak, and holds within one chooser only. Each round of a request is a new wait, at the back of its chooser's line for the pool. So a request that was woken and then declined again, because another offer took the room first, or whose backoff ended its wait, goes behind the requests that wait already. A new request is not held behind the waiters, so it can take room that frees first, and the waiters of other choosers are not ordered against them. A chooser has no queue: each hand-off is its own task, and the pool's admission takes whichever offer comes first ([Pools design](../development/pools-design.md#re-queue-for-the-same-pool)).
+- The request's deadline ends the wait, and the request fails with `DeadlineExceeded`. It is never offered to another pool while its pool takes work.
+- A waiting request holds no lease on the pool's follow, so a drain does not wait for it. It keeps the policy's lease on its choice, which learns of the acceptance. A wait allocates nothing beyond its timer.
+- The pool is not damped, and the waits count no failover and use none of `pool_failovers`. Each offer counts under its pool and outcome, as any offer does.
+- The request leaves the pool, and is failed over as before, once the pool declines it other than as full, or no longer takes work as the policy sees it, as when it drains, or its follow is not offered.
+
 ## A hand-off is an offer
 
 A child pool may decline the hand-off. The chooser then offers the request to another pool in the same call. Nothing of a declined offer is sent again: the entry started no work and holds nothing, and a streamed request's input goes only to the pool that accepts it. A selector's lease and metadata from a declined choice are released before the next choice.
 
 | What happens | Outcome |
 |---|---|
-| The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the pool declines offers (a drain, or its own policy) | another pool is offered the request |
+| The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the pool declines offers (a drain, or its own policy) | another pool is offered the request, or, when it declined as full and the pool policy re-queues the request, the same pool once it has room |
 | The entry answers `Overloaded` as its own decline: it cannot serve the request | the pool's next entry instance is offered the request, then another pool |
 | The entry answers `Overloaded` as not present: it does not have the property the request wants | another pool is offered the request; the pool is not damped |
 | The entry answers `Placement`: the hand-off is not of its deployment | another pool is offered the request |
@@ -363,7 +394,7 @@ A child pool may decline the hand-off. The chooser then offers the request to an
 
 The chooser offers to at most `[runtime] pool_failovers` more pools (2 by default). With 0, each request is offered to one pool, and to each of that pool's entry instances when they decline as their own. When every offered pool declines, the request fails with the last refusal, so a full fleet answers `Overloaded`. When the chooser holds every offered pool gone and the pool policy chooses no other pool, it fails with `Routing` instead, as the requests after it do. A refusal is not remembered past its request, except through damping.
 
-A chooser that records metrics counts each offer under its pool and the row of this table it ended in, and each offer after a request's first as a failover ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)). The counts are kept by the pool's name, so a new generation of the pool goes on counting into the same series.
+A chooser that records metrics counts each offer under its pool and the row of this table it ended in, and each offer after a request's first as a failover, except an offer of a re-queued request to its pool ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)). The counts are kept by the pool's name, so a new generation of the pool goes on counting into the same series.
 
 ## Entry retirement across pools
 

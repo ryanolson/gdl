@@ -15,6 +15,14 @@
 //! request, and gone when it returns. What outlives the request is the
 //! chooser's damping of a pool that declined ([`super::damping`]), written
 //! only when a pool declines, or when a damped pool accepts.
+//!
+//! A pool policy may re-queue a request for the pool that declined it as
+//! full ([`gdl::PoolPolicy::requeue`]): the chooser then waits for room
+//! in that pool and offers the request to it again, until it takes it, the
+//! request's deadline passes, or the pool declines it otherwise or stops
+//! taking work, which sends it on to another pool as before
+//! ([`Runtime::requeue`]). So a full decline damps its pool only once the
+//! policy did not re-queue the request.
 
 use gdl::__runtime::ChoiceHeld;
 use gdl::{Cx, NoPool, Result};
@@ -30,9 +38,11 @@ use crate::dist::runtime::{Handed, Held, Runtime, Within};
 use gdl::Decline;
 
 /// What became of an offer, as `crossing` sent it to the pool `pool`
-/// with `held`. A pool that declined it is damped, or passed over until
-/// its follow changes when it said it is gone, and a damped pool that
-/// accepted it is no longer; an acceptance is told to the pool policy's
+/// with `held`. A pool that declined it as gone is passed over until its
+/// follow changes, and a damped pool that accepted it is no longer. A
+/// full decline damps nothing here: the failover damps the pool once its
+/// pool policy did not re-queue the request for it ([`Runtime::fail_over`]).
+/// An acceptance is told to the pool policy's
 /// lease in `held`, if it gave one. A hand-off that never left says
 /// nothing of the pool, and changes nothing. An unknown outcome names the
 /// class, since it is not offered to another pool. Every answer counts
@@ -48,6 +58,7 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, pool: u64, held: &mu
             crossing.accepted(pool);
             held.accepted();
         }
+        Answer::Missed(Missed::Declined(_, Decline::Full)) => {}
         Answer::Missed(Missed::Declined(_, decline)) => {
             crossing.declined(pool, *decline, held.pool_lease());
         }
@@ -100,7 +111,11 @@ impl Runtime {
     /// of those offers, so that it learns of an acceptance by any of them.
     /// Any other miss leaves the pool at once. The pool policy reads why
     /// each pool it left declined the request, if it did
-    /// ([`gdl::PoolRequest::declines`]). When no pool may take it
+    /// ([`gdl::PoolRequest::declines`]). A pool that declined it as full
+    /// is asked about first: the pool policy may re-queue the request for
+    /// it ([`Runtime::requeue`]), which uses none of `pool_failovers` and
+    /// counts no failover; otherwise the pool is damped, and the request
+    /// leaves it. Each pool is asked once. When no pool may take it
     /// any more, or no failover is left, the request fails with the last
     /// refusal, or, when no pool refused it, with the last hand-off that
     /// never left. When the chooser holds every pool it left gone and its
@@ -134,6 +149,10 @@ impl Runtime {
         // said nothing, and the policy reads only the pools that declined.
         let mut declines = Vec::new();
         let mut walk: Option<Walk> = None;
+        // The pool a re-queue just left for an instance's own decline,
+        // whose other entry instances are offered the request before it
+        // leaves the pool: it was left and counted when it declined first.
+        let mut requeued: Option<u64> = None;
         loop {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
@@ -152,14 +171,48 @@ impl Runtime {
             let (to, at, mut held) = match next {
                 Some(chosen) => chosen,
                 None => {
+                    walk = None;
+                    if requeued.take() == Some(pool) {
+                        set_reason(&mut declines, pool, last);
+                    } else {
+                        // A policy that chooses a pool it left again is
+                        // not asked about it again, and the pool counts
+                        // again, so that `pool_failovers` bounds it.
+                        let first = declines.iter().all(|(left, _)| *left != pool);
+                        offered.push(pool);
+                        if let Some(decline) = last {
+                            declines.push((pool, decline));
+                        }
+                        if last == Some(Decline::Full) {
+                            let left = Left::new(&offered, &declines);
+                            if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
+                                let requeued_for =
+                                    self.requeue(crossing, cx, envelope, timed, pool, &mut choice);
+                                match requeued_for.await? {
+                                    Requeued::Handed(handed) => return Ok(handed),
+                                    Requeued::Missed(to, then) => {
+                                        last = reason(&then);
+                                        instance = to;
+                                        missed = missed.then(then);
+                                        set_reason(&mut declines, pool, last);
+                                        // The pool's other entry instances
+                                        // are offered it, as after any
+                                        // instance's own decline.
+                                        if last == Some(Decline::Instance) {
+                                            requeued = Some(pool);
+                                            continue;
+                                        }
+                                    }
+                                    Requeued::Unavailable => {}
+                                }
+                            } else {
+                                crossing.declined(pool, Decline::Full, None);
+                            }
+                        }
+                    }
                     // The request leaves the pool, and the pool policy's
                     // lease on it ends before the next choice.
-                    walk = None;
                     drop(choice.take());
-                    offered.push(pool);
-                    if let Some(decline) = last {
-                        declines.push((pool, decline));
-                    }
                     if offered.len() > self.config.pool_failovers {
                         break;
                     }
@@ -188,8 +241,7 @@ impl Runtime {
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
                     last = reason(&then);
-                    choice = held.take_choice();
-                    drop(held);
+                    choice = held.missed();
                     (pool, instance) = (at, to);
                     missed = missed.then(then);
                 }
@@ -236,6 +288,91 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    /// Offer `envelope` again to `pool`, which declined it as full and for
+    /// which the pool policy re-queued it: wait for room in the pool
+    /// ([`Crossing::room`]), choose an instance of it as the first offer
+    /// was chosen, from its current table, and offer the request to it, until
+    /// the pool takes it, or declines it other than as full. Each wait
+    /// holds no lease on the pool's follow, and allocates nothing beyond
+    /// its timer; the pool policy's lease on the choice of the pool,
+    /// `choice`, passes to each offer. No failover is counted, and a full
+    /// decline damps nothing. The request's deadline, which every request
+    /// that crosses segments has, ends the wait: it fails the request with
+    /// `DeadlineExceeded`, and so does a cancel. A pool that no longer takes
+    /// work, or whose follow is no longer offered, ends the re-queue
+    /// ([`Requeued::Unavailable`]), as does a decline for another reason
+    /// ([`Requeued::Missed`]).
+    async fn requeue(
+        &self,
+        crossing: &Crossing,
+        cx: &Cx,
+        envelope: &mut Forward,
+        timed: bool,
+        pool: u64,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Result<Requeued> {
+        let deadline = cx.deadline().map(gdl::Deadline::instant);
+        loop {
+            crossing
+                .room(pool, self.config.pool_requeue_backoff, deadline)
+                .await;
+            cx.check()?;
+            let chosen = match crossing.within() {
+                Within::Policy(policy) => crossing
+                    .pick_again(pool, *policy, self.random(), choice)
+                    .map(|(to, lease)| (to, Held::pool(None, lease))),
+                Within::Selector {
+                    selector, encoding, ..
+                } => {
+                    envelope.cx = WireCx::of(cx);
+                    let chosen = crossing
+                        .choose_again(pool, &**selector, cx, &envelope.payload, *encoding, choice)
+                        .await?;
+                    chosen.map(|(to, picked, lease)| {
+                        envelope.cx.add_meta(picked.meta);
+                        (to, Held::pool(picked.lease, lease))
+                    })
+                }
+            };
+            let Some((to, mut held)) = chosen else {
+                return Ok(Requeued::Unavailable);
+            };
+            let (offering, sent) = self.deliver(to, envelope, timed)?;
+            match answer(offering.await, crossing, pool, &mut held) {
+                Answer::Accepted(accepted) => {
+                    return Ok(Requeued::Handed(Handed {
+                        accepted,
+                        sent,
+                        held,
+                    }));
+                }
+                Answer::Failed(error) => return Err(error),
+                Answer::Missed(then) => {
+                    *choice = held.missed();
+                    if !matches!(then, Missed::Declined(_, Decline::Full)) {
+                        return Ok(Requeued::Missed(to, then));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How a re-queue of a request for one pool ended, short of the request's
+/// own error.
+enum Requeued {
+    /// The pool took the request.
+    Handed(Handed),
+    /// The pool's entry instance `.0` declined the request other than as
+    /// full, or the hand-off to it never left (`.1`): the request is
+    /// failed over as after any such miss.
+    Missed(InstanceId, Missed),
+    /// The pool no longer takes work, or the chooser no longer follows it:
+    /// the request leaves it.
+    Unavailable,
+}
+
 /// What a chooser's first offer into another class came to, when it
 /// missed: the pool and the instance it went to, the pool policy's lease
 /// on the choice of that pool, if it gave one, and the miss.
@@ -244,6 +381,17 @@ pub(crate) struct Declined {
     pub(crate) instance: InstanceId,
     pub(crate) choice: Option<ChoiceHeld>,
     pub(crate) missed: Missed,
+}
+
+/// Record `last` as why `pool`, which the request left, declined it, in
+/// place of the reason it gave before: what the pool policy reads of it
+/// next. A hand-off that never left (`None`) keeps the reason before.
+fn set_reason(declines: &mut [(u64, Decline)], pool: u64, last: Option<Decline>) {
+    if let Some(why) = last
+        && let Some(left) = declines.iter_mut().find(|(at, _)| *at == pool)
+    {
+        left.1 = why;
+    }
 }
 
 /// Why `missed`'s entry declined, or `None` for a hand-off that never
@@ -257,6 +405,8 @@ fn reason(missed: &Missed) -> Option<Decline> {
 
 #[cfg(test)]
 mod instances;
+#[cfg(test)]
+mod requeue;
 
 #[cfg(test)]
 mod tests {

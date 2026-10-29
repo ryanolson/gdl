@@ -72,6 +72,25 @@ pub trait PoolPolicy: Send + Sync + 'static {
         pool.takes_work()
     }
 
+    /// Whether to offer the request to `pool` again, rather than to
+    /// another pool, now that `pool` declined it as full
+    /// ([`request.declined(pool)`](PoolRequest::declined) is
+    /// [`Decline::Full`]). `true` re-queues the request for that pool:
+    /// the chooser waits until an offer it made to the pool ends, or a
+    /// short backoff (`[runtime] pool_requeue_backoff_ms`), then offers
+    /// it there again, until the pool takes it or the request's deadline
+    /// passes, which fails it with `DeadlineExceeded`. The waits count
+    /// no failover, and the decline does not damp the pool for other
+    /// requests. The request goes back to failover, as if this answered
+    /// `false`, once the pool declines it for any other reason or no
+    /// longer takes work. Asked once per pool and request, on the
+    /// decline's path only. By default, `false`: the request is offered
+    /// to another pool.
+    fn requeue(&self, request: PoolRequest<'_, Self::Head>, pool: &Pool) -> bool {
+        let _ = (request, pool);
+        false
+    }
+
     /// Register in `kinds` each property kind the policy reads from
     /// [`PoolRequest::properties`], so that the chooser decodes it
     /// ([`PropertyKinds::register`]). The runtime calls it once, before the
@@ -651,6 +670,15 @@ pub trait ErasedPolicy: Send + Sync + 'static {
 
     fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool;
 
+    /// Read the head from `request`'s bytes in `encoding`, and ask
+    /// whether to re-queue the request for `pool`.
+    fn requeue(
+        &self,
+        request: PoolRequest<'_, ()>,
+        encoding: Encoding,
+        pool: &Pool,
+    ) -> Result<bool>;
+
     /// The head type it reads, if it reads one.
     fn edge(&self) -> Option<(TypeId, &'static str)>;
 
@@ -679,6 +707,16 @@ impl<P: PoolPolicy> ErasedPolicy for TypedPolicy<P> {
 
     fn eligible(&self, pool: &Pool, region: &str, now: Instant) -> bool {
         self.0.eligible(pool, region, now)
+    }
+
+    fn requeue(
+        &self,
+        request: PoolRequest<'_, ()>,
+        encoding: Encoding,
+        pool: &Pool,
+    ) -> Result<bool> {
+        let head = <P::Head as Sealed>::decode(request.bytes, encoding)?;
+        Ok(self.0.requeue(request.with_head(&head), pool))
     }
 
     fn edge(&self) -> Option<(TypeId, &'static str)> {
@@ -903,6 +941,47 @@ mod tests {
                 .map(PoolChoice::new)
                 .ok_or_else(NoPool::new)
         }
+
+        fn requeue(&self, request: PoolRequest<'_, Projected<Hinted>>, pool: &Pool) -> bool {
+            pool.name() == request.head().hint.target
+                && request.declined(pool) == Some(Decline::Full)
+        }
+    }
+
+    /// The runtime asks a policy whether to re-queue a request through the
+    /// erased policy, which reads the head as `choose` does: a policy that
+    /// keeps the request with the pool its hint names re-queues it there
+    /// when that pool declined it as full, and not for another pool or
+    /// reason. A policy that does not say re-queues nothing.
+    #[test]
+    fn a_policy_reads_the_head_and_the_decline_to_re_queue() {
+        let policy = TypedPolicy(Arc::new(ByHint));
+        let (a, b) = (
+            Pool::new("c", "a", "r", PoolState::Ready),
+            Pool::new("c", "b", "r", PoolState::Ready),
+        );
+        let routed = Routed {
+            request: vec![],
+            hint: Hint { target: "b".into() },
+        };
+        let bytes = crate::codec::encoder::<Routed>(Encoding::Msgpack)(&routed).expect("encoded");
+        let cx = Cx::new();
+        let asked = |declines: &[(u64, Decline)], pool: &Pool| {
+            let request = PoolRequest::new(&cx, &(), "r", Instant::now())
+                .with_bytes(&bytes)
+                .with_declines(declines);
+            policy
+                .requeue(request, Encoding::Msgpack, pool)
+                .expect("read")
+        };
+        assert!(asked(&[(b.id(), Decline::Full)], &b));
+        assert!(!asked(&[(b.id(), Decline::NotPresent)], &b));
+        assert!(!asked(&[(a.id(), Decline::Full)], &a), "not its pool");
+        assert!(!asked(&[], &b), "no decline");
+        let own = TypedPolicy(Arc::new(HomeFirst));
+        let full = [(b.id(), Decline::Full)];
+        let request = PoolRequest::new(&cx, &(), "r", Instant::now()).with_declines(&full);
+        assert!(!own.requeue(request, Encoding::Msgpack, &b).expect("read"));
     }
 
     /// A choice's lease reaches the runtime through `into_parts`, is told

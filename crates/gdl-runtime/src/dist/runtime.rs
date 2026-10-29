@@ -56,6 +56,12 @@ pub struct RuntimeConfig {
     /// is tried again at least this often. From `pool_damping_first` to
     /// one hour.
     pub pool_damping_max: Duration,
+    /// The longest a chooser waits before it offers a request again to the
+    /// pool its pool policy re-queued it for (`PoolPolicy::requeue`), when
+    /// no offer it made to that pool ends first: room that another chooser
+    /// frees, or a property that becomes ready, is seen no later. From
+    /// 1 ms to one hour.
+    pub pool_requeue_backoff: Duration,
     /// How many of its periods a pool's load summary stays fresh after it
     /// reached the chooser's hub. A policy that chooses by load, as `home_first`
     /// does, passes over a pool whose summary is stale. From 1 to 100.
@@ -202,6 +208,7 @@ impl Default for RuntimeConfig {
             pool_failovers: 2,
             pool_damping_first: Self::DEFAULT_POOL_DAMPING_FIRST,
             pool_damping_max: Self::DEFAULT_POOL_DAMPING_MAX,
+            pool_requeue_backoff: Self::DEFAULT_POOL_REQUEUE_BACKOFF,
             pool_fresh_periods: gdl::Load::FRESH_PERIODS,
             home_first: HomeFirstAt::DEFAULT,
             instance_failovers: 2,
@@ -235,6 +242,7 @@ struct Settings {
     pool_failovers: usize,
     pool_damping_first_ms: u64,
     pool_damping_max_ms: u64,
+    pool_requeue_backoff_ms: u64,
     pool_fresh_periods: u32,
     home_first_saturated_percent: u64,
     home_first_spill_percent: u64,
@@ -260,6 +268,7 @@ impl Default for Settings {
             pool_failovers: config.pool_failovers,
             pool_damping_first_ms: ms(config.pool_damping_first),
             pool_damping_max_ms: ms(config.pool_damping_max),
+            pool_requeue_backoff_ms: ms(config.pool_requeue_backoff),
             pool_fresh_periods: config.pool_fresh_periods,
             home_first_saturated_percent: config.home_first.saturated_percent,
             home_first_spill_percent: config.home_first.spill_percent,
@@ -287,6 +296,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             pool_failovers: s.pool_failovers,
             pool_damping_first: Duration::from_millis(s.pool_damping_first_ms),
             pool_damping_max: Duration::from_millis(s.pool_damping_max_ms),
+            pool_requeue_backoff: Duration::from_millis(s.pool_requeue_backoff_ms),
             pool_fresh_periods: s.pool_fresh_periods,
             home_first: HomeFirstAt {
                 saturated_percent: s.home_first_saturated_percent,
@@ -378,6 +388,10 @@ impl RuntimeConfig {
     /// 30 s.
     pub(crate) const DEFAULT_POOL_DAMPING_MAX: Duration = Duration::from_secs(30);
 
+    /// The longest wait before a re-queued request is offered again,
+    /// unless `pool_requeue_backoff_ms` is set: 50 ms.
+    pub(crate) const DEFAULT_POOL_REQUEUE_BACKOFF: Duration = Duration::from_millis(50);
+
     /// The longest damping window: a pool is tried again at least once an
     /// hour, and a window's end stays far inside what the clock holds.
     const MAX_DAMPING: Duration = Duration::from_secs(3600);
@@ -415,6 +429,15 @@ impl RuntimeConfig {
         if self.pool_damping_max > Self::MAX_DAMPING {
             return refuse(
                 "pool_damping_max_ms",
+                format!("must be at most {}", ms(Self::MAX_DAMPING)),
+            );
+        }
+        if self.pool_requeue_backoff < Duration::from_millis(1) {
+            return refuse("pool_requeue_backoff_ms", "must be at least 1".into());
+        }
+        if self.pool_requeue_backoff > Self::MAX_DAMPING {
+            return refuse(
+                "pool_requeue_backoff_ms",
                 format!("must be at most {}", ms(Self::MAX_DAMPING)),
             );
         }
@@ -953,8 +976,7 @@ impl Runtime {
                         Answer::Failed(error) => Err(error),
                         // Boxed, and only here, as for an instance.
                         Answer::Missed(missed) => {
-                            let choice = held.take_choice();
-                            drop(held);
+                            let choice = held.missed();
                             let declined = super::pools::Declined {
                                 pool,
                                 instance,
@@ -1148,13 +1170,13 @@ impl Held {
         self.pool.as_ref()
     }
 
-    /// The pool policy's lease on the choice of the pool this offer went
-    /// to, taken out, if it gave one.
+    /// The pool this offer went to did not take it: end its leases, the
+    /// lease on the pool's follow without waking a request that waits for
+    /// room in the pool, since the miss freed none. Gives back the pool
+    /// policy's lease on the choice, if it gave one.
     #[cfg(feature = "hub")]
-    pub(crate) fn take_choice(&mut self) -> Option<gdl::__runtime::ChoiceHeld> {
-        self.pool
-            .as_mut()
-            .and_then(super::pools::PoolLease::take_choice)
+    pub(crate) fn missed(self) -> Option<gdl::__runtime::ChoiceHeld> {
+        self.pool.and_then(super::pools::PoolLease::declined)
     }
 
     /// The pool this offer went to accepted it: tell the pool policy's
@@ -1304,17 +1326,20 @@ mod tests {
         ] {
             assert_eq!(defaults.pool_damping_first, Duration::from_secs(1));
             assert_eq!(defaults.pool_damping_max, Duration::from_secs(30));
+            assert_eq!(defaults.pool_requeue_backoff, Duration::from_millis(50));
             assert_eq!(defaults.pool_fresh_periods, 3);
             assert_eq!(defaults.home_first.saturated_percent, 100);
             assert_eq!(defaults.home_first.spill_percent, 80);
         }
         let set: RuntimeConfig = toml::from_str(
             "pool_damping_first_ms = 2000\npool_damping_max_ms = 5000\npool_fresh_periods = 5\n\
-             home_first_saturated_percent = 90\nhome_first_spill_percent = 0\n",
+             home_first_saturated_percent = 90\nhome_first_spill_percent = 0\n\
+             pool_requeue_backoff_ms = 20\n",
         )
         .expect("set");
         assert_eq!(set.pool_damping_first, Duration::from_secs(2));
         assert_eq!(set.pool_damping_max, Duration::from_secs(5));
+        assert_eq!(set.pool_requeue_backoff, Duration::from_millis(20));
         assert_eq!(set.pool_fresh_periods, 5);
         assert_eq!(set.home_first.saturated_percent, 90);
         assert_eq!(set.home_first.spill_percent, 0);
@@ -1333,6 +1358,11 @@ mod tests {
             // Against the first window's default, 1 s.
             ("pool_damping_max_ms = 999\n", "pool_damping_max_ms"),
             ("pool_damping_max_ms = 3600001\n", "pool_damping_max_ms"),
+            ("pool_requeue_backoff_ms = 0\n", "pool_requeue_backoff_ms"),
+            (
+                "pool_requeue_backoff_ms = 3600001\n",
+                "pool_requeue_backoff_ms",
+            ),
             ("pool_fresh_periods = 0\n", "pool_fresh_periods"),
             ("pool_fresh_periods = 101\n", "pool_fresh_periods"),
             (
@@ -1364,10 +1394,15 @@ mod tests {
         // The bounds themselves are taken.
         let edge: RuntimeConfig = toml::from_str(
             "pool_damping_first_ms = 3600000\npool_damping_max_ms = 3600000\npool_fresh_periods = 100\n\
-             home_first_saturated_percent = 1\nhome_first_spill_percent = 1\n",
+             home_first_saturated_percent = 1\nhome_first_spill_percent = 1\n\
+             pool_requeue_backoff_ms = 3600000\n",
         )
         .expect("the bounds");
         assert_eq!(edge.pool_damping_max, Duration::from_secs(3600));
+        assert_eq!(edge.pool_requeue_backoff, Duration::from_secs(3600));
+        let least: RuntimeConfig =
+            toml::from_str("pool_requeue_backoff_ms = 1\n").expect("the least backoff");
+        assert_eq!(least.pool_requeue_backoff, Duration::from_millis(1));
     }
 
     #[test]

@@ -248,6 +248,137 @@ impl Crossing {
         Ok(self.pool_by(&table, &damped, cx, head, left)?.err())
     }
 
+    /// Whether the pool policy re-queues the request with context `cx` and
+    /// head `head` for `pool`, which declined it as full, of the pools it
+    /// `left` ([`gdl::PoolPolicy::requeue`]). `false` when the chooser no
+    /// longer follows the pool. Asked only on a full decline: one load of
+    /// the table, a search of its pools, and the policy's read of the
+    /// head. Fails when the pool policy cannot read the head.
+    pub(crate) fn requeue(&self, cx: &Cx, head: &[u8], left: Left<'_>, pool: u64) -> Result<bool> {
+        let target = &self.target;
+        let table = target.table.load();
+        let Some(view) = table.views.iter().find(|view| view.id() == pool) else {
+            return Ok(false);
+        };
+        let damped = target.damping.view();
+        let request = PoolRequest::new(cx, &(), &target.region, tokio::time::Instant::now())
+            .with_bytes(head)
+            .with_excluded(left.excluded)
+            .with_declines(left.declines)
+            .with_damped(&damped)
+            .with_properties(&table.properties);
+        target.policy.requeue(request, self.encoding, view)
+    }
+
+    /// Wait for room in `pool`, which a request is re-queued for: until an
+    /// offer this chooser made to the pool ends, for at most `backoff`,
+    /// and never past `deadline` ([`Leases::room`](super::lease::Leases::room)).
+    /// Returns at once when the chooser no longer follows the pool. Holds
+    /// no lease on the pool's follow, so that a drain does not wait for
+    /// it. A wait that began under one follow of the pool is woken by that
+    /// follow's offers alone: under a newer follow, by its backoff.
+    pub(crate) async fn room(
+        &self,
+        pool: u64,
+        backoff: std::time::Duration,
+        deadline: Option<tokio::time::Instant>,
+    ) {
+        let leases = {
+            let table = self.target.table.load();
+            match table.pools.iter().find(|shown| shown.id == pool) {
+                Some(shown) => Arc::clone(&shown.leases),
+                None => return,
+            }
+        };
+        leases.room(backoff, deadline).await;
+    }
+
+    /// An instance of `pool`, which a request is re-queued for, by
+    /// `policy`, with a lease on the pool's follow that holds `choice`, the
+    /// pool policy's lease on the choice of the pool: from the pool's
+    /// current table, while the pool policy still takes the pool
+    /// ([`gdl::PoolPolicy::eligible`]) and its follow is offered. `None`
+    /// once it is not, and the request leaves the pool. The pool policy is
+    /// not asked to choose: it chose the pool. One load of the table, a
+    /// search of its pools, the clock, and the lease, with no allocation.
+    pub(crate) fn pick_again(
+        &self,
+        pool: u64,
+        policy: Policy,
+        random: &RandomState,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Option<(InstanceId, PoolLease)> {
+        let target = &self.target;
+        let table = target.table.load();
+        let (shown, view) = table
+            .pools
+            .iter()
+            .zip(&table.views)
+            .find(|(shown, _)| shown.id == pool)?;
+        let now = tokio::time::Instant::now();
+        if shown.eligible.is_empty() || !target.policy.eligible(view, &target.region, now) {
+            return None;
+        }
+        let lease = PoolLease::take(&shown.leases)?;
+        let sequence = shown.turn.fetch_add(1, Ordering::Relaxed);
+        let chosen = shown.eligible[turn(policy, sequence, shown.eligible.len(), random)];
+        Some((chosen, lease.with_choice(choice.take())))
+    }
+
+    /// [`Crossing::pick_again`], asking `selector` to choose among the
+    /// pool's eligible entry instances. A selector may wait, so the choice
+    /// is checked when it returns, as [`Crossing::choose`] checks its own.
+    /// A request that ended while its selector chose is not handed on.
+    pub(crate) async fn choose_again(
+        &self,
+        pool: u64,
+        selector: &dyn Erased,
+        cx: &Cx,
+        head: &[u8],
+        encoding: Encoding,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Result<Option<(InstanceId, Picked, PoolLease)>> {
+        let target = &self.target;
+        let policy = |current: &gdl::Pool| {
+            target
+                .policy
+                .eligible(current, &target.region, tokio::time::Instant::now())
+        };
+        for _ in 0..CHOICES {
+            let table = target.table.load_full();
+            let Some((shown, view)) = table
+                .pools
+                .iter()
+                .zip(&table.views)
+                .find(|(shown, _)| shown.id == pool)
+            else {
+                return Ok(None);
+            };
+            if shown.offered.is_empty() || !policy(view) {
+                return Ok(None);
+            }
+            let shown = Arc::clone(shown);
+            let picked = selector
+                .select(
+                    cx,
+                    head,
+                    encoding,
+                    &[],
+                    Instances::new(&target.segment, &shown.offered),
+                )
+                .await?;
+            cx.check()?;
+            let chosen = shown.eligible[picked.index];
+            let current = target.table.load();
+            let lease = still_eligible(&current, &shown, chosen, policy)
+                .and_then(|now| PoolLease::take(&now.leases));
+            if let Some(lease) = lease {
+                return Ok(Some((chosen, picked, lease.with_choice(choice.take()))));
+            }
+        }
+        Ok(None)
+    }
+
     /// The pool `pool` accepted an offer: its damping, as the chooser has
     /// it now, ends, whatever it was when the offer was chosen: another
     /// request's decline may have damped it since, or another acceptance
