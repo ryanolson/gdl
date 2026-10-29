@@ -937,10 +937,13 @@ async fn an_entry_that_declines_as_not_present_sends_each_request_to_another_poo
     .await;
     let m2 = pool(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
     let pools = tables(&chooser);
+    // M2 takes every request m1 declines, so it must have its entry
+    // instance to route to, not only its state.
     until(&pools, "the model pools followed", |pools| {
         followed(pools, "f", M1)
             .is_some_and(|m| m.state == PoolState::Ready && m.eligible.len() == 2)
-            && followed(pools, "f", M2).is_some_and(|m| m.state == PoolState::Degraded)
+            && followed(pools, "f", M2)
+                .is_some_and(|m| m.state == PoolState::Degraded && m.eligible.len() == 1)
     })
     .await;
 
