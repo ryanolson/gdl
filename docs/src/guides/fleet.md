@@ -49,6 +49,24 @@ ready = { engine = 2 }            # overrides the class default
 
 `requires = { model_x = 1 }` in `[class.global]` sets how many `ready` children the global pool's health needs (1 of each class by default). A pool needs `layout = "<name>"` when the spec has several layouts. Every key is in [Spec and fleet reference](../appendix/spec-reference.md).
 
+A fleet can also name the Kubernetes clusters that run its pools. A pool that names a cluster takes the cluster's region:
+
+```toml
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"             # the kube context, whose credentials stay in the kubeconfig
+namespace = "gdl-api"
+region = "us-east-1"
+
+[pool.global-us]
+class = "global"
+cluster = "use1"                  # region = "us-east-1", from the cluster
+```
+
+`check` refuses a cluster that the fleet does not have, a pool `region` that is not its cluster's, and two clusters with the same context and namespace. The bundle uses only each cluster's region. So this fleet writes the same bundle as one whose pools write `region = "us-east-1"`.
+
 ## 3. Check and write the bundle
 
 ```bash

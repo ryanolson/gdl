@@ -97,9 +97,19 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
             "[pool.g]\nclass = 'global'\nregion = 'r'\nseeds = ['hub-a:1337']\n",
             "line 4: [pool.g] seeds: unknown field `seeds`",
         ),
+        // A pool may take its region from a cluster, so a pool without
+        // one is the check's to refuse; a cluster always has one.
         (
-            "[pool.g]\nclass = 'global'\n",
-            "line 1: [pool.g] region: missing field `region`",
+            "[cluster.a]\ncontext = 'c'\nnamespace = 'n'\n",
+            "line 1: [cluster.a] region: missing field `region`",
+        ),
+        (
+            "[cluster.a]\ncontext = 'c'\nnamespace = 'n'\nregion = 'r'\nzone = 'a'\n",
+            "line 5: [cluster.a] zone: unknown field `zone`",
+        ),
+        (
+            "[fleet]\nname = 'f'\nzone = 'a'\n",
+            "line 3: [fleet] zone: unknown field `zone`",
         ),
         (
             "[class.global]\nready = { a = 'two' }\n",

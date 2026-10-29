@@ -63,12 +63,83 @@ pub enum FleetError {
         /// Why the name is refused.
         reason: String,
     },
-    /// A pool's region is not a DNS label.
+    /// A pool's or a cluster's region is not a DNS label.
     InvalidRegion {
-        /// The pool.
-        pool: String,
+        /// The pool's or the cluster's table.
+        table: FleetTable,
         /// Why the region is refused.
         reason: String,
+    },
+    /// A pool names neither a region nor a cluster.
+    MissingRegion {
+        /// The pool.
+        pool: String,
+    },
+    /// A pool names a cluster the fleet does not have.
+    UnknownCluster {
+        /// The pool.
+        pool: String,
+        /// The unknown name.
+        cluster: String,
+    },
+    /// A pool's region is not its cluster's.
+    RegionNotCluster {
+        /// The pool.
+        pool: String,
+        /// The pool's region.
+        region: String,
+        /// Its cluster.
+        cluster: String,
+        /// The cluster's region.
+        cluster_region: String,
+    },
+    /// The fleet's name is not a DNS label.
+    InvalidFleetName {
+        /// Why the name is refused.
+        reason: String,
+    },
+    /// A cluster's name is not a DNS label.
+    InvalidClusterName {
+        /// The cluster.
+        cluster: String,
+        /// Why the name is refused.
+        reason: String,
+    },
+    /// A cluster's namespace is not a DNS label.
+    InvalidNamespace {
+        /// The cluster.
+        cluster: String,
+        /// Why the namespace is refused.
+        reason: String,
+    },
+    /// A cluster has the kube context and the namespace of a cluster
+    /// before it in name order.
+    SharedNamespace {
+        /// The later cluster.
+        cluster: String,
+        /// The first cluster with them.
+        first: String,
+        /// The context they share.
+        context: String,
+        /// The namespace they share.
+        namespace: String,
+    },
+    /// A cluster's `secrets` names a Kubernetes Secret by a name no Secret
+    /// can have.
+    InvalidSecretName {
+        /// The cluster.
+        cluster: String,
+        /// The spec's secret.
+        secret: String,
+        /// The name given for its Kubernetes Secret.
+        name: String,
+    },
+    /// A cluster's `env` key is not a variable's name.
+    InvalidVariable {
+        /// The cluster.
+        cluster: String,
+        /// The key.
+        variable: String,
     },
     /// A pool's layout is not a layout's name.
     InvalidLayout {
@@ -157,6 +228,10 @@ pub enum FleetTable {
     Class(String),
     /// `[pool.<name>]`.
     Pool(String),
+    /// `[cluster.<name>]`.
+    Cluster(String),
+    /// `[fleet]`.
+    Fleet,
 }
 
 impl FleetTable {
@@ -165,6 +240,8 @@ impl FleetTable {
         match self {
             Self::Class(name) => format!("class.{name}"),
             Self::Pool(name) => format!("pool.{name}"),
+            Self::Cluster(name) => format!("cluster.{name}"),
+            Self::Fleet => "fleet".into(),
         }
     }
 }
@@ -181,6 +258,7 @@ impl FleetError {
     pub fn problem(&self) -> Problem {
         let class = |name: &str| Some(format!("class.{name}"));
         let pool = |name: &str| Some(format!("pool.{name}"));
+        let cluster = |name: &str| Some(format!("cluster.{name}"));
         let key = |key: &str| Some(key.to_string());
         let quoted = |names: &[String]| {
             let names: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
@@ -199,8 +277,8 @@ impl FleetError {
                 // A class table's own name is the class; a pool names it
                 // with its `class` key.
                 let key = match table {
-                    FleetTable::Class(_) => None,
                     FleetTable::Pool(_) => key("class"),
+                    _ => None,
                 };
                 let message = match layout {
                     Some(layout) => format!("layout `{layout}` has no class `{class}`"),
@@ -246,9 +324,76 @@ impl FleetError {
                 "is 0; a requirement is at least 1".into(),
             ),
             Self::InvalidPoolName { pool: name, reason } => (pool(name), None, reason.clone()),
-            Self::InvalidRegion { pool: name, reason } => {
-                (pool(name), key("region"), reason.clone())
+            Self::InvalidRegion { table, reason } => {
+                (Some(table.path()), key("region"), reason.clone())
             }
+            Self::MissingRegion { pool: name } => (
+                pool(name),
+                key("region"),
+                "missing; a pool names its region, or a cluster whose region it takes".into(),
+            ),
+            Self::UnknownCluster {
+                pool: name,
+                cluster,
+            } => (
+                pool(name),
+                key("cluster"),
+                format!("the fleet has no cluster `{cluster}`"),
+            ),
+            Self::RegionNotCluster {
+                pool: name,
+                region,
+                cluster,
+                cluster_region,
+            } => (
+                pool(name),
+                key("region"),
+                format!(
+                    "`{region}` is not the region of cluster `{cluster}`, which is `{cluster_region}`; a pool's region is its cluster's"
+                ),
+            ),
+            Self::InvalidFleetName { reason } => {
+                (Some(FleetTable::Fleet.path()), key("name"), reason.clone())
+            }
+            Self::InvalidClusterName {
+                cluster: name,
+                reason,
+            } => (cluster(name), None, reason.clone()),
+            Self::InvalidNamespace {
+                cluster: name,
+                reason,
+            } => (cluster(name), key("namespace"), reason.clone()),
+            Self::SharedNamespace {
+                cluster: name,
+                first,
+                context,
+                namespace,
+            } => (
+                cluster(name),
+                None,
+                format!(
+                    "cluster `{first}` has the same context `{context}` and namespace `{namespace}`; each cluster deploys to a namespace of its own"
+                ),
+            ),
+            Self::InvalidSecretName {
+                cluster: name,
+                secret,
+                name: holder,
+            } => (
+                cluster(name),
+                Some(format!("secrets.{secret}")),
+                format!(
+                    "`{holder}` is not a Kubernetes Secret's name: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters"
+                ),
+            ),
+            Self::InvalidVariable {
+                cluster: name,
+                variable,
+            } => (
+                cluster(name),
+                Some(format!("env.{variable}")),
+                "not a variable's name: letters, digits, and `_`, not starting with a digit".into(),
+            ),
             Self::InvalidLayout { pool: name, reason } => {
                 (pool(name), key("layout"), reason.clone())
             }

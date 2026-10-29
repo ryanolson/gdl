@@ -98,17 +98,32 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 
 | Key | Meaning | Default |
 |---|---|---|
+| `[fleet] name` | the fleet's name, which labels the objects it deploys | none |
+| `[cluster.<name>] context` | the kube context that reaches the cluster | required |
+| `[cluster.<name>] namespace` | the namespace the fleet's objects go in | required |
+| `[cluster.<name>] region` | the region of every pool in the cluster | required |
+| `[cluster.<name>] registry` | the registry the cluster pulls images from | none |
+| `[cluster.<name>] platform` | the platform of the cluster's nodes, as `docker buildx --platform` takes it, such as `linux/amd64` | none |
+| `[cluster.<name>] service_account_annotations` | annotations of the pools' service account, such as a cloud role | none |
+| `[cluster.<name>] secrets` | spec secret name to the name of an existing Kubernetes Secret that holds it in this cluster | none |
+| `[cluster.<name>] env` | variables that every container of the cluster's pools gets | none |
+| `[cluster.<name>] pins_local` | whether the cluster's pin table runs in a DynamoDB Local of its own | `false` |
 | `[class.<name>] ready` | segment to the usable instances a pool of the class needs to be ready | 1 per segment |
 | `[class.<name>] requires` | class to the number of ready children of it that a pool's health needs | 1 for each class the pool's class sends to |
 | `[pool.<name>] class` | the pool's class, a class of its layout | required |
-| `[pool.<name>] region` | the pool's region | required |
+| `[pool.<name>] cluster` | the cluster that runs the pool | none |
+| `[pool.<name>] region` | the pool's region | its cluster's, and required without a cluster |
 | `[pool.<name>] layout` | the spec layout the pool runs | the only layout, when there is one; required otherwise |
 | `[pool.<name>] home` | the parent pool | required for a class that another class sends to; refused otherwise |
 | `[pool.<name>] ready` | overrides the class's quorum for a segment | the class's, else 1 |
 
 - A pool's quorum for a segment is its own `ready`, else its class's, else 1.
 - An explicit `requires` replaces the default whole. It can raise a count or name a subset of the classes sent to. A count of 0, and a class that the class does not send to, are refused.
-- A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters.
+- A pool or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. So are the fleet's name, a cluster's name, and its namespace.
+- A pool's `cluster` names a `[cluster.<name>]` table, and the pool takes the cluster's region. A pool may still write `region`, and then it must be the cluster's. A pool without a cluster writes its `region`.
+- No two clusters have the same `context` and `namespace`.
+- The fleet file holds no secret value and no credential. A cluster's `secrets` holds only Kubernetes Secret names: lowercase letters, digits, `-`, and `.`, starting and ending with a letter or digit, at most 253 characters. Its keys are not checked against the spec's `[deployment.secrets]` tables. A kube context's credentials stay in the kubeconfig. Do not put a secret value in `env`. An `env` key is letters, digits, and `_`, not starting with a digit.
+- `cargo gdl compose` reads only a cluster's region. A fleet whose pools take their regions from clusters writes the same bundle as one whose pools write the same regions.
 - A `home` names a pool of a parent class that runs the same layout. Every pool whose class sends to another class needs a child of each class it sends to, in its layout.
 - A `ready` key must be a segment of the class, and a count is at least 1.
 - A `[class.<name>]` table applies to the class's pools in every layout with the class, and is checked against each.
@@ -163,6 +178,7 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 | spec `[binary] allocator` | `"system"` | `Allocator::DEFAULT` |
 | fleet `ready.<segment>`, `[pool] ready.<segment>` | `1` | `PoolSettings::DEFAULT_QUORUM` |
 | fleet `requires.<class>`, `[pool] requires.<class>`, for each class the pool's class sends to, when `requires` is unsaid | `1` | `PoolSettings::DEFAULT_REQUIRES` |
+| fleet `[cluster.<name>] pins_local` | `false` | `Cluster::DEFAULT_PINS_LOCAL` |
 | `[pool] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |
 | `[pool] summary_ms` | `10000` | `PoolSettings::DEFAULT_SUMMARY` |
 | `[pool] summary_ms`, its least | `1000` | `PoolSettings::MIN_SUMMARY` |

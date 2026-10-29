@@ -57,7 +57,7 @@
 | Class | A named set of segments that deploy together. Every segment is in exactly one class. Classes are part of the placement hash. See [Classes and pools](../concepts/pools.md) |
 | Pool | One running deployment of one class, with its own hub. Pools are runtime topology, like replicas, and not part of the hash |
 | Home | The parent pool of a pool: the one that follows it and prefers it |
-| Fleet | The `fleet.toml` file that lists pools, their classes, regions, and homes. See [Deploy a fleet of pools](../guides/fleet.md) |
+| Fleet | The `fleet.toml` file that lists pools, their classes, regions, and homes, and the clusters that run them. See [Deploy a fleet of pools](../guides/fleet.md) |
 | Pool record | One record per pool, published by its hub: class, region, hashes, state, load summary, hub address, and expiry |
 | Pool directory | Where pool records live and are watched. Its backends are `memory` and `dir` |
 | Chooser | An instance whose segment holds the outer end of a hop into another class. It picks the pool for each attempt. See [Following and choosing pools](../concepts/pool-routing.md) |

@@ -987,7 +987,7 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
 /// as the table writes it.
 fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{
-        DirectoryBackend, HubTiming, PoolPolicy, PoolSettings, RequestRouter, WatchCaps,
+        Cluster, DirectoryBackend, HubTiming, PoolPolicy, PoolSettings, RequestRouter, WatchCaps,
     };
     let millis = |d: std::time::Duration| d.as_millis().to_string();
     let directory = match DirectoryBackend::DEFAULT {
@@ -1023,6 +1023,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "PoolSettings::DEFAULT_REQUIRES",
             PoolSettings::DEFAULT_REQUIRES.to_string(),
+        ),
+        (
+            "Cluster::DEFAULT_PINS_LOCAL",
+            Cluster::DEFAULT_PINS_LOCAL.to_string(),
         ),
         ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (

@@ -393,7 +393,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** check the settings the segment reports at start. See [Configuration](configuration.md).
 
 ### Only Docker Compose is generated, and the composer applies only on its own host
-- **What:** `cargo gdl compose` writes a Compose bundle and no Kubernetes manifests. The Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.
+- **What:** `cargo gdl compose` writes a Compose bundle and no Kubernetes manifests. A fleet's `[cluster.<name>]` tables are checked, but the bundle uses only each cluster's region. Nothing reads their context, namespace, registry, platform, annotations, Secret names, variables, or `pins_local` yet. The Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.
 - **Apply:** **Build and apply** runs `docker compose up --build --detach` on the host that runs `gdl-web`, with that host's Docker, and only when the server started with `--docker`. A second apply while one runs is refused. The page shows the output of the build and start, not the segments' health. The segments can still be loading when the command returns.
 - **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health would hold the request for the segments' start period (30 minutes, to cover a slow load).
 - **Scaling:** a segment that publishes a fixed, nonzero host port cannot scale, since two containers cannot bind one port. A port Docker chooses scales. See [Deploy with Docker Compose](../guides/compose-deploy.md).

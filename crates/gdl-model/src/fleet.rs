@@ -7,17 +7,30 @@ use crate::{
     DirectoryBackend, Layout, PoolSettings, Problem, Problems, check_layout_name, read_toml,
 };
 
+mod cluster;
 mod errors;
 
+pub use cluster::Cluster;
 pub use errors::{FleetError, FleetErrors, FleetTable};
+
+use cluster::{Header, check_clusters};
 
 /// A deployment's pools: `fleet.toml`. Not part of the placement's
 /// identity: pools are runtime topology, like replicas. It says what each
-/// class's pools need by default, and which pools there are, with their
-/// layout, class, region, home, and quorum overrides; a bundle generator writes
-/// each pool's own settings from it ([`Fleet::pool`]).
+/// class's pools need by default, which pools there are, with their
+/// layout, class, region, home, and quorum overrides, and the clusters
+/// that run them; a bundle generator writes each pool's own settings from
+/// it ([`Fleet::pool`]).
 ///
 /// ```toml
+/// [fleet]
+/// name = "llm"                       # optional: labels the objects the fleet deploys
+///
+/// [cluster.use1]                     # optional: a Kubernetes cluster ([`Cluster`])
+/// context = "kind-use1"
+/// namespace = "gdl-llm"
+/// region = "us-east-1"
+///
 /// [class.global]
 /// ready = { a = 2, b = 2, c = 2 }   # default quorum of a pool of this class, per segment
 /// requires = { model_x = 1 }         # optional: ready children of each class it sends to its health needs; 1 of each when unsaid
@@ -25,13 +38,22 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 /// [pool.model-x-01-us-east-1]
 /// layout = "regional"                # the spec's layout it runs: required when the spec has several
 /// class = "model_x"
-/// region = "us-east-1"
+/// cluster = "use1"                   # the cluster that runs it, whose region it takes
+/// region = "us-east-1"               # required without a cluster; with one, its region if given
 /// home = "global-us-east-1"          # the parent pool, required when another class sends to this one: whose hub follows it
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fleet {
+    #[serde(rename = "fleet", default, skip_serializing_if = "Header::is_empty")]
+    header: Header,
+    #[serde(
+        rename = "cluster",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    clusters: BTreeMap<String, Cluster>,
     #[serde(rename = "class", default, skip_serializing_if = "BTreeMap::is_empty")]
     classes: BTreeMap<String, ClassDefaults>,
     #[serde(rename = "pool", default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -56,7 +78,13 @@ struct PoolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<String>,
     class: String,
-    region: String,
+    /// The cluster that runs the pool, whose region is the pool's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<String>,
+    /// The pool's region: required without a cluster, and its cluster's
+    /// when given with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
     /// The parent pool: the pool of a class that sends to this one that
     /// follows this pool and offers it work. Required for a pool of a
     /// class that another class sends to, and refused for one of a class
@@ -133,11 +161,15 @@ impl Fleet {
     /// to its pools in every layout with the class, and are judged against
     /// each. A pool whose layout or class is unknown is reported once: its
     /// quorum, its home, and its children are not judged against them.
-    /// What needs a layout's classes is not judged for a layout given
-    /// without its [`Layout`], and without any layouts (the spec did not
-    /// read) only what needs none is: the pools' names, regions, and layout
-    /// names, that each home is a pool of the fleet in the layout its pool
-    /// names, and that no count is 0. [`Fleet::children_unchecked`] says
+    /// A pool's cluster is one of the fleet's, and its region, when it
+    /// gives one with a cluster, is the cluster's; a pool without a cluster
+    /// gives its region. No two clusters share a kube context and a
+    /// namespace. What needs a layout's classes is not judged for a layout
+    /// given without its [`Layout`], and without any layouts (the spec did
+    /// not read) only what needs none is: the fleet's name, its clusters,
+    /// the pools' names, regions, clusters, and layout names, that each
+    /// home is a pool of the fleet in the layout its pool names, and that
+    /// no count is 0. [`Fleet::children_unchecked`] says
     /// when that left a pool's children unjudged.
     pub fn check(
         &self,
@@ -160,6 +192,8 @@ impl Fleet {
         for (class, defaults) in &self.classes {
             self.check_class(class, defaults, laid.as_ref(), &mut errors);
         }
+        self.header.check(&mut errors);
+        check_clusters(&self.clusters, &mut errors);
         // Each child by its home, its layout, and its class: a parent's
         // children are the pools that name it in its own layout.
         let children: BTreeSet<(&str, &str, &str)> = self
@@ -178,12 +212,7 @@ impl Fleet {
                     reason,
                 });
             }
-            if let Err(reason) = check_region_name(&pool.region) {
-                errors.push(FleetError::InvalidRegion {
-                    pool: name.clone(),
-                    reason,
-                });
-            }
+            self.region_problems(name, pool, &mut errors);
             let runs = match self.layout_of(name, pool, laid.as_ref()) {
                 Ok(runs) => runs,
                 Err(error) => {
@@ -234,6 +263,47 @@ impl Fleet {
             Ok(())
         } else {
             Err(FleetErrors(unique))
+        }
+    }
+
+    /// What is wrong with `pool`'s region and cluster: its region is a DNS
+    /// label, its cluster one of the fleet's, and it has a region, its own
+    /// or its cluster's, the same when it has both. A cluster's own region
+    /// is judged at the cluster.
+    fn region_problems(&self, name: &str, pool: &PoolSpec, errors: &mut Vec<FleetError>) {
+        let mut shaped = true;
+        if let Some(region) = &pool.region
+            && let Err(reason) = check_region_name(region)
+        {
+            shaped = false;
+            errors.push(FleetError::InvalidRegion {
+                table: FleetTable::Pool(name.into()),
+                reason,
+            });
+        }
+        let Some(cluster) = &pool.cluster else {
+            if pool.region.is_none() {
+                errors.push(FleetError::MissingRegion { pool: name.into() });
+            }
+            return;
+        };
+        let Some(placed) = self.clusters.get(cluster) else {
+            errors.push(FleetError::UnknownCluster {
+                pool: name.into(),
+                cluster: cluster.clone(),
+            });
+            return;
+        };
+        // A region that is no region's name is already its problem.
+        if let Some(region) = pool.region.as_ref().filter(|_| shaped)
+            && *region != placed.region
+        {
+            errors.push(FleetError::RegionNotCluster {
+                pool: name.into(),
+                region: region.clone(),
+                cluster: cluster.clone(),
+                cluster_region: placed.region.clone(),
+            });
         }
     }
 
@@ -465,7 +535,8 @@ impl Fleet {
     /// The settings of the pool `name`, with its quorum resolved: for each
     /// segment, the pool's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`PoolSettings::quorum`]'s fallback. Its `requires` is its class's, and
+    /// [`PoolSettings::quorum`]'s fallback. Its region is its cluster's,
+    /// when it names one, else its own. Its `requires` is its class's, and
     /// unsaid when that is, which requires one ready child of each class its
     /// class sends to ([`PoolSettings::requirements`]). The directory, hub
     /// address, summary period, and hub timing are not in the fleet file and take their defaults. Meant for a fleet that
@@ -483,7 +554,11 @@ impl Fleet {
             name: name.to_string(),
             layout: pool.layout.clone(),
             class: pool.class.clone(),
-            region: pool.region.clone(),
+            region: self
+                .cluster_of(name)
+                .map(|(_, cluster)| cluster.region.clone())
+                .or_else(|| pool.region.clone())
+                .unwrap_or_default(),
             home: pool.home.clone(),
             directory: DirectoryBackend::default(),
             ready,
@@ -500,6 +575,31 @@ impl Fleet {
     /// what a bundle generator deploys.
     pub fn pools(&self) -> impl Iterator<Item = PoolSettings> + '_ {
         self.pools.keys().filter_map(|name| self.pool(name))
+    }
+
+    /// The fleet's name, from `[fleet] name`, if it has one.
+    pub fn name(&self) -> Option<&str> {
+        self.header.name.as_deref()
+    }
+
+    /// The cluster `name`, if the fleet has it.
+    pub fn cluster(&self, name: &str) -> Option<&Cluster> {
+        self.clusters.get(name)
+    }
+
+    /// Every cluster, by its name, in name order.
+    pub fn clusters(&self) -> impl Iterator<Item = (&str, &Cluster)> + '_ {
+        self.clusters
+            .iter()
+            .map(|(name, cluster)| (name.as_str(), cluster))
+    }
+
+    /// The cluster that runs the pool `pool`, by its name: `None` when the
+    /// fleet has no such pool, the pool names no cluster, or the fleet has
+    /// no cluster of that name.
+    pub fn cluster_of(&self, pool: &str) -> Option<(&str, &Cluster)> {
+        let name = self.pools.get(pool)?.cluster.as_deref()?;
+        Some((name, self.clusters.get(name)?))
     }
 }
 

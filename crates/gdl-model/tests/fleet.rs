@@ -9,6 +9,9 @@ use gdl_model::{
     PoolSettings, Role, TypeInfo, layout,
 };
 
+#[path = "fleet/clusters.rs"]
+mod clusters;
+
 /// The graph of a model served in pools (docs/src/concepts/pools.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`.
 fn manifest() -> Manifest {
@@ -363,7 +366,6 @@ fn unknown_keys_are_refused_anywhere() {
         "[region.us-east-1]\n",
         "[class.global]\nquorum = { a = 1 }\n",
         "[pool.g]\nclass = 'global'\nregion = 'r'\nzone = 'a'\n",
-        "[pool.g]\nclass = 'global'\n",
         "[pool.g]\nregion = 'r'\n",
         "[class.global]\nready = { a = -1 }\n",
         "[class.global]\nready = { a = 'two' }\n",

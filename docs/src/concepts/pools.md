@@ -8,7 +8,7 @@ A class is a set of segments that deploy together. A pool is one running deploym
 |---|---|---|---|
 | graph file (`x.gdl`) | nodes, types, topology | contract hash | the pipeline changes |
 | spec (`gdl.toml`) | segments, classes, routing, pool policy | placement hash | the split changes |
-| fleet file (`fleet.toml`) | pools, regions, parents, quorums | no | capacity changes |
+| fleet file (`fleet.toml`) | pools, regions, clusters, parents, quorums | no | capacity changes |
 
 Classes are part of the placement. Adding, renaming, or changing a class changes the placement hash. A spec without classes keeps its hash. Pools are runtime topology, like replicas: they are not in either hash.
 

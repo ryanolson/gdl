@@ -126,6 +126,49 @@ fn a_clean_spec_and_fleet_check_clean() {
     assert!(stdout.contains("no problems"), "{stdout}");
 }
 
+/// The fleet's clusters: a pool takes its region from the cluster it
+/// names. `check` refuses a cluster the fleet does not have, a pool region
+/// that is not its cluster's, and two clusters that deploy to one
+/// namespace of one context, each at the pool or cluster it is about.
+#[test]
+fn check_refuses_what_is_wrong_with_the_fleets_clusters() {
+    let clusters = "[fleet]\nname = \"chat\"\n\
+        [cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl\"\nregion = \"us-east-1\"\n\
+        [cluster.use1-b]\ncontext = \"kind-use1-b\"\nnamespace = \"gdl\"\nregion = \"us-east-1\"\n";
+    let clean = FLEET.replace("region = \"us-east-1\"", "cluster = \"use1\"");
+    let files = Files::new(&spec(""), &format!("{clusters}{clean}"));
+    let output = files.check();
+    assert!(output.status.success(), "{output:?}");
+
+    let broken = format!(
+        "{}{}",
+        clusters.replace("kind-use1-b", "kind-use1"),
+        FLEET
+            .replace("region = \"us-east-1\"\nhome", "cluster = \"use2\"\nhome")
+            .replacen(
+                "region = \"us-east-1\"",
+                "cluster = \"use1\"\nregion = \"us-west-2\"",
+                1
+            )
+    );
+    let files = Files::new(&spec(""), &broken);
+    let f = files.fleet().display().to_string();
+    let check = files.check();
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert_problems(
+        &problems(&check),
+        &[
+            format!(
+                "{f}: [cluster.use1-b]: cluster `use1` has the same context `kind-use1` and namespace `gdl`"
+            ),
+            format!(
+                "{f}: [pool.global-us-east-1] region: `us-west-2` is not the region of cluster `use1`, which is `us-east-1`"
+            ),
+            format!("{f}: [pool.model-x-01-us-east-1] cluster: the fleet has no cluster `use2`"),
+        ],
+    );
+}
+
 /// A spec that does not parse is one problem, and the fleet file is still
 /// checked for what needs no layout.
 #[test]
