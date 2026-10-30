@@ -16,8 +16,15 @@ fn fitted_monitor_names_remain_dns_labels() {
             .replace("name = \"api\"", &format!("name = {fleet:?}"))
             .replace("use1", &cluster);
         let fleet = gdl_model::Fleet::from_toml(&text).expect("a fleet");
-        let files = gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), Some("pinned"), None)
-            .expect("valid names permit rendering");
+        let files = gdl_gen::k8s_files(
+            &spec,
+            &fleet,
+            &mirror.target(),
+            Some("pinned"),
+            None,
+            gdl_gen::Sources::Fetched,
+        )
+        .expect("valid names permit rendering");
         let objects = super::super::super::k8s::objects(&files);
         let monitors: Vec<_> = objects
             .values()
@@ -58,8 +65,15 @@ fn invalid_fleet_and_cluster_names_are_refused_before_rendering() {
             fleet_asking(true).replace("use1", &invalid),
         ] {
             let fleet = gdl_model::Fleet::from_toml(&text).expect("valid TOML");
-            let error = gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), Some("pinned"), None)
-                .expect_err("invalid names are refused");
+            let error = gdl_gen::k8s_files(
+                &spec,
+                &fleet,
+                &mirror.target(),
+                Some("pinned"),
+                None,
+                gdl_gen::Sources::Fetched,
+            )
+            .expect_err("invalid names are refused");
             assert!(error.to_string().contains("name"), "{error}");
         }
     }

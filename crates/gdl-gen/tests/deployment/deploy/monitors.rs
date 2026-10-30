@@ -199,6 +199,7 @@ fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {})
         .expect("aliases permit a deploy");
@@ -256,6 +257,7 @@ fn deploy_stops_when_operator_discovery_is_incomplete() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     let result = gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {});
     assert!(
@@ -344,6 +346,7 @@ fn assert_monitor_group(prune: bool) {
             target: mirror.target(),
             out: None,
             waits: waits(),
+            sources: gdl_gen::Sources::Fetched,
         };
         gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {}).expect("deploy");
     } else {

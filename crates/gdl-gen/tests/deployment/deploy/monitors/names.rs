@@ -22,6 +22,7 @@ fn apply_fleet(mirror: &Mirror, text: &str, log: &Log, kube: &mut dyn gdl_gen::K
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     gdl_gen::deploy(&how, &mut docker(log), kube, &mut |_| {})
         .expect("both cluster names permit a deploy");
