@@ -245,3 +245,46 @@ fn a_linked_manifest_with_an_absolute_dependency_is_refused() {
         );
     }
 }
+
+/// The Cargo configuration at the tree's root, which Cargo reads where it
+/// settles the locks and in the image build, is checked as a manifest is:
+/// a `[patch]` path, or a `paths` entry, that is absolute or leaves the
+/// tree is refused, naming the file and the path.
+#[test]
+fn a_root_cargo_configuration_with_an_absolute_path_is_refused() {
+    let host = tempfile::Builder::new()
+        .prefix("gdl-host-support-")
+        .tempdir()
+        .expect("a crate outside the sources");
+    std::fs::create_dir(host.path().join("src")).expect("a source directory");
+    std::fs::write(
+        host.path().join("Cargo.toml"),
+        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a manifest");
+    std::fs::write(host.path().join("src/lib.rs"), "").expect("a source");
+    let name = host
+        .path()
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    for (config, named) in [
+        (
+            format!(
+                "[patch.crates-io]\nimage-support = {{ path = {} }}\n",
+                toml::Value::String(host.path().display().to_string())
+            ),
+            host.path().display().to_string(),
+        ),
+        (format!("paths = [\"../{name}\"]\n"), format!("../{name}")),
+    ] {
+        let copy = Copy::new();
+        std::fs::create_dir(copy.path().join(".cargo")).expect("a directory");
+        std::fs::write(copy.path().join(".cargo/config.toml"), &config).expect("a configuration");
+        copy.add();
+        let error = refused(&copy);
+        assert!(error.contains(".cargo/config.toml"), "{config}: {error}");
+        assert!(error.contains(&named), "{config}: {error}");
+    }
+}

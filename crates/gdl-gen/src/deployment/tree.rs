@@ -9,8 +9,10 @@
 //! touches neither the checkout nor any ref. So no file Git ignores or
 //! does not track can reach an image, a link travels as a link, and a name
 //! stays the bytes Git holds. A walk of the working tree, filtered by hand,
-//! was the design before this one: each review found another way around
-//! its filter. See `docs/src/guides/kubernetes.md`.
+//! was the design before this one, and files got past its filter: through a
+//! tracked directory replaced by a link, a name Git lists as bytes read as
+//! UTF-8, and a parent step in an absolute path. See
+//! `docs/src/guides/kubernetes.md`.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -46,6 +48,7 @@ pub(super) fn build(
             manifest(dir, context, path)?;
         }
     }
+    config(dir, context)?;
     // A manifest that names a directory outside the sources says why Git
     // cannot place it: that refusal comes first.
     if let Some(error) = unplaced {
@@ -441,10 +444,7 @@ fn links(dir: &Path, context: &Context, entries: &BTreeMap<PathBuf, Entry>) -> R
 /// hold them. A manifest Cargo cannot read is left to Cargo, which refuses
 /// it in the build with its own words.
 fn manifest(dir: &Path, context: &Context, path: &Path) -> Result<(), Error> {
-    let Ok(text) = std::fs::read_to_string(dir.join(path)) else {
-        return Ok(());
-    };
-    let Ok(table) = text.parse::<toml::Table>() else {
+    let Some(table) = table(dir, path) else {
         return Ok(());
     };
     let mut named = Vec::new();
@@ -456,7 +456,43 @@ fn manifest(dir: &Path, context: &Context, path: &Path) -> Result<(), Error> {
     {
         named.push(workspace.to_string());
     }
-    let here = path.parent().unwrap_or(Path::new(""));
+    inside(context, path, path.parent().unwrap_or(Path::new("")), named)
+}
+
+/// Refuse the Cargo configuration at the tree's root, in `dir`, as
+/// [`manifest`] refuses a manifest: Cargo reads it where it settles the
+/// locks, and in the image build. Its `[patch]` paths and its `paths` are
+/// read from the directory that holds `.cargo`.
+fn config(dir: &Path, context: &Context) -> Result<(), Error> {
+    for name in [".cargo/config.toml", ".cargo/config"] {
+        let path = Path::new(name);
+        let Some(table) = table(dir, path) else {
+            continue;
+        };
+        let mut named = Vec::new();
+        paths(&table, &mut named);
+        let listed = table.get("paths").and_then(toml::Value::as_array);
+        named.extend(
+            listed
+                .into_iter()
+                .flatten()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string),
+        );
+        inside(context, path, Path::new(""), named)?;
+    }
+    Ok(())
+}
+
+/// The TOML table of the file at `path` in the tree in `dir`, when it is
+/// one.
+fn table(dir: &Path, path: &Path) -> Option<toml::Table> {
+    std::fs::read_to_string(dir.join(path)).ok()?.parse().ok()
+}
+
+/// Refuse each of `named`, the paths the file at `path` in the tree names
+/// from `here`, that is absolute or leaves the tree.
+fn inside(context: &Context, path: &Path, here: &Path, named: Vec<String>) -> Result<(), Error> {
     for name in named {
         let why = if Path::new(&name).is_absolute() {
             "by an absolute path"
