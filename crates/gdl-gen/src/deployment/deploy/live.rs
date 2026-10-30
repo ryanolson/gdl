@@ -1,5 +1,5 @@
 //! The fleet's objects as a cluster holds them: what `deploy` prunes, and
-//! `down` deletes. Each is read for its kind, its name, and the labels the
+//! `down` deletes. Each is read for its kind, its name, its uid, and the labels the
 //! render gives it, by their whole values ([`super::super::k8s`] labels a
 //! long value by its start and a hash, and keeps it whole in an
 //! annotation). A hub's Deployment is also read for the pool's parent and
@@ -15,6 +15,9 @@ use crate::Error;
 pub(super) struct Live {
     pub(super) kind: String,
     pub(super) name: String,
+    /// The cluster's own name for it, which no other object of the
+    /// cluster has.
+    pub(super) uid: String,
     /// `gdl.dev/pool`: the pool it is of, for a pool's object.
     pub(super) pool: Option<String>,
     /// `gdl.dev/class`.
@@ -29,13 +32,17 @@ pub(super) struct Live {
 }
 
 impl Live {
-    /// The objects of a `kubectl get --output json` list.
+    /// The objects of a `kubectl get --output json` list, or of what
+    /// `kubectl apply --output json` printed: one object, or a list.
     pub(super) fn list(text: &str) -> Result<Vec<Self>, Error> {
         let list: Value = serde_json::from_str(text)
-            .map_err(|e| Error::new(format!("`kubectl get` printed no JSON list: {e}")))?;
+            .map_err(|e| Error::new(format!("`kubectl` printed no JSON: {e}")))?;
+        if list["kind"] != "List" {
+            return Self::of(&list).map(|object| vec![object]);
+        }
         list["items"]
             .as_array()
-            .ok_or_else(|| Error::new("`kubectl get` printed a list with no items"))?
+            .ok_or_else(|| Error::new("`kubectl` printed a list with no items"))?
             .iter()
             .map(Self::of)
             .collect()
@@ -44,10 +51,12 @@ impl Live {
     fn of(object: &Value) -> Result<Self, Error> {
         let text = |value: &Value| value.as_str().map(str::to_string);
         let kind = text(&object["kind"])
-            .ok_or_else(|| Error::new("`kubectl get` listed an object with no kind"))?;
+            .ok_or_else(|| Error::new("`kubectl` printed an object with no kind"))?;
         let metadata = &object["metadata"];
         let name = text(&metadata["name"])
-            .ok_or_else(|| Error::new(format!("`kubectl get` listed a {kind} with no name")))?;
+            .ok_or_else(|| Error::new(format!("`kubectl` printed a {kind} with no name")))?;
+        let uid = text(&metadata["uid"])
+            .ok_or_else(|| Error::new(format!("`kubectl` printed {kind} `{name}` with no uid")))?;
         // A label's whole value: in the annotation of its key when the
         // label holds a shortened one.
         let whole = |key: &str| {
@@ -69,6 +78,7 @@ impl Live {
             grace: pod["terminationGracePeriodSeconds"].as_u64(),
             kind,
             name,
+            uid,
         })
     }
 

@@ -111,7 +111,7 @@ Each file is a YAML stream of JSON documents. The pinned output of this fleet is
 | entry Service | `<pool>-<segment>` | ClusterIP, for a segment with `[deployment.segment.<name>] ports` only |
 | PersistentVolumeClaim | `<pool>-state` | 1Gi, for a parent's hub only |
 
-Every object carries `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/class`. Every object but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class is not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
+Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for its cluster. Every object of a pool also carries `gdl.dev/pool` and `gdl.dev/class`. Every object of a pool but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class and the cluster are not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
 
 - **Settings.** Each pod reads its settings from the pool's ConfigMap, mounted at `/etc/gdl/fleet`: the hub runs `/usr/local/bin/segment /etc/gdl/fleet/deployment.json`, and a segment `/usr/local/bin/segment /etc/gdl/fleet/<segment>.toml`. A pod template carries `gdl.dev/config`, a checksum of the ConfigMap's data. A change to the settings changes it, and so replaces the pods. A ConfigMap's change alone restarts no pod.
 - **Variables.** A pool's hub and segments get the `GDL_POOL__*` variables that its Compose services get, from the same function. Only the addresses differ. A hub's `GDL_POOL__HUB` is `$(GDL_POD_IP):1337`, and `GDL_POD_IP` comes from `status.podIP`, so the pool's record names the hub's pod. A segment's `GDL_POOL__HUB` and `GDL_HUB__HOST` name the hub's Service. A child's `GDL_POOL__PARENT_HUB` is `<parent>:1337`, the parent hub's Service. The cluster's `env` comes after these. Kubernetes reads `$(NAME)` in a value as another variable, so the render writes each `$` of a cluster's value as `$$`.
@@ -158,7 +158,7 @@ cargo gdl deploy --spec gdl.toml --fleet fleet.toml
 4. **Base.** For each cluster, it applies `base.yaml`, the Namespace and the ServiceAccount, and waits until the namespace is `Active`.
 5. **Tables.** No fleet renders a tables job yet, so this step does nothing.
 6. **Apply.** For each cluster, it applies the pools' objects with `kubectl apply --server-side --field-manager=gdl`.
-7. **Prune.** For each cluster, it lists the objects in the namespace that carry `gdl.dev/fleet=<fleet>`, and deletes those that this render did not write ([Prune](#prune)).
+7. **Prune.** For each cluster, it lists the objects in the namespace that carry `gdl.dev/fleet=<fleet>` and `gdl.dev/cluster=<cluster>`, and deletes those that this render did not write ([Prune](#prune)).
 8. **Wait.** It waits until each pool's health answers 200, through the API server's service proxy, for up to 600 s.
 
 Each `kubectl` command names its cluster's `--context` first, so that no command uses the current context. `deploy` reads no kubeconfig, token, key, or Secret. It uses the contexts you already have. It does not check up front that the Secrets the cluster's `secrets` names exist, because `kubectl get secret` sends the Secret's data to the client. A missing Secret shows when the health wait fails: for each pod of an unhealthy pool that is not ready, the error names its phase, why its container waits, and its latest events, such as `secret "api-fingerprint" not found`.
@@ -174,7 +174,7 @@ kubectl refuses `--prune` together with `--server-side`, so `deploy` prunes by i
 3. It waits until the parent's hub answers 404 for the pool's record (`GET /v1/ext/gdl-pool/report/<class>/<pool>`). The pool's hub withdraws the record only once its drain has ended. A pool that stops without a drain stays in its parent's records, as missing. The wait lasts for the longest `terminationGracePeriodSeconds` of the pool's Deployments, and 60 s more.
 4. It deletes the objects it did not render: first the segments' Deployments, then the hubs' Deployments, then the Services, ConfigMaps, PersistentVolumeClaims, and ServiceAccounts. Each delete uses `--cascade=foreground` and waits until the pods are gone.
 
-Prune never deletes a Namespace. It looks only in the namespaces of the fleet's clusters. A cluster removed from the fleet keeps its objects: run `cargo gdl down` with the old fleet first.
+Prune never deletes a Namespace. It looks only in the namespaces of the fleet's clusters, and only at the objects rendered for that cluster, by `gdl.dev/cluster`. So two clusters of the fleet whose contexts reach one namespace never prune each other's objects. As a second guard, `deploy` stops, and deletes nothing, when a cluster's prune would delete an object that this run applied in any cluster, by its uid. A cluster removed from the fleet keeps its objects: run `cargo gdl down` with the old fleet first.
 
 ## 5. Take the fleet down
 
@@ -182,7 +182,7 @@ Prune never deletes a Namespace. It looks only in the namespaces of the fleet's 
 cargo gdl down --spec gdl.toml --fleet fleet.toml
 ```
 
-For each cluster, `down` drains each pool that has a parent and waits until it withdraws, as the prune does. Then it deletes every object in the namespace that carries `gdl.dev/fleet=<fleet>`. Last, it removes the label from the Namespace and keeps the Namespace, so the Secrets in it remain. `down` needs only the fleet file. With `--spec`, it first checks the spec and the fleet, as `cargo gdl check --fleet` does, and stops on a problem before it touches a cluster.
+For each cluster, `down` drains each pool that has a parent and waits until it withdraws, as the prune does. Then it deletes every object in the namespace that carries `gdl.dev/fleet=<fleet>` and `gdl.dev/cluster=<cluster>`. Last, it removes both labels from the Namespace and keeps the Namespace, so the Secrets in it remain. `down` needs only the fleet file. With `--spec`, it first checks the spec and the fleet, as `cargo gdl check --fleet` does, and stops on a problem before it touches a cluster.
 
 To reach a global pool's entry while the fleet runs, forward its Service:
 

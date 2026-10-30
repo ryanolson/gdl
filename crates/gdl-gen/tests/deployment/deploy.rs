@@ -90,13 +90,25 @@ impl Kube {
         }
     }
 
-    /// Put `object` in `context` as if an earlier deploy had applied it.
-    fn holds(&mut self, context: &str, object: Value) {
+    /// Put `object` in `context` as if an earlier deploy had applied it:
+    /// labelled with the cluster the context names (`kind-<cluster>`)
+    /// unless it already names one, and with the uid it had there, or a new
+    /// one. Returns it as held.
+    fn holds(&mut self, context: &str, mut object: Value) -> Value {
         let key = key(&object);
-        self.objects
-            .entry(context.to_string())
-            .or_default()
-            .insert(key, object);
+        let labels = &mut object["metadata"]["labels"];
+        if labels.get("gdl.dev/cluster").is_none() {
+            let cluster = context.strip_prefix("kind-").unwrap_or(context);
+            labels["gdl.dev/cluster"] = cluster.into();
+        }
+        let objects = self.objects.entry(context.to_string()).or_default();
+        let uid = objects
+            .get(&key)
+            .map(|held| held["metadata"]["uid"].clone())
+            .unwrap_or_else(|| format!("{context}/{}/{}", key.0, key.1).into());
+        object["metadata"]["uid"] = uid;
+        objects.insert(key, object.clone());
+        object
     }
 }
 
@@ -138,14 +150,15 @@ impl gdl_gen::Kube for Kube {
         let reply = match (verb, raw) {
             ("auth", _) => gdl_gen::Reply::ok(format!("{}\n", self.can_i)),
             ("apply", _) => {
+                let mut applied = Vec::new();
                 for document in input.unwrap_or_default().split("---\n") {
                     if document.trim().is_empty() {
                         continue;
                     }
                     let object: Value = serde_json::from_str(document).expect("JSON");
-                    self.holds(&context, object);
+                    applied.push(self.holds(&context, object));
                 }
-                gdl_gen::Reply::ok("")
+                gdl_gen::Reply::ok(json!({"kind": "List", "items": applied}).to_string())
             }
             ("wait" | "label", _) => gdl_gen::Reply::ok(""),
             ("create", Some(path)) => {
@@ -177,12 +190,23 @@ impl gdl_gen::Kube for Kube {
             ("get", None) if rest[1] == "pods" => gdl_gen::Reply::ok(self.pods.to_string()),
             ("get", None) if rest[1] == "events" => gdl_gen::Reply::ok(self.events.to_string()),
             ("get", None) => {
+                let selector = rest
+                    .iter()
+                    .position(|a| a == "--selector")
+                    .map(|i| rest[i + 1].clone())
+                    .unwrap_or_default();
                 let items: Vec<Value> = self
                     .objects
                     .get(&context)
                     .into_iter()
                     .flat_map(|objects| objects.values())
                     .filter(|object| object["kind"] != "Namespace")
+                    .filter(|object| {
+                        selector.split(',').filter(|s| !s.is_empty()).all(|pair| {
+                            let (key, value) = pair.split_once('=').expect("key=value");
+                            object["metadata"]["labels"][key] == value
+                        })
+                    })
                     .cloned()
                     .collect();
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": items}).to_string())
@@ -694,7 +718,7 @@ fn a_health_timeout_names_the_pods_and_their_events() {
         .find(|args| args.contains(&"pods".to_string()))
         .expect("pods were listed");
     assert!(
-        pods.contains(&"gdl.dev/fleet=api,gdl.dev/pool=global-eu".to_string()),
+        pods.contains(&"gdl.dev/fleet=api,gdl.dev/cluster=euw1,gdl.dev/pool=global-eu".to_string()),
         "{pods:?}"
     );
 }
@@ -751,7 +775,12 @@ fn down_drains_deletes_and_keeps_the_namespace() {
         .expect("an unlabel");
     assert_eq!(
         unlabel[2..],
-        ["label", "namespace/gdl-api", "gdl.dev/fleet-"]
+        [
+            "label",
+            "namespace/gdl-api",
+            "gdl.dev/fleet-",
+            "gdl.dev/cluster-"
+        ]
     );
     // Segments go first, so that each hub outlives its instances.
     assert_eq!(
@@ -832,3 +861,6 @@ fn no_command_carries_a_credential() {
         assert!(!input.contains(MARKER), "{args:?}");
     }
 }
+
+#[path = "deploy/aliases.rs"]
+mod aliases;

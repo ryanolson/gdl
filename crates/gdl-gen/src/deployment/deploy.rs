@@ -6,8 +6,9 @@
 //! images (pushed), objects (rendered by the pushed digests), base objects,
 //! tables, apply, prune, and the wait for each pool's health. kubectl
 //! refuses `--prune` together with server-side apply, so the prune is
-//! `deploy`'s own: it deletes the objects labelled with the fleet that
-//! this deploy did not render, after it drains each pool it removes.
+//! `deploy`'s own: it deletes the objects labelled with the fleet and the
+//! cluster that this deploy did not render, after it drains each pool it
+//! removes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,10 @@ use live::{Live, Stopping};
 
 /// The label every object of a fleet carries, with the fleet's name.
 const FLEET_LABEL: &str = "gdl.dev/fleet";
+
+/// The label every object of a fleet carries, with the fleet's name for
+/// the cluster it is rendered for.
+const CLUSTER_LABEL: &str = "gdl.dev/cluster";
 
 /// A pool's hub's routes, as the service proxy reaches them.
 const HEALTH: &str = "/v1/ext/gdl-pool/health";
@@ -90,8 +95,9 @@ impl Default for Waits {
 /// 5. the tables job: no fleet renders one yet, so this step does nothing;
 /// 6. apply each cluster's pools, server-side;
 /// 7. prune each cluster: drain each pool that the fleet no longer places
-///    there, then delete every object labelled with the fleet that this
-///    render did not write;
+///    there, then delete every object labelled with the fleet and the
+///    cluster that this render did not write, and none that it applied in
+///    any cluster;
 /// 8. wait until each pool's health answers 200, through the API server's
 ///    service proxy; on a timeout, the error names each pod of an
 ///    unhealthy pool that is not ready, why it waits, and its events.
@@ -122,10 +128,13 @@ pub fn deploy(
         say(&format!("k8s: the objects are in {}", out.display()));
     }
     let rendered = Rendered::of(&files, &clusters)?;
+    // Every object this run applied, in any cluster, by its uid: none is
+    // pruned, even where two clusters' contexts reach one namespace.
+    let mut applied = BTreeSet::new();
 
     for cluster in &clusters.0 {
         let base = &rendered.0[&cluster.name];
-        apply(kube, cluster, &base.base)?;
+        applied.extend(apply(kube, cluster, &base.base)?);
         run(
             kube,
             &cluster.at().namespace_active(how.waits.objects.as_secs()),
@@ -141,7 +150,7 @@ pub fn deploy(
     // yet, so there is nothing to run.
 
     for cluster in &clusters.0 {
-        apply(kube, cluster, &rendered.0[&cluster.name].pools)?;
+        applied.extend(apply(kube, cluster, &rendered.0[&cluster.name].pools)?);
     }
     say("apply: each cluster's pools");
 
@@ -152,6 +161,12 @@ pub fn deploy(
             .iter()
             .filter(|object| !names.contains(&(object.kind.clone(), object.name.clone())))
             .collect();
+        if let Some(object) = pruned.iter().find(|object| applied.contains(&object.uid)) {
+            return Err(Error::new(format!(
+                "cluster `{}`: this deploy applied {} `{}` in another cluster, so it will not prune it: two clusters' contexts reach namespace `{}` of one cluster",
+                cluster.name, object.kind, object.name, cluster.namespace
+            )));
+        }
         if pruned.is_empty() {
             continue;
         }
@@ -179,9 +194,9 @@ pub fn deploy(
 
 /// Take the fleet in the file `fleet` off its clusters with `kube`, saying
 /// each step to `say`: drain each pool that has a parent, delete every
-/// object in each cluster's namespace that carries the fleet's label, and
-/// then remove the label from the namespace, which stays, with any
-/// Secret in it.
+/// object in each cluster's namespace that carries the fleet's and the
+/// cluster's labels, and then remove both labels from the namespace,
+/// which stays, with any Secret in it.
 pub fn down(
     fleet: &Path,
     waits: &Waits,
@@ -199,9 +214,9 @@ pub fn down(
         stop(kube, cluster, &all, waits, say)?;
         run(
             kube,
-            &cluster.at().unlabel(FLEET_LABEL),
+            &cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
             None,
-            "removing the fleet's label from the namespace",
+            "removing the fleet's labels from the namespace",
         )?;
         say(&format!(
             "down: deleted {} object(s) in cluster `{}`; namespace `{}` stays",
@@ -224,7 +239,7 @@ struct Clusters(Vec<Cluster>);
 
 impl Clusters {
     fn of(fleet: &Fleet) -> Result<Self, Error> {
-        let name = fleet.name().ok_or_else(|| {
+        let fleet_name = fleet.name().ok_or_else(|| {
             Error::new("the fleet has no `[fleet] name`, which labels its objects")
         })?;
         Ok(Self(
@@ -234,7 +249,11 @@ impl Clusters {
                     name: cluster.to_string(),
                     context: settings.context.clone(),
                     namespace: settings.namespace.clone(),
-                    selector: format!("{FLEET_LABEL}={}", label_value(name)),
+                    selector: format!(
+                        "{FLEET_LABEL}={},{CLUSTER_LABEL}={}",
+                        label_value(fleet_name),
+                        label_value(cluster)
+                    ),
                 })
                 .collect(),
         ))
@@ -253,7 +272,9 @@ struct Cluster {
     name: String,
     context: String,
     namespace: String,
-    /// The selector of the fleet's objects.
+    /// The selector of the fleet's objects that were rendered for this
+    /// cluster: another cluster's, in a namespace that two contexts reach,
+    /// are not this cluster's to prune.
     selector: String,
 }
 
@@ -363,15 +384,13 @@ fn run(
     Ok(reply)
 }
 
-/// Apply `objects`, a YAML stream, to `cluster`, server-side.
-fn apply(kube: &mut dyn Kube, cluster: &Cluster, objects: &str) -> Result<(), Error> {
-    run(
-        kube,
-        &cluster.at().apply(),
-        Some(objects.as_bytes()),
-        &format!("applying to cluster `{}`", cluster.name),
-    )
-    .map(drop)
+/// Apply `objects`, a YAML stream, to `cluster`, server-side: the uid of
+/// each object applied.
+fn apply(kube: &mut dyn Kube, cluster: &Cluster, objects: &str) -> Result<Vec<String>, Error> {
+    let what = format!("applying to cluster `{}`", cluster.name);
+    let reply = run(kube, &cluster.at().apply(), Some(objects.as_bytes()), &what)?;
+    let applied = Live::list(&reply.stdout).map_err(|e| Error::new(format!("{what}: {e}")))?;
+    Ok(applied.into_iter().map(|object| object.uid).collect())
 }
 
 /// Stop `objects` of `cluster`: drain each pool among them that has a

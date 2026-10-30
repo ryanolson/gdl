@@ -9,6 +9,7 @@
   "metadata": {
     "labels": {
       "gdl.dev/class": "model_x",
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us"
     },
@@ -23,6 +24,7 @@
   "metadata": {
     "labels": {
       "gdl.dev/class": "model_x",
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
       "gdl.dev/segment": "hub"
@@ -49,6 +51,7 @@
         },
         "labels": {
           "gdl.dev/class": "model_x",
+          "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "model-x-us",
           "gdl.dev/segment": "hub"
@@ -175,6 +178,7 @@
   "metadata": {
     "labels": {
       "gdl.dev/class": "model_x",
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
       "gdl.dev/segment": "hub"
@@ -210,6 +214,7 @@
   "metadata": {
     "labels": {
       "gdl.dev/class": "model_x",
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
       "gdl.dev/segment": "engine"
@@ -233,6 +238,7 @@
         },
         "labels": {
           "gdl.dev/class": "model_x",
+          "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "model-x-us",
           "gdl.dev/segment": "engine"

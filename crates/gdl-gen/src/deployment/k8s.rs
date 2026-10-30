@@ -315,7 +315,7 @@ impl Render<'_> {
         }
         let fleet_name = self.fleet.name().expect("refusals::fleet requires a name");
         for (name, cluster) in self.fleet.clusters() {
-            let base = objects::base(fleet_name, cluster);
+            let base = objects::base(fleet_name, name, cluster);
             self.files.insert(
                 Path::new(name).join("base.yaml"),
                 objects::stream(&base).map_err(io)?,
@@ -412,6 +412,7 @@ impl Render<'_> {
         let pod = Pod {
             fleet: self.fleet.name().expect("refusals::fleet requires a name"),
             pool,
+            cluster_name,
             cluster,
             naming,
         };

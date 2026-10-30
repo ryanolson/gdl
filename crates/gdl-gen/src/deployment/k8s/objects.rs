@@ -1,8 +1,11 @@
 //! The Kubernetes objects themselves, as JSON: each is also YAML, and a
 //! file of them is a YAML stream that `kubectl apply` and `kubeconform`
-//! read. Every object of a pool carries the labels `gdl.dev/fleet`,
-//! `gdl.dev/pool`, `gdl.dev/class`, and `gdl.dev/segment` (`hub` for its
-//! hub's, which no segment can be named). A Deployment and a Service
+//! read. Every object carries the labels `gdl.dev/fleet` and
+//! `gdl.dev/cluster`, the fleet's name for the cluster it is rendered for:
+//! `deploy` prunes only the objects of its own cluster, so that two
+//! clusters whose contexts reach one namespace never prune each other's.
+//! Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`, and
+//! `gdl.dev/segment` (`hub` for its hub's, which no segment can be named). A Deployment and a Service
 //! select pods only by the labels that name them, `gdl.dev/fleet`,
 //! `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects
 //! share: a Deployment's selector cannot change, and a class's name can.
@@ -150,6 +153,8 @@ impl Port {
 pub(super) struct Pod<'a> {
     pub(super) fleet: &'a str,
     pub(super) pool: &'a PoolSettings,
+    /// The fleet's name for the cluster.
+    pub(super) cluster_name: &'a str,
     pub(super) cluster: &'a Cluster,
     pub(super) naming: &'a super::Naming<'a>,
 }
@@ -180,6 +185,7 @@ impl Pod<'_> {
     fn named<'s>(&'s self, segment: Option<&'s str>) -> Vec<(&'static str, &'s str)> {
         let mut named = vec![
             ("gdl.dev/fleet", self.fleet),
+            ("gdl.dev/cluster", self.cluster_name),
             ("gdl.dev/pool", self.pool.name.as_str()),
             ("gdl.dev/class", self.pool.class.as_str()),
         ];
@@ -510,10 +516,14 @@ fn object_name(pool: &str, segment: &str) -> String {
     format!("{pool}-{segment}")
 }
 
-/// The Namespace of `cluster`, and the fleet's ServiceAccount in it, which
-/// carries the cluster's annotations, for a cloud role.
-pub(super) fn base(fleet: &str, cluster: &Cluster) -> Vec<Value> {
-    let labels = json!({"gdl.dev/fleet": fleet});
+/// The Namespace of `cluster`, which the fleet names `name`, and the
+/// fleet's ServiceAccount in it, which carries the cluster's annotations,
+/// for a cloud role.
+pub(super) fn base(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
+    let labels = json!({
+        "gdl.dev/fleet": label_value(fleet),
+        "gdl.dev/cluster": label_value(name),
+    });
     let mut account = json!({
         "name": fleet,
         "namespace": cluster.namespace,

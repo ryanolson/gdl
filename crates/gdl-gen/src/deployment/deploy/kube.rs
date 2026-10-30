@@ -140,9 +140,18 @@ impl At<'_> {
         self.namespaced(&["auth", "can-i", "create", "deployments.apps"])
     }
 
-    /// Apply the objects on stdin, server-side.
+    /// Apply the objects on stdin, server-side, and print them as applied,
+    /// as JSON: one object, or a list of them.
     pub(super) fn apply(&self) -> Vec<String> {
-        self.cluster(&["apply", "--server-side", MANAGER, "-f", "-"])
+        self.cluster(&[
+            "apply",
+            "--server-side",
+            MANAGER,
+            "-f",
+            "-",
+            "--output",
+            "json",
+        ])
     }
 
     /// Wait, at most `seconds`, until the namespace is active.
@@ -222,10 +231,11 @@ impl At<'_> {
         args
     }
 
-    /// Remove label `key` from the namespace.
-    pub(super) fn unlabel(&self, key: &str) -> Vec<String> {
+    /// Remove the labels `keys` from the namespace.
+    pub(super) fn unlabel(&self, keys: &[&str]) -> Vec<String> {
         let namespace = format!("namespace/{}", self.namespace);
-        let remove = format!("{key}-");
-        self.cluster(&["label", &namespace, &remove])
+        let mut args = self.cluster(&["label", &namespace]);
+        args.extend(keys.iter().map(|key| format!("{key}-")));
+        args
     }
 }

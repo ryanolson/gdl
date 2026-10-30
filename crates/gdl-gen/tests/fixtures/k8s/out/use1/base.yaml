@@ -4,6 +4,7 @@
   "kind": "Namespace",
   "metadata": {
     "labels": {
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api"
     },
     "name": "gdl-api"
@@ -18,6 +19,7 @@
       "eks.amazonaws.com/role-arn": "arn:aws:iam::000000000000:role/gdl-api"
     },
     "labels": {
+      "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api"
     },
     "name": "api",

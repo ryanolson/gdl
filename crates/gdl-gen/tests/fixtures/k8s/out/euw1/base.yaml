@@ -4,6 +4,7 @@
   "kind": "Namespace",
   "metadata": {
     "labels": {
+      "gdl.dev/cluster": "euw1",
       "gdl.dev/fleet": "api"
     },
     "name": "gdl-api"
@@ -15,6 +16,7 @@
   "kind": "ServiceAccount",
   "metadata": {
     "labels": {
+      "gdl.dev/cluster": "euw1",
       "gdl.dev/fleet": "api"
     },
     "name": "api",
