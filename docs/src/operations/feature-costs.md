@@ -248,7 +248,7 @@ A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` 
 
 ### Re-queue for the same pool
 
-A pool policy can re-queue a request for the pool that declined it as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). Every offer into another class pays for it whether or not a request waits: before the offer, the chooser reads the follow's generation of lease ends; at the end of the offer's lease, it adds one to the generation, sequentially consistent, and reads the count of waits. Measured with callgrind on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 30, rustc 1.93.1, release profile, two rounds each, which agreed within 1 Ir per lease. Base `8b909c95` with the same test added; a first design that woke one waiter at a time, `86775e35`; the generation, this design:
+A pool policy can re-queue a request for the pool that declined it as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). Every offer into another class pays for it whether or not a request waits: before the offer, the chooser reads the follow's generation of lease ends; at the end of the offer's lease, it adds one to the generation, sequentially consistent, and reads the count of waits. Measured with callgrind on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 30, rustc 1.93.1, release profile, two rounds each, which agreed within 1 Ir per lease. Base `8b909c95` with the same test added; a first design with no generation, `86775e35`; the generation waking every waiter, `fab681c2`; and this design, the generation waking the waiter that registered first:
 
 ```bash
 RUSTFLAGS="--cfg rustix_use_libc" cargo test --release -p gdl-runtime --all-features --lib --no-run
@@ -256,9 +256,9 @@ GDL_LEASES=100000 valgrind --tool=callgrind --callgrind-out-file=/dev/null <lib 
 GDL_LEASES=200000 valgrind ...   # per lease: (Ir at 200,000 - Ir at 100,000) / 100,000
 ```
 
-| Measure | Base | One waiter at a time | Generation |
-|---|---|---|---|
-| a lease taken and ended, no request waiting | 59.0 Ir | 66.0 Ir | 93.0 Ir |
+| Measure | Base | No generation | Generation, every waiter | Generation, first waiter |
+|---|---|---|---|---|
+| a lease taken and ended, no request waiting | 59.0 Ir | 66.0 Ir | 93.0 Ir | 91.0 Ir |
 
 The generation's read crosses the offer's wait, so `send_forward`'s future grew from 896 to 912 bytes, the size it had before hand-offs were offers (`a_first_offer_is_no_larger_than_a_hand_off_was`). A 32-bit generation left it at 912 too.
 

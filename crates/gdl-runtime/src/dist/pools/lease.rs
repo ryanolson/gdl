@@ -14,9 +14,9 @@
 //! pool ([`Leases::room`]). It counts the leases that ended, other than
 //! those whose offer the pool declined: a generation of ends. A request
 //! reads the generation before each offer, and a wait returns at once
-//! when it has moved since; otherwise a lease's end wakes every waiter.
-//! A lease's end adds one to the generation and reads the waiter count,
-//! and takes the waiters' lock only when some wait.
+//! when it has moved since; otherwise a lease's end wakes the waiter that
+//! registered first. A lease's end adds one to the generation and reads
+//! the waiter count, and takes the waiters' lock only when some wait.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -45,9 +45,9 @@ pub(crate) struct Leases(AtomicUsize, Option<&'static PoolFigures>, Room);
 struct Room {
     /// The leases on the follow that ended, other than declined ones.
     ends: AtomicU64,
-    /// The waits under way: only for a lease's end to skip
-    /// `Notify::notify_waiters`, which takes the waiters' lock even when
-    /// none waits (tokio 1.54, `sync/notify.rs`, `notify_waiters`).
+    /// The waits under way: for a lease's end to skip `Notify::notify_one`,
+    /// which takes the waiters' lock when no permit is stored, and leaves
+    /// a permit when no waiter is registered.
     waiting: AtomicUsize,
     woken: Notify,
 }
@@ -87,12 +87,19 @@ impl Leases {
 
     /// Wait for room in the follow's pool, for a request that read the
     /// generation of lease ends `seen` before its last offer: return at
-    /// once if a lease ended since, else when one ends, or after
-    /// `backoff`, or at `deadline`, whichever comes first. Every lease end
-    /// wakes every waiter, which then offers again, so no end is lost
-    /// however many end at once or however waits and ends interleave. The
-    /// backoff sees room that another chooser frees. Allocates nothing:
-    /// the waiter is held in this future, and the timer is the one sleep.
+    /// once if a lease ended since, else when a lease's end wakes it, or
+    /// after `backoff`, or at `deadline`, whichever comes first. Each end
+    /// wakes one waiter, the one registered first, so waiters are served
+    /// in the order they registered. No end is lost: a waiter registers
+    /// before it reads the generation, so an end either finds it
+    /// registered and wakes it, or comes before the read and moves the
+    /// generation it sees. An end that finds no waiter registered leaves
+    /// one permit, which gives the next wait one spurious return at most,
+    /// and a woken wait that ends another way, by its backoff or a drop,
+    /// passes its wake to the next waiter (tokio's `Notified` does on
+    /// drop). The backoff sees room that another chooser frees. Allocates
+    /// nothing: the waiter is held in this future, and the timer is the
+    /// one sleep.
     pub(crate) async fn room(&self, seen: u64, backoff: Duration, deadline: Option<Instant>) {
         let room = &self.2;
         // A store, then a load, on each side: the wait counts itself, then
@@ -110,10 +117,11 @@ impl Leases {
                 hook();
             }
         });
-        // `notify_waiters` wakes every `Notified` made before it, polled or
-        // not, so one made before the generation is read misses no end
-        // after the read.
+        // Registered before the generation is read, in the order of the
+        // waits, so that an end after the read finds this waiter.
         let woken = room.woken.notified();
+        let mut woken = std::pin::pin!(woken);
+        woken.as_mut().enable();
         if room.ends.load(Ordering::SeqCst) != seen {
             return;
         }
@@ -133,8 +141,8 @@ impl Leases {
         }
     }
 
-    /// One lease ended: add to the generation of ends, and wake every
-    /// waiter, if some wait.
+    /// One lease ended: add to the generation of ends, and wake the waiter
+    /// registered first, if some wait.
     fn end(&self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
         let room = &self.2;
@@ -146,7 +154,7 @@ impl Leases {
             }
         });
         if room.waiting.load(Ordering::SeqCst) > 0 {
-            room.woken.notify_waiters();
+            room.woken.notify_one();
         }
     }
 }
@@ -624,16 +632,16 @@ mod tests {
         }
     }
 
-    /// A lease that ends wakes every request that waits for room in its
-    /// pool, and moves the generation of ends; a lease whose offer was
-    /// declined wakes none and leaves the generation as it was. A wait
-    /// allocates nothing. Each wait's backoff is an hour, so only a lease's
-    /// end can wake it, and the waits are polled by hand, so that nothing
-    /// here depends on time.
+    /// A lease that ends wakes the request that registered its wait
+    /// first, and moves the generation of ends; the next end wakes the
+    /// next. A lease whose offer was declined wakes none and leaves the
+    /// generation as it was. A wait allocates nothing. Each wait's backoff
+    /// is an hour, so only a lease's end can wake it, and the waits are
+    /// polled by hand, so that nothing here depends on time.
     #[tokio::test]
-    async fn a_lease_that_ends_wakes_every_waiting_request() {
+    async fn a_lease_that_ends_wakes_the_first_registered_request() {
         let leases = Arc::new(Leases::default());
-        let held: Vec<PoolLease> = (0..2)
+        let held: Vec<PoolLease> = (0..3)
             .map(|_| PoolLease::take(&leases).expect("offered"))
             .collect();
         let hour = Duration::from_secs(3600);
@@ -658,14 +666,15 @@ mod tests {
         assert!(declined.declined().is_none());
         assert!(!first.woken() && !second.woken(), "a declined lease woke");
         assert_eq!(leases.ends(), seen, "a declined lease moved the generation");
-        assert_eq!(leases.held(), 1);
 
         drop(held.next());
         assert_eq!(leases.ends(), seen + 1);
-        assert!(first.woken() && second.woken(), "not every waiter woke");
-        for (wait, cx) in waits.iter_mut().zip(&mut contexts) {
-            assert_eq!(wait.as_mut().poll(cx), Poll::Ready(()));
-        }
+        assert!(first.woken() && !second.woken(), "not the first registered");
+        assert_eq!(waits[0].as_mut().poll(&mut contexts[0]), Poll::Ready(()));
+        assert!(waits[1].as_mut().poll(&mut contexts[1]).is_pending());
+        drop(held.next());
+        assert!(second.woken());
+        assert_eq!(waits[1].as_mut().poll(&mut contexts[1]), Poll::Ready(()));
         assert_eq!(leases.held(), 0);
         assert_eq!(
             leases.2.waiting.load(Ordering::SeqCst),
@@ -704,56 +713,79 @@ mod tests {
         assert!(follow.as_mut().poll(&mut cx).is_ready(), "a new follow");
     }
 
-    /// `N` requests wait for room in a full pool, and the pool's `N` leases
-    /// end one at a time, each freeing one room. A request offers again
-    /// each time its wait returns, reading the generation before each
-    /// offer, and an offer takes a free room if one is left. Every request
-    /// is served, with no time passed: each backoff is an hour, so none
-    /// was served by its backoff. Each end wakes every waiter, and each
-    /// waiter offers once per wake, so the end that finds `k` requests
-    /// waiting causes `k` offers, of which one takes the room: with each
-    /// request's first offer, `N + N(N + 1) / 2` offers in all, 14 for 4.
+    /// Four requests register their waits in order, and four leases end,
+    /// each freeing one room: the requests are served in the order they
+    /// registered, with no time passed, and each end causes one offer,
+    /// with no herd: each request's first offer, then one more each.
     #[tokio::test(start_paused = true)]
-    async fn every_waiting_request_is_served_with_bounded_offers() {
-        const N: usize = 4;
+    async fn waiting_requests_are_served_in_the_order_they_registered() {
+        let (order, offers) = served(4, &[true; 4]).await;
+        assert_eq!(order, [0, 1, 2, 3]);
+        assert_eq!(offers, [2; 4], "offers per request");
+    }
+
+    /// The request woken by the first end finds its room taken by another
+    /// request, so its offer is declined: it waits again, behind the
+    /// others, and each later end wakes the next in order.
+    #[tokio::test(start_paused = true)]
+    async fn a_woken_request_that_loses_its_room_waits_again_behind_the_others() {
+        let (order, offers) = served(3, &[false, true, true, true]).await;
+        assert_eq!(order, [1, 2, 0]);
+        assert_eq!(offers, [3, 2, 2], "offers per request");
+    }
+
+    /// `n` requests wait for room in a full pool, each registering its
+    /// wait after the one before, and the pool's leases end one at a time:
+    /// each frees a room if its entry in `frees` says so, and otherwise
+    /// another request took the room. A request offers again each time its
+    /// wait returns, reading the generation before each offer, and an
+    /// offer takes a free room if one is left. Every request must be served
+    /// with no time passed, as each backoff is an hour. The order the
+    /// requests were served in, and how many offers each made.
+    async fn served(n: usize, frees: &[bool]) -> (Vec<usize>, Vec<usize>) {
         let leases = Arc::new(Leases::default());
-        let (rooms, offers) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let held: Vec<PoolLease> = (0..N)
+        let rooms = Arc::new(AtomicUsize::new(0));
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let offers: Arc<Vec<AtomicUsize>> = Arc::new((0..n).map(|_| AtomicUsize::new(0)).collect());
+        let held: Vec<PoolLease> = frees
+            .iter()
             .map(|_| PoolLease::take(&leases).expect("offered"))
             .collect();
         let start = tokio::time::Instant::now();
-        let requests: Vec<_> = (0..N)
-            .map(|_| {
-                let (leases, rooms, offers) =
-                    (Arc::clone(&leases), Arc::clone(&rooms), Arc::clone(&offers));
-                tokio::spawn(async move {
-                    loop {
-                        let seen = leases.ends();
-                        offers.fetch_add(1, Ordering::SeqCst);
-                        let took = rooms
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| r.checked_sub(1))
-                            .is_ok();
-                        if took {
-                            return;
-                        }
-                        leases.room(seen, Duration::from_secs(3600), None).await;
-                    }
-                })
-            })
-            .collect();
         let settle = || async {
             for _ in 0..100 {
                 tokio::task::yield_now().await;
             }
         };
-        settle().await;
-        assert_eq!(
-            leases.2.waiting.load(Ordering::SeqCst),
-            N,
-            "every request waits"
-        );
-        for lease in held {
-            rooms.fetch_add(1, Ordering::SeqCst);
+        let mut requests = Vec::new();
+        for at in 0..n {
+            let (follow, free, served, offered) = (
+                Arc::clone(&leases),
+                Arc::clone(&rooms),
+                Arc::clone(&order),
+                Arc::clone(&offers),
+            );
+            requests.push(tokio::spawn(async move {
+                loop {
+                    let seen = follow.ends();
+                    offered[at].fetch_add(1, Ordering::SeqCst);
+                    let took = free
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| r.checked_sub(1))
+                        .is_ok();
+                    if took {
+                        served.lock().expect("not poisoned").push(at);
+                        return;
+                    }
+                    follow.room(seen, Duration::from_secs(3600), None).await;
+                }
+            }));
+            settle().await;
+            assert_eq!(leases.2.waiting.load(Ordering::SeqCst), at + 1, "in order");
+        }
+        for (lease, frees) in held.into_iter().zip(frees) {
+            if *frees {
+                rooms.fetch_add(1, Ordering::SeqCst);
+            }
             drop(lease);
             settle().await;
         }
@@ -765,10 +797,10 @@ mod tests {
             Duration::ZERO,
             "a request waited for its backoff"
         );
-        let offers = offers.load(Ordering::SeqCst);
-        println!("{N} waiting requests, {N} lease ends: {offers} offers");
-        assert!(offers <= N + N * (N + 1) / 2, "{offers} offers");
         assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+        let order = order.lock().expect("not poisoned").clone();
+        let offers = offers.iter().map(|n| n.load(Ordering::SeqCst)).collect();
+        (order, offers)
     }
 
     /// Take and end `GDL_LEASES` leases on one follow, with no request
