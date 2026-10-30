@@ -443,13 +443,18 @@ impl Local {
             .tempdir()
             .map_err(io)?;
         let root = dir.path();
-        for path in source_files(context)? {
+        for (path, link) in source_files(context)? {
             let to = root.join(&path);
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent).map_err(io)?;
             }
-            std::fs::copy(context.root().join(&path), &to)
-                .map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
+            let copied = match &link {
+                // The link itself, never its target: Docker keeps it as a
+                // link, and nothing on this machine resolves it.
+                Some(target) => std::os::unix::fs::symlink(target, &to),
+                None => std::fs::copy(context.root().join(&path), &to).map(drop),
+            };
+            copied.map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
         }
         let bundle = context.bundle().to_path_buf();
         let mut files: Files = prepared
@@ -529,10 +534,17 @@ impl Local {
 /// pushed is a trust boundary, so it fails closed: a source outside a Git
 /// checkout, and any error of Git's, such as a checkout it refuses for its
 /// ownership, stops the build, naming the path and Git's words.
+///
+/// Each is a file, or a link with its target: a link is copied as a link,
+/// never followed, so no byte of what it names is copied. A link whose
+/// target is absolute, or leaves the copied tree, is refused by its name:
+/// its text would put a path of this machine into the image, and Docker
+/// would resolve it to nothing that was copied. A path of any other kind,
+/// such as a socket, is refused too.
 fn source_files(
     context: &super::context::Context,
-) -> Result<std::collections::BTreeSet<PathBuf>, Error> {
-    let mut files = std::collections::BTreeSet::new();
+) -> Result<BTreeMap<PathBuf, Option<PathBuf>>, Error> {
+    let mut files = BTreeMap::new();
     for dir in context.sources() {
         let from = dir.strip_prefix(context.root()).map_err(|_| {
             Error::new(format!(
@@ -558,9 +570,38 @@ fn source_files(
                     dir.display()
                 ))
             })?;
+            let path = from.join(name);
+            let refuse = |why: &str| {
+                Err(Error::new(format!(
+                    "`--local`: {} {why}, so it is not copied into an image: remove it, or make it a file",
+                    dir.join(name).display()
+                )))
+            };
             // A tracked file deleted in the checkout is not built.
-            if dir.join(name).is_file() {
-                files.insert(from.join(name));
+            let Ok(kind) = std::fs::symlink_metadata(dir.join(name)) else {
+                continue;
+            };
+            if kind.is_file() {
+                files.insert(path, None);
+            } else if kind.is_symlink() {
+                let target = std::fs::read_link(dir.join(name)).map_err(io)?;
+                let named =
+                    crate::paths::normalize(&path.parent().unwrap_or(Path::new("")).join(&target));
+                if target.is_absolute() {
+                    return refuse(&format!(
+                        "is a link to an absolute path, {}",
+                        target.display()
+                    ));
+                }
+                if named.starts_with("..") {
+                    return refuse(&format!(
+                        "is a link to {}, outside the copied sources",
+                        target.display()
+                    ));
+                }
+                files.insert(path, Some(target));
+            } else {
+                return refuse("is neither a file nor a link");
             }
         }
     }
@@ -615,9 +656,11 @@ fn walk(
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
+        // A link is a leaf: it is not followed.
+        let kind = entry.file_type().map_err(failed)?;
+        if kind.is_dir() {
             walk(&path, &from.join(&name), files)?;
-        } else if path.is_file() {
+        } else {
             files.insert(from.join(&name));
         }
     }
@@ -638,7 +681,15 @@ fn digest(root: &Path) -> Result<String, Error> {
     for path in files {
         field(path.to_string_lossy().as_bytes());
         let path = root.join(&path);
-        field(&std::fs::read(&path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?);
+        let failed = |e: std::io::Error| Error::new(format!("{}: {e}", path.display()));
+        // A link by its text, as Docker copies it.
+        match std::fs::read_link(&path) {
+            Ok(target) => {
+                field(b"link");
+                field(target.to_string_lossy().as_bytes());
+            }
+            Err(_) => field(&std::fs::read(&path).map_err(failed)?),
+        }
     }
     Ok(hash
         .finalize()

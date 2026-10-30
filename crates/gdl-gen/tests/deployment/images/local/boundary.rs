@@ -14,7 +14,8 @@ fn tracked(copy: &Copy) {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "F1: a visible symlink copies credentials from outside the selected sources"]
+/// A link to a file outside the copied tree is never followed: no byte of
+/// its target reaches a context, and the build is refused, naming it.
 fn external_symlinks_do_not_copy_host_credentials() {
     let copy = Copy::new();
     tracked(&copy);
@@ -82,5 +83,54 @@ fn a_hidden_crate_directory_does_not_admit_untracked_credentials() {
             context.values().all(|text| !text.contains(&marker)),
             "{reference}: an untracked credential below .private reached the build context"
         );
+    }
+}
+
+/// A Docker that reads what a link in each context is.
+#[derive(Default)]
+struct Links {
+    seen: Vec<Option<PathBuf>>,
+}
+
+impl gdl_gen::Docker for Links {
+    fn digest(&mut self, _: &str) -> Result<Option<String>, gdl_gen::Error> {
+        Ok(None)
+    }
+
+    fn build(
+        &mut self,
+        context: &Path,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<String, gdl_gen::Error> {
+        self.seen
+            .push(std::fs::read_link(context.join("examples/api/LINKED.md")).ok());
+        Ok(format!("sha256:{}", "0".repeat(64)))
+    }
+}
+
+/// A link whose target is inside the copied sources reaches each context
+/// as the same link, not as a copy of what it names.
+#[cfg(unix)]
+#[test]
+fn a_link_within_the_sources_is_copied_as_a_link() {
+    let copy = Copy::new();
+    std::fs::write(copy.path().join("examples/api/NOTES.md"), "notes\n").expect("a file");
+    std::os::unix::fs::symlink("NOTES.md", copy.path().join("examples/api/LINKED.md"))
+        .expect("a link within the sources");
+    let mut docker = Links::default();
+    gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    )
+    .expect("local images");
+    assert_eq!(docker.seen.len(), 3);
+    for seen in &docker.seen {
+        assert_eq!(seen.as_deref(), Some(Path::new("NOTES.md")));
     }
 }
