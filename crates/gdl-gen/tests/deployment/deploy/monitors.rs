@@ -209,3 +209,59 @@ fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
         "both clusters' pods still run, so both must be scraped"
     );
 }
+
+struct PartialOperator(Kube);
+
+impl gdl_gen::Kube for PartialOperator {
+    fn run(
+        &mut self,
+        args: &[String],
+        input: Option<&[u8]>,
+    ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+        let mut reply = self.0.run(args, input)?;
+        if args.iter().any(|arg| arg == "api-resources") {
+            assert!(reply.stdout.contains("podmonitors.monitoring.coreos.com"));
+            // Discovery can list a resource from another served version while v1 fails.
+            reply.success = false;
+            reply.stderr = "error: unable to retrieve the complete list of server APIs: monitoring.coreos.com/v1: operator discovery unavailable".into();
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+#[ignore = "F2: deploy ignores failed operator discovery when stdout lists PodMonitor"]
+fn deploy_stops_when_operator_discovery_is_incomplete() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_asking(true));
+    let log = Log::default();
+    let mut kube = PartialOperator(Kube::new(&log));
+    let how = gdl_gen::Deploy {
+        spec: files.spec.clone(),
+        fleet: files.fleet.clone(),
+        target: mirror.target(),
+        out: None,
+        waits: waits(),
+    };
+    let result = gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {});
+    assert!(
+        result.is_err() && !steps(&log).iter().any(|step| step == "docker"),
+        "failed operator discovery must stop before image builds: {result:?}, {:?}",
+        steps(&log)
+    );
+}
+
+#[test]
+#[ignore = "F2: down ignores failed operator discovery when stdout lists PodMonitor"]
+fn down_stops_when_operator_discovery_is_incomplete() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_asking(false));
+    let log = Log::default();
+    let mut kube = PartialOperator(Kube::new(&log));
+    let result = gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut |_| {});
+    assert!(
+        result.is_err() && commands(&log).iter().all(|args| args[2] == "api-resources"),
+        "failed operator discovery must stop before listing or deleting: {result:?}, {:?}",
+        commands(&log)
+    );
+}
