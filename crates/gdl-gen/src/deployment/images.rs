@@ -521,12 +521,14 @@ impl Local {
     }
 }
 
-/// Each file of the sources of `context`, from its root. In a Git
-/// checkout: every file Git tracks, and each file it would track that is
-/// not hidden, so that build output and what the checkout ignores stay out,
-/// a new source that is not committed is in, and an untracked dotfile, such
-/// as an `.env` of credentials, never reaches an image. Elsewhere: every
-/// file but those under `target` and `.git`.
+/// Each file of the sources of `context`, from its root: every file Git
+/// tracks, and each file it would track that is not hidden, so that build
+/// output and what the checkout ignores stay out, a new source that is not
+/// committed is in, and an untracked dotfile, such as an `.env` of
+/// credentials, never reaches an image. The copy into an image that is
+/// pushed is a trust boundary, so it fails closed: a source outside a Git
+/// checkout, and any error of Git's, such as a checkout it refuses for its
+/// ownership, stops the build, naming the path and Git's words.
 fn source_files(
     context: &super::context::Context,
 ) -> Result<std::collections::BTreeSet<PathBuf>, Error> {
@@ -538,27 +540,8 @@ fn source_files(
                 dir.display()
             ))
         })?;
-        let listed = |which: &str| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(["ls-files", "-z", which, "--exclude-standard"])
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .map(|output| {
-                    output
-                        .stdout
-                        .split(|byte| *byte == 0)
-                        .filter(|name| !name.is_empty())
-                        .map(|name| PathBuf::from(String::from_utf8_lossy(name).into_owned()))
-                        .collect::<Vec<_>>()
-                })
-        };
-        let (Some(tracked), Some(untracked)) = (listed("--cached"), listed("--others")) else {
-            walk(dir, from, &mut files)?;
-            continue;
-        };
+        let tracked = git_files(dir, "--cached")?;
+        let untracked = git_files(dir, "--others")?;
         let hidden = |name: &Path| {
             name.components()
                 .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
@@ -572,6 +555,30 @@ fn source_files(
         }
     }
     Ok(files)
+}
+
+/// The files `git ls-files <which> --exclude-standard` lists in `dir`,
+/// from `dir`. Refused, naming `dir` and Git's words, when Git fails.
+fn git_files(dir: &Path, which: &str) -> Result<Vec<PathBuf>, Error> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "-z", which, "--exclude-standard"])
+        .output()
+        .map_err(|e| Error::new(format!("`--local`: running git in {}: {e}", dir.display())))?;
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "`--local`: git cannot list the sources in {}, and nothing is copied from a checkout git cannot list: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| PathBuf::from(String::from_utf8_lossy(name).into_owned()))
+        .collect())
 }
 
 /// Each file under `dir`, at `from` joined with its path there, but those

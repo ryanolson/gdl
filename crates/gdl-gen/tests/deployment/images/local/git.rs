@@ -1,14 +1,15 @@
 use super::*;
 
 #[test]
-#[ignore = "F5: a Git ownership error falls back to copying ignored credentials"]
+/// A Git checkout that Git refuses to list, here for its ownership, stops
+/// the build with Git's error: nothing falls back to a plain copy, which
+/// would admit what the checkout ignores.
 fn a_git_error_does_not_admit_ignored_credentials() {
     if std::env::var_os("GDL_REVIEW_GIT_WORKER").is_none() {
         let output = std::process::Command::new("timeout")
             .arg("30")
             .arg(std::env::current_exe().expect("the test binary"))
             .args([
-                "--ignored",
                 "--exact",
                 "images::local::git::a_git_error_does_not_admit_ignored_credentials",
                 "--nocapture",
@@ -17,12 +18,14 @@ fn a_git_error_does_not_admit_ignored_credentials() {
             .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
             .output()
             .expect("an isolated Git ownership check");
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // The child ran the case itself, not none.
+        assert!(stdout.contains("1 passed"), "{stdout}");
         return;
     }
     let copy = Copy::new();

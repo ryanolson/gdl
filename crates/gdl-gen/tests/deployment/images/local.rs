@@ -40,6 +40,20 @@ impl Copy {
         for tree in ["crates", "examples/api"] {
             copy_tree(&from.join(tree), &dir.path().join(tree));
         }
+        // `--local` copies only what Git lists: the copy is a checkout,
+        // with every file added.
+        for args in [&["init", "-q"][..], &["add", "-A"][..]] {
+            // The fixture is set up as its owner, whatever a case asks
+            // of Git afterwards.
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env_remove("GIT_TEST_ASSUME_DIFFERENT_OWNER")
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        }
         Self { dir }
     }
 
