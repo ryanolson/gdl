@@ -641,8 +641,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, Error> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Each file under `dir`, at `from` joined with its path there, but those
-/// under `target` and `.git`.
+/// Each file and link under `dir`, at `from` joined with its path there.
+/// A link is a leaf: it is not followed.
 fn walk(
     dir: &Path,
     from: &Path,
@@ -652,14 +652,8 @@ fn walk(
     for entry in std::fs::read_dir(dir).map_err(failed)? {
         let entry = entry.map_err(failed)?;
         let name = entry.file_name();
-        if name == "target" || name == ".git" {
-            continue;
-        }
-        let path = entry.path();
-        // A link is a leaf: it is not followed.
-        let kind = entry.file_type().map_err(failed)?;
-        if kind.is_dir() {
-            walk(&path, &from.join(&name), files)?;
+        if entry.file_type().map_err(failed)?.is_dir() {
+            walk(&entry.path(), &from.join(&name), files)?;
         } else {
             files.insert(from.join(&name));
         }
@@ -668,7 +662,9 @@ fn walk(
 }
 
 /// The sha256, as hex, of every path and byte of the files under `root`,
-/// in path order, each with its length.
+/// in path order, each with its length: the whole prepared tree, the
+/// generated crates and their settled locks under `target/gdl-images`
+/// included, so that the tag covers every byte the image builds from.
 fn digest(root: &Path) -> Result<String, Error> {
     let mut files = std::collections::BTreeSet::new();
     walk(root, Path::new(""), &mut files)?;
