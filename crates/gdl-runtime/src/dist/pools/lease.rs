@@ -58,9 +58,20 @@ impl Leases {
         Self(AtomicUsize::new(0), figures, Room::default())
     }
 
-    /// Mark the follow not offered: no lease is taken from now on.
+    /// Mark the follow not offered: no lease is taken from now on. Every
+    /// request that waits for room on it is woken, to choose again under
+    /// the pool's current follow, or to leave the pool: no lease can end
+    /// here to wake it any more, and a follow that replaced this one has
+    /// its own. The follower marks a follow not offered whenever it
+    /// replaces it, drops it, or the hub stops offering it.
     pub(crate) fn unoffer(&self) {
-        self.0.fetch_or(UNOFFERED, Ordering::AcqRel);
+        // The mark, then the count, as a lease's end writes the generation
+        // and reads the count: a wait that counts itself, then reads the
+        // mark, either sees it or is woken here.
+        self.0.fetch_or(UNOFFERED, Ordering::SeqCst);
+        if self.2.waiting.load(Ordering::SeqCst) > 0 {
+            self.2.woken.notify_waiters();
+        }
     }
 
     /// Mark the follow offered again.
@@ -134,7 +145,9 @@ impl Leases {
         // A permit an earlier end stored is taken here, and is this
         // request's to use or pass on, as a notification is.
         let notified = woken.as_mut().enable();
-        if room.ends.load(Ordering::SeqCst) != seen {
+        if room.ends.load(Ordering::SeqCst) != seen
+            || self.0.load(Ordering::SeqCst) & UNOFFERED != 0
+        {
             return Wake::of(notified.then_some(self));
         }
         let after = Instant::now().checked_add(backoff);
@@ -868,6 +881,43 @@ mod tests {
         let order = order.lock().expect("not poisoned").clone();
         let offers = offers.iter().map(|n| n.load(Ordering::SeqCst)).collect();
         (order, offers)
+    }
+
+    /// A follow marked not offered, as when it is replaced or dropped,
+    /// wakes every request that waits on it, so that it chooses again
+    /// under the pool's current follow: no lease can end on it to wake
+    /// them any more. A mark that lands while a wait registers, between
+    /// its count and its read, ends that wait too. Each backoff is an
+    /// hour, and the waits are polled by hand.
+    #[tokio::test]
+    async fn a_follow_marked_not_offered_wakes_its_waiting_requests() {
+        let hour = Duration::from_secs(3600);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let leases = Arc::new(Leases::default());
+        let seen = leases.ends();
+        let mut waits = [
+            Box::pin(leases.room(seen, hour, None)),
+            Box::pin(leases.room(seen, hour, None)),
+        ];
+        for wait in &mut waits {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
+        leases.unoffer();
+        for wait in &mut waits {
+            assert!(wait.as_mut().poll(&mut cx).is_ready(), "a wait slept on");
+        }
+        drop(waits);
+
+        let during = Arc::new(Leases::default());
+        let marked = Arc::clone(&during);
+        ENABLING.with_borrow_mut(|hook| *hook = Some(Box::new(move || marked.unoffer())));
+        let mut wait = Box::pin(during.room(during.ends(), hour, None));
+        assert!(
+            wait.as_mut().poll(&mut cx).is_ready(),
+            "a mark during the registration was missed"
+        );
+        drop(wait);
+        assert_eq!(during.2.waiting.load(Ordering::SeqCst), 0);
     }
 
     /// Take and end `GDL_LEASES` leases on one follow, with no request

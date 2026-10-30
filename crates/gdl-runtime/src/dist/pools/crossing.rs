@@ -867,6 +867,92 @@ mod tests {
         );
     }
 
+    /// The control: a follow replaced before the request's wait registers
+    /// is seen at once, as another follow than its offer's.
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_replaced_before_wait_registration_is_seen() {
+        assert!(replaced_follow(false).await);
+    }
+
+    /// A follow replaced while a request waits on it wakes the request,
+    /// which chooses again under the new follow, where a lease ended: no
+    /// lease can end on the old one any more.
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_replaced_after_wait_registration_wakes_the_request() {
+        assert!(
+            replaced_follow(true).await,
+            "the pinned pool has room in its new follow, but the request expires waiting on its previous follow"
+        );
+    }
+
+    /// A request whose offer under one follow of its pool was declined
+    /// waits, registering before the follow is replaced if
+    /// `register_before_change`; the follow is replaced, and a lease ends
+    /// under the new one. Whether the wait returned with no time passed.
+    async fn replaced_follow(register_before_change: bool) -> bool {
+        use std::task::{Context, Poll};
+
+        let previous = pool("m", PoolState::Ready, &ids(1));
+        let crossing = crossing(
+            vec![Arc::clone(&previous)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let lease = PoolLease::take(&previous.leases).expect("offered");
+        let seen = Seen::of(Some(&lease), lease.ends());
+        lease.declined();
+        let request = Cx::new().with_timeout(Duration::from_millis(20));
+        let mut wait = Box::pin(crossing.room(
+            previous.id,
+            &seen,
+            crate::dist::runtime::RuntimeConfig::DEFAULT_POOL_REQUEUE_BACKOFF,
+            request.deadline().map(gdl::Deadline::instant),
+        ));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        if register_before_change {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
+
+        let mut current = pool("m", PoolState::Ready, &ids(1));
+        Arc::get_mut(&mut current).expect("one owner").generation = 2;
+        previous.leases.unoffer();
+        crossing
+            .target
+            .table
+            .store(Arc::new(EntryTable::new(Box::new([Arc::clone(&current)]))));
+        assert!(
+            previous.leases.idle(),
+            "no more leases can end on the previous follow"
+        );
+        let (_, held) = crossing
+            .pick_again(
+                previous.id,
+                Policy::RoundRobin,
+                &RandomState::new(),
+                &mut None,
+            )
+            .expect("the same pool still takes work under its new follow");
+        drop(held);
+        assert_eq!(current.leases.ends(), 1);
+        let ready = match wait.as_mut().poll(&mut cx) {
+            Poll::Ready(woken) => {
+                request.check().expect("the request can offer again");
+                drop(woken);
+                true
+            }
+            Poll::Pending => {
+                tokio::time::advance(Duration::from_millis(20)).await;
+                drop(wait.as_mut().await);
+                assert_eq!(
+                    request.check().expect_err("expired").kind(),
+                    ErrorKind::DeadlineExceeded
+                );
+                false
+            }
+        };
+        drop(wait);
+        ready
+    }
+
     #[derive(serde::Deserialize)]
     struct Routed {
         #[allow(dead_code, reason = "a field to read, never read")]
