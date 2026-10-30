@@ -27,6 +27,9 @@ pub(super) struct Live {
     /// For a hub's Deployment, the pool's parent (`GDL_POOL__HOME`): the
     /// pool whose hub holds its record.
     pub(super) home: Option<String>,
+    /// For a pool's Deployment, its parents' class (`GDL_POOL__PARENTS`),
+    /// for a shared pool.
+    pub(super) parents: Option<String>,
     /// For a Deployment, its pods' stop grace, in seconds.
     pub(super) grace: Option<u64>,
     /// For a pool's Deployment, whether its pool publishes to the DynamoDB
@@ -76,12 +79,14 @@ impl Live {
                 .and_then(|var| text(&var["value"]))
         };
         let home = variable("GDL_POOL__HOME");
+        let parents = variable("GDL_POOL__PARENTS");
         let dynamodb = variable("GDL_POOL__DIRECTORY").as_deref() == Some("dynamodb");
         Ok(Self {
             pool: whole("gdl.dev/pool"),
             class: whole("gdl.dev/class"),
             segment: whole("gdl.dev/segment"),
             home: (kind == "Deployment").then_some(home).flatten(),
+            parents: (kind == "Deployment").then_some(parents).flatten(),
             grace: pod["terminationGracePeriodSeconds"].as_u64(),
             dynamodb: kind == "Deployment" && dynamodb,
             kind,
@@ -129,17 +134,18 @@ pub(super) struct Stopping {
 }
 
 impl Stopping {
-    /// The pools of `objects` that have a Deployment there and a parent, or
-    /// publish to the DynamoDB directory, in name order: every Deployment
-    /// of a pool names its parent, so a pool whose hub's Deployment is
-    /// gone is still found by its segments'.
+    /// The pools of `objects` that have a Deployment there and a parent,
+    /// `home` or, for a shared pool, `parents`, in name order: every
+    /// Deployment of a pool names its parent, so a pool whose hub's
+    /// Deployment is gone is still found by its segments'. A pool with no
+    /// parent, such as a global pool, cannot drain: its hub refuses it.
     pub(super) fn of(objects: &[&Live]) -> Vec<Self> {
         let mut pools: std::collections::BTreeMap<String, Self> = Default::default();
         for deployment in objects.iter().filter(|object| object.kind == "Deployment") {
             let (Some(pool), Some(class)) = (&deployment.pool, &deployment.class) else {
                 continue;
             };
-            if deployment.home.is_none() && !deployment.dynamodb {
+            if deployment.home.is_none() && deployment.parents.is_none() {
                 continue;
             }
             let stopping = pools.entry(pool.clone()).or_insert_with(|| Self {

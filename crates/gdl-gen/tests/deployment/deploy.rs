@@ -71,6 +71,9 @@ struct Kube {
     held: Option<usize>,
     /// How many health reads fail before each answers 200; `None`: never.
     health: Option<usize>,
+    /// How many reads of a pool's own `withdrawn` answer false before one
+    /// answers true; `None`: always false.
+    withdrawn: Option<usize>,
     /// What `get pods` and `get events` print.
     pods: Value,
     events: Value,
@@ -90,6 +93,7 @@ impl Kube {
             fail: None,
             held: Some(1),
             health: Some(0),
+            withdrawn: Some(1),
             pods: json!({"items": []}),
             events: json!({"items": []}),
             local_pods: json!({"items": [local_pod(true)]}),
@@ -182,6 +186,17 @@ impl gdl_gen::Kube for Kube {
                     }
                     None => gdl_gen::Reply::failed("Error from server (ServiceUnavailable)"),
                 }
+            }
+            ("get", Some(path)) if path.ends_with("/v1/ext/gdl-pool/withdrawn") => {
+                let withdrawn = match &mut self.withdrawn {
+                    Some(0) => true,
+                    Some(n) => {
+                        *n -= 1;
+                        false
+                    }
+                    None => false,
+                };
+                gdl_gen::Reply::ok(json!({"withdrawn": withdrawn}).to_string())
             }
             ("get", Some(path)) if path.contains("/v1/ext/gdl-pool/report/") => {
                 match &mut self.held {

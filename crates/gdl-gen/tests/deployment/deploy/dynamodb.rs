@@ -174,17 +174,36 @@ fn left_dynamodb(name: &str, pool: &str, segment: &str) -> Value {
     object
 }
 
+/// The index of the first command that deletes `object` in `context`.
+fn deleted_at(log: &Log, context: &str, object: &str) -> Option<usize> {
+    commands(log).iter().position(|args| {
+        args[1] == context && args.iter().any(|a| a == "delete") && args.iter().any(|a| a == object)
+    })
+}
+
+/// The indexes of the reads of pool `pool`'s own `withdrawn` route.
+fn withdrawn_reads(log: &Log, pool: &str) -> Vec<usize> {
+    let route = format!("services/http:{pool}:public/proxy/v1/ext/gdl-pool/withdrawn");
+    commands(log)
+        .iter()
+        .enumerate()
+        .filter(|(_, args)| args.iter().any(|a| a.ends_with(&route)))
+        .map(|(at, _)| at)
+        .collect()
+}
+
 /// A pool under the DynamoDB directory that the fleet no longer places is
-/// not deleted: its parent's hub answers 404 for its record at once,
-/// since only the relay serves that route, and that proves nothing. The
-/// deploy stops, naming the pool, and deletes nothing.
+/// drained, and deleted only once its own hub, through its own Service,
+/// says its record is withdrawn: never on its parent's 404, which only
+/// the relay serves, and which here would come at once.
 #[test]
-fn a_removed_dynamodb_pool_is_not_deleted_on_its_parents_404() {
+fn a_removed_dynamodb_pool_is_deleted_only_once_its_own_hub_says_withdrawn() {
     let mirror = Mirror::new();
     let files = files(&mirror, &fleet_text());
     let log = Log::default();
     let (mut docker, mut kube) = fakes(&log);
     kube.held = Some(0);
+    kube.withdrawn = Some(2);
     kube.holds(
         "kind-use1",
         left_dynamodb("model-x-old", "model-x-old", "hub"),
@@ -193,21 +212,85 @@ fn a_removed_dynamodb_pool_is_not_deleted_on_its_parents_404() {
         "kind-use1",
         left_dynamodb("model-x-old-engine", "model-x-old", "engine"),
     );
-    let error =
-        deploy(&mirror, &files, &mut docker, &mut kube).expect_err("a removed dynamodb pool");
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    assert!(
+        !commands(&log)
+            .iter()
+            .any(|args| args.iter().any(|a| a.contains("/report/"))),
+        "the parent's relay route was asked"
+    );
+    let drained = commands(&log)
+        .iter()
+        .position(|args| {
+            args.iter()
+                .any(|a| a.ends_with("http:model-x-old:control/proxy/v1/ext/gdl-pool/drain"))
+        })
+        .expect("the pool is drained");
+    let reads = withdrawn_reads(&log, "model-x-old");
+    assert_eq!(reads.len(), 3, "two false, then true: {reads:?}");
+    assert!(reads[0] > drained, "read before the drain");
+    for object in ["deployment/model-x-old-engine", "deployment/model-x-old"] {
+        let deleted = deleted_at(&log, "kind-use1", object).expect("deleted");
+        assert!(
+            deleted > *reads.last().expect("a read"),
+            "{object} was deleted before the pool said withdrawn"
+        );
+    }
+}
+
+/// A pool under the DynamoDB directory whose hub never says withdrawn
+/// stops the deploy at the bound, its drain grace and the drain wait,
+/// naming the pool, and none of it is deleted.
+#[test]
+fn a_dynamodb_pool_that_never_says_withdrawn_stops_the_deploy() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.held = Some(0);
+    kube.withdrawn = None;
+    kube.holds(
+        "kind-use1",
+        left_dynamodb("model-x-old", "model-x-old", "hub"),
+    );
+    kube.holds(
+        "kind-use1",
+        left_dynamodb("model-x-old-engine", "model-x-old", "engine"),
+    );
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("a pool that never says withdrawn");
     let error = error.to_string();
     assert!(
-        error.contains("`model-x-old`") && error.contains("DynamoDB"),
+        error.contains("`model-x-old`") && error.contains("withdrawn"),
         "{error}"
     );
-    // Only the tables step's own delete of its last Job runs.
-    let deleted = deletes(&log, "kind-use1");
-    assert!(
-        deleted
-            .iter()
-            .flatten()
-            .all(|object| object == "job/dynamodb-tables"),
-        "{deleted:?}"
+    assert!(withdrawn_reads(&log, "model-x-old").len() > 1);
+    for object in ["deployment/model-x-old-engine", "deployment/model-x-old"] {
+        assert_eq!(deleted_at(&log, "kind-use1", object), None, "{object}");
+    }
+}
+
+/// A pool under the DynamoDB directory whose hub's Deployment is gone has
+/// no hub to drain it or to say that it withdrew, and its parent's 404
+/// proves nothing: the deploy stops before it changes anything, naming
+/// the pool.
+#[test]
+fn a_dynamodb_pool_without_its_hub_is_not_deleted() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.held = Some(0);
+    kube.holds(
+        "kind-use1",
+        left_dynamodb("model-x-old-engine", "model-x-old", "engine"),
+    );
+    let error =
+        deploy(&mirror, &files, &mut docker, &mut kube).expect_err("a pool without its hub");
+    assert!(error.to_string().contains("`model-x-old`"), "{error}");
+    assert_eq!(
+        deleted_at(&log, "kind-use1", "deployment/model-x-old-engine"),
+        None
     );
     assert!(
         !commands(&log)
@@ -217,9 +300,10 @@ fn a_removed_dynamodb_pool_is_not_deleted_on_its_parents_404() {
     );
 }
 
-/// `down` takes a DynamoDB fleet off its clusters: it drains each pool,
-/// asks no parent for a record, deletes the segments, then the hubs, and
-/// the Local and the Job last, after the hubs that use them. Only each
+/// `down` takes a DynamoDB fleet off its clusters: it drains each pool
+/// that has a parent, waits until its own hub says withdrawn, asks no
+/// parent for a record, deletes the segments, then the hubs, and the
+/// Local and the Job last, after the hubs that use them. Only each
 /// namespace stays.
 #[test]
 fn down_deletes_the_local_after_the_hubs() {
@@ -236,6 +320,24 @@ fn down_deletes_the_local_after_the_hubs() {
             .any(|args| args.iter().any(|a| a.contains("/report/"))),
         "the parent's relay route was asked"
     );
+    // A global pool has no parent, and its hub refuses a drain (409): it
+    // is not drained. Each child is, and is waited for until it says
+    // withdrawn.
+    let drains: Vec<String> = commands(&log)
+        .into_iter()
+        .filter_map(|args| {
+            args.into_iter()
+                .find(|a| a.ends_with("/v1/ext/gdl-pool/drain"))
+        })
+        .collect();
+    assert_eq!(drains.len(), 2, "{drains:?}");
+    assert!(
+        drains.iter().all(|path| path.contains("model-x")),
+        "{drains:?}"
+    );
+    for pool in ["model-x-us", "model-x-shared"] {
+        assert!(!withdrawn_reads(&log, pool).is_empty(), "{pool}");
+    }
     let batches = deletes(&log, "kind-use1");
     let at = |object: &str| {
         batches

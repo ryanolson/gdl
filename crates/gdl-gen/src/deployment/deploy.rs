@@ -38,6 +38,7 @@ const CLUSTER_LABEL: &str = "gdl.dev/cluster";
 /// A pool's hub's routes, as the service proxy reaches them.
 const HEALTH: &str = "/v1/ext/gdl-pool/health";
 const DRAIN: &str = "/v1/ext/gdl-pool/drain";
+const WITHDRAWN: &str = "/v1/ext/gdl-pool/withdrawn";
 
 /// What `deploy` deploys, and where it builds.
 #[derive(Debug, Clone)]
@@ -105,8 +106,9 @@ impl Default for Waits {
 /// 7. prune each cluster: drain each pool that the fleet no longer places
 ///    there, then delete every object labelled with the fleet and the
 ///    cluster that this render did not write, and none that it applied in
-///    any cluster. A pool under the DynamoDB directory is refused, naming
-///    it: only the relay's parent hub shows that a drained pool withdrew;
+///    any cluster. A drained pool is deleted once it has withdrawn its
+///    record: under `relay` its parent's hub answers 404 for it, and under
+///    the DynamoDB directory its own hub says so;
 /// 8. wait until each pool's health answers 200, through the API server's
 ///    service proxy; on a timeout, the error names each pod of an
 ///    unhealthy pool that is not ready, why it waits, and its events.
@@ -217,15 +219,7 @@ pub fn deploy(
         if pruned.is_empty() {
             continue;
         }
-        stop(
-            kube,
-            cluster,
-            &pruned,
-            &retained,
-            Stop::Prune,
-            &how.waits,
-            say,
-        )?;
+        stop(kube, cluster, &pruned, &retained, &how.waits, say)?;
         say(&format!(
             "prune: deleted {} object(s) in cluster `{}`",
             pruned.len(),
@@ -269,29 +263,13 @@ pub fn down(
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
         let pools: Vec<&Live> = live.iter().filter(|object| object.pool.is_some()).collect();
-        stop(
-            kube,
-            cluster,
-            &pools,
-            &BTreeSet::new(),
-            Stop::Down,
-            waits,
-            say,
-        )?;
+        stop(kube, cluster, &pools, &BTreeSet::new(), waits, say)?;
         deleted.insert(cluster.name.clone(), pools.len());
     }
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
         let rest: Vec<&Live> = live.iter().collect();
-        stop(
-            kube,
-            cluster,
-            &rest,
-            &BTreeSet::new(),
-            Stop::Down,
-            waits,
-            say,
-        )?;
+        stop(kube, cluster, &rest, &BTreeSet::new(), waits, say)?;
         run(
             kube,
             cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
@@ -594,16 +572,6 @@ fn run_tables(
     }
 }
 
-/// Why `stop` stops a cluster's objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stop {
-    /// `deploy` removes what the fleet no longer places there, while the
-    /// rest of the fleet serves.
-    Prune,
-    /// `down` takes the whole fleet off.
-    Down,
-}
-
 /// Refuse a pool that `fleet` places in another cluster than one that
 /// holds any of its Deployments. A pool keeps one name and one record
 /// wherever it runs: a drain of its old copy would withdraw the record its
@@ -696,7 +664,6 @@ fn stop(
     cluster: &Cluster,
     objects: &[&Live],
     retained: &BTreeSet<String>,
-    why: Stop,
     waits: &Waits,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
@@ -704,38 +671,10 @@ fn stop(
     // A pool that this run still renders keeps serving: only objects it no
     // longer has are deleted, such as a renamed segment's, and it is
     // neither drained nor asked about at its parent.
-    let (dynamodb, relay): (Vec<Stopping>, Vec<Stopping>) = Stopping::of(objects)
+    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) = Stopping::of(objects)
         .into_iter()
         .filter(|pool| !retained.contains(&pool.pool))
-        .partition(|pool| pool.dynamodb);
-    // Under the DynamoDB directory no parent's hub holds a pool's record,
-    // so its 404 shows nothing, and no route of the pool's own hub shows
-    // yet that its drained record is withdrawn. A prune would delete a
-    // pool that still serves: refused, before anything changes. `down`
-    // takes every pool off: each is drained, and its pods' grace lets
-    // what they hold finish.
-    if why == Stop::Prune && !dynamodb.is_empty() {
-        let pools: Vec<String> = dynamodb.iter().map(|p| format!("`{}`", p.pool)).collect();
-        return Err(Error::new(format!(
-            "cluster `{}`: pool(s) {} publish to the DynamoDB directory, and the fleet no longer places them there; deploy cannot yet show that a drained pool withdrew its record from DynamoDB, so it removes none. Drain each (`POST /v1/ext/gdl-pool/drain` on its hub's control port), wait until its parents no longer follow it, delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool=<pool>`), then deploy again",
-            cluster.name,
-            pools.join(", "),
-            cluster.context,
-            cluster.namespace
-        )));
-    }
-    for pool in dynamodb.iter().filter(|pool| pool.hub) {
-        run(
-            kube,
-            at.post(&pool.pool, CONTROL, DRAIN),
-            waits.objects,
-            Some(b""),
-            &format!("draining pool `{}`", pool.pool),
-        )?;
-        say(&format!("drain: pool `{}` is draining", pool.pool));
-    }
-    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) =
-        relay.into_iter().partition(|pool| pool.hub);
+        .partition(|pool| pool.hub);
     // Checked before any drain starts, so that a pool that cannot be shown
     // to have withdrawn stops the step before anything changes.
     for pool in &hubless {
@@ -752,7 +691,12 @@ fn stop(
         say(&format!("drain: pool `{}` is draining", pool.pool));
     }
     for pool in &draining {
-        withdrawn(kube, at, pool, waits)?;
+        // Under the DynamoDB directory no parent's hub holds the pool's
+        // record, so only the pool's own hub can say it is withdrawn.
+        match pool.dynamodb {
+            true => withdrawn_by_its_hub(kube, at, pool, waits)?,
+            false => withdrawn(kube, at, pool, waits)?,
+        }
         say(&format!("drain: pool `{}` has withdrawn", pool.pool));
     }
     let segments: Vec<String> = objects
@@ -798,8 +742,60 @@ fn stop(
 /// Service does not exist, and at its bound when it does not answer,
 /// naming the pool either way. The relay directory is the one that serves
 /// this record: another directory needs another proof.
+/// The parent of `pool`, a relay pool, whose hub holds its record: a pool
+/// with `parents` alone is refused, since under the relay only one
+/// parent's hub holds a pool's record.
+fn relay_home(pool: &Stopping) -> Result<&str, Error> {
+    pool.home.as_deref().ok_or_else(|| {
+        Error::new(format!(
+            "pool `{}` names no `home`, and under the relay directory only its one parent's hub can show that it withdrew, so it is not deleted",
+            pool.pool
+        ))
+    })
+}
+
+/// Wait until the hub of `pool`, a pool under the DynamoDB directory,
+/// says through its own Service that its drained record is withdrawn
+/// (`GET /v1/ext/gdl-pool/withdrawn`): the directory has stored the
+/// withdrawal. Its health says so too, but answers 503 for a drained pool,
+/// and the service proxy hides the body of a 503. The wait is bounded as
+/// the relay's, and names the pool when it runs out.
+fn withdrawn_by_its_hub(
+    kube: &mut dyn Kube,
+    at: At<'_>,
+    pool: &Stopping,
+    waits: &Waits,
+) -> Result<(), Error> {
+    let args = at.get(&pool.pool, PUBLIC, WITHDRAWN);
+    let bound = Duration::from_secs(pool.grace) + waits.drain;
+    let deadline = Instant::now() + bound;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let reply = kube.run(&bounded(args.clone(), left), None)?;
+        let said = reply.success
+            && serde_json::from_str::<Value>(&reply.stdout)
+                .is_ok_and(|body| body["withdrawn"] == true);
+        if said {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let last = if reply.success {
+                format!("its hub still says {}", reply.stdout.trim())
+            } else {
+                format!("its hub does not answer: {}", reply.stderr.trim())
+            };
+            return Err(Error::new(format!(
+                "pool `{}` did not say within {} s that its record is withdrawn from the DynamoDB directory, so it is not deleted: {last}",
+                pool.pool,
+                bound.as_secs()
+            )));
+        }
+        std::thread::sleep(waits.interval);
+    }
+}
+
 fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) -> Result<(), Error> {
-    let home = pool.home.as_deref().expect("a relay pool names its parent");
+    let home = relay_home(pool)?;
     let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
     let args = at.get(home, PUBLIC, &route);
     let bound = Duration::from_secs(pool.grace) + waits.drain;
@@ -844,7 +840,15 @@ fn withdrawn_without_hub(
     pool: &Stopping,
     waits: &Waits,
 ) -> Result<(), Error> {
-    let home = pool.home.as_deref().expect("a relay pool names its parent");
+    // Under the DynamoDB directory no parent's hub holds the record, so
+    // nothing here can show that the pool withdrew.
+    if pool.dynamodb {
+        return Err(Error::new(format!(
+            "pool `{}` is not known to have withdrawn from the DynamoDB directory, so nothing is deleted: its hub's Deployment is gone, so it can neither drain nor say that its record is withdrawn, and no parent's hub holds its record. Withdraw it on a parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), which answers 204 once the directory has stored it; then delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool={}`) and deploy again",
+            pool.pool, pool.class, pool.pool, at.context, at.namespace, pool.pool
+        )));
+    }
+    let home = relay_home(pool)?;
     let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
     let reply = kube.run(&bounded(at.get(home, PUBLIC, &route), waits.objects), None)?;
     if reply.proxied_not_found() {
