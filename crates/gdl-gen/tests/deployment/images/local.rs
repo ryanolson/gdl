@@ -15,6 +15,8 @@ use super::{Context, Fake, run_with};
 use crate::common::root;
 use crate::{SEGMENTS, SPLIT};
 
+#[path = "local/archive.rs"]
+mod archive;
 #[path = "local/boundary.rs"]
 mod boundary;
 #[path = "local/git.rs"]
