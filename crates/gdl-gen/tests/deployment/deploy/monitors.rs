@@ -231,7 +231,6 @@ impl gdl_gen::Kube for PartialOperator {
 }
 
 #[test]
-#[ignore = "F2: deploy ignores failed operator discovery when stdout lists PodMonitor"]
 fn deploy_stops_when_operator_discovery_is_incomplete() {
     let mirror = Mirror::new();
     let files = files(&mirror, &fleet_asking(true));
@@ -253,7 +252,6 @@ fn deploy_stops_when_operator_discovery_is_incomplete() {
 }
 
 #[test]
-#[ignore = "F2: down ignores failed operator discovery when stdout lists PodMonitor"]
 fn down_stops_when_operator_discovery_is_incomplete() {
     let mirror = Mirror::new();
     let files = files(&mirror, &fleet_asking(false));

@@ -389,15 +389,17 @@ impl Cluster {
     /// by one, and exits 1 when another group's discovery fails, as a
     /// stale metrics server's does, after printing what it found: what it
     /// printed answers unless the failed groups include the operator's.
+    /// When they do, nothing it printed answers, a PodMonitor listed from
+    /// another of the group's versions included: the run stops.
     fn find_monitors(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
         let args = bounded(self.at().monitoring(), budget);
         let reply = kube.run(&args, None)?;
         let found = reply.stdout.lines().any(|line| line.trim() == PODMONITORS);
-        let partial = reply
+        let others_only = reply
             .stderr
             .contains("unable to retrieve the complete list of server APIs")
             && !reply.stderr.contains(MONITORING);
-        if !reply.success && !found && !partial {
+        if !reply.success && !others_only {
             return Err(Error::new(format!(
                 "cluster `{}`: asking whether it has `{PODMONITORS}`: `kubectl {}` failed: {}",
                 self.name,
