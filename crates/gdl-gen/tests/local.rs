@@ -1374,11 +1374,13 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
     );
 }
 
-/// Compose reads the Cargo configuration of the build context, as the image
-/// build does, wherever it runs from. It copies gdl's sources and resolves
-/// two bundles, which takes several seconds. Compose runs offline.
+/// Sources that need the Cargo configuration around them, here a registry
+/// that a node crate names, are refused, naming the file, wherever compose
+/// runs from: the image build reads no configuration of the sources, so
+/// it would build otherwise than this machine does. It copies gdl's
+/// sources, which takes a few seconds. Compose runs offline.
 #[test]
-fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
+fn sources_that_need_their_cargo_configuration_are_refused() {
     let holder = tempfile::Builder::new()
         .prefix("gdl-local-config-")
         .tempdir_in(root())
@@ -1454,28 +1456,15 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
             .expect("compose")
     };
     checkout(holder.path());
-    let inside = holder.path().join("inside");
-    let control = compose(holder.path(), &inside);
-    assert!(
-        control.status.success(),
-        "compose works from the context: {}",
-        String::from_utf8_lossy(&control.stderr)
-    );
-    let compose_file: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(inside.join("compose.yaml")).expect("compose.yaml"),
-    )
-    .expect("JSON");
-    assert_eq!(
-        compose_file["services"]["main"]["build"]["context"],
-        "context"
-    );
-
-    let outside = compose(&root(), &holder.path().join("outside"));
-    assert!(
-        outside.status.success(),
-        "the same spec fails from outside the context:\n{}",
-        String::from_utf8_lossy(&outside.stderr)
-    );
+    let config = holder.path().join(".cargo/config.toml");
+    for (cwd, out) in [(holder.path(), "inside"), (root().as_path(), "outside")] {
+        let out = holder.path().join(out);
+        let refused = compose(cwd, &out);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{stderr}");
+        assert!(stderr.contains(&config.display().to_string()), "{stderr}");
+        assert!(!out.exists());
+    }
 }
 
 /// A crate by path that stands in for crates.io's `name` at version 1.0.0,

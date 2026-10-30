@@ -48,7 +48,7 @@ pub(super) fn build(
             manifest(dir, context, path)?;
         }
     }
-    config(dir, context)?;
+    configuration(dir, context, &entries)?;
     // A manifest that names a directory outside the sources says why Git
     // cannot place it: that refusal comes first.
     if let Some(error) = unplaced {
@@ -135,9 +135,6 @@ struct Source {
     top: PathBuf,
     /// Its path in the repository, empty or ending in `/`, as bytes.
     prefix: Vec<u8>,
-    /// Whether it may hold nothing Git tracks: the Cargo configuration at
-    /// the context's root.
-    optional: bool,
 }
 
 /// The directories of sources of `context`, each in the repository Git
@@ -148,23 +145,6 @@ fn sources(context: &Context) -> Result<(Vec<Source>, Option<Error>), Error> {
     let mut found: Vec<Source> = Vec::new();
     let mut unplaced = None;
     let root = context.root().canonicalize().map_err(super::io)?;
-    // The image build runs Cargo at the tree's root, which reads the Cargo
-    // configuration there, as Cargo on this machine reads the context's:
-    // the tree holds what Git holds of it, if anything.
-    let config = context.root().join(".cargo");
-    if let Ok(real) = config.canonicalize()
-        && let Ok(at) = real.strip_prefix(&root)
-        && let Ok(top) = git(context, &config, &["rev-parse", "--show-toplevel"])
-        && let Ok(prefix) = git(context, &config, &["rev-parse", "--show-prefix"])
-    {
-        found.push(Source {
-            dir: config.clone(),
-            at: at.to_path_buf(),
-            top: PathBuf::from(OsStr::from_bytes(trim(&top))),
-            prefix: trim(&prefix).to_vec(),
-            optional: true,
-        });
-    }
     for dir in context.sources() {
         // A directory reached through a link is placed where Git has it,
         // and the link is the archive's own entry.
@@ -194,7 +174,6 @@ fn sources(context: &Context) -> Result<(Vec<Source>, Option<Error>), Error> {
             at: at.to_path_buf(),
             top: PathBuf::from(OsStr::from_bytes(trim(&top))),
             prefix: trim(&prefix).to_vec(),
-            optional: false,
         });
     }
     found.sort_by(|a, b| (&a.top, &a.prefix).cmp(&(&b.top, &b.prefix)));
@@ -240,9 +219,6 @@ fn unpack(
         .output()
         .map_err(|e| Error::new(format!("{prefix}: running git: {e}")))?;
     if !tracked.status.success() {
-        if source.optional {
-            return Ok(());
-        }
         return Err(Error::new(format!(
             "{prefix}: {} holds no file Git tracks, and `--local` builds only what Git holds: `git add` its files",
             source.dir.display()
@@ -481,30 +457,58 @@ fn manifest(dir: &Path, context: &Context, path: &Path) -> Result<(), Error> {
     inside(context, path, path.parent().unwrap_or(Path::new("")), named)
 }
 
-/// Refuse the Cargo configuration at the tree's root, in `dir`, as
-/// [`manifest`] refuses a manifest: Cargo reads it where it settles the
-/// locks, and in the image build. Its `[patch]` paths and its `paths` are
-/// read from the directory that holds `.cargo`.
-fn config(dir: &Path, context: &Context) -> Result<(), Error> {
-    for name in [".cargo/config.toml", ".cargo/config"] {
-        let path = Path::new(name);
-        let Some(table) = table(dir, path) else {
-            continue;
-        };
-        let mut named = Vec::new();
-        paths(&table, &mut named);
-        let listed = table.get("paths").and_then(toml::Value::as_array);
-        named.extend(
-            listed
-                .into_iter()
-                .flatten()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_string),
-        );
-        inside(context, path, Path::new(""), named)?;
+/// Refuse any Cargo configuration that a build of the sources reads: one
+/// that the archive holds, at any depth, one in a directory between a
+/// source and the context's root, which Cargo on this machine reads, and
+/// one above the tree in `dir`, which Cargo would read where it settles the
+/// locks. The image build reads only the configuration the generator
+/// writes, which is none, so a build with such a file would quietly differ
+/// from this checkout's. Cargo's own home configuration is read in each
+/// build on this machine, and in none in an image.
+fn configuration(
+    dir: &Path,
+    context: &Context,
+    entries: &BTreeMap<PathBuf, Entry>,
+) -> Result<(), Error> {
+    let named = |path: &Path| {
+        path.parent().and_then(Path::file_name) == Some(OsStr::new(".cargo"))
+            && CONFIG
+                .iter()
+                .any(|name| path.file_name() == Some(OsStr::new(name)))
+    };
+    let archived = entries
+        .keys()
+        .find(|path| named(path))
+        .map(|path| context.root().join(path));
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cargo")));
+    let read = |above: &Path| {
+        CONFIG
+            .iter()
+            .map(|name| above.join(".cargo").join(name))
+            .filter(|file| home.as_deref() != file.parent())
+            .find(|file| std::fs::symlink_metadata(file).is_ok())
+    };
+    let between = context.sources().iter().find_map(|source| {
+        source
+            .ancestors()
+            .take_while(|above| above.starts_with(context.root()))
+            .find_map(read)
+    });
+    let settling = dir.ancestors().find_map(read);
+    match archived.or(between).or(settling) {
+        None => Ok(()),
+        Some(file) => Err(Error::new(format!(
+            "{}: {} is Cargo configuration, which `--local` does not build with: the image build reads none, so the build would differ from this machine's. Remove it, or build without `--local`",
+            context.prefix(),
+            file.display()
+        ))),
     }
-    Ok(())
 }
+
+/// The names Cargo reads its configuration from in a `.cargo` directory.
+const CONFIG: [&str; 2] = ["config.toml", "config"];
 
 /// The TOML table of the file at `path` in the tree in `dir`, when it is
 /// one.

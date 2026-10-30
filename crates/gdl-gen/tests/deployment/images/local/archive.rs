@@ -56,7 +56,6 @@ fn an_ignored_lock_cannot_supply_bytes_to_the_context() {
 
 /// A source replacement must not resolve packages from an absolute host directory.
 #[test]
-#[ignore = "F2: a Cargo source directory bypasses the root configuration path check"]
 fn a_cargo_source_cannot_resolve_from_an_absolute_host_directory() {
     let copy = Copy::new();
     let host = tempfile::Builder::new()
@@ -96,8 +95,9 @@ fn a_cargo_source_cannot_resolve_from_an_absolute_host_directory() {
     let mut accepted = Vec::new();
     for builder in Builder::ALL {
         match builder.contexts(&copy.spec()) {
+            // Refused as Cargo configuration, naming the file.
             Err(error) => assert!(
-                error.to_string().contains("outside the sources"),
+                error.to_string().contains(".cargo/config.toml"),
                 "{builder:?}: {error}"
             ),
             Ok(contexts) => {

@@ -246,45 +246,27 @@ fn a_linked_manifest_with_an_absolute_dependency_is_refused() {
     }
 }
 
-/// The Cargo configuration at the tree's root, which Cargo reads where it
-/// settles the locks and in the image build, is checked as a manifest is:
-/// a `[patch]` path, or a `paths` entry, that is absolute or leaves the
-/// tree is refused, naming the file and the path.
+/// Any Cargo configuration a build of the sources reads is refused,
+/// naming the file, whatever it holds: committed at the root or below it,
+/// or untracked in a directory between a source and the root, which Cargo
+/// on this machine reads. The image build reads none, so a build with one
+/// would quietly differ from this checkout's.
 #[test]
-fn a_root_cargo_configuration_with_an_absolute_path_is_refused() {
-    let host = tempfile::Builder::new()
-        .prefix("gdl-host-support-")
-        .tempdir()
-        .expect("a crate outside the sources");
-    std::fs::create_dir(host.path().join("src")).expect("a source directory");
-    std::fs::write(
-        host.path().join("Cargo.toml"),
-        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .expect("a manifest");
-    std::fs::write(host.path().join("src/lib.rs"), "").expect("a source");
-    let name = host
-        .path()
-        .file_name()
-        .expect("a name")
-        .to_string_lossy()
-        .into_owned();
-    for (config, named) in [
-        (
-            format!(
-                "[patch.crates-io]\nimage-support = {{ path = {} }}\n",
-                toml::Value::String(host.path().display().to_string())
-            ),
-            host.path().display().to_string(),
-        ),
-        (format!("paths = [\"../{name}\"]\n"), format!("../{name}")),
+fn any_cargo_configuration_is_refused() {
+    let net = "[net]\ngit-fetch-with-cli = true\n";
+    for (at, staged) in [
+        (".cargo/config.toml", true),
+        ("examples/api/.cargo/config", true),
+        (".cargo/config.toml", false),
     ] {
         let copy = Copy::new();
-        std::fs::create_dir(copy.path().join(".cargo")).expect("a directory");
-        std::fs::write(copy.path().join(".cargo/config.toml"), &config).expect("a configuration");
-        copy.add();
+        let file = copy.path().join(at);
+        std::fs::create_dir_all(file.parent().expect("a directory")).expect("a directory");
+        std::fs::write(&file, net).expect("a configuration");
+        if staged {
+            copy.add();
+        }
         let error = refused(&copy);
-        assert!(error.contains(".cargo/config.toml"), "{config}: {error}");
-        assert!(error.contains(&named), "{config}: {error}");
+        assert!(error.contains(&file.display().to_string()), "{at}: {error}");
     }
 }
