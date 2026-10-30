@@ -1461,3 +1461,106 @@ impl gdl::Build for ByModel {
     )
     .expect("the pools' settings provide it");
 }
+
+/// A bound pool policy and a bound selector resolve side by side from one
+/// crate, and each stays held to its own rules: the policy's `NEEDS` to
+/// its class's supply, and the selector to the crate's offer.
+#[test]
+fn check_holds_a_policys_needs_beside_a_bound_selector() {
+    let router = router(
+        r#"
+pub struct ByModel;
+
+impl gdl::PoolPolicy for ByModel {
+    type Head = gdl::Encoded;
+    const NEEDS: &'static [&'static str] = &["model"];
+
+    fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, pools: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        pools.iter().position(gdl::Pool::takes_work).map(gdl::PoolChoice::new).ok_or_else(gdl::NoPool::new)
+    }
+}
+
+impl gdl::Build for ByModel {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+
+pub struct First;
+
+impl gdl::Selector for First {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(&'a self, _: gdl::Request<'a, gdl::Encoded>, instances: gdl::Instances<'a>) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+
+impl gdl::Build for First {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+"#,
+    );
+    let spec = |selector: &str, provides: &[&str]| {
+        let mut text: toml::Table = std::fs::read_to_string(fixture().join("gdl.toml"))
+            .expect("spec")
+            .parse()
+            .expect("spec table");
+        let path = toml::Value::String(router.path().display().to_string());
+        text["pool_policy"]["by_model"]["path"] = path.clone();
+        let mut bound = toml::Table::new();
+        bound.insert("crate".into(), "policy-router".into());
+        bound.insert("path".into(), path);
+        bound.insert("type".into(), selector.into());
+        let mut selectors = toml::Table::new();
+        selectors.insert("first".into(), bound.into());
+        text.insert("selector".into(), selectors.into());
+        let mut router = toml::Table::new();
+        router.insert("selector".into(), "first".into());
+        let mut routing = toml::Table::new();
+        routing.insert("Model".into(), router.into());
+        text.insert("routing".into(), routing.into());
+        if !provides.is_empty() {
+            let kinds = provides
+                .iter()
+                .map(|kind| toml::Value::from(*kind))
+                .collect();
+            text["pools"]["model"]
+                .as_table_mut()
+                .expect("the model class's table")
+                .insert("provides".into(), toml::Value::Array(kinds));
+        }
+        let graph = std::fs::read_to_string(fixture().join("policy.gdl"))
+            .expect("graph")
+            .replace("schema = 1;", "schema = 1;\nproperty model: Ask;");
+        gdl_gen::Spec::from_text(
+            &toml::to_string(&text).expect("spec text"),
+            &graph,
+            &fixture(),
+        )
+        .expect("spec")
+    };
+    let checked = |spec: &gdl_gen::Spec| {
+        gdl_gen::check(spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    let unmet = checked(&spec("policy_router::First", &[])).expect_err("nothing supplies `model`");
+    assert!(
+        unmet.contains("pool policy `by_model` needs property `model` from class `model`"),
+        "{unmet}"
+    );
+    assert!(!unmet.contains("[selector.first]"), "{unmet}");
+    checked(&spec("policy_router::First", &["model"])).expect("both bind, and the need is met");
+    let wrong = checked(&spec("policy_router::ByModel", &["model"]))
+        .expect_err("a pool policy's type, bound as a selector");
+    assert!(wrong.contains("[selector.first]: "), "{wrong}");
+}
