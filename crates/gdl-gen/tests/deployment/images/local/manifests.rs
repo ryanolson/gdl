@@ -95,3 +95,79 @@ fn copied_manifests_resolve_without_the_host_sources() {
     .expect("local images");
     assert!(docker.checked);
 }
+
+/// Parent components cannot disguise an absolute dependency outside the
+/// copied sources as a path within their root.
+#[test]
+#[ignore = "parent components still bypass the absolute dependency boundary"]
+fn parent_components_cannot_admit_an_absolute_host_dependency() {
+    let copy = Copy::new();
+    let host = tempfile::Builder::new()
+        .prefix("gdl-host-dependency-")
+        .tempdir()
+        .expect("a dependency outside the copied sources");
+    std::fs::create_dir(host.path().join("src")).expect("a source directory");
+    std::fs::write(
+        host.path().join("Cargo.toml"),
+        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a dependency manifest");
+    std::fs::write(host.path().join("src/lib.rs"), "pub const VALUE: u8 = 1;\n")
+        .expect("a dependency source");
+    let manifest = copy.path().join("examples/api/Cargo.toml");
+    let original = std::fs::read_to_string(&manifest).expect("the node manifest");
+    let set_path = |named: &Path| {
+        std::fs::write(
+            &manifest,
+            format!(
+                "{original}\n[dependencies.image-support]\npath = {}\n",
+                toml::Value::String(named.display().to_string())
+            ),
+        )
+        .expect("an absolute dependency");
+    };
+    set_path(host.path());
+    let mut docker = Fake::default();
+    let refused = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    )
+    .expect_err("an absolute dependency outside the sources is refused");
+    assert!(
+        refused.to_string().contains("outside the sources"),
+        "{refused}"
+    );
+    assert!(docker.contexts.is_empty());
+    let disguised = copy
+        .path()
+        .join("..")
+        .join(host.path().file_name().expect("a host directory name"));
+    assert_eq!(
+        disguised.canonicalize().expect("the same dependency"),
+        host.path()
+    );
+    set_path(&disguised);
+    let result = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    );
+    assert!(
+        result.is_err(),
+        "parent components admitted an absolute host dependency into {} contexts: {:?}",
+        docker.contexts.len(),
+        docker
+            .contexts
+            .values()
+            .filter_map(|context| context.get(Path::new("examples/api/Cargo.toml")))
+            .collect::<Vec<_>>()
+    );
+    assert!(docker.contexts.is_empty());
+}
