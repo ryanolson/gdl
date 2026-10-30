@@ -8,6 +8,7 @@ A pool's hub serves the `gdl-pool` extension's routes under `/v1/ext/gdl-pool`. 
 |---|---|---|---|---|
 | `GET /health` | public | none | none | 200 when the pool is healthy, 503 otherwise, both with a `PoolHealth` body |
 | `GET /withdrawn` | public | none | none | 200 with `{"withdrawn": true}` once the directory has stored the drained pool's withdrawal and a read after it finds no record of the pool, and `{"withdrawn": false}` before, as the health body's `withdrawn` says. It answers 200 either way because health answers 503 for a drained pool, and a reader through the API server's service proxy, as `kubectl get --raw` is, does not see the body of a 503 |
+| `GET /metrics` | public | none | none | 200 with the hub's metrics in Prometheus' text format: its pool's load summary and each followed pool's link ([A pool hub's metrics](metrics.md#a-pool-hubs-metrics)) |
 | `GET /watch` | public | none | optional query `?class=&pool=&run=&generation=` (`gdl_watch::Follower`) | the pool's watch as server-sent events (`PoolWatchEvent`) |
 | `GET /follows` | public | none | optional query `?instance=` (`gdl_watch::RelayWatcher`), the chooser that watches | the relay as server-sent events (`FollowEvent`) |
 | `GET /follows/{class}/{pool}` | public | none | none | one pool's follows: its closing generations, then its current one, then `synced`, then each relay event that names the pool |

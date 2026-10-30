@@ -38,6 +38,11 @@ pub(crate) struct Installed {
 }
 
 impl Installed {
+    /// The pool's region, as its watch's first event showed it.
+    pub(super) fn region(&self) -> &str {
+        &self.region
+    }
+
     /// A pool as its watch's first event shows it.
     pub(crate) fn new(
         pool: String,

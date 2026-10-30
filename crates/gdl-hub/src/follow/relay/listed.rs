@@ -116,6 +116,12 @@ impl Listed {
 }
 
 impl Listings {
+    /// The region of the pool `pool` of `class`, if it is listed.
+    pub(super) fn region(&self, class: &str, pool: &str) -> Option<&str> {
+        let listed = self.classes.get(class)?.get(pool)?;
+        Some(&listed.region)
+    }
+
     /// The hub sends to `classes`: the listings are whole once each one's
     /// directory watch has completed a snapshot.
     pub(super) fn expect(&mut self, classes: impl IntoIterator<Item = String>) {

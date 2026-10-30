@@ -14,6 +14,8 @@ gdl-model = { path = "../gdl-model" }
 gdl-watch = { path = "../gdl-watch" }
 # The keyed record table's order of use.
 lru = "0.16"
+# The hub's metrics route, in Prometheus' text format.
+prometheus = { workspace = true }
 velo-hub = { workspace = true, features = ["server", "client"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }

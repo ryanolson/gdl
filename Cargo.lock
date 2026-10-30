@@ -1214,6 +1214,7 @@ dependencies = [
  "gdl-pools-dynamodb",
  "gdl-watch",
  "lru",
+ "prometheus",
  "reqwest",
  "serde",
  "serde_json",

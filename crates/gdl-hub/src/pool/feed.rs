@@ -512,6 +512,11 @@ impl Feed {
         load
     }
 
+    /// The load summary last made, as the watch last sent it.
+    pub(super) fn summary(&self) -> Option<LoadSummary> {
+        self.lock().loads.summary()
+    }
+
     /// The counting saw `event` on the `watched` service of the class's
     /// segment at `index`.
     pub(super) fn observe(&self, index: usize, watched: Watched, event: &ServiceEvent) {

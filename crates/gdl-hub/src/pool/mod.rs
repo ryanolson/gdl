@@ -41,6 +41,7 @@ mod followers;
 mod health;
 mod judge;
 mod load;
+mod meter;
 mod properties;
 mod publish;
 mod retiring;
@@ -993,6 +994,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
         });
         Router::new()
             .merge(reports)
+            .merge(meter::routes(&self.record, Arc::clone(&self.feed), Arc::clone(&self.relay)))
             .route(
                 gdl_watch::AVOIDED_ROUTE,
                 post(move |Json(avoided): Json<gdl_watch::Avoided>| async move {

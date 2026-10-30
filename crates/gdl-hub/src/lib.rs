@@ -4,7 +4,9 @@
 //! and placement. A pool's hub runs [`PoolReadiness`] beside it: the
 //! `gdl-pool` extension, which judges from the pool's usable instances and
 //! its quorum ([`Quorum`]) whether the pool can take work, answers on the
-//! pool health endpoint (`GET /v1/ext/gdl-pool/health`), publishes the
+//! pool health endpoint (`GET /v1/ext/gdl-pool/health`), serves its
+//! metrics (`GET /v1/ext/gdl-pool/metrics`: its pool's load summary and
+//! each followed pool's link, in Prometheus' text format), publishes the
 //! pool's record through a [`gdl_pools::PoolDirectory`], and serves the
 //! pool's watch (`GET /v1/ext/gdl-pool/watch`): the pool's state and epoch
 //! and its entry instances, as [`gdl_watch::PoolWatchEvent`]s, which a hub

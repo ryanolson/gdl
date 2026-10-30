@@ -55,6 +55,7 @@ use velo_hub::velo::InstanceId;
 
 mod changes;
 mod installed;
+mod links;
 mod listed;
 
 pub(crate) use installed::Installed;

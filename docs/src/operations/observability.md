@@ -110,6 +110,8 @@ A chooser also shows what it holds of each pool now, as gauges: the last load su
 - **A stale view:** `pool_load_age_seconds` past a few of the pool's summary periods. `home_first` passes over a pool whose summary is stale.
 - **A pool that stopped taking work:** `pool_takes_work` at 0, with `pool_state` saying why.
 
+A pool's hub shows the same summary as it sends it (`hub_pool_load_*`), and whether each pool it follows has its link up (`hub_follow_up`), at `GET /v1/ext/gdl-pool/metrics` on its public listener ([A pool hub's metrics](../appendix/metrics.md#a-pool-hubs-metrics)). A chooser's `pool_load_age_seconds` that grows while its hub's `hub_follow_up` for the pool is 0 says the link is down, not the pool.
+
 The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, and two more for its round trip, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)). The gauges are read from the chooser's tables at each scrape and cost an offer nothing.
 
 ## Logs

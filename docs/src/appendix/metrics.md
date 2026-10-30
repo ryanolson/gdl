@@ -122,6 +122,23 @@ An instance under a pool's hub registers one more family: what became of each wr
 - A table's four series appear at zero when a node takes the table, and stay for the life of the process. Two handles on one table count into the same series.
 - A dropped write never reaches the hub, so the callback never gets it. The others each reach the callback once.
 
+## A pool hub's metrics
+
+A pool's hub serves its own metrics on its public listener, at `GET /v1/ext/gdl-pool/metrics` ([Pool hub routes](hub-api.md)), in Prometheus' text format. They are in `crates/gdl-hub/src/pool/meter.rs`. Each is read when the route is asked, from what the hub already keeps, so nothing is recorded on a watch's or a report's path. Each has the labels `class`, `pool`, and `region`.
+
+| Name | Type | Meaning |
+|---|---|---|
+| `hub_pool_load_admitted` | gauge | Requests the pool's entry instances held admitted, in the load summary the hub last made of its own pool and sent on its watch. |
+| `hub_pool_load_limit` | gauge | The admission limit over the same entry instances, in that summary. |
+| `hub_pool_load_refusals` | gauge | Hand-offs the pool's entry instances declined in the summary's period, in that summary. A count for one period, not a total. |
+| `hub_pool_load_instances` | gauge | The pool's usable entry instances, in that summary. |
+| `hub_follow_up` | gauge | One series for each pool the hub follows: 1 while its follow's link is up, its watch's snapshot installed and the link not ended; 0 from the link's end until a later follow of the pool is installed. A withheld pool's link is up: it reads the pool again. |
+
+- A pool with no summary, as one that no hop enters, or one with no report counted, has no `hub_pool_load_*` series. A hub that follows no pool has no `hub_follow_up` series.
+- The pool labels of `hub_pool_load_*` are the hub's own pool's. Those of `hub_follow_up` are the followed pool's, with its region from its follow, or from its record while no follow of it is installed.
+- A pool leaves `hub_follow_up` when the hub no longer follows it, as when it withdraws its record.
+- The names carry no prefix, and the series no `dynamo_namespace`, `dynamo_component`, or `worker_id`. Those come from a segment's `[system]` settings and its instance, and a hub has neither: it is one process per pool, and its pool's labels name it.
+
 ## Buckets
 
 All six histograms, the runtime's five and `pool_offer_round_trip_seconds`, use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
