@@ -39,21 +39,23 @@ fn a_pod_monitor_is_applied_where_asked_and_down_deletes_it() {
     let log = Log::default();
     let mut kube = Kube::new(&log);
     deploy(&mirror, &files, &mut docker(&log), &mut kube).expect("deploy");
-    for context in ["kind-use1", "kind-euw1"] {
+    for (context, cluster) in [("kind-use1", "use1"), ("kind-euw1", "euw1")] {
+        let name = format!("api-{cluster}");
         assert!(
-            kube.objects[context].contains_key(&("PodMonitor".into(), "api".into())),
+            kube.objects[context].contains_key(&("PodMonitor".into(), name)),
             "{context}"
         );
     }
     assert!(steps(&log).contains(&"kind-use1:crds".to_string()));
     down(&files, &mut kube).expect("down");
-    for context in ["kind-use1", "kind-euw1"] {
+    for (context, cluster) in [("kind-use1", "use1"), ("kind-euw1", "euw1")] {
+        let name = format!("api-{cluster}");
         let deleted: Vec<String> = deletes(&log, context).into_iter().flatten().collect();
         assert!(
-            deleted.contains(&"podmonitor/api".to_string()),
+            deleted.contains(&format!("podmonitor/{name}")),
             "{deleted:?}"
         );
-        assert!(!kube.objects[context].contains_key(&("PodMonitor".into(), "api".into())));
+        assert!(!kube.objects[context].contains_key(&("PodMonitor".into(), name)));
     }
 }
 
@@ -159,7 +161,6 @@ fn another_groups_failed_discovery_does_not_stop_deploy_or_down() {
 }
 
 #[test]
-#[ignore = "F1: context aliases overwrite one cluster's PodMonitor with the other's"]
 fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
     struct Aliases(Kube);
     impl gdl_gen::Kube for Aliases {

@@ -35,7 +35,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api"
     },
-    "name": "api",
+    "name": "api-use1",
     "namespace": "gdl-api"
   },
   "spec": {

@@ -558,7 +558,11 @@ pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
     json!({
         "apiVersion": "monitoring.coreos.com/v1",
         "kind": "PodMonitor",
-        "metadata": {"name": fleet, "namespace": cluster.namespace, "labels": labels},
+        "metadata": {
+            "name": pod_monitor_name(fleet, name),
+            "namespace": cluster.namespace,
+            "labels": labels,
+        },
         "spec": {
             "selector": {"matchLabels": labels},
             "podMetricsEndpoints": [
@@ -567,6 +571,14 @@ pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
             ],
         },
     })
+}
+
+/// The name of `fleet`'s PodMonitor in cluster `cluster`: one of its own
+/// for each cluster, since two clusters' contexts can reach one namespace,
+/// where one name would hold only the last cluster's selector. Fitted to a
+/// label's length as a label's value is ([`label_value`]).
+pub(super) fn pod_monitor_name(fleet: &str, cluster: &str) -> String {
+    label_value(&format!("{fleet}-{cluster}"))
 }
 
 /// A Kubernetes label's key as Prometheus' discovery names it: each
@@ -863,7 +875,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
     text.push_str("\nEvery pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations.");
     if fleet.metrics().pod_monitor {
-        text.push_str(&format!(" Each `base.yaml` also holds PodMonitor `{name}` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
+        text.push_str(&format!(" Each `base.yaml` also holds PodMonitor `{name}-<cluster>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
     }
     text.push('\n');
     text.push_str(&super::dynamodb::readme(fleet));
