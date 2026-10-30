@@ -299,9 +299,23 @@ async fn a_full_pool_serves_the_request_it_re_queued_once_room_returns() {
     let setup = setup(true, 60_000).await;
     let waiting = send(&setup.chooser, asked("waiting"), Cx::new());
     setup.declines(1).await;
+    // The entry counts its decline before its answer reaches the chooser,
+    // which then ends the declined offer's lease: wait for that, so that
+    // the one lease left is the held request's.
+    tokio::time::timeout(WAIT, async {
+        while followed(&setup.pools, "f", M1).is_none_or(|m| m.leases != 1) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "a lease held while the request waits: {:?}",
+            followed(&setup.pools, "f", M1)
+        )
+    });
     let m = followed(&setup.pools, "f", M1).expect("followed");
     assert!(m.damped.is_none() && !m.gone, "the pool was damped: {m:?}");
-    assert_eq!(m.leases, 1, "a lease held while the request waits: {m:?}");
     assert_eq!(offers(&setup.m2), 0, "offered to the other pool");
     assert!(!waiting.is_finished(), "the request did not wait");
 
