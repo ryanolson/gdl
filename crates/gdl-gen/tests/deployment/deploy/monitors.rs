@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "monitors/names.rs"]
+mod names;
+
 /// [`fleet_text`], which asks for a PodMonitor, or the same without.
 fn fleet_asking(pod_monitor: bool) -> String {
     let text = fleet_text();
