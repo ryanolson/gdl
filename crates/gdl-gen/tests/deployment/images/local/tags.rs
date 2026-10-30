@@ -104,7 +104,6 @@ fn an_external_spec_change_moves_the_generated_images_tag() {
 /// read like the paths and contents of a different set of regular files.
 #[cfg(unix)]
 #[test]
-#[ignore = "file and link digest fields still collide and reuse published tags"]
 fn different_file_and_link_trees_cannot_reuse_published_tags() {
     #[derive(Default)]
     struct Kinds {
@@ -149,6 +148,7 @@ fn different_file_and_link_trees_cannot_reuse_published_tags() {
     for (name, text) in [("lia", "link"), ("lib", "lic"), ("link", "lid")] {
         std::fs::write(copy.path().join(name), text).expect("a regular source file");
     }
+    copy.add();
     let mut docker = Kinds::default();
     let build = |push, docker: &mut Kinds| {
         gdl_gen::images(
@@ -169,6 +169,7 @@ fn different_file_and_link_trees_cannot_reuse_published_tags() {
         std::os::unix::fs::symlink(target, copy.path().join(name))
             .expect("an internal relative link");
     }
+    copy.add();
     let second = build(false, &mut docker);
     assert_eq!(docker.seen.len(), 6);
     assert_ne!(docker.seen[0], docker.seen[3], "the contexts differ");

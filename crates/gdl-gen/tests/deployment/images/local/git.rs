@@ -86,7 +86,6 @@ fn a_git_error_does_not_admit_ignored_credentials() {
 /// UTF-8 name. The latter must never supply bytes for the former.
 #[cfg(unix)]
 #[test]
-#[ignore = "lossy Git name decoding still selects an ignored secret"]
 fn a_non_utf8_tracked_name_cannot_select_an_ignored_secret() {
     use std::os::unix::ffi::OsStringExt;
 

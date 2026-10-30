@@ -138,6 +138,7 @@ mod images;
 mod k8s;
 pub(crate) mod locks;
 mod pools;
+mod tree;
 mod variables;
 
 pub use deploy::{Deploy, Kube, Kubectl, Reply, Waits, deploy, down};

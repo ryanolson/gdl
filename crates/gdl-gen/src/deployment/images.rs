@@ -7,10 +7,10 @@
 //! Each image is tagged with a sha256 of what it is built from: its
 //! platform and every file of its build context, its Dockerfile included.
 //! With local sources ([`Sources::Local`]) every image builds from one
-//! tree: a copy of gdl's workspace and of each crate the spec names by
-//! path, with the bundle placed in it as in gdl's workspace, and each
-//! segment's lock settled there. So each tag covers those sources, and a
-//! change to one moves every tag.
+//! tree ([`super::tree`]): gdl's workspace and each crate the spec names by
+//! path, as Git holds them, with the bundle placed in it as in gdl's
+//! workspace, and each segment's lock settled there. So each tag covers
+//! those sources, and a change to one moves every tag.
 //! `k8s` computes the tags without Docker, and `images` skips an image
 //! whose tag its registry already holds. The binary is built on the build
 //! host's platform for the image's, with a cross linker when the two
@@ -250,8 +250,8 @@ impl Source {
     }
 }
 
-/// A copy of the local sources that a spec's images build from, with the
-/// bundle in it, and the sha256 of every path and byte of it.
+/// The tree of local sources that a spec's images build from, with the
+/// bundle in it, and the sha256 of what it holds.
 struct Tree {
     dir: tempfile::TempDir,
     digest: String,
@@ -432,45 +432,15 @@ struct Local {
 }
 
 impl Local {
-    /// Copy the sources of `context` into a new tree, at their paths from
-    /// its root; write `prepared`'s bundle at the bundle's place there,
-    /// each segment's manifest patched to build against gdl's sources;
-    /// settle each segment's lock from gdl's, as `compose --local` does;
-    /// and digest the tree.
+    /// Build the tree of `context`'s sources ([`super::tree`]), with
+    /// `prepared`'s bundle at the bundle's place there, each segment's
+    /// manifest patched to build against gdl's sources, and its lock
+    /// settled from gdl's, as `compose --local` does.
     fn new(prepared: &Prepared, context: &super::context::Context) -> Result<Self, Error> {
         let dir = tempfile::Builder::new()
             .prefix("gdl-images-local-")
             .tempdir()
             .map_err(io)?;
-        let root = dir.path();
-        for (path, link) in source_files(context)? {
-            // The tree's root is the build's context. Docker reads its
-            // ignore rules there, from `.dockerignore`, or from
-            // `Dockerfile.dockerignore` beside the Dockerfile, which this
-            // writes there for each image: none of the checkout's applies,
-            // so no rule of it, such as `target/`, can leave the bundle out.
-            if [".dockerignore", "Dockerfile", "Dockerfile.dockerignore"]
-                .iter()
-                .any(|name| path == Path::new(name))
-            {
-                continue;
-            }
-            let to = root.join(&path);
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(io)?;
-            }
-            let copied = match &link {
-                // The link itself, never its target: Docker keeps it as a
-                // link, and nothing on this machine resolves it.
-                Some(target) => std::os::unix::fs::symlink(target, &to),
-                None => std::fs::copy(context.root().join(&path), &to).map(drop),
-            };
-            copied.map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
-            if link.is_none() && path.file_name().is_some_and(|name| name == "Cargo.toml") {
-                relocate(context.root(), &path, &to)?;
-            }
-        }
-        let bundle = context.bundle().to_path_buf();
         let mut files: Files = prepared
             .bundle
             .files
@@ -488,21 +458,10 @@ impl Local {
         for crate_dir in &segments {
             super::localize(&mut files, context, crate_dir)?;
         }
-        crate::write(&root.join(&bundle), &files)
-            .map_err(|e| Error::new(format!("`--local`: writing the bundle: {e}")))?;
-        for crate_dir in &segments {
-            let at = root.join(&bundle).join(crate_dir);
-            if let Some(lock) = context.lock() {
-                std::fs::copy(lock, at.join("Cargo.lock"))
-                    .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
-            }
-            let carried = context.host_patches(&files, std::slice::from_ref(crate_dir));
-            super::locks::settle(&at, &carried, context)?;
-        }
-        let digest = digest(root)?;
+        let digest = super::tree::build(dir.path(), context, &files, &segments)?;
         Ok(Self {
             tree: Rc::new(Tree { dir, digest }),
-            bundle,
+            bundle: context.bundle().to_path_buf(),
         })
     }
 
@@ -538,244 +497,6 @@ impl Local {
         );
         dockerfile(&settings.build_image, base, true, &build)
     }
-}
-
-/// Each file of the sources of `context`, from its root: every file Git
-/// tracks, and each file it would track that is not hidden, so that build
-/// output and what the checkout ignores stay out, a new source that is not
-/// committed is in, and an untracked dotfile, such as an `.env` of
-/// credentials, never reaches an image. The copy into an image that is
-/// pushed is a trust boundary, so it fails closed: a source outside a Git
-/// checkout, and any error of Git's, such as a checkout it refuses for its
-/// ownership, stops the build, naming the path and Git's words.
-///
-/// Each is a file, or a link with its target: a link is copied as a link,
-/// never followed, so no byte of what it names is copied. A link whose
-/// target is absolute, or leaves the copied tree, is refused by its name:
-/// its text would put a path of this machine into the image, and Docker
-/// would resolve it to nothing that was copied. A path of any other kind,
-/// such as a socket, is refused too.
-fn source_files(
-    context: &super::context::Context,
-) -> Result<BTreeMap<PathBuf, Option<PathBuf>>, Error> {
-    let mut files = BTreeMap::new();
-    for dir in context.sources() {
-        let from = dir.strip_prefix(context.root()).map_err(|_| {
-            Error::new(format!(
-                "`--local`: {} is outside the context",
-                dir.display()
-            ))
-        })?;
-        // Each path from the checkout's root, so that a hidden directory
-        // above `dir` is seen, and the prefix that takes it to `dir`.
-        let prefix = PathBuf::from(git(dir, &["rev-parse", "--show-prefix"])?.trim_end());
-        let tracked = git_files(dir, "--cached")?;
-        let untracked = git_files(dir, "--others")?;
-        let hidden = |name: &Path| {
-            name.components()
-                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-        };
-        let untracked = untracked.into_iter().filter(|name| !hidden(name));
-        for full in tracked.into_iter().chain(untracked) {
-            let name = full.strip_prefix(&prefix).map_err(|_| {
-                Error::new(format!(
-                    "`--local`: git listed {} outside {}",
-                    full.display(),
-                    dir.display()
-                ))
-            })?;
-            let path = from.join(name);
-            let refuse = |why: &str| {
-                Err(Error::new(format!(
-                    "`--local`: {} {why}, so it is not copied into an image: remove it, or make it a file",
-                    dir.join(name).display()
-                )))
-            };
-            // A tracked file deleted in the checkout is not built.
-            let Ok(kind) = std::fs::symlink_metadata(dir.join(name)) else {
-                continue;
-            };
-            if kind.is_file() {
-                files.insert(path, None);
-            } else if kind.is_symlink() {
-                let target = std::fs::read_link(dir.join(name)).map_err(io)?;
-                let named =
-                    crate::paths::normalize(&path.parent().unwrap_or(Path::new("")).join(&target));
-                if target.is_absolute() {
-                    return refuse(&format!(
-                        "is a link to an absolute path, {}",
-                        target.display()
-                    ));
-                }
-                if named.starts_with("..") {
-                    return refuse(&format!(
-                        "is a link to {}, outside the copied sources",
-                        target.display()
-                    ));
-                }
-                files.insert(path, Some(target));
-            } else {
-                return refuse("is neither a file nor a link");
-            }
-        }
-    }
-    Ok(files)
-}
-
-/// The files `git ls-files <which> --exclude-standard` lists in `dir`,
-/// each from the checkout's root (`--full-name`).
-fn git_files(dir: &Path, which: &str) -> Result<Vec<PathBuf>, Error> {
-    let listed = git(
-        dir,
-        &["ls-files", "-z", "--full-name", which, "--exclude-standard"],
-    )?;
-    Ok(listed
-        .split('\0')
-        .filter(|name| !name.is_empty())
-        .map(PathBuf::from)
-        .collect())
-}
-
-/// What `git <args>` prints in `dir`. Refused, naming `dir` and Git's
-/// words, when Git fails.
-fn git(dir: &Path, args: &[&str]) -> Result<String, Error> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| Error::new(format!("`--local`: running git in {}: {e}", dir.display())))?;
-    if !output.status.success() {
-        return Err(Error::new(format!(
-            "`--local`: git cannot list the sources in {}, and nothing is copied from a checkout git cannot list: {}",
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Rewrite the copy at `copy` of the manifest at `path`, from the context's
-/// `root`, so that each `path` it names absolutely, a path dependency's
-/// say, is named from the manifest's place in the copied tree: in the
-/// image the host's path does not exist, and on this machine Cargo would
-/// resolve the host's source rather than the copy. A path outside the
-/// context is refused, naming the manifest.
-fn relocate(root: &Path, path: &Path, copy: &Path) -> Result<(), Error> {
-    let text = std::fs::read_to_string(copy)
-        .map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
-    let Ok(mut manifest) = text.parse::<toml::Table>() else {
-        // Cargo refuses it in the build, with its own words.
-        return Ok(());
-    };
-    let here = Path::new("/").join(path.parent().unwrap_or(Path::new("")));
-    let mut outside = None;
-    let changed = relocate_paths(
-        &mut manifest,
-        &mut |named: &Path| match named.strip_prefix(root) {
-            Ok(inside) => Some(crate::paths::relative(&here, &Path::new("/").join(inside))),
-            Err(_) => {
-                outside.get_or_insert_with(|| named.to_path_buf());
-                None
-            }
-        },
-    );
-    if let Some(named) = outside {
-        return Err(Error::new(format!(
-            "`--local`: {} names {} by its absolute path, outside the sources the images copy, so no image can build it: name it by a relative path, from within the sources",
-            path.display(),
-            named.display()
-        )));
-    }
-    if changed {
-        let text = toml::to_string(&manifest).map_err(io)?;
-        std::fs::write(copy, text).map_err(io)?;
-    }
-    Ok(())
-}
-
-/// Replace each absolute `path` string in `table`, at any depth, with what
-/// `relative` gives for it, when it gives one: whether any changed.
-fn relocate_paths(
-    table: &mut toml::Table,
-    relative: &mut dyn FnMut(&Path) -> Option<PathBuf>,
-) -> bool {
-    let mut changed = false;
-    for (key, value) in table.iter_mut() {
-        match value {
-            toml::Value::String(text)
-                if key == "path" && Path::new(text.as_str()).is_absolute() =>
-            {
-                if let Some(path) = relative(Path::new(text.as_str())) {
-                    *text = crate::paths::display(&path);
-                    changed = true;
-                }
-            }
-            toml::Value::Table(inner) => changed |= relocate_paths(inner, relative),
-            toml::Value::Array(items) => {
-                for item in items {
-                    if let toml::Value::Table(inner) = item {
-                        changed |= relocate_paths(inner, relative);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    changed
-}
-
-/// Each file and link under `dir`, at `from` joined with its path there.
-/// A link is a leaf: it is not followed.
-fn walk(
-    dir: &Path,
-    from: &Path,
-    files: &mut std::collections::BTreeSet<PathBuf>,
-) -> Result<(), Error> {
-    let failed = |e: std::io::Error| Error::new(format!("`--local`: {}: {e}", dir.display()));
-    for entry in std::fs::read_dir(dir).map_err(failed)? {
-        let entry = entry.map_err(failed)?;
-        let name = entry.file_name();
-        if entry.file_type().map_err(failed)?.is_dir() {
-            walk(&entry.path(), &from.join(&name), files)?;
-        } else {
-            files.insert(from.join(&name));
-        }
-    }
-    Ok(())
-}
-
-/// The sha256, as hex, of every path and byte of the files under `root`,
-/// in path order, each with its length: the whole prepared tree, the
-/// generated crates and their settled locks under `target/gdl-images`
-/// included, so that the tag covers every byte the image builds from.
-fn digest(root: &Path) -> Result<String, Error> {
-    let mut files = std::collections::BTreeSet::new();
-    walk(root, Path::new(""), &mut files)?;
-    let mut hash = Sha256::new();
-    let mut field = |bytes: &[u8]| {
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(bytes);
-    };
-    field(b"gdl local sources");
-    for path in files {
-        field(path.to_string_lossy().as_bytes());
-        let path = root.join(&path);
-        let failed = |e: std::io::Error| Error::new(format!("{}: {e}", path.display()));
-        // A link by its text, as Docker copies it.
-        match std::fs::read_link(&path) {
-            Ok(target) => {
-                field(b"link");
-                field(target.to_string_lossy().as_bytes());
-            }
-            Err(_) => field(&std::fs::read(&path).map_err(failed)?),
-        }
-    }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
 }
 
 /// The Dockerfile of the hub, installed as the spec's `[gdl]` names it:

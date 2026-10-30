@@ -1,11 +1,13 @@
 use super::*;
 
-struct Isolated<'a> {
-    host: &'a Path,
-    checked: bool,
+/// A Docker that checks, in each context, that every manifest the
+/// generator wrote names each path relatively, and within the context.
+#[derive(Default)]
+struct Generated {
+    manifests: usize,
 }
 
-impl gdl_gen::Docker for Isolated<'_> {
+impl gdl_gen::Docker for Generated {
     fn digest(&mut self, _: &str) -> Result<Option<String>, gdl_gen::Error> {
         Ok(None)
     }
@@ -17,73 +19,71 @@ impl gdl_gen::Docker for Isolated<'_> {
         reference: &str,
         _: bool,
     ) -> Result<String, gdl_gen::Error> {
-        if reference.contains("/api-front:") {
-            assert!(context.join("examples/api/support/Cargo.toml").is_file());
-            let resolve = || {
-                std::process::Command::new("timeout")
-                    .arg("30")
-                    .arg(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-                    .args([
-                        "metadata",
-                        "--offline",
-                        "--locked",
-                        "--format-version",
-                        "1",
-                        "--manifest-path",
-                    ])
-                    .arg(context.join("target/gdl-images/front/Cargo.toml"))
-                    .current_dir(context)
-                    .output()
-                    .expect("Cargo resolves the context")
-            };
-            let reachable = resolve();
-            assert!(
-                reachable.status.success(),
-                "{}",
-                String::from_utf8_lossy(&reachable.stderr)
-            );
-            let saved = self.host.with_file_name("support-saved");
-            std::fs::rename(self.host, &saved).expect("hide the host source from Cargo");
-            let isolated = resolve();
-            std::fs::rename(&saved, self.host).expect("restore the host source");
-            self.checked = true;
-            assert!(
-                isolated.status.success(),
-                "the copied dependency exists, but Cargo still requires the host source: {}",
-                String::from_utf8_lossy(&isolated.stderr)
-            );
+        let bundle = context.join("target/gdl-images");
+        let mut stack = vec![bundle];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.file_name().is_none_or(|name| name != "Cargo.toml") {
+                    continue;
+                }
+                self.manifests += 1;
+                let text = std::fs::read_to_string(&path).expect("a manifest");
+                let table: toml::Table = text.parse().expect("a manifest");
+                let mut named = Vec::new();
+                paths(&table, &mut named);
+                for name in named {
+                    assert!(
+                        Path::new(&name).is_relative(),
+                        "{reference}: {} names {name}",
+                        path.display()
+                    );
+                    let real = path
+                        .parent()
+                        .expect("a directory")
+                        .join(&name)
+                        .canonicalize()
+                        .unwrap_or_else(|e| panic!("{}: {name}: {e}", path.display()));
+                    assert!(
+                        real.starts_with(context.canonicalize().expect("the context")),
+                        "{reference}: {} names {name}, outside the context",
+                        path.display()
+                    );
+                }
+            }
         }
         Ok(format!("sha256:{}", "0".repeat(64)))
     }
 }
 
-/// A copied manifest that names a dependency by an absolute path names it
-/// within the copied tree: Cargo resolves the segment with the host's
-/// source hidden.
+/// Each `path` string in `table`, at any depth.
+fn paths(table: &toml::Table, named: &mut Vec<String>) {
+    for (key, value) in table {
+        match value {
+            toml::Value::String(text) if key == "path" => named.push(text.clone()),
+            toml::Value::Table(inner) => paths(inner, named),
+            toml::Value::Array(items) => {
+                for item in items.iter().filter_map(toml::Value::as_table) {
+                    paths(item, named);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The manifests the generator writes, each segment's patched to build
+/// against gdl's sources, are the generator's, not archived: each names
+/// every path relative to itself, and within the context, so that no
+/// image depends on where the sources are on this machine.
 #[test]
-fn copied_manifests_resolve_without_the_host_sources() {
+fn the_generated_manifests_name_paths_within_the_tree() {
     let copy = Copy::new();
-    let api = copy.path().join("examples/api");
-    let support = api.join("support");
-    std::fs::create_dir_all(support.join("src")).expect("a dependency directory");
-    std::fs::write(
-        support.join("Cargo.toml"),
-        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .expect("a dependency manifest");
-    std::fs::write(support.join("src/lib.rs"), "pub const VALUE: u8 = 1;\n")
-        .expect("a dependency source");
-    let manifest = api.join("Cargo.toml");
-    let mut text = std::fs::read_to_string(&manifest).expect("the node manifest");
-    text.push_str(&format!(
-        "\n[dependencies.image-support]\npath = {}\n",
-        toml::Value::String(support.display().to_string())
-    ));
-    std::fs::write(&manifest, text).expect("a valid absolute path dependency");
-    let mut docker = Isolated {
-        host: &support,
-        checked: false,
-    };
+    let mut docker = Generated::default();
     gdl_gen::images(
         &copy.spec(),
         &fleet(),
@@ -93,13 +93,103 @@ fn copied_manifests_resolve_without_the_host_sources() {
         &mut docker,
     )
     .expect("local images");
-    assert!(docker.checked);
+    assert!(docker.manifests >= 3, "{}", docker.manifests);
+}
+
+/// Add a dependency of the api example on `support`, a crate of its own,
+/// named by `path`.
+fn depend(copy: &Copy, path: &str) {
+    let support = copy.path().join("examples/api/support");
+    std::fs::create_dir_all(support.join("src")).expect("a dependency directory");
+    std::fs::write(
+        support.join("Cargo.toml"),
+        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a dependency manifest");
+    std::fs::write(support.join("src/lib.rs"), "pub const VALUE: u8 = 1;\n")
+        .expect("a dependency source");
+    let manifest = copy.path().join("examples/api/Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("the node manifest");
+    text.push_str(&format!(
+        "\n[dependencies.image-support]\npath = {}\n",
+        toml::Value::String(path.to_string())
+    ));
+    std::fs::write(&manifest, text).expect("a path dependency");
+}
+
+/// Build the copy's images, and return the refusal.
+fn refused(copy: &Copy) -> String {
+    let mut docker = Fake::default();
+    let error = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    )
+    .expect_err("refused");
+    assert!(docker.contexts.is_empty());
+    error.to_string()
+}
+
+/// A manifest that names a dependency by an absolute path is refused,
+/// naming the manifest and the path, even when the path is within the
+/// sources: Cargo would read the host's source there, and the image would
+/// not hold it. No host source can reach an image.
+#[test]
+fn an_absolute_path_dependency_is_refused() {
+    let copy = Copy::new();
+    let support = copy.path().join("examples/api/support");
+    depend(&copy, &support.display().to_string());
+    copy.add();
+    let error = refused(&copy);
+    for named in [copy.path().join("examples/api/Cargo.toml"), support.clone()] {
+        assert!(
+            error.contains(&named.display().to_string()),
+            "{} in: {error}",
+            named.display()
+        );
+    }
+}
+
+/// A relative path dependency that leaves the sources, to a crate of this
+/// machine, is refused, naming the manifest and the path.
+#[test]
+fn a_path_dependency_that_leaves_the_sources_is_refused() {
+    let copy = Copy::new();
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-outside-")
+        .tempdir_in(copy.path().parent().expect("a parent"))
+        .expect("a directory beside the sources");
+    std::fs::create_dir(outside.path().join("src")).expect("a source directory");
+    std::fs::write(
+        outside.path().join("Cargo.toml"),
+        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a manifest");
+    std::fs::write(outside.path().join("src/lib.rs"), "").expect("a source");
+    let named = format!(
+        "../../../{}",
+        outside
+            .path()
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+    );
+    let manifest = copy.path().join("examples/api/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("the node manifest")
+        + &format!("\n[dependencies.image-support]\npath = \"{named}\"\n");
+    std::fs::write(&manifest, text).expect("a path dependency");
+    copy.add();
+    let error = refused(&copy);
+    assert!(error.contains("examples/api/Cargo.toml"), "{error}");
+    assert!(error.contains(&named), "{error}");
 }
 
 /// Parent components cannot disguise an absolute dependency outside the
 /// copied sources as a path within their root.
 #[test]
-#[ignore = "parent components still bypass the absolute dependency boundary"]
 fn parent_components_cannot_admit_an_absolute_host_dependency() {
     let copy = Copy::new();
     let host = tempfile::Builder::new()
@@ -127,6 +217,7 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
         .expect("an absolute dependency");
     };
     set_path(host.path());
+    copy.add();
     let mut docker = Fake::default();
     let refused = gdl_gen::images(
         &copy.spec(),
@@ -151,6 +242,7 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
         host.path()
     );
     set_path(&disguised);
+    copy.add();
     let result = gdl_gen::images(
         &copy.spec(),
         &fleet(),
@@ -172,44 +264,26 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
     assert!(docker.contexts.is_empty());
 }
 
-/// A manifest reached through an internal file link must still name its
-/// absolute dependencies within the prepared tree.
+/// A manifest reached through a link within the sources is checked as
+/// the manifest Cargo reads: its absolute dependency is refused, naming
+/// the link and the path, so no host source reaches an image through it.
 #[cfg(unix)]
 #[test]
-#[ignore = "linked manifests still retain absolute host dependencies"]
-fn a_linked_manifest_resolves_without_the_host_sources() {
+fn a_linked_manifest_with_an_absolute_dependency_is_refused() {
     let copy = Copy::new();
     let api = copy.path().join("examples/api");
     let support = api.join("support");
-    std::fs::create_dir_all(support.join("src")).expect("a dependency directory");
-    std::fs::write(
-        support.join("Cargo.toml"),
-        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .expect("a dependency manifest");
-    std::fs::write(support.join("src/lib.rs"), "pub const VALUE: u8 = 1;\n")
-        .expect("a dependency source");
+    depend(&copy, &support.display().to_string());
     let manifest = api.join("Cargo.toml");
-    let mut text = std::fs::read_to_string(&manifest).expect("the node manifest");
-    text.push_str(&format!(
-        "\n[dependencies.image-support]\npath = {}\n",
-        toml::Value::String(support.display().to_string())
-    ));
-    std::fs::write(&manifest, text).expect("an absolute path dependency");
     std::fs::rename(&manifest, api.join("Manifest.toml")).expect("move the manifest text");
     std::os::unix::fs::symlink("Manifest.toml", &manifest).expect("an internal manifest link");
-    let mut docker = Isolated {
-        host: &support,
-        checked: false,
-    };
-    gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    )
-    .expect("local images");
-    assert!(docker.checked);
+    copy.add();
+    let error = refused(&copy);
+    for named in [manifest, support] {
+        assert!(
+            error.contains(&named.display().to_string()),
+            "{} in: {error}",
+            named.display()
+        );
+    }
 }

@@ -119,6 +119,7 @@ fn a_link_within_the_sources_is_copied_as_a_link() {
     std::fs::write(copy.path().join("examples/api/NOTES.md"), "notes\n").expect("a file");
     std::os::unix::fs::symlink("NOTES.md", copy.path().join("examples/api/LINKED.md"))
         .expect("a link within the sources");
+    copy.add();
     let mut docker = Links::default();
     gdl_gen::images(
         &copy.spec(),
@@ -173,7 +174,6 @@ fn a_tracked_root_dockerignore_does_not_drop_the_bundle() {
 /// link. Checking only the leaf must not copy that link's host target.
 #[cfg(unix)]
 #[test]
-#[ignore = "directory symlinks still redirect tracked files to host credentials"]
 fn a_directory_link_cannot_redirect_tracked_files_to_host_credentials() {
     let copy = Copy::new();
     let assets = copy.path().join("assets");
@@ -229,4 +229,98 @@ fn a_directory_link_cannot_redirect_tracked_files_to_host_credentials() {
             "{reference}: an ancestor directory link copied host credentials into the context"
         );
     }
+}
+
+/// Build the copy's images, and return the refusal, which no context
+/// precedes.
+fn refused(copy: &Copy) -> String {
+    let mut docker = Fake::default();
+    let error = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    )
+    .expect_err("refused");
+    assert!(docker.contexts.is_empty());
+    error.to_string()
+}
+
+/// A committed link to an absolute path is refused, naming it: its text
+/// would put a path of this machine into the image.
+#[cfg(unix)]
+#[test]
+fn a_tracked_link_to_an_absolute_path_is_refused() {
+    let copy = Copy::new();
+    std::os::unix::fs::symlink("/etc/hostname", copy.path().join("examples/api/host.txt"))
+        .expect("a link");
+    copy.add();
+    let error = refused(&copy);
+    assert!(error.contains("examples/api/host.txt"), "{error}");
+    assert!(error.contains("absolute"), "{error}");
+}
+
+/// A committed link whose target leaves the sources is refused, naming it.
+#[cfg(unix)]
+#[test]
+fn a_tracked_link_that_leaves_the_sources_is_refused() {
+    let copy = Copy::new();
+    std::os::unix::fs::symlink("../../../x", copy.path().join("examples/api/out.txt"))
+        .expect("a link");
+    copy.add();
+    let error = refused(&copy);
+    assert!(error.contains("examples/api/out.txt"), "{error}");
+}
+
+/// Links whose targets each stay within the sources, but which resolve
+/// outside them through each other, are refused: in `examples/api/a/b`,
+/// `y -> x/../..` reads as `examples/api/a`, and resolves two levels above
+/// the root, through `x -> ../../../..`, the root.
+#[cfg(unix)]
+#[test]
+fn a_link_that_resolves_outside_through_another_is_refused() {
+    let copy = Copy::new();
+    let dir = copy.path().join("examples/api/a/b");
+    std::fs::create_dir_all(&dir).expect("a directory");
+    std::os::unix::fs::symlink("../../../..", dir.join("x")).expect("a link");
+    std::os::unix::fs::symlink("x/../..", dir.join("y")).expect("a link");
+    copy.add();
+    let error = refused(&copy);
+    assert!(error.contains("examples/api/a/b/y"), "{error}");
+}
+
+/// A submodule is another repository, which `git archive` leaves out: it
+/// is refused, naming it, rather than built without its files.
+#[test]
+fn a_submodule_is_refused() {
+    let copy = Copy::new();
+    let inner = tempfile::Builder::new()
+        .prefix("gdl-submodule-")
+        .tempdir()
+        .expect("a repository");
+    std::fs::write(inner.path().join("README.md"), "inner\n").expect("a file");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &["commit", "-q", "-m", "inner"][..],
+    ] {
+        super::git(inner.path(), args);
+    }
+    super::git(
+        copy.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &inner.path().display().to_string(),
+            "examples/api/vendored",
+        ],
+    );
+    let error = refused(&copy);
+    assert!(error.contains("examples/api/vendored"), "{error}");
+    assert!(error.contains("submodule"), "{error}");
 }

@@ -40,21 +40,22 @@ impl Copy {
         for tree in ["crates", "examples/api"] {
             copy_tree(&from.join(tree), &dir.path().join(tree));
         }
-        // `--local` copies only what Git lists: the copy is a checkout,
-        // with every file added.
-        for args in [&["init", "-q"][..], &["add", "-A"][..]] {
-            // The fixture is set up as its owner, whatever a case asks
-            // of Git afterwards.
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .env_remove("GIT_TEST_ASSUME_DIFFERENT_OWNER")
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "git {args:?}: {output:?}");
+        // `--local` builds what Git holds: the copy is a checkout, with
+        // every file committed.
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"][..],
+            &["commit", "-q", "-m", "copy"][..],
+        ] {
+            git(dir.path(), args);
         }
         Self { dir }
+    }
+
+    /// Stage every change in the copy, as a developer does before a build
+    /// with `--local`.
+    fn add(&self) {
+        git(self.path(), &["add", "-A"]);
     }
 
     fn path(&self) -> &Path {
@@ -70,6 +71,21 @@ impl Copy {
         let graph = std::fs::read_to_string(dir.join("api.gdl")).expect("the graph");
         gdl_gen::Spec::from_text(&text.replace(SEGMENTS, SPLIT), &graph, &dir).expect("a spec")
     }
+}
+
+/// Run `git <args>` in `dir`, as the fixture's owner, whatever a case asks
+/// of Git afterwards, under a name of its own and without signing.
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=gdl", "-c", "user.email=gdl@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .env_remove("GIT_TEST_ASSUME_DIFFERENT_OWNER")
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git {args:?}: {output:?}");
 }
 
 /// Copy `from` into `to`, all but build output.
@@ -262,26 +278,15 @@ fn the_tags_and_the_objects_do_not_depend_on_where_the_sources_are() {
     }
 }
 
-/// In a Git checkout the context holds what Git tracks and a new source
-/// that is not committed, but no untracked dotfile, such as an `.env` of
-/// credentials, and nothing the checkout ignores.
+/// The context holds what Git tracks, and nothing it does not: no
+/// untracked file, a dotfile such as an `.env` of credentials or a new
+/// source, and nothing the checkout ignores.
 #[test]
-fn an_untracked_dotfile_never_reaches_an_image() {
+fn an_untracked_file_never_reaches_an_image() {
     let copy = Copy::new();
-    let git = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(copy.path())
-            .args(["-c", "user.name=gdl", "-c", "user.email=gdl@example.com"])
-            .args(args)
-            .output()
-            .expect("git runs");
-        assert!(status.status.success(), "git {args:?}: {status:?}");
-    };
-    git(&["init", "-q"]);
     std::fs::write(copy.path().join(".gitignore"), "/ignored.txt\n").expect("written");
-    git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", "copy"]);
+    git(copy.path(), &["add", "-A"]);
+    git(copy.path(), &["commit", "-q", "-m", "ignore"]);
     // Made here, so that no source file, this one in the copy included,
     // holds it.
     let marker = ["gdl-local", "credential", "marker"].join("-");
@@ -305,9 +310,62 @@ fn an_untracked_dotfile_never_reaches_an_image() {
             );
         }
         assert!(
-            context.contains_key(Path::new("crates/gdl/src/unpublished.rs")),
-            "{reference}: the new source is not in the context"
+            !context.contains_key(Path::new("crates/gdl/src/unpublished.rs")),
+            "{reference}: an untracked source is in the context"
         );
         assert!(context.contains_key(Path::new(".gitignore")), "{reference}");
     }
+}
+
+/// A new source that is staged, and a change to a tracked file that is
+/// not, are both built, from the commit `git stash create` makes of them;
+/// the checkout, its index, and its refs are as they were.
+#[test]
+fn a_staged_source_and_an_unstaged_change_are_built() {
+    let copy = Copy::new();
+    std::fs::write(
+        copy.path().join("crates/gdl/src/unpublished.rs"),
+        "// A new source, staged.\n",
+    )
+    .expect("written");
+    git(copy.path(), &["add", "crates/gdl/src/unpublished.rs"]);
+    let lib = copy.path().join("crates/gdl/src/lib.rs");
+    let text = std::fs::read_to_string(&lib).expect("gdl's lib.rs") + "// Not staged.\n";
+    std::fs::write(&lib, &text).expect("written");
+    let state = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(copy.path())
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        output.stdout
+    };
+    let before = (
+        state(&["status", "--porcelain"]),
+        state(&["show-ref"]),
+        state(&["stash", "list"]),
+    );
+    let mut docker = Fake::default();
+    local(&copy, false, &mut docker);
+    assert_eq!(docker.contexts.len(), 3);
+    for (reference, context) in &docker.contexts {
+        assert!(
+            context.contains_key(Path::new("crates/gdl/src/unpublished.rs")),
+            "{reference}: the staged source is not in the context"
+        );
+        assert_eq!(
+            context[Path::new("crates/gdl/src/lib.rs")],
+            text,
+            "{reference}: the unstaged change is not in the context"
+        );
+    }
+    let after = (
+        state(&["status", "--porcelain"]),
+        state(&["show-ref"]),
+        state(&["stash", "list"]),
+    );
+    assert_eq!(before, after, "the build changed the checkout's state");
+    assert_eq!(std::fs::read_to_string(&lib).expect("gdl's lib.rs"), text);
 }
