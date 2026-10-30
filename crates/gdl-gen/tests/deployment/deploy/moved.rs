@@ -50,3 +50,91 @@ fn a_pool_that_moves_between_clusters_is_refused() {
             .contains_key(&("Deployment".to_string(), "model-x-eu-engine".to_string()))
     );
 }
+
+/// Deploy a fleet with a second child in euw1, remove `model-x-eu`'s hub's
+/// Deployment unless `hub_present`, and move `model-x-eu` to use1: the move
+/// is refused before anything changes.
+fn move_child(hub_present: bool) {
+    let mirror = Mirror::new();
+    let initial = format!(
+        "{}\n[pool.model-y-eu]\nclass = \"model_x\"\ncluster = \"euw1\"\nhome = \"global-eu\"\n",
+        fleet_text()
+    );
+    let files = files(&mirror, &initial);
+    let log = Log::default();
+    let mut docker = Docker {
+        log: Rc::clone(&log),
+        fail: false,
+    };
+    let mut kube = Kube::new(&log);
+    kube.held = None;
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("the first deploy");
+
+    let objects = kube
+        .objects
+        .get_mut("kind-euw1")
+        .expect("the source cluster");
+    if !hub_present {
+        assert!(
+            objects
+                .remove(&("Deployment".into(), "model-x-eu".into()))
+                .is_some()
+        );
+    }
+    for segment in ["global-eu", "global-eu-front", "model-x-eu-engine"] {
+        assert!(objects.contains_key(&("Deployment".into(), segment.into())));
+    }
+    let moved = initial.replace(
+        "[pool.model-x-eu]\nclass = \"model_x\"\ncluster = \"euw1\"\nhome = \"global-eu\"",
+        "[pool.model-x-eu]\nclass = \"model_x\"\ncluster = \"use1\"\nhome = \"global-us\"",
+    );
+    assert_ne!(
+        moved, initial,
+        "the child moves to its new parent's cluster"
+    );
+    std::fs::write(&files.fleet, moved).expect("the moved fleet");
+    log.borrow_mut().clear();
+
+    let result = deploy(&mirror, &files, &mut docker, &mut kube);
+    if hub_present {
+        let error = result.as_ref().expect_err("a moved pool").to_string();
+        assert!(
+            error.contains(
+                "pool `model-x-eu` is placed in cluster `use1`, but its hub runs in cluster `euw1`"
+            ),
+            "{error}"
+        );
+    }
+    let withdrawal: Vec<Vec<String>> = commands(&log)
+        .into_iter()
+        .filter(|args| {
+            args.iter()
+                .any(|a| a.ends_with("/drain") || a.contains("/report/"))
+        })
+        .collect();
+    let changed: Vec<Vec<String>> = commands(&log)
+        .into_iter()
+        .filter(|args| {
+            args.iter().any(|a| {
+                ["apply", "delete", "label"].contains(&a.as_str()) || a.ends_with("/drain")
+            })
+        })
+        .collect();
+    let deleted = deletes(&log, "kind-euw1");
+    assert!(
+        result.is_err() && changed.is_empty(),
+        "hub_present={hub_present}: a pool still has running segments in its source cluster and its original parent still holds its record; the move must be refused before mutation: result={result:?}, deleted={deleted:?}, withdrawal={withdrawal:?}, changed={changed:?}"
+    );
+}
+
+/// A child with its hub cannot move.
+#[test]
+fn a_child_with_its_hub_cannot_move_between_clusters() {
+    move_child(true);
+}
+
+/// A missing hub does not make a pool's running segments safe to move.
+#[test]
+fn a_child_without_its_hub_cannot_move_between_clusters() {
+    move_child(false);
+}

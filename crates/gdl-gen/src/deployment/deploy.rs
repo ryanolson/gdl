@@ -90,8 +90,8 @@ impl Default for Waits {
 /// 2. build the images and push them ([`images`]);
 /// 3. render the objects, each image named by its pushed digest
 ///    ([`k8s::k8s_files`]), and write them to `out` if given; then refuse
-///    a pool that the fleet places in another cluster than the one its
-///    hub runs in, before anything is applied;
+///    a pool that the fleet places in another cluster than one that holds
+///    any of its Deployments, before anything is applied;
 /// 4. apply each cluster's base objects, and wait until its namespace is
 ///    active;
 /// 5. the tables job: no fleet renders one yet, so this step does nothing;
@@ -409,11 +409,13 @@ impl Rendered {
     }
 }
 
-/// Refuse a pool that `fleet` places in another cluster than the one its
-/// hub runs in. A pool keeps one name and one record wherever it runs: a
-/// drain of its old copy would withdraw the record its new copy serves,
-/// and a delete of the old copy undrained would cut its requests. Read
-/// before anything is applied, so a refused move changes nothing.
+/// Refuse a pool that `fleet` places in another cluster than one that
+/// holds any of its Deployments. A pool keeps one name and one record
+/// wherever it runs: a drain of its old copy would withdraw the record its
+/// new copy serves, and a delete of the old copy undrained would cut its
+/// requests. A segment whose hub's Deployment is gone still serves, and
+/// its parent still holds the pool's record, so any Deployment counts.
+/// Read before anything is applied, so a refused move changes nothing.
 fn unmoved(
     kube: &mut dyn Kube,
     fleet: &Fleet,
@@ -422,17 +424,27 @@ fn unmoved(
 ) -> Result<(), Error> {
     let mut moved = Vec::new();
     for cluster in &clusters.0 {
-        for hub in cluster
-            .live(kube, waits.objects)?
-            .iter()
-            .filter(|o| o.is_hub())
-        {
-            let Some(pool) = &hub.pool else { continue };
-            if let Some((placed, _)) = fleet.cluster_of(pool)
+        // Each pool with a Deployment here, and whether its hub's is one.
+        let mut live: BTreeMap<String, bool> = BTreeMap::new();
+        for deployment in cluster.live(kube, waits.objects)? {
+            if deployment.kind != "Deployment" {
+                continue;
+            }
+            if let Some(pool) = &deployment.pool {
+                *live.entry(pool.clone()).or_default() |= deployment.is_hub();
+            }
+        }
+        for (pool, hub) in live {
+            if let Some((placed, _)) = fleet.cluster_of(&pool)
                 && placed != cluster.name
             {
+                let runs = if hub {
+                    "its hub runs"
+                } else {
+                    "its segments run"
+                };
                 moved.push(format!(
-                    "pool `{pool}` is placed in cluster `{placed}`, but its hub runs in cluster `{}`: a pool keeps one name and one record, so it cannot move. To move it, give the pool a new name in cluster `{placed}` and deploy, then remove `{pool}` from the fleet and deploy again, which drains it",
+                    "pool `{pool}` is placed in cluster `{placed}`, but {runs} in cluster `{}`: a pool keeps one name and one record, so it cannot move. To move it, give the pool a new name in cluster `{placed}` and deploy, then remove `{pool}` from the fleet and deploy again, which drains it",
                     cluster.name
                 ));
             }
