@@ -3,7 +3,8 @@
 //! which the source reader shares, so the catalogue and the build agree.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned};
+use syn::spanned::Spanned;
 
 pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
     let syn::Data::Struct(data) = &input.data else {
@@ -40,6 +41,16 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
             .ident
             .as_ref()
             .expect("metric_fields refuses unnamed fields");
+        // The catalogue reads a field named `ScrapeGaugeVec` as a gauge, so
+        // the field must be gdl's: a type of that name aliasing another
+        // metric fails to build here, rather than shows as a gauge.
+        if scrape_gauge(&field.ty) {
+            return quote_spanned! {field.ty.span()=>
+                #ident: ::gdl::__private::metric::<::gdl::ScrapeGaugeVec>(
+                    registry, node, &definitions[#index],
+                )?
+            };
+        }
         quote!(#ident: ::gdl::__private::metric(registry, node, &definitions[#index])?)
     });
     let ident = &input.ident;
@@ -58,4 +69,11 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
             }
         }
     })
+}
+
+/// Whether `ty`'s last path segment is `ScrapeGaugeVec`, the name the
+/// catalogue reads as a gauge filled at scrape time.
+fn scrape_gauge(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path)
+        if path.path.segments.last().is_some_and(|last| last.ident == "ScrapeGaugeVec"))
 }

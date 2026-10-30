@@ -1,0 +1,9 @@
+error[E0308]: `?` operator has incompatible types
+  --> tests/ui/metrics-scrape-alias.rs:11:19
+   |
+11 |     model_status: other::ScrapeGaugeVec,
+   |                   ^^^^^ expected `MetricVec<CounterVecBuilder<AtomicU64>>`, found `ScrapeGaugeVec`
+   |
+   = note: `?` operator cannot convert from `gdl::ScrapeGaugeVec` to `MetricVec<prometheus::counter::CounterVecBuilder<gdl::prometheus::core::AtomicU64>>`
+   = note: expected struct `MetricVec<prometheus::counter::CounterVecBuilder<gdl::prometheus::core::AtomicU64>>`
+              found struct `gdl::ScrapeGaugeVec`
