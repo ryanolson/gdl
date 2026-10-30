@@ -19,6 +19,8 @@ use crate::{SEGMENTS, SPLIT};
 mod archive;
 #[path = "local/boundary.rs"]
 mod boundary;
+#[path = "local/bypasses.rs"]
+mod bypasses;
 #[path = "local/git.rs"]
 mod git;
 #[path = "local/manifests.rs"]
