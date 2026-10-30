@@ -290,6 +290,7 @@ The script starts a local `registry:2` and a kind cluster of Kubernetes 1.35 tha
 - the cluster has no fleet namespace before the first `deploy`;
 - after the first `deploy`, the global pool's health answers 200, and its hub holds both model pools;
 - a request through `kubectl port-forward` to the global pool's entry is answered;
+- with the cluster's one node labelled and tainted as a node group of the fleet's own, every pod of the fleet runs there by its cluster's `node_selector` and `tolerations`, with the cluster's default requests and limits, and one pool's engine with its own memory limit;
 - a Prometheus 3.7.3 without the operator, given the scrape job above (`docs/src/guides/prometheus.yml`), finds each hub and segment of the three pools, each with its `in_pool`, `in_class`, `in_region`, and `segment`, and scrapes each segment. A hub serves its metrics only from a gdl that has the route. `HUB_METRICS_REV` names a commit of the spec's `[gdl] git` that does: the images are then built from it, and every hub must be scraped too. The PodMonitor is not run here, since the operator is too large to install for this check. `kubeconform.sh` checks it against the operator's schema instead;
 - a second `deploy`, with one model pool removed from the fleet, drains that pool, and the global pool's hub then answers 404 for its record;
 - that pool's objects are deleted, and the other pools' Deployments and pods keep their uids and generations;

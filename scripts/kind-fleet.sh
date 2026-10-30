@@ -10,6 +10,8 @@
 #   - `deploy` builds and pushes the images, applies the objects, and waits until each pool's health answers 200;
 #   - the global pool's health answers 200 through the API server's service proxy, and a request through
 #     `kubectl port-forward` is answered;
+#   - the cluster's one node is labelled and tainted as a node group of the fleet's own, and every pod of the fleet
+#     runs there by its cluster's node selector and toleration, with its requests and limits;
 #   - a Prometheus without the operator, configured with the scrape job of docs/src/guides/prometheus.yml, finds
 #     every hub and segment of the fleet, each with its pool, class, region and segment, and scrapes each segment.
 #     A hub serves its metrics only from a gdl that has its route: with HUB_METRICS_REV, a commit of the spec's
@@ -147,6 +149,12 @@ if k get namespace gdl-api >/dev/null 2>&1; then
   fail "the new cluster already has namespace gdl-api"
 fi
 
+# The node as a node group of the fleet's own: labelled, and tainted so that only a pod that tolerates it is
+# scheduled there. The fleet places every pod on it by its cluster's node selector and toleration.
+node_name="$(k get nodes --output jsonpath='{.items[0].metadata.name}')"
+k label node "${node_name}" gdl.dev/node-group=gdl-api >/dev/null
+k taint node "${node_name}" dedicated=gdl-api:NoSchedule >/dev/null
+
 # The api example in two classes. The frontend listens on every interface, so that a port-forward reaches it, and
 # each segment drains within 20 s.
 sed "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" examples/api/deploy.toml >"${scratch}/gdl.toml"
@@ -179,6 +187,12 @@ namespace = "gdl-api"
 region = "local"
 registry = "${registry}/gdl"
 platform = "linux/${arch}"
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Equal", value = "gdl-api", effect = "NoSchedule" }]
+
+[cluster.kind.resources.default]
+requests = { cpu = "50m", memory = "64Mi" }
+limits = { cpu = "1", memory = "512Mi" }
 
 [class.global]
 ready = { front = 1 }
@@ -193,6 +207,9 @@ cluster = "kind"
 class = "model"
 cluster = "kind"
 home = "global"
+
+[pool.model-a.resources.segment.engine]
+limits = { memory = "768Mi" }
 EOF
 cp "${scratch}/fleet.toml" "${scratch}/smaller.toml"
 cat >>"${scratch}/fleet.toml" <<'EOF'
@@ -217,6 +234,25 @@ hub global /v1/ext/gdl-pool/health >/dev/null || fail "the global pool's health 
 for pool in model-a model-b; do
   hub global "/v1/ext/gdl-pool/report/model/${pool}" >/dev/null || fail "the global pool's hub does not hold ${pool}"
 done
+# Every pod of the fleet runs on the tainted node by the cluster's selector and toleration, and asks for its
+# requests and limits: the default, and model-a's engine its own memory limit.
+placed="$(k --namespace gdl-api get pods --selector gdl.dev/fleet=api --output json | jq -r '.items[]
+  | [.metadata.labels["gdl.dev/pool"], .metadata.labels["gdl.dev/segment"],
+     .spec.nodeSelector["gdl.dev/node-group"],
+     ([.spec.tolerations[] | select(.key == "dedicated" and .effect == "NoSchedule")] | length),
+     (.spec.containers[0].resources | [.requests.cpu, .requests.memory, .limits.cpu, .limits.memory] | join("/"))]
+  | map(tostring) | join(" ")' | sort)"
+expected_placed="global front gdl-api 1 50m/64Mi/1/512Mi
+global hub gdl-api 1 50m/64Mi/1/512Mi
+model-a engine gdl-api 1 50m/64Mi/1/768Mi
+model-a hub gdl-api 1 50m/64Mi/1/512Mi
+model-b engine gdl-api 1 50m/64Mi/1/512Mi
+model-b hub gdl-api 1 50m/64Mi/1/512Mi"
+[[ "${placed}" == "${expected_placed}" ]] || fail "the fleet's pods are not placed as the fleet says:
+${placed}
+expected:
+${expected_placed}"
+echo "kind-fleet.sh: every pod runs on the tainted node group, with its requests and limits"
 echo "kind-fleet.sh: every pool is healthy, and the global pool holds both model pools"
 
 # A request through a port-forward of the global pool's entry Service.
@@ -269,6 +305,8 @@ spec:
     metadata: {labels: {app: prometheus}}
     spec:
       serviceAccountName: prometheus
+      nodeSelector: {gdl.dev/node-group: gdl-api}
+      tolerations: [{key: dedicated, operator: Equal, value: gdl-api, effect: NoSchedule}]
       containers:
       - name: prometheus
         image: ${PROMETHEUS_IMAGE}
