@@ -152,6 +152,11 @@ pub fn deploy(
 
     for cluster in &clusters.0 {
         let pools = &rendered.0[&cluster.name].pools;
+        // A cluster the fleet now places no pool in has nothing to apply,
+        // and kubectl refuses an apply of nothing; its prune still runs.
+        if pools.trim().is_empty() {
+            continue;
+        }
         applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
     }
     say("apply: each cluster's pools");

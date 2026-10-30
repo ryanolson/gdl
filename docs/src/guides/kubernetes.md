@@ -157,7 +157,7 @@ cargo gdl deploy --spec gdl.toml --fleet fleet.toml
 3. **Objects.** It renders the objects, as `cargo gdl k8s` does (step 3), with each image named by the digest it pushed. `--out <dir>` also writes them there. The directory must not exist.
 4. **Base.** For each cluster, it applies `base.yaml`, the Namespace and the ServiceAccount, and waits until the namespace is `Active`.
 5. **Tables.** No fleet renders a tables job yet, so this step does nothing.
-6. **Apply.** For each cluster, it applies the pools' objects with `kubectl apply --server-side --field-manager=gdl`.
+6. **Apply.** For each cluster, it applies the pools' objects with `kubectl apply --server-side --field-manager=gdl`. A cluster in which the fleet now places no pool has nothing to apply, and is still pruned.
 7. **Prune.** For each cluster, it lists the objects in the namespace that carry `gdl.dev/fleet=<fleet>` and `gdl.dev/cluster=<cluster>`, and deletes those that this render did not write ([Prune](#prune)).
 8. **Wait.** It waits until each pool's health answers 200, through the API server's service proxy, for up to 600 s.
 
