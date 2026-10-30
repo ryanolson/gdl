@@ -127,13 +127,14 @@ fn sources(context: &Context) -> Result<(Vec<Source>, Option<Error>), Error> {
     // configuration there, as Cargo on this machine reads the context's:
     // the tree holds what Git holds of it, if anything.
     let config = context.root().join(".cargo");
-    if config.is_dir()
+    if let Ok(real) = config.canonicalize()
+        && let Ok(at) = real.strip_prefix(&root)
         && let Ok(top) = git(context, &config, &["rev-parse", "--show-toplevel"])
         && let Ok(prefix) = git(context, &config, &["rev-parse", "--show-prefix"])
     {
         found.push(Source {
             dir: config.clone(),
-            at: PathBuf::from(".cargo"),
+            at: at.to_path_buf(),
             top: PathBuf::from(OsStr::from_bytes(trim(&top))),
             prefix: trim(&prefix).to_vec(),
             optional: true,
