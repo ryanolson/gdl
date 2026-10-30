@@ -203,19 +203,40 @@ fn a_node_crate_offers_its_nodes_by_message_origin() {
         .iter()
         .find(|n| n.name == "Engine")
         .expect("Engine");
-    let metrics: Vec<(&str, gdl_model::MetricKind, &[f64])> = engine
+    let metrics: Vec<(&str, gdl_model::MetricKind, &[String], &[f64])> = engine
         .metrics
         .iter()
-        .map(|m| (m.name.as_str(), m.kind, m.buckets.as_slice()))
+        .map(|m| {
+            (
+                m.name.as_str(),
+                m.kind,
+                m.labels.as_slice(),
+                m.buckets.as_slice(),
+            )
+        })
         .collect();
+    let queue = ["queue".to_string()];
     assert_eq!(
         metrics,
         [
-            ("tokens_total", gdl_model::MetricKind::Counter, &[][..]),
+            (
+                "tokens_total",
+                gdl_model::MetricKind::Counter,
+                &[][..],
+                &[][..]
+            ),
             (
                 "time_to_first_token_seconds",
                 gdl_model::MetricKind::Histogram,
+                &[][..],
                 &[0.01, 1.0][..]
+            ),
+            // A gauge filled at scrape time reads as any labelled gauge.
+            (
+                "queued_sequences",
+                gdl_model::MetricKind::Gauge,
+                &queue[..],
+                &[][..]
             ),
         ]
     );

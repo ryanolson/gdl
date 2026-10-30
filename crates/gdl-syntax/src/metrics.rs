@@ -95,7 +95,7 @@ fn kind(ty: &syn::Type) -> syn::Result<(MetricKind, bool)> {
     let unsupported = || {
         syn::Error::new(
             ty.span(),
-            "a metric is a prometheus `IntCounter`, `Counter`, `IntGauge`, `Gauge`, `Histogram`, or the `Vec` form of one",
+            "a metric is a prometheus `IntCounter`, `Counter`, `IntGauge`, `Gauge`, `Histogram`, or the `Vec` form of one, or a `gdl::ScrapeGaugeVec`",
         )
     };
     let syn::Type::Path(path) = ty else {
@@ -109,7 +109,7 @@ fn kind(ty: &syn::Type) -> syn::Result<(MetricKind, bool)> {
         "IntCounter" | "Counter" => (MetricKind::Counter, false),
         "IntCounterVec" | "CounterVec" => (MetricKind::Counter, true),
         "IntGauge" | "Gauge" => (MetricKind::Gauge, false),
-        "IntGaugeVec" | "GaugeVec" => (MetricKind::Gauge, true),
+        "IntGaugeVec" | "GaugeVec" | "ScrapeGaugeVec" => (MetricKind::Gauge, true),
         "Histogram" => (MetricKind::Histogram, false),
         "HistogramVec" => (MetricKind::Histogram, true),
         _ => return Err(unsupported()),
@@ -321,6 +321,9 @@ mod tests {
                 /// Queue wait, by queue.
                 #[gdl(buckets = [-1.0, 0.0], labels = ["queue"])]
                 queue_wait_seconds: HistogramVec,
+                /// Each model's status, read at scrape time.
+                #[gdl(labels = ["model"])]
+                model_status: gdl::ScrapeGaugeVec,
             }
         };
         let fields = read(input).expect("valid metrics");
@@ -350,6 +353,12 @@ mod tests {
                     MetricKind::Histogram,
                     vec!["queue".to_string()],
                     vec![-1.0, 0.0]
+                ),
+                (
+                    "model_status",
+                    MetricKind::Gauge,
+                    vec!["model".to_string()],
+                    vec![]
                 ),
             ]
         );
@@ -455,6 +464,10 @@ mod tests {
         for (field, why) in [
             (
                 quote::quote!(/** x */ refused_total: IntCounterVec),
+                "a vector needs",
+            ),
+            (
+                quote::quote!(/** x */ model_status: ScrapeGaugeVec),
                 "a vector needs",
             ),
             (

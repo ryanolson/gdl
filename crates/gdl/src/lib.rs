@@ -53,7 +53,7 @@ pub use gdl_model::{
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
-pub use metrics::Metrics;
+pub use metrics::{GaugeReadings, Metrics, ScrapeGaugeVec};
 pub use policy::{
     ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool,
     PoolChoice, PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, PropertyState,

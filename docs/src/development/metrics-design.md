@@ -22,6 +22,18 @@ Every laptop number here is provisional: Apple M5, macOS, loopback, a shared mac
 
 Two nodes of a segment may share a metric name only with the same kind, help, labels, and buckets. Prometheus refuses a different help or label set with a message that names neither node. It does not notice a different kind at all. So the `Builder` compares the definitions first and names both nodes.
 
+### A gauge read at scrape time
+
+`gdl::ScrapeGaugeVec` is a field type for a gauge whose values the node computes at each scrape from state it already holds. It costs nothing on the request path: the node gives it a closure, and only the registry's scrape runs it. The derive reads it as a labelled gauge, so the catalogue shows it as it shows a `GaugeVec`.
+
+- **The closure comes after registration.** The segment registers a node's metrics before it builds the node, so the state the closure reads does not exist yet. The node calls `fill_with` in `build`. The registry and the node hold clones of one value, so the closure set on the node's copy is the one the registry runs.
+- **Rejected: making `Construct` public.** A crate could then register any collector under a prometheus type's name, and the catalogue would list it as that type. That is how the model gate in dynamo-http-endpoints joined, and a change to `Construct` or to how the derive reads names would break it.
+- **Rejected: handing the closure the prometheus `GaugeVec`.** Its `with_label_values` panics on a wrong number of labels, and the panic would happen in the `/metrics` handler. `GaugeReadings::set` returns the error instead.
+- **Rejected: one vector, reset before each scrape.** Two scrapes at once would share it, and each could read the other's half-set values. Each scrape fills a new vector, which costs one allocation for each scrape.
+- **Rejected: an integer form.** One `f64` gauge covers both, and a 0 or 1 converts exactly.
+- **Rejected: a generic `ScrapeGaugeVec<T>`.** The derive reads a field's kind from its type's last path segment and refuses type arguments.
+- **Rejected: a closure that can be set only once.** A second call would be silently ignored. A later `fill_with` replaces the closure. The `Mutex` that holds it is taken by `fill_with` and once by each scrape, never by a request.
+
 ## Identity
 
 The registry carries dynamo's prefix and identity labels, so dynamo's scrape configuration, relabelling, and dashboards take gdl's metrics as they are. The prefix is a setting, `[system] metrics_prefix`, with dynamo's as the default. An empty prefix is no prefix, since prometheus refuses an empty one.

@@ -10,6 +10,10 @@ use prometheus::{
 
 use gdl_model::{ENDPOINT_LABEL, MetricField};
 
+mod scrape;
+
+pub use scrape::{GaugeReadings, ScrapeGaugeVec};
+
 /// A node's metrics: a struct of prometheus metrics, registered by the
 /// runtime and handed to the node's [`Build::build`](crate::Build::build).
 ///
@@ -58,7 +62,8 @@ where
     Ok(metric)
 }
 
-/// A prometheus metric type a [`Metrics`] field may have.
+/// A metric type a [`Metrics`] field may have: a prometheus metric, or a
+/// [`ScrapeGaugeVec`].
 #[doc(hidden)]
 pub trait Construct: Sized {
     /// The metric `definition` describes, labelled with node `node`.

@@ -147,6 +147,22 @@ All six histograms, the runtime's five and `pool_offer_round_trip_seconds`, use 
 
 Each error family has one series for each of these ten values, at zero from the start: `node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`, `routing`, `outcome_unknown`. They are the snake-case names of `gdl::ErrorKind`. `Cancelled` has no value: the cancellation counters count it. [Health and metrics](../operations/observability.md#reading-the-runtimes-figures) says where each error is counted.
 
+## A node's field types
+
+A node's own metrics are the fields of its `derive(gdl::Metrics)` struct ([Define node metrics](../guides/node-metrics.md)). The derive and the source reader read each field's kind from the last path segment of its type (`crates/gdl-syntax/src/metrics.rs`).
+
+| Field type | Kind in the catalogue | `#[gdl(...)]` |
+|---|---|---|
+| `IntCounter`, `Counter` | counter | |
+| `IntCounterVec`, `CounterVec` | counter | `labels` |
+| `IntGauge`, `Gauge` | gauge | |
+| `IntGaugeVec`, `GaugeVec` | gauge | `labels` |
+| `gdl::ScrapeGaugeVec` | gauge | `labels` |
+| `Histogram` | histogram | `buckets` |
+| `HistogramVec` | histogram | `buckets`, `labels` |
+
+A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node gave to `fill_with` sets its series on an empty vector, so it has only the series that the closure set in that scrape, and none before the node calls `fill_with`. Its scrape lines are those of a `GaugeVec`: `# TYPE <name> gauge`, then one line for each label set, with `dynamo_endpoint` and the identity labels.
+
 ## Reserved names
 
 `gdl_model::RUNTIME_METRICS` holds 30 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the 12 families of a chooser's pools, `pool_record_writes_total`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.

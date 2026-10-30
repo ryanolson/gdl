@@ -13,4 +13,7 @@ pub struct EngineMetrics {
     /// Time to the first token.
     #[gdl(buckets = [0.01, 1.0])]
     time_to_first_token_seconds: gdl::prometheus::Histogram,
+    /// Sequences in each queue, read at scrape time.
+    #[gdl(labels = ["queue"])]
+    queued_sequences: gdl::ScrapeGaugeVec,
 }
