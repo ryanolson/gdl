@@ -151,10 +151,44 @@ impl<D: PoolDirectory> Publisher<D> {
                 .publish(directory, (feed, stored), &self.record, &last)
                 .await;
         }
-        if writer.withdraw(directory, &self.record).await {
+        let stored = writer.withdraw(directory, &self.record).await;
+        feed.close();
+        // The withdrawal's success alone is no proof: a later hub of the
+        // pool may have published since it was stored, and before its
+        // reply. Only a read that finds no record of the pool is.
+        if stored && self.absent(directory).await {
             self.health.send_modify(|health| health.withdrawn = true);
         }
-        feed.close();
+    }
+}
+
+impl<D: PoolDirectory> Publisher<D> {
+    /// Whether the directory holds no record of the pool, read as the
+    /// pool's last record is read when the hub starts: from its parent's
+    /// hub under the `relay` backend, else from the directory. A read that
+    /// fails is made again a heartbeat later, since only a read answers.
+    async fn absent(&self, directory: &D) -> bool {
+        loop {
+            let read = async {
+                match &self.parent {
+                    Some(parent) => parent.held(&self.record.class, &self.record.name).await,
+                    None => {
+                        gdl_pools::last_record(directory, &self.record.class, &self.record.name)
+                            .await
+                    }
+                }
+            };
+            match tokio::time::timeout(SNAPSHOT, read).await {
+                Ok(Ok(held)) => return held.is_none(),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "the withdrawn pool's record was not read again");
+                }
+                Err(_) => {
+                    tracing::warn!("the withdrawn pool's record was not read again in time");
+                }
+            }
+            tokio::time::sleep(self.heartbeat).await;
+        }
     }
 }
 

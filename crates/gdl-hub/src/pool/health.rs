@@ -32,7 +32,8 @@ pub struct PoolHealth {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
     /// Whether the drained pool's record is withdrawn: the directory has
-    /// stored the withdrawal, so it holds no record of the pool. Only the
+    /// stored the withdrawal, and a read after it finds no record of the
+    /// pool, so no later hub of the pool has published since. Only the
     /// hub's own word shows this under a directory where no parent's hub
     /// holds the record. Absent from the body while false, so that a
     /// reader of an earlier hub reads it as before.

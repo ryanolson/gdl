@@ -138,7 +138,6 @@ async fn a_stored_withdrawal_with_no_later_writer_is_proof() {
 }
 
 #[tokio::test]
-#[ignore = "F1: a later hub replaces the withdrawal before its reply, but withdrawn becomes true"]
 async fn a_withdrawal_replaced_before_its_reply_is_not_proof() {
     assert!(
         !withdrawn_after_reply(true).await,
