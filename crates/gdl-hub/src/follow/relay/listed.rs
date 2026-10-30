@@ -98,13 +98,15 @@ impl Listed {
     }
 
     /// Take `properties` if they are newer than the list held, or the first
-    /// list: a writer may begin its versions at 0.
-    fn take_properties(&mut self, properties: &PropertyList) {
-        if !self.taken || properties.version > self.properties.version {
+    /// list: a writer may begin its versions at 0. Whether they were taken.
+    fn take_properties(&mut self, properties: &PropertyList) -> bool {
+        let take = !self.taken || properties.version > self.properties.version;
+        if take {
             self.properties = properties.clone();
             self.taken = true;
             self.dirty = true;
         }
+        take
     }
 
     fn set<T: PartialEq>(field: &mut T, value: T, dirty: &mut bool) {
@@ -216,8 +218,19 @@ impl Listings {
 
     /// The pool's follow link sent `properties`.
     pub(super) fn link_properties(&mut self, class: &str, pool: &str, properties: &PropertyList) {
-        if let Some(listed) = self.get_mut(class, pool) {
-            listed.take_properties(properties);
+        if let Some(listed) = self.get_mut(class, pool)
+            && listed.take_properties(properties)
+            && !properties.dropped.is_empty()
+        {
+            // The directory path logs a record's drops where it takes them
+            // ([`Listings::record`]); a list the link takes first leaves the
+            // record of that version untaken, so its kinds are logged here.
+            tracing::debug!(
+                class,
+                pool,
+                kinds = ?properties.dropped,
+                "a follow link's property list holds properties that do not check: they are left out"
+            );
         }
     }
 

@@ -178,7 +178,6 @@ fn a_directory_records_dropped_properties_are_logged() {
 /// Both paths can read the same malformed list. The link winning the
 /// version race must not hide a directory record's first diagnostic.
 #[test]
-#[ignore = "F1: the follow link version suppresses a later directory drop diagnostic"]
 fn a_later_directory_drop_is_logged_when_the_link_wins_the_race() {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
