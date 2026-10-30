@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::k8s::{container, deployment, fleet, fleet_text, objects, spec};
-use super::{Mirror, SPLIT, WHOLE, nest, placed};
+use super::{Mirror, SEGMENTS, SPLIT, WHOLE, nest, placed};
 
 /// What the fake Docker was asked to do.
 #[derive(Debug, Clone, PartialEq)]
@@ -362,6 +362,40 @@ fn a_change_to_settings_alone_moves_no_tag() {
     assert_ne!(deployment, changed);
     let changed = placed(&mirror, &format!("{SPLIT}{changed}"));
     assert_eq!(before, references(&changed));
+}
+
+/// An image's tag digests its build context, which holds no absolute
+/// path: one spec, loaded from its file in two directories, as two
+/// checkouts or two hosts hold it, gives every image the same tag. A
+/// generated crate's comment names the spec it was made from, and a spec
+/// loaded from a file is named by its absolute path there.
+#[test]
+fn a_tag_does_not_depend_on_where_the_spec_is() {
+    let mirror = Mirror::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).expect(path);
+    let text = mirror.portable(&read("examples/api/gdl.toml"));
+    assert!(text.contains(SEGMENTS), "{text}");
+    let text = text.replace(SEGMENTS, &format!("{SPLIT}{}", deployment()));
+    let graph = read("examples/api/api.gdl");
+    let fleet = fleet(&fleet_text());
+    let references = |prefix: &str| -> BTreeSet<String> {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("a directory");
+        std::fs::write(dir.path().join("gdl.toml"), &text).expect("the spec");
+        std::fs::write(dir.path().join("api.gdl"), &graph).expect("the graph");
+        let spec = gdl_gen::Spec::load(&dir.path().join("gdl.toml")).expect("a spec");
+        let mut docker = Fake::default();
+        run(&mirror, &spec, &fleet, true, &mut docker)
+            .into_iter()
+            .map(|image| image.reference)
+            .collect()
+    };
+    let here = references("gdl-images-here-");
+    assert_eq!(here.len(), 6);
+    assert_eq!(here, references("gdl-images-there-"));
 }
 
 /// One hub image serves every layout: its pod reads the deployment from

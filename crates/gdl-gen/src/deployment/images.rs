@@ -299,7 +299,8 @@ fn tag(platform: &str, context: &Files) -> String {
 
 /// The build context of the segment whose crate is in `crate_dir`, which
 /// builds package `package`: the contract crate, the segment's crate
-/// without its settings, and a Dockerfile.
+/// without its settings, each file with no absolute path ([`placeless`]),
+/// and a Dockerfile.
 fn segment_context(bundle: &super::Bundle, crate_dir: &Path, package: &str) -> Files {
     let settings = crate_dir.join("config.toml");
     let mut files: Files = bundle
@@ -308,7 +309,7 @@ fn segment_context(bundle: &super::Bundle, crate_dir: &Path, package: &str) -> F
         .filter(|(path, _)| {
             path.starts_with("contract") || (path.starts_with(crate_dir) && **path != settings)
         })
-        .map(|(path, text)| (path.clone(), text.clone()))
+        .map(|(path, text)| (path.clone(), placeless(text)))
         .collect();
     let settings = &bundle.settings;
     let segment = crate_dir
@@ -330,6 +331,23 @@ fn segment_context(bundle: &super::Bundle, crate_dir: &Path, package: &str) -> F
         dockerfile(&settings.build_image, base, true, &build),
     );
     files
+}
+
+/// `text`, a generated file, with its `Regenerate with:` comment naming
+/// the command that builds images instead. The generated comment names a
+/// spec loaded from a file by its absolute path, which would make the tag
+/// depend on where the checkout is. The comment changes no binary. The
+/// generator writes the path on one line, its line breaks escaped.
+fn placeless(text: &str) -> String {
+    const PREFIXES: [&str; 2] = ["# Regenerate with: ", "// Regenerate with: "];
+    text.split_inclusive('\n')
+        .map(
+            |line| match PREFIXES.iter().find(|prefix| line.starts_with(*prefix)) {
+                Some(prefix) => format!("{prefix}cargo gdl images --spec <spec> --fleet <fleet>\n"),
+                None => line.to_string(),
+            },
+        )
+        .collect()
 }
 
 /// The Dockerfile of the hub, installed as the spec's `[gdl]` names it.
@@ -428,6 +446,24 @@ mod tests {
         ] {
             assert_ne!(tag, super::tag(platform, &other), "{platform} {other:?}");
         }
+    }
+
+    /// The comment that names the spec by its path names none, in either
+    /// comment form, and every other line is kept as it is.
+    #[test]
+    fn a_context_names_no_path() {
+        let text = "# @generated\n# Regenerate with: cargo gdl export --spec \"/home/a/gdl.toml\" --out <archive.tar.gz>\n[package]\nname = \"x\"\n";
+        assert_eq!(
+            placeless(text),
+            "# @generated\n# Regenerate with: cargo gdl images --spec <spec> --fleet <fleet>\n[package]\nname = \"x\"\n"
+        );
+        let rust = "// Regenerate with: cargo gdl export --spec \"/srv/b/gdl.toml\" --out <archive.tar.gz>\nfn main() {}";
+        assert_eq!(
+            placeless(rust),
+            "// Regenerate with: cargo gdl images --spec <spec> --fleet <fleet>\nfn main() {}"
+        );
+        let other = "let s = \"# Regenerate with: kept\";\n";
+        assert_eq!(placeless(other), other);
     }
 
     /// A digest is `sha256:` and 64 lowercase hex digits, and a file of
