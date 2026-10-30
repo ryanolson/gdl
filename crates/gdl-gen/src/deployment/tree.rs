@@ -55,6 +55,13 @@ pub(super) fn build(
     }
     let seed = seed(context, &entries)?;
     let bundle = dir.join(context.bundle());
+    if let Err(link) = directories(dir, context.bundle()).map_err(super::io)? {
+        return Err(Error::new(format!(
+            "{prefix}: {} is on the bundle's path, {}, and is not a directory: the bundle is written through no link, which could lead outside the tree",
+            context.root().join(link).display(),
+            context.bundle().display()
+        )));
+    }
     crate::write(&bundle, files)
         .map_err(|e| Error::new(format!("{prefix}: writing the bundle: {e}")))?;
     // A link that is dangling in the archive can resolve once the bundle
@@ -76,6 +83,26 @@ pub(super) fn build(
     generated(&bundle, context.bundle(), &mut entries)?;
     links(dir, context, &entries)?;
     Ok(digest(&entries))
+}
+
+/// Make each directory of `path`, a path in the tree in `dir`, from the
+/// tree's root, never following a link: a component that exists and is
+/// not a directory, such as a link, is given back, and nothing below it is
+/// made.
+fn directories(dir: &Path, path: &Path) -> std::io::Result<Result<(), PathBuf>> {
+    let mut at = PathBuf::new();
+    for part in path.components() {
+        at.push(part);
+        match std::fs::symlink_metadata(dir.join(&at)) {
+            Ok(found) if found.is_dir() => {}
+            Ok(_) => return Ok(Err(at)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(dir.join(&at))?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Ok(()))
 }
 
 /// gdl's lock, as a path in the tree, when the archive holds it: each
@@ -297,9 +324,28 @@ fn unpack(
         {
             continue;
         }
+        // Nothing is written through a link: each directory on the way is
+        // made here, or is a directory already.
+        let parent = match kind.is_dir() {
+            true => path.as_path(),
+            false => path.parent().unwrap_or(Path::new("")),
+        };
+        if let Err(link) = directories(dir, parent).map_err(failed)? {
+            return refuse(&format!(
+                "is below {}, which is not a directory",
+                context.root().join(link).display()
+            ));
+        }
         if kind.is_dir() {
-            std::fs::create_dir_all(dir.join(&path)).map_err(failed)?;
             continue;
+        }
+        // The bundle is written through each directory on its path, so
+        // none of them may be a file or a link of the sources.
+        if context.bundle().starts_with(&path) {
+            return refuse(&format!(
+                "is on the bundle's path, {}, and the bundle is written through no link, which could lead outside the tree",
+                context.bundle().display()
+            ));
         }
         if path.starts_with(context.bundle()) {
             return refuse(&format!(
@@ -311,9 +357,6 @@ fn unpack(
             return refuse("is in two of the source directories");
         }
         let to = dir.join(&path);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent).map_err(failed)?;
-        }
         let mode = entry.header().mode().map_err(failed)?;
         let recorded = if kind.is_symlink() {
             let target = entry

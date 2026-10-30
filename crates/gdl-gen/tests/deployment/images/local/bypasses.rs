@@ -3,7 +3,6 @@ use super::*;
 /// Refusing a link must precede writes through it to the host.
 #[cfg(unix)]
 #[test]
-#[ignore = "major: bundle generation writes through an escaping link before refusal"]
 fn an_external_bundle_link_is_refused_before_writing() {
     let original = Copy::new();
     let mut leaked = Vec::new();
