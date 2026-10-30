@@ -7,6 +7,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::Error;
@@ -128,18 +129,30 @@ impl Kube for Kubectl {
             }
             _ => None,
         };
+        // Each pipe is read on a thread of its own, which sends what it
+        // read once the pipe closes: a process the command started can hold
+        // a pipe open after the command exits, so the reads too are waited
+        // for only until the deadline.
         let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            let (send, read) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut text = Vec::new();
                 if let Some(mut pipe) = pipe {
                     let _ = pipe.read_to_end(&mut text);
                 }
-                text
-            })
+                let _ = send.send(text);
+            });
+            read
         };
         let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
         let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
         let deadline = request_timeout(args).map(|timeout| Instant::now() + timeout + MARGIN);
+        let late = || {
+            Reply::failed(format!(
+                "`kubectl` did not end within its request timeout and {} ms, and was killed",
+                MARGIN.as_millis()
+            ))
+        };
         let status = loop {
             if let Some(status) = child.try_wait().map_err(running)? {
                 break status;
@@ -147,28 +160,32 @@ impl Kube for Kubectl {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 let _ = child.kill();
                 let _ = child.wait();
-                // The readers are left to end with the pipes: a process the
-                // command started may still hold them.
-                return Ok(Reply::failed(format!(
-                    "`kubectl` did not end within its request timeout and {} ms, and was killed",
-                    MARGIN.as_millis()
-                )));
+                return Ok(late());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        if let Some(writer) = writer {
-            // A command that exits before it reads all its input breaks the
-            // pipe; its own status says what went wrong.
-            let _ = writer.join();
-        }
-        let text = |reader: std::thread::JoinHandle<Vec<u8>>| {
-            String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
+        // The writer is not waited for: a command that exits before it reads
+        // all its input breaks the pipe, and its own status says what went
+        // wrong.
+        drop(writer);
+        let text = |reader: std::sync::mpsc::Receiver<Vec<u8>>| {
+            let read = match deadline {
+                Some(deadline) => {
+                    reader.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                }
+                None => reader.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            read.map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         };
-        Ok(Reply {
-            success: status.success(),
-            stdout: text(stdout),
-            stderr: text(stderr),
-        })
+        match (text(stdout), text(stderr)) {
+            (Ok(stdout), Ok(stderr)) => Ok(Reply {
+                success: status.success(),
+                stdout,
+                stderr,
+            }),
+            // The readers are left to end with the pipes.
+            _ => Ok(late()),
+        }
     }
 }
 
