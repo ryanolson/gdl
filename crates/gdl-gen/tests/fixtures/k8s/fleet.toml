@@ -46,3 +46,6 @@ cluster = "euw1"
 class = "model_x"
 cluster = "euw1"
 home = "global-eu"
+
+[metrics]
+pod_monitor = true

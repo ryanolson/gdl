@@ -49,6 +49,9 @@ cluster = "euw1"
 class = "model_x"
 cluster = "euw1"
 home = "global-eu"
+
+[metrics]
+pod_monitor = true                # optional: a PodMonitor in each cluster, for the Prometheus operator
 ```
 
 Each child runs in its parent's cluster. The hubs publish under the `relay` directory: a child's hub reports to its parent's hub by the parent's Service name, and that name does not resolve in another cluster. With a DynamoDB `[directory]`, a child may run in any cluster ([The DynamoDB directory](#the-dynamodb-directory)).
@@ -111,7 +114,7 @@ Each file is a YAML stream of JSON documents. The pinned output of this fleet is
 | entry Service | `<pool>-<segment>` | ClusterIP, for a segment with `[deployment.segment.<name>] ports` only |
 | PersistentVolumeClaim | `<pool>-state` | 1Gi, for a parent's hub only, under `relay` |
 
-Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for its cluster. Every object of a pool also carries `gdl.dev/pool` and `gdl.dev/class`. Every object of a pool but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class and the cluster are not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
+Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for its cluster. Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`, and `gdl.dev/region`, the pool's region. Every object of a pool but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class and the cluster are not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
 
 - **Settings.** Each pod reads its settings from the pool's ConfigMap, mounted at `/etc/gdl/fleet`: the hub runs `/usr/local/bin/segment /etc/gdl/fleet/deployment.json`, and a segment `/usr/local/bin/segment /etc/gdl/fleet/<segment>.toml`. A pod template carries `gdl.dev/config`, a checksum of the ConfigMap's data. A change to the settings changes it, and so replaces the pods. A ConfigMap's change alone restarts no pod.
 - **Variables.** A pool's hub and segments get the `GDL_POOL__*` variables that its Compose services get, from the same function. Only the addresses differ. A hub's `GDL_POOL__HUB` is `$(GDL_POD_IP):1337`, and `GDL_POD_IP` comes from `status.podIP`, so the pool's record names the hub's pod. A segment's `GDL_POOL__HUB` and `GDL_HUB__HOST` name the hub's Service. A child's `GDL_POOL__PARENT_HUB` is `<parent>:1337`, the parent hub's Service. The cluster's `env` comes after these. Kubernetes reads `$(NAME)` in a value as another variable, so the render writes each `$` of a cluster's value as `$$`.
@@ -126,6 +129,22 @@ Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for
 
 - **Ports.** An entry Service publishes each container port of `[deployment.segment.<name>] ports`, in Compose's short form. The host port is Compose's alone.
 - **Pods.** A pod runs as the fleet's ServiceAccount, which carries the cluster's `service_account_annotations`, on nodes of the cluster's platform (`kubernetes.io/os` and `kubernetes.io/arch`). Service links are off, so that no Service of the namespace adds variables to a container.
+
+## Metrics
+
+A segment serves its metrics on its system port at `/metrics`, and a hub on its public port, 1337, at `/v1/ext/gdl-pool/metrics` ([Metrics reference](../appendix/metrics.md)). Every pod template says so in the annotations that a Prometheus's pod discovery reads by convention: `prometheus.io/scrape: "true"`, `prometheus.io/port`, and `prometheus.io/path`. The ports are named, `system` on a segment's container and `public` on a hub's.
+
+A series that Prometheus scrapes should say which pool it comes from. gdl's own labels are taken: a chooser labels its pool series with `class`, `pool`, and `region` of the pool it offered to, and a hub labels its follow series with the followed pool's. So the pod's pool, class, region, and segment become `in_pool`, `in_class`, `in_region`, and `segment` on every series, read from the pod's `gdl.dev/*` labels, or whole from their annotations when a label holds a shortened value.
+
+**With the Prometheus operator,** set `pod_monitor = true` in the fleet's `[metrics]` table. Each cluster's `base.yaml` then holds a PodMonitor named for the fleet, in the fleet's namespace. It selects the pods with `gdl.dev/fleet` and `gdl.dev/cluster`, scrapes port `system` at `/metrics` and port `public` at the hub's route, and adds the four labels, and the pod's fleet and cluster as `fleet` and `cluster`. The operator adds `namespace` and `pod` itself. The operator's Prometheus must select the PodMonitor, by its `podMonitorSelector` and `podMonitorNamespaceSelector`. Without the operator's CRD in the cluster, `deploy` fails at the base objects, naming the kind. `deploy` prunes and `down` deletes the fleet's PodMonitors in each cluster that has the CRD ([Prune](#prune)).
+
+**Without the operator,** give a Prometheus a scrape job of role `pod`, whose service account may get, list, and watch pods. This one finds every gdl fleet's hubs and segments in the cluster, and adds the same labels and the pod's fleet and cluster:
+
+```yaml
+{{#include prometheus.yml}}
+```
+
+Pod discovery makes one target for each container port. The job keeps the one named `system` or `public`, and so does not need `prometheus.io/port`, which is there for other scrape jobs that read it.
 
 ## The DynamoDB directory
 
@@ -211,7 +230,7 @@ The `README.md` that `k8s` writes lists the `kubectl apply` commands for each cl
 
 ## Validate the objects
 
-`scripts/kubeconform.sh` validates objects with kubeconform 0.8.0, in strict mode, against the schemas of Kubernetes 1.35.0. It runs offline. `INSTALL_TOOLS=1` downloads kubeconform and the schemas into `TOOLS_DIR`, which is `.k8s-tools` at the repository's root by default. Without a directory, it validates the pinned objects:
+`scripts/kubeconform.sh` validates objects with kubeconform 0.8.0, in strict mode, against the schemas of Kubernetes 1.35.0, and a PodMonitor against the Prometheus operator's CRD schema, from the CRDs catalog of datreeio at a pinned commit. It runs offline. `INSTALL_TOOLS=1` downloads kubeconform and the schemas into `TOOLS_DIR`, which is `.k8s-tools` at the repository's root by default. Without a directory, it validates the pinned objects:
 
 ```bash
 INSTALL_TOOLS=1 bash scripts/kubeconform.sh

@@ -11,7 +11,8 @@
       "gdl.dev/class": "global",
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
-      "gdl.dev/pool": "global-us"
+      "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1"
     },
     "name": "global-us",
     "namespace": "gdl-api"
@@ -27,6 +28,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "hub"
     },
     "name": "global-us",
@@ -47,13 +49,17 @@
     "template": {
       "metadata": {
         "annotations": {
-          "gdl.dev/config": "3dad74e221897c07"
+          "gdl.dev/config": "3dad74e221897c07",
+          "prometheus.io/path": "/v1/ext/gdl-pool/metrics",
+          "prometheus.io/port": "1337",
+          "prometheus.io/scrape": "true"
         },
         "labels": {
           "gdl.dev/class": "global",
           "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "global-us",
+          "gdl.dev/region": "us-east-1",
           "gdl.dev/segment": "hub"
         }
       },
@@ -185,6 +191,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "hub"
     },
     "name": "global-us",
@@ -221,6 +228,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "front"
     },
     "name": "global-us-front",
@@ -238,13 +246,17 @@
     "template": {
       "metadata": {
         "annotations": {
-          "gdl.dev/config": "3dad74e221897c07"
+          "gdl.dev/config": "3dad74e221897c07",
+          "prometheus.io/path": "/metrics",
+          "prometheus.io/port": "9090",
+          "prometheus.io/scrape": "true"
         },
         "labels": {
           "gdl.dev/class": "global",
           "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "global-us",
+          "gdl.dev/region": "us-east-1",
           "gdl.dev/segment": "front"
         }
       },
@@ -396,6 +408,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "front"
     },
     "name": "global-us-front",

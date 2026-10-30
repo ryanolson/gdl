@@ -1,0 +1,55 @@
+# A Prometheus scrape job, for a Prometheus without the operator, that finds every hub and segment of every gdl
+# fleet in the cluster by its pod's labels and annotations, as `cargo gdl k8s` writes them. Its service account
+# needs `get`, `list`, and `watch` on pods. `scripts/kind-fleet.sh` runs a Prometheus with this file.
+scrape_configs:
+  - job_name: gdl
+    scrape_interval: 5s
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      # A gdl fleet's pods that say they serve metrics.
+      - source_labels: [__meta_kubernetes_pod_labelpresent_gdl_dev_fleet]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      # Pod discovery makes one target per container port: keep the one that serves metrics, a segment's system
+      # port or a hub's public port, at the path the pod names.
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: system|public
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      # The pod's fleet, cluster, pool, class, region, and segment, each read whole from its annotation when its
+      # label holds a shortened value. Not `pool`, `class`, or `region`: a chooser labels its own series with the
+      # pool it offered to.
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_fleet]
+        target_label: fleet
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_cluster]
+        target_label: cluster
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_pool]
+        target_label: in_pool
+      - source_labels: [__meta_kubernetes_pod_annotation_gdl_dev_pool]
+        regex: (.+)
+        target_label: in_pool
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_class]
+        target_label: in_class
+      - source_labels: [__meta_kubernetes_pod_annotation_gdl_dev_class]
+        regex: (.+)
+        target_label: in_class
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_region]
+        target_label: in_region
+      - source_labels: [__meta_kubernetes_pod_annotation_gdl_dev_region]
+        regex: (.+)
+        target_label: in_region
+      - source_labels: [__meta_kubernetes_pod_label_gdl_dev_segment]
+        target_label: segment
+      - source_labels: [__meta_kubernetes_pod_annotation_gdl_dev_segment]
+        regex: (.+)
+        target_label: segment

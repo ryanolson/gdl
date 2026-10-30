@@ -50,6 +50,9 @@ use cluster::{Header, check_clusters};
 /// lists_table = "gdl-pool-lists"
 /// local = true                       # optional: the bundle runs one DynamoDB Local for them
 /// cluster = "use1"                   # with local, when the fleet names clusters: the one that runs it
+///
+/// [metrics]                          # optional
+/// pod_monitor = true                 # each cluster's objects include a PodMonitor for the Prometheus operator
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +71,25 @@ pub struct Fleet {
     pools: BTreeMap<String, PoolSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     directory: Option<FleetDirectory>,
+    #[serde(default, skip_serializing_if = "FleetMetrics::is_empty")]
+    metrics: FleetMetrics,
+}
+
+/// The fleet's `[metrics]` table: how a Prometheus finds what the fleet
+/// serves. Read by `cargo gdl k8s`; Compose does not read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetMetrics {
+    /// Whether each cluster's objects include a `PodMonitor` of the
+    /// fleet's pods, for a cluster that runs the Prometheus operator.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pod_monitor: bool,
+}
+
+impl FleetMetrics {
+    fn is_empty(&self) -> bool {
+        !self.pod_monitor
+    }
 }
 
 /// The fleet's `[directory]` table: where every pool's hub publishes its
@@ -712,6 +734,11 @@ impl Fleet {
     /// The fleet's `[directory]` table, if it has one.
     pub fn directory(&self) -> Option<&FleetDirectory> {
         self.directory.as_ref()
+    }
+
+    /// The fleet's `[metrics]` table.
+    pub fn metrics(&self) -> &FleetMetrics {
+        &self.metrics
     }
 
     /// Every pool's settings, as [`Fleet::pool`] gives them, in name order:

@@ -1,6 +1,7 @@
 //! A fleet's Kubernetes objects: one directory per cluster, of plain
 //! objects only. Each cluster gets its Namespace and the fleet's
-//! ServiceAccount (`<cluster>/base.yaml`), and each of its pools one file
+//! ServiceAccount (`<cluster>/base.yaml`), with a PodMonitor of the fleet's
+//! pods when the fleet asks for one (`[metrics] pod_monitor`), and each of its pools one file
 //! (`<cluster>/pools/<pool>.yaml`): a ConfigMap of the pool's settings, its
 //! hub's Deployment and Service, a Deployment for each segment of its
 //! class, and a Service for each segment that publishes ports. A pool's
@@ -318,6 +319,9 @@ impl Render<'_> {
         let fleet_name = self.fleet.name().expect("refusals::fleet requires a name");
         for (name, cluster) in self.fleet.clusters() {
             let mut base = objects::base(fleet_name, name, cluster);
+            if self.fleet.metrics().pod_monitor {
+                base.push(objects::pod_monitor(fleet_name, name, cluster));
+            }
             if let Some(directory) = self.fleet.directory()
                 && dynamodb::runs_local(self.fleet, name)
             {

@@ -11,7 +11,8 @@
       "gdl.dev/class": "model_x",
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
-      "gdl.dev/pool": "model-x-us"
+      "gdl.dev/pool": "model-x-us",
+      "gdl.dev/region": "us-east-1"
     },
     "name": "model-x-us",
     "namespace": "gdl-api"
@@ -27,6 +28,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "hub"
     },
     "name": "model-x-us",
@@ -47,13 +49,17 @@
     "template": {
       "metadata": {
         "annotations": {
-          "gdl.dev/config": "6e3f29878d53a9f9"
+          "gdl.dev/config": "6e3f29878d53a9f9",
+          "prometheus.io/path": "/v1/ext/gdl-pool/metrics",
+          "prometheus.io/port": "1337",
+          "prometheus.io/scrape": "true"
         },
         "labels": {
           "gdl.dev/class": "model_x",
           "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "model-x-us",
+          "gdl.dev/region": "us-east-1",
           "gdl.dev/segment": "hub"
         }
       },
@@ -181,6 +187,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "hub"
     },
     "name": "model-x-us",
@@ -217,6 +224,7 @@
       "gdl.dev/cluster": "use1",
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "model-x-us",
+      "gdl.dev/region": "us-east-1",
       "gdl.dev/segment": "engine"
     },
     "name": "model-x-us-engine",
@@ -234,13 +242,17 @@
     "template": {
       "metadata": {
         "annotations": {
-          "gdl.dev/config": "6e3f29878d53a9f9"
+          "gdl.dev/config": "6e3f29878d53a9f9",
+          "prometheus.io/path": "/metrics",
+          "prometheus.io/port": "9090",
+          "prometheus.io/scrape": "true"
         },
         "labels": {
           "gdl.dev/class": "model_x",
           "gdl.dev/cluster": "use1",
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "model-x-us",
+          "gdl.dev/region": "us-east-1",
           "gdl.dev/segment": "engine"
         }
       },

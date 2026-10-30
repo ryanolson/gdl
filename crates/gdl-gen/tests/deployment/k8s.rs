@@ -95,7 +95,7 @@ pub(super) fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Valu
             let kind = object["kind"].as_str().expect("a kind").to_string();
             let name = object["metadata"]["name"].as_str().expect("a name");
             let name = match kind.as_str() {
-                "Namespace" | "ServiceAccount" => format!("{cluster}/{name}"),
+                "Namespace" | "ServiceAccount" | "PodMonitor" => format!("{cluster}/{name}"),
                 _ => name.to_string(),
             };
             let key = (kind, name);
@@ -207,7 +207,7 @@ fn a_fleets_objects_are_pinned() {
 }
 
 /// Each object carries the fleet's label, and each of a pool's objects
-/// its pool's, class's, and segment's; a Deployment's selector picks its
+/// its pool's, class's, region's, and segment's; a Deployment's selector picks its
 /// own pods only, by the labels that name them, and a hub's is never a
 /// segment's.
 #[test]
@@ -219,10 +219,10 @@ fn every_object_is_labelled_and_selects_its_own_pods() {
     for ((kind, name), object) in &objects {
         let labels = &object["metadata"]["labels"];
         assert_eq!(labels["gdl.dev/fleet"], "api", "{kind} {name}");
-        if matches!(kind.as_str(), "Namespace" | "ServiceAccount") {
+        if matches!(kind.as_str(), "Namespace" | "ServiceAccount" | "PodMonitor") {
             continue;
         }
-        for key in ["gdl.dev/pool", "gdl.dev/class"] {
+        for key in ["gdl.dev/pool", "gdl.dev/class", "gdl.dev/region"] {
             assert!(labels[key].is_string(), "{kind} {name}: {key}");
         }
         // A pool's settings are all its segments'.
@@ -726,6 +726,8 @@ mod labels;
 mod probes;
 #[path = "k8s/rollout.rs"]
 mod rollout;
+#[path = "k8s/scrape.rs"]
+mod scrape;
 #[path = "k8s/secrets.rs"]
 mod secrets;
 #[path = "k8s/variables.rs"]

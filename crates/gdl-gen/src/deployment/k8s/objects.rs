@@ -4,8 +4,11 @@
 //! `gdl.dev/cluster`, the fleet's name for the cluster it is rendered for:
 //! `deploy` prunes only the objects of its own cluster, so that two
 //! clusters whose contexts reach one namespace never prune each other's.
-//! Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`, and
-//! `gdl.dev/segment` (`hub` for its hub's, which no segment can be named). A Deployment and a Service
+//! Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`,
+//! `gdl.dev/region`, and `gdl.dev/segment` (`hub` for its hub's, which no
+//! segment can be named). Every pod says where it serves its metrics, in
+//! the `prometheus.io` annotations that a Prometheus's pod discovery reads
+//! by convention. A Deployment and a Service
 //! select pods only by the labels that name them, `gdl.dev/fleet`,
 //! `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects
 //! share: a Deployment's selector cannot change, and a class's name can.
@@ -43,6 +46,17 @@ const STATE_GROUP: u32 = 65532;
 
 /// The longest name of a Service: a DNS label's.
 const LABEL_LIMIT: usize = 63;
+
+/// Where a hub serves its metrics, on its public port.
+const HUB_METRICS: &str = "/v1/ext/gdl-pool/metrics";
+
+/// Where a segment serves its metrics, on its system port.
+const SEGMENT_METRICS: &str = "/metrics";
+
+/// The names of the container ports a hub and a segment serve their
+/// metrics on, which a PodMonitor scrapes by name.
+const PUBLIC: &str = "public";
+const SYSTEM: &str = "system";
 
 /// One segment of a layout, as its pods run it.
 pub(super) struct Segment {
@@ -188,6 +202,7 @@ impl Pod<'_> {
             ("gdl.dev/cluster", self.cluster_name),
             ("gdl.dev/pool", self.pool.name.as_str()),
             ("gdl.dev/class", self.pool.class.as_str()),
+            ("gdl.dev/region", self.pool.region.as_str()),
         ];
         named.extend(segment.map(|segment| ("gdl.dev/segment", segment)));
         named
@@ -282,7 +297,7 @@ impl Pod<'_> {
             "command": [BINARY, format!("{CONFIG_DIR}/deployment.json")],
             "env": env,
             "ports": [
-                {"name": "public", "containerPort": HUB_PUBLIC_PORT},
+                {"name": PUBLIC, "containerPort": HUB_PUBLIC_PORT},
                 {"name": "control", "containerPort": HUB_CONTROL_PORT},
             ],
             "livenessProbe": probe(2, 30),
@@ -293,7 +308,11 @@ impl Pod<'_> {
         if state_dir.is_some() {
             pod["securityContext"] = json!({"fsGroup": STATE_GROUP});
         }
-        Ok(self.deployment(&self.pool.name, "hub", 1, true, checksum, pod))
+        let scrape = Scrape {
+            port: HUB_PUBLIC_PORT,
+            path: HUB_METRICS,
+        };
+        Ok(self.deployment(&self.pool.name, "hub", 1, true, checksum, scrape, pod))
     }
 
     /// The Service of the pool's hub, named for the pool: where its
@@ -336,7 +355,7 @@ impl Pod<'_> {
                 "failureThreshold": 3,
             })
         };
-        let mut ports = vec![json!({"name": "system", "containerPort": segment.probes.port})];
+        let mut ports = vec![json!({"name": SYSTEM, "containerPort": segment.probes.port})];
         ports.extend(segment.ports.iter().map(Port::container));
         let mut mounts = vec![config_mount()];
         let mut volumes = vec![self.config_volume()];
@@ -369,12 +388,17 @@ impl Pod<'_> {
         });
         let mut pod = self.pod_spec(container, volumes);
         pod["terminationGracePeriodSeconds"] = segment.grace.into();
+        let scrape = Scrape {
+            port: segment.probes.port,
+            path: SEGMENT_METRICS,
+        };
         Ok(self.deployment(
             &object_name(&self.pool.name, &segment.name),
             &segment.name,
             self.pool.quorum(&segment.name),
             false,
             checksum,
+            scrape,
             pod,
         ))
     }
@@ -395,7 +419,9 @@ impl Pod<'_> {
 
     /// A Deployment of `replicas` pods of `segment` with `pod` as their
     /// spec, which `checksum`, the pool's ConfigMap's, replaces when the
-    /// settings change: a ConfigMap's change alone restarts no pod.
+    /// settings change: a ConfigMap's change alone restarts no pod. Each pod
+    /// says where it serves its metrics (`scrape`).
+    #[allow(clippy::too_many_arguments)]
     fn deployment(
         &self,
         name: &str,
@@ -403,11 +429,15 @@ impl Pod<'_> {
         replicas: u32,
         recreate: bool,
         checksum: &str,
+        scrape: Scrape,
         pod: Value,
     ) -> Value {
         let labels = self.labels(Some(segment));
         let mut annotations = self.whole(Some(segment));
         annotations.insert("gdl.dev/config".into(), checksum.into());
+        annotations.insert("prometheus.io/scrape".into(), "true".into());
+        annotations.insert("prometheus.io/port".into(), scrape.port.to_string().into());
+        annotations.insert("prometheus.io/path".into(), scrape.path.into());
         let mut spec = json!({
             "replicas": replicas,
             "selector": {"matchLabels": self.selector(segment)},
@@ -472,6 +502,79 @@ impl Pod<'_> {
         crate::deployment::validate_image(&image)?;
         Ok(image)
     }
+}
+
+/// Where a pod serves its metrics.
+struct Scrape {
+    port: u16,
+    path: &'static str,
+}
+
+/// The labels a PodMonitor copies from each pod onto every series it
+/// scrapes there, each as the target label it becomes: the same as the
+/// chapter's scrape job without the operator gives. Not `pool`, `class`
+/// or `region`: a chooser labels its own series with the pool it offered
+/// to, its class and its region, and a target label of the same name would
+/// move those aside.
+const MONITORED: [(&str, &str); 6] = [
+    ("gdl.dev/fleet", "fleet"),
+    ("gdl.dev/cluster", "cluster"),
+    ("gdl.dev/pool", "in_pool"),
+    ("gdl.dev/class", "in_class"),
+    ("gdl.dev/region", "in_region"),
+    ("gdl.dev/segment", "segment"),
+];
+
+/// The PodMonitor of `fleet`'s pods in `cluster`, which the fleet names
+/// `name`, for a cluster that runs the Prometheus operator: each segment's
+/// system port at `/metrics` and each hub's public port at its pool's
+/// route, the two named ports no other pod of the fleet has. Each copied
+/// label is read from the pod's label, then from the annotation that holds
+/// its whole value when the label holds a shortened one ([`label_value`]).
+pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
+    let labels = json!({
+        "gdl.dev/fleet": label_value(fleet),
+        "gdl.dev/cluster": label_value(name),
+    });
+    let relabelings: Vec<Value> = MONITORED
+        .iter()
+        .flat_map(|(label, target)| {
+            let meta = prometheus_name(label);
+            [
+                json!({
+                    "sourceLabels": [format!("__meta_kubernetes_pod_label_{meta}")],
+                    "targetLabel": target,
+                }),
+                json!({
+                    "sourceLabels": [format!("__meta_kubernetes_pod_annotation_{meta}")],
+                    "regex": "(.+)",
+                    "targetLabel": target,
+                }),
+            ]
+        })
+        .collect();
+    let endpoint =
+        |port: &str, path: &str| json!({"port": port, "path": path, "relabelings": relabelings});
+    json!({
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "PodMonitor",
+        "metadata": {"name": fleet, "namespace": cluster.namespace, "labels": labels},
+        "spec": {
+            "selector": {"matchLabels": labels},
+            "podMetricsEndpoints": [
+                endpoint(SYSTEM, SEGMENT_METRICS),
+                endpoint(PUBLIC, HUB_METRICS),
+            ],
+        },
+    })
+}
+
+/// A Kubernetes label's key as Prometheus' discovery names it: each
+/// character that a label name cannot hold becomes `_`.
+fn prometheus_name(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 /// The image `repository` at `tag` in `registry`, and at `digest` when it
@@ -758,6 +861,11 @@ pub(super) fn readme(fleet: &Fleet) -> String {
         }
     }
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
+    text.push_str("\nEvery pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations.");
+    if fleet.metrics().pod_monitor {
+        text.push_str(&format!(" Each `base.yaml` also holds PodMonitor `{name}` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
+    }
+    text.push('\n');
     text.push_str(&super::dynamodb::readme(fleet));
     text
 }

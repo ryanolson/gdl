@@ -50,18 +50,23 @@ fn a_placement_leaves_its_defaults_unsaid() {
 const FLEET: &str = "[class.global]\nready = { a = 2 }\nrequires = { model_x = 1 }\n\
     [class.model_x]\nready = { d = 4 }\n\
     [pool.g]\nclass = 'global'\nregion = 'us-east-1'\nready = { a = 3 }\n\
-    [pool.m]\nlayout = 'regional'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = 'g'\nready = { d = 8 }\n";
+    [pool.m]\nlayout = 'regional'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = 'g'\nready = { d = 8 }\n\
+    [metrics]\npod_monitor = true\n";
 
 #[test]
 fn a_fleet_reads_back_what_it_writes() {
     let fleet = Fleet::from_toml(FLEET).expect("a fleet");
+    assert!(fleet.metrics().pod_monitor);
     let text = toml::to_string(&fleet).expect("toml");
     assert_eq!(Fleet::from_toml(&text).expect("reads"), fleet, "{text}");
+    // An unknown key of `[metrics]` is refused, as anywhere else.
+    let typo = FLEET.replace("pod_monitor", "pod_monitors");
+    assert!(Fleet::from_toml(&typo).is_err(), "{typo}");
     // Nothing optional is written when it is not set.
     let least = Fleet::from_toml("[class.model_x]\n[pool.g]\nclass = 'global'\nregion = 'r'\n")
         .expect("a fleet");
     let text = toml::to_string(&least).expect("toml");
-    for unsaid in ["ready", "requires", "home", "layout"] {
+    for unsaid in ["ready", "requires", "home", "layout", "metrics"] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }
     assert_eq!(Fleet::from_toml(&text).expect("reads"), least, "{text}");

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Validate the Kubernetes objects that `cargo gdl k8s` writes with kubeconform, against the schemas of a pinned
-# Kubernetes version, in strict mode, offline. Outside the default suite: the objects' contents are pinned by
+# Kubernetes version, and a PodMonitor against the Prometheus operator's CRD schema at a pinned commit, in strict
+# mode, offline. Outside the default suite: the objects' contents are pinned by
 # `crates/gdl-gen/tests/deployment/k8s.rs`, and this checks that the Kubernetes API accepts each one.
 #
 #   bash scripts/kubeconform.sh [dir ...]
@@ -8,7 +9,7 @@
 # Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out and
 # crates/gdl-gen/tests/fixtures/k8s/dynamodb/out. With
 # INSTALL_TOOLS=1 it first downloads the pinned kubeconform and the schemas of the kinds that `cargo gdl k8s`
-# writes into TOOLS_DIR (default: .k8s-tools at the repository's root, which git ignores).
+# writes, and of the PodMonitor, into TOOLS_DIR (default: .k8s-tools at the repository's root, which git ignores).
 set -euo pipefail
 
 KUBECONFORM_VERSION="0.8.0"
@@ -17,10 +18,15 @@ KUBERNETES_VERSION="1.35.0"
 SCHEMAS_COMMIT="47163ead3738a996c3e30be9691bb37b8071d9d3"
 # Each kind that `cargo gdl k8s` writes, as the schema repository names its file.
 KINDS=(namespace-v1 serviceaccount-v1 configmap-v1 persistentvolumeclaim-v1 service-v1 deployment-apps-v1 job-batch-v1)
+# The commit of github.com/datreeio/CRDs-catalog the custom resources' schemas are read from, and each one that
+# `cargo gdl k8s` writes, as the catalog names its file: the Prometheus operator's PodMonitor.
+CRDS_COMMIT="3eb90d47aba8d61919d4419dd38301536e32a94b"
+CRDS=(monitoring.coreos.com/podmonitor_v1)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tools="${TOOLS_DIR:-${root}/.k8s-tools}"
 schemas="${tools}/schemas/v${KUBERNETES_VERSION}-standalone-strict"
+crds="${tools}/crds/${CRDS_COMMIT}"
 
 if [[ "${INSTALL_TOOLS:-0}" == "1" ]]; then
   case "$(uname -m)" in
@@ -39,6 +45,11 @@ if [[ "${INSTALL_TOOLS:-0}" == "1" ]]; then
     curl -sSfL -o "${schemas}/${kind}.json" \
       "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${SCHEMAS_COMMIT}/v${KUBERNETES_VERSION}-standalone-strict/${kind}.json"
   done
+  for crd in "${CRDS[@]}"; do
+    mkdir -p "${crds}/$(dirname "${crd}")"
+    curl -sSfL -o "${crds}/${crd}.json" \
+      "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${CRDS_COMMIT}/${crd}.json"
+  done
 fi
 
 kubeconform="${tools}/bin/kubeconform"
@@ -51,7 +62,9 @@ fi
 if [[ $# -eq 0 ]]; then
   set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out"
 fi
-# A kind with no schema here fails: -ignore-missing-schemas is not given.
+# A kind with no schema here fails: -ignore-missing-schemas is not given. A custom resource's schema is found by its
+# group, as the catalog files it.
 "${kubeconform}" -strict -summary -kubernetes-version "${KUBERNETES_VERSION}" \
   -schema-location "${tools}/schemas/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json" \
+  -schema-location "${crds}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
   "$@"

@@ -23,3 +23,194 @@
     "namespace": "gdl-api"
   }
 }
+---
+{
+  "apiVersion": "monitoring.coreos.com/v1",
+  "kind": "PodMonitor",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "euw1",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "api",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "podMetricsEndpoints": [
+      {
+        "path": "/metrics",
+        "port": "system",
+        "relabelings": [
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_fleet"
+            ],
+            "targetLabel": "fleet"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_fleet"
+            ],
+            "targetLabel": "fleet"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_cluster"
+            ],
+            "targetLabel": "cluster"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_cluster"
+            ],
+            "targetLabel": "cluster"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_pool"
+            ],
+            "targetLabel": "in_pool"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_pool"
+            ],
+            "targetLabel": "in_pool"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_class"
+            ],
+            "targetLabel": "in_class"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_class"
+            ],
+            "targetLabel": "in_class"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_region"
+            ],
+            "targetLabel": "in_region"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_region"
+            ],
+            "targetLabel": "in_region"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_segment"
+            ],
+            "targetLabel": "segment"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_segment"
+            ],
+            "targetLabel": "segment"
+          }
+        ]
+      },
+      {
+        "path": "/v1/ext/gdl-pool/metrics",
+        "port": "public",
+        "relabelings": [
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_fleet"
+            ],
+            "targetLabel": "fleet"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_fleet"
+            ],
+            "targetLabel": "fleet"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_cluster"
+            ],
+            "targetLabel": "cluster"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_cluster"
+            ],
+            "targetLabel": "cluster"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_pool"
+            ],
+            "targetLabel": "in_pool"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_pool"
+            ],
+            "targetLabel": "in_pool"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_class"
+            ],
+            "targetLabel": "in_class"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_class"
+            ],
+            "targetLabel": "in_class"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_region"
+            ],
+            "targetLabel": "in_region"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_region"
+            ],
+            "targetLabel": "in_region"
+          },
+          {
+            "sourceLabels": [
+              "__meta_kubernetes_pod_label_gdl_dev_segment"
+            ],
+            "targetLabel": "segment"
+          },
+          {
+            "regex": "(.+)",
+            "sourceLabels": [
+              "__meta_kubernetes_pod_annotation_gdl_dev_segment"
+            ],
+            "targetLabel": "segment"
+          }
+        ]
+      }
+    ],
+    "selector": {
+      "matchLabels": {
+        "gdl.dev/cluster": "euw1",
+        "gdl.dev/fleet": "api"
+      }
+    }
+  }
+}
