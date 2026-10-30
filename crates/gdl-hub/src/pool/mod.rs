@@ -1021,6 +1021,16 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 }),
             )
             .route(
+                gdl_watch::WITHDRAWN_ROUTE,
+                get({
+                    let health = self.health.subscribe();
+                    move || {
+                        let withdrawn = health.borrow().withdrawn;
+                        async move { Json(serde_json::json!({"withdrawn": withdrawn})) }
+                    }
+                }),
+            )
+            .route(
                 "/health",
                 get(move || {
                     let health = self.health.borrow().clone();

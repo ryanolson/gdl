@@ -179,6 +179,13 @@ pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
 /// whose class no hop enters is refused with `409 Conflict`.
 pub const DRAIN_ROUTE: &str = "/drain";
 
+/// The route of a pool's hub, on its public listener, that says whether
+/// the drained pool's record is withdrawn: 200 with `{"withdrawn": bool}`,
+/// as the pool's health body says it. Health answers 503 for a drained
+/// pool, and a reader through the API server's service proxy, as
+/// `kubectl get --raw` is, does not see the body of a 503.
+pub const WITHDRAWN_ROUTE: &str = "/withdrawn";
+
 /// The presence route, under the extension's, on the hub's control
 /// listener: `POST` with a [`SetPresence`] tells the pool's hub whether the
 /// pool serves or is scaled to 0 on purpose, and is answered

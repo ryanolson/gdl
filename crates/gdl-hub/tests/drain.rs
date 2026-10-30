@@ -369,7 +369,9 @@ impl PoolDirectory for Refusing {
 /// no record of it: not while its withdrawal fails, whatever its state,
 /// and then once the withdrawal is stored. Before the drain ends the body
 /// has no `withdrawn` at all, so a reader of an earlier hub reads it as
-/// before.
+/// before. `GET /v1/ext/gdl-pool/withdrawn` says the same with 200 each
+/// time, which a reader through a proxy that hides the body of a 503, as
+/// `kubectl get --raw` does, can read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_says_withdrawn_only_once_the_directory_holds_no_record() {
     let memory = MemoryDirectory::new();
@@ -385,6 +387,10 @@ async fn health_says_withdrawn_only_once_the_directory_holds_no_record() {
     records.until(PoolState::Unavailable).await;
     let (_, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
     assert!(!body.contains("withdrawn"), "{body}");
+    assert_eq!(
+        get(&hub, "/v1/ext/gdl-pool/withdrawn").await,
+        (200, "{\"withdrawn\":false}".to_string())
+    );
 
     pool.drain().await.expect("the pool drains");
     tokio::time::timeout(WAIT, attempts.wait_for(|attempts| *attempts > 0))
@@ -395,6 +401,10 @@ async fn health_says_withdrawn_only_once_the_directory_holds_no_record() {
     assert!(!pool.health().borrow().withdrawn, "withdrawn while held");
     let (_, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
     assert!(!body.contains("withdrawn"), "{body}");
+    assert_eq!(
+        get(&hub, "/v1/ext/gdl-pool/withdrawn").await,
+        (200, "{\"withdrawn\":false}".to_string())
+    );
 
     directory
         .allowed
@@ -405,5 +415,9 @@ async fn health_says_withdrawn_only_once_the_directory_holds_no_record() {
     let (status, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
     assert_eq!(status, 503, "{body}");
     assert!(body.contains("\"withdrawn\":true"), "{body}");
+    assert_eq!(
+        get(&hub, "/v1/ext/gdl-pool/withdrawn").await,
+        (200, "{\"withdrawn\":true}".to_string())
+    );
     hub.shutdown().await.expect("the hub stops");
 }
