@@ -146,7 +146,6 @@ fn quantities_compare_by_value() {
 }
 
 #[test]
-#[ignore = "F1: a long zero quantity overflows the divisor and panics in Fleet::check"]
 fn a_long_zero_quantity_does_not_panic_during_fleet_check() {
     let check = |cpu: &str| {
         let text = changed(r#"cpu = "250m""#, &format!("cpu = {cpu:?}"));

@@ -136,6 +136,10 @@ impl Resources {
     }
 }
 
+/// The most significant digits a quantity may have: more than any value
+/// Kubernetes keeps, and few enough that every one fits the arithmetic.
+const MAX_DIGITS: usize = 30;
+
 /// A Kubernetes quantity's value, in billionths of its unit: exact, so
 /// that `1` equals `1000m` and `1Gi` is more than `1G`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -179,22 +183,36 @@ impl Quantity {
                 _ => return Err(format!("`{suffix}` is not a unit")),
             },
         };
-        let mantissa: u128 = format!("{whole}{fraction}")
-            .parse()
-            .map_err(|_| "too long".to_string())?;
-        // The value in billionths: mantissa x 10^(9 + power - fraction digits).
-        let scale = 9 + power_of_ten - i32::try_from(fraction.len()).map_err(|_| "too long")?;
-        let mut value = mantissa;
-        if scale >= 0 {
-            value = value
-                .checked_mul(10u128.pow(scale.unsigned_abs()))
-                .ok_or("too large")?;
+        // Leading zeros of the number and trailing zeros of its fraction
+        // say nothing, and a long run of either must not reach a power: so
+        // `0.000…0` of any length is 0, and every power below is checked.
+        let fraction = fraction.trim_end_matches('0');
+        let digits = format!("{whole}{fraction}");
+        let digits = digits.trim_start_matches('0');
+        if digits.len() > MAX_DIGITS {
+            return Err(format!("more than {MAX_DIGITS} significant digits"));
+        }
+        let mantissa: u128 = if digits.is_empty() {
+            0
         } else {
-            let divisor = 10u128.pow(scale.unsigned_abs());
-            if !value.is_multiple_of(divisor) {
-                return Err("finer than a billionth of its unit".into());
+            digits.parse().map_err(|_| "not a number".to_string())?
+        };
+        // The value in billionths: mantissa x 10^(9 + power - fraction digits).
+        let fraction_digits = i32::try_from(fraction.len()).map_err(|_| "too long")?;
+        let scale = 9 + power_of_ten - fraction_digits;
+        let power = 10u128.checked_pow(scale.unsigned_abs());
+        let mut value = mantissa;
+        if mantissa != 0 {
+            if scale >= 0 {
+                value = power
+                    .and_then(|power| value.checked_mul(power))
+                    .ok_or("too large")?;
+            } else {
+                match power {
+                    Some(divisor) if value.is_multiple_of(divisor) => value /= divisor,
+                    _ => return Err("finer than a billionth of its unit".into()),
+                }
             }
-            value /= divisor;
         }
         value = value
             .checked_mul(1u128 << power_of_two)
