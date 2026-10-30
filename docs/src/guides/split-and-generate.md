@@ -16,7 +16,7 @@ This guide takes a graph from a spec to checked, generated segment crates and bu
 | `check --spec <gdl.toml> [--fleet <fleet.toml>]` | Checks the spec as `generate` does, and a fleet file against it. Prints every problem. | nothing |
 | `diagram --spec <gdl.toml> --format dot\|mermaid` | Draws the placed graph. Takes a spec of one layout. | stdout |
 | `export --spec <gdl.toml> --out <file.tar.gz>` | Writes the generated crates as one archive with `build-all.sh`. Takes a spec of one layout. | the archive |
-| `compose --spec <gdl.toml> --out <dir> [--fleet <fleet.toml>] [--local]` | Writes a Docker Compose bundle. A spec with classes or several layouts needs `--fleet`. With `--local`, the images build local sources, and the bundle builds only on this machine. | `--out` |
+| `compose --spec <gdl.toml> --out <dir> [--fleet <fleet.toml>] [--local]` | Writes a Docker Compose bundle. A spec with classes or several layouts needs `--fleet`. With `--local`, the images build local sources, as Git holds them, from the bundle's `context/`. | `--out` |
 | `k8s --spec <gdl.toml> --fleet <fleet.toml> --out <dir> [--tag <tag>] [--images <images.json>]` | Writes a fleet's Kubernetes objects, one directory per cluster. Needs no Docker and no cluster. | `--out` |
 | `images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>]` | Builds the fleet's images for each cluster's platform. With `--push`, pushes them and writes their digests to `--out`. | the image store or the registries, and `--out` |
 | `deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <dir>]` | Runs `check`, `images --push`, and `k8s`, applies the objects to each cluster, prunes what the fleet no longer places, and waits for each pool's health. | the clusters, and `--out` |

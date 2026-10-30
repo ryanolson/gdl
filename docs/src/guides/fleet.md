@@ -143,7 +143,7 @@ cd target/fleet
 docker compose up --build
 ```
 
-The bundle has the same services, hubs, and variables as above. Each image builds from the repository as it is on this machine: the hub from `[gdl] path`, and each segment from the crates that the spec names by path. One service still builds each image, and the pools of one class run it. Write the bundle under the repository's `target/`, since the build context must hold it. The bundle builds only on this machine ([Local sources](compose-deploy.md#local-sources)).
+The bundle has the same services, hubs, and variables as above. Each image builds from the repository as Git holds it on this machine, copied into the bundle's `context/`: the hub from `[gdl] path`, and each segment from the crates that the spec names by path. One service still builds each image, and the pools of one class run it. `git add` a new file to build it ([Local sources](compose-deploy.md#local-sources)).
 
 ## How the bundle starts
 
