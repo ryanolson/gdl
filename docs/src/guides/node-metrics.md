@@ -85,7 +85,7 @@ impl gdl::Build for Gate {
 - The segment registers it before `build`. A scrape before the first `fill_with` has no series of it. A later `fill_with` replaces the closure.
 - Each scrape starts from an empty vector. A label set that the closure does not set has no series in that scrape.
 - `set` takes the label values in the order that `labels` names them. A wrong count returns an error, and the scrape goes on without that series.
-- Keep the closure fast. The system listener runs it on a blocking thread, one scrape at a time, and answers with 503 a scrape that takes longer than 5 s, or that comes while another runs ([`/metrics`](../operations/observability.md#metrics)). The closure must not await. It may take a `blocking_read` of a tokio lock.
+- Keep the closure fast. The system listener runs it on a blocking thread, up to 4 scrapes at once, and answers with 503 a scrape that takes longer than 5 s, or that finds 4 running ([`/metrics`](../operations/observability.md#metrics)). Scrapes at once run the closure at once, each on its own vector, so the closure must be safe to run concurrently. It must not await. It may take a `blocking_read` of a tokio lock.
 
 ### Replace a hand-written collector
 

@@ -164,7 +164,7 @@ pub(crate) struct Health {
     registry: OnceLock<prometheus::Registry>,
     /// How long a scrape may take before it is answered with 503.
     scrape_limit: Duration,
-    /// One permit: the scrape whose gather runs.
+    /// `SCRAPES` permits: the scrapes whose gathers run.
     scrapes: Arc<tokio::sync::Semaphore>,
 }
 
@@ -175,7 +175,7 @@ impl Health {
             started: Instant::now(),
             registry: OnceLock::new(),
             scrape_limit: SCRAPE_LIMIT,
-            scrapes: Arc::new(tokio::sync::Semaphore::new(1)),
+            scrapes: Arc::new(tokio::sync::Semaphore::new(SCRAPES)),
         }
     }
 
@@ -194,11 +194,11 @@ impl Health {
     /// text format, or why there are none.
     ///
     /// A node's `ScrapeGaugeVec` runs its closure inside the gather, so
-    /// the gather runs on a blocking thread, where it holds up no probe,
-    /// and one at a time, so a closure that never returns holds one
-    /// thread. A scrape past `scrape_limit` is answered with 503. A scrape
-    /// that finds another running is answered with 503 at once: waiting,
-    /// it would hold a connection the probes need.
+    /// the gather runs on a blocking thread, where it holds up no probe.
+    /// At most `SCRAPES` run at once, so closures that never return hold
+    /// few threads. A scrape past `scrape_limit` is answered with 503. A
+    /// scrape that finds `SCRAPES` running is answered with 503 at once:
+    /// waiting, it would hold a connection the probes need.
     async fn scrape(&self) -> (u16, String) {
         let Some(registry) = self.registry.get().cloned() else {
             return (200, String::new());
@@ -271,6 +271,9 @@ const DRAIN_LIMIT: usize = 64 << 10;
 /// How long a scrape may take: a node's closures run inside it.
 /// Prometheus gives up on a scrape after 10 s by default.
 const SCRAPE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Scrapes gathered at once: an HA Prometheus pair and a person; few threads for stuck closures.
+const SCRAPES: usize = 4;
 
 /// How long the listener waits after an accept fails.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
