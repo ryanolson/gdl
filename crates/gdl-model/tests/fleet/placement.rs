@@ -161,6 +161,32 @@ fn a_long_zero_quantity_does_not_panic_during_fleet_check() {
     );
 }
 
+#[test]
+#[ignore = "F2: Fleet::check does not cap binary quantities as Kubernetes does"]
+fn binary_quantity_caps_cannot_hide_a_limit_below_its_request() {
+    let resources = |request: &str, limit: &str| {
+        changed(
+            r#"limits = { memory = "4Gi" }"#,
+            &format!("requests = {{ memory = {request:?} }}\nlimits = {{ memory = {limit:?} }}"),
+        )
+    };
+    fleet(&resources("1Gi", "2Gi"))
+        .check(Some(&laid()))
+        .expect("ordinary binary resources fit");
+    assert!(
+        fleet(&resources("10E", "9223372036854775807"))
+            .check(Some(&laid()))
+            .is_err(),
+        "the capped limit is below the decimal request"
+    );
+    assert!(
+        fleet(&resources("10E", "10Ei"))
+            .check(Some(&laid()))
+            .is_err(),
+        "Kubernetes caps 10Ei at 9223372036854775807, below the 10E request"
+    );
+}
+
 /// [`PLACED`] with `from` replaced by `to`, which must be in it.
 fn changed(from: &str, to: &str) -> String {
     assert!(PLACED.contains(from), "{from}");
