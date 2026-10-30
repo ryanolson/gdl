@@ -157,10 +157,18 @@ impl Fleet {
                 .register(&rt.names().forward, move |message| {
                     offered.fetch_add(1, Ordering::SeqCst);
                     let forward: Forward = decode(&message).expect("a forward hand-off");
-                    let cx = forward
+                    // An offer that arrives past its deadline is answered
+                    // with the request's own error, as an entry does.
+                    let cx = match forward
                         .cx
                         .arrive(Duration::ZERO, gdl::__runtime::wall_now_nanos)
-                        .expect("within its deadline");
+                    {
+                        Ok(cx) => cx,
+                        Err(error) => {
+                            let reply = encode(&Err::<Accepted, Error>(error)).expect("encode");
+                            return Box::pin(async move { reply });
+                        }
+                    };
                     metas
                         .lock()
                         .expect("not poisoned")
@@ -379,6 +387,12 @@ async fn a_re_queued_request_fails_at_its_deadline() {
 /// no offer to the pool ends meanwhile. A request re-queued once costs no
 /// more than one that fails over once, and each further round adds the
 /// same count.
+///
+/// Each figure is the fewest of 30 sends. Run beside the other offer
+/// tests on 8 threads, one figure came out one allocation over its
+/// fewest in 1 run of 200. So each figure keeps its fewest over up to
+/// three attempts, and the test stops at the first attempt whose figures
+/// hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wait_allocates_nothing_beyond_its_timer() {
     let fleet = Fleet::new(RuntimeConfig {
@@ -396,16 +410,25 @@ async fn a_wait_allocates_nothing_beyond_its_timer() {
         let sleep = tokio::time::sleep(Duration::from_millis(1));
         timer = timer.min(Counted::new(sleep).await.1);
     }
-    let first = fleet.fewest(&failover, [0, 0, 0]).await;
-    let failed_over = [
-        fleet.fewest(&failover, [1, 0, 0]).await,
-        fleet.fewest(&failover, [1, 1, 0]).await,
-    ];
-    let requeued = [
-        fleet.fewest(&requeue, [1, 0, 0]).await,
-        fleet.fewest(&requeue, [2, 0, 0]).await,
-        fleet.fewest(&requeue, [4, 0, 0]).await,
-    ];
+    let (mut first, mut failed_over, mut requeued) = (u64::MAX, [u64::MAX; 2], [u64::MAX; 3]);
+    let holds = |failed_over: [u64; 2], requeued: [u64; 3]| {
+        let round = requeued[1] - requeued[0];
+        requeued[2] - requeued[1] == 2 * round
+            && round == failed_over[1] - failed_over[0] + timer
+            && requeued[0] <= failed_over[0]
+    };
+    for _ in 0..3 {
+        first = first.min(fleet.fewest(&failover, [0, 0, 0]).await);
+        for (fewest, declines) in failed_over.iter_mut().zip([[1, 0, 0], [1, 1, 0]]) {
+            *fewest = (*fewest).min(fleet.fewest(&failover, declines).await);
+        }
+        for (fewest, declines) in requeued.iter_mut().zip([[1, 0, 0], [2, 0, 0], [4, 0, 0]]) {
+            *fewest = (*fewest).min(fleet.fewest(&requeue, declines).await);
+        }
+        if holds(failed_over, requeued) {
+            break;
+        }
+    }
     println!(
         "allocations: a timer {timer}; accepted first offer {first}; failover once {}, \
          twice {}; re-queued once {}, twice {}, four times {}",
