@@ -168,3 +168,65 @@ fn a_tracked_root_dockerignore_does_not_drop_the_bundle() {
         );
     }
 }
+
+/// Git still lists tracked descendants when their directory becomes a
+/// link. Checking only the leaf must not copy that link's host target.
+#[cfg(unix)]
+#[test]
+#[ignore = "directory symlinks still redirect tracked files to host credentials"]
+fn a_directory_link_cannot_redirect_tracked_files_to_host_credentials() {
+    let copy = Copy::new();
+    let assets = copy.path().join("assets");
+    std::fs::create_dir(&assets).expect("a tracked directory");
+    std::fs::write(assets.join("credentials.txt"), "public fixture\n").expect("a tracked file");
+    tracked(&copy);
+    std::fs::write(copy.path().join(".gitignore"), "/assets\n").expect("an ignore rule");
+    local(&copy, false, &mut Fake::default());
+
+    let host = tempfile::Builder::new()
+        .prefix("gdl-host-credentials-")
+        .tempdir()
+        .expect("a host directory outside the sources");
+    let marker = ["ancestor", "credential", "marker"].join("-");
+    std::fs::write(host.path().join("credentials.txt"), &marker).expect("a synthetic secret");
+    std::fs::remove_dir_all(&assets).expect("remove the tracked directory");
+    std::os::unix::fs::symlink(host.path(), &assets).expect("redirect the tracked directory");
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(copy.path())
+        .args(["ls-files", "--cached", "--full-name"])
+        .output()
+        .expect("Git lists the tracked descendants");
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("assets/credentials.txt"));
+    let untracked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(copy.path())
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .expect("Git lists the untracked files");
+    assert!(untracked.status.success());
+    assert!(!String::from_utf8_lossy(&untracked.stdout).contains("assets"));
+
+    let mut docker = Fake::default();
+    let result = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    );
+    if let Err(error) = result {
+        assert!(error.to_string().contains("assets"), "{error}");
+        assert!(docker.contexts.is_empty());
+        return;
+    }
+    assert_eq!(docker.contexts.len(), 3);
+    for (reference, context) in &docker.contexts {
+        assert!(
+            context.values().all(|text| !text.contains(&marker)),
+            "{reference}: an ancestor directory link copied host credentials into the context"
+        );
+    }
+}
