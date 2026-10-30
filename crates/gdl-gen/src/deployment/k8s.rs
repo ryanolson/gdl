@@ -23,6 +23,7 @@ mod objects;
 mod refusals;
 mod relay;
 
+pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
 use objects::{Names, Pod, Port, Segment};
 pub(super) use objects::{image, label_value};
 

@@ -26,8 +26,8 @@ use crate::deployment::pools::DYNAMODB_LOCAL;
 
 /// The Local's Deployment and Service, and the tables Job: a pool may not
 /// take either name.
-pub(super) const LOCAL: &str = "dynamodb-local";
-pub(super) const TABLES: &str = "dynamodb-tables";
+pub(in crate::deployment) const LOCAL: &str = "dynamodb-local";
+pub(in crate::deployment) const TABLES: &str = "dynamodb-tables";
 
 /// The Local's port.
 const PORT: u16 = 8000;

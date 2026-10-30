@@ -74,6 +74,11 @@ struct Kube {
     /// What `get pods` and `get events` print.
     pods: Value,
     events: Value,
+    /// What `get pods` prints for the DynamoDB Local's pods.
+    local_pods: Value,
+    /// The status `get job` prints for the tables Job, and its log.
+    job: Value,
+    job_log: &'static str,
 }
 
 impl Kube {
@@ -87,6 +92,9 @@ impl Kube {
             health: Some(0),
             pods: json!({"items": []}),
             events: json!({"items": []}),
+            local_pods: json!({"items": [local_pod(true)]}),
+            job: json!({"succeeded": 1}),
+            job_log: "",
         }
     }
 
@@ -187,7 +195,19 @@ impl gdl_gen::Kube for Kube {
                     None => gdl_gen::Reply::ok("{}"),
                 }
             }
+            ("get", None)
+                if rest[1] == "pods"
+                    && rest
+                        .iter()
+                        .any(|a| a.contains("gdl.dev/directory=dynamodb-local")) =>
+            {
+                gdl_gen::Reply::ok(self.local_pods.to_string())
+            }
             ("get", None) if rest[1] == "pods" => gdl_gen::Reply::ok(self.pods.to_string()),
+            ("get", None) if rest[1] == "job" => {
+                gdl_gen::Reply::ok(json!({"kind": "Job", "status": self.job}).to_string())
+            }
+            ("logs", None) => gdl_gen::Reply::ok(self.job_log),
             ("get", None) if rest[1] == "events" => gdl_gen::Reply::ok(self.events.to_string()),
             ("get", None) => {
                 let selector = rest
@@ -226,7 +246,11 @@ impl gdl_gen::Kube for Kube {
                     let objects = self.objects.entry(context.clone()).or_default();
                     let before = objects.len();
                     objects.retain(|(k, n), _| !(k.eq_ignore_ascii_case(kind) && n == name));
-                    assert_eq!(objects.len() + 1, before, "{reference} is not held");
+                    // The tables Job is deleted before each run, whether
+                    // or not an earlier one is there.
+                    if kind != "job" {
+                        assert_eq!(objects.len() + 1, before, "{reference} is not held");
+                    }
                 }
                 gdl_gen::Reply::ok("")
             }
@@ -372,6 +396,17 @@ fn deletes(log: &Log, context: &str) -> Vec<Vec<String>> {
                 .collect()
         })
         .collect()
+}
+
+/// The DynamoDB Local's pod, ready or not, at a pod IP.
+fn local_pod(ready: bool) -> Value {
+    json!({
+        "metadata": {"name": "dynamodb-local-0"},
+        "status": {
+            "podIP": "10.1.2.3",
+            "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}],
+        },
+    })
 }
 
 /// A pool's object as an earlier deploy left it: labelled with the fleet,
@@ -890,6 +925,9 @@ mod parent;
 
 #[path = "deploy/deadline.rs"]
 mod deadline;
+
+#[path = "deploy/dynamodb.rs"]
+mod dynamodb;
 
 #[path = "deploy/empty.rs"]
 mod empty;

@@ -29,6 +29,9 @@ pub(super) struct Live {
     pub(super) home: Option<String>,
     /// For a Deployment, its pods' stop grace, in seconds.
     pub(super) grace: Option<u64>,
+    /// For a pool's Deployment, whether its pool publishes to the DynamoDB
+    /// directory (`GDL_POOL__DIRECTORY=dynamodb`).
+    pub(super) dynamodb: bool,
 }
 
 impl Live {
@@ -63,19 +66,24 @@ impl Live {
             text(&metadata["annotations"][key]).or_else(|| text(&metadata["labels"][key]))
         };
         let pod = &object["spec"]["template"]["spec"];
-        let home = pod["containers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|container| container["env"].as_array().into_iter().flatten())
-            .find(|var| var["name"] == "GDL_POOL__HOME")
-            .and_then(|var| text(&var["value"]));
+        let variable = |name: &str| {
+            pod["containers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|container| container["env"].as_array().into_iter().flatten())
+                .find(|var| var["name"] == name)
+                .and_then(|var| text(&var["value"]))
+        };
+        let home = variable("GDL_POOL__HOME");
+        let dynamodb = variable("GDL_POOL__DIRECTORY").as_deref() == Some("dynamodb");
         Ok(Self {
             pool: whole("gdl.dev/pool"),
             class: whole("gdl.dev/class"),
             segment: whole("gdl.dev/segment"),
             home: (kind == "Deployment").then_some(home).flatten(),
             grace: pod["terminationGracePeriodSeconds"].as_u64(),
+            dynamodb: kind == "Deployment" && dynamodb,
             kind,
             name,
             uid,
@@ -92,9 +100,10 @@ impl Live {
         self.kind == "Deployment" && self.segment.as_deref() == Some("hub")
     }
 
-    /// Whether it is a Deployment of a pool's segment.
+    /// Whether it is a Deployment of a pool's segment: not the DynamoDB
+    /// Local's, which is no pool's, and goes after every hub that uses it.
     pub(super) fn is_segment(&self) -> bool {
-        self.kind == "Deployment" && !self.is_hub()
+        self.kind == "Deployment" && self.pool.is_some() && !self.is_hub()
     }
 }
 
@@ -106,36 +115,44 @@ impl Live {
 pub(super) struct Stopping {
     pub(super) pool: String,
     pub(super) class: String,
-    /// Its parent pool, whose hub's Service is named for it.
-    pub(super) home: String,
+    /// Its parent pool, whose hub's Service is named for it: none for a
+    /// shared pool under the DynamoDB directory.
+    pub(super) home: Option<String>,
     /// The longest stop grace of its Deployments, in seconds.
     pub(super) grace: u64,
     /// Whether its hub's Deployment is there to drain it. A pool whose hub
     /// is gone cannot drain: only its parent can show that it withdrew.
     pub(super) hub: bool,
+    /// Whether it publishes to the DynamoDB directory, where its parent's
+    /// hub holds no record of it to show that it withdrew.
+    pub(super) dynamodb: bool,
 }
 
 impl Stopping {
-    /// The pools of `objects` that have a Deployment there and a parent, in
-    /// name order: every Deployment of a pool names its parent, so a pool
-    /// whose hub's Deployment is gone is still found by its segments'.
+    /// The pools of `objects` that have a Deployment there and a parent, or
+    /// publish to the DynamoDB directory, in name order: every Deployment
+    /// of a pool names its parent, so a pool whose hub's Deployment is
+    /// gone is still found by its segments'.
     pub(super) fn of(objects: &[&Live]) -> Vec<Self> {
         let mut pools: std::collections::BTreeMap<String, Self> = Default::default();
         for deployment in objects.iter().filter(|object| object.kind == "Deployment") {
-            let (Some(pool), Some(class), Some(home)) =
-                (&deployment.pool, &deployment.class, &deployment.home)
-            else {
+            let (Some(pool), Some(class)) = (&deployment.pool, &deployment.class) else {
                 continue;
             };
+            if deployment.home.is_none() && !deployment.dynamodb {
+                continue;
+            }
             let stopping = pools.entry(pool.clone()).or_insert_with(|| Self {
                 pool: pool.clone(),
                 class: class.clone(),
-                home: home.clone(),
+                home: deployment.home.clone(),
                 grace: 0,
                 hub: false,
+                dynamodb: false,
             });
             stopping.grace = stopping.grace.max(deployment.grace.unwrap_or_default());
             stopping.hub |= deployment.is_hub();
+            stopping.dynamodb |= deployment.dynamodb;
         }
         pools.into_values().collect()
     }

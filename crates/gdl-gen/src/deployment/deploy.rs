@@ -89,17 +89,24 @@ impl Default for Waits {
 ///    that each cluster's context may create Deployments in its namespace;
 /// 2. build the images and push them ([`images`]);
 /// 3. render the objects, each image named by its pushed digest
-///    ([`k8s::k8s_files`]), and write them to `out` if given; then refuse
-///    a pool that the fleet places in another cluster than one that holds
-///    any of its Deployments, before anything is applied;
+///    ([`k8s::k8s_files`]); then refuse a pool that the fleet places in
+///    another cluster than one that holds any of its Deployments, before
+///    anything is applied;
 /// 4. apply each cluster's base objects, and wait until its namespace is
-///    active;
-/// 5. the tables job: no fleet renders one yet, so this step does nothing;
+///    active: the DynamoDB directory's cluster first, whose base holds the
+///    directory's DynamoDB Local, which is waited for until it is ready.
+///    Its pod's IP then replaces the placeholder in the other clusters'
+///    objects, before their base is applied. The objects, so complete, are
+///    written to `out` if given;
+/// 5. the tables Job, where the fleet renders one: delete the last run,
+///    apply it, and wait until it succeeds; a failure stops the deploy
+///    with the Job's log, which names the table;
 /// 6. apply each cluster's pools, server-side;
 /// 7. prune each cluster: drain each pool that the fleet no longer places
 ///    there, then delete every object labelled with the fleet and the
 ///    cluster that this render did not write, and none that it applied in
-///    any cluster;
+///    any cluster. A pool under the DynamoDB directory is refused, naming
+///    it: only the relay's parent hub shows that a drained pool withdrew;
 /// 8. wait until each pool's health answers 200, through the API server's
 ///    service proxy; on a timeout, the error names each pod of an
 ///    unhealthy pool that is not ready, why it waits, and its events.
@@ -124,18 +131,23 @@ pub fn deploy(
     let built = images(&spec, &fleet, &how.target, true, docker)?;
     say(&format!("images: {} in their registries", built.len()));
 
-    let files = k8s::k8s_files(&spec, &fleet, &how.target, None, Some(&Digests::of(&built)))?;
-    if let Some(out) = &how.out {
-        k8s::write_new(out, &files)?;
-        say(&format!("k8s: the objects are in {}", out.display()));
-    }
+    let mut files = k8s::k8s_files(&spec, &fleet, &how.target, None, Some(&Digests::of(&built)))?;
     let rendered = Rendered::of(&files, &clusters)?;
     unmoved(kube, &fleet, &clusters, &how.waits)?;
     // Every object this run applied, in any cluster, by its uid: none is
     // pruned, even where two clusters' contexts reach one namespace.
     let mut applied = BTreeSet::new();
 
-    for cluster in &clusters.0 {
+    // The directory's cluster first: the other clusters' hubs name its
+    // Local's pod IP, which exists only once the Local runs.
+    let home = fleet
+        .directory()
+        .filter(|directory| directory.local)
+        .and_then(|directory| directory.cluster.clone());
+    let mut order: Vec<&Cluster> = clusters.0.iter().collect();
+    order.sort_by_key(|cluster| Some(&cluster.name) != home.as_ref());
+    let mut local = None;
+    for cluster in order {
         let base = &rendered.0[&cluster.name];
         applied.extend(apply(kube, cluster, &base.base, how.waits.objects)?);
         run(
@@ -145,13 +157,36 @@ pub fn deploy(
             None,
             "waiting for the namespace",
         )?;
-        // DynamoDB Local joins the base here once a fleet renders it, and
-        // is waited for until it answers.
+        if Some(&cluster.name) == home.as_ref() {
+            local = Some(local_ip(kube, cluster, &how.waits)?);
+        }
     }
     say("base: each cluster's namespace and service account");
+    let mut rendered = rendered;
+    if let Some(ip) = &local {
+        rendered.fill(ip);
+        for text in files.values_mut() {
+            *text = text.replace(k8s::PLACEHOLDER, ip);
+        }
+        say(&format!("base: the DynamoDB Local runs at {ip}"));
+    }
+    if let Some(out) = &how.out {
+        k8s::write_new(out, &files)?;
+        say(&format!("k8s: the objects are in {}", out.display()));
+    }
 
-    // The tables job runs here once a fleet renders one: no fleet does
-    // yet, so there is nothing to run.
+    for cluster in &clusters.0 {
+        let tables = &rendered.0[&cluster.name].tables;
+        if tables.trim().is_empty() {
+            continue;
+        }
+        applied.extend(run_tables(kube, cluster, tables, &how.waits)?);
+        say(&format!(
+            "tables: the DynamoDB directory's tables are ready, by Job `{}` in cluster `{}`",
+            k8s::TABLES,
+            cluster.name
+        ));
+    }
 
     for cluster in &clusters.0 {
         let pools = &rendered.0[&cluster.name].pools;
@@ -182,7 +217,15 @@ pub fn deploy(
         if pruned.is_empty() {
             continue;
         }
-        stop(kube, cluster, &pruned, &retained, &how.waits, say)?;
+        stop(
+            kube,
+            cluster,
+            &pruned,
+            &retained,
+            Stop::Prune,
+            &how.waits,
+            say,
+        )?;
         say(&format!(
             "prune: deleted {} object(s) in cluster `{}`",
             pruned.len(),
@@ -223,7 +266,15 @@ pub fn down(
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
         let all: Vec<&Live> = live.iter().collect();
-        stop(kube, cluster, &all, &BTreeSet::new(), waits, say)?;
+        stop(
+            kube,
+            cluster,
+            &all,
+            &BTreeSet::new(),
+            Stop::Down,
+            waits,
+            say,
+        )?;
         run(
             kube,
             cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
@@ -368,6 +419,8 @@ struct Rendered(BTreeMap<String, Objects>);
 #[derive(Default)]
 struct Objects {
     base: String,
+    /// The tables Job, in the DynamoDB directory's cluster alone.
+    tables: String,
     pools: String,
     names: BTreeSet<(String, String)>,
 }
@@ -391,6 +444,8 @@ impl Rendered {
             }
             if path.ends_with("base.yaml") {
                 objects.base.push_str(text);
+            } else if path.ends_with("tables.yaml") {
+                objects.tables.push_str(text);
             } else {
                 objects.pools.push_str(text);
             }
@@ -407,6 +462,129 @@ impl Rendered {
         }
         Ok(Self(rendered))
     }
+
+    /// Write `ip`, the DynamoDB Local's pod IP, where the render left its
+    /// placeholder: in the other clusters' hubs and segments. It is in
+    /// their pod templates, so a new IP replaces their pods.
+    fn fill(&mut self, ip: &str) {
+        for objects in self.0.values_mut() {
+            objects.pools = objects.pools.replace(k8s::PLACEHOLDER, ip);
+        }
+    }
+}
+
+/// Wait until the DynamoDB Local of `cluster` is ready, within the objects
+/// bound: its pod's IP.
+fn local_ip(kube: &mut dyn Kube, cluster: &Cluster, waits: &Waits) -> Result<String, Error> {
+    let selector = format!("{},gdl.dev/directory={}", cluster.selector, k8s::LOCAL);
+    let deadline = Instant::now() + waits.objects;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let reply = run(
+            kube,
+            cluster.at().pods(&selector),
+            left.max(Duration::from_secs(1)),
+            None,
+            "listing the DynamoDB Local's pods",
+        )?;
+        let pods: Value = serde_json::from_str(&reply.stdout)
+            .map_err(|e| Error::new(format!("`kubectl get pods` printed no JSON list: {e}")))?;
+        let ready = pods["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|pod| {
+                let ready = pod["status"]["conditions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|c| c["type"] == "Ready" && c["status"] == "True");
+                let gone = !pod["metadata"]["deletionTimestamp"].is_null();
+                pod["status"]["podIP"]
+                    .as_str()
+                    .filter(|ip| ready && !gone && !ip.is_empty())
+                    .map(str::to_string)
+            });
+        if let Some(ip) = ready {
+            return Ok(ip);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::new(format!(
+                "cluster `{}`: the DynamoDB Local `{}` was not ready within {} s",
+                cluster.name,
+                k8s::LOCAL,
+                waits.objects.as_secs()
+            )));
+        }
+        std::thread::sleep(waits.interval);
+    }
+}
+
+/// Run the tables Job `tables` in `cluster`: delete the last run, since a
+/// Job's pod template cannot change and a Job that once succeeded would
+/// not make the tables of a new Local, apply it, and wait until it
+/// succeeds, within the objects bound. The uids applied. A Job that fails
+/// is refused with its pod's log, which names the table.
+fn run_tables(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    tables: &str,
+    waits: &Waits,
+) -> Result<Vec<String>, Error> {
+    let at = cluster.at();
+    let job = k8s::TABLES;
+    let seconds = waits.objects.as_secs();
+    run(
+        kube,
+        at.delete(&[format!("job/{job}")], seconds),
+        waits.objects,
+        None,
+        &format!("deleting the last tables Job in cluster `{}`", cluster.name),
+    )?;
+    let applied = apply(kube, cluster, tables, waits.objects)?;
+    let deadline = Instant::now() + waits.objects;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let reply = run(
+            kube,
+            at.job(job),
+            left.max(Duration::from_secs(1)),
+            None,
+            "reading the tables Job",
+        )?;
+        let object: Value = serde_json::from_str(&reply.stdout)
+            .map_err(|e| Error::new(format!("`kubectl get job` printed no JSON: {e}")))?;
+        let count = |key: &str| object["status"][key].as_u64().unwrap_or(0);
+        if count("succeeded") > 0 {
+            return Ok(applied);
+        }
+        if count("failed") > 0 {
+            let log = kube.run(&bounded(at.job_log(job), waits.objects), None)?;
+            let log = if log.success { log.stdout } else { log.stderr };
+            return Err(Error::new(format!(
+                "cluster `{}`: the tables Job `{job}` failed, so no pool is applied: {}",
+                cluster.name,
+                log.trim()
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::new(format!(
+                "cluster `{}`: the tables Job `{job}` did not complete within {seconds} s",
+                cluster.name
+            )));
+        }
+        std::thread::sleep(waits.interval);
+    }
+}
+
+/// Why `stop` stops a cluster's objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// `deploy` removes what the fleet no longer places there, while the
+    /// rest of the fleet serves.
+    Prune,
+    /// `down` takes the whole fleet off.
+    Down,
 }
 
 /// Refuse a pool that `fleet` places in another cluster than one that
@@ -501,6 +679,7 @@ fn stop(
     cluster: &Cluster,
     objects: &[&Live],
     retained: &BTreeSet<String>,
+    why: Stop,
     waits: &Waits,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
@@ -508,10 +687,38 @@ fn stop(
     // A pool that this run still renders keeps serving: only objects it no
     // longer has are deleted, such as a renamed segment's, and it is
     // neither drained nor asked about at its parent.
-    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) = Stopping::of(objects)
+    let (dynamodb, relay): (Vec<Stopping>, Vec<Stopping>) = Stopping::of(objects)
         .into_iter()
         .filter(|pool| !retained.contains(&pool.pool))
-        .partition(|pool| pool.hub);
+        .partition(|pool| pool.dynamodb);
+    // Under the DynamoDB directory no parent's hub holds a pool's record,
+    // so its 404 shows nothing, and no route of the pool's own hub shows
+    // yet that its drained record is withdrawn. A prune would delete a
+    // pool that still serves: refused, before anything changes. `down`
+    // takes every pool off: each is drained, and its pods' grace lets
+    // what they hold finish.
+    if why == Stop::Prune && !dynamodb.is_empty() {
+        let pools: Vec<String> = dynamodb.iter().map(|p| format!("`{}`", p.pool)).collect();
+        return Err(Error::new(format!(
+            "cluster `{}`: pool(s) {} publish to the DynamoDB directory, and the fleet no longer places them there; deploy cannot yet show that a drained pool withdrew its record from DynamoDB, so it removes none. Drain each (`POST /v1/ext/gdl-pool/drain` on its hub's control port), wait until its parents no longer follow it, delete its objects (`kubectl --context {} --namespace {} delete deployments,services,configmaps -l gdl.dev/pool=<pool>`), then deploy again",
+            cluster.name,
+            pools.join(", "),
+            cluster.context,
+            cluster.namespace
+        )));
+    }
+    for pool in dynamodb.iter().filter(|pool| pool.hub) {
+        run(
+            kube,
+            at.post(&pool.pool, CONTROL, DRAIN),
+            waits.objects,
+            Some(b""),
+            &format!("draining pool `{}`", pool.pool),
+        )?;
+        say(&format!("drain: pool `{}` is draining", pool.pool));
+    }
+    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) =
+        relay.into_iter().partition(|pool| pool.hub);
     // Checked before any drain starts, so that a pool that cannot be shown
     // to have withdrawn stops the step before anything changes.
     for pool in &hubless {
@@ -541,9 +748,11 @@ fn stop(
         .filter(|object| object.is_hub())
         .map(|object| object.reference())
         .collect();
+    // The rest after every hub: a pool's other objects, and the DynamoDB
+    // directory's Local and Job, which the hubs use until they stop.
     let rest: Vec<String> = objects
         .iter()
-        .filter(|object| object.kind != "Deployment")
+        .filter(|object| !object.is_segment() && !object.is_hub())
         .map(|object| object.reference())
         .collect();
     // Each Deployment's pods may take their grace to stop.
@@ -573,14 +782,15 @@ fn stop(
 /// naming the pool either way. The relay directory is the one that serves
 /// this record: another directory needs another proof.
 fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) -> Result<(), Error> {
+    let home = pool.home.as_deref().expect("a relay pool names its parent");
     let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
-    let args = at.get(&pool.home, PUBLIC, &route);
+    let args = at.get(home, PUBLIC, &route);
     let bound = Duration::from_secs(pool.grace) + waits.drain;
     let deadline = Instant::now() + bound;
     let unproven = |why: &str| {
         Error::new(format!(
-            "pool `{}` is not known to have withdrawn from its parent `{}`, so it is not deleted: {why}",
-            pool.pool, pool.home
+            "pool `{}` is not known to have withdrawn from its parent `{home}`, so it is not deleted: {why}",
+            pool.pool
         ))
     };
     loop {
@@ -589,7 +799,7 @@ fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) ->
         if reply.proxied_not_found() {
             return Ok(());
         }
-        if reply.no_service(&pool.home) {
+        if reply.no_service(home) {
             return Err(unproven(&format!(
                 "the parent's Service does not exist: {}",
                 reply.stderr.trim()
@@ -617,18 +827,16 @@ fn withdrawn_without_hub(
     pool: &Stopping,
     waits: &Waits,
 ) -> Result<(), Error> {
+    let home = pool.home.as_deref().expect("a relay pool names its parent");
     let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
-    let reply = kube.run(
-        &bounded(at.get(&pool.home, PUBLIC, &route), waits.objects),
-        None,
-    )?;
+    let reply = kube.run(&bounded(at.get(home, PUBLIC, &route), waits.objects), None)?;
     if reply.proxied_not_found() {
         return Ok(());
     }
     let why = if reply.success {
         let withdraw = format!(
             "/api/v1/namespaces/{}/services/http:{}:{CONTROL}/proxy/v1/ext/gdl-pool/children/{}/{}/withdraw",
-            at.namespace, pool.home, pool.class, pool.pool
+            at.namespace, home, pool.class, pool.pool
         );
         format!(
             "its hub's Deployment is gone, so it cannot drain, and its parent still holds its record. Withdraw it on the parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), for example with `kubectl --context {} create --raw {withdraw} -f /dev/null`, then deploy again",
@@ -641,8 +849,8 @@ fn withdrawn_without_hub(
         )
     };
     Err(Error::new(format!(
-        "pool `{}` is not known to have withdrawn from its parent `{}`, so nothing is deleted: {why}",
-        pool.pool, pool.home
+        "pool `{}` is not known to have withdrawn from its parent `{home}`, so nothing is deleted: {why}",
+        pool.pool
     )))
 }
 

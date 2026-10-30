@@ -197,7 +197,7 @@ const MANAGER: &str = "--field-manager=gdl";
 /// The kinds of namespaced object the render writes, as `kubectl get`
 /// takes them: what `deploy` prunes and `down` deletes.
 pub(super) const KINDS: &str =
-    "deployments.apps,services,configmaps,persistentvolumeclaims,serviceaccounts";
+    "deployments.apps,services,configmaps,persistentvolumeclaims,serviceaccounts,jobs.batch";
 
 /// The service port on which a hub serves its public routes, and its
 /// control routes, as the render names them.
@@ -268,6 +268,17 @@ impl At<'_> {
     /// The namespace's pods that `selector` selects, as a JSON list.
     pub(super) fn pods(&self, selector: &str) -> Vec<String> {
         self.namespaced(&["get", "pods", "--selector", selector, "--output", "json"])
+    }
+
+    /// Job `name` of the namespace, as JSON.
+    pub(super) fn job(&self, name: &str) -> Vec<String> {
+        self.namespaced(&["get", "job", name, "--output", "json"])
+    }
+
+    /// The log of Job `name`'s pod.
+    pub(super) fn job_log(&self, name: &str) -> Vec<String> {
+        let job = format!("job/{name}");
+        self.namespaced(&["logs", &job])
     }
 
     /// The events of the namespace's object `name`, as a JSON list.
