@@ -266,7 +266,7 @@ fn series(scrape: &str, name: &str) -> Option<(std::collections::BTreeMap<String
 }
 
 /// `/metrics` answers from the start, empty until the process's registry
-/// exists; then every series carries the instance's identity, under the
+/// is served; then every series carries the instance's identity, under the
 /// prefix, and `uptime_seconds` counts from the process's start.
 #[tokio::test]
 async fn metrics_carry_the_identity_of_the_instance() {
@@ -293,6 +293,9 @@ async fn metrics_carry_the_identity_of_the_instance() {
         .register(Box::new(counter.clone()))
         .expect("registered");
     counter.inc();
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!((code, scrape.as_str()), (200, ""), "made, not served");
+    process.serve_metrics(registry.clone()).expect("served");
     let (code, scrape) = get(address, "/metrics").await;
     assert_eq!(code, 200);
     let hash = gdl_runtime::layout(&deployment.graph, &deployment.placement)
@@ -323,6 +326,53 @@ async fn metrics_carry_the_identity_of_the_instance() {
         .registry(&deployment, "only")
         .expect_err("one registry per process");
     assert!(error.to_string().contains("once"), "{error}");
+    let error = process
+        .serve_metrics(registry)
+        .expect_err("one registry served per process");
+    assert!(error.to_string().contains("once"), "{error}");
+}
+
+/// A gauge read at scrape time, which counts its closure's runs.
+#[derive(gdl::Metrics)]
+struct GateMetrics {
+    /// 1 for each model.
+    #[gdl(labels = ["model"])]
+    model_status: gdl::ScrapeGaugeVec,
+}
+
+/// A scrape runs a node's closure inside the registry's gather, which
+/// holds the registry's lock, and a registration waits for that lock. So
+/// no scrape reaches the registry while anything can still register: a
+/// scrape before the registry is served is answered empty, and runs no
+/// closure.
+#[tokio::test]
+async fn a_scrape_runs_no_closure_until_the_registry_is_served() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = roster();
+    let config = config(dir.path(), "host = \"127.0.0.1\"\nport = 0\n");
+    let process = Process::start(&config).await.expect("process");
+    let address = process.system_address().expect("a listener");
+    let registry = process.registry(&deployment(), "only").expect("a registry");
+    let gate = <GateMetrics as gdl::Metrics>::register(&registry, "Gate").expect("registered");
+    let runs = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&runs);
+    gate.model_status.fill_with(move |gauges| {
+        count.fetch_add(1, Ordering::SeqCst);
+        gauges.set(&["llama"], 1.0).expect("one label");
+    });
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!(code, 200);
+    assert_eq!(scrape, "", "served before the registrations end");
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "a scrape ran the closure");
+
+    process.serve_metrics(registry).expect("served");
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!(code, 200);
+    let (labels, value) = series(&scrape, "dynamo_component_model_status").expect(&scrape);
+    assert_eq!((labels["model"].as_str(), value), ("llama", 1.0));
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
 /// `metrics_prefix` names the prefix; empty, there is none.
@@ -338,7 +388,8 @@ async fn the_metrics_prefix_is_a_setting() {
             &format!("host = \"127.0.0.1\"\nport = 0\nmetrics_prefix = {prefix}\n"),
         );
         let process = Process::start(&config).await.expect("process");
-        process.registry(&deployment(), "only").expect("a registry");
+        let registry = process.registry(&deployment(), "only").expect("a registry");
+        process.serve_metrics(registry).expect("served");
         let (_, scrape) = get(process.system_address().expect("a listener"), "/metrics").await;
         assert!(
             series(&scrape, name).is_some(),

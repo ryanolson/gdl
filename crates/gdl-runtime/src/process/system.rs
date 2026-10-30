@@ -158,9 +158,9 @@ impl Phase {
 pub(crate) struct Health {
     phase: AtomicU8,
     started: Instant,
-    /// The process's registry, made once the deployment is known; until
-    /// then `/metrics` answers with no metrics, not an error, which a
-    /// scrape would take for a target that is down.
+    /// The process's registry, served once nothing more registers in it;
+    /// until then `/metrics` answers with no metrics, not an error, which
+    /// a scrape would take for a target that is down.
     registry: OnceLock<prometheus::Registry>,
     /// How long a scrape may take before it is answered with 503.
     scrape_limit: Duration,
@@ -194,11 +194,14 @@ impl Health {
     /// text format, or why there are none.
     ///
     /// A node's `ScrapeGaugeVec` runs its closure inside the gather, so
-    /// the gather runs on a blocking thread, where it holds up no probe.
-    /// At most `SCRAPES` run at once, so closures that never return hold
-    /// few threads. A scrape past `scrape_limit` is answered with 503. A
-    /// scrape that finds `SCRAPES` running is answered with 503 at once:
-    /// waiting, it would hold a connection the probes need.
+    /// the gather runs on a blocking thread, not on the runtime worker
+    /// that answers this connection. A scrape past `scrape_limit` is
+    /// answered with 503, but its gather runs on until the closure
+    /// returns, holding its thread, one of the `SCRAPES` places, and the
+    /// registry's lock. Once `SCRAPES` gathers never return, every scrape
+    /// is answered with 503. A scrape that finds `SCRAPES` running is
+    /// answered with 503 at once: waiting, it would hold a connection the
+    /// probes need.
     async fn scrape(&self) -> (u16, String) {
         let Some(registry) = self.registry.get().cloned() else {
             return (200, String::new());

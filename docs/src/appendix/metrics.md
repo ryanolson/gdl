@@ -37,7 +37,7 @@ Every family in [The runtime's families](#the-runtimes-families) also has `dynam
 | `end_to_end_duration_seconds` | histogram | | source | Time from a request into the graph to the end of its response. |
 | `uptime_seconds` | gauge | no `dynamo_endpoint` | one per process | Seconds since the segment process started. |
 
-A series appears at zero when its entry is registered, before the segment serves. The runtime records the families only when `RuntimeConfig::metrics` holds a registry. A segment binary sets it only when its system listener is on.
+A series appears at zero once the registry is served, as the segment starts to serve. Before that, `/metrics` has no metrics ([`/metrics`](../operations/observability.md#metrics)). The runtime records the families only when `RuntimeConfig::metrics` holds a registry. A segment binary sets it only when its system listener is on.
 
 ## Entries
 

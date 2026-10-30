@@ -153,7 +153,10 @@ pub async fn run_graph_in<H: Register + Send + Sync + 'static>(
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> gdl::Result<Running<H>> {
     let process = Process::start(config).await?;
-    launched(process, config, segment, segments, spec, runtime, assemble).await
+    launched(
+        process, config, segment, segments, spec, runtime, None, assemble,
+    )
+    .await
 }
 
 /// [`run_graph`] for an instance whose settings turn its system listener
@@ -172,14 +175,26 @@ pub async fn run_recorded<H: Register + Send + Sync + 'static>(
     let registry = process.registry(spec, segment)?;
     config.runtime.metrics = Some(registry.clone());
     let runtime = RuntimeConfig {
-        metrics: Some(registry),
+        metrics: Some(registry.clone()),
         ..runtime
     };
-    launched(process, &config, segment, SEGMENTS, spec, runtime, assemble).await
+    launched(
+        process,
+        &config,
+        segment,
+        SEGMENTS,
+        spec,
+        runtime,
+        Some(registry),
+        assemble,
+    )
+    .await
 }
 
 /// Launch the started `process` as an instance of `segment`, and serve the
-/// graph `assemble` builds on it with `runtime`.
+/// graph `assemble` builds on it with `runtime`, and `metrics` on its
+/// listener once the segment is made, as a segment binary does.
+#[allow(clippy::too_many_arguments, reason = "a test's launch, spelled out")]
 async fn launched<H: Register + Send + Sync + 'static>(
     process: Process,
     config: &ProcessConfig<Nothing>,
@@ -187,6 +202,7 @@ async fn launched<H: Register + Send + Sync + 'static>(
     segments: &'static [&'static str],
     spec: &DeploymentSpec,
     runtime: RuntimeConfig,
+    metrics: Option<prometheus::Registry>,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> gdl::Result<Running<H>> {
     let launch = config
@@ -204,6 +220,9 @@ async fn launched<H: Register + Send + Sync + 'static>(
     )?;
     let root = assemble(&deployment)?;
     let started = deployment.start(root)?;
+    if let Some(registry) = metrics {
+        process.serve_metrics(registry)?;
+    }
     let (tx, rx) = oneshot::channel();
     let body = Arc::new(tokio::sync::watch::Sender::new(false));
     let held = body.subscribe();

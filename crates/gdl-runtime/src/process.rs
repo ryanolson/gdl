@@ -1303,6 +1303,8 @@ pub struct Process {
     node: Arc<std::sync::Mutex<Option<Velo>>>,
     instance: velo::InstanceId,
     metrics_prefix: Option<String>,
+    /// Whether [`registry`](Self::registry) made the registry.
+    registry_made: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Process {
@@ -1345,6 +1347,7 @@ impl Process {
             instance: node.instance_id(),
             node: Arc::new(std::sync::Mutex::new(Some(node))),
             metrics_prefix: config.system.metrics_prefix(),
+            registry_made: Arc::default(),
         })
     }
 
@@ -1365,11 +1368,12 @@ impl Process {
     }
 
     /// Make the process's one metrics registry, for segment `segment` of
-    /// `deployment`, and serve it on `/metrics`. Every series it serves
-    /// carries the prefix and dynamo's identity labels: `dynamo_namespace`
-    /// (the graph's name and the first eight hex digits of the placement
-    /// hash), `dynamo_component` (the segment), and `worker_id` (the
-    /// instance id). It holds `uptime_seconds` from the start.
+    /// `deployment`. Every series it holds carries the prefix and dynamo's
+    /// identity labels: `dynamo_namespace` (the graph's name and the first
+    /// eight hex digits of the placement hash), `dynamo_component` (the
+    /// segment), and `worker_id` (the instance id). It holds
+    /// `uptime_seconds` from the start. `/metrics` serves it only once it
+    /// is given to [`serve_metrics`](Self::serve_metrics).
     pub fn registry(
         &self,
         deployment: &gdl_model::DeploymentSpec,
@@ -1403,14 +1407,39 @@ impl Process {
             Box::new(move || health.uptime()),
         )
         .map_err(metrics_error)?;
-        registry.register(Box::new(uptime)).map_err(metrics_error)?;
-        if !self.health.serve_metrics(registry.clone()) {
+        if self
+            .registry_made
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             return Err(Error::new(
                 ErrorKind::Placement,
                 "the process's metrics registry is made once",
             ));
         }
+        registry.register(Box::new(uptime)).map_err(metrics_error)?;
         Ok(registry)
+    }
+
+    /// Serve `registry` on `/metrics`, once nothing more registers in it:
+    /// after the launch and after the segment is made, whose figures
+    /// register last. Until then `/metrics` answers 200 with no metrics.
+    ///
+    /// A scrape gathers the registry under its lock, and a node's
+    /// `ScrapeGaugeVec` closure runs inside the gather, while a
+    /// registration waits for that lock. Served any sooner, a slow closure
+    /// would hold up the nodes' builds and the launch.
+    ///
+    /// # Errors
+    ///
+    /// When a registry is served already.
+    pub fn serve_metrics(&self, registry: prometheus::Registry) -> Result<()> {
+        if !self.health.serve_metrics(registry) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "the process's metrics registry is served once",
+            ));
+        }
+        Ok(())
     }
 
     /// Stop the process as a signal does: the first stop drains, the

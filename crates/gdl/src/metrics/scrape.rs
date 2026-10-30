@@ -20,12 +20,15 @@ use super::{Construct, labels, opts};
 /// there, with [`fill_with`](Self::fill_with). Each scrape runs the closure
 /// once, on an empty vector. A request never runs it.
 ///
-/// Keep the closure fast. The system listener runs it on a blocking
-/// thread, up to 4 scrapes at once, and answers with 503 a scrape that
-/// takes longer than 5 s or finds 4 running. Scrapes at once run the
-/// closure at once, each on its own vector, so their values do not mix,
-/// and the closure must be safe to run concurrently. It must not await,
-/// and may take a `blocking_read` of a tokio lock.
+/// The closure must return promptly: it runs inside the registry's
+/// gather, and holds the registry's lock while it runs. The system
+/// listener runs it on a blocking thread, up to 4 scrapes at once, and
+/// answers with 503 a scrape that takes longer than 5 s or finds 4
+/// running. A scrape answered so still runs until the closure returns.
+/// Scrapes at once run the closure at once, each on its own vector, so
+/// their values do not mix, and the closure must be safe to run
+/// concurrently. It must not await, and may take a `blocking_read` of a
+/// tokio lock.
 ///
 /// ```
 /// use std::sync::Arc;

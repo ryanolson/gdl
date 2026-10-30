@@ -44,7 +44,7 @@ Both bodies are dynamo's JSON with gdl's phase added:
 
 ## `/metrics`
 
-`GET /metrics` answers in Prometheus text format (`text/plain; version=0.0.4`). The process has one registry. It is made once the deployment is known and before the nodes are built. Until then the answer is 200 with an empty body: a 503 would mark the scrape target as down.
+`GET /metrics` answers in Prometheus text format (`text/plain; version=0.0.4`). The process has one registry. It is made once the deployment is known and before the nodes are built, and served once nothing more registers in it: after the launch, when the segment is made and before it serves. Until then the answer is 200 with an empty body: a 503 would mark the scrape target as down. So a scrape during startup shows no metrics, not even `uptime_seconds`. A program that embeds a segment serves its registry with `Process::serve_metrics`.
 
 The registry holds:
 
@@ -53,7 +53,7 @@ The registry holds:
 - the runtime's figures for each segment a request passes through;
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
-The listener gathers the registry on a blocking thread, so a node's `ScrapeGaugeVec` closure holds up no probe. Up to 4 scrapes run at once, enough for an HA pair of Prometheus servers and a person. Each runs the closures on vectors of its own, so their values do not mix. A scrape that takes longer than 5 s is answered with 503 and the reason. A scrape that finds 4 running is answered with 503 at once ("a scrape is in progress"). Waiting, it would hold one of the listener's 64 connections, and enough waiting scrapes would keep the probes from being answered. A closure that panics is answered with 500.
+The listener gathers the registry on a blocking thread, so a node's `ScrapeGaugeVec` closure does not run on a runtime worker. A scrape answered with 503 for its time still runs until its closures return. Up to 4 scrapes run at once, enough for an HA pair of Prometheus servers and a person. Each runs the closures on vectors of its own, so their values do not mix. A scrape that takes longer than 5 s is answered with 503 and the reason. A scrape that finds 4 running is answered with 503 at once ("a scrape is in progress"). Waiting, it would hold one of the listener's 64 connections, and enough waiting scrapes would keep the probes from being answered. A closure that panics is answered with 500.
 
 The identity labels are applied when the registry gathers, in a hash map's order. Parse the text in tests. Do not compare it as a string.
 

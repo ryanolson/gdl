@@ -171,7 +171,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
     // the launch, where a chooser's follower registers the pools' figures.
-    config.runtime.metrics = process.system_address().map(|_| registry);
+    config.runtime.metrics = process.system_address().map(|_| registry.clone());
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
         Ok(())
@@ -182,6 +182,9 @@ pub async fn run_segment<B: SegmentBinary>(
     let mut runtime = config.runtime;
     runtime.selectors = builder.into_selectors();
     let serving = B::start(hosts, launch.node(), launch.roster(), runtime)?;
+    // Last: making the segment registers its figures, and a scrape runs
+    // the nodes' closures under the lock a registration waits for.
+    process.serve_metrics(registry)?;
     (serving.serve)(launch).await?;
     Ok(())
 }
@@ -458,90 +461,4 @@ impl Serving {
             serve: Box::new(move |launch: Launch| Box::pin(launch.serve(segment, body))),
         }
     }
-}
-
-/// A timed-out gather must not make a later node build block the executor.
-/// The callback's three-second bound lets that failure end without a hang.
-#[cfg(test)]
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "F4: building a node blocks the worker on a timed-out gather's registry lock"]
-async fn a_timed_out_scrape_does_not_block_the_next_node_build() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    const WAIT: Duration = Duration::from_secs(5);
-    const HOLD: Duration = Duration::from_secs(3);
-
-    #[derive(gdl::Metrics)]
-    struct QueueMetrics {
-        /// Sequences waiting in each queue.
-        #[gdl(labels = ["queue"])]
-        queued_sequences: gdl::ScrapeGaugeVec,
-    }
-
-    struct Node {
-        metrics: QueueMetrics,
-    }
-
-    impl Build for Node {
-        type Config = toml::Table;
-        type Metrics = QueueMetrics;
-
-        async fn build(_config: toml::Table, metrics: QueueMetrics) -> Result<Self> {
-            Ok(Self { metrics })
-        }
-    }
-
-    let registry = prometheus::Registry::new();
-    let builder =
-        Builder::new("", registry.clone(), BTreeMap::new(), HubRecords::new()).expect("a builder");
-    let first = builder.build::<Node>("First", None).await.expect("built");
-    let (release, released) = std::sync::mpsc::channel();
-    let released = Mutex::new(released);
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let expired = Arc::new(AtomicBool::new(false));
-    let (tell, waited) = (Arc::clone(&entered), Arc::clone(&expired));
-    first.metrics.queued_sequences.fill_with(move |gauges| {
-        tell.notify_one();
-        if released
-            .lock()
-            .expect("release")
-            .recv_timeout(HOLD)
-            .is_err()
-        {
-            waited.store(true, Ordering::SeqCst);
-        }
-        gauges.set(&["prefill"], 1.0).expect("one label");
-    });
-    let gather = tokio::task::spawn_blocking(move || registry.gather());
-    tokio::time::timeout(WAIT, entered.notified())
-        .await
-        .expect("the scrape entered the closure");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), gather)
-            .await
-            .is_err(),
-        "the gather outlives its response, as in Health::scrape"
-    );
-    assert!(!expired.load(Ordering::SeqCst), "the closure still waits");
-
-    let (starting, started) = tokio::sync::oneshot::channel();
-    let building = tokio::spawn(async move {
-        starting.send(()).expect("the test waits for the build");
-        builder.build::<Node>("Second", None).await.expect("built")
-    });
-    tokio::time::timeout(WAIT, started)
-        .await
-        .expect("the next build started")
-        .expect("the build signalled");
-    let blocked = expired.load(Ordering::SeqCst);
-    release.send(()).expect("the closure owns its receiver");
-    tokio::time::timeout(WAIT, building)
-        .await
-        .expect("the next build ended")
-        .expect("the build joined");
-    assert!(
-        !blocked,
-        "Builder::build blocked the runtime worker until the timed-out scrape's closure gave up"
-    );
 }
