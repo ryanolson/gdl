@@ -403,9 +403,10 @@ fn left(kind: &str, name: &str, pool: &str, segment: &str, home: Option<&str>) -
     object
 }
 
-/// `deploy` checks, builds and pushes, renders, applies each cluster's
-/// base and waits for its namespace, applies its pools, prunes, and waits
-/// for health, in that order.
+/// `deploy` checks, builds and pushes, renders, lists each cluster's
+/// pools to refuse a move, applies each cluster's base and waits for its
+/// namespace, applies its pools, prunes, and waits for health, in that
+/// order.
 #[test]
 fn a_deploy_runs_its_steps_in_order() {
     let mirror = Mirror::new();
@@ -425,6 +426,8 @@ fn a_deploy_runs_its_steps_in_order() {
             "kind-euw1:can-i",
             "kind-use1:can-i",
             "docker",
+            "kind-euw1:list",
+            "kind-use1:list",
             "kind-euw1:base",
             "kind-euw1:wait-namespace",
             "kind-use1:base",
@@ -579,7 +582,7 @@ fn a_prune_drains_a_removed_pool_and_deletes_only_what_was_not_rendered() {
         .collect();
     let at = use1
         .iter()
-        .position(|s| s == "kind-use1:list")
+        .rposition(|s| s == "kind-use1:list")
         .expect("a list");
     assert_eq!(
         use1[at..],
@@ -902,3 +905,6 @@ mod guard;
 
 #[path = "deploy/renamed.rs"]
 mod renamed;
+
+#[path = "deploy/moved.rs"]
+mod moved;

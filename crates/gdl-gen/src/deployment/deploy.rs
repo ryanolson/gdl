@@ -89,7 +89,9 @@ impl Default for Waits {
 ///    that each cluster's context may create Deployments in its namespace;
 /// 2. build the images and push them ([`images`]);
 /// 3. render the objects, each image named by its pushed digest
-///    ([`k8s::k8s_files`]), and write them to `out` if given;
+///    ([`k8s::k8s_files`]), and write them to `out` if given; then refuse
+///    a pool that the fleet places in another cluster than the one its
+///    hub runs in, before anything is applied;
 /// 4. apply each cluster's base objects, and wait until its namespace is
 ///    active;
 /// 5. the tables job: no fleet renders one yet, so this step does nothing;
@@ -128,6 +130,7 @@ pub fn deploy(
         say(&format!("k8s: the objects are in {}", out.display()));
     }
     let rendered = Rendered::of(&files, &clusters)?;
+    unmoved(kube, &fleet, &clusters, &how.waits)?;
     // Every object this run applied, in any cluster, by its uid: none is
     // pruned, even where two clusters' contexts reach one namespace.
     let mut applied = BTreeSet::new();
@@ -404,6 +407,41 @@ impl Rendered {
         }
         Ok(Self(rendered))
     }
+}
+
+/// Refuse a pool that `fleet` places in another cluster than the one its
+/// hub runs in. A pool keeps one name and one record wherever it runs: a
+/// drain of its old copy would withdraw the record its new copy serves,
+/// and a delete of the old copy undrained would cut its requests. Read
+/// before anything is applied, so a refused move changes nothing.
+fn unmoved(
+    kube: &mut dyn Kube,
+    fleet: &Fleet,
+    clusters: &Clusters,
+    waits: &Waits,
+) -> Result<(), Error> {
+    let mut moved = Vec::new();
+    for cluster in &clusters.0 {
+        for hub in cluster
+            .live(kube, waits.objects)?
+            .iter()
+            .filter(|o| o.is_hub())
+        {
+            let Some(pool) = &hub.pool else { continue };
+            if let Some((placed, _)) = fleet.cluster_of(pool)
+                && placed != cluster.name
+            {
+                moved.push(format!(
+                    "pool `{pool}` is placed in cluster `{placed}`, but its hub runs in cluster `{}`: a pool keeps one name and one record, so it cannot move. To move it, give the pool a new name in cluster `{placed}` and deploy, then remove `{pool}` from the fleet and deploy again, which drains it",
+                    cluster.name
+                ));
+            }
+        }
+    }
+    if moved.is_empty() {
+        return Ok(());
+    }
+    Err(Error::all(moved))
 }
 
 /// Run `args`, bounded by `budget`, refused with `what` and kubectl's own
