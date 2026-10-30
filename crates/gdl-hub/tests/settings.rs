@@ -9,7 +9,7 @@ use futures::StreamExt;
 use gdl_hub::{PoolTiming, hub_builder, pool_from_env, pool_from_vars};
 use gdl_model::{
     DeploymentSpec, DirectoryBackend, HopInfo, HubTiming, Manifest, NodeInfo, Placement,
-    PoolPolicy, PoolSettings, PropertyInfo, Role, TypeInfo, WatchCaps,
+    PoolPolicy, PoolSettings, PropertyInfo, PropertyKey, Role, TypeInfo, WatchCaps,
 };
 use gdl_pools::{DirDirectory, PoolDirectory, PoolEvent, PoolState};
 use velo_hub::{Hub, HubConfig};
@@ -751,4 +751,58 @@ fn a_pools_declared_properties_are_read_from_the_environment() {
         );
         Ok(())
     });
+}
+
+/// Each backend's way through `hub_builder` holds a pool's static
+/// properties to the class's `provides`: a kind it names is taken, and
+/// one it does not is refused, naming the kind, before the hub serves.
+#[tokio::test]
+async fn every_backend_refuses_a_static_property_its_class_does_not_provide() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-static-")
+        .tempdir()
+        .expect("a directory");
+    let backends = vec![
+        DirectoryBackend::Relay {
+            parent_hub: Some("127.0.0.1:1".into()),
+            state_dir: None,
+        },
+        DirectoryBackend::Dir {
+            path: dir.path().to_path_buf(),
+        },
+    ];
+    #[cfg(feature = "dynamodb")]
+    let backends = [
+        backends,
+        vec![DirectoryBackend::DynamoDb {
+            records_table: "records".into(),
+            lists_table: "lists".into(),
+            aws_region: "us-east-1".into(),
+            endpoint: Some("http://127.0.0.1:1".into()),
+        }],
+    ]
+    .concat();
+    let declaring = |directory: &DirectoryBackend, kind: &str| PoolSettings {
+        properties: vec![
+            PropertyKey::new(kind, serde_json::json!({ "name": "a" })).expect("a key"),
+        ],
+        ..settings(directory.clone())
+    };
+    for directory in &backends {
+        let provided = declaring(directory, "test");
+        assert!(
+            hub_builder(config(), spec(), Some(provided)).await.is_ok(),
+            "{directory:?}: a kind the class provides"
+        );
+        let unprovided = declaring(directory, "other");
+        let Err(error) = hub_builder(config(), spec(), Some(unprovided)).await else {
+            panic!("{directory:?}: accepted a kind the class does not provide");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("`[pools.model_x] provides` does not name property kind `other`"),
+            "{directory:?}: {error}"
+        );
+    }
 }
