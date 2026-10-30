@@ -15,6 +15,8 @@ use crate::{SEGMENTS, SPLIT};
 
 #[path = "local/boundary.rs"]
 mod boundary;
+#[path = "local/tags.rs"]
+mod tags;
 
 /// A copy of the gdl workspace and the api example, with no build output.
 struct Copy {
