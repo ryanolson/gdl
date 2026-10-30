@@ -31,6 +31,13 @@ pub struct PoolHealth {
     /// [`PoolHealth::healthy`] judges by the counts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+    /// Whether the drained pool's record is withdrawn: the directory has
+    /// stored the withdrawal, so it holds no record of the pool. Only the
+    /// hub's own word shows this under a directory where no parent's hub
+    /// holds the record. Absent from the body while false, so that a
+    /// reader of an earlier hub reads it as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdrawn: bool,
 }
 
 impl PoolHealth {
@@ -49,6 +56,7 @@ impl PoolHealth {
                 .map(|(class, &required)| (class.clone(), RequiredHealth { required, met: 0 }))
                 .collect(),
             missing: requires.keys().cloned().collect(),
+            withdrawn: false,
         }
     }
 

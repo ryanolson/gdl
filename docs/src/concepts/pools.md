@@ -98,7 +98,7 @@ For each segment of the pool's class, the hub counts the instances usable for fr
 {"state": "ready", "segments": {"front": {"usable": 2, "quorum": 2}}, "requires": {"model_x": {"required": 1, "met": 0}}, "missing": ["model_x"]}
 ```
 
-`requires` is absent for a pool of a class that sends to none. `missing` is absent when every class is met.
+`requires` is absent for a pool of a class that sends to none. `missing` is absent when every class is met. `withdrawn: true` says that the drained pool's record is withdrawn: the directory has stored the withdrawal, and holds no record of the pool. It is absent until then, and while a withdrawal fails, which the hub retries once a heartbeat. Under a directory where no parent's hub holds the record, such as DynamoDB, it is the one proof of that, and `cargo gdl deploy` waits for it before it deletes a pool ([Prune](../guides/kubernetes.md#prune)).
 
 `state` is always the pool's own quorum state, which its record carries. An instance's own `/live` and `/health` do not change with pools (see [Health and metrics](../operations/observability.md)).
 

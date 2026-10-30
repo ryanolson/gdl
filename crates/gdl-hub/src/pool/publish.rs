@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::drain::Drain;
 use super::feed::Feed;
+use super::health::PoolHealth;
 use super::properties::PropertyList;
 use crate::HubDirectory;
 
@@ -46,6 +47,9 @@ pub(super) struct Publisher<D> {
     /// its parent's hub, since the hub's own directory holds its
     /// children's records, not its own.
     pub(super) parent: Option<HubDirectory>,
+    /// The pool's health, which says `withdrawn` once the directory has
+    /// stored the withdrawal.
+    pub(super) health: watch::Sender<PoolHealth>,
 }
 
 impl<D: PoolDirectory> Publisher<D> {
@@ -144,7 +148,9 @@ impl<D: PoolDirectory> Publisher<D> {
                 .publish(directory, (feed, stored), &self.record, &last)
                 .await;
         }
-        writer.withdraw(directory, &self.record).await;
+        if writer.withdraw(directory, &self.record).await {
+            self.health.send_modify(|health| health.withdrawn = true);
+        }
         feed.close();
     }
 }
@@ -349,8 +355,10 @@ impl Writer {
 
 impl Writer {
     /// Withdraw the record, after every write before it, retried once a
-    /// heartbeat until the directory takes it.
-    async fn withdraw(&mut self, directory: &impl PoolDirectory, record: &PoolRecord) {
+    /// heartbeat until the directory takes it: whether this hub's
+    /// withdrawal is stored. A later hub of the pool holds its record
+    /// otherwise, which is that hub's to withdraw.
+    async fn withdraw(&mut self, directory: &impl PoolDirectory, record: &PoolRecord) -> bool {
         loop {
             self.seq += 1;
             let withdrawal = Withdrawal {
@@ -360,7 +368,7 @@ impl Writer {
                 seq: self.seq,
             };
             match tokio::time::timeout(self.bound, directory.withdraw(withdrawal)).await {
-                Ok(Ok(())) => return,
+                Ok(Ok(())) => return true,
                 Ok(Err(DirectoryError::NotNewer { held, .. })) if held.epoch == self.epoch => {
                     self.seq = held.seq;
                     continue;
@@ -369,7 +377,7 @@ impl Writer {
                 // hub's to withdraw.
                 Ok(Err(DirectoryError::NotNewer { held, .. })) if held.epoch > self.epoch => {
                     tracing::warn!(%held, "another hub publishes this pool with a later epoch");
-                    return;
+                    return false;
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "the drained pool's record was not withdrawn");

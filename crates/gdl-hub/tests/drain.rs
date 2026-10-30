@@ -316,3 +316,94 @@ async fn a_drain_is_answered_once_the_draining_record_is_stored() {
     );
     hub.shutdown().await.expect("the hub stops");
 }
+
+/// A directory whose withdrawals fail until they are allowed, and which
+/// counts each attempt: a store that cannot take the drained pool's
+/// withdrawal yet.
+#[derive(Clone)]
+struct Refusing {
+    inner: MemoryDirectory,
+    allowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    attempts: std::sync::Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+impl Refusing {
+    fn new(inner: &MemoryDirectory) -> Self {
+        Self {
+            inner: inner.clone(),
+            allowed: Default::default(),
+            attempts: std::sync::Arc::new(tokio::sync::watch::channel(0).0),
+        }
+    }
+}
+
+impl PoolDirectory for Refusing {
+    type Watch = MemoryWatch;
+
+    async fn publish(
+        &self,
+        record: gdl_pools::PoolRecord,
+    ) -> Result<(), gdl_pools::DirectoryError> {
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(
+        &self,
+        withdrawal: gdl_pools::Withdrawal,
+    ) -> Result<(), gdl_pools::DirectoryError> {
+        self.attempts.send_modify(|attempts| *attempts += 1);
+        if !self.allowed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(gdl_pools::DirectoryError::Unavailable(
+                "the withdrawal is not allowed yet".into(),
+            ));
+        }
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> MemoryWatch {
+        self.inner.watch(class, from)
+    }
+}
+
+/// A drained pool's health says `withdrawn` only once the directory holds
+/// no record of it: not while its withdrawal fails, whatever its state,
+/// and then once the withdrawal is stored. Before the drain ends the body
+/// has no `withdrawn` at all, so a reader of an earlier hub reads it as
+/// before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_says_withdrawn_only_once_the_directory_holds_no_record() {
+    let memory = MemoryDirectory::new();
+    let directory = Refusing::new(&memory);
+    let mut attempts = directory.attempts.subscribe();
+    // A refused withdrawal is tried again a heartbeat later.
+    let timing = gdl_hub::PoolTiming {
+        heartbeat: std::time::Duration::from_millis(200),
+        ..timing()
+    };
+    let (hub, pool) = hub_of(common::settings(), directory.clone(), timing).await;
+    let mut records = Records::new(&memory);
+    records.until(PoolState::Unavailable).await;
+    let (_, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert!(!body.contains("withdrawn"), "{body}");
+
+    pool.drain().await.expect("the pool drains");
+    tokio::time::timeout(WAIT, attempts.wait_for(|attempts| *attempts > 0))
+        .await
+        .expect("the hub tries to withdraw the record in time")
+        .expect("the directory counts");
+    assert!(held(&memory).await.is_some(), "the record is still held");
+    assert!(!pool.health().borrow().withdrawn, "withdrawn while held");
+    let (_, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert!(!body.contains("withdrawn"), "{body}");
+
+    directory
+        .allowed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let said = health(&pool, "withdrawn", |health| health.withdrawn).await;
+    assert_eq!(said.state, PoolState::Draining);
+    assert!(held(&memory).await.is_none(), "withdrawn, but still held");
+    let (status, body) = get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("\"withdrawn\":true"), "{body}");
+    hub.shutdown().await.expect("the hub stops");
+}

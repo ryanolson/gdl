@@ -858,6 +858,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 drain: Arc::clone(&self.drain),
                 stored: self.stored.clone(),
                 parent: self.parent.clone(),
+                health: self.health.clone(),
             }
             .run(
                 publish::Sources {
