@@ -44,6 +44,30 @@ fn a_dynamodb_fleets_objects_are_pinned() {
     assert!(!files.contains_key(Path::new("euw1/tables.yaml")));
 }
 
+#[test]
+#[ignore = "F2: the tables Job has no hub image when its cluster hosts no pools"]
+fn a_directory_can_run_in_a_cluster_without_pools() {
+    let mirror = Mirror::new();
+    let mut text: toml::Value = toml::from_str(&dynamodb_text()).expect("the fleet");
+    for (_, pool) in text["pool"].as_table_mut().expect("pools").iter_mut() {
+        pool["cluster"] = "euw1".into();
+    }
+    let fleet = fleet(&toml::to_string(&text).expect("the fleet"));
+    fleet.check(None).expect("a valid fleet");
+    assert!(
+        fleet
+            .pools()
+            .all(|pool| { fleet.cluster_of(&pool.name).map(|(name, _)| name) == Some("euw1") })
+    );
+
+    let spec = spec(&mirror);
+    let tagged = render(&mirror, &spec, &fleet).expect("objects with an explicit tag");
+    assert!(tagged.contains_key(Path::new("use1/tables.yaml")));
+    let files = gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), None, None)
+        .expect("a directory cluster without pools still needs its tables Job's hub image");
+    assert!(files.contains_key(Path::new("use1/tables.yaml")));
+}
+
 /// Every hub and segment publishes to the tables in its cluster's region:
 /// the directory's cluster at the Local's Service, the other at the
 /// placeholder. None reports to a parent's hub or keeps a state claim, so
