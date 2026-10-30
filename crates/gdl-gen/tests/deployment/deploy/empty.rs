@@ -59,6 +59,7 @@ fn deploy_prunes_a_cluster_with_no_remaining_pools() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
     assert!(

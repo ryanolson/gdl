@@ -43,6 +43,10 @@ pub(crate) struct Context {
     /// with the reason. The image build can still build such a crate: a
     /// dependency's own dev-dependencies, for one, need not exist.
     unread: Vec<String>,
+    /// Each directory of sources the images build from, absolute: gdl's
+    /// workspace and hub, each crate the bundle reaches by path, and each
+    /// one's workspace. The bundle is not among them.
+    sources: Vec<PathBuf>,
 }
 
 /// What a [`Context`] is for.
@@ -239,7 +243,13 @@ impl Context {
             return Err(shared_only_the_root(&root, &needed));
         }
         let from = |path: &Path| relative(&root, path);
+        let sources = needed
+            .iter()
+            .filter(|dir| !dir.starts_with(out))
+            .cloned()
+            .collect();
         let context = Self {
+            sources,
             bundle: from(out),
             hub: gdl.as_ref().and_then(|gdl| gdl.hub.as_deref()).map(from),
             lock,
@@ -263,6 +273,16 @@ impl Context {
     /// The context's root, absolute.
     pub(super) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The bundle's directory, from the root.
+    pub(super) fn bundle(&self) -> &Path {
+        &self.bundle
+    }
+
+    /// Each directory of sources the images build from, absolute.
+    pub(super) fn sources(&self) -> &[PathBuf] {
+        &self.sources
     }
 
     /// Where Cargo runs: the image build's root, or the spec's directory
@@ -912,6 +932,22 @@ fn workspace_of(dir: &Path) -> Option<PathBuf> {
                 .is_some_and(|manifest| manifest.contains_key("workspace"))
         })
         .map(Path::to_path_buf)
+}
+
+/// Where the images of a spec whose `[gdl] path` is `runtime` place their
+/// bundle in their build context: `target/gdl-images` of gdl's workspace.
+/// Nothing is written there: the bundle's place in the context decides the
+/// relative paths of its manifests, so a fixed place gives the same files,
+/// and the same tags, wherever the checkout is.
+pub(crate) fn image_bundle(runtime: &Path) -> Result<PathBuf, Error> {
+    let runtime = crate::dump::absolute(runtime)?;
+    let workspace = workspace_of(&runtime).ok_or_else(|| {
+        Error::new(format!(
+            "`--local`: [gdl] path {} is in no Cargo workspace",
+            runtime.display()
+        ))
+    })?;
+    Ok(workspace.join("target").join("gdl-images"))
 }
 
 /// The deepest directory that holds both `a` and `b`.

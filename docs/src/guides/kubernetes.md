@@ -66,6 +66,21 @@ cargo gdl images --spec gdl.toml --fleet fleet.toml --push --out target/images.j
 
 `images` prints each image as `<registry>/<repository>:<tag>@sha256:<digest>`, and says on stderr whether it pushed the image or found it in the registry. `--out` writes the digests to a JSON file, keyed by reference, for `k8s --images`. Without `--push`, it asks no registry: it builds each image into the local image store, and `--out` is refused.
 
+### Build from local sources
+
+`--local` builds every image from this machine's sources, with no fetch of gdl: gdl and its hub from the workspace of the spec's `[gdl] path`, and the node, message, and policy crates the spec names by path, as `compose --local` does ([Local sources](compose-deploy.md#local-sources)). The spec must name gdl by `path`. So a change to gdl or to a node that is not published is what runs, which is how a policy is developed against a fleet's metrics. `k8s`, `images`, and `deploy` take `--local`, and a run of `images --local` is named by `k8s --local --images`.
+
+```bash
+cargo gdl deploy --local --spec examples/api/gdl.toml --fleet fleet.toml
+```
+
+Every image of the spec builds from one tree, which `--local` makes in a temporary directory, and removes after:
+
+- **Sources.** A copy of gdl's workspace and of each crate the spec names by path, and of each one's workspace, at their paths from the directory that holds them all. In a Git checkout it copies every file Git tracks, and each file Git would track that is not hidden: so build output and what the checkout ignores stay out, a new source that is not committed yet is in, and an untracked dotfile, such as an `.env` of credentials, never reaches an image. Elsewhere it copies every file but those under `target` and `.git`.
+- **Bundle.** The generated crates are placed in the tree at `target/gdl-images` of gdl's workspace, the same place on every machine, so that their manifests name the sources by the same relative paths. Each segment's manifest is patched to build gdl from the tree, and its lock is settled on this machine from gdl's lock, as `compose --local` does, so the image build resolves nothing.
+- **Dockerfiles.** Each image copies the tree to `/app`. The hub installs with `cargo install --path /app/crates/gdl-hub --locked`, with its `dynamodb` feature under a DynamoDB directory. A segment builds with `cargo build --locked` from its crate in the bundle.
+- **Tags.** An image's tag is the sha256 of its platform, its Dockerfile, and every path and byte of the tree. A change to any source file moves every tag, and the same sources give the same tags wherever the checkout is: no file of the tree names this machine's directories. Sources that did not change push nothing.
+
 The command uses the Docker login you already have. It never reads, writes, or prints a registry credential. Log in to each registry first, for example with `docker login` or a credential helper. A registry that makes no repository on push, such as Amazon ECR, must already have each repository: `<graph>-hub`, and each segment's package.
 
 ## 3. Write the objects

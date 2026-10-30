@@ -261,6 +261,34 @@ fn mark_local(files: &mut Files) -> Result<(), Error> {
     Ok(())
 }
 
+/// Give the manifest of the segment crate in `crate_dir`, a path in a
+/// bundle of local sources whose files are `files`, the patch of `context`
+/// that builds it against gdl's sources, and the oldest Rust gdl builds
+/// with: the host's Rust may be newer than the image's, and Cargo picks
+/// each new dependency for the oldest Rust the segment says it builds
+/// with.
+fn localize(files: &mut Files, context: &context::Context, crate_dir: &Path) -> Result<(), Error> {
+    let patch = context.patch(
+        files,
+        std::slice::from_ref(&crate_dir.to_path_buf()),
+        crate_dir,
+    )?;
+    if let Some(manifest) = files.get_mut(&crate_dir.join("Cargo.toml")) {
+        manifest.push_str(&patch);
+        if let Some(version) = context.rust_version() {
+            *manifest = manifest.replacen(
+                "publish = false\n",
+                &format!(
+                    "publish = false\nrust-version = {}\n",
+                    crate::dump::toml_string(version)
+                ),
+                1,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// What every bundle of a spec starts from: its deployment settings, how
 /// its hub is installed, its generated crates, its graph's name, and the
 /// build context of a bundle that builds local sources.
@@ -471,24 +499,7 @@ impl Bundle {
         // or move a Git dependency to its newest commit.
         let locked = match &self.context {
             Some(context) => {
-                let patch =
-                    context.patch(&self.files, std::slice::from_ref(&crate_dir), &crate_dir)?;
-                if let Some(manifest) = self.files.get_mut(&crate_dir.join("Cargo.toml")) {
-                    manifest.push_str(&patch);
-                    // The host's Rust may be newer than the image's: Cargo
-                    // picks each new dependency for the oldest Rust the
-                    // segment says it builds with, which is gdl's.
-                    if let Some(version) = context.rust_version() {
-                        *manifest = manifest.replacen(
-                            "publish = false\n",
-                            &format!(
-                                "publish = false\nrust-version = {}\n",
-                                crate::dump::toml_string(version)
-                            ),
-                            1,
-                        );
-                    }
-                }
+                localize(&mut self.files, context, &crate_dir)?;
                 "--locked "
             }
             None => "",

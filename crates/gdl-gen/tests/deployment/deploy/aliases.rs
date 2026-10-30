@@ -30,6 +30,7 @@ fn prune_keeps_rendered_pools_through_context_aliases() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
     let deleted = deletes(&log, "shared-cluster");
@@ -79,6 +80,7 @@ fn prune_refuses_an_object_this_deploy_applied() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
         .expect_err("a prune of an applied object")

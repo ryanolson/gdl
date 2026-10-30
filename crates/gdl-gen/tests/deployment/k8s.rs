@@ -69,7 +69,14 @@ fn render(
     spec: &gdl_gen::Spec,
     fleet: &gdl_model::Fleet,
 ) -> Result<gdl_gen::Files, gdl_gen::Error> {
-    gdl_gen::k8s_files(spec, fleet, &mirror.target(), Some(TAG), None)
+    gdl_gen::k8s_files(
+        spec,
+        fleet,
+        &mirror.target(),
+        Some(TAG),
+        None,
+        gdl_gen::Sources::Fetched,
+    )
 }
 
 /// The objects of a file the render writes: one JSON document each, in a
@@ -489,11 +496,28 @@ fn the_objects_are_written_into_a_fresh_directory() {
     let out = temp.path().join("k8s");
     let spec = spec(&mirror);
     let fleet = fleet(&fleet_text());
-    gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG), None).expect("written");
+    gdl_gen::k8s(
+        &spec,
+        &fleet,
+        &out,
+        &mirror.target(),
+        Some(TAG),
+        None,
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("written");
     assert!(out.join("use1/base.yaml").is_file());
     assert!(out.join("euw1/pools/model-x-eu.yaml").is_file());
-    let again = gdl_gen::k8s(&spec, &fleet, &out, &mirror.target(), Some(TAG), None)
-        .expect_err("the directory exists");
+    let again = gdl_gen::k8s(
+        &spec,
+        &fleet,
+        &out,
+        &mirror.target(),
+        Some(TAG),
+        None,
+        gdl_gen::Sources::Fetched,
+    )
+    .expect_err("the directory exists");
     assert!(again.to_string().contains("already exists"), "{again}");
 }
 

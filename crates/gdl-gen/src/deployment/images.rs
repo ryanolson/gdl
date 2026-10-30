@@ -6,6 +6,11 @@
 //!
 //! Each image is tagged with a sha256 of what it is built from: its
 //! platform and every file of its build context, its Dockerfile included.
+//! With local sources ([`Sources::Local`]) every image builds from one
+//! tree: a copy of gdl's workspace and of each crate the spec names by
+//! path, with the bundle placed in it as in gdl's workspace, and each
+//! segment's lock settled there. So each tag covers those sources, and a
+//! change to one moves every tag.
 //! `k8s` computes the tags without Docker, and `images` skips an image
 //! whose tag its registry already holds. The binary is built on the build
 //! host's platform for the image's, with a cross linker when the two
@@ -21,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::k8s::Prepared;
-use super::{io, quote};
+use super::{Sources, io, quote};
 use crate::{Error, Files, emit};
 
 mod buildx;
@@ -142,9 +147,10 @@ pub fn images(
     fleet: &Fleet,
     target: &Path,
     push: bool,
+    sources: Sources,
     docker: &mut dyn Docker,
 ) -> Result<Vec<Built>, Error> {
-    let plan = super::k8s::judged(spec, fleet, target)?;
+    let plan = super::k8s::judged(spec, fleet, target, sources)?;
     let unsupported: Vec<String> = plan
         .iter()
         .map(|image| image.platform.as_str())
@@ -177,9 +183,20 @@ pub fn images(
             });
             continue;
         }
-        let context = scratch.path().join(index.to_string());
-        std::fs::create_dir(&context).map_err(io)?;
-        crate::write(&context, &image.context)?;
+        let context = match &image.context {
+            Source::Files(files) => {
+                let context = scratch.path().join(index.to_string());
+                std::fs::create_dir(&context).map_err(io)?;
+                crate::write(&context, files)?;
+                context
+            }
+            // The tree is shared: its Dockerfile is this image's while it
+            // builds.
+            Source::Tree { tree, dockerfile } => {
+                std::fs::write(tree.dir.path().join("Dockerfile"), dockerfile).map_err(io)?;
+                tree.dir.path().to_path_buf()
+            }
+        };
         let digest = docker.build(&context, &image.platform, &reference, push)?;
         check_digest(&digest).map_err(|why| Error::new(format!("`{reference}`: {why}")))?;
         built.push(Built {
@@ -203,9 +220,41 @@ pub(super) struct Image {
     pub(super) platform: String,
     /// The sha256 of the platform and the context, as hex.
     pub(super) tag: String,
-    /// Its build context, the `Dockerfile` included, shared by every
-    /// registry it goes to.
-    context: Rc<Files>,
+    /// Its build context, shared by every registry it goes to.
+    context: Source,
+}
+
+/// What an image builds from.
+#[derive(Clone)]
+enum Source {
+    /// Its own files, the `Dockerfile` among them.
+    Files(Rc<Files>),
+    /// A tree of local sources that every image of the spec shares, and
+    /// this image's Dockerfile, written at the tree's root for its build.
+    Tree { tree: Rc<Tree>, dockerfile: String },
+}
+
+impl Source {
+    /// The sha256, as hex, of `platform` and what this source holds.
+    fn tag(&self, platform: &str) -> String {
+        match self {
+            Self::Files(files) => tag(platform, files),
+            Self::Tree { tree, dockerfile } => tag(
+                platform,
+                &Files::from([
+                    (PathBuf::from("Dockerfile"), dockerfile.clone()),
+                    (PathBuf::from("sources"), tree.digest.clone()),
+                ]),
+            ),
+        }
+    }
+}
+
+/// A copy of the local sources that a spec's images build from, with the
+/// bundle in it, and the sha256 of every path and byte of it.
+struct Tree {
+    dir: tempfile::TempDir,
+    digest: String,
 }
 
 impl Image {
@@ -221,26 +270,33 @@ impl Image {
 pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Error> {
     let bundle = &prepared.bundle;
     let graph = &bundle.graph;
-    let hub = Rc::new(Files::from([(
-        PathBuf::from("Dockerfile"),
-        hub_dockerfile(bundle, fleet),
-    )]));
+    let local = match &bundle.context {
+        Some(context) => Some(Local::new(prepared, context)?),
+        None => None,
+    };
+    let hub = match &local {
+        None => Source::Files(Rc::new(Files::from([(
+            PathBuf::from("Dockerfile"),
+            hub_dockerfile(bundle, fleet),
+        )]))),
+        Some(local) => local.source(hub_dockerfile(bundle, fleet)),
+    };
     let hub_repository = emit::package_name(graph, "hub");
     let pools: Vec<PoolSettings> = fleet.pools().collect();
     // By registry, repository, and platform: two clusters that share a
     // registry and a platform share each image.
     let mut images = BTreeMap::new();
-    let mut add = |cluster: &gdl_model::Cluster, repository: &str, context: &Rc<Files>| {
+    let mut add = |cluster: &gdl_model::Cluster, repository: &str, context: &Source| {
         let registry = cluster.registry.clone().unwrap_or_default();
         let platform = cluster.platform.clone().unwrap_or_default();
         images
             .entry((registry.clone(), repository.to_string(), platform.clone()))
             .or_insert_with(|| Image {
-                tag: tag(&platform, context),
+                tag: context.tag(&platform),
                 registry,
                 repository: repository.to_string(),
                 platform,
-                context: Rc::clone(context),
+                context: context.clone(),
             });
     };
     for laid in prepared.spec.layouts() {
@@ -249,7 +305,7 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
             .get(laid.name)
             .and_then(Option::as_ref)
             .ok_or_else(|| Error::new(laid.named("the placement does not fit the graph".into())))?;
-        let mut contexts: BTreeMap<&str, Rc<Files>> = BTreeMap::new();
+        let mut contexts: BTreeMap<&str, Source> = BTreeMap::new();
         for pool in pools
             .iter()
             .filter(|pool| pool.layout.as_deref().unwrap_or(laid.name) == laid.name)
@@ -264,9 +320,17 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
                 }
                 let context = contexts.entry(segment).or_insert_with(|| {
                     let package = laid.package(graph, segment);
-                    Rc::new(segment_context(bundle, &laid.dir().join(segment), &package))
+                    let crate_dir = laid.dir().join(segment);
+                    match &local {
+                        None => {
+                            Source::Files(Rc::new(segment_context(bundle, &crate_dir, &package)))
+                        }
+                        Some(local) => {
+                            local.source(local.segment_dockerfile(bundle, &crate_dir, &package))
+                        }
+                    }
                 });
-                let context = Rc::clone(context);
+                let context = context.clone();
                 add(cluster, &laid.package(graph, segment), &context);
             }
         }
@@ -360,7 +424,205 @@ fn placeless(text: &str) -> String {
         .collect()
 }
 
-/// The Dockerfile of the hub, installed as the spec's `[gdl]` names it.
+/// The tree of local sources a spec's images build from, once it is made.
+struct Local {
+    tree: Rc<Tree>,
+    /// The bundle's directory in the tree.
+    bundle: PathBuf,
+}
+
+impl Local {
+    /// Copy the sources of `context` into a new tree, at their paths from
+    /// its root; write `prepared`'s bundle at the bundle's place there,
+    /// each segment's manifest patched to build against gdl's sources;
+    /// settle each segment's lock from gdl's, as `compose --local` does;
+    /// and digest the tree.
+    fn new(prepared: &Prepared, context: &super::context::Context) -> Result<Self, Error> {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-images-local-")
+            .tempdir()
+            .map_err(io)?;
+        let root = dir.path();
+        for path in source_files(context)? {
+            let to = root.join(&path);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(io)?;
+            }
+            std::fs::copy(context.root().join(&path), &to)
+                .map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
+        }
+        let bundle = context.bundle().to_path_buf();
+        let mut files: Files = prepared
+            .bundle
+            .files
+            .iter()
+            .filter(|(path, _)| path.file_name().is_none_or(|name| name != "config.toml"))
+            .map(|(path, text)| (path.clone(), placeless(text)))
+            .collect();
+        let segments: Vec<PathBuf> = files
+            .keys()
+            .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml"))
+            .filter_map(|path| path.parent())
+            .filter(|dir| !dir.starts_with("contract"))
+            .map(Path::to_path_buf)
+            .collect();
+        for crate_dir in &segments {
+            super::localize(&mut files, context, crate_dir)?;
+        }
+        crate::write(&root.join(&bundle), &files)
+            .map_err(|e| Error::new(format!("`--local`: writing the bundle: {e}")))?;
+        for crate_dir in &segments {
+            let at = root.join(&bundle).join(crate_dir);
+            if let Some(lock) = context.lock() {
+                std::fs::copy(lock, at.join("Cargo.lock"))
+                    .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
+            }
+            let carried = context.host_patches(&files, std::slice::from_ref(crate_dir));
+            super::locks::settle(&at, &carried, context)?;
+        }
+        let digest = digest(root)?;
+        Ok(Self {
+            tree: Rc::new(Tree { dir, digest }),
+            bundle,
+        })
+    }
+
+    fn source(&self, dockerfile: String) -> Source {
+        Source::Tree {
+            tree: Rc::clone(&self.tree),
+            dockerfile,
+        }
+    }
+
+    /// The Dockerfile of the segment whose crate is `crate_dir` in the
+    /// bundle, which builds package `package` by its settled lock.
+    fn segment_dockerfile(
+        &self,
+        bundle: &super::Bundle,
+        crate_dir: &Path,
+        package: &str,
+    ) -> String {
+        let settings = &bundle.settings;
+        let segment = crate_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let base = settings
+            .segment
+            .get(&segment)
+            .and_then(|image| image.base_image.as_ref())
+            .unwrap_or(&settings.base_image);
+        let manifest = format!("/app/{}/Cargo.toml", self.bundle.join(crate_dir).display());
+        let build = format!(
+            "cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
+            quote(&manifest)
+        );
+        dockerfile(&settings.build_image, base, true, &build)
+    }
+}
+
+/// Each file of the sources of `context`, from its root. In a Git
+/// checkout: every file Git tracks, and each file it would track that is
+/// not hidden, so that build output and what the checkout ignores stay out,
+/// a new source that is not committed is in, and an untracked dotfile, such
+/// as an `.env` of credentials, never reaches an image. Elsewhere: every
+/// file but those under `target` and `.git`.
+fn source_files(
+    context: &super::context::Context,
+) -> Result<std::collections::BTreeSet<PathBuf>, Error> {
+    let mut files = std::collections::BTreeSet::new();
+    for dir in context.sources() {
+        let from = dir.strip_prefix(context.root()).map_err(|_| {
+            Error::new(format!(
+                "`--local`: {} is outside the context",
+                dir.display()
+            ))
+        })?;
+        let listed = |which: &str| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["ls-files", "-z", which, "--exclude-standard"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|name| !name.is_empty())
+                        .map(|name| PathBuf::from(String::from_utf8_lossy(name).into_owned()))
+                        .collect::<Vec<_>>()
+                })
+        };
+        let (Some(tracked), Some(untracked)) = (listed("--cached"), listed("--others")) else {
+            walk(dir, from, &mut files)?;
+            continue;
+        };
+        let hidden = |name: &Path| {
+            name.components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+        };
+        let untracked = untracked.into_iter().filter(|name| !hidden(name));
+        for name in tracked.into_iter().chain(untracked) {
+            // A tracked file deleted in the checkout is not built.
+            if dir.join(&name).is_file() {
+                files.insert(from.join(name));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Each file under `dir`, at `from` joined with its path there, but those
+/// under `target` and `.git`.
+fn walk(
+    dir: &Path,
+    from: &Path,
+    files: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<(), Error> {
+    let failed = |e: std::io::Error| Error::new(format!("`--local`: {}: {e}", dir.display()));
+    for entry in std::fs::read_dir(dir).map_err(failed)? {
+        let entry = entry.map_err(failed)?;
+        let name = entry.file_name();
+        if name == "target" || name == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            walk(&path, &from.join(&name), files)?;
+        } else if path.is_file() {
+            files.insert(from.join(&name));
+        }
+    }
+    Ok(())
+}
+
+/// The sha256, as hex, of every path and byte of the files under `root`,
+/// in path order, each with its length.
+fn digest(root: &Path) -> Result<String, Error> {
+    let mut files = std::collections::BTreeSet::new();
+    walk(root, Path::new(""), &mut files)?;
+    let mut hash = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+    field(b"gdl local sources");
+    for path in files {
+        field(path.to_string_lossy().as_bytes());
+        let path = root.join(&path);
+        field(&std::fs::read(&path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?);
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// The Dockerfile of the hub, installed as the spec's `[gdl]` names it:
+/// with local sources, from the hub's crate in the context it copies.
 fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
     let settings = &bundle.settings;
     // The DynamoDB directory, and its tables step, are a feature of the
@@ -376,7 +638,7 @@ fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
     dockerfile(
         &settings.build_image,
         settings.hub_image.as_ref().unwrap_or(&settings.base_image),
-        false,
+        bundle.context.is_some(),
         &build,
     )
 }

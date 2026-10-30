@@ -64,8 +64,15 @@ fn a_directory_can_run_in_a_cluster_without_pools() {
     let spec = spec(&mirror);
     let tagged = render(&mirror, &spec, &fleet).expect("objects with an explicit tag");
     assert!(tagged.contains_key(Path::new("use1/tables.yaml")));
-    let files = gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), None, None)
-        .expect("a directory cluster without pools still needs its tables Job's hub image");
+    let files = gdl_gen::k8s_files(
+        &spec,
+        &fleet,
+        &mirror.target(),
+        None,
+        None,
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a directory cluster without pools still needs its tables Job's hub image");
     assert!(files.contains_key(Path::new("use1/tables.yaml")));
 }
 

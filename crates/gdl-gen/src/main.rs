@@ -9,9 +9,9 @@
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
-//! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
-//! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
-//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--target-dir <dir>]
+//! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
+//! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
+//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
@@ -55,7 +55,10 @@
 //! platform, with `docker buildx`; with `--push` it pushes each to each
 //! cluster's registry, unless the registry already holds its tag, and
 //! writes each image's digest to `--out`. It prints each image by
-//! reference and digest. `deploy` applies a fleet to its clusters with
+//! reference and digest. With `--local`, `k8s`, `images`, and `deploy`
+//! build gdl and its hub from `[gdl] path`, and the crates the spec names
+//! by path, as they are on this machine, with no fetch of gdl; each tag
+//! covers those sources. `deploy` applies a fleet to its clusters with
 //! `kubectl` and each cluster's kube context, and stops at the first step
 //! that fails: `check`, and each cluster's context; `images --push`; `k8s`,
 //! by the pushed digests, also written to `--out` when given; each
@@ -82,9 +85,9 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
-       cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
-       cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
-       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--target-dir <dir>]
+       cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
+       cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
+       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
@@ -102,15 +105,18 @@ enum Command {
         fleet: PathBuf,
         tag: Option<String>,
         images: Option<PathBuf>,
+        local: bool,
     },
     Images {
         fleet: PathBuf,
         push: bool,
         out: Option<PathBuf>,
+        local: bool,
     },
     Deploy {
         fleet: PathBuf,
         out: Option<PathBuf>,
+        local: bool,
     },
     Down {
         fleet: PathBuf,
@@ -222,6 +228,7 @@ fn args() -> Result<Args, String> {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
             tag: tag.take(),
             images: images.take(),
+            local: std::mem::take(&mut local),
         },
         "images" => {
             // The digests file names images in their registries, which a
@@ -235,11 +242,13 @@ fn args() -> Result<Args, String> {
                 fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
                 push: std::mem::take(&mut push),
                 out: out.take(),
+                local: std::mem::take(&mut local),
             }
         }
         "deploy" => Command::Deploy {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
             out: out.take(),
+            local: std::mem::take(&mut local),
         },
         "down" => Command::Down {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
@@ -279,6 +288,15 @@ fn args() -> Result<Args, String> {
         spec,
         target,
     })
+}
+
+/// Where the images take gdl and the crates they build: `--local`, from
+/// this machine's sources.
+fn sources(local: bool) -> gdl_gen::Sources {
+    match local {
+        true => gdl_gen::Sources::Local,
+        false => gdl_gen::Sources::Fetched,
+    }
 }
 
 fn main() -> ExitCode {
@@ -401,6 +419,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             fleet,
             tag,
             images,
+            local,
         } => {
             let Some(Deployed {
                 spec,
@@ -428,9 +447,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 &target,
                 tag.as_deref(),
                 digests.as_ref(),
+                sources(*local),
             )?;
         }
-        Command::Images { fleet, push, out } => {
+        Command::Images {
+            fleet,
+            push,
+            out,
+            local,
+        } => {
             let Some(Deployed {
                 spec,
                 fleet,
@@ -439,7 +464,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             else {
                 return Ok(ExitCode::FAILURE);
             };
-            let built = gdl_gen::images(&spec, &fleet, &target, *push, &mut gdl_gen::Buildx)?;
+            let built = gdl_gen::images(
+                &spec,
+                &fleet,
+                &target,
+                *push,
+                sources(*local),
+                &mut gdl_gen::Buildx,
+            )?;
             for image in &built {
                 let what = match image.outcome {
                     gdl_gen::Outcome::Pushed => "pushed",
@@ -454,7 +486,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     .map_err(|e| format!("{}: {e}", out.display()))?;
             }
         }
-        Command::Deploy { fleet, out } => {
+        Command::Deploy { fleet, out, local } => {
             let file = args.spec.as_ref().ok_or(USAGE)?;
             let how = gdl_gen::Deploy {
                 spec: file.clone(),
@@ -462,6 +494,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 target: target(beside(file)),
                 out: out.clone(),
                 waits: gdl_gen::Waits::default(),
+                sources: sources(*local),
             };
             let mut say = |step: &str| eprintln!("cargo gdl: {step}");
             if let Err(error) =

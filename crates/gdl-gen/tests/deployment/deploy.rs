@@ -385,6 +385,7 @@ fn deploy(
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     let mut said = Vec::new();
     gdl_gen::deploy(&how, docker, kube, &mut |step| said.push(step.to_string()))?;

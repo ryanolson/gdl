@@ -41,17 +41,22 @@ pub(super) use objects::{image, label_value};
 /// every one a segment there mounts, and its `env` no variable the
 /// render sets; under the relay directory each child is in its parent's
 /// cluster; and the spec does not choose jemalloc.
+///
+/// With [`Sources::Local`], the images build gdl and its hub from the
+/// spec's `[gdl] path`, and the crates it names by path, as they are on
+/// this machine, and each tag covers those sources ([`super::images`]).
 pub fn k8s_files(
     spec: &Spec,
     fleet: &Fleet,
     target: &Path,
     tag: Option<&str>,
     digests: Option<&Digests>,
+    sources: Sources,
 ) -> Result<Files, Error> {
     if let Some(tag) = tag {
         objects::check_tag(tag)?;
     }
-    let prepared = prepare(spec, fleet, target)?;
+    let prepared = prepare(spec, fleet, target, sources)?;
     let plan = images::plan(&prepared, fleet)?;
     render(prepared, fleet, &Naming::new(tag, &plan, digests))
 }
@@ -65,11 +70,12 @@ pub fn k8s(
     target: &Path,
     tag: Option<&str>,
     digests: Option<&Digests>,
+    sources: Sources,
 ) -> Result<(), Error> {
     if out.exists() {
         return Err(exists());
     }
-    let files = k8s_files(spec, fleet, target, tag, digests)?;
+    let files = k8s_files(spec, fleet, target, tag, digests, sources)?;
     write_new(out, &files)
 }
 
@@ -102,8 +108,13 @@ pub(super) fn write_new(out: &Path, files: &Files) -> Result<(), Error> {
 /// The images of `fleet`'s pools, once the fleet's objects are judged as
 /// [`k8s_files`] judges them, so that no image is built for a fleet that
 /// cannot run.
-pub(super) fn judged(spec: &Spec, fleet: &Fleet, target: &Path) -> Result<Vec<Image>, Error> {
-    let prepared = prepare(spec, fleet, target)?;
+pub(super) fn judged(
+    spec: &Spec,
+    fleet: &Fleet,
+    target: &Path,
+    sources: Sources,
+) -> Result<Vec<Image>, Error> {
+    let prepared = prepare(spec, fleet, target, sources)?;
     let plan = images::plan(&prepared, fleet)?;
     render(prepared, fleet, &Naming::new(None, &plan, None))?;
     Ok(plan)
@@ -119,7 +130,7 @@ pub(super) struct Prepared {
 }
 
 /// `spec` prepared for `fleet`, refused as [`k8s_files`] says.
-fn prepare(spec: &Spec, fleet: &Fleet, target: &Path) -> Result<Prepared, Error> {
+fn prepare(spec: &Spec, fleet: &Fleet, target: &Path, sources: Sources) -> Result<Prepared, Error> {
     if pools::by_pool(spec).is_none() {
         return Err(Error::new(
             "a fleet on Kubernetes deploys a spec by pool: give its placement classes, and the fleet its pools",
@@ -147,12 +158,20 @@ fn prepare(spec: &Spec, fleet: &Fleet, target: &Path) -> Result<Prepared, Error>
         }
         Allocator::System | Allocator::Mimalloc => Allocator::Mimalloc,
     };
-    // The generated crates are not written: only their files are read.
+    // The generated crates are not written here: only their files are
+    // read. Local sources place the bundle in gdl's workspace, where the
+    // images' context holds it and the crates it names by path.
     let scratch = tempfile::Builder::new()
         .prefix("gdl-k8s-")
         .tempdir()
         .map_err(io)?;
-    let (spec, bundle) = Bundle::prepare(&spec, scratch.path(), target, Sources::Fetched)?;
+    let out = match (sources, &spec.gdl) {
+        (Sources::Local, crate::spec::GdlDep::Path(runtime)) => {
+            super::context::image_bundle(runtime)?
+        }
+        _ => scratch.path().to_path_buf(),
+    };
+    let (spec, bundle) = Bundle::prepare(&spec, &out, target, sources)?;
     let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
     let checked = checked?;
     fleet

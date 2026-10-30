@@ -412,6 +412,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the render reads one fleet, and cannot see another fleet's names.
 - **Workaround:** give each fleet a namespace of its own (`[cluster.<name>] namespace`).
 
+### Under `--local`, a change to any copied file moves every image's tag
+- **What:** `k8s`, `images`, and `deploy` with `--local` build every image from one copy of gdl's workspace and of each crate the spec names by path, with each one's workspace, and tag each image with a sha256 of every byte of it. A change to any file in it, a document or another crate of the workspace included, moves every tag, so the next run builds and pushes every image again. In a Git checkout an untracked file that Git does not ignore is in the copy too.
+- **Why:** each image copies the whole tree into its build, as `compose --local` does, and a tag that covered less could name an image built from other sources.
+- **Workaround:** keep scratch files out of the workspace, or in a path the checkout's `.gitignore` names.
+- **Lifts:** a context of only the files each build reads.
+
 ### A fleet's DynamoDB Local is one pod in memory, pulled from Docker Hub
 - **What:** with `[directory] local = true`, `cargo gdl k8s` runs one DynamoDB Local, `amazon/dynamodb-local` by digest, which each cluster pulls from Docker Hub, not from its registry. It keeps the tables in memory: a new Local pod, after a restart or a move to another node, starts empty, with a new pod IP, which the other clusters' hubs still name. Its hubs then fail to publish until `cargo gdl deploy` runs again, which makes the tables again and writes the new IP.
 - **Why:** DynamoDB Local stands in for a global table in a trial or a proof, with no AWS account. A pod's IP is the one address of it that every cluster routes to without a load balancer.

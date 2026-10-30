@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::images::{Digests, Docker, images};
 use super::k8s::{self, label_value};
-use crate::{Error, Files, Spec};
+use crate::{Error, Files, Sources, Spec};
 
 mod kube;
 mod live;
@@ -54,6 +54,10 @@ pub struct Deploy {
     pub out: Option<PathBuf>,
     /// How long it waits for each thing it waits on.
     pub waits: Waits,
+    /// Where the images take gdl and the crates they build: with
+    /// [`Sources::Local`], from the spec's `[gdl] path` and its crates by
+    /// path, as they are on this machine.
+    pub sources: Sources,
 }
 
 /// How long `deploy` and `down` wait for what they wait on, and how often
@@ -139,10 +143,17 @@ pub fn deploy(
     }
     say("check: the spec, the fleet, and each cluster's context");
 
-    let built = images(&spec, &fleet, &how.target, true, docker)?;
+    let built = images(&spec, &fleet, &how.target, true, how.sources, docker)?;
     say(&format!("images: {} in their registries", built.len()));
 
-    let mut files = k8s::k8s_files(&spec, &fleet, &how.target, None, Some(&Digests::of(&built)))?;
+    let mut files = k8s::k8s_files(
+        &spec,
+        &fleet,
+        &how.target,
+        None,
+        Some(&Digests::of(&built)),
+        how.sources,
+    )?;
     let rendered = Rendered::of(&files, &clusters)?;
     unmoved(kube, &fleet, &clusters, &how.waits)?;
     // Every object this run applied, in any cluster, by its uid: none is

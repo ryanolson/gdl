@@ -99,7 +99,10 @@ fn read_dir(dir: &Path) -> Context {
             if path.is_dir() {
                 pending.push(path);
             } else {
-                let text = std::fs::read_to_string(&path).expect("a text file");
+                // A context of local sources can hold a file that is not
+                // text.
+                let bytes = std::fs::read(&path).expect("a file");
+                let text = String::from_utf8_lossy(&bytes).into_owned();
                 files.insert(path.strip_prefix(dir).expect("inside").to_path_buf(), text);
             }
         }
@@ -114,7 +117,25 @@ fn run(
     push: bool,
     docker: &mut Fake,
 ) -> Vec<gdl_gen::Built> {
-    gdl_gen::images(spec, fleet, &mirror.target(), push, docker).expect("images")
+    run_with(
+        spec,
+        fleet,
+        &mirror.target(),
+        push,
+        gdl_gen::Sources::Fetched,
+        docker,
+    )
+}
+
+fn run_with(
+    spec: &gdl_gen::Spec,
+    fleet: &gdl_model::Fleet,
+    target: &Path,
+    push: bool,
+    sources: gdl_gen::Sources,
+    docker: &mut Fake,
+) -> Vec<gdl_gen::Built> {
+    gdl_gen::images(spec, fleet, target, push, sources, docker).expect("images")
 }
 
 /// A reference's repository and tag: `<registry>/<repository>:<tag>`.
@@ -424,8 +445,15 @@ fn the_hub_has_one_tag_for_every_layout() {
         .collect();
     assert_eq!(hubs.len(), 1, "{hubs:?}");
     let digests = gdl_gen::Digests::of(&built);
-    let files =
-        gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), None, Some(&digests)).expect("objects");
+    let files = gdl_gen::k8s_files(
+        &spec,
+        &fleet,
+        &mirror.target(),
+        None,
+        Some(&digests),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("objects");
     let objects = objects(&files);
     let hub = |pool: &str| {
         container(&objects[&("Deployment".to_string(), pool.to_string())])["image"]
@@ -452,8 +480,15 @@ fn the_objects_name_the_pushed_digests() {
         .map(|image| (image.reference.as_str(), image.digest.as_str()))
         .collect();
     let images = |digests: Option<&gdl_gen::Digests>| -> BTreeSet<String> {
-        let files =
-            gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), None, digests).expect("objects");
+        let files = gdl_gen::k8s_files(
+            &spec,
+            &fleet,
+            &mirror.target(),
+            None,
+            digests,
+            gdl_gen::Sources::Fetched,
+        )
+        .expect("objects");
         objects(&files)
             .iter()
             .filter(|((kind, _), _)| kind == "Deployment")
@@ -492,8 +527,15 @@ fn an_image_missing_from_the_digests_is_refused() {
         .filter(|image| !image.reference.contains("/api-engine:"))
         .collect();
     let digests = gdl_gen::Digests::of(&kept);
-    let error = gdl_gen::k8s_files(&spec, &fleet, &mirror.target(), None, Some(&digests))
-        .expect_err("refused");
+    let error = gdl_gen::k8s_files(
+        &spec,
+        &fleet,
+        &mirror.target(),
+        None,
+        Some(&digests),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect_err("refused");
     let error = error.to_string();
     assert!(error.contains("/api-engine:"), "{error}");
     assert!(error.contains("cargo gdl images"), "{error}");
@@ -518,6 +560,7 @@ fn jemalloc_is_refused() {
         &fleet(&fleet_text()),
         &mirror.target(),
         true,
+        gdl_gen::Sources::Fetched,
         &mut docker,
     )
     .expect_err("refused")
@@ -535,9 +578,16 @@ fn a_platform_without_a_cross_build_is_refused() {
     let mirror = Mirror::new();
     let mut docker = Fake::default();
     let fleet = with_euw1("registry.example/gdl-eu", "linux/s390x");
-    let error = gdl_gen::images(&spec(&mirror), &fleet, &mirror.target(), true, &mut docker)
-        .expect_err("refused")
-        .to_string();
+    let error = gdl_gen::images(
+        &spec(&mirror),
+        &fleet,
+        &mirror.target(),
+        true,
+        gdl_gen::Sources::Fetched,
+        &mut docker,
+    )
+    .expect_err("refused")
+    .to_string();
     assert!(error.contains("linux/s390x"), "{error}");
     assert!(docker.calls.is_empty());
 }
@@ -618,8 +668,12 @@ fn the_directorys_cluster_gets_the_hubs_image_without_a_pool() {
         &mirror.target(),
         None,
         Some(&gdl_gen::Digests::of(&built)),
+        gdl_gen::Sources::Fetched,
     )
     .expect("objects");
     let job = &files[Path::new("use1/tables.yaml")];
     assert!(job.contains(&hub.0), "{job}");
 }
+
+#[path = "images/local.rs"]
+mod local;

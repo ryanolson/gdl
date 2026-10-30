@@ -39,6 +39,7 @@ fn aliases_prune_removed_objects_and_keep_applied_objects() {
         target: mirror.target(),
         out: None,
         waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
     };
     gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
         .expect("aliases permit a legitimate prune");
