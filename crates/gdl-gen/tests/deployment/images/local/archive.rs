@@ -131,7 +131,6 @@ fn a_cargo_source_cannot_resolve_from_an_absolute_host_directory() {
 /// Generating the bundle must not activate a link to unchecked host configuration.
 #[cfg(unix)]
 #[test]
-#[ignore = "F3: generating the bundle activates a dangling link outside the tree"]
 fn generating_the_bundle_cannot_activate_an_external_config_link() {
     struct Probe {
         config: String,
@@ -245,4 +244,46 @@ fn generating_the_bundle_cannot_activate_an_external_config_link() {
         bundle.is_ok(),
         docker.reads
     );
+}
+
+/// A link that is dangling until the bundle is generated, and then
+/// resolves outside the tree through the bundle's place, is refused by
+/// name: links are checked on the tree that is built, after generation.
+/// Here no Cargo configuration is involved: in `examples/api`, `deep/x`
+/// names the bundle's place, which does not exist until generation, and
+/// `notes.txt -> deep/x/../../../<host>/secret.txt` reads as within the
+/// tree.
+#[cfg(unix)]
+#[test]
+fn a_link_that_generation_activates_is_refused() {
+    let copy = Copy::new();
+    let host = tempfile::Builder::new()
+        .prefix("gdl-host-secret-")
+        .tempdir_in(copy.path().parent().expect("a parent"))
+        .expect("a host directory beside the sources");
+    std::fs::write(host.path().join("secret.txt"), "host-only\n").expect("a host file");
+    let api = copy.path().join("examples/api");
+    std::fs::create_dir(api.join("deep")).expect("a directory");
+    std::os::unix::fs::symlink("../../../target/gdl-images", api.join("deep/x"))
+        .expect("a link to the bundle's place");
+    let target = format!(
+        "deep/x/../../../{}/secret.txt",
+        host.path().file_name().expect("a name").to_string_lossy()
+    );
+    std::os::unix::fs::symlink(&target, api.join("notes.txt")).expect("a link");
+    assert!(
+        !api.join("notes.txt").exists(),
+        "dangling before generation"
+    );
+    copy.add();
+    for builder in Builder::ALL {
+        let error = builder
+            .contexts(&copy.spec())
+            .expect_err("a link that resolves outside the built tree")
+            .to_string();
+        assert!(
+            error.contains("examples/api/notes.txt"),
+            "{builder:?}: {error}"
+        );
+    }
 }

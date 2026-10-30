@@ -42,7 +42,6 @@ pub(super) fn build(
     for source in sources {
         unpack(dir, context, &source, &mut commits, &mut entries)?;
     }
-    links(dir, context, &entries)?;
     for (path, entry) in &entries {
         if entry.kind != Kind::Generated && path.file_name() == Some(OsStr::new("Cargo.toml")) {
             manifest(dir, context, path)?;
@@ -58,6 +57,10 @@ pub(super) fn build(
     let bundle = dir.join(context.bundle());
     crate::write(&bundle, files)
         .map_err(|e| Error::new(format!("{prefix}: writing the bundle: {e}")))?;
+    // A link that is dangling in the archive can resolve once the bundle
+    // is written: links are checked on the tree as built, before Cargo
+    // reads it, and again once it is complete, before any image uses it.
+    links(dir, context, &entries)?;
     for crate_dir in segments {
         let at = bundle.join(crate_dir);
         if let Some(lock) = &seed {
@@ -71,6 +74,7 @@ pub(super) fn build(
         super::locks::settle(&at, dir, &carried, context)?;
     }
     generated(&bundle, context.bundle(), &mut entries)?;
+    links(dir, context, &entries)?;
     Ok(digest(&entries))
 }
 
@@ -411,9 +415,11 @@ fn commit(context: &Context, top: &Path) -> Result<OsString, Error> {
 /// Refuse a link of the tree in `dir` that the file system resolves
 /// outside it. Each link's own target is within it, but a link can reach
 /// through another: in `a/b`, `x -> ../..` names the root, and `y ->
-/// x/../..` reads as `a`, but resolves two levels above the root. Cargo resolves the
-/// segments' locks in this tree, so it must not reach this machine's files
-/// through one.
+/// x/../..` reads as `a`, but resolves two levels above the root. A link
+/// that names nothing reads nothing; one that names a place the bundle
+/// makes resolves once it is written, so the check runs on the built tree.
+/// Cargo resolves the segments' locks in this tree, so it must not reach
+/// this machine's files through one.
 fn links(dir: &Path, context: &Context, entries: &BTreeMap<PathBuf, Entry>) -> Result<(), Error> {
     let root = dir.canonicalize().map_err(super::io)?;
     for (path, entry) in entries {
