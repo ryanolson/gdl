@@ -14,7 +14,7 @@ use gdl_pools::{LoadSummary, PoolProperty};
 use gdl_watch::{FollowEvent, Listing, PropertyList};
 use tokio::time::Instant;
 
-use super::super::Pools;
+use super::super::{Damping, Pools};
 use super::{M1, M2, follow, follower};
 use crate::dist::counting::{counted, counting};
 
@@ -97,6 +97,23 @@ fn handle(pools: &Pools) -> FollowedPools {
     let handle = FollowedPools::new();
     assert!(handle.bind(Arc::new(pools.clone())), "bound once");
     handle
+}
+
+/// A node reads the region the chooser's own pool runs in, the one its
+/// policies get as the request's region, from the handle bound to the
+/// chooser's tables: nothing before the bind.
+#[test]
+fn a_node_reads_the_choosers_region() {
+    let pools = Pools::new(
+        "us-east-1",
+        [("model_x", "f")],
+        Damping::default(),
+        gdl::PropertyKinds::new(),
+    );
+    let node = FollowedPools::new();
+    assert_eq!(node.region(), None, "not bound");
+    assert!(node.bind(Arc::new(pools.clone())), "bound once");
+    assert_eq!(node.region().as_deref(), Some("us-east-1"));
 }
 
 /// What a node reads of `property`: whether the index is synced, and each

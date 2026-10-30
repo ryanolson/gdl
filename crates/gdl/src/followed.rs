@@ -70,6 +70,26 @@ impl FollowedPools {
         Self::fixed_with_gone(pools, withdrawn, std::iter::empty::<(String, String)>())
     }
 
+    /// [`FollowedPools::fixed`], for a chooser whose own pool runs in
+    /// `region` ([`FollowedPools::region`]).
+    pub fn fixed_in<C, N>(
+        region: impl Into<Arc<str>>,
+        pools: impl IntoIterator<Item = Pool>,
+        withdrawn: impl IntoIterator<Item = (C, N)>,
+    ) -> Self
+    where
+        C: Into<String>,
+        N: Into<String>,
+    {
+        Self::fixed_tables(
+            Some(region.into()),
+            pools,
+            withdrawn,
+            std::iter::empty::<(String, String)>(),
+            std::iter::empty::<(String, PropertyIndexes)>(),
+        )
+    }
+
     /// [`FollowedPools::fixed`], with the pools named by class and name in
     /// `gone` held gone ([`ClassPools::is_gone`]), as a chooser holds a
     /// pool that declined its offer as gone. A name in `gone` that is not
@@ -110,6 +130,24 @@ impl FollowedPools {
         M: Into<String>,
         K: Into<String>,
     {
+        Self::fixed_tables(None, pools, withdrawn, gone, properties)
+    }
+
+    /// The handle bound to fixed tables, for a chooser in `region`, if any.
+    fn fixed_tables<C, N, G, M, K>(
+        region: Option<Arc<str>>,
+        pools: impl IntoIterator<Item = Pool>,
+        withdrawn: impl IntoIterator<Item = (C, N)>,
+        gone: impl IntoIterator<Item = (G, M)>,
+        properties: impl IntoIterator<Item = (K, PropertyIndexes)>,
+    ) -> Self
+    where
+        C: Into<String>,
+        N: Into<String>,
+        G: Into<String>,
+        M: Into<String>,
+        K: Into<String>,
+    {
         let mut classes: BTreeMap<String, (Vec<Pool>, Vec<Box<str>>)> = BTreeMap::new();
         for pool in pools {
             classes
@@ -137,30 +175,37 @@ impl FollowedPools {
         for class in properties.keys() {
             classes.entry(class.clone()).or_default();
         }
-        let fixed = Fixed(
-            classes
-                .into_iter()
-                .map(|(class, (mut pools, mut withdrawn))| {
-                    pools.sort_by(|a, b| a.name().cmp(b.name()));
-                    withdrawn.sort();
-                    withdrawn.dedup();
-                    let damped = pools
-                        .iter()
-                        .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
-                        .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
-                    let index = properties.remove(&class).unwrap_or_default();
-                    (class, (pools.into(), withdrawn.into(), damped, index))
-                })
-                .collect(),
-        );
+        let tables = classes
+            .into_iter()
+            .map(|(class, (mut pools, mut withdrawn))| {
+                pools.sort_by(|a, b| a.name().cmp(b.name()));
+                withdrawn.sort();
+                withdrawn.dedup();
+                let damped = pools
+                    .iter()
+                    .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
+                    .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
+                let index = properties.remove(&class).unwrap_or_default();
+                (class, (pools.into(), withdrawn.into(), damped, index))
+            })
+            .collect();
         let handle = Self::new();
-        handle.bind(Arc::new(fixed));
+        handle.bind(Arc::new(Fixed { tables, region }));
         handle
     }
 
     /// Whether the runtime has bound the handle to a chooser's tables.
     pub fn is_bound(&self) -> bool {
         self.source.get().is_some()
+    }
+
+    /// The region the chooser's own pool runs in, as the runtime resolved
+    /// it from the instance's `[pool]`: the one a pool policy gets as
+    /// [`PoolRequest::region`](crate::PoolRequest::region). `None` while
+    /// the handle is not bound, so a node that falls back to its own
+    /// setting does so only when the segment has no chooser to ask.
+    pub fn region(&self) -> Option<Arc<str>> {
+        self.source.get()?.region()
     }
 
     /// Read the pools of `class` as the chooser holds them now, with
@@ -259,6 +304,11 @@ pub trait PoolSource: Send + Sync + 'static {
     /// `entry` holds them, or as its one entry segment holds them when
     /// `entry` is `None`; or not at all when there is no such table.
     fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>));
+
+    /// The region the chooser's own pool runs in, if the source knows it.
+    fn region(&self) -> Option<Arc<str>> {
+        None
+    }
 }
 
 /// The pools of one class that a chooser follows, as one moment's table.
@@ -383,17 +433,24 @@ impl<'a> ClassPools<'a> {
 /// gone pools, and its property indexes.
 type Tables = BTreeMap<String, (Box<[Pool]>, Box<[Box<str>]>, Damped, PropertyIndexes)>;
 
-struct Fixed(Tables);
+struct Fixed {
+    tables: Tables,
+    region: Option<Arc<str>>,
+}
 
 impl PoolSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>)) {
-        if let Some((pools, withdrawn, damped, properties)) = self.0.get(class) {
+        if let Some((pools, withdrawn, damped, properties)) = self.tables.get(class) {
             read(
                 ClassPools::new(pools, withdrawn)
                     .with_damped(damped)
                     .with_properties(properties),
             );
         }
+    }
+
+    fn region(&self) -> Option<Arc<str>> {
+        self.region.clone()
     }
 }
 
@@ -410,9 +467,18 @@ mod tests {
         let segment = FollowedPools::new();
         let taken = segment.scope(async { FollowedPools::current() }).await;
         assert!(!taken.is_bound());
-        assert!(segment.bind(Arc::new(Fixed(Tables::new()))));
+        assert!(segment.bind(Arc::new(Fixed {
+            tables: Tables::new(),
+            region: None
+        })));
         assert!(taken.is_bound(), "another handle");
-        assert!(!segment.bind(Arc::new(Fixed(Tables::new()))), "bound twice");
+        assert!(
+            !segment.bind(Arc::new(Fixed {
+                tables: Tables::new(),
+                region: None
+            })),
+            "bound twice"
+        );
     }
 
     /// A node registers a kind on the handle it takes in its build, which
@@ -432,6 +498,25 @@ mod tests {
             .register(&TEST)
             .expect("outside a build, a handle of its own");
         assert_eq!(segment.kinds().changes(), before + 1);
+    }
+
+    /// A node reads the region of the chooser's own pool from its handle:
+    /// nothing before the runtime binds it, and for fixed tables made
+    /// without one.
+    #[test]
+    fn a_handle_reads_the_choosers_region() {
+        assert_eq!(FollowedPools::new().region(), None, "not bound");
+        let none = FollowedPools::fixed([], [("model_x", "m1")]);
+        assert!(none.is_bound());
+        assert_eq!(none.region(), None, "bound, with no region");
+        let pools = [Pool::new("model_x", "m1", "us-east-1", PoolState::Ready)];
+        let in_region = FollowedPools::fixed_in("eu-west-1", pools, [("model_x", "m2")]);
+        assert_eq!(in_region.region().as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            in_region.clone().region().as_deref(),
+            Some("eu-west-1"),
+            "a clone reads the same region"
+        );
     }
 
     /// Fixed tables read by class: each class's pools by name, and its

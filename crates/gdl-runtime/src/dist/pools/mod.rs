@@ -345,6 +345,10 @@ impl gdl::__runtime::PoolSource for Pools {
                 .with_properties(&table.properties),
         );
     }
+
+    fn region(&self) -> Option<Arc<str>> {
+        Some(Pools::region(self))
+    }
 }
 
 impl std::fmt::Debug for Pools {

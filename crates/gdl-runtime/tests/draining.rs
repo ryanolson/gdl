@@ -22,7 +22,9 @@ use common::boundary::{
     Model, ModelPool, RUNTIME, Running, ask, model_configured, model_of, model_proxied, placement,
     run_graph, spec_of,
 };
-use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
+use common::pools::{
+    REGION, Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until,
+};
 use common::proxy::Mode;
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use futures::StreamExt;
@@ -1492,8 +1494,14 @@ async fn a_node_reads_a_drained_pool_as_withdrawn_and_a_stopped_one_as_not() {
     let (hub, _global): (Hub, Arc<PoolReadiness<Resolving>>) =
         pool_hub_of(&spec, global_hub(), &directory).await;
     let node = FollowedPools::new();
+    assert_eq!(node.region(), None, "before the launch");
     let chooser = reading_chooser(&spec, &hub, &node).await;
     assert!(node.is_bound(), "the launch binds the handle");
+    assert_eq!(
+        node.region().as_deref(),
+        Some(REGION),
+        "the region of the chooser's `[pool]`"
+    );
     let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
     let pools = tables(&chooser);
     following(&pools, &[(M1, PoolState::Ready)]).await;
