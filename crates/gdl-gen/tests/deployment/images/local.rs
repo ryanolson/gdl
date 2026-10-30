@@ -13,6 +13,9 @@ use super::{Fake, run_with};
 use crate::common::root;
 use crate::{SEGMENTS, SPLIT};
 
+#[path = "local/boundary.rs"]
+mod boundary;
+
 /// A copy of the gdl workspace and the api example, with no build output.
 struct Copy {
     dir: tempfile::TempDir,
