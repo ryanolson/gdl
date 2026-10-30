@@ -1564,3 +1564,72 @@ impl gdl::Build for First {
         .expect_err("a pool policy's type, bound as a selector");
     assert!(wrong.contains("[selector.first]: "), "{wrong}");
 }
+
+#[test]
+#[ignore = "F10: a macro-defined NEEDS is read as the empty default"]
+fn check_does_not_treat_a_macro_defined_need_as_the_default() {
+    let source = r#"
+pub struct ByModel;
+
+macro_rules! property_needs {
+    () => {
+        const NEEDS: &'static [&'static str] = &["model"];
+    };
+}
+
+impl gdl::PoolPolicy for ByModel {
+    type Head = gdl::Encoded;
+    property_needs!();
+
+    fn choose(&self, _: gdl::PoolRequest<'_, gdl::Encoded>, _: &[gdl::Pool]) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
+    }
+}
+
+const _: () = assert!(<ByModel as gdl::PoolPolicy>::NEEDS.len() == 1);
+
+impl gdl::Build for ByModel {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+"#;
+    let expanded = router(&source.replace(
+        "    property_needs!();",
+        "    const NEEDS: &'static [&'static str] = &[\"model\"];",
+    ));
+    let explicit = gdl_gen::check(
+        &spec(expanded.path()),
+        &target("gdl-gen-tests"),
+        gdl_gen::Offers::Read,
+    )
+    .expect_err("an explicit need for an undeclared kind");
+    assert!(
+        explicit
+            .to_string()
+            .contains("which the graph does not declare"),
+        "{explicit}"
+    );
+
+    let generated = router(source);
+    let specification = spec(generated.path());
+    let checked = gdl_gen::check(
+        &specification,
+        &target("gdl-gen-tests"),
+        gdl_gen::Offers::Read,
+    )
+    .is_ok();
+    let rendered = gdl_gen::render(
+        &specification,
+        &generated.path().join("generated"),
+        &target("gdl-gen-tests"),
+    )
+    .is_ok();
+    assert!(
+        !checked && !rendered,
+        "check accepted: {checked}, generate accepted: {rendered}; the compiled policy's NEEDS is [model], although the graph declares no property kind"
+    );
+}
