@@ -781,7 +781,8 @@ fn down_drains_deletes_and_keeps_the_namespace() {
             "label",
             "namespace/gdl-api",
             "gdl.dev/fleet-",
-            "gdl.dev/cluster-"
+            "gdl.dev/cluster-",
+            "--request-timeout=5000ms"
         ]
     );
     // Segments go first, so that each hub outlives its instances.
@@ -802,7 +803,8 @@ fn down_drains_deletes_and_keeps_the_namespace() {
 
 /// No command line names a kubeconfig, a token, a user, a key, or a
 /// certificate, nor reads kubectl's configuration or any Secret; each
-/// names its context first; and nothing applied holds the fleet's secret.
+/// names its context first and its request timeout last; and nothing
+/// applied holds the fleet's secret.
 #[test]
 fn no_command_carries_a_credential() {
     let mirror = Mirror::new();
@@ -832,6 +834,13 @@ fn no_command_carries_a_credential() {
             continue;
         };
         assert_eq!(args[0], "--context", "{args:?}");
+        // Each command is bounded, so that one that hangs cannot outlive
+        // its step's wait.
+        assert!(
+            args.last()
+                .is_some_and(|a| a.starts_with("--request-timeout=")),
+            "{args:?}"
+        );
         assert!(
             ["kind-use1", "kind-euw1"].contains(&args[1].as_str()),
             "{args:?}"
@@ -869,3 +878,6 @@ mod aliases;
 
 #[path = "deploy/parent.rs"]
 mod parent;
+
+#[path = "deploy/deadline.rs"]
+mod deadline;

@@ -5,8 +5,9 @@
 //! a certificate, and none reads a Secret or kubectl's configuration: the
 //! user's own kube contexts reach each cluster.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::Error;
 
@@ -71,9 +72,38 @@ impl Reply {
     }
 }
 
-/// Runs the `kubectl` on the `PATH`.
+/// Runs the `kubectl` on the `PATH`. A command line that carries
+/// `--request-timeout=<n>ms`, as every one that `deploy` and `down` run
+/// does, is killed when that time and [`MARGIN`] have passed, so that a
+/// command that hangs before or after its requests still ends.
 #[derive(Debug, Default)]
 pub struct Kubectl;
+
+/// How long past its request timeout a `kubectl` may run before it is
+/// killed: time to start, and to print its own timeout.
+const MARGIN: Duration = Duration::from_millis(500);
+
+/// The shortest request timeout a command gets: a wait whose bound has all
+/// but run out still asks once.
+const SHORTEST: Duration = Duration::from_millis(100);
+
+/// `args` with a request timeout of `budget`, at least [`SHORTEST`]:
+/// kubectl ends each request it makes by then, and [`Kubectl`] kills it
+/// [`MARGIN`] later.
+pub(super) fn bounded(mut args: Vec<String>, budget: Duration) -> Vec<String> {
+    let budget = budget.max(SHORTEST);
+    args.push(format!("--request-timeout={}ms", budget.as_millis()));
+    args
+}
+
+/// The request timeout that `args` carry, as [`bounded`] writes it.
+fn request_timeout(args: &[String]) -> Option<Duration> {
+    args.iter().find_map(|arg| {
+        let value = arg.strip_prefix("--request-timeout=")?;
+        let millis = value.strip_suffix("ms")?.parse().ok()?;
+        Some(Duration::from_millis(millis))
+    })
+}
 
 impl Kube for Kubectl {
     fn run(&mut self, args: &[String], input: Option<&[u8]>) -> Result<Reply, Error> {
@@ -98,16 +128,46 @@ impl Kube for Kubectl {
             }
             _ => None,
         };
-        let output = child.wait_with_output().map_err(running)?;
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut text = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut text);
+                }
+                text
+            })
+        };
+        let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+        let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+        let deadline = request_timeout(args).map(|timeout| Instant::now() + timeout + MARGIN);
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(running)? {
+                break status;
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                let _ = child.kill();
+                let _ = child.wait();
+                // The readers are left to end with the pipes: a process the
+                // command started may still hold them.
+                return Ok(Reply::failed(format!(
+                    "`kubectl` did not end within its request timeout and {} ms, and was killed",
+                    MARGIN.as_millis()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         if let Some(writer) = writer {
             // A command that exits before it reads all its input breaks the
             // pipe; its own status says what went wrong.
             let _ = writer.join();
         }
+        let text = |reader: std::thread::JoinHandle<Vec<u8>>| {
+            String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
+        };
         Ok(Reply {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            success: status.success(),
+            stdout: text(stdout),
+            stderr: text(stderr),
         })
     }
 }

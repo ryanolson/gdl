@@ -37,7 +37,7 @@ impl Live {
     pub(super) fn list(text: &str) -> Result<Vec<Self>, Error> {
         let list: Value = serde_json::from_str(text)
             .map_err(|e| Error::new(format!("`kubectl` printed no JSON: {e}")))?;
-        if list["kind"] != "List" {
+        if list.get("items").is_none() {
             return Self::of(&list).map(|object| vec![object]);
         }
         list["items"]

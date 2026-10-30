@@ -24,7 +24,7 @@ use crate::{Error, Files, Spec};
 mod kube;
 mod live;
 
-use kube::{At, CONTROL, PUBLIC};
+use kube::{At, CONTROL, PUBLIC, bounded};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
 
@@ -115,7 +115,7 @@ pub fn deploy(
     let spec = Spec::load(&how.spec).map_err(|e| Error::from(e.in_file(how.spec.display())))?;
     let clusters = Clusters::of(&fleet)?;
     for cluster in &clusters.0 {
-        cluster.check(kube)?;
+        cluster.check(kube, how.waits.objects)?;
     }
     say("check: the spec, the fleet, and each cluster's context");
 
@@ -134,10 +134,11 @@ pub fn deploy(
 
     for cluster in &clusters.0 {
         let base = &rendered.0[&cluster.name];
-        applied.extend(apply(kube, cluster, &base.base)?);
+        applied.extend(apply(kube, cluster, &base.base, how.waits.objects)?);
         run(
             kube,
-            &cluster.at().namespace_active(how.waits.objects.as_secs()),
+            cluster.at().namespace_active(how.waits.objects.as_secs()),
+            how.waits.objects,
             None,
             "waiting for the namespace",
         )?;
@@ -150,13 +151,14 @@ pub fn deploy(
     // yet, so there is nothing to run.
 
     for cluster in &clusters.0 {
-        applied.extend(apply(kube, cluster, &rendered.0[&cluster.name].pools)?);
+        let pools = &rendered.0[&cluster.name].pools;
+        applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
     }
     say("apply: each cluster's pools");
 
     for cluster in &clusters.0 {
         let names = &rendered.0[&cluster.name].names;
-        let live = cluster.live(kube)?;
+        let live = cluster.live(kube, how.waits.objects)?;
         let pruned: Vec<&Live> = live
             .iter()
             .filter(|object| !names.contains(&(object.kind.clone(), object.name.clone())))
@@ -209,12 +211,13 @@ pub fn down(
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
     let clusters = Clusters::of(&fleet)?;
     for cluster in &clusters.0 {
-        let live = cluster.live(kube)?;
+        let live = cluster.live(kube, waits.objects)?;
         let all: Vec<&Live> = live.iter().collect();
         stop(kube, cluster, &all, waits, say)?;
         run(
             kube,
-            &cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
+            cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
+            waits.objects,
             None,
             "removing the fleet's labels from the namespace",
         )?;
@@ -288,8 +291,8 @@ impl Cluster {
 
     /// Refuse a cluster whose context cannot be reached, or may not create
     /// Deployments in its namespace.
-    fn check(&self, kube: &mut dyn Kube) -> Result<(), Error> {
-        let reply = kube.run(&self.at().can_i(), None)?;
+    fn check(&self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
+        let reply = kube.run(&bounded(self.at().can_i(), budget), None)?;
         match reply.stdout.trim() {
             "yes" => Ok(()),
             "no" => Err(Error::new(format!(
@@ -306,10 +309,11 @@ impl Cluster {
     }
 
     /// The fleet's objects in the cluster's namespace.
-    fn live(&self, kube: &mut dyn Kube) -> Result<Vec<Live>, Error> {
+    fn live(&self, kube: &mut dyn Kube, budget: Duration) -> Result<Vec<Live>, Error> {
         let reply = run(
             kube,
-            &self.at().list(&self.selector),
+            self.at().list(&self.selector),
+            budget,
             None,
             "listing the fleet's objects",
         )?;
@@ -365,15 +369,17 @@ impl Rendered {
     }
 }
 
-/// Run `args`, refused with `what` and kubectl's own words unless it
-/// succeeds.
+/// Run `args`, bounded by `budget`, refused with `what` and kubectl's own
+/// words unless it succeeds.
 fn run(
     kube: &mut dyn Kube,
-    args: &[String],
+    args: Vec<String>,
+    budget: Duration,
     input: Option<&[u8]>,
     what: &str,
 ) -> Result<Reply, Error> {
-    let reply = kube.run(args, input)?;
+    let args = bounded(args, budget);
+    let reply = kube.run(&args, input)?;
     if !reply.success {
         return Err(Error::new(format!(
             "{what}: `kubectl {}` failed: {}",
@@ -386,9 +392,15 @@ fn run(
 
 /// Apply `objects`, a YAML stream, to `cluster`, server-side: the uid of
 /// each object applied.
-fn apply(kube: &mut dyn Kube, cluster: &Cluster, objects: &str) -> Result<Vec<String>, Error> {
+fn apply(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    objects: &str,
+    budget: Duration,
+) -> Result<Vec<String>, Error> {
     let what = format!("applying to cluster `{}`", cluster.name);
-    let reply = run(kube, &cluster.at().apply(), Some(objects.as_bytes()), &what)?;
+    let input = Some(objects.as_bytes());
+    let reply = run(kube, cluster.at().apply(), budget, input, &what)?;
     let applied = Live::list(&reply.stdout).map_err(|e| Error::new(format!("{what}: {e}")))?;
     Ok(applied.into_iter().map(|object| object.uid).collect())
 }
@@ -409,7 +421,8 @@ fn stop(
     for pool in &draining {
         run(
             kube,
-            &at.post(&pool.pool, CONTROL, DRAIN),
+            at.post(&pool.pool, CONTROL, DRAIN),
+            waits.objects,
             Some(b""),
             &format!("draining pool `{}`", pool.pool),
         )?;
@@ -443,7 +456,8 @@ fn stop(
         }
         run(
             kube,
-            &at.delete(&batch, seconds),
+            at.delete(&batch, seconds),
+            Duration::from_secs(seconds),
             None,
             &format!("deleting from cluster `{}`", cluster.name),
         )?;
@@ -471,7 +485,8 @@ fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) ->
         ))
     };
     loop {
-        let reply = kube.run(&args, None)?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        let reply = kube.run(&bounded(args.clone(), left), None)?;
         if reply.proxied_not_found() {
             return Ok(());
         }
@@ -501,10 +516,9 @@ fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> 
         let mut still = Vec::new();
         for entry in waiting {
             let (cluster, pool) = entry;
-            if !kube
-                .run(&cluster.at().get(pool, PUBLIC, HEALTH), None)?
-                .success
-            {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let args = bounded(cluster.at().get(pool, PUBLIC, HEALTH), left);
+            if !kube.run(&args, None)?.success {
                 still.push(entry);
             }
         }
@@ -520,7 +534,7 @@ fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> 
             );
             for (cluster, pool) in waiting {
                 message.push_str(&format!("\n- pool `{pool}` in cluster `{}`", cluster.name));
-                for line in why_not_ready(kube, cluster, pool)? {
+                for line in why_not_ready(kube, cluster, pool, waits.objects)? {
                     message.push_str(&format!("\n  {line}"));
                 }
             }
@@ -533,12 +547,23 @@ fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> 
 /// The pods of `pool` that are not ready, each with why its containers
 /// wait and its latest events: these name a missing Secret or image, and
 /// no Secret is read.
-fn why_not_ready(kube: &mut dyn Kube, cluster: &Cluster, pool: &str) -> Result<Vec<String>, Error> {
+fn why_not_ready(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    pool: &str,
+    budget: Duration,
+) -> Result<Vec<String>, Error> {
     /// The events shown for each pod: the latest.
     const EVENTS: usize = 5;
     let selector = format!("{},gdl.dev/pool={}", cluster.selector, label_value(pool));
     let at = cluster.at();
-    let reply = run(kube, &at.pods(&selector), None, "listing the pool's pods")?;
+    let reply = run(
+        kube,
+        at.pods(&selector),
+        budget,
+        None,
+        "listing the pool's pods",
+    )?;
     let pods: Value = serde_json::from_str(&reply.stdout)
         .map_err(|e| Error::new(format!("`kubectl get pods` printed no JSON list: {e}")))?;
     let mut lines = Vec::new();
@@ -572,7 +597,13 @@ fn why_not_ready(kube: &mut dyn Kube, cluster: &Cluster, pool: &str) -> Result<V
             }
         }
         lines.push(line);
-        let reply = run(kube, &at.events(name), None, "listing the pod's events")?;
+        let reply = run(
+            kube,
+            at.events(name),
+            budget,
+            None,
+            "listing the pod's events",
+        )?;
         let events: Value = serde_json::from_str(&reply.stdout)
             .map_err(|e| Error::new(format!("`kubectl get events` printed no JSON list: {e}")))?;
         let events = events["items"].as_array().cloned().unwrap_or_default();
