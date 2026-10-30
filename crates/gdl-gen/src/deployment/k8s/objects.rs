@@ -574,11 +574,21 @@ pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
 }
 
 /// The name of `fleet`'s PodMonitor in cluster `cluster`: one of its own
-/// for each cluster, since two clusters' contexts can reach one namespace,
-/// where one name would hold only the last cluster's selector. Fitted to a
-/// label's length as a label's value is ([`label_value`]).
+/// for each pair, since two clusters' contexts, or two fleets' clusters,
+/// can reach one namespace, where one name would hold only the last one's
+/// selector. `<fleet>-<cluster>` alone is not one of its own: fleet `api`
+/// with cluster `use1-east` and fleet `api-use1` with cluster `east` would
+/// share it, as would a fitted name and a name that spells its hash. So it
+/// is a readable start, `<fleet>-<cluster>` cut to fit, `-`, and always 10
+/// hex digits of a hash of the pair with the fleet's length before it,
+/// which no other pair spells: at most 63 characters.
 pub(super) fn pod_monitor_name(fleet: &str, cluster: &str) -> String {
-    label_value(&format!("{fleet}-{cluster}"))
+    let start: String = format!("{fleet}-{cluster}")
+        .chars()
+        .take(LABEL_PREFIX)
+        .collect();
+    let hash = format!("{:016x}", fnv(&format!("{}:{fleet}{cluster}", fleet.len())));
+    format!("{}-{}", start.trim_end_matches('-'), &hash[..10])
 }
 
 /// A Kubernetes label's key as Prometheus' discovery names it: each
@@ -875,7 +885,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
     text.push_str("\nEvery pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations.");
     if fleet.metrics().pod_monitor {
-        text.push_str(&format!(" Each `base.yaml` also holds PodMonitor `{name}-<cluster>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
+        text.push_str(&format!(" Each `base.yaml` also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
     }
     text.push('\n');
     text.push_str(&super::dynamodb::readme(fleet));

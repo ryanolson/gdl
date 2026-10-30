@@ -20,4 +20,4 @@ Before its pods start, namespace `gdl-api` of cluster `use1` must hold: Secret `
 
 Each image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.
 
-Every pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations. Each `base.yaml` also holds PodMonitor `api-<cluster>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs.
+Every pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations. Each `base.yaml` also holds a PodMonitor `api-<cluster>-<hash>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs.

@@ -32,7 +32,7 @@
       "gdl.dev/cluster": "euw1",
       "gdl.dev/fleet": "api"
     },
-    "name": "api-euw1",
+    "name": "api-euw1-b8113a657a",
     "namespace": "gdl-api"
   },
   "spec": {

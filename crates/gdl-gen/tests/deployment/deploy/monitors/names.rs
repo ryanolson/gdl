@@ -65,7 +65,6 @@ fn a_long_cluster_and_a_short_cluster_keep_their_monitors() {
 }
 
 #[test]
-#[ignore = "F5: a short cluster name replaces another cluster's fitted PodMonitor"]
 fn a_short_name_cannot_replace_a_fitted_pod_monitor() {
     // Both names are valid cluster names; the shorter one matches a fitted suffix.
     assert_clusters(
@@ -136,7 +135,6 @@ fn two_fleets_keep_their_monitors_in_one_namespace() {
 }
 
 #[test]
-#[ignore = "F5: fleet and cluster names share a PodMonitor across two fleets"]
 fn fleet_and_cluster_boundaries_cannot_replace_another_fleets_monitor() {
     assert_fleets("use1-east");
 }

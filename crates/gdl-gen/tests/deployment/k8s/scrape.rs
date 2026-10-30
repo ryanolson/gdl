@@ -91,7 +91,21 @@ fn every_pod_says_where_it_serves_its_metrics() {
 fn a_fleet_that_asks_gets_a_pod_monitor_in_each_cluster() {
     let objects = rendered(&monitored(true));
     for cluster in ["use1", "euw1"] {
-        let monitor = &objects[&("PodMonitor".into(), format!("{cluster}/api-{cluster}"))];
+        let monitors: Vec<&Value> = objects
+            .iter()
+            .filter(|((kind, name), _)| {
+                kind == "PodMonitor" && name.starts_with(&format!("{cluster}/"))
+            })
+            .map(|(_, monitor)| monitor)
+            .collect();
+        assert_eq!(monitors.len(), 1, "{cluster}");
+        let monitor = monitors[0];
+        let name = monitor["metadata"]["name"].as_str().expect("a name");
+        assert!(
+            name.starts_with(&format!("api-{cluster}-"))
+                && name.len() == format!("api-{cluster}-").len() + 10,
+            "{name}"
+        );
         assert_eq!(monitor["apiVersion"], "monitoring.coreos.com/v1");
         assert_eq!(monitor["metadata"]["namespace"], "gdl-api");
         assert_eq!(monitor["metadata"]["labels"]["gdl.dev/fleet"], "api");

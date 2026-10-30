@@ -42,17 +42,25 @@ fn a_pod_monitor_is_applied_where_asked_and_down_deletes_it() {
     let log = Log::default();
     let mut kube = Kube::new(&log);
     deploy(&mirror, &files, &mut docker(&log), &mut kube).expect("deploy");
+    // Each cluster's PodMonitor, by its name, which selects that cluster.
+    let monitor = |kube: &Kube, context: &str, cluster: &str| {
+        kube.objects[context]
+            .iter()
+            .find(|((kind, _), object)| {
+                kind == "PodMonitor"
+                    && object["spec"]["selector"]["matchLabels"]["gdl.dev/cluster"] == cluster
+            })
+            .map(|((_, name), _)| name.clone())
+    };
+    let mut names = BTreeMap::new();
     for (context, cluster) in [("kind-use1", "use1"), ("kind-euw1", "euw1")] {
-        let name = format!("api-{cluster}");
-        assert!(
-            kube.objects[context].contains_key(&("PodMonitor".into(), name)),
-            "{context}"
-        );
+        let name = monitor(&kube, context, cluster).unwrap_or_else(|| panic!("{context}"));
+        names.insert(context, name);
     }
     assert!(steps(&log).contains(&"kind-use1:crds".to_string()));
     down(&files, &mut kube).expect("down");
-    for (context, cluster) in [("kind-use1", "use1"), ("kind-euw1", "euw1")] {
-        let name = format!("api-{cluster}");
+    for context in ["kind-use1", "kind-euw1"] {
+        let name = names[context].clone();
         let deleted: Vec<String> = deletes(&log, context).into_iter().flatten().collect();
         assert!(
             deleted.contains(&format!("podmonitors.monitoring.coreos.com/{name}")),
