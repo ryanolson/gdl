@@ -747,7 +747,7 @@ fn a_shared_pool_is_every_parents_child_and_refused_under_relay() {
     assert_eq!(
         problems(SHARED),
         [
-            "[pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`"
+            "[pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; without a `[directory]` table a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`, or give the fleet a DynamoDB `[directory]`"
         ]
     );
     let pool = fleet(SHARED).pool("model-x-shared").expect("a pool");
@@ -873,4 +873,20 @@ fn a_directory_table_is_checked_at_its_keys() {
             "{unreadable}"
         );
     }
+}
+
+/// A fleet whose pools publish to a DynamoDB directory, which every hub
+/// reads, takes a shared pool: each pool of its parents' class finds it
+/// there. Without the `[directory]` table it is refused, as above.
+#[test]
+fn a_shared_pool_is_taken_under_a_dynamodb_directory() {
+    let text = format!(
+        "{SHARED}[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\n"
+    );
+    fleet(&text)
+        .check(Some(&laid()))
+        .expect("a shared pool under dynamodb");
+    let pool = fleet(&text).pool("model-x-shared").expect("a pool");
+    assert_eq!(pool.parent, Some(Parent::Class("global".into())));
+    assert!(matches!(pool.directory, DirectoryBackend::DynamoDb { .. }));
 }

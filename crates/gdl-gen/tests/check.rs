@@ -605,7 +605,7 @@ fn check_names_a_shared_pool_that_relay_refuses() {
     let files = Files::new(&spec(""), fleet);
     let f = files.fleet().display().to_string();
     let expected = [format!(
-        "{f}: [pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`"
+        "{f}: [pool.model-x-shared] parents: every pool of class `global` follows a shared pool, so it needs a directory each of their hubs reads; without a `[directory]` table a fleet's pools publish through `relay`"
     )];
     let check = files.check();
     assert_eq!(check.status.code(), Some(1), "{check:?}");

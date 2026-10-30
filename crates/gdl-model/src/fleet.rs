@@ -339,7 +339,9 @@ impl Fleet {
                 },
             }
             errors.extend(self.home_problem(name, pool, laid.as_ref()));
-            if let Some(parents) = &pool.parents {
+            // Under the fleet's DynamoDB directory every parent's hub reads
+            // every record, so a shared pool is found by each.
+            if let (Some(parents), None) = (&pool.parents, &self.directory) {
                 errors.push(FleetError::SharedUnderRelay {
                     pool: name.clone(),
                     parents: parents.clone(),

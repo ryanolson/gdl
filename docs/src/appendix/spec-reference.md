@@ -115,7 +115,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 | `[pool.<name>] region` | the pool's region | its cluster's, and required without a cluster |
 | `[pool.<name>] layout` | the spec layout the pool runs | the only layout, when there is one; required otherwise |
 | `[pool.<name>] home` | the parent pool | this or `parents` is required for a class that another class sends to; refused otherwise |
-| `[pool.<name>] parents` | in place of `home`, the parent class: every pool of it follows this pool | none; refused while the fleet's pools publish through `relay` |
+| `[pool.<name>] parents` | in place of `home`, the parent class: every pool of it follows this pool | none; refused without a `[directory]` table, while the fleet's pools publish through `relay` |
 | `[pool.<name>] ready` | overrides the class's quorum for a segment | the class's, else 1 |
 | `[directory] backend` | where every pool's hub publishes its record: `dynamodb`, the one value. Without the table, each child's hub reports to its parent's (`relay`) | no table |
 | `[directory] records_table`, `lists_table` | the DynamoDB tables' names: 3 to 255 letters, digits, `_`, `-`, and `.` | required |
@@ -132,7 +132,7 @@ The fleet file lists a deployment's pools. It is not part of the placement's ide
 - `cargo gdl k8s` requires `[fleet] name`, a `cluster` for every pool, and a `registry` and `platform` for every cluster. It refuses an `env` key that names a static AWS credential (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CONTAINER_AUTHORIZATION_TOKEN`), an `env` key that is `GDL_POD_IP`, `GDL_POOL`, or `GDL_HUB`, or starts with `GDL_POOL__` or `GDL_HUB__`, in any case, and a child in another cluster than its parent. See [Deploy a fleet on Kubernetes](../guides/kubernetes.md).
 - `cargo gdl compose` reads only a cluster's region. A fleet whose pools take their regions from clusters writes the same bundle as one whose pools write the same regions.
 - A `home` names a pool of a parent class that runs the same layout. A `parents` names a class that sends to the pool's class in its layout. A pool names one of the two. Every pool whose class sends to another class needs a child of each class it sends to, in its layout: a pool whose `home` it is, or whose `parents` is its class.
-- A fleet's pools publish through `relay`, so `check` refuses a pool with `parents`.
+- Without a `[directory]` table a fleet's pools publish through `relay`, so `check` refuses a pool with `parents`. With one, every parent's hub reads every record, and `check` takes it.
 - A `ready` key must be a segment of the class, and a count is at least 1.
 - A `[class.<name>]` table applies to the class's pools in every layout with the class, and is checked against each.
 - With `[directory]`, each pool's settings name the `dynamodb` backend, with the pool's `region` as `aws_region`. A Compose bundle adds the endpoint of its DynamoDB Local.

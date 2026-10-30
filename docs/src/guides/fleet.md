@@ -47,7 +47,7 @@ home = "global-us"
 ready = { engine = 2 }            # overrides the class default
 ```
 
-`home` names one parent pool. A pool can instead write `parents = "global"`: then every pool of class `global` follows it and offers it work. A fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so `check` refuses `parents` ([Limitations](../operations/limitations.md#a-fleet-cannot-deploy-a-shared-pool)).
+`home` names one parent pool. A pool can instead write `parents = "global"`: then every pool of class `global` follows it and offers it work. Without a `[directory]` table, a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so `check` refuses `parents`. With a DynamoDB `[directory]` ([below](#use-the-dynamodb-directory)), it takes them ([Limitations](../operations/limitations.md#a-fleet-deploys-a-shared-pool-only-with-a-dynamodb-directory)).
 
 `requires = { model_x = 1 }` in `[class.global]` sets how many `ready` children the global pool's health needs (1 of each class by default). A pool needs `layout = "<name>"` when the spec has several layouts. Every key is in [Spec and fleet reference](../appendix/spec-reference.md).
 

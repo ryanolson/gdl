@@ -553,7 +553,7 @@ impl FleetError {
                 pool(name),
                 key("parents"),
                 format!(
-                    "every pool of class `{parents}` follows a shared pool, so it needs a directory each of their hubs reads; a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`"
+                    "every pool of class `{parents}` follows a shared pool, so it needs a directory each of their hubs reads; without a `[directory]` table a fleet's pools publish through `relay`, where a pool reports its record to one parent's hub: name the pool's parent with `home`, or give the fleet a DynamoDB `[directory]`"
                 ),
             ),
             Self::HomeNotParent {

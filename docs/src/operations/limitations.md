@@ -558,9 +558,9 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 ### A pool's settings without a fleet file are not checked against the other pools
 - **What:** a fleet file refuses a pool of a class that is sent to without a `home` or `parents`, a `home` that names no pool or a pool of a class that does not send to this one, a `parents` that names a class that does not send to this one, both on one pool, either on a pool of a class nothing sends to, and a parent without a child of each class its class sends to. It cannot judge a parent's children in a layout whose classes it does not know, and says so. Pool settings given without a fleet file are not checked: a pool of a class that is sent to with no `home`, or with a `home` that names no pool, is followed by no hub and never chosen. A hub publishes no `home` for a pool of a class nothing sends to.  A hub follows its children only. Region plays no part in following, and no round trip is measured.
 
-### A fleet cannot deploy a shared pool
-- **What:** `cargo gdl check` and `compose` refuse a pool that names `parents`. A fleet's pools publish through `relay`, where a pool reports its record to one parent's hub, so the other parents would never find it. A hub that publishes through `relay` refuses such a pool too.
-- **Workaround:** give each child pool a `home`. Or run the shared pool and its parents with settings of your own under `dir`, or with a directory the hub's program gives it ([The pool directory](../concepts/pools.md#the-pool-directory)).
+### A fleet deploys a shared pool only with a DynamoDB directory
+- **What:** without a `[directory]` table, `cargo gdl check` and `compose` refuse a pool that names `parents`. A fleet's pools then publish through `relay`, where a pool reports its record to one parent's hub, so the other parents would never find it. A hub that publishes through `relay` refuses such a pool too. With a DynamoDB `[directory]`, every parent's hub reads every record, and the shared pool is taken.
+- **Workaround:** give the fleet a `[directory]` table ([Use the DynamoDB directory](../guides/fleet.md#use-the-dynamodb-directory)), or give each child pool a `home`.
 
 ### A parent of an earlier build does not follow a shared pool
 - **What:** a hub built before `parents` reads a shared pool's record with no parent, so it never follows the pool or offers it work. It fails closed: no request reaches the pool through that hub.

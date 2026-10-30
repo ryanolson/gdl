@@ -246,3 +246,37 @@ fn the_tables_step_reads_a_quoted_table_name_as_the_fleet_gives_it() {
     };
     assert_eq!(records_table, "123");
 }
+
+/// A shared pool, which every global pool follows, composes under the
+/// DynamoDB directory: its hub publishes to the tables with its parents'
+/// class, and names no parent's hub.
+#[test]
+fn a_shared_pool_composes_under_the_dynamodb_directory() {
+    let mirror = Mirror::new();
+    let spec = placed(&mirror, SPLIT);
+    let fleet = gdl_model::Fleet::from_toml(&format!(
+        "[class.model_x]\nready = {{ engine = 1 }}\n\
+         [pool.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+         [pool.global-eu]\nclass = \"global\"\nregion = \"eu-west-1\"\n\
+         [pool.model-x-shared]\nclass = \"model_x\"\nregion = \"eu-west-1\"\nparents = \"global\"\n{DIRECTORY}"
+    ))
+    .expect("a fleet");
+    let (files, compose) = fleet_bundle(&mirror, &spec, &fleet);
+    let deployment: gdl_model::DeploymentSpec =
+        serde_json::from_str(&files[Path::new("deployment.json")]).expect("the hub's spec");
+    let env = compose["services"]["model-x-shared"]["environment"]
+        .as_object()
+        .expect("the hub's variables");
+    assert!(env.get("GDL_POOL__PARENT_HUB").is_none(), "{env:?}");
+    let vars = env
+        .iter()
+        .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
+    let read = gdl_hub::pool_from_vars(&deployment, vars)
+        .expect("the hub reads its settings")
+        .expect("a pool");
+    assert_eq!(read.parent, Some(gdl_model::Parent::Class("global".into())));
+    assert!(matches!(
+        read.directory,
+        gdl_model::DirectoryBackend::DynamoDb { .. }
+    ));
+}
