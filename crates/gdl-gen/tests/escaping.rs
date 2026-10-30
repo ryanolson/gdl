@@ -103,6 +103,22 @@ fn a_context_with_template_syntax_builds_or_is_refused_before_writing() {
             &root().join("examples/http"),
             &checkout.join("examples/http"),
         );
+        // `--local` builds what Git holds: the copy is a checkout.
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"][..],
+            &["commit", "-q", "-m", "copy"][..],
+        ] {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["-c", "user.name=gdl", "-c", "user.email=gdl@localhost"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        }
         let spec = gdl_gen::Spec::load(&checkout.join("examples/http/gdl.toml")).expect("the spec");
         let out = checkout.join("target/bundle");
         let context = match gdl_gen::compose(
@@ -120,8 +136,8 @@ fn a_context_with_template_syntax_builds_or_is_refused_before_writing() {
                 continue;
             }
         };
-        assert_eq!(context, checkout);
-        let dockerfile = out.join("hub/Dockerfile");
+        assert_eq!(context, out.join("context"));
+        let dockerfile = hub_dockerfile(&out);
         let generated = std::fs::read_to_string(&dockerfile).expect("the generated Dockerfile");
         let copy = generated
             .lines()
@@ -198,7 +214,7 @@ fn a_fetched_bundle_with_non_utf8_ancestry_builds_or_is_refused_before_writing()
                 continue;
             }
         }
-        let dockerfile = out.join("hub/Dockerfile");
+        let dockerfile = hub_dockerfile(&out);
         let generated = std::fs::read_to_string(&dockerfile).expect("the generated Dockerfile");
         let copy = generated
             .lines()
@@ -297,53 +313,35 @@ fn a_bundle_under_a_git_directory_builds_or_is_refused_before_writing() {
                 continue;
             }
         };
-        let staging = tempfile::Builder::new()
-            .prefix("gdl-ignore-context-")
-            .tempdir()
-            .expect("a minimal context");
-        let exported = tempfile::Builder::new()
-            .prefix("gdl-ignore-export-")
-            .tempdir()
-            .expect("the exported image");
-        let relative = out
-            .strip_prefix(&context)
-            .expect("the bundle is in its context");
-        let source = staging.path().join(relative).join("deployment.json");
-        std::fs::create_dir_all(source.parent().expect("a parent")).expect("the source directory");
-        let settings = std::fs::read(out.join("deployment.json")).expect("the generated settings");
-        std::fs::write(source, &settings).expect("the settings in the minimal context");
-        let generated =
-            std::fs::read_to_string(out.join("hub/Dockerfile")).expect("the generated Dockerfile");
-        let copy = generated
-            .lines()
-            .find(|line| line.starts_with("COPY ["))
-            .expect("the settings copy");
-        std::fs::write(
-            staging.path().join("Dockerfile"),
-            format!("FROM scratch\n{copy}\n"),
-        )
-        .expect("the settings copy probe");
-        std::fs::copy(
-            out.join("hub/Dockerfile.dockerignore"),
-            staging.path().join("Dockerfile.dockerignore"),
-        )
-        .expect("the generated ignore file");
-        let build = Command::new("timeout")
-            .args(["30", "docker", "build", "--network=none", "--output"])
-            .arg(format!("type=local,dest={}", exported.path().display()))
-            .arg(staging.path())
-            .output()
-            .expect("docker build");
+        assert_eq!(context, out.join("context"));
+        let project = format!("gdl-review-git-dir-{}", std::process::id());
+        let built = build_settings(&out, &project);
         assert!(
-            build.status.success(),
-            "accepted {name:?}, but the generated ignore file prevents its settings COPY:\n{}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        assert_eq!(
-            std::fs::read(exported.path().join("etc/gdl/config")).expect("the copied settings"),
-            settings
+            built.status.success(),
+            "accepted {name:?}, but Compose cannot build it:\n{}",
+            String::from_utf8_lossy(&built.stderr)
         );
     }
+}
+
+/// The hub's Dockerfile in the bundle in `out`, where `compose.yaml` names
+/// it: in the bundle, or, for a bundle of local sources, in its tree.
+fn hub_dockerfile(out: &std::path::Path) -> std::path::PathBuf {
+    let compose: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("compose.yaml")).expect("compose.yaml"),
+    )
+    .expect("the Compose configuration");
+    let build = &compose["services"]["hub"]["build"];
+    let unescape = |field: &str| build[field].as_str().expect(field).replace("$$", "$");
+    out.join(unescape("context")).join(unescape("dockerfile"))
+}
+
+/// The hub's settings in the bundle in `out`, beside its Dockerfile's
+/// directory.
+fn hub_settings(out: &std::path::Path) -> std::path::PathBuf {
+    let dockerfile = hub_dockerfile(out);
+    let bundle = dockerfile.parent().and_then(std::path::Path::parent);
+    bundle.expect("the bundle").join("deployment.json")
 }
 
 fn build_settings(out: &std::path::Path, project: &str) -> std::process::Output {
@@ -356,7 +354,7 @@ fn build_settings(out: &std::path::Path, project: &str) -> std::process::Output 
         }
     }
 
-    let dockerfile = out.join("hub/Dockerfile");
+    let dockerfile = hub_dockerfile(out);
     let generated = std::fs::read_to_string(&dockerfile).expect("the generated Dockerfile");
     let copy = generated
         .lines()
@@ -419,7 +417,7 @@ fn build_settings(out: &std::path::Path, project: &str) -> std::process::Output 
     if copied.status.success() {
         assert_eq!(
             std::fs::read(destination).expect("the copied settings"),
-            std::fs::read(out.join("deployment.json")).expect("the generated settings")
+            std::fs::read(hub_settings(out)).expect("the generated settings")
         );
     }
     copied
@@ -735,7 +733,7 @@ fn a_long_bundle_basename_builds_or_is_refused_before_writing() {
                 assert!(error.to_string().starts_with("Compose output"), "{error}");
                 continue;
             }
-            let dockerfile = out.join("hub/Dockerfile");
+            let dockerfile = hub_dockerfile(&out);
             let generated = std::fs::read_to_string(&dockerfile).expect("the generated Dockerfile");
             let copy = generated
                 .lines()
@@ -877,7 +875,7 @@ fn a_bundle_with_project_separators_builds_or_is_refused_before_writing() {
                 assert!(error.to_string().starts_with("Compose output"), "{error}");
                 continue;
             }
-            let dockerfile = out.join("hub/Dockerfile");
+            let dockerfile = hub_dockerfile(&out);
             let generated = std::fs::read_to_string(&dockerfile).expect("the generated Dockerfile");
             let copy = generated
                 .lines()

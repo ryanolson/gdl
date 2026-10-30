@@ -464,7 +464,8 @@ impl Context {
 }
 
 /// `path` as a Docker path pattern that matches only `path`, for a `COPY`
-/// source or an ignore file. Docker matches a component that holds a `*`,
+/// source: the bundle's place in its tree holds the names of the
+/// directories between the sources' root and gdl's workspace. Docker matches a component that holds a `*`,
 /// `?`, or `[` as a Go regular expression built from it, which keeps
 /// `^`, `+`, `(`, `)`, `{`, `}`, and `|` as regex syntax. It reads a
 /// leading `!` as a negation and trims whitespace at the ends of a
@@ -489,7 +490,7 @@ pub(super) fn pattern(path: &str) -> String {
 
 /// Refuse `path`, which `what` names, when a bundle's files cannot name
 /// it: when it is not UTF-8, which the files are, or holds a line break,
-/// which ends a line of a Dockerfile or an ignore file.
+/// which ends a line of a Dockerfile.
 fn writable(what: &str, path: &Path) -> Result<(), Error> {
     let shown = format!("{:?}", path.as_os_str());
     let Some(text) = path.to_str() else {
@@ -499,7 +500,7 @@ fn writable(what: &str, path: &Path) -> Result<(), Error> {
     };
     if text.contains(['\n', '\r']) {
         return Err(Error::new(format!(
-            "`--local`: {what} from its build context, {shown}, holds a line break, which a Dockerfile or an ignore file cannot name; choose a directory without one"
+            "`--local`: {what} from its build context, {shown}, holds a line break, which a Dockerfile cannot name; choose a directory without one"
         )));
     }
     Ok(())
@@ -510,7 +511,7 @@ fn writable(what: &str, path: &Path) -> Result<(), Error> {
 fn shared_only_the_root(root: &Path, needed: &BTreeSet<PathBuf>) -> Error {
     let paths: Vec<String> = needed.iter().map(|p| display(p)).collect();
     Error::new(format!(
-        "`--local`: the build context would be `{}`: the bundle and the crates it builds from by path share no other directory; write the bundle into a directory beside them, such as `target/` of their repository ({})",
+        "`--local`: the build context would be `{}`: gdl's workspace and the crates the images build from by path share no other directory; keep them under one directory, such as beside each other ({})",
         display(root),
         paths.join(", ")
     ))
@@ -957,7 +958,22 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    use super::{Patch, patch_key, source_id, tables};
+    use super::{Patch, patch_key, pattern, source_id, tables};
+
+    /// Each character Docker reads as pattern or regex syntax in a `COPY`
+    /// source becomes a class of that one escaped character, whitespace a
+    /// class of itself, and every other character stays.
+    #[test]
+    fn a_pattern_matches_only_its_path() {
+        assert_eq!(
+            pattern("./target/gdl-images/a.toml"),
+            "./target/gdl-images/a.toml"
+        );
+        assert_eq!(
+            pattern(r" a$[b]*?\^!+(c){d}|é"),
+            r"[ ]a$[\[]b[\]][\*][\?][\\][\^][\!][\+][\(]c[\)][\{]d[\}][\|]é"
+        );
+    }
 
     /// A host workspace at `workspace` patching `name` from `key` with
     /// `value`, its path absolute, as [`super::workspace_patches`] reads it.
