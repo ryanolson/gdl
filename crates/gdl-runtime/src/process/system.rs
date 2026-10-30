@@ -162,6 +162,10 @@ pub(crate) struct Health {
     /// then `/metrics` answers with no metrics, not an error, which a
     /// scrape would take for a target that is down.
     registry: OnceLock<prometheus::Registry>,
+    /// How long a scrape may take before it is answered with 503.
+    scrape_limit: Duration,
+    /// One permit: the scrape whose gather runs.
+    scrapes: Arc<tokio::sync::Semaphore>,
 }
 
 impl Health {
@@ -170,6 +174,8 @@ impl Health {
             phase: AtomicU8::new(Phase::Starting as u8),
             started: Instant::now(),
             registry: OnceLock::new(),
+            scrape_limit: SCRAPE_LIMIT,
+            scrapes: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -184,14 +190,43 @@ impl Health {
         self.registry.set(registry).is_ok()
     }
 
-    /// The metrics in Prometheus's text format, or why they cannot be
-    /// encoded.
-    fn metrics(&self) -> std::result::Result<String, prometheus::Error> {
-        let mut text = String::new();
-        if let Some(registry) = self.registry.get() {
-            prometheus::TextEncoder::new().encode_utf8(&registry.gather(), &mut text)?;
+    /// The status code and body of a scrape: the metrics in Prometheus's
+    /// text format, or why there are none.
+    ///
+    /// A node's `ScrapeGaugeVec` runs its closure inside the gather, so
+    /// the gather runs on a blocking thread, where it holds up no probe,
+    /// and one at a time, so a closure that never returns holds one
+    /// thread. A scrape past `scrape_limit` is answered with 503.
+    async fn scrape(&self) -> (u16, String) {
+        let Some(registry) = self.registry.get().cloned() else {
+            return (200, String::new());
+        };
+        let gather = async {
+            let permit = Arc::clone(&self.scrapes)
+                .acquire_owned()
+                .await
+                .expect("the scrape semaphore is never closed");
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let mut text = String::new();
+                prometheus::TextEncoder::new()
+                    .encode_utf8(&registry.gather(), &mut text)
+                    .map(|()| text)
+            })
+            .await
+        };
+        match tokio::time::timeout(self.scrape_limit, gather).await {
+            Ok(Ok(Ok(text))) => (200, text),
+            Ok(Ok(Err(error))) => (500, error.to_string()),
+            Ok(Err(_)) => (500, "a metric's closure panicked".into()),
+            Err(_) => (
+                503,
+                format!(
+                    "the scrape took longer than {} ms",
+                    self.scrape_limit.as_millis()
+                ),
+            ),
         }
-        Ok(text)
     }
 
     pub(crate) fn phase(&self) -> Phase {
@@ -234,6 +269,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most of a refused request read and dropped before closing.
 const DRAIN_LIMIT: usize = 64 << 10;
+
+/// How long a scrape may take: a node's closures run inside it.
+/// Prometheus gives up on a scrape after 10 s by default.
+const SCRAPE_LIMIT: Duration = Duration::from_secs(5);
 
 /// How long the listener waits after an accept fails.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
@@ -328,10 +367,10 @@ async fn answer(
             let (ready, body) = health.body();
             (if ready { 200 } else { 503 }, JSON, body)
         }
-        ("GET", METRICS_PATH) => match health.metrics() {
-            Ok(text) => (200, prometheus::TEXT_FORMAT, text),
-            Err(error) => (500, prometheus::TEXT_FORMAT, error.to_string()),
-        },
+        ("GET", METRICS_PATH) => {
+            let (code, body) = health.scrape().await;
+            (code, prometheus::TEXT_FORMAT, body)
+        }
         ("GET", _) => (404, JSON, "{}".into()),
         _ => (405, JSON, "{}".into()),
     };
@@ -440,3 +479,6 @@ fn invalid(message: impl Into<String>) -> Error {
 fn unhealthy(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Transport, message)
 }
+
+#[cfg(test)]
+mod tests;

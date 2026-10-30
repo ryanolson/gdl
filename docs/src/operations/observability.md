@@ -53,6 +53,8 @@ The registry holds:
 - the runtime's figures for each segment a request passes through;
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
+The listener gathers the registry on a blocking thread, one scrape at a time, so a node's `ScrapeGaugeVec` closure holds up no probe. A scrape that takes longer than 5 s is answered with 503 and the reason. A scrape that comes while another still runs waits for it, within the same 5 s. A closure that panics is answered with 500.
+
 The identity labels are applied when the registry gathers, in a hash map's order. Parse the text in tests. Do not compare it as a string.
 
 A segment binary records the runtime's figures only while its listener is on: with no listener, nobody can read them. A node's own metrics are still built and counted. A program that embeds a segment turns recording on by setting `RuntimeConfig::metrics`.

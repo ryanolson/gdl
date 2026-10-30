@@ -20,6 +20,11 @@ use super::{Construct, labels, opts};
 /// there, with [`fill_with`](Self::fill_with). Each scrape runs the closure
 /// once, on an empty vector. A request never runs it.
 ///
+/// Keep the closure fast. The system listener runs it on a blocking
+/// thread, one scrape at a time, and answers a scrape that takes longer
+/// than 5 s with 503. It must not await, and may take a `blocking_read`
+/// of a tokio lock.
+///
 /// ```
 /// use std::sync::Arc;
 /// use std::sync::atomic::{AtomicU32, Ordering};
