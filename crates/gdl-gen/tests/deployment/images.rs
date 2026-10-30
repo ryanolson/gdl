@@ -587,3 +587,39 @@ fn a_dynamodb_fleets_hub_is_built_with_its_feature() {
     };
     assert_eq!(segments(&relay), segments(&dynamodb));
 }
+
+/// A cluster that runs the DynamoDB directory's Local and tables Job, but
+/// no pool, still gets the hub's image, which the Job runs, built for its
+/// platform and pushed to its registry; the objects name that image.
+#[test]
+fn the_directorys_cluster_gets_the_hubs_image_without_a_pool() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let text = fleet_text().replace("cluster = \"use1\"", "cluster = \"euw1\"")
+        + "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\nlocal = true\ncluster = \"use1\"\n";
+    let fleet = fleet(&text);
+    assert!(
+        fleet
+            .pools()
+            .all(|pool| fleet.cluster_of(&pool.name).map(|(name, _)| name) == Some("euw1"))
+    );
+    let mut docker = Fake::default();
+    let built = run(&mirror, &spec, &fleet, true, &mut docker);
+    let hub = docker
+        .builds()
+        .into_iter()
+        .find(|(reference, _, _)| reference.starts_with("registry.example/gdl/api-hub:"))
+        .map(|(reference, platform, push)| (reference.to_string(), platform.to_string(), push))
+        .expect("the hub's image in the directory's cluster");
+    assert_eq!((hub.1.as_str(), hub.2), ("linux/amd64", true));
+    let files = gdl_gen::k8s_files(
+        &spec,
+        &fleet,
+        &mirror.target(),
+        None,
+        Some(&gdl_gen::Digests::of(&built)),
+    )
+    .expect("objects");
+    let job = &files[Path::new("use1/tables.yaml")];
+    assert!(job.contains(&hub.0), "{job}");
+}

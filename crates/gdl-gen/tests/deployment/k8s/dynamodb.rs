@@ -45,7 +45,8 @@ fn a_dynamodb_fleets_objects_are_pinned() {
 }
 
 #[test]
-#[ignore = "F2: the tables Job has no hub image when its cluster hosts no pools"]
+/// The directory may run in a cluster that runs no pool: its tables Job
+/// still has the hub's image there, by the default tag as by `--tag`.
 fn a_directory_can_run_in_a_cluster_without_pools() {
     let mirror = Mirror::new();
     let mut text: toml::Value = toml::from_str(&dynamodb_text()).expect("the fleet");

@@ -230,10 +230,7 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
     // By registry, repository, and platform: two clusters that share a
     // registry and a platform share each image.
     let mut images = BTreeMap::new();
-    let mut add = |pool: &PoolSettings, repository: &str, context: &Rc<Files>| {
-        let (_, cluster) = fleet
-            .cluster_of(&pool.name)
-            .expect("Prepared requires every pool's cluster");
+    let mut add = |cluster: &gdl_model::Cluster, repository: &str, context: &Rc<Files>| {
         let registry = cluster.registry.clone().unwrap_or_default();
         let platform = cluster.platform.clone().unwrap_or_default();
         images
@@ -257,7 +254,10 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
             .iter()
             .filter(|pool| pool.layout.as_deref().unwrap_or(laid.name) == laid.name)
         {
-            add(pool, &hub_repository, &hub);
+            let (_, cluster) = fleet
+                .cluster_of(&pool.name)
+                .expect("Prepared requires every pool's cluster");
+            add(cluster, &hub_repository, &hub);
             for (segment, _) in laid.placement.segments() {
                 if layout.class_of(segment) != Some(pool.class.as_str()) {
                     continue;
@@ -267,9 +267,19 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
                     Rc::new(segment_context(bundle, &laid.dir().join(segment), &package))
                 });
                 let context = Rc::clone(context);
-                add(pool, &laid.package(graph, segment), &context);
+                add(cluster, &laid.package(graph, segment), &context);
             }
         }
+    }
+    // The DynamoDB directory's tables Job runs the hub's image in the
+    // directory's cluster, which may run no pool.
+    if let Some(cluster) = fleet
+        .directory()
+        .filter(|directory| directory.local)
+        .and_then(|directory| directory.cluster.as_deref())
+        .and_then(|name| fleet.cluster(name))
+    {
+        add(cluster, &hub_repository, &hub);
     }
     let mut images: Vec<Image> = images.into_values().collect();
     images.sort_by_key(Image::reference);
