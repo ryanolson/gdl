@@ -455,6 +455,9 @@ impl Local {
                 None => std::fs::copy(context.root().join(&path), &to).map(drop),
             };
             copied.map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
+            if link.is_none() && path.file_name().is_some_and(|name| name == "Cargo.toml") {
+                relocate(context.root(), &path, &to)?;
+            }
         }
         let bundle = context.bundle().to_path_buf();
         let mut files: Files = prepared
@@ -639,6 +642,76 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, Error> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Rewrite the copy at `copy` of the manifest at `path`, from the context's
+/// `root`, so that each `path` it names absolutely, a path dependency's
+/// say, is named from the manifest's place in the copied tree: in the
+/// image the host's path does not exist, and on this machine Cargo would
+/// resolve the host's source rather than the copy. A path outside the
+/// context is refused, naming the manifest.
+fn relocate(root: &Path, path: &Path, copy: &Path) -> Result<(), Error> {
+    let text = std::fs::read_to_string(copy)
+        .map_err(|e| Error::new(format!("`--local`: {}: {e}", path.display())))?;
+    let Ok(mut manifest) = text.parse::<toml::Table>() else {
+        // Cargo refuses it in the build, with its own words.
+        return Ok(());
+    };
+    let here = Path::new("/").join(path.parent().unwrap_or(Path::new("")));
+    let mut outside = None;
+    let changed = relocate_paths(
+        &mut manifest,
+        &mut |named: &Path| match named.strip_prefix(root) {
+            Ok(inside) => Some(crate::paths::relative(&here, &Path::new("/").join(inside))),
+            Err(_) => {
+                outside.get_or_insert_with(|| named.to_path_buf());
+                None
+            }
+        },
+    );
+    if let Some(named) = outside {
+        return Err(Error::new(format!(
+            "`--local`: {} names {} by its absolute path, outside the sources the images copy, so no image can build it: name it by a relative path, from within the sources",
+            path.display(),
+            named.display()
+        )));
+    }
+    if changed {
+        let text = toml::to_string(&manifest).map_err(io)?;
+        std::fs::write(copy, text).map_err(io)?;
+    }
+    Ok(())
+}
+
+/// Replace each absolute `path` string in `table`, at any depth, with what
+/// `relative` gives for it, when it gives one: whether any changed.
+fn relocate_paths(
+    table: &mut toml::Table,
+    relative: &mut dyn FnMut(&Path) -> Option<PathBuf>,
+) -> bool {
+    let mut changed = false;
+    for (key, value) in table.iter_mut() {
+        match value {
+            toml::Value::String(text)
+                if key == "path" && Path::new(text.as_str()).is_absolute() =>
+            {
+                if let Some(path) = relative(Path::new(text.as_str())) {
+                    *text = crate::paths::display(&path);
+                    changed = true;
+                }
+            }
+            toml::Value::Table(inner) => changed |= relocate_paths(inner, relative),
+            toml::Value::Array(items) => {
+                for item in items {
+                    if let toml::Value::Table(inner) = item {
+                        changed |= relocate_paths(inner, relative);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 /// Each file and link under `dir`, at `from` joined with its path there.

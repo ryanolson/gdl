@@ -57,8 +57,10 @@ impl gdl_gen::Docker for Isolated<'_> {
     }
 }
 
+/// A copied manifest that names a dependency by an absolute path names it
+/// within the copied tree: Cargo resolves the segment with the host's
+/// source hidden.
 #[test]
-#[ignore = "F4: copied dependency manifests retain absolute paths to host sources"]
 fn copied_manifests_resolve_without_the_host_sources() {
     let copy = Copy::new();
     let api = copy.path().join("examples/api");
