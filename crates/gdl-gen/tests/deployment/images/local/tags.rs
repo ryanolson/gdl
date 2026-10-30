@@ -1,9 +1,9 @@
 use super::*;
 
-#[test]
 /// A change to a spec outside the copied sources changes the generated
 /// Rust, which the tag covers with every byte the image builds from: the
 /// changed image is pushed again.
+#[test]
 fn an_external_spec_change_moves_the_generated_images_tag() {
     let copy = Copy::new();
     let deployment = tempfile::Builder::new()

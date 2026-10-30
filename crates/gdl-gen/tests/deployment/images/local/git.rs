@@ -1,9 +1,9 @@
 use super::*;
 
-#[test]
 /// A Git checkout that Git refuses to list, here for its ownership, stops
 /// the build with Git's error: nothing falls back to a plain copy, which
 /// would admit what the checkout ignores.
+#[test]
 fn a_git_error_does_not_admit_ignored_credentials() {
     if std::env::var_os("GDL_REVIEW_GIT_WORKER").is_none() {
         let output = std::process::Command::new("timeout")

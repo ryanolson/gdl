@@ -12,10 +12,10 @@ fn tracked(copy: &Copy) {
     }
 }
 
-#[cfg(unix)]
-#[test]
 /// A link to a file outside the copied tree is never followed: no byte of
 /// its target reaches a context, and the build is refused, naming it.
+#[cfg(unix)]
+#[test]
 fn external_symlinks_do_not_copy_host_credentials() {
     let copy = Copy::new();
     tracked(&copy);
@@ -52,10 +52,10 @@ fn external_symlinks_do_not_copy_host_credentials() {
     }
 }
 
-#[test]
 /// A crate named by path below a hidden directory of its checkout: its
 /// tracked sources are copied, but no untracked file below that directory,
 /// since hidden is judged from the checkout's root, not the crate's.
+#[test]
 fn a_hidden_crate_directory_does_not_admit_untracked_credentials() {
     let copy = Copy::new();
     let dir = copy.path().join("examples/.private");
