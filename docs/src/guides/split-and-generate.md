@@ -17,11 +17,16 @@ This guide takes a graph from a spec to checked, generated segment crates and bu
 | `diagram --spec <gdl.toml> --format dot\|mermaid` | Draws the placed graph. Takes a spec of one layout. | stdout |
 | `export --spec <gdl.toml> --out <file.tar.gz>` | Writes the generated crates as one archive with `build-all.sh`. Takes a spec of one layout. | the archive |
 | `compose --spec <gdl.toml> --out <dir> [--fleet <fleet.toml>] [--local]` | Writes a Docker Compose bundle. A spec with classes or several layouts needs `--fleet`. With `--local`, the images build local sources, and the bundle builds only on this machine. | `--out` |
+| `k8s --spec <gdl.toml> --fleet <fleet.toml> --out <dir> [--tag <tag>] [--images <images.json>]` | Writes a fleet's Kubernetes objects, one directory per cluster. Needs no Docker and no cluster. | `--out` |
+| `images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>]` | Builds the fleet's images for each cluster's platform. With `--push`, pushes them and writes their digests to `--out`. | the image store or the registries, and `--out` |
+| `deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <dir>]` | Runs `check`, `images --push`, and `k8s`, applies the objects to each cluster, prunes what the fleet no longer places, and waits for each pool's health. | the clusters, and `--out` |
+| `down --fleet <fleet.toml> [--spec <gdl.toml>]` | Drains each pool that has a parent, and deletes every object with the fleet's label. Keeps each namespace. With `--spec`, checks the spec and the fleet first. | the clusters |
 
 Every command that builds or fetches takes `--target-dir <dir>`. The default is `$CARGO_TARGET_DIR`, else `target` beside the spec (or beside the crate, for `extract`). Each command exits non-zero on a problem.
 
 - [The catalogue](../concepts/catalogue.md) covers `extract` and `catalog`.
 - [Deploy with Docker Compose](compose-deploy.md) and [Deploy a fleet of pools](fleet.md) cover `compose`.
+- [Deploy a fleet on Kubernetes](kubernetes.md) covers `k8s`, `images`, `deploy`, and `down`.
 
 ## Write the spec
 

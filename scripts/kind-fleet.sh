@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# Deploy a fleet to a kind cluster with `cargo gdl deploy`, change it, and take it down with `cargo gdl down`,
+# outside the default suite. It runs the real kubectl against a cluster of its own. It needs Docker with buildx,
+# kubectl, network access for the image builds (crates.io, GitHub, and Debian's packages), and kind.
+#
+# It starts a `registry:2` on a free loopback port and a kind cluster that pulls from it, each with a name of its
+# own, and writes the api example's spec in two classes and a fleet of one global pool and two model pools. From a
+# cluster with no fleet namespace, it checks that:
+#   - `deploy` builds and pushes the images, applies the objects, and waits until each pool's health answers 200;
+#   - the global pool's health answers 200 through the API server's service proxy, and a request through
+#     `kubectl port-forward` is answered;
+#   - a second `deploy`, with one model pool removed from the fleet, drains that pool, which withdraws: its parent's
+#     hub no longer holds its record. Its objects are deleted, and the other pools' Deployments and pods are left
+#     as they were;
+#   - after `down`, no object with the fleet's label is left, and the namespace stays.
+#
+#   INSTALL_TOOLS=1 bash scripts/kind-fleet.sh      # first downloads the pinned kind into TOOLS_DIR
+#   bash scripts/kind-fleet.sh
+#
+# TOOLS_DIR holds kind (default: .k8s-tools at the repository's root, which git ignores). TIMEOUT bounds each
+# `cargo gdl` run in seconds (default 1800: the first deploy builds three release binaries with fat LTO). The images
+# are built for the host's platform, which the kind node runs. On exit it stops the port-forward, deletes the
+# cluster and the registry, and removes the scratch directory. It never reads or changes ~/.kube/config: the
+# cluster's kubeconfig is in the scratch directory.
+set -euo pipefail
+
+KIND_VERSION="0.33.0"
+# The kind release's node image of Kubernetes 1.35, by the digest the release names.
+NODE_IMAGE="kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0"
+# registry 2.8.3, by the digest of its multi-architecture index.
+REGISTRY_IMAGE="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+TIMEOUT="${TIMEOUT:-1800}"
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${root}"
+target="${CARGO_TARGET_DIR:-${root}/target}"
+tools="${TOOLS_DIR:-${root}/.k8s-tools}"
+
+fail() {
+  echo "kind-fleet.sh: $*" >&2
+  exit 1
+}
+
+case "$(uname -m)" in
+  x86_64) arch=amd64 sha=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d ;;
+  aarch64 | arm64) arch=arm64 sha=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2 ;;
+  *) fail "no pinned kind for $(uname -m)" ;;
+esac
+if [[ "${INSTALL_TOOLS:-0}" == "1" ]]; then
+  mkdir -p "${tools}/bin"
+  download="$(mktemp -d)"
+  trap 'rm -rf "${download}"' EXIT
+  curl -sSfL -o "${download}/kind" \
+    "https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-linux-${arch}"
+  echo "${sha}  ${download}/kind" | sha256sum -c --quiet -
+  install -m 755 "${download}/kind" "${tools}/bin/kind"
+  rm -rf "${download}"
+  trap - EXIT
+fi
+kind="${tools}/bin/kind"
+[[ -x "${kind}" ]] || fail "${kind} is missing; run with INSTALL_TOOLS=1"
+"${kind}" version | grep -q "v${KIND_VERSION} " || fail "${kind} is not kind ${KIND_VERSION}"
+command -v kubectl >/dev/null || fail "kubectl is not on the PATH"
+
+cargo build -p gdl-gen --bin cargo-gdl
+gdl=("${target}/debug/cargo-gdl" gdl)
+
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/gdl-kind-fleet-XXXXXX")"
+name="gdl-kind-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+registry_container=""
+forward=""
+cleanup() {
+  if [[ -n "${forward}" ]]; then
+    kill "${forward}" 2>/dev/null || true
+  fi
+  "${kind}" delete cluster --name "${name}" --kubeconfig "${scratch}/kubeconfig" >/dev/null 2>&1 || true
+  if [[ -n "${registry_container}" ]]; then
+    docker rm -f "${registry_container}" >/dev/null || true
+  fi
+  rm -rf "${scratch}"
+}
+trap cleanup EXIT
+
+# containerd reads a registry's hosts from certs.d: the nodes pull `localhost:<port>` from the registry's container
+# on kind's network, and the host pushes to it on loopback.
+cat >"${scratch}/kind.yaml" <<'EOF'
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+EOF
+echo "kind-fleet.sh: creating kind cluster ${name}"
+timeout 600 "${kind}" create cluster --name "${name}" --kubeconfig "${scratch}/kubeconfig" \
+  --config "${scratch}/kind.yaml" --image "${NODE_IMAGE}" --wait 300s
+# Started on kind's network, which kind made: connecting a running container to a network gives its published port
+# another host port.
+registry_container="$(docker run --detach --name "${name}-registry" --network kind --publish 127.0.0.1::5000 \
+  "${REGISTRY_IMAGE}")"
+port="$(docker port "${registry_container}" 5000/tcp | head -n 1 | sed 's/.*://')"
+registry="localhost:${port}"
+for _ in $(seq 1 100); do
+  if curl -sf -o /dev/null "http://${registry}/v2/"; then
+    break
+  fi
+  sleep 0.1
+done
+curl -sf -o /dev/null "http://${registry}/v2/" || fail "the registry at ${registry} does not answer"
+for node in $("${kind}" get nodes --name "${name}"); do
+  docker exec "${node}" mkdir -p "/etc/containerd/certs.d/${registry}"
+  printf '[host."http://%s:5000"]\n' "${name}-registry" \
+    | docker exec -i "${node}" cp /dev/stdin "/etc/containerd/certs.d/${registry}/hosts.toml"
+done
+export KUBECONFIG="${scratch}/kubeconfig"
+context="kind-${name}"
+k() {
+  timeout 60 kubectl --context "${context}" "$@"
+}
+# A route of a pool's hub's public listener, through the API server's service proxy.
+hub() {
+  k get --raw "/api/v1/namespaces/gdl-api/services/http:$1:public/proxy$2"
+}
+
+if k get namespace gdl-api >/dev/null 2>&1; then
+  fail "the new cluster already has namespace gdl-api"
+fi
+
+# The api example in two classes. The frontend listens on every interface, so that a port-forward reaches it, and
+# each segment drains within 20 s.
+sed "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" examples/api/deploy.toml >"${scratch}/gdl.toml"
+grep -q "^path = \"${root}/examples/api/api.gdl\"" "${scratch}/gdl.toml" || fail "examples/api/deploy.toml names no api.gdl"
+cat >>"${scratch}/gdl.toml" <<'EOF'
+[class.global]
+segments = ["front"]
+[class.model]
+segments = ["engine"]
+[deployment.segment.front]
+ports = ["8080"]
+[deployment.segment.front.config.frontend]
+listen = "0.0.0.0:8080"
+[deployment.segment.front.config.runtime]
+drain_ms = 20000
+[deployment.segment.engine.config.runtime]
+drain_ms = 20000
+EOF
+cat >"${scratch}/fleet.toml" <<EOF
+[fleet]
+name = "api"
+
+[cluster.kind]
+context = "${context}"
+namespace = "gdl-api"
+region = "local"
+registry = "${registry}/gdl"
+platform = "linux/${arch}"
+
+[class.global]
+ready = { front = 1 }
+[class.model]
+ready = { engine = 1 }
+
+[pool.global]
+class = "global"
+cluster = "kind"
+
+[pool.model-a]
+class = "model"
+cluster = "kind"
+home = "global"
+EOF
+cp "${scratch}/fleet.toml" "${scratch}/smaller.toml"
+cat >>"${scratch}/fleet.toml" <<'EOF'
+
+[pool.model-b]
+class = "model"
+cluster = "kind"
+home = "global"
+EOF
+
+run() {
+  local step="$1"
+  shift
+  echo "kind-fleet.sh: cargo gdl ${step}"
+  timeout "${TIMEOUT}" "${gdl[@]}" "${step}" "$@" 2>"${scratch}/${step}.err" \
+    || { grep -v '^#\|^ ' "${scratch}/${step}.err" | tail -n 40 >&2; fail "cargo gdl ${step} failed"; }
+  grep '^cargo gdl: ' "${scratch}/${step}.err" || true
+}
+
+run deploy --spec "${scratch}/gdl.toml" --fleet "${scratch}/fleet.toml" --target-dir "${target}"
+hub global /v1/ext/gdl-pool/health >/dev/null || fail "the global pool's health does not answer 200"
+for pool in model-a model-b; do
+  hub global "/v1/ext/gdl-pool/report/model/${pool}" >/dev/null || fail "the global pool's hub does not hold ${pool}"
+done
+echo "kind-fleet.sh: every pool is healthy, and the global pool holds both model pools"
+
+# A request through a port-forward of the global pool's entry Service.
+k --namespace gdl-api port-forward service/global-front :8080 >"${scratch}/forward.out" 2>&1 &
+forward=$!
+for _ in $(seq 1 100); do
+  grep -q '^Forwarding from 127.0.0.1:' "${scratch}/forward.out" && break
+  sleep 0.1
+done
+local_port="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) .*/\1/p' "${scratch}/forward.out" | head -n 1)"
+[[ -n "${local_port}" ]] || fail "the port-forward did not start: $(cat "${scratch}/forward.out")"
+answer="$(curl -sS -m 30 -X POST -H 'content-type: application/json' -d '{"messages":["chat words"]}' \
+  "http://127.0.0.1:${local_port}/v1/chat/completions")"
+[[ "${answer}" == $'{"delta":"chat"}\n{"delta":"words"}' ]] || fail "the request through the port-forward got: ${answer}"
+kill "${forward}"
+forward=""
+echo "kind-fleet.sh: a request through the port-forward is answered"
+
+# What a second deploy must leave alone: the other pools' Deployments (uid and generation) and pods (uid).
+kept() {
+  k --namespace gdl-api get deployments,pods --selector 'gdl.dev/pool in (global,model-a)' \
+    --output jsonpath='{range .items[*]}{.kind}/{.metadata.name} {.metadata.uid} {.metadata.generation}{"\n"}{end}' \
+    | sort
+}
+before="$(kept)"
+[[ "$(grep -c '^Pod/' <<<"${before}")" -eq 4 ]] || fail "expected 4 pods of global and model-a, got:
+${before}"
+
+run deploy --spec "${scratch}/gdl.toml" --fleet "${scratch}/smaller.toml" --target-dir "${target}"
+grep -q "pool \`model-b\` has withdrawn" "${scratch}/deploy.err" || fail "the second deploy did not drain model-b"
+if hub global /v1/ext/gdl-pool/report/model/model-b >/dev/null 2>"${scratch}/held.err"; then
+  fail "the global pool's hub still holds model-b: it did not withdraw"
+fi
+grep -q '(NotFound)' "${scratch}/held.err" || fail "reading model-b's record failed: $(cat "${scratch}/held.err")"
+left="$(k --namespace gdl-api get deployments,services,configmaps,pods --selector gdl.dev/pool=model-b --output name)"
+[[ -z "${left}" ]] || fail "model-b's objects are left: ${left}"
+[[ "$(kept)" == "${before}" ]] || fail "the second deploy changed the other pools:
+before:
+${before}
+after:
+$(kept)"
+hub global /v1/ext/gdl-pool/health >/dev/null || fail "the global pool's health does not answer 200 after model-b left"
+echo "kind-fleet.sh: model-b drained, withdrew, and was deleted; global and model-a are as they were"
+
+run down --spec "${scratch}/gdl.toml" --fleet "${scratch}/smaller.toml" --target-dir "${target}"
+labelled="$(k get namespaces,serviceaccounts,configmaps,persistentvolumeclaims,services,deployments,replicasets,pods \
+  --all-namespaces --selector gdl.dev/fleet=api --output name)"
+[[ -z "${labelled}" ]] || fail "objects with the fleet's label are left: ${labelled}"
+k get namespace gdl-api >/dev/null || fail "down deleted the namespace"
+echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays"
+echo "kind-fleet.sh: passed"

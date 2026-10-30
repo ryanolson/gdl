@@ -1,0 +1,559 @@
+//! `cargo gdl deploy` and `cargo gdl down`: a fleet applied to its
+//! clusters, and taken off them, through `kubectl` and the kube contexts
+//! the user already has. See `docs/src/guides/kubernetes.md`.
+//!
+//! `deploy` runs its steps in order and stops at the first failure: check,
+//! images (pushed), objects (rendered by the pushed digests), base objects,
+//! tables, apply, prune, and the wait for each pool's health. kubectl
+//! refuses `--prune` together with server-side apply, so the prune is
+//! `deploy`'s own: it deletes the objects labelled with the fleet that
+//! this deploy did not render, after it drains each pool it removes.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use gdl_model::Fleet;
+use serde_json::Value;
+
+use super::images::{Digests, Docker, images};
+use super::k8s::{self, label_value};
+use crate::{Error, Files, Spec};
+
+mod kube;
+mod live;
+
+use kube::{At, CONTROL, PUBLIC};
+pub use kube::{Kube, Kubectl, Reply};
+use live::{Live, Stopping};
+
+/// The label every object of a fleet carries, with the fleet's name.
+const FLEET_LABEL: &str = "gdl.dev/fleet";
+
+/// A pool's hub's routes, as the service proxy reaches them.
+const HEALTH: &str = "/v1/ext/gdl-pool/health";
+const DRAIN: &str = "/v1/ext/gdl-pool/drain";
+
+/// What `deploy` deploys, and where it builds.
+#[derive(Debug, Clone)]
+pub struct Deploy {
+    /// The spec's file.
+    pub spec: PathBuf,
+    /// The fleet's file.
+    pub fleet: PathBuf,
+    /// The target directory the images build in.
+    pub target: PathBuf,
+    /// Where to also write the objects it applies, as `k8s` writes them: a
+    /// directory that must not exist.
+    pub out: Option<PathBuf>,
+    /// How long it waits for each thing it waits on.
+    pub waits: Waits,
+}
+
+/// How long `deploy` and `down` wait for what they wait on, and how often
+/// they look. A wait that runs out fails the command, naming what it
+/// waited for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Waits {
+    /// Between two reads of something awaited.
+    pub interval: Duration,
+    /// For every pool's health, after the apply.
+    pub health: Duration,
+    /// For a pool's drain, beyond the longest stop grace of its pods: the
+    /// grace is its drain bound and 30 s.
+    pub drain: Duration,
+    /// For a namespace to be active, and for each delete.
+    pub objects: Duration,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(2),
+            health: Duration::from_secs(600),
+            drain: Duration::from_secs(60),
+            objects: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Deploy the fleet of `how` with `docker` and `kube`, saying each step to
+/// `say`. The steps run in order, and the first that fails stops it:
+///
+/// 1. check the spec and the fleet, as `cargo gdl check --fleet` does, and
+///    that each cluster's context may create Deployments in its namespace;
+/// 2. build the images and push them ([`images`]);
+/// 3. render the objects, each image named by its pushed digest
+///    ([`k8s::k8s_files`]), and write them to `out` if given;
+/// 4. apply each cluster's base objects, and wait until its namespace is
+///    active;
+/// 5. the tables job: no fleet renders one yet, so this step does nothing;
+/// 6. apply each cluster's pools, server-side;
+/// 7. prune each cluster: drain each pool that the fleet no longer places
+///    there, then delete every object labelled with the fleet that this
+///    render did not write;
+/// 8. wait until each pool's health answers 200, through the API server's
+///    service proxy; on a timeout, the error names each pod of an
+///    unhealthy pool that is not ready, why it waits, and its events.
+pub fn deploy(
+    how: &Deploy,
+    docker: &mut dyn Docker,
+    kube: &mut dyn Kube,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    let problems = crate::check_files(&how.spec, Some(&how.fleet), &how.target);
+    if !problems.is_empty() {
+        return Err(problems.into());
+    }
+    let fleet = read_fleet(&how.fleet)?;
+    let spec = Spec::load(&how.spec).map_err(|e| Error::from(e.in_file(how.spec.display())))?;
+    let clusters = Clusters::of(&fleet)?;
+    for cluster in &clusters.0 {
+        cluster.check(kube)?;
+    }
+    say("check: the spec, the fleet, and each cluster's context");
+
+    let built = images(&spec, &fleet, &how.target, true, docker)?;
+    say(&format!("images: {} in their registries", built.len()));
+
+    let files = k8s::k8s_files(&spec, &fleet, &how.target, None, Some(&Digests::of(&built)))?;
+    if let Some(out) = &how.out {
+        k8s::write_new(out, &files)?;
+        say(&format!("k8s: the objects are in {}", out.display()));
+    }
+    let rendered = Rendered::of(&files, &clusters)?;
+
+    for cluster in &clusters.0 {
+        let base = &rendered.0[&cluster.name];
+        apply(kube, cluster, &base.base)?;
+        run(
+            kube,
+            &cluster.at().namespace_active(how.waits.objects.as_secs()),
+            None,
+            "waiting for the namespace",
+        )?;
+        // DynamoDB Local joins the base here once a fleet renders it, and
+        // is waited for until it answers.
+    }
+    say("base: each cluster's namespace and service account");
+
+    // The tables job runs here once a fleet renders one: no fleet does
+    // yet, so there is nothing to run.
+
+    for cluster in &clusters.0 {
+        apply(kube, cluster, &rendered.0[&cluster.name].pools)?;
+    }
+    say("apply: each cluster's pools");
+
+    for cluster in &clusters.0 {
+        let names = &rendered.0[&cluster.name].names;
+        let live = cluster.live(kube)?;
+        let pruned: Vec<&Live> = live
+            .iter()
+            .filter(|object| !names.contains(&(object.kind.clone(), object.name.clone())))
+            .collect();
+        if pruned.is_empty() {
+            continue;
+        }
+        stop(kube, cluster, &pruned, &how.waits, say)?;
+        say(&format!(
+            "prune: deleted {} object(s) in cluster `{}`",
+            pruned.len(),
+            cluster.name
+        ));
+    }
+
+    let pools: Vec<(&Cluster, String)> = fleet
+        .pools()
+        .map(|pool| {
+            let (name, _) = fleet
+                .cluster_of(&pool.name)
+                .expect("k8s_files requires every pool's cluster");
+            (clusters.get(name), pool.name)
+        })
+        .collect();
+    healthy(kube, &pools, &how.waits)?;
+    say("wait: every pool's health answers 200");
+    Ok(())
+}
+
+/// Take the fleet in the file `fleet` off its clusters with `kube`, saying
+/// each step to `say`: drain each pool that has a parent, delete every
+/// object in each cluster's namespace that carries the fleet's label, and
+/// then remove the label from the namespace, which stays, with any
+/// Secret in it.
+pub fn down(
+    fleet: &Path,
+    waits: &Waits,
+    kube: &mut dyn Kube,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    let fleet = read_fleet(fleet)?;
+    fleet
+        .check(None)
+        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+    let clusters = Clusters::of(&fleet)?;
+    for cluster in &clusters.0 {
+        let live = cluster.live(kube)?;
+        let all: Vec<&Live> = live.iter().collect();
+        stop(kube, cluster, &all, waits, say)?;
+        run(
+            kube,
+            &cluster.at().unlabel(FLEET_LABEL),
+            None,
+            "removing the fleet's label from the namespace",
+        )?;
+        say(&format!(
+            "down: deleted {} object(s) in cluster `{}`; namespace `{}` stays",
+            all.len(),
+            cluster.name,
+            cluster.at().namespace
+        ));
+    }
+    Ok(())
+}
+
+fn read_fleet(path: &Path) -> Result<Fleet, Error> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+    Fleet::from_toml(&text).map_err(|problems| problems.in_file(path.display()).into())
+}
+
+/// Each cluster of a fleet, in name order, and the fleet's label there.
+struct Clusters(Vec<Cluster>);
+
+impl Clusters {
+    fn of(fleet: &Fleet) -> Result<Self, Error> {
+        let name = fleet.name().ok_or_else(|| {
+            Error::new("the fleet has no `[fleet] name`, which labels its objects")
+        })?;
+        Ok(Self(
+            fleet
+                .clusters()
+                .map(|(cluster, settings)| Cluster {
+                    name: cluster.to_string(),
+                    context: settings.context.clone(),
+                    namespace: settings.namespace.clone(),
+                    selector: format!("{FLEET_LABEL}={}", label_value(name)),
+                })
+                .collect(),
+        ))
+    }
+
+    fn get(&self, name: &str) -> &Cluster {
+        self.0
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("a cluster of the fleet")
+    }
+}
+
+/// One cluster of a fleet.
+struct Cluster {
+    name: String,
+    context: String,
+    namespace: String,
+    /// The selector of the fleet's objects.
+    selector: String,
+}
+
+impl Cluster {
+    fn at(&self) -> At<'_> {
+        At {
+            context: &self.context,
+            namespace: &self.namespace,
+        }
+    }
+
+    /// Refuse a cluster whose context cannot be reached, or may not create
+    /// Deployments in its namespace.
+    fn check(&self, kube: &mut dyn Kube) -> Result<(), Error> {
+        let reply = kube.run(&self.at().can_i(), None)?;
+        match reply.stdout.trim() {
+            "yes" => Ok(()),
+            "no" => Err(Error::new(format!(
+                "cluster `{}`: context `{}` may not create Deployments in namespace `{}`",
+                self.name, self.context, self.namespace
+            ))),
+            _ => Err(Error::new(format!(
+                "cluster `{}`: context `{}` does not answer: {}",
+                self.name,
+                self.context,
+                reply.stderr.trim()
+            ))),
+        }
+    }
+
+    /// The fleet's objects in the cluster's namespace.
+    fn live(&self, kube: &mut dyn Kube) -> Result<Vec<Live>, Error> {
+        let reply = run(
+            kube,
+            &self.at().list(&self.selector),
+            None,
+            "listing the fleet's objects",
+        )?;
+        Live::list(&reply.stdout).map_err(|e| Error::new(format!("cluster `{}`: {e}", self.name)))
+    }
+}
+
+/// The objects of one render, by cluster: the base's, and the pools', each
+/// as one YAML stream, and the kind and name of each namespaced object.
+struct Rendered(BTreeMap<String, Objects>);
+
+#[derive(Default)]
+struct Objects {
+    base: String,
+    pools: String,
+    names: BTreeSet<(String, String)>,
+}
+
+impl Rendered {
+    fn of(files: &Files, clusters: &Clusters) -> Result<Self, Error> {
+        let mut rendered: BTreeMap<String, Objects> = clusters
+            .0
+            .iter()
+            .map(|cluster| (cluster.name.clone(), Objects::default()))
+            .collect();
+        for (path, text) in files {
+            let Some(cluster) = path.iter().next().and_then(|c| c.to_str()) else {
+                continue;
+            };
+            let Some(objects) = rendered.get_mut(cluster) else {
+                continue;
+            };
+            if path.extension().is_none_or(|e| e != "yaml") {
+                continue;
+            }
+            if path.ends_with("base.yaml") {
+                objects.base.push_str(text);
+            } else {
+                objects.pools.push_str(text);
+            }
+            for document in text.split("---\n").filter(|doc| !doc.trim().is_empty()) {
+                let object: Value = serde_json::from_str(document)
+                    .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+                let kind = object["kind"].as_str().unwrap_or_default();
+                if kind == "Namespace" {
+                    continue;
+                }
+                let name = object["metadata"]["name"].as_str().unwrap_or_default();
+                objects.names.insert((kind.to_string(), name.to_string()));
+            }
+        }
+        Ok(Self(rendered))
+    }
+}
+
+/// Run `args`, refused with `what` and kubectl's own words unless it
+/// succeeds.
+fn run(
+    kube: &mut dyn Kube,
+    args: &[String],
+    input: Option<&[u8]>,
+    what: &str,
+) -> Result<Reply, Error> {
+    let reply = kube.run(args, input)?;
+    if !reply.success {
+        return Err(Error::new(format!(
+            "{what}: `kubectl {}` failed: {}",
+            args.join(" "),
+            reply.stderr.trim()
+        )));
+    }
+    Ok(reply)
+}
+
+/// Apply `objects`, a YAML stream, to `cluster`, server-side.
+fn apply(kube: &mut dyn Kube, cluster: &Cluster, objects: &str) -> Result<(), Error> {
+    run(
+        kube,
+        &cluster.at().apply(),
+        Some(objects.as_bytes()),
+        &format!("applying to cluster `{}`", cluster.name),
+    )
+    .map(drop)
+}
+
+/// Stop `objects` of `cluster`: drain each pool among them that has a
+/// parent, wait until its parent's hub no longer holds its record, and
+/// then delete them, segments first and hubs next, so that a hub outlives
+/// the instances that report to it.
+fn stop(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    objects: &[&Live],
+    waits: &Waits,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    let at = cluster.at();
+    let draining = Stopping::of(objects);
+    for pool in &draining {
+        run(
+            kube,
+            &at.post(&pool.pool, CONTROL, DRAIN),
+            Some(b""),
+            &format!("draining pool `{}`", pool.pool),
+        )?;
+        say(&format!("drain: pool `{}` is draining", pool.pool));
+    }
+    for pool in &draining {
+        withdrawn(kube, at, pool, waits)?;
+        say(&format!("drain: pool `{}` has withdrawn", pool.pool));
+    }
+    let segments: Vec<String> = objects
+        .iter()
+        .filter(|object| object.is_segment())
+        .map(|object| object.reference())
+        .collect();
+    let hubs: Vec<String> = objects
+        .iter()
+        .filter(|object| object.is_hub())
+        .map(|object| object.reference())
+        .collect();
+    let rest: Vec<String> = objects
+        .iter()
+        .filter(|object| object.kind != "Deployment")
+        .map(|object| object.reference())
+        .collect();
+    // Each Deployment's pods may take their grace to stop.
+    let grace = objects.iter().filter_map(|o| o.grace).max().unwrap_or(0);
+    let seconds = waits.objects.as_secs() + grace;
+    for batch in [segments, hubs, rest] {
+        if batch.is_empty() {
+            continue;
+        }
+        run(
+            kube,
+            &at.delete(&batch, seconds),
+            None,
+            &format!("deleting from cluster `{}`", cluster.name),
+        )?;
+    }
+    Ok(())
+}
+
+/// Wait until the hub of `pool`'s parent no longer holds its record: the
+/// pool's drain has ended, and its hub has withdrawn it. A parent holds a
+/// pool that stopped without a drain, as missing, until an operator
+/// withdraws it.
+fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) -> Result<(), Error> {
+    let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
+    let args = at.get(&pool.home, PUBLIC, &route);
+    let bound = Duration::from_secs(pool.grace) + waits.drain;
+    let deadline = Instant::now() + bound;
+    loop {
+        let reply = kube.run(&args, None)?;
+        if reply.not_found() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let last = if reply.success {
+                "it still holds the record".to_string()
+            } else {
+                reply.stderr.trim().to_string()
+            };
+            return Err(Error::new(format!(
+                "pool `{}` did not withdraw from its parent `{}` within {} s: {last}",
+                pool.pool,
+                pool.home,
+                bound.as_secs()
+            )));
+        }
+        std::thread::sleep(waits.interval);
+    }
+}
+
+/// Wait until the health of each of `pools`, by its cluster, answers 200.
+fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> Result<(), Error> {
+    let deadline = Instant::now() + waits.health;
+    let mut waiting: Vec<&(&Cluster, String)> = pools.iter().collect();
+    loop {
+        let mut still = Vec::new();
+        for entry in waiting {
+            let (cluster, pool) = entry;
+            if !kube
+                .run(&cluster.at().get(pool, PUBLIC, HEALTH), None)?
+                .success
+            {
+                still.push(entry);
+            }
+        }
+        waiting = still;
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let mut message = format!(
+                "the health of {} pool(s) did not answer 200 within {} s:",
+                waiting.len(),
+                waits.health.as_secs()
+            );
+            for (cluster, pool) in waiting {
+                message.push_str(&format!("\n- pool `{pool}` in cluster `{}`", cluster.name));
+                for line in why_not_ready(kube, cluster, pool)? {
+                    message.push_str(&format!("\n  {line}"));
+                }
+            }
+            return Err(Error::new(message));
+        }
+        std::thread::sleep(waits.interval);
+    }
+}
+
+/// The pods of `pool` that are not ready, each with why its containers
+/// wait and its latest events: these name a missing Secret or image, and
+/// no Secret is read.
+fn why_not_ready(kube: &mut dyn Kube, cluster: &Cluster, pool: &str) -> Result<Vec<String>, Error> {
+    /// The events shown for each pod: the latest.
+    const EVENTS: usize = 5;
+    let selector = format!("{},gdl.dev/pool={}", cluster.selector, label_value(pool));
+    let at = cluster.at();
+    let reply = run(kube, &at.pods(&selector), None, "listing the pool's pods")?;
+    let pods: Value = serde_json::from_str(&reply.stdout)
+        .map_err(|e| Error::new(format!("`kubectl get pods` printed no JSON list: {e}")))?;
+    let mut lines = Vec::new();
+    for pod in pods["items"].as_array().into_iter().flatten() {
+        let ready = pod["status"]["conditions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c["type"] == "Ready" && c["status"] == "True");
+        if ready {
+            continue;
+        }
+        let name = pod["metadata"]["name"].as_str().unwrap_or_default();
+        let mut line = format!(
+            "pod `{name}`: {}",
+            pod["status"]["phase"].as_str().unwrap_or("Unknown")
+        );
+        for status in pod["status"]["containerStatuses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for (state, what) in [("waiting", "waiting"), ("terminated", "terminated")] {
+                let found = &status["state"][state];
+                if let Some(reason) = found["reason"].as_str() {
+                    line.push_str(&format!(", {what}: {reason}"));
+                    if let Some(message) = found["message"].as_str() {
+                        line.push_str(&format!(" ({message})"));
+                    }
+                }
+            }
+        }
+        lines.push(line);
+        let reply = run(kube, &at.events(name), None, "listing the pod's events")?;
+        let events: Value = serde_json::from_str(&reply.stdout)
+            .map_err(|e| Error::new(format!("`kubectl get events` printed no JSON list: {e}")))?;
+        let events = events["items"].as_array().cloned().unwrap_or_default();
+        for event in events.iter().rev().take(EVENTS).rev() {
+            lines.push(format!(
+                "  {} {}: {}",
+                event["type"].as_str().unwrap_or_default(),
+                event["reason"].as_str().unwrap_or_default(),
+                event["message"].as_str().unwrap_or_default().trim()
+            ));
+        }
+    }
+    Ok(lines)
+}

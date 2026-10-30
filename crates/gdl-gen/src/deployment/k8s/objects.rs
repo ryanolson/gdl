@@ -568,7 +568,7 @@ const LABEL_PREFIX: usize = 52;
 /// it fits, else its first 52 characters, `-`, and 10 hex digits of its
 /// hash, so that two long values that share their start still differ. The
 /// whole value is then in the annotation of the label's key.
-fn label_value(value: &str) -> String {
+pub(in crate::deployment) fn label_value(value: &str) -> String {
     if value.len() <= LABEL_LIMIT {
         return value.to_string();
     }

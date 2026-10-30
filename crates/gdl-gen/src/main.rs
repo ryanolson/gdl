@@ -11,6 +11,8 @@
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
 //! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
+//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--target-dir <dir>]
+//! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -53,7 +55,17 @@
 //! platform, with `docker buildx`; with `--push` it pushes each to each
 //! cluster's registry, unless the registry already holds its tag, and
 //! writes each image's digest to `--out`. It prints each image by
-//! reference and digest. `export` writes the generated crates as a `.tar.gz` with
+//! reference and digest. `deploy` applies a fleet to its clusters with
+//! `kubectl` and each cluster's kube context, and stops at the first step
+//! that fails: `check`, and each cluster's context; `images --push`; `k8s`,
+//! by the pushed digests, also written to `--out` when given; each
+//! cluster's base objects; its pools, applied server-side; a prune of the
+//! objects labelled with the fleet that it did not render, after a drain
+//! of each pool it removes; and a wait until each pool's health answers
+//! 200. `down` drains every pool that has a parent, deletes every object
+//! labelled with the fleet, and removes the label from each namespace,
+//! which it keeps; with `--spec`, it first runs the same check as `check`.
+//! `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
@@ -72,6 +84,8 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
        cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--target-dir <dir>]
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--target-dir <dir>]
+       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--target-dir <dir>]
+       cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
@@ -93,6 +107,13 @@ enum Command {
         fleet: PathBuf,
         push: bool,
         out: Option<PathBuf>,
+    },
+    Deploy {
+        fleet: PathBuf,
+        out: Option<PathBuf>,
+    },
+    Down {
+        fleet: PathBuf,
     },
     Extract {
         krate: gdl_gen::Crate,
@@ -216,6 +237,13 @@ fn args() -> Result<Args, String> {
                 out: out.take(),
             }
         }
+        "deploy" => Command::Deploy {
+            fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+            out: out.take(),
+        },
+        "down" => Command::Down {
+            fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
+        },
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
         },
@@ -230,7 +258,10 @@ fn args() -> Result<Args, String> {
         },
         _ => return Err(USAGE.to_string()),
     };
-    let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
+    let needs_spec = !matches!(
+        command,
+        Command::Extract { .. } | Command::Catalog(_) | Command::Down { .. }
+    );
     // `--fleet`, `--tag`, `--images`, `--push`, `--local`, and `--release`
     // are for the commands that took them above.
     if (needs_spec && spec.is_none())
@@ -422,6 +453,39 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 std::fs::write(out, gdl_gen::Digests::of(&built).to_json())
                     .map_err(|e| format!("{}: {e}", out.display()))?;
             }
+        }
+        Command::Deploy { fleet, out } => {
+            let file = args.spec.as_ref().ok_or(USAGE)?;
+            let how = gdl_gen::Deploy {
+                spec: file.clone(),
+                fleet: fleet.clone(),
+                target: target(beside(file)),
+                out: out.clone(),
+                waits: gdl_gen::Waits::default(),
+            };
+            let mut say = |step: &str| eprintln!("cargo gdl: {step}");
+            if let Err(error) =
+                gdl_gen::deploy(&how, &mut gdl_gen::Buildx, &mut gdl_gen::Kubectl, &mut say)
+            {
+                eprintln!("{error}");
+                eprintln!("cargo gdl: deploy stopped");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+        Command::Down { fleet } => {
+            if let Some(file) = &args.spec {
+                let problems = gdl_gen::check_files(file, Some(fleet), &target(beside(file)));
+                if !problems.is_empty() {
+                    return Ok(report(&problems));
+                }
+            }
+            let mut say = |step: &str| eprintln!("cargo gdl: {step}");
+            gdl_gen::down(
+                fleet,
+                &gdl_gen::Waits::default(),
+                &mut gdl_gen::Kubectl,
+                &mut say,
+            )?;
         }
         Command::Export { out } => {
             let spec = spec()?;

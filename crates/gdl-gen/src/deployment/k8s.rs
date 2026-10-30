@@ -22,8 +22,8 @@ mod objects;
 mod refusals;
 mod relay;
 
-pub(super) use objects::image;
 use objects::{Names, Pod, Port, Segment};
+pub(super) use objects::{image, label_value};
 
 /// The objects of `fleet`'s pools, which run `spec`, by path from the
 /// output directory: `<cluster>/base.yaml`, `<cluster>/pools/<pool>.yaml`
@@ -63,11 +63,23 @@ pub fn k8s(
     tag: Option<&str>,
     digests: Option<&Digests>,
 ) -> Result<(), Error> {
-    let exists = || Error::new("Kubernetes output already exists; choose a fresh directory");
     if out.exists() {
         return Err(exists());
     }
     let files = k8s_files(spec, fleet, target, tag, digests)?;
+    write_new(out, &files)
+}
+
+fn exists() -> Error {
+    Error::new("Kubernetes output already exists; choose a fresh directory")
+}
+
+/// Write `files` into `out`, which must not exist: all of them, or, on a
+/// failure, none.
+pub(super) fn write_new(out: &Path, files: &Files) -> Result<(), Error> {
+    if out.exists() {
+        return Err(exists());
+    }
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
@@ -77,7 +89,7 @@ pub fn k8s(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists()),
         other => other.map_err(io)?,
     }
-    if let Err(error) = crate::write(out, &files) {
+    if let Err(error) = crate::write(out, files) {
         let _ = std::fs::remove_dir_all(out);
         return Err(error);
     }

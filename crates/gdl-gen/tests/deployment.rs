@@ -5,6 +5,8 @@ mod common;
 
 #[path = "deployment/clusters.rs"]
 mod clusters;
+#[path = "deployment/deploy.rs"]
+mod deploy;
 #[path = "deployment/images.rs"]
 mod images;
 #[path = "deployment/k8s.rs"]

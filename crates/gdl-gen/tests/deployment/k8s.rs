@@ -23,7 +23,7 @@ const PINNED: &str = "tests/fixtures/k8s/out";
 const SECRET: &str = "tests/fixtures/k8s/secret";
 
 /// The text of [`SECRET`].
-const MARKER: &str = "gdl-k8s-secret-marker-5f1c";
+pub(super) const MARKER: &str = "gdl-k8s-secret-marker-5f1c";
 
 /// The tag the pinned objects name: the default tag digests what each
 /// image is built from, which holds the test mirror's URL and commit.

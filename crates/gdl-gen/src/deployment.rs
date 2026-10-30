@@ -133,12 +133,14 @@ use crate::{
 };
 
 pub(crate) mod context;
+mod deploy;
 mod images;
 mod k8s;
 pub(crate) mod locks;
 mod pools;
 mod variables;
 
+pub use deploy::{Deploy, Kube, Kubectl, Reply, Waits, deploy, down};
 pub use images::{Buildx, Built, Digests, Docker, Outcome, images};
 pub use k8s::{k8s, k8s_files};
 

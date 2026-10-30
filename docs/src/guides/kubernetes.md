@@ -1,6 +1,6 @@
 # Deploy a fleet on Kubernetes
 
-This guide writes the Kubernetes objects of a fleet: plain Namespaces, ServiceAccounts, ConfigMaps, Deployments, Services, and PersistentVolumeClaims, one directory per cluster. It uses the `api` example's fleet of [Deploy a fleet of pools](fleet.md), over two clusters. `cargo gdl images` builds the images for each cluster's platform and pushes them to each cluster's registry. `cargo gdl k8s` needs no Docker and no cluster. Neither command applies the objects.
+This guide writes the Kubernetes objects of a fleet: plain Namespaces, ServiceAccounts, ConfigMaps, Deployments, Services, and PersistentVolumeClaims, one directory per cluster. It uses the `api` example's fleet of [Deploy a fleet of pools](fleet.md), over two clusters. `cargo gdl images` builds the images for each cluster's platform and pushes them to each cluster's registry. `cargo gdl k8s` needs no Docker and no cluster. `cargo gdl deploy` runs both and applies the objects to each cluster, and `cargo gdl down` takes the fleet off its clusters.
 
 ## 1. Name the clusters
 
@@ -144,20 +144,53 @@ One hub image serves every layout, because its pod reads the deployment from the
 - **Allocator.** Each segment links mimalloc. jemalloc fixes the page size when it is built, so a binary built on a host of 4 KB pages does not start on a node of 64 KB pages. mimalloc reads the page size when it runs. `images` and `k8s` refuse a spec that sets `[binary] allocator = "jemalloc"`, and use mimalloc when it sets `system` or nothing. The hub uses the system allocator, as `gdl-hub` builds it.
 - **Base images.** The build stage uses `[deployment] build_image`, and the final stage `base_image`, or `hub_image` for the hub. A build image of your own must be Debian, with `apt-get` and `rustup`, as the default one is.
 
-## 4. Apply the objects
-
-Apply each cluster's base first, since every other object is in its Namespace:
+## 4. Deploy the fleet
 
 ```bash
-kubectl --context kind-use1 apply --server-side -f target/k8s/use1/base.yaml
-kubectl --context kind-use1 apply --server-side -R -f target/k8s/use1/pools
+cargo gdl deploy --spec gdl.toml --fleet fleet.toml
 ```
 
-The `README.md` in the output lists these commands for each cluster, and the Secrets each cluster must hold. To reach a global pool's entry, forward its Service:
+`deploy` runs these steps in order. It stops at the first step that fails, and runs nothing after it:
+
+1. **Check.** It checks the spec and the fleet, as `cargo gdl check --fleet` does. Then it runs `kubectl auth can-i create deployments.apps` with each cluster's context and namespace, and refuses a cluster that does not answer `yes`.
+2. **Images.** It builds and pushes the images, as `cargo gdl images --push` does (step 2).
+3. **Objects.** It renders the objects, as `cargo gdl k8s` does (step 3), with each image named by the digest it pushed. `--out <dir>` also writes them there. The directory must not exist.
+4. **Base.** For each cluster, it applies `base.yaml`, the Namespace and the ServiceAccount, and waits until the namespace is `Active`.
+5. **Tables.** No fleet renders a tables job yet, so this step does nothing.
+6. **Apply.** For each cluster, it applies the pools' objects with `kubectl apply --server-side --field-manager=gdl`.
+7. **Prune.** For each cluster, it lists the objects in the namespace that carry `gdl.dev/fleet=<fleet>`, and deletes those that this render did not write ([Prune](#prune)).
+8. **Wait.** It waits until each pool's health answers 200, through the API server's service proxy, for up to 600 s.
+
+Each `kubectl` command names its cluster's `--context` first, so that no command uses the current context. `deploy` reads no kubeconfig, token, key, or Secret. It uses the contexts you already have. It does not check up front that the Secrets the cluster's `secrets` names exist, because `kubectl get secret` sends the Secret's data to the client. A missing Secret shows when the health wait fails: for each pod of an unhealthy pool that is not ready, the error names its phase, why its container waits, and its latest events, such as `secret "api-fingerprint" not found`.
+
+A second `deploy` with no change pushes no image and changes no object, so no pod restarts.
+
+### Prune
+
+kubectl refuses `--prune` together with `--server-side`, so `deploy` prunes by itself. A pool that the fleet no longer places in a cluster is drained first, when it has a parent:
+
+1. `deploy` reads the pool's parent from `GDL_POOL__HOME` in its hub's Deployment. A pool with no parent, such as a global pool, is not drained.
+2. It sends `POST /v1/ext/gdl-pool/drain` to the pool's hub, at its Service's `control` port, through the service proxy.
+3. It waits until the parent's hub answers 404 for the pool's record (`GET /v1/ext/gdl-pool/report/<class>/<pool>`). The pool's hub withdraws the record only once its drain has ended. A pool that stops without a drain stays in its parent's records, as missing. The wait lasts for the longest `terminationGracePeriodSeconds` of the pool's Deployments, and 60 s more.
+4. It deletes the objects it did not render: first the segments' Deployments, then the hubs' Deployments, then the Services, ConfigMaps, PersistentVolumeClaims, and ServiceAccounts. Each delete uses `--cascade=foreground` and waits until the pods are gone.
+
+Prune never deletes a Namespace. It looks only in the namespaces of the fleet's clusters. A cluster removed from the fleet keeps its objects: run `cargo gdl down` with the old fleet first.
+
+## 5. Take the fleet down
+
+```bash
+cargo gdl down --spec gdl.toml --fleet fleet.toml
+```
+
+For each cluster, `down` drains each pool that has a parent and waits until it withdraws, as the prune does. Then it deletes every object in the namespace that carries `gdl.dev/fleet=<fleet>`. Last, it removes the label from the Namespace and keeps the Namespace, so the Secrets in it remain. `down` needs only the fleet file. With `--spec`, it first checks the spec and the fleet, as `cargo gdl check --fleet` does, and stops on a problem before it touches a cluster.
+
+To reach a global pool's entry while the fleet runs, forward its Service:
 
 ```bash
 kubectl --context kind-use1 -n gdl-api port-forward service/global-us-front 8080
 ```
+
+The `README.md` that `k8s` writes lists the `kubectl apply` commands for each cluster, and the Secrets each cluster must hold, for applying the objects without `deploy`.
 
 ## Validate the objects
 
@@ -180,3 +213,22 @@ PLATFORM=linux/arm64 TIMEOUT=1200 bash scripts/images-local.sh
 ```
 
 It checks that the first run pushes the hub's image and each segment's, and that each printed digest is the one the registry serves. It checks that each image and its binary are of `PLATFORM`, that each segment links mimalloc, that each binary starts when `PLATFORM` is the host's own, and that `k8s --images` names exactly the pushed images, by digest. A second run must find every image in the registry, build nothing, and leave the registry's files unchanged. `TIMEOUT` bounds each run of `images`, in seconds.
+
+## Test a fleet on kind
+
+`scripts/kind-fleet.sh` runs `cargo gdl deploy` and `cargo gdl down` with the real `kubectl`, against a kind cluster of its own, outside the default suite. It needs Docker with buildx, `kubectl`, and network access for the image builds. `INSTALL_TOOLS=1` downloads kind 0.33.0 into `TOOLS_DIR` and checks its sha256:
+
+```bash
+INSTALL_TOOLS=1 bash scripts/kind-fleet.sh
+```
+
+The script starts a local `registry:2` and a kind cluster of Kubernetes 1.35 that pulls from it. It writes the `api` example in two classes, and a fleet of one global pool and two model pools, built for the host's platform. It checks that:
+
+- the cluster has no fleet namespace before the first `deploy`;
+- after the first `deploy`, the global pool's health answers 200, and its hub holds both model pools;
+- a request through `kubectl port-forward` to the global pool's entry is answered;
+- a second `deploy`, with one model pool removed from the fleet, drains that pool, and the global pool's hub then answers 404 for its record;
+- that pool's objects are deleted, and the other pools' Deployments and pods keep their uids and generations;
+- after `down`, no object with the fleet's label is left, and the namespace remains.
+
+The kubeconfig is in the script's scratch directory, so the script never reads or changes `~/.kube/config`. On exit it deletes the cluster and the registry. `TIMEOUT` bounds each `cargo gdl` run, in seconds (1800 by default).
