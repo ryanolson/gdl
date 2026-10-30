@@ -262,6 +262,7 @@ impl Clusters {
                         label_value(fleet_name),
                         label_value(cluster)
                     ),
+                    unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
                 })
                 .collect(),
         ))
@@ -284,6 +285,8 @@ struct Cluster {
     /// cluster: another cluster's, in a namespace that two contexts reach,
     /// are not this cluster's to prune.
     selector: String,
+    /// The selector of the fleet's objects that name no cluster.
+    unowned: String,
 }
 
 impl Cluster {
@@ -313,8 +316,35 @@ impl Cluster {
         }
     }
 
-    /// The fleet's objects in the cluster's namespace.
+    /// The fleet's objects in the cluster's namespace that were rendered
+    /// for this cluster. Refused when the namespace holds an object of the
+    /// fleet that names no cluster, as a render before `gdl.dev/cluster`
+    /// wrote them: it may be another cluster's, where two contexts reach
+    /// one namespace, so it is neither this cluster's to delete nor one to
+    /// leave running unseen.
     fn live(&self, kube: &mut dyn Kube, budget: Duration) -> Result<Vec<Live>, Error> {
+        let reply = run(
+            kube,
+            self.at().list(&self.unowned),
+            budget,
+            None,
+            "listing the fleet's objects that name no cluster",
+        )?;
+        let unowned = Live::list(&reply.stdout)
+            .map_err(|e| Error::new(format!("cluster `{}`: {e}", self.name)))?;
+        if !unowned.is_empty() {
+            let objects: Vec<String> = unowned.iter().map(Live::reference).collect();
+            return Err(Error::new(format!(
+                "cluster `{}`: namespace `{}` holds objects of the fleet that carry no `{CLUSTER_LABEL}` label, so it is not known which cluster's they are: {}. Label the ones that are this cluster's with `kubectl --context {} --namespace {} label {} {CLUSTER_LABEL}={}`, or delete them, then run again",
+                self.name,
+                self.namespace,
+                objects.join(", "),
+                self.context,
+                self.namespace,
+                objects.join(" "),
+                label_value(&self.name)
+            )));
+        }
         let reply = run(
             kube,
             self.at().list(&self.selector),

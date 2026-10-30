@@ -203,8 +203,14 @@ impl gdl_gen::Kube for Kube {
                     .filter(|object| object["kind"] != "Namespace")
                     .filter(|object| {
                         selector.split(',').filter(|s| !s.is_empty()).all(|pair| {
-                            let (key, value) = pair.split_once('=').expect("key=value");
-                            object["metadata"]["labels"][key] == value
+                            let labels = &object["metadata"]["labels"];
+                            match pair.strip_prefix('!') {
+                                Some(key) => labels.get(key).is_none(),
+                                None => {
+                                    let (key, value) = pair.split_once('=').expect("key=value");
+                                    labels[key] == value
+                                }
+                            }
                         })
                     })
                     .cloned()
@@ -887,3 +893,9 @@ mod empty;
 
 #[path = "deploy/hubless.rs"]
 mod hubless;
+
+#[path = "deploy/unlabelled.rs"]
+mod unlabelled;
+
+#[path = "deploy/guard.rs"]
+mod guard;

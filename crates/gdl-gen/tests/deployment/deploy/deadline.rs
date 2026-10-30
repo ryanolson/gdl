@@ -51,6 +51,7 @@ case "$*" in
     exit 1
     ;;
   *"/drain"*) echo '{}' ;;
+  *"!gdl.dev/cluster"*) echo '{"items": []}' ;;
   *" get "*) cat "$GDL_REVIEW_OBJECTS" ;;
 esac
 "#,
