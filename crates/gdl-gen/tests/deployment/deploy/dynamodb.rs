@@ -256,3 +256,39 @@ fn down_deletes_the_local_after_the_hubs() {
         );
     }
 }
+
+#[test]
+#[ignore = "F1: down deletes the Local before hubs in later clusters"]
+fn down_keeps_the_local_until_every_clusters_hubs_stop() {
+    let mirror = Mirror::new();
+    let text = fleet_text().replace(
+        "local = true\ncluster = \"use1\"",
+        "local = true\ncluster = \"euw1\"",
+    );
+    let files = files(&mirror, &text);
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    log.borrow_mut().clear();
+    down(&files, &mut kube).expect("down");
+
+    let commands = commands(&log);
+    let deletion = |context: &str, object: &str| {
+        commands
+            .iter()
+            .position(|args| {
+                args[1] == context
+                    && args.iter().any(|arg| arg == "delete")
+                    && args.iter().any(|arg| arg == object)
+            })
+            .unwrap_or_else(|| panic!("{context}: {object} was not deleted"))
+    };
+    let local = deletion("kind-euw1", "deployment/dynamodb-local");
+    for hub in ["deployment/global-us", "deployment/model-x-us"] {
+        let stopped = deletion("kind-use1", hub);
+        assert!(
+            stopped < local,
+            "the Local is deleted at command {local}, before {hub} at command {stopped} in kind-use1"
+        );
+    }
+}
