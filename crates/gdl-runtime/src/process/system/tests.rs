@@ -158,31 +158,91 @@ async fn a_closure_may_block_on_a_tokio_lock() {
 }
 
 /// A scrape that overruns its limit is answered with 503, and a scrape
-/// that comes while it still runs waits for it rather than starting the
-/// closure again.
+/// that comes while it still runs is answered with 503 rather than
+/// starting the closure again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_overrunning_scrape_is_answered_and_not_repeated() {
     let limit = Duration::from_millis(200);
     let (health, metrics) = health(limit);
     let held = Held::fill(&metrics.model_status);
     let address = serve(health).await;
-    for _ in 0..2 {
+    for why in ["longer than", "in progress"] {
         let (code, body) = tokio::time::timeout(WAIT, get(address, "/metrics"))
             .await
             .expect("the scrape answered")
             .expect("a response");
         assert_eq!(code, 503, "{body}");
-        assert!(body.contains("longer than"), "{body}");
+        assert!(body.contains(why), "{body}");
     }
     assert_eq!(held.runs.load(Ordering::SeqCst), 1, "one closure at a time");
     held.release.send(()).expect("the closure waits");
-    // Once the held closure returns, the next scrape runs it again.
+    // Once the held scrape ends, the next scrape runs the closure again.
+    // It ends on its blocking thread after the release, so a scrape may
+    // still find it running: those are answered as in progress.
     held.release.send(()).expect("the closure waits");
-    let (code, body) = tokio::time::timeout(WAIT, get(address, "/metrics"))
-        .await
-        .expect("the scrape answered")
-        .expect("a response");
-    assert_eq!(code, 200, "{body}");
+    let body = tokio::time::timeout(WAIT, async {
+        loop {
+            let (code, body) = get(address, "/metrics").await.expect("a response");
+            match code {
+                200 => return body,
+                503 if body.contains("in progress") => tokio::task::yield_now().await,
+                _ => panic!("{code}: {body}"),
+            }
+        }
+    })
+    .await
+    .expect("a scrape ran once the held one ended");
+    assert!(body.contains("model=\"llama\"} 1"), "{body}");
     assert_eq!(held.runs.load(Ordering::SeqCst), 2);
     assert_eq!(held.unreleased.load(Ordering::SeqCst), 0);
+}
+
+/// Scrapes that come while one runs are answered at once, so they hold
+/// none of the listener's connections and the probes still get one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scrapes_that_find_one_running_leave_the_probes_room() {
+    let (health, metrics) = health(SCRAPE_LIMIT);
+    let held = Held::fill(&metrics.model_status);
+    let address = serve(health).await;
+    let first = tokio::spawn(async move { get(address, "/metrics").await });
+    tokio::time::timeout(WAIT, held.entered.notified())
+        .await
+        .expect("the scrape ran the closure");
+    // Enough scrapes to take every other connection, then the probes.
+    let scrapes: Vec<_> = (1..CONNECTIONS)
+        .map(|_| tokio::spawn(async move { get(address, "/metrics").await }))
+        .collect();
+    let probes: Vec<_> = ["/live", "/health"]
+        .into_iter()
+        .map(|path| tokio::spawn(async move { get(address, path).await }))
+        .collect();
+    for scrape in scrapes {
+        let (code, body) = tokio::time::timeout(WAIT, scrape)
+            .await
+            .expect("the scrape answered")
+            .expect("joined")
+            .expect("a response");
+        assert_eq!(code, 503, "{body}");
+        assert!(body.contains("in progress"), "{body}");
+    }
+    for probe in probes {
+        tokio::time::timeout(WAIT, probe)
+            .await
+            .expect("the probe answered")
+            .expect("joined")
+            .expect("a response");
+    }
+    assert_eq!(
+        held.unreleased.load(Ordering::SeqCst),
+        0,
+        "the scrapes or the probes waited for the held closure"
+    );
+    assert_eq!(held.runs.load(Ordering::SeqCst), 1);
+    held.release.send(()).expect("the closure waits");
+    let (code, body) = tokio::time::timeout(WAIT, first)
+        .await
+        .expect("the scrape answered")
+        .expect("joined")
+        .expect("a response");
+    assert_eq!(code, 200, "{body}");
 }

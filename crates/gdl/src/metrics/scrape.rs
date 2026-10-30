@@ -21,9 +21,9 @@ use super::{Construct, labels, opts};
 /// once, on an empty vector. A request never runs it.
 ///
 /// Keep the closure fast. The system listener runs it on a blocking
-/// thread, one scrape at a time, and answers a scrape that takes longer
-/// than 5 s with 503. It must not await, and may take a `blocking_read`
-/// of a tokio lock.
+/// thread, one scrape at a time. It answers with 503 a scrape that takes
+/// longer than 5 s, or that comes while another runs. The closure must
+/// not await, and may take a `blocking_read` of a tokio lock.
 ///
 /// ```
 /// use std::sync::Arc;

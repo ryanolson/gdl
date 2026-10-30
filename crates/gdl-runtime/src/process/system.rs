@@ -196,25 +196,23 @@ impl Health {
     /// A node's `ScrapeGaugeVec` runs its closure inside the gather, so
     /// the gather runs on a blocking thread, where it holds up no probe,
     /// and one at a time, so a closure that never returns holds one
-    /// thread. A scrape past `scrape_limit` is answered with 503.
+    /// thread. A scrape past `scrape_limit` is answered with 503. A scrape
+    /// that finds another running is answered with 503 at once: waiting,
+    /// it would hold a connection the probes need.
     async fn scrape(&self) -> (u16, String) {
         let Some(registry) = self.registry.get().cloned() else {
             return (200, String::new());
         };
-        let gather = async {
-            let permit = Arc::clone(&self.scrapes)
-                .acquire_owned()
-                .await
-                .expect("the scrape semaphore is never closed");
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let mut text = String::new();
-                prometheus::TextEncoder::new()
-                    .encode_utf8(&registry.gather(), &mut text)
-                    .map(|()| text)
-            })
-            .await
+        let Ok(permit) = Arc::clone(&self.scrapes).try_acquire_owned() else {
+            return (503, "a scrape is in progress".into());
         };
+        let gather = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut text = String::new();
+            prometheus::TextEncoder::new()
+                .encode_utf8(&registry.gather(), &mut text)
+                .map(|()| text)
+        });
         match tokio::time::timeout(self.scrape_limit, gather).await {
             Ok(Ok(Ok(text))) => (200, text),
             Ok(Ok(Err(error))) => (500, error.to_string()),
