@@ -226,6 +226,29 @@ cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_p
 
 Counting an outcome costs 4.6 ns, in every run, with one thread. The picks run none of the change's code, so their 0.8 ns comes from where the code is placed ([A reason for no pool](#a-reason-for-no-pool)). The offers vary from run to run, the roster's as much as the pools', so they show no change. The runs are sequential, so they cannot show contention between threads.
 
+### Round trips, re-queues, and what a chooser holds
+
+A chooser that records metrics also times each offer's round trip, and counts its re-queues ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)). An offer to a counted pool is timed: one clock read once it is encoded, kept across the wait in the instant a hand-off timed for its visit already keeps, and one more at the answer, with two relaxed adds to its thread's shard of the outcome's bins. A re-queue adds one to its pool's shard, found through the pool's table. The gauges of what the chooser holds of each pool are read from its tables at the scrape, so an offer does nothing for them.
+
+Measured with callgrind 3.22.0 on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 7 to 40, rustc 1.93.1, release profile, rustix on its libc backend. Base `82597b8d` and change `7b953e2d` were built in turn in one checkout and one target directory. Instructions are collected only inside one function (`--toggle-collect`) while `an_accepted_first_offer_allocates_what_a_roster_hand_off_does` sends 62 offers through crossings to a counted pool, and 62 through the roster:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo test --release -p gdl-runtime --features hub --lib --no-run
+valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*pools::offer::answer*' <lib test binary> \
+  --exact dist::pools::offer::tests::an_accepted_first_offer_allocates_what_a_roster_hand_off_does
+valgrind --tool=callgrind --collect-atstart=no --toggle-collect='clock_gettime*' <lib test binary> --exact ...
+```
+
+| Measure | Base | Change |
+|---|---|---|
+| `pools::offer::answer`, all 62 pool offers | 71,006 Ir, twice | 81,285 and 81,337 Ir |
+| per pool offer | 1,145 Ir | 1,311 Ir |
+| inside `clock_gettime`, the whole test | 35,830 to 36,270 Ir | 37,350 to 37,660 Ir |
+
+The whole path, once each: `cost_of_a_pool_choice_and_an_offer` sends 60,000 offers through the roster and 60,000 to a counted pool, under `--toggle-collect='*send_forward*'`. It collected 1,206,198,070 Ir before and 1,227,485,527 after: 10,052 and 10,229 Ir per send. All of the difference over the 60,000 pool offers is 355 Ir each. The roster's sends run none of the change's code, but the count also holds the polls the scheduler makes, which vary by about 80 Ir per send between runs of the shorter test, so this is a bound, not the attribution. The rows above are.
+
+An accepted pool offer runs about 166 more instructions where its answer is read: the clock read, the outcome's bin, and the two adds. The clock read at the send adds about 25 to 30 more over the two reads, in user space. Under valgrind the clock is a system call, so callgrind does not count its time; natively it is the vDSO's. Allocations do not change: `a_wait_allocates_nothing_beyond_its_timer` prints 7 for an accepted first offer, 19 and 28 for one and two failovers, and 19, 28, and 46 for one, two, and four re-queues, before and after, three runs each. `an_accepted_first_offer_allocates_what_a_roster_hand_off_does` checks that the round trips are recorded, and `a_first_offer_is_no_larger_than_a_hand_off_was` passes before and after.
+
 ### An instance's own decline
 
 An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
