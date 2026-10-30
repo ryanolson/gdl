@@ -128,3 +128,122 @@ fn a_cargo_source_cannot_resolve_from_an_absolute_host_directory() {
         "the generated contexts require the host's absolute vendor directory: {accepted:?}"
     );
 }
+
+/// Generating the bundle must not activate a link to unchecked host configuration.
+#[cfg(unix)]
+#[test]
+#[ignore = "F3: generating the bundle activates a dangling link outside the tree"]
+fn generating_the_bundle_cannot_activate_an_external_config_link() {
+    struct Probe {
+        config: String,
+        reads: usize,
+    }
+
+    impl gdl_gen::Docker for Probe {
+        fn digest(&mut self, _: &str) -> Result<Option<String>, gdl_gen::Error> {
+            Ok(None)
+        }
+
+        fn build(
+            &mut self,
+            context: &Path,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<String, gdl_gen::Error> {
+            let path = context.join(".cargo/config.toml");
+            let real = path
+                .canonicalize()
+                .expect("the activated configuration link");
+            assert!(!real.starts_with(context.canonicalize().expect("the tree")));
+            assert_eq!(
+                std::fs::read_to_string(path).expect("the host configuration"),
+                self.config
+            );
+            let lock: toml::Table =
+                std::fs::read_to_string(context.join("target/gdl-images/front/Cargo.lock"))
+                    .expect("the generated lock")
+                    .parse()
+                    .expect("a lock");
+            let itoa = lock["package"]
+                .as_array()
+                .expect("packages")
+                .iter()
+                .find(|package| package["name"].as_str() == Some("itoa"))
+                .expect("itoa in the segment");
+            assert!(
+                itoa.get("source").is_none(),
+                "the lock did not select the unchecked host patch"
+            );
+            self.reads += 1;
+            Ok(format!("sha256:{}", "0".repeat(64)))
+        }
+    }
+
+    let copy = Copy::new();
+    let host = tempfile::Builder::new()
+        .prefix("gdl-host-config-")
+        .tempdir()
+        .expect("a host directory");
+    let lock: toml::Table = std::fs::read_to_string(copy.path().join("Cargo.lock"))
+        .expect("the workspace lock")
+        .parse()
+        .expect("a lock");
+    let version = lock["package"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"].as_str() == Some("itoa"))
+        .expect("the locked itoa")["version"]
+        .as_str()
+        .expect("a version");
+    let patch = host.path().join("itoa");
+    std::fs::create_dir_all(patch.join("src")).expect("a host patch");
+    std::fs::write(
+        patch.join("Cargo.toml"),
+        format!("[package]\nname = \"itoa\"\nversion = {version:?}\nedition = \"2024\"\n"),
+    )
+    .expect("a patch manifest");
+    std::fs::write(patch.join("src/lib.rs"), "pub const VALUE: u8 = 1;\n").expect("a host library");
+    let config = format!(
+        "[patch.crates-io]\nitoa = {{ path = {} }}\n",
+        toml::Value::String(patch.display().to_string())
+    );
+    std::fs::write(host.path().join("config.toml"), &config).expect("host-only configuration");
+    std::fs::create_dir_all(copy.path().join(".cargo/deep")).expect("a configuration directory");
+    std::os::unix::fs::symlink("../../target/gdl-images", copy.path().join(".cargo/deep/x"))
+        .expect("a dangling link to the generated bundle");
+    let link_target = format!(
+        "deep/x/../../../{}/config.toml",
+        host.path()
+            .file_name()
+            .expect("a host directory name")
+            .to_string_lossy()
+    );
+    let linked = copy.path().join(".cargo/config.toml");
+    std::os::unix::fs::symlink(&link_target, &linked)
+        .expect("a lexically internal configuration link");
+    assert!(
+        !linked.exists(),
+        "the configuration was active before generation"
+    );
+    copy.add();
+
+    let mut docker = Probe { config, reads: 0 };
+    let images = gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    );
+    let bundle = compose(&copy.spec());
+    assert!(
+        images.is_err() && bundle.is_err(),
+        "a link to unchecked host configuration was accepted: images={}, compose={}, host reads={}",
+        images.is_ok(),
+        bundle.is_ok(),
+        docker.reads
+    );
+}
