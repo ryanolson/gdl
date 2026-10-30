@@ -25,12 +25,19 @@
 # fleet that the relay refuses: the model pools are shared by their parents' class. It checks that the tables Job
 # succeeds, that every pool is healthy, which needs the global pool to find and follow both model pools through the
 # tables, and that a request is answered; then that `down` leaves no object with the fleet's label. The hub's image
-# is then built with the hub's `dynamodb` feature, from a gdl that has it: GDL_REV names a commit of the spec's
-# `[gdl] git` that does (examples/api/deploy.toml pins an older one). kind runs one cluster, so the case covers only
+# is then built with the hub's `dynamodb` feature, from a gdl that has it: with LOCAL=1, the working tree; else
+# GDL_REV names a commit of the spec's `[gdl] git` that does (examples/api/deploy.toml pins an older one). The case
+# then removes a model pool, which the next deploy drains and deletes once its own hub says that its record is
+# withdrawn, and takes the fleet down. kind runs one cluster, so the case covers only
 # the hubs of the Local's own cluster, which reach it at its Service, not the pod-IP address of other clusters.
 #
 #   INSTALL_TOOLS=1 bash scripts/kind-fleet.sh      # first downloads the pinned kind into TOOLS_DIR
 #   bash scripts/kind-fleet.sh
+#   LOCAL=1 DYNAMODB=1 bash scripts/kind-fleet.sh   # every image from this working tree, both cases
+#
+# LOCAL=1 builds every image from this working tree, with `cargo gdl deploy --local`: the spec is
+# examples/api/gdl.toml, which names gdl and the api crates by path, so no gdl is fetched, and a change that is not
+# published is what runs.
 #
 # TOOLS_DIR holds kind (default: .k8s-tools at the repository's root, which git ignores). TIMEOUT bounds each
 # `cargo gdl` run in seconds (default 1800: the first deploy builds three release binaries with fat LTO). The images
@@ -48,8 +55,9 @@ REGISTRY_IMAGE="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace
 PROMETHEUS_IMAGE="prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038"
 TIMEOUT="${TIMEOUT:-1800}"
 DYNAMODB="${DYNAMODB:-0}"
-if [[ "${DYNAMODB}" == "1" && -z "${GDL_REV:-}" ]]; then
-  echo "kind-fleet.sh: DYNAMODB=1 needs GDL_REV, a commit of the spec's [gdl] git with the hub's dynamodb feature" >&2
+LOCAL="${LOCAL:-0}"
+if [[ "${DYNAMODB}" == "1" && "${LOCAL}" != "1" && -z "${GDL_REV:-}" ]]; then
+  echo "kind-fleet.sh: DYNAMODB=1 needs LOCAL=1, or GDL_REV, a commit of the spec's [gdl] git with the hub's dynamodb feature" >&2
   exit 1
 fi
 
@@ -157,12 +165,25 @@ k taint node "${node_name}" dedicated=gdl-api:NoSchedule >/dev/null
 
 # The api example in two classes. The frontend listens on every interface, so that a port-forward reaches it, and
 # each segment drains within 20 s.
-sed "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" examples/api/deploy.toml >"${scratch}/gdl.toml"
-grep -q "^path = \"${root}/examples/api/api.gdl\"" "${scratch}/gdl.toml" || fail "examples/api/deploy.toml names no api.gdl"
-if [[ -n "${HUB_METRICS_REV:-}" ]]; then
-  sed -i "s#^rev = \".*\"#rev = \"${HUB_METRICS_REV}\"#" "${scratch}/gdl.toml"
-  grep -q "^rev = \"${HUB_METRICS_REV}\"" "${scratch}/gdl.toml" || fail "the spec names no [gdl] rev to replace"
+if [[ "${LOCAL}" == "1" ]]; then
+  # The spec that names gdl and the api crates by path, each made absolute, since the spec is written elsewhere.
+  sed -e "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" \
+    -e "s#^crates = \[\".\"\]#crates = [\"${root}/examples/api\"]#" \
+    -e "s#^path = \"../../crates/gdl-runtime\"#path = \"${root}/crates/gdl-runtime\"#" \
+    examples/api/gdl.toml >"${scratch}/gdl.toml"
+  grep -q "^path = \"${root}/crates/gdl-runtime\"" "${scratch}/gdl.toml" || fail "examples/api/gdl.toml names no gdl path"
+  [[ "$(grep -c "^crates = \[\"${root}/examples/api\"\]" "${scratch}/gdl.toml")" -eq 2 ]] \
+    || fail "examples/api/gdl.toml names its crates otherwise"
+  local_flag=(--local)
+else
+  sed "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" examples/api/deploy.toml >"${scratch}/gdl.toml"
+  if [[ -n "${HUB_METRICS_REV:-}" ]]; then
+    sed -i "s#^rev = \".*\"#rev = \"${HUB_METRICS_REV}\"#" "${scratch}/gdl.toml"
+    grep -q "^rev = \"${HUB_METRICS_REV}\"" "${scratch}/gdl.toml" || fail "the spec names no [gdl] rev to replace"
+  fi
+  local_flag=()
 fi
+grep -q "^path = \"${root}/examples/api/api.gdl\"" "${scratch}/gdl.toml" || fail "the spec names no api.gdl"
 cat >>"${scratch}/gdl.toml" <<'EOF'
 [class.global]
 segments = ["front"]
@@ -224,7 +245,12 @@ run() {
   local step="$1"
   shift
   echo "kind-fleet.sh: cargo gdl ${step}"
-  timeout "${TIMEOUT}" "${gdl[@]}" "${step}" "$@" 2>"${scratch}/${step}.err" \
+  # Only deploy builds images: down takes no --local.
+  local extra=()
+  if [[ "${step}" == "deploy" ]]; then
+    extra=("${local_flag[@]}")
+  fi
+  timeout "${TIMEOUT}" "${gdl[@]}" "${step}" "$@" "${extra[@]}" 2>"${scratch}/${step}.err" \
     || { grep -v '^#\|^ ' "${scratch}/${step}.err" | tail -n 40 >&2; fail "cargo gdl ${step} failed"; }
   grep '^cargo gdl: ' "${scratch}/${step}.err" || true
 }
@@ -392,18 +418,24 @@ k get namespace gdl-api >/dev/null || fail "down deleted the namespace"
 echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays"
 
 if [[ "${DYNAMODB}" == "1" ]]; then
-  sed "s#^rev = \".*\"#rev = \"${GDL_REV}\"#" "${scratch}/gdl.toml" >"${scratch}/dynamodb.gdl.toml"
-  grep -q "^rev = \"${GDL_REV}\"" "${scratch}/dynamodb.gdl.toml" || fail "the spec names no [gdl] rev to replace"
-  sed 's/^home = "global"$/parents = "global"/' "${scratch}/fleet.toml" >"${scratch}/dynamodb.toml"
-  cat >>"${scratch}/dynamodb.toml" <<'TOML'
-
+  if [[ "${LOCAL}" == "1" ]]; then
+    cp "${scratch}/gdl.toml" "${scratch}/dynamodb.gdl.toml"
+  else
+    sed "s#^rev = \".*\"#rev = \"${GDL_REV}\"#" "${scratch}/gdl.toml" >"${scratch}/dynamodb.gdl.toml"
+    grep -q "^rev = \"${GDL_REV}\"" "${scratch}/dynamodb.gdl.toml" || fail "the spec names no [gdl] rev to replace"
+  fi
+  directory='
 [directory]
 backend = "dynamodb"
 records_table = "gdl-pools"
 lists_table = "gdl-pool-lists"
 local = true
 cluster = "kind"
-TOML
+'
+  sed 's/^home = "global"$/parents = "global"/' "${scratch}/fleet.toml" >"${scratch}/dynamodb.toml"
+  printf '%s' "${directory}" >>"${scratch}/dynamodb.toml"
+  sed 's/^home = "global"$/parents = "global"/' "${scratch}/smaller.toml" >"${scratch}/dynamodb-smaller.toml"
+  printf '%s' "${directory}" >>"${scratch}/dynamodb-smaller.toml"
   run deploy --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb.toml" --target-dir "${target}"
   grep -q "tables: the DynamoDB directory's tables are ready" "${scratch}/deploy.err" \
     || fail "the deploy ran no tables Job"
@@ -425,7 +457,14 @@ TOML
   kill "${forward}"
   forward=""
   echo "kind-fleet.sh: under DynamoDB every pool is healthy, and a request is answered"
-  run down --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb.toml" --target-dir "${target}"
+  run deploy --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb-smaller.toml" --target-dir "${target}"
+  grep -q "pool \`model-b\` has withdrawn" "${scratch}/deploy.err" || fail "the deploy did not drain model-b under DynamoDB"
+  left="$(k --namespace gdl-api get deployments,services,configmaps,pods --selector gdl.dev/pool=model-b --output name)"
+  [[ -z "${left}" ]] || fail "model-b's objects are left under DynamoDB: ${left}"
+  hub global /v1/ext/gdl-pool/health >/dev/null \
+    || fail "the global pool's health does not answer 200 under DynamoDB after model-b left"
+  echo "kind-fleet.sh: under DynamoDB, model-b drained, said that it withdrew, and was deleted"
+  run down --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb-smaller.toml" --target-dir "${target}"
   labelled="$(k get serviceaccounts,configmaps,services,deployments,replicasets,pods,jobs \
     --all-namespaces --selector gdl.dev/fleet=api --output name)"
   [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left under DynamoDB: ${labelled}"

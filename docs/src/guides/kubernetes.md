@@ -319,4 +319,4 @@ The kubeconfig is in the script's scratch directory, so the script never reads o
 DYNAMODB=1 GDL_REV=<commit> bash scripts/kind-fleet.sh
 ```
 
-kind runs one cluster, so the case covers only the hubs in the Local's own cluster, which reach it at its Service. The address of the other clusters' hubs, the Local's pod IP, is covered by the fake-kubectl tests in `crates/gdl-gen/tests/deployment/deploy/dynamodb.rs`.
+`LOCAL=1` builds every image from this working tree, with `cargo gdl deploy --local` and the spec `examples/api/gdl.toml`, so the DynamoDB case needs no `GDL_REV`: `LOCAL=1 DYNAMODB=1 bash scripts/kind-fleet.sh`. The DynamoDB case also removes a model pool, which the next deploy drains and deletes once its own hub says that its record is withdrawn. kind runs one cluster, so the case covers only the hubs in the Local's own cluster, which reach it at its Service. The address of the other clusters' hubs, the Local's pod IP, is covered by the fake-kubectl tests in `crates/gdl-gen/tests/deployment/deploy/dynamodb.rs`.
