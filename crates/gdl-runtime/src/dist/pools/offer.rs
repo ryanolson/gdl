@@ -329,7 +329,9 @@ impl Runtime {
     ) -> Result<Requeued> {
         let deadline = cx.deadline().map(gdl::Deadline::instant);
         loop {
-            crossing
+            // Held until the request offers again: any way out of this
+            // round before the offer passes the wake to the next waiter.
+            let woken = crossing
                 .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
@@ -366,6 +368,9 @@ impl Runtime {
             };
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, timed)?;
+            if let Some(woken) = woken {
+                woken.used();
+            }
             match answer(offering.await, crossing, pool, &mut held) {
                 Answer::Accepted(accepted) => {
                     return Ok(Requeued::Handed(Handed {

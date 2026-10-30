@@ -18,7 +18,7 @@ use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
 use super::damping::Damping;
-use super::lease::{PoolLease, Seen};
+use super::lease::{PoolLease, Seen, Wake};
 use super::policy;
 use super::{EntryTable, PoolTable, Pools};
 use crate::dist::roster::{CHOICES, Policy, turn};
@@ -276,22 +276,23 @@ impl Crossing {
     /// never past `deadline` ([`Seen::room`]). Returns at once when the
     /// chooser no longer follows the pool, or follows it under another
     /// follow than the offer's. Holds no lease on the pool's follow, so
-    /// that a drain does not wait for it.
+    /// that a drain does not wait for it. The wake that ended the wait, if
+    /// one did, is the caller's to use or pass on ([`Wake`]).
     pub(crate) async fn room(
         &self,
         pool: u64,
         seen: &Seen,
         backoff: std::time::Duration,
         deadline: Option<tokio::time::Instant>,
-    ) {
+    ) -> Option<Wake> {
         let leases = {
             let table = self.target.table.load();
             match table.pools.iter().find(|shown| shown.id == pool) {
                 Some(shown) => Arc::clone(&shown.leases),
-                None => return,
+                None => return None,
             }
         };
-        seen.room(&leases, backoff, deadline).await;
+        Some(seen.room(&leases, backoff, deadline).await)
     }
 
     /// An instance of `pool`, which a request is re-queued for, by

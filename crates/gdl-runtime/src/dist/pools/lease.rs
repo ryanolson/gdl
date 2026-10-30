@@ -100,7 +100,17 @@ impl Leases {
     /// drop). The backoff sees room that another chooser frees. Allocates
     /// nothing: the waiter is held in this future, and the timer is the
     /// one sleep.
-    pub(crate) async fn room(&self, seen: u64, backoff: Duration, deadline: Option<Instant>) {
+    ///
+    /// A wake that ended the wait is the request's to use: it comes back
+    /// as a [`Wake`], which the request marks used once it offers again,
+    /// and which passes the wake to the next waiter when it is dropped
+    /// unused, as when the request's deadline or a cancel ends it first.
+    pub(crate) async fn room(
+        self: &Arc<Self>,
+        seen: u64,
+        backoff: Duration,
+        deadline: Option<Instant>,
+    ) -> Wake {
         let room = &self.2;
         // A store, then a load, on each side: the wait counts itself, then
         // reads the generation; an end adds to the generation, then reads
@@ -121,9 +131,11 @@ impl Leases {
         // waits, so that an end after the read finds this waiter.
         let woken = room.woken.notified();
         let mut woken = std::pin::pin!(woken);
-        woken.as_mut().enable();
+        // A permit an earlier end stored is taken here, and is this
+        // request's to use or pass on, as a notification is.
+        let notified = woken.as_mut().enable();
         if room.ends.load(Ordering::SeqCst) != seen {
-            return;
+            return Wake::of(notified.then_some(self));
         }
         let after = Instant::now().checked_add(backoff);
         let until = match (after, deadline) {
@@ -133,11 +145,24 @@ impl Leases {
         match until {
             Some(until) => {
                 tokio::select! {
-                    () = woken => {}
-                    () = tokio::time::sleep_until(until) => {}
+                    () = woken => Wake::of(Some(self)),
+                    // A notification that lands as the backoff ends is passed
+                    // on by the `Notified`'s drop, which has not taken it.
+                    () = tokio::time::sleep_until(until) => Wake::of(None),
                 }
             }
-            None => woken.await,
+            None => {
+                woken.await;
+                Wake::of(Some(self))
+            }
+        }
+    }
+
+    /// Pass a wake that a request took and did not use to the waiter
+    /// registered first, if some wait.
+    fn pass_on(&self) {
+        if self.2.waiting.load(Ordering::SeqCst) > 0 {
+            self.2.woken.notify_one();
         }
     }
 
@@ -169,6 +194,35 @@ impl Drop for Waiting<'_> {
     }
 }
 
+/// A wake that ended a request's wait for room ([`Leases::room`]), held
+/// until the request offers again. A wake taken from `Notify` is no
+/// longer tokio's to pass on, so a request that leaves without offering,
+/// at its deadline, by a cancel, or because its pool stopped taking work,
+/// would strand the room it signalled while another request still waits.
+/// Dropped unused, it wakes the next waiter instead. Empty when no wake
+/// ended the wait: a moved generation, the backoff, or the deadline.
+#[must_use = "a wake dropped unused passes to the next waiter"]
+pub(crate) struct Wake(Option<Arc<Leases>>);
+
+impl Wake {
+    fn of(follow: Option<&Arc<Leases>>) -> Self {
+        Self(follow.cloned())
+    }
+
+    /// The request offers again for the room the wake signalled.
+    pub(crate) fn used(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Wake {
+    fn drop(&mut self) {
+        if let Some(follow) = self.0.take() {
+            follow.pass_on();
+        }
+    }
+}
+
 /// What a re-queued request saw of its pool before its last offer: the
 /// follow the offer was made under, and that follow's generation of
 /// lease ends then. Made only on a miss.
@@ -196,15 +250,15 @@ impl Seen {
         current: &Arc<Leases>,
         backoff: Duration,
         deadline: Option<Instant>,
-    ) {
+    ) -> Wake {
         if !self
             .follow
             .as_ref()
             .is_some_and(|follow| Arc::ptr_eq(follow, current))
         {
-            return;
+            return Wake::of(None);
         }
-        current.room(self.ends, backoff, deadline).await;
+        current.room(self.ends, backoff, deadline).await
     }
 }
 
@@ -302,6 +356,9 @@ impl std::fmt::Debug for PoolLease {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod wakes;
 
 #[cfg(test)]
 mod tests {
@@ -410,7 +467,7 @@ mod tests {
             tokio::time::advance(Duration::from_secs(1)).await;
             for (wait, ready) in waits.iter_mut().zip(ready) {
                 if !ready {
-                    wait.await;
+                    drop(wait.await);
                 }
             }
             assert_eq!(
@@ -550,7 +607,7 @@ mod tests {
                         assert!(cx.check().is_ok());
                     } else {
                         tokio::time::advance(Duration::from_secs(1)).await;
-                        waiting.await;
+                        drop(waiting.await);
                         assert_eq!(
                             cx.check()
                                 .expect_err("the wait exhausted its deadline")
@@ -605,7 +662,7 @@ mod tests {
         drop(second);
         assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
-        leases.room(leases.ends(), hour, Some(deadline)).await;
+        drop(leases.room(leases.ends(), hour, Some(deadline)).await);
         assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
         let mut cancelled = Box::pin(leases.room(leases.ends(), hour, None));
         assert!(cancelled.as_mut().poll(&mut cx).is_pending());
@@ -670,11 +727,17 @@ mod tests {
         drop(held.next());
         assert_eq!(leases.ends(), seen + 1);
         assert!(first.woken() && !second.woken(), "not the first registered");
-        assert_eq!(waits[0].as_mut().poll(&mut contexts[0]), Poll::Ready(()));
+        let Poll::Ready(wake) = waits[0].as_mut().poll(&mut contexts[0]) else {
+            panic!("the first registered was not served");
+        };
+        wake.used();
         assert!(waits[1].as_mut().poll(&mut contexts[1]).is_pending());
         drop(held.next());
         assert!(second.woken());
-        assert_eq!(waits[1].as_mut().poll(&mut contexts[1]), Poll::Ready(()));
+        let Poll::Ready(wake) = waits[1].as_mut().poll(&mut contexts[1]) else {
+            panic!("the second registered was not served");
+        };
+        wake.used();
         assert_eq!(leases.held(), 0);
         assert_eq!(
             leases.2.waiting.load(Ordering::SeqCst),
@@ -776,7 +839,11 @@ mod tests {
                         served.lock().expect("not poisoned").push(at);
                         return;
                     }
-                    follow.room(seen, Duration::from_secs(3600), None).await;
+                    // It offers again at once, as the re-queue does.
+                    follow
+                        .room(seen, Duration::from_secs(3600), None)
+                        .await
+                        .used();
                 }
             }));
             settle().await;
@@ -823,17 +890,21 @@ mod tests {
     /// once.
     #[tokio::test(start_paused = true)]
     async fn a_wait_ends_at_its_backoff_or_the_deadline() {
-        let leases = Leases::default();
+        let leases = Arc::new(Leases::default());
         let start = tokio::time::Instant::now();
-        leases
-            .room(leases.ends(), Duration::from_millis(50), None)
-            .await;
+        drop(
+            leases
+                .room(leases.ends(), Duration::from_millis(50), None)
+                .await,
+        );
         assert_eq!(start.elapsed(), Duration::from_millis(50));
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_millis(20);
-        leases
-            .room(leases.ends(), Duration::from_secs(60), Some(deadline))
-            .await;
+        drop(
+            leases
+                .room(leases.ends(), Duration::from_secs(60), Some(deadline))
+                .await,
+        );
         assert_eq!(start.elapsed(), Duration::from_millis(20));
     }
 
