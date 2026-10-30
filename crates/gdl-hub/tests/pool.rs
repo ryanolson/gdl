@@ -279,6 +279,33 @@ async fn the_pool_health_endpoint_answers_ready_only_once_the_pool_is() {
     hub.shutdown().await.expect("the hub stops");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F3: the rendered hub metrics path answers 404"]
+async fn the_rendered_hub_metrics_path_answers_a_scrape() {
+    let objects = include_str!("../../gdl-gen/tests/fixtures/k8s/out/use1/pools/model-x-us.yaml");
+    let deployment = objects
+        .split("---\n")
+        .filter(|document| !document.trim().is_empty())
+        .map(|document| serde_json::from_str::<serde_json::Value>(document).expect("an object"))
+        .find(|object| {
+            object["kind"] == "Deployment"
+                && object["metadata"]["labels"]["gdl.dev/segment"] == "hub"
+        })
+        .expect("the rendered hub");
+    let path = deployment["spec"]["template"]["metadata"]["annotations"]["prometheus.io/path"]
+        .as_str()
+        .expect("the scrape path");
+    let (hub, _pool) = pool_hub(MemoryDirectory::new(), timing()).await;
+    let (health, _) = get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert_eq!(
+        health, 503,
+        "the pool extension answers on the public listener"
+    );
+    let (status, body) = get(&hub, path).await;
+    hub.shutdown().await.expect("the hub stops");
+    assert_eq!(status, 200, "Prometheus scrapes {path}: {body}");
+}
+
 /// A hub given no pool settings runs as before: admission alone, and no
 /// pool health endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
