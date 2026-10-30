@@ -187,6 +187,14 @@ fn binary_quantity_caps_cannot_hide_a_limit_below_its_request() {
     );
 }
 
+#[test]
+#[ignore = "F3: binary quantities are rejected before their suffix can make them exact"]
+fn fractional_binary_quantities_are_scaled_before_precision_is_checked() {
+    let q = |text: &str| Quantity::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+    assert_eq!(q("0.5Gi"), q("512Mi"));
+    assert_eq!(q("0.0009765625Gi"), q("1Mi"));
+}
+
 /// [`PLACED`] with `from` replaced by `to`, which must be in it.
 fn changed(from: &str, to: &str) -> String {
     assert!(PLACED.contains(from), "{from}");
