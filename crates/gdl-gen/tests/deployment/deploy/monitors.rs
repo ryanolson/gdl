@@ -265,3 +265,96 @@ fn down_stops_when_operator_discovery_is_incomplete() {
         commands(&log)
     );
 }
+
+struct MonitorGroups {
+    inner: Kube,
+    foreign: Option<Value>,
+}
+
+impl gdl_gen::Kube for MonitorGroups {
+    fn run(
+        &mut self,
+        args: &[String],
+        input: Option<&[u8]>,
+    ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+        if args.iter().any(|arg| arg == "delete")
+            && args.iter().any(|arg| arg == "podmonitor/retired")
+        {
+            // kubectl resolves an unqualified resource to the first matching API group.
+            self.inner.log.borrow_mut().push(Call::Kube {
+                args: args.to_vec(),
+                input: String::new(),
+            });
+            self.foreign.take().expect("another team's PodMonitor");
+            return Ok(gdl_gen::Reply::ok("podmonitor.another-team.dev deleted"));
+        }
+        let qualified: Vec<String> = args
+            .iter()
+            .map(|arg| match arg.as_str() {
+                "podmonitor.monitoring.coreos.com/retired"
+                | "podmonitors.monitoring.coreos.com/retired" => "podmonitor/retired".into(),
+                _ => arg.clone(),
+            })
+            .collect();
+        self.inner.run(&qualified, input)
+    }
+}
+
+fn assert_monitor_group(prune: bool) {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_asking(false));
+    let log = Log::default();
+    let mut kube = MonitorGroups {
+        inner: Kube::new(&log),
+        foreign: Some(json!({
+            "apiVersion": "another-team.dev/v1",
+            "kind": "PodMonitor",
+            "metadata": {"name": "retired", "namespace": "gdl-api"},
+        })),
+    };
+    kube.inner.holds(
+        "kind-use1",
+        json!({
+            "apiVersion": "monitoring.coreos.com/v1",
+            "kind": "PodMonitor",
+            "metadata": {
+                "name": "retired",
+                "namespace": "gdl-api",
+                "labels": {"gdl.dev/fleet": "api"},
+            },
+        }),
+    );
+    if prune {
+        let how = gdl_gen::Deploy {
+            spec: files.spec.clone(),
+            fleet: files.fleet.clone(),
+            target: mirror.target(),
+            out: None,
+            waits: waits(),
+        };
+        gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {}).expect("deploy");
+    } else {
+        gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut |_| {}).expect("down");
+    }
+    assert!(
+        kube.foreign.is_some(),
+        "a qualified list must not become a delete in another API group: {:?}",
+        deletes(&log, "kind-use1")
+    );
+    assert!(
+        !kube.inner.objects["kind-use1"].contains_key(&("PodMonitor".into(), "retired".into())),
+        "the fleet's operator PodMonitor must be deleted"
+    );
+}
+
+#[test]
+#[ignore = "F4: down deletes an unqualified PodMonitor in another API group"]
+fn down_deletes_only_the_operator_pod_monitor() {
+    assert_monitor_group(false);
+}
+
+#[test]
+#[ignore = "F4: prune deletes an unqualified PodMonitor in another API group"]
+fn prune_deletes_only_the_operator_pod_monitor() {
+    assert_monitor_group(true);
+}
