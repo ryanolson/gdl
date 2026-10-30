@@ -19,7 +19,6 @@ fn tracked(copy: &Copy) {
 fn external_symlinks_do_not_copy_host_credentials() {
     let copy = Copy::new();
     tracked(&copy);
-    local(&copy, false, &mut Fake::default());
     let host = tempfile::Builder::new()
         .prefix("gdl-host-secret-")
         .tempdir()

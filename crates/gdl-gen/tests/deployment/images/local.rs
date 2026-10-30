@@ -4,7 +4,9 @@
 //! gdl workspace and the api example in a directory of its own, so that it
 //! can change a source file, or move the copy, without touching the
 //! checkout that other tests build. Each copy is resolved with `cargo
-//! metadata` and its segments' locks settled, which takes a few seconds.
+//! metadata` and its segments' locks settled, which takes about 3 s; a
+//! boundary case builds with both `images` and `compose`, one builder with
+//! one set of rules, so it takes twice that.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
