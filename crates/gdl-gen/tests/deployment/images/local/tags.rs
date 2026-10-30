@@ -99,3 +99,86 @@ fn an_external_spec_change_moves_the_generated_images_tag() {
         tags(&changed)
     );
 }
+
+/// A link adds a type and a target to the digest. Those fields must not
+/// read like the paths and contents of a different set of regular files.
+#[cfg(unix)]
+#[test]
+#[ignore = "file and link digest fields still collide and reuse published tags"]
+fn different_file_and_link_trees_cannot_reuse_published_tags() {
+    #[derive(Default)]
+    struct Kinds {
+        registry: BTreeMap<String, String>,
+        seen: Vec<BTreeMap<String, String>>,
+    }
+
+    impl gdl_gen::Docker for Kinds {
+        fn digest(&mut self, reference: &str) -> Result<Option<String>, gdl_gen::Error> {
+            Ok(self.registry.get(reference).cloned())
+        }
+
+        fn build(
+            &mut self,
+            context: &Path,
+            _: &str,
+            reference: &str,
+            push: bool,
+        ) -> Result<String, gdl_gen::Error> {
+            let mut seen = BTreeMap::new();
+            for name in ["lia", "lib", "lic", "link"] {
+                let path = context.join(name);
+                if std::fs::symlink_metadata(&path).is_err() {
+                    continue;
+                }
+                let value = match std::fs::read_link(&path) {
+                    Ok(target) => format!("link:{}", target.display()),
+                    Err(_) => format!("file:{}", std::fs::read_to_string(path).expect("a file")),
+                };
+                seen.insert(name.to_string(), value);
+            }
+            self.seen.push(seen);
+            let digest = format!("sha256:{:064x}", self.seen.len());
+            if push {
+                self.registry.insert(reference.to_string(), digest.clone());
+            }
+            Ok(digest)
+        }
+    }
+
+    let copy = Copy::new();
+    for (name, text) in [("lia", "link"), ("lib", "lic"), ("link", "lid")] {
+        std::fs::write(copy.path().join(name), text).expect("a regular source file");
+    }
+    let mut docker = Kinds::default();
+    let build = |push, docker: &mut Kinds| {
+        gdl_gen::images(
+            &copy.spec(),
+            &fleet(),
+            &target(),
+            push,
+            gdl_gen::Sources::Local,
+            docker,
+        )
+        .expect("local images")
+    };
+    let first = build(true, &mut docker);
+    for name in ["lia", "lib", "link"] {
+        std::fs::remove_file(copy.path().join(name)).expect("remove the regular file");
+    }
+    for (name, target) in [("lia", "lib"), ("lic", "lid")] {
+        std::os::unix::fs::symlink(target, copy.path().join(name))
+            .expect("an internal relative link");
+    }
+    let second = build(false, &mut docker);
+    assert_eq!(docker.seen.len(), 6);
+    assert_ne!(docker.seen[0], docker.seen[3], "the contexts differ");
+    let cached = build(true, &mut docker);
+    assert!(
+        cached
+            .iter()
+            .all(|image| image.outcome == gdl_gen::Outcome::Pushed),
+        "a different file/link tree reused published tags; before: {:?}; after: {:?}; outcomes: {cached:?}",
+        tags(&first),
+        tags(&second)
+    );
+}
