@@ -47,7 +47,7 @@ pub(super) fn build(
             manifest(dir, context, path)?;
         }
     }
-    configuration(dir, context, &entries)?;
+    configuration(dir, context, &mut entries)?;
     // A manifest that names a directory outside the sources says why Git
     // cannot place it: that refusal comes first.
     if let Some(error) = unplaced {
@@ -463,18 +463,21 @@ fn manifest(dir: &Path, context: &Context, path: &Path) -> Result<(), Error> {
     inside(context, path, path.parent().unwrap_or(Path::new("")), named)
 }
 
-/// Refuse any Cargo configuration that a build of the sources reads: one
-/// that the archive holds, at any depth, one in a directory between a
-/// source and the context's root, which Cargo on this machine reads, and
-/// one above the tree in `dir`, which Cargo would read where it settles the
-/// locks. The image build reads only the configuration the generator
-/// writes, which is none, so a build with such a file would quietly differ
-/// from this checkout's. Cargo's own home configuration is read in each
-/// build on this machine, and in none in an image.
+/// Refuse any Cargo configuration that a build of the sources reads, but
+/// one whose only key is `[net] git-fetch-with-cli`: one that the archive
+/// holds, at any depth, one in a directory between a source and the
+/// context's root, which Cargo on this machine reads, and one above the
+/// tree in `dir`, which Cargo would read where it settles the locks. The
+/// image build reads only the configuration the generator writes, which is
+/// none, so a build with such a file would quietly differ from this
+/// checkout's. The one key is accepted, and the file left out of the tree:
+/// a local build fetches no gdl over Git, so it changes nothing an image
+/// builds. Cargo's own home configuration is read in each build on this
+/// machine, and in none in an image.
 fn configuration(
     dir: &Path,
     context: &Context,
-    entries: &BTreeMap<PathBuf, Entry>,
+    entries: &mut BTreeMap<PathBuf, Entry>,
 ) -> Result<(), Error> {
     let named = |path: &Path| {
         path.parent().and_then(Path::file_name) == Some(OsStr::new(".cargo"))
@@ -482,35 +485,92 @@ fn configuration(
                 .iter()
                 .any(|name| path.file_name() == Some(OsStr::new(name)))
     };
-    let archived = entries
-        .keys()
-        .find(|path| named(path))
-        .map(|path| context.root().join(path));
+    let archived: Vec<PathBuf> = entries.keys().filter(|path| named(path)).cloned().collect();
+    for path in &archived {
+        let file = context.root().join(path);
+        // Read only as a file of the tree: a link could name anything.
+        if entries[path].kind != Kind::File {
+            return Err(refuse_configuration(context, &file, "is a link"));
+        }
+        let text = std::fs::read_to_string(dir.join(path)).map_err(super::io)?;
+        accepted(context, &file, &text)?;
+        std::fs::remove_file(dir.join(path)).map_err(super::io)?;
+        entries.remove(path);
+    }
     let home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cargo")));
-    let read = |above: &Path| {
+    let found = |above: &Path| -> Vec<PathBuf> {
         CONFIG
             .iter()
             .map(|name| above.join(".cargo").join(name))
             .filter(|file| home.as_deref() != file.parent())
-            .find(|file| std::fs::symlink_metadata(file).is_ok())
+            .filter(|file| std::fs::symlink_metadata(file).is_ok())
+            .collect()
     };
-    let between = context.sources().iter().find_map(|source| {
-        source
-            .ancestors()
-            .take_while(|above| above.starts_with(context.root()))
-            .find_map(read)
-    });
-    let settling = dir.ancestors().find_map(read);
-    match archived.or(between).or(settling) {
-        None => Ok(()),
-        Some(file) => Err(Error::new(format!(
-            "{}: {} is Cargo configuration, which `--local` does not build with: the image build reads none, so the build would differ from this machine's. Remove it, or build without `--local`",
-            context.prefix(),
-            file.display()
-        ))),
+    let mut host: Vec<PathBuf> = context
+        .sources()
+        .iter()
+        .flat_map(|source| {
+            source
+                .ancestors()
+                .take_while(|above| above.starts_with(context.root()))
+                .flat_map(found)
+                .collect::<Vec<_>>()
+        })
+        .chain(dir.ancestors().flat_map(found))
+        .collect();
+    host.sort();
+    host.dedup();
+    for file in host {
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| refuse_configuration(context, &file, &format!("cannot be read: {e}")))?;
+        accepted(context, &file, &text)?;
     }
+    Ok(())
+}
+
+/// Refuse the configuration `text` of `file` unless its only key is `[net]
+/// git-fetch-with-cli`, a boolean, naming the first other key.
+fn accepted(context: &Context, file: &Path, text: &str) -> Result<(), Error> {
+    let table: toml::Table = text
+        .parse()
+        .map_err(|_| refuse_configuration(context, file, "does not parse as TOML"))?;
+    for (key, value) in &table {
+        let toml::Value::Table(net) = value else {
+            return Err(refuse_configuration(
+                context,
+                file,
+                &format!("sets `{key}`"),
+            ));
+        };
+        if key != "net" {
+            return Err(refuse_configuration(
+                context,
+                file,
+                &format!("sets `{key}`"),
+            ));
+        }
+        for (inner, value) in net {
+            if inner != "git-fetch-with-cli" || !value.is_bool() {
+                return Err(refuse_configuration(
+                    context,
+                    file,
+                    &format!("sets `net.{inner}`"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The refusal of the Cargo configuration in `file`, which `why`.
+fn refuse_configuration(context: &Context, file: &Path, why: &str) -> Error {
+    Error::new(format!(
+        "{}: {} is Cargo configuration that {why}, and `--local` builds with none but `[net] git-fetch-with-cli`: the image build reads none, so the build would differ from this machine's. Remove it, or build without `--local`",
+        context.prefix(),
+        file.display()
+    ))
 }
 
 /// The names Cargo reads its configuration from in a `.cargo` directory.

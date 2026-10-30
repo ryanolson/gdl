@@ -253,7 +253,7 @@ fn a_linked_manifest_with_an_absolute_dependency_is_refused() {
 /// would quietly differ from this checkout's.
 #[test]
 fn any_cargo_configuration_is_refused() {
-    let net = "[net]\ngit-fetch-with-cli = true\n";
+    let net = "[build]\njobs = 1\n";
     for (at, staged) in [
         (".cargo/config.toml", true),
         ("examples/api/.cargo/config", true),
@@ -268,5 +268,91 @@ fn any_cargo_configuration_is_refused() {
         }
         let error = refused(&copy);
         assert!(error.contains(&file.display().to_string()), "{at}: {error}");
+    }
+}
+
+/// The configuration `dynamo-endpoints` holds, as it is: only `[net]
+/// git-fetch-with-cli`.
+const FETCH_WITH_CLI: &str =
+    "# gdl is a private GitHub repository: let cargo fetch it with the system git
+# and its SSH agent rather than libgit2, which has no agent support.
+[net]
+git-fetch-with-cli = true
+";
+
+/// A Cargo configuration whose only key is `[net] git-fetch-with-cli` is
+/// accepted, committed or untracked, and kept out of the tree: a local
+/// build fetches no gdl over Git, so the key changes nothing it builds.
+#[test]
+fn a_configuration_of_git_fetch_with_cli_alone_is_accepted() {
+    for (text, at, staged) in [
+        (FETCH_WITH_CLI, ".cargo/config.toml", true),
+        (
+            "[net]\ngit-fetch-with-cli = false\n",
+            "examples/api/.cargo/config",
+            true,
+        ),
+        (FETCH_WITH_CLI, ".cargo/config.toml", false),
+    ] {
+        let copy = Copy::new();
+        let file = copy.path().join(at);
+        std::fs::create_dir_all(file.parent().expect("a directory")).expect("a directory");
+        std::fs::write(&file, text).expect("a configuration");
+        if staged {
+            copy.add();
+        }
+        for builder in Builder::ALL {
+            let contexts = builder.contexts(&copy.spec()).expect("local images");
+            for (reference, context) in &contexts {
+                assert!(
+                    !context.keys().any(|path| path.starts_with(".cargo")
+                        || path.starts_with("examples/api/.cargo")),
+                    "{builder:?}: {reference}: {at} is in the tree"
+                );
+            }
+        }
+    }
+}
+
+/// Any other key beside `[net] git-fetch-with-cli`, or a file that does not
+/// parse, is refused, naming the file and the key. The file that does not
+/// parse is in a directory Cargo does not read here, so that only the
+/// check reads it.
+#[test]
+fn a_configuration_with_another_key_is_refused() {
+    let root = ".cargo/config.toml";
+    for (text, key, at) in [
+        (
+            format!("{FETCH_WITH_CLI}[source.x]\ndirectory = \"/host\"\n"),
+            "`source`",
+            root,
+        ),
+        (
+            "[net]\ngit-fetch-with-cli = true\noffline = true\n".to_string(),
+            "`net.offline`",
+            root,
+        ),
+        (
+            "[net]\ngit-fetch-with-cli = \"yes\"\n".to_string(),
+            "`net.git-fetch-with-cli`",
+            root,
+        ),
+        (
+            "[net\n".to_string(),
+            "does not parse",
+            "crates/gdl/.cargo/config.toml",
+        ),
+    ] {
+        let copy = Copy::new();
+        let file = copy.path().join(at);
+        std::fs::create_dir_all(file.parent().expect("a directory")).expect("a directory");
+        std::fs::write(&file, &text).expect("a configuration");
+        copy.add();
+        let error = refused(&copy);
+        assert!(
+            error.contains(&file.display().to_string()),
+            "{text}: {error}"
+        );
+        assert!(error.contains(key), "{text}: {error}");
     }
 }
