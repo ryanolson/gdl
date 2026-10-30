@@ -175,6 +175,17 @@ impl Listings {
         Listed::set(&mut listed.presence, record.presence, &mut listed.dirty);
         Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
         if !listed.taken || record.properties_version > listed.properties.version {
+            // Logged where the properties are taken, so a record read again
+            // unchanged does not repeat it, and a listing the relay sends
+            // carries no `dropped` list of its own.
+            if !record.dropped.is_empty() {
+                tracing::debug!(
+                    class = %record.class,
+                    pool = %record.name,
+                    kinds = ?record.dropped,
+                    "a directory record holds properties that do not check: they are left out"
+                );
+            }
             listed.properties = PropertyList {
                 dropped: Vec::new(),
                 entries: record.properties.clone(),

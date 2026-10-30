@@ -122,3 +122,55 @@ fn only_a_new_silence_is_sent_again() {
     assert_eq!(lapsed.missing_age_ms, Some(30_000));
     assert_eq!(listings.changed(CLASS, POOL, t0 + second * 31), None);
 }
+
+/// A directory record's malformed properties need a diagnostic before
+/// the relay discards them, or an operator cannot see why a key vanished.
+#[test]
+fn a_directory_records_dropped_properties_are_logged() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("the log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let output = Log(Arc::default());
+    let captured = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || captured.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::debug!("diagnostic control");
+        let mut wire = serde_json::to_value(record(1, Presence::Serving)).expect("a record");
+        wire["properties"] = serde_json::json!([
+            {"kind": "shard", "key": {"name": "a"}, "state": "ready", "since": 1},
+            {"kind": "broken", "key": {"ratio": 0.5}, "state": "ready", "since": 1}
+        ]);
+        let read: PoolRecord = serde_json::from_value(wire).expect("the rest of the record reads");
+        assert_eq!(read.dropped, ["broken"]);
+        let mut listings = Listings::default();
+        listings.record(&read, None);
+        let listing = listings
+            .listing(CLASS, POOL, Instant::now())
+            .expect("listed");
+        assert_eq!(listing.properties.entries.len(), 1, "the valid key stays");
+        let logged = String::from_utf8(output.0.lock().expect("the log").clone()).expect("utf8");
+        assert!(logged.contains("control"), "the debug log is captured");
+        assert!(
+            logged.contains(POOL) && logged.contains("broken"),
+            "the directory-to-relay path discarded a malformed property's pool and kind without logging them: {logged:?}"
+        );
+    });
+}
