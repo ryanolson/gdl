@@ -8,6 +8,9 @@ use super::*;
 #[path = "monitors/names.rs"]
 mod names;
 
+#[path = "monitors/upgrade.rs"]
+mod upgrade;
+
 /// [`fleet_text`], which asks for a PodMonitor, or the same without.
 fn fleet_asking(pod_monitor: bool) -> String {
     let text = fleet_text();
