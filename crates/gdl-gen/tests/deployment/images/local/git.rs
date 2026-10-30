@@ -60,26 +60,7 @@ fn a_git_error_does_not_admit_ignored_credentials() {
         .status()
         .expect("Git checks the ignore rule without the ownership error");
     assert!(ignored.success());
-    let mut docker = Fake::default();
-    let result = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    if let Err(error) = result {
-        assert!(error.to_string().contains("git"), "{error}");
-        return;
-    }
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        assert!(
-            context.values().all(|text| !text.contains(&marker)),
-            "{reference}: a Git ownership error admitted the ignored credential"
-        );
-    }
+    kept_out(&copy.spec(), "git", &marker);
 }
 
 /// Lossy decoding can turn a tracked byte name into a different, ignored
@@ -125,29 +106,5 @@ fn a_non_utf8_tracked_name_cannot_select_an_ignored_secret() {
         .expect("Git checks the distinct UTF-8 name");
     assert!(ignored.success());
 
-    let mut docker = Fake::default();
-    let result = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    if let Err(error) = result {
-        let text = error.to_string();
-        assert!(
-            text.contains("UTF-8") || text.contains("utf-8") || text.contains("credential-"),
-            "{error}"
-        );
-        assert!(docker.contexts.is_empty());
-        return;
-    }
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        assert!(
-            context.values().all(|text| !text.contains(&marker)),
-            "{reference}: lossy Git name decoding copied an ignored secret into the context"
-        );
-    }
+    kept_out(&copy.spec(), "credential-", &marker);
 }

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{Fake, run_with};
+use super::{Context, Fake, run_with};
 use crate::common::root;
 use crate::{SEGMENTS, SPLIT};
 
@@ -133,6 +133,81 @@ fn local(copy: &Copy, push: bool, docker: &mut Fake) -> Vec<gdl_gen::Built> {
         gdl_gen::Sources::Local,
         docker,
     )
+}
+
+/// The two commands that build images from the tree of local sources,
+/// with one builder and one set of rules: each boundary case runs against
+/// both.
+#[derive(Clone, Copy, Debug)]
+enum Builder {
+    /// `images --local`, through the fake Docker.
+    Images,
+    /// `compose --local`, which writes the tree in its bundle's `context/`.
+    Compose,
+}
+
+impl Builder {
+    const ALL: [Self; 2] = [Self::Images, Self::Compose];
+
+    /// Build `spec`'s images from local sources: each context, by what
+    /// builds from it, as the fake Docker reads it.
+    fn contexts(self, spec: &gdl_gen::Spec) -> Result<BTreeMap<String, Context>, gdl_gen::Error> {
+        match self {
+            Self::Images => {
+                let mut docker = Fake::default();
+                gdl_gen::images(
+                    spec,
+                    &fleet(),
+                    &target(),
+                    false,
+                    gdl_gen::Sources::Local,
+                    &mut docker,
+                )?;
+                Ok(docker.contexts)
+            }
+            Self::Compose => {
+                let (_bundle, tree) = compose(spec)?;
+                Ok(BTreeMap::from([("compose".into(), super::read_dir(&tree))]))
+            }
+        }
+    }
+}
+
+/// Build `spec`'s images with each builder: each must refuse, naming
+/// `named`, or leave `marker` out of every context.
+fn kept_out(spec: &gdl_gen::Spec, named: &str, marker: &str) {
+    for builder in Builder::ALL {
+        match builder.contexts(spec) {
+            Err(error) => assert!(error.to_string().contains(named), "{builder:?}: {error}"),
+            Ok(contexts) => {
+                assert!(!contexts.is_empty(), "{builder:?}");
+                for (reference, context) in &contexts {
+                    assert!(
+                        context.values().all(|text| !text.contains(marker)),
+                        "{builder:?}: {reference}: {marker} reached the build context"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `compose --local` of `spec`, by [`fleet`]: the bundle's directory, and
+/// its tree, in it.
+fn compose(spec: &gdl_gen::Spec) -> Result<(tempfile::TempDir, PathBuf), gdl_gen::Error> {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-local-")
+        .tempdir()
+        .expect("a directory");
+    let tree = gdl_gen::compose(
+        spec,
+        Some(&fleet()),
+        &holder.path().join("bundle"),
+        &target(),
+        gdl_gen::Sources::Local,
+    )?
+    .expect("a tree");
+    Ok((holder, tree))
 }
 
 /// Each image's tag, by its repository.
@@ -368,4 +443,93 @@ fn a_staged_source_and_an_unstaged_change_are_built() {
     );
     assert_eq!(before, after, "the build changed the checkout's state");
     assert_eq!(std::fs::read_to_string(&lib).expect("gdl's lib.rs"), text);
+}
+
+/// gdl and the api example as sibling checkouts, each its own Git
+/// repository, under a parent that holds a file of neither: the bundle's
+/// sources span the parent, and the file is in no context, of `images` or
+/// of `compose`, which writes its bundle beside them. The parent is only
+/// where the tree places each checkout; what it holds is what Git holds of
+/// each.
+#[test]
+fn siblings_build_without_what_their_parent_holds() {
+    let parent = tempfile::Builder::new()
+        .prefix("gdl-siblings-")
+        .tempdir()
+        .expect("a parent directory");
+    let (gdl, app) = (parent.path().join("gdl"), parent.path().join("app"));
+    let from = root();
+    std::fs::create_dir(&gdl).expect("a checkout");
+    for file in ["Cargo.toml", "Cargo.lock"] {
+        std::fs::copy(from.join(file), gdl.join(file)).expect("a workspace file");
+    }
+    copy_tree(&from.join("crates"), &gdl.join("crates"));
+    copy_tree(&from.join("examples/api"), &app);
+    for (file, from, to) in [
+        ("Cargo.toml", "../../crates/gdl", "../gdl/crates/gdl"),
+        (
+            "gdl.toml",
+            "../../crates/gdl-runtime",
+            "../gdl/crates/gdl-runtime",
+        ),
+    ] {
+        let path = app.join(file);
+        let text = std::fs::read_to_string(&path).expect("a file");
+        assert!(text.contains(from), "{file}");
+        std::fs::write(&path, text.replace(from, to)).expect("written");
+    }
+    for dir in [&gdl, &app] {
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"][..],
+            &["commit", "-q", "-m", "checkout"][..],
+        ] {
+            git(dir, args);
+        }
+    }
+    let marker = ["sibling", "parent", "marker"].join("-");
+    std::fs::write(parent.path().join("notes.env"), &marker).expect("a file of neither");
+    let text = std::fs::read_to_string(app.join("gdl.toml")).expect("the spec");
+    let graph = std::fs::read_to_string(app.join("api.gdl")).expect("the graph");
+    let spec =
+        gdl_gen::Spec::from_text(&text.replace(SEGMENTS, SPLIT), &graph, &app).expect("a spec");
+
+    for builder in Builder::ALL {
+        let contexts = builder.contexts(&spec).expect("local images");
+        assert!(!contexts.is_empty(), "{builder:?}");
+        for (reference, context) in &contexts {
+            for source in ["gdl/crates/gdl-runtime/src/lib.rs", "app/src/lib.rs"] {
+                assert!(
+                    context.contains_key(Path::new(source)),
+                    "{builder:?}: {reference}: {source} is not in the context"
+                );
+            }
+            assert!(
+                !context.contains_key(Path::new("notes.env")),
+                "{builder:?}: {reference}: the parent's file is in the context"
+            );
+            for (path, text) in context {
+                assert!(
+                    !text.contains(&marker),
+                    "{builder:?}: {reference}: {} holds the marker",
+                    path.display()
+                );
+            }
+        }
+    }
+    // `compose` writes its bundle beside the checkouts, and its tree in it.
+    let out = parent.path().join("bundle");
+    let tree = gdl_gen::compose(
+        &spec,
+        Some(&fleet()),
+        &out,
+        &target(),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle")
+    .expect("a tree");
+    assert_eq!(tree, out.join("context"));
+    let context = super::read_dir(&tree);
+    assert!(context.values().all(|text| !text.contains(&marker)));
+    assert!(context.contains_key(Path::new("gdl/target/gdl-images/hub/Dockerfile")));
 }

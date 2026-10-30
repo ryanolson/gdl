@@ -6,35 +6,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use std::path::PathBuf;
-
 use super::context::{Context, HostPatch};
-use crate::{Error, Files};
-
-/// Write `Cargo.lock` in each segment crate of the bundle in `out`, whose
-/// files are `files`: each crate a Dockerfile builds. Each starts from the
-/// gdl workspace's lock, so that a dependency the runtime shares, such as
-/// velo from its Git branch, stays at the version gdl was built and tested
-/// with; a fresh resolve would take the newest commit. Refuses a segment
-/// that still builds a second copy of a gdl crate, from a source that no
-/// crate it reaches by path names, which its patch therefore misses.
-pub(super) fn write(out: &Path, files: &Files, context: &Context) -> Result<(), Error> {
-    let segments = files
-        .keys()
-        .filter(|path| path.file_name().is_some_and(|name| name == "Dockerfile"))
-        .filter_map(|path| path.parent())
-        .filter(|dir| files.contains_key(&dir.join("Cargo.toml")));
-    for segment in segments {
-        let dir = out.join(segment);
-        if let Some(lock) = context.lock() {
-            std::fs::copy(lock, dir.join("Cargo.lock"))
-                .map_err(|e| Error::new(format!("`--local`: {}: {e}", lock.display())))?;
-        }
-        let carried = context.host_patches(files, &[PathBuf::from(segment)]);
-        settle(&dir, &carried, context)?;
-    }
-    Ok(())
-}
+use crate::Error;
 
 /// Resolve the lock of the workspace in `dir`, which builds generated
 /// crates that carry the host patches `carried`: move each package the
@@ -42,9 +15,13 @@ pub(super) fn write(out: &Path, files: &Files, context: &Context) -> Result<(), 
 /// version, and refuse a second copy of a gdl crate, from a source that no
 /// crate the workspace reaches by path names, which its patch therefore
 /// misses.
-pub(crate) fn settle(dir: &Path, carried: &[HostPatch], context: &Context) -> Result<(), Error> {
+pub(crate) fn settle(
+    dir: &Path,
+    cwd: &Path,
+    carried: &[HostPatch],
+    context: &Context,
+) -> Result<(), Error> {
     let prefix = context.prefix();
-    let cwd = context.cwd();
     let mut metadata = resolve(dir, cwd, prefix)?;
     // An update can move other patched packages with it, so the pins
     // are read again after each.

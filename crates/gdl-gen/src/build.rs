@@ -97,7 +97,7 @@ pub fn build(spec: &Spec, target: &Path, how: &Build) -> Result<Vec<PathBuf>, Er
     let inputs = lock_inputs(seed.as_deref(), &files, &carried);
     let settled = dir.join("lock-inputs");
     if seeded || std::fs::read_to_string(&settled).ok().as_deref() != Some(inputs.as_str()) {
-        locks::settle(&workspace, &carried, &context)?;
+        locks::settle(&workspace, context.cwd(), &carried, &context)?;
         crate::dump::write(&settled, &inputs)?;
     }
 

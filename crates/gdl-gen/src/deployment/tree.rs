@@ -36,7 +36,8 @@ pub(super) fn build(
     let prefix = context.prefix();
     let mut entries = BTreeMap::new();
     let mut commits = BTreeMap::new();
-    for source in sources(context)? {
+    let (sources, unplaced) = sources(context)?;
+    for source in sources {
         unpack(dir, context, &source, &mut commits, &mut entries)?;
     }
     links(dir, context, &entries)?;
@@ -44,6 +45,11 @@ pub(super) fn build(
         if entry.kind != Kind::Generated && path.file_name() == Some(OsStr::new("Cargo.toml")) {
             manifest(dir, context, path)?;
         }
+    }
+    // A manifest that names a directory outside the sources says why Git
+    // cannot place it: that refusal comes first.
+    if let Some(error) = unplaced {
+        return Err(error);
     }
     let bundle = dir.join(context.bundle());
     crate::write(&bundle, files)
@@ -55,7 +61,10 @@ pub(super) fn build(
                 .map_err(|e| Error::new(format!("{prefix}: {}: {e}", lock.display())))?;
         }
         let carried = context.host_patches(files, std::slice::from_ref(crate_dir));
-        super::locks::settle(&at, &carried, context)?;
+        // Cargo runs at the tree's root, as the image build does at
+        // `/app`, so that both read the Cargo configuration the sources
+        // hold, whose relative paths name the tree's copies.
+        super::locks::settle(&at, dir, &carried, context)?;
     }
     generated(&bundle, context.bundle(), &mut entries)?;
     Ok(digest(&entries))
@@ -94,25 +103,72 @@ struct Entry {
 struct Source {
     /// The directory, absolute, as the context names it.
     dir: PathBuf,
+    /// Its path in the tree: from the context's root, with every link
+    /// resolved.
+    at: PathBuf,
     /// Its repository's working tree, as Git names it.
     top: PathBuf,
     /// Its path in the repository, empty or ending in `/`, as bytes.
     prefix: Vec<u8>,
+    /// Whether it may hold nothing Git tracks: the Cargo configuration at
+    /// the context's root.
+    optional: bool,
 }
 
 /// The directories of sources of `context`, each in the repository Git
-/// finds for it, without one that another of the same repository holds.
-/// A directory Git cannot place, such as one in no repository, stops the
-/// build, naming it and Git's words.
-fn sources(context: &Context) -> Result<Vec<Source>, Error> {
+/// finds for it, without one that another of the same repository holds,
+/// and the refusal of the first directory Git cannot place, such as one in
+/// no repository, naming it and Git's words: it stops the build.
+fn sources(context: &Context) -> Result<(Vec<Source>, Option<Error>), Error> {
     let mut found: Vec<Source> = Vec::new();
-    for dir in context.sources() {
-        let top = git(context, dir, &["rev-parse", "--show-toplevel"])?;
-        let prefix = git(context, dir, &["rev-parse", "--show-prefix"])?;
+    let mut unplaced = None;
+    let root = context.root().canonicalize().map_err(super::io)?;
+    // The image build runs Cargo at the tree's root, which reads the Cargo
+    // configuration there, as Cargo on this machine reads the context's:
+    // the tree holds what Git holds of it, if anything.
+    let config = context.root().join(".cargo");
+    if config.is_dir()
+        && let Ok(top) = git(context, &config, &["rev-parse", "--show-toplevel"])
+        && let Ok(prefix) = git(context, &config, &["rev-parse", "--show-prefix"])
+    {
         found.push(Source {
-            dir: dir.clone(),
+            dir: config.clone(),
+            at: PathBuf::from(".cargo"),
             top: PathBuf::from(OsStr::from_bytes(trim(&top))),
             prefix: trim(&prefix).to_vec(),
+            optional: true,
+        });
+    }
+    for dir in context.sources() {
+        // A directory reached through a link is placed where Git has it,
+        // and the link is the archive's own entry.
+        let real = dir
+            .canonicalize()
+            .map_err(|e| Error::new(format!("{}: {}: {e}", context.prefix(), dir.display())))?;
+        let Ok(at) = real.strip_prefix(&root) else {
+            return Err(Error::new(format!(
+                "{}: {} resolves to {}, outside the context {}",
+                context.prefix(),
+                dir.display(),
+                real.display(),
+                root.display()
+            )));
+        };
+        let placed = git(context, dir, &["rev-parse", "--show-toplevel"])
+            .and_then(|top| Ok((top, git(context, dir, &["rev-parse", "--show-prefix"])?)));
+        let (top, prefix) = match placed {
+            Ok(placed) => placed,
+            Err(error) => {
+                unplaced.get_or_insert(error);
+                continue;
+            }
+        };
+        found.push(Source {
+            dir: dir.clone(),
+            at: at.to_path_buf(),
+            top: PathBuf::from(OsStr::from_bytes(trim(&top))),
+            prefix: trim(&prefix).to_vec(),
+            optional: false,
         });
     }
     found.sort_by(|a, b| (&a.top, &a.prefix).cmp(&(&b.top, &b.prefix)));
@@ -125,7 +181,7 @@ fn sources(context: &Context) -> Result<Vec<Source>, Error> {
             kept.push(source);
         }
     }
-    Ok(kept)
+    Ok((kept, unplaced))
 }
 
 /// Unpack `source` into `dir`, at its path from the context's root, from
@@ -139,12 +195,7 @@ fn unpack(
     entries: &mut BTreeMap<PathBuf, Entry>,
 ) -> Result<(), Error> {
     let prefix = context.prefix();
-    let at = source.dir.strip_prefix(context.root()).map_err(|_| {
-        Error::new(format!(
-            "{prefix}: {} is outside the context",
-            source.dir.display()
-        ))
-    })?;
+    let at = &source.at;
     let commit = match commits.get(&source.top) {
         Some(commit) => commit.clone(),
         None => {
@@ -156,6 +207,21 @@ fn unpack(
     let mut tree = commit;
     tree.push(":");
     tree.push(OsStr::from_bytes(&source.prefix));
+    let tracked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&source.top)
+        .args([OsStr::new("cat-file"), "-e".as_ref(), &tree])
+        .output()
+        .map_err(|e| Error::new(format!("{prefix}: running git: {e}")))?;
+    if !tracked.status.success() {
+        if source.optional {
+            return Ok(());
+        }
+        return Err(Error::new(format!(
+            "{prefix}: {} holds no file Git tracks, and `--local` builds only what Git holds: `git add` its files",
+            source.dir.display()
+        )));
+    }
     // A submodule is another repository, whose files the archive leaves
     // out: refused, rather than built without them.
     let listed = git(

@@ -29,27 +29,10 @@ fn external_symlinks_do_not_copy_host_credentials() {
     std::fs::write(&secret, &marker).expect("a synthetic credential");
     std::os::unix::fs::symlink(&secret, copy.path().join("credentials.txt"))
         .expect("a visible untracked symlink");
-
-    let mut docker = Fake::default();
-    let result = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    if let Err(error) = result {
-        assert!(error.to_string().contains("credentials.txt"), "{error}");
-        return;
-    }
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        assert!(
-            context.values().all(|text| !text.contains(&marker)),
-            "{reference}: the external credential reached the Docker build context"
-        );
-    }
+    kept_out(&copy.spec(), "credentials.txt", &marker);
+    // Committed, the link is refused by name.
+    copy.add();
+    kept_out(&copy.spec(), "credentials.txt", &marker);
 }
 
 /// A crate named by path below a hidden directory of its checkout: its
@@ -67,22 +50,18 @@ fn a_hidden_crate_directory_does_not_admit_untracked_credentials() {
         .expect("a spec naming the hidden crate by path");
     let marker = ["hidden", "credential", "marker"].join("-");
     std::fs::write(dir.join("credentials.txt"), &marker).expect("an untracked credential");
-    let mut docker = Fake::default();
-    run_with(
-        &spec,
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        assert!(context.contains_key(Path::new("examples/.private/src/lib.rs")));
-        assert!(
-            context.values().all(|text| !text.contains(&marker)),
-            "{reference}: an untracked credential below .private reached the build context"
-        );
+    for builder in Builder::ALL {
+        let contexts = builder.contexts(&spec).expect("local images");
+        for (reference, context) in &contexts {
+            assert!(
+                context.contains_key(Path::new("examples/.private/src/lib.rs")),
+                "{builder:?}: {reference}"
+            );
+            assert!(
+                context.values().all(|text| !text.contains(&marker)),
+                "{builder:?}: {reference}: an untracked credential below .private reached the build context"
+            );
+        }
     }
 }
 
@@ -134,6 +113,11 @@ fn a_link_within_the_sources_is_copied_as_a_link() {
     for seen in &docker.seen {
         assert_eq!(seen.as_deref(), Some(Path::new("NOTES.md")));
     }
+    let (_bundle, tree) = compose(&copy.spec()).expect("a compose bundle");
+    assert_eq!(
+        std::fs::read_link(tree.join("examples/api/LINKED.md")).expect("a link"),
+        Path::new("NOTES.md")
+    );
 }
 
 /// A tracked `.dockerignore` at the root of the sources, which would leave
@@ -147,26 +131,29 @@ fn a_tracked_root_dockerignore_does_not_drop_the_bundle() {
     std::fs::write(copy.path().join("Dockerfile.dockerignore"), "*\n").expect("an ignore file");
     std::fs::write(copy.path().join("Dockerfile"), "FROM scratch\n").expect("a Dockerfile");
     tracked(&copy);
-    let mut docker = Fake::default();
-    local(&copy, false, &mut docker);
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        for ignore in [".dockerignore", "Dockerfile.dockerignore"] {
+    for builder in Builder::ALL {
+        let contexts = builder.contexts(&copy.spec()).expect("local images");
+        for (reference, context) in &contexts {
+            for ignore in [".dockerignore", "Dockerfile.dockerignore"] {
+                assert!(
+                    !context.contains_key(Path::new(ignore)),
+                    "{builder:?}: {reference}: {ignore} is in the context"
+                );
+            }
+            // `images` writes its own Dockerfile there; `compose` none.
             assert!(
-                !context.contains_key(Path::new(ignore)),
-                "{reference}: {ignore} is in the context"
+                context
+                    .get(Path::new("Dockerfile"))
+                    .is_none_or(|text| !text.starts_with("FROM scratch")),
+                "{builder:?}: {reference}: the checkout's Dockerfile is in the context"
+            );
+            assert!(
+                context
+                    .keys()
+                    .any(|path| path.starts_with("target/gdl-images")),
+                "{builder:?}: {reference}: the bundle is not in the context"
             );
         }
-        assert!(
-            !context[Path::new("Dockerfile")].starts_with("FROM scratch"),
-            "{reference}: the checkout's Dockerfile replaced the image's"
-        );
-        assert!(
-            context
-                .keys()
-                .any(|path| path.starts_with("target/gdl-images")),
-            "{reference}: the bundle is not in the context"
-        );
     }
 }
 
@@ -208,44 +195,21 @@ fn a_directory_link_cannot_redirect_tracked_files_to_host_credentials() {
     assert!(untracked.status.success());
     assert!(!String::from_utf8_lossy(&untracked.stdout).contains("assets"));
 
-    let mut docker = Fake::default();
-    let result = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    if let Err(error) = result {
-        assert!(error.to_string().contains("assets"), "{error}");
-        assert!(docker.contexts.is_empty());
-        return;
-    }
-    assert_eq!(docker.contexts.len(), 3);
-    for (reference, context) in &docker.contexts {
-        assert!(
-            context.values().all(|text| !text.contains(&marker)),
-            "{reference}: an ancestor directory link copied host credentials into the context"
-        );
-    }
+    kept_out(&copy.spec(), "assets", &marker);
 }
 
-/// Build the copy's images, and return the refusal, which no context
-/// precedes.
+/// Build the copy's images with each builder, and return the refusal of
+/// each, which no context precedes: one rule for both.
 fn refused(copy: &Copy) -> String {
-    let mut docker = Fake::default();
-    let error = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    )
-    .expect_err("refused");
-    assert!(docker.contexts.is_empty());
-    error.to_string()
+    let errors: Vec<String> = Builder::ALL
+        .iter()
+        .map(|builder| match builder.contexts(&copy.spec()) {
+            Err(error) => error.to_string(),
+            Ok(contexts) => panic!("{builder:?} built {} contexts", contexts.len()),
+        })
+        .collect();
+    assert_eq!(errors[0], errors[1], "one rule refuses for both");
+    errors[0].clone()
 }
 
 /// A committed link to an absolute path is refused, naming it: its text

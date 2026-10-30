@@ -29,8 +29,9 @@ fn local(spec: &gdl_gen::Spec, out: &Path) -> Result<gdl_gen::Files, gdl_gen::Er
 }
 
 /// The http example's bundle: every file but the generated Rust, pinned.
-/// Paths are relative to the bundle or to the context, so no file names
-/// this machine's directories, and the pin holds on any checkout.
+/// Paths are relative to the bundle or to its tree, so no file names this
+/// machine's directories, and the pin holds on any checkout. With
+/// `GDL_UPDATE_FIXTURES` set, the bundle becomes the pin.
 #[test]
 fn a_local_bundle_builds_from_a_context_that_holds_its_crates() {
     let files = local(
@@ -52,19 +53,18 @@ fn a_local_bundle_builds_from_a_context_that_holds_its_crates() {
         "compose.yaml",
         "contract/Cargo.toml",
         "hub/Dockerfile",
-        "hub/Dockerfile.dockerignore",
         "main/Cargo.toml",
         "main/Dockerfile",
-        "main/Dockerfile.dockerignore",
         "main/config.toml",
     ]
     .iter()
     .map(|name| format!("==> {name} <==\n{}\n", files[Path::new(name)]))
     .collect();
-    let expected = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/http-local.txt"),
-    )
-    .expect("the pinned bundle");
+    let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/http-local.txt");
+    if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&pin, &found).expect("the pin");
+    }
+    let expected = std::fs::read_to_string(&pin).expect("the pinned bundle");
     for (found, expected) in found.lines().zip(expected.lines()) {
         assert_eq!(found, expected, "the bundle differs from the pin");
     }
@@ -144,13 +144,14 @@ fn a_local_fleet_builds_each_pools_images_from_local_sources() {
         assert_eq!(depends.keys().collect::<Vec<_>>(), [&pool.name]);
         assert_eq!(service["environment"]["GDL_HUB__HOST"], pool.name.as_str());
     }
-    // One service builds each image, from the context that holds the
-    // repository, with the Dockerfile's own ignore file.
+    // One service builds each image, from the bundle's tree in
+    // `context/`, with the bundle at its place there: the tree holds only
+    // what Git holds and the bundle, so no ignore file is written.
     let mut built: Vec<&str> = services
         .values()
         .filter_map(|service| service.get("build"))
         .map(|build| {
-            assert_eq!(build["context"], "../..", "{build}");
+            assert_eq!(build["context"], "context", "{build}");
             build["dockerfile"].as_str().expect("a Dockerfile")
         })
         .collect();
@@ -158,17 +159,18 @@ fn a_local_fleet_builds_each_pools_images_from_local_sources() {
     assert_eq!(
         built,
         [
-            "target/gdl-local-fleet/engine/Dockerfile",
-            "target/gdl-local-fleet/front/Dockerfile",
-            "target/gdl-local-fleet/hub/Dockerfile"
+            "target/gdl-images/engine/Dockerfile",
+            "target/gdl-images/front/Dockerfile",
+            "target/gdl-images/hub/Dockerfile"
         ]
     );
-    for name in ["hub", "front", "engine"] {
-        assert!(
-            files.contains_key(&Path::new(name).join("Dockerfile.dockerignore")),
-            "{name}"
-        );
-    }
+    assert!(
+        !files
+            .keys()
+            .any(|path| path.to_string_lossy().ends_with(".dockerignore")),
+        "{:?}",
+        files.keys()
+    );
     assert!(
         files[Path::new("hub/Dockerfile")].contains("cargo install --path '/app/crates/gdl-hub'"),
         "{}",
@@ -178,7 +180,7 @@ fn a_local_fleet_builds_each_pools_images_from_local_sources() {
         let dockerfile = &files[&Path::new(segment).join("Dockerfile")];
         assert!(
             dockerfile.contains(&format!(
-                "--manifest-path '/app/target/gdl-local-fleet/{segment}/Cargo.toml'"
+                "--manifest-path '/app/target/gdl-images/{segment}/Cargo.toml'"
             )),
             "{dockerfile}"
         );
@@ -205,31 +207,20 @@ fn a_local_fleet_builds_each_pools_images_from_local_sources() {
     }
 }
 
-/// A bundle and crates that share no directory but the root have no build
-/// context: sending the whole disk to Docker is none.
+/// Where the bundle is written does not matter to what it builds: a bundle
+/// that shares no directory but the root with its crates is the same as
+/// one in the repository, since its images build from the tree in its
+/// `context/`, where the bundle is at a fixed place.
 #[test]
-fn a_bundle_that_shares_only_the_root_with_its_crates_is_refused() {
+fn a_bundle_anywhere_builds_from_the_same_tree() {
     let temp = tempfile::Builder::new()
         .prefix("gdl-local-elsewhere-")
         .tempdir()
         .expect("a directory");
-    let shared = temp
-        .path()
-        .components()
-        .zip(root().components())
-        .take_while(|(a, b)| a == b)
-        .count();
-    if shared > 1 {
-        eprintln!("skipped: the temporary directory and the repository share a directory");
-        return;
-    }
-    let error = local(&spec("examples/http/gdl.toml"), &temp.path().join("bundle"))
-        .expect_err("no build context")
-        .to_string();
-    assert!(
-        error.starts_with("`--local`: the build context would be `/`"),
-        "{error}"
-    );
+    let spec = spec("examples/http/gdl.toml");
+    let elsewhere = local(&spec, &temp.path().join("bundle")).expect("a bundle");
+    let here = local(&spec, &root().join("target/gdl-local-here")).expect("a bundle");
+    assert_eq!(elsewhere, here);
 }
 
 /// A spec given by a relative path names gdl by a path relative to where
@@ -348,10 +339,9 @@ fn a_local_preview_accepts_a_relative_output_directory() {
     );
 }
 
-/// Each image copies its settings by one path, though a local bundle's
-/// path from its context can hold spaces: the `COPY` takes its JSON form,
-/// which Docker does not split, and writes each space as a class, which
-/// Docker does not trim.
+/// Each image copies its settings by one path, in the `COPY`'s JSON form,
+/// which Docker does not split, from the bundle's fixed place in its tree,
+/// whatever the path of the bundle written, spaces and all.
 #[test]
 fn a_local_bundle_copies_its_settings_by_one_path() {
     let out = root().join("target/gdl-local-spaced/bundle with spaces");
@@ -370,7 +360,7 @@ fn a_local_bundle_copies_its_settings_by_one_path() {
         assert_eq!(
             args,
             [
-                format!("./target/gdl-local-spaced/bundle[ ]with[ ]spaces/{config}"),
+                format!("./target/gdl-images/{config}"),
                 "/etc/gdl/config".into()
             ],
             "{dockerfile}"
@@ -385,36 +375,11 @@ fn a_local_bundle_copies_its_settings_by_one_path() {
 /// the Dockerfile, and spaces, which Docker trims at the ends of a pattern.
 const SYNTAX: &str = r#" bundle $X [dev] *?\ '" ^!+(a){2}| "#;
 
-/// A bundle whose path holds Compose and Docker syntax names it literally
-/// in each file that names it: `compose.yaml` doubles `$`, each `COPY`
-/// and the ignore file write Docker's pattern characters as classes of
-/// one escaped character and whitespace as a class, and the `COPY` also
-/// escapes what the Dockerfile reads in a word. Paths that hold none of
-/// them are written as they are
-/// ([`a_local_bundle_builds_from_a_context_that_holds_its_crates`]).
+/// A bundle whose path holds Compose and Docker syntax, or a line break,
+/// names none of it: every Dockerfile and `compose.yaml` names the
+/// bundle's fixed place in its tree, alone and with a fleet.
 #[test]
-fn a_local_bundle_writes_compose_and_docker_syntax_in_its_path_literally() {
-    let parent = "target/gdl-local-syntax";
-    let out = root().join(parent).join(SYNTAX);
-    let compose_path = format!("{parent}/{}", r#" bundle $$X [dev] *?\ '" ^!+(a){2}| "#);
-    let copy_path = format!(
-        "./{parent}/{}",
-        r#"[ ]bundle[ ]\$X[ ][\\[]dev[\\]][ ][\\*][\\?][\\\\][ ]\'\"[ ][\\^][\\!][\\+][\\(]a[\\)][\\{]2[\\}][\\|][ ]"#
-    );
-    let ignore = format!(
-        "!{parent}/{}\n",
-        r#"[ ]bundle[ ]$X[ ][\[]dev[\]][ ][\*][\?][\\][ ]'"[ ][\^][\!][\+][\(]a[\)][\{]2[\}][\|][ ]"#
-    );
-    let copy = |files: &gdl_gen::Files, dockerfile: &str| -> String {
-        let line = files[Path::new(dockerfile)]
-            .lines()
-            .find(|line| line.starts_with("COPY [") && line.contains("/etc/gdl/config"))
-            .unwrap_or_else(|| panic!("{dockerfile} copies its settings"))
-            .to_owned();
-        let args: Vec<String> =
-            serde_json::from_str(&line["COPY ".len()..]).expect("the JSON form");
-        args[0].clone()
-    };
+fn a_local_bundle_names_none_of_its_path() {
     let dockerfiles = |files: &gdl_gen::Files| -> Vec<String> {
         let compose: serde_json::Value =
             serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
@@ -428,77 +393,33 @@ fn a_local_bundle_writes_compose_and_docker_syntax_in_its_path_literally() {
         found.sort();
         found
     };
-
-    let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
-    assert_eq!(
-        dockerfiles(&files),
-        [
-            format!("{compose_path}/hub/Dockerfile"),
-            format!("{compose_path}/main/Dockerfile")
-        ]
-    );
-    assert_eq!(
-        copy(&files, "hub/Dockerfile"),
-        format!("{copy_path}/deployment.json")
-    );
-    assert_eq!(
-        copy(&files, "main/Dockerfile"),
-        format!("{copy_path}/main/config.toml")
-    );
-    for name in ["hub", "main"] {
-        let text = &files[&Path::new(name).join("Dockerfile.dockerignore")];
-        assert!(text.ends_with(&ignore), "{name}: {text}");
+    let names_none = |files: &gdl_gen::Files, name: &str| {
+        for (path, text) in files {
+            assert!(!text.contains(name), "{} names {name:?}", path.display());
+        }
+    };
+    for name in [SYNTAX, "gdl-local-line\nbreak"] {
+        let out = root().join("target/gdl-local-syntax").join(name);
+        let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
+        assert_eq!(
+            dockerfiles(&files),
+            [
+                "target/gdl-images/hub/Dockerfile",
+                "target/gdl-images/main/Dockerfile"
+            ]
+        );
+        names_none(&files, name);
+        let (_, files) = local_fleet(&out);
+        assert_eq!(
+            dockerfiles(&files),
+            [
+                "target/gdl-images/engine/Dockerfile",
+                "target/gdl-images/front/Dockerfile",
+                "target/gdl-images/hub/Dockerfile"
+            ]
+        );
+        names_none(&files, name);
     }
-
-    let (_, files) = local_fleet(&out);
-    assert_eq!(
-        dockerfiles(&files),
-        [
-            format!("{compose_path}/engine/Dockerfile"),
-            format!("{compose_path}/front/Dockerfile"),
-            format!("{compose_path}/hub/Dockerfile")
-        ]
-    );
-    assert_eq!(
-        copy(&files, "engine/Dockerfile"),
-        format!("{copy_path}/engine/config.toml")
-    );
-    assert!(
-        files[Path::new("hub/Dockerfile.dockerignore")].ends_with(&ignore),
-        "{}",
-        files[Path::new("hub/Dockerfile.dockerignore")]
-    );
-}
-
-/// A line break cannot be written in a Dockerfile or an ignore file, and a
-/// path that is not UTF-8 cannot be written in any of the bundle's files:
-/// `--local` refuses either rather than write another path.
-#[cfg(unix)]
-#[test]
-fn a_local_bundle_refuses_a_path_it_cannot_write() {
-    use std::os::unix::ffi::OsStrExt;
-    let error = local(
-        &spec("examples/http/gdl.toml"),
-        &root().join("target/gdl-local-line\nbreak"),
-    )
-    .expect_err("a line break")
-    .to_string();
-    assert!(
-        error.starts_with("`--local`: the bundle's path from its build context, \"target/gdl-local-line\\nbreak\", holds a line break"),
-        "{error}"
-    );
-    let error = local(
-        &spec("examples/http/gdl.toml"),
-        &root()
-            .join("target")
-            .join(std::ffi::OsStr::from_bytes(b"gdl-local-\xff")),
-    )
-    .expect_err("not UTF-8")
-    .to_string();
-    assert!(
-        error.starts_with("`--local`: the bundle's path from its build context, \"target/gdl-local-\\xFF\", is not UTF-8"),
-        "{error}"
-    );
 }
 
 /// A bundle that Docker Compose cannot run from where it is written is
@@ -585,284 +506,35 @@ fn a_bundle_that_compose_cannot_run_is_refused_before_it_is_written() {
 
 /// `compose.yaml` is JSON, and Compose reads it as YAML, which folds U+0085
 /// into a space and refuses U+FFFE: each is written as a `\u` escape,
-/// which JSON and YAML read alike. Other characters stay as they are.
+/// which JSON and YAML read alike, here in a secret's path. Other
+/// characters stay as they are.
 #[test]
 fn a_local_bundle_escapes_in_compose_yaml_what_yaml_reads_otherwise() {
-    let name = "bundle\u{85}\u{fffe}\u{2028}\u{e9}\u{1f600}";
-    let files = local(
-        &spec("examples/http/gdl.toml"),
-        &root().join("target/gdl-local-yaml").join(name),
-    )
-    .expect("a bundle");
+    let name = "key\u{85}\u{fffe}\u{2028}\u{e9}\u{1f600}";
+    let dir = root().join("examples/http");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the spec");
+    let graph = std::fs::read_to_string(dir.join("http.gdl")).expect("the graph");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let file = serde_json::to_string(outside.path().join(name).to_str().expect("UTF-8"))
+        .expect("a string");
+    let secrets = format!(
+        "[deployment.secrets.key]\nfile = {file}\n[deployment.segment.main]\nsecrets = [\"key\"]\n"
+    );
+    let spec = gdl_gen::Spec::from_text(&format!("{text}{secrets}"), &graph, &dir).expect("a spec");
+    let files = local(&spec, &root().join("target/gdl-local-yaml")).expect("a bundle");
     let text = &files[Path::new("compose.yaml")];
     assert!(
-        text.contains("bundle\\u0085\\ufffe\\u2028\u{e9}\u{1f600}/hub/Dockerfile"),
+        text.contains("key\\u0085\\ufffe\\u2028\u{e9}\u{1f600}"),
         "{text}"
     );
     let compose: serde_json::Value = serde_json::from_str(text).expect("JSON");
     assert_eq!(
-        compose["services"]["hub"]["build"]["dockerfile"],
-        format!("target/gdl-local-yaml/{name}/hub/Dockerfile")
+        compose["secrets"]["key"]["file"],
+        outside.path().join(name).to_str().expect("UTF-8")
     );
-}
-
-/// A bundle under a `.git` directory, which the ignore file leaves out of
-/// the context as it does `target`, is let back in the same way.
-#[test]
-fn a_local_bundle_under_a_git_directory_keeps_itself_in_its_context() {
-    let files = local(
-        &spec("examples/http/gdl.toml"),
-        &root().join("gdl-local-git/.git/bundle"),
-    )
-    .expect("a bundle");
-    let ignore = &files[Path::new("hub/Dockerfile.dockerignore")];
-    assert!(ignore.ends_with("!gdl-local-git/.git/bundle\n"), "{ignore}");
-}
-
-/// The same, with Docker: the hub's generated `COPY` copies its settings
-/// from a bundle path with spaces, as a `COPY` in JSON form does.
-#[test]
-#[ignore = "needs docker; run with --ignored"]
-fn a_local_bundle_copies_configuration_from_a_path_with_spaces() {
-    let holder = tempfile::Builder::new()
-        .prefix("gdl-local-copy-")
-        .tempdir_in(root().join("target"))
-        .expect("a directory in the context");
-    let out = holder.path().join("bundle with spaces");
-    let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
-    let context = tempfile::Builder::new()
-        .prefix("gdl-copy-context-")
-        .tempdir()
-        .expect("a context for the COPY instruction");
-    let deployment = out
-        .strip_prefix(root())
-        .expect("the bundle is under the repository")
-        .join("deployment.json");
-    let source = context.path().join(&deployment);
-    std::fs::create_dir_all(source.parent().expect("a parent")).expect("the source directory");
-    std::fs::write(&source, &files[Path::new("deployment.json")]).expect("the config");
-    let generated = files[Path::new("hub/Dockerfile")]
-        .lines()
-        .find(|line| line.starts_with("COPY ") && line.contains("/etc/gdl/config"))
-        .expect("the hub copies its config");
-    let control = format!(
-        "COPY {}",
-        serde_json::to_string(&[deployment.to_str().expect("a path"), "/etc/gdl/config"])
-            .expect("COPY arguments")
-    );
-    // Test only COPY, so no Rust image, compilation, or running service is needed.
-    for (case, copy) in [("control", control.as_str()), ("generated", generated)] {
-        let dockerfile = context.path().join("Dockerfile");
-        std::fs::write(&dockerfile, format!("FROM scratch\n{copy}\n")).expect("a Dockerfile");
-        let destination = context.path().join(case);
-        let result = Command::new("timeout")
-            .args([
-                "30",
-                "docker",
-                "build",
-                "--network=none",
-                "--progress=plain",
-                "--output",
-            ])
-            .arg(format!("type=local,dest={}", destination.display()))
-            .arg("--file")
-            .arg(&dockerfile)
-            .arg(context.path())
-            .output()
-            .expect("docker build");
-        assert!(
-            result.status.success(),
-            "{case}: {copy}\n{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert_eq!(
-            std::fs::read_to_string(destination.join("etc/gdl/config")).expect("the copied config"),
-            files[Path::new("deployment.json")]
-        );
-    }
-}
-
-/// The same, with Docker: Compose finds each Dockerfile, and the image
-/// build copies the settings, from a bundle whose path holds [`SYNTAX`].
-/// `docker compose config` cannot show this: it writes `$` back as `$$`,
-/// and Compose builds through `buildx bake`, which reads the Dockerfile's
-/// path again. So the hub builds for real, its Dockerfile cut to the copy
-/// of its settings. A decoy directory, which each pattern character would
-/// match unescaped, holds other settings.
-#[test]
-#[ignore = "needs docker; run with --ignored"]
-fn a_local_bundle_builds_from_a_path_with_compose_and_docker_syntax() {
-    let holder = tempfile::Builder::new()
-        .prefix("gdl-local-syntax-")
-        .tempdir_in(root().join("target"))
-        .expect("a directory in the context");
-    let out = holder.path().join(SYNTAX);
-    gdl_gen::compose(
-        &spec("examples/http/gdl.toml"),
-        None,
-        &out,
-        &target("gdl-gen-tests"),
-        gdl_gen::Sources::Local,
-    )
-    .expect("a bundle")
-    .expect("a local context");
-    let decoy = holder.path().join(
-        SYNTAX
-            .replace('*', "A")
-            .replace('?', "B")
-            .replace("[dev]", "d")
-            .replace("\\ ", " "),
-    );
-    std::fs::create_dir(&decoy).expect("the decoy");
-    std::fs::write(decoy.join("deployment.json"), "decoy").expect("the decoy settings");
-    let dockerfile = out.join("hub/Dockerfile");
-    let text = std::fs::read_to_string(&dockerfile).expect("the hub's Dockerfile");
-    let copy = text
-        .lines()
-        .find(|line| line.starts_with("COPY [") && line.contains("/etc/gdl/config"))
-        .expect("the hub copies its settings");
-    std::fs::write(&dockerfile, format!("FROM scratch\n{copy}\n")).expect("a Dockerfile");
-
-    let project = holder
-        .path()
-        .file_name()
-        .expect("a name")
-        .to_string_lossy()
-        .to_lowercase();
-    let image = format!("{project}-hub");
-    let docker = |args: &[&str], dir: &Path| {
-        let result = Command::new("timeout")
-            .arg("120")
-            .arg("docker")
-            .args(args)
-            .current_dir(dir)
-            .env_remove("X")
-            .output()
-            .expect("docker");
-        assert!(
-            result.status.success(),
-            "docker {args:?}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        String::from_utf8_lossy(&result.stdout).trim().to_owned()
-    };
-    // The image goes however the test ends.
-    struct Image(String);
-    impl Drop for Image {
-        fn drop(&mut self) {
-            let _ = Command::new("docker")
-                .args(["image", "rm", "--force", &self.0])
-                .output();
-        }
-    }
-    let _image = Image(image.clone());
-    docker(
-        &["compose", "--project-name", &project, "build", "hub"],
-        &out,
-    );
-    let container = docker(&["create", &image, "none"], &out);
-    let copied = holder.path().join("copied");
-    let result = Command::new("timeout")
-        .arg("30")
-        .args(["docker", "cp"])
-        .arg(format!("{container}:/etc/gdl/config"))
-        .arg(&copied)
-        .output()
-        .expect("docker cp");
-    let _ = Command::new("docker")
-        .args(["rm", "--force", &container])
-        .output();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(copied).expect("the copied settings"),
-        std::fs::read_to_string(out.join("deployment.json")).expect("the settings")
-    );
-}
-
-/// Docker treats brackets as patterns even in a JSON-form COPY and in
-/// the ignore file's exception for a bundle under target.
-#[test]
-#[ignore = "needs docker; run with --ignored"]
-fn a_local_bundle_copies_configuration_from_a_bracketed_path() {
-    let holder = tempfile::Builder::new()
-        .prefix("gdl-local-bracket-")
-        .tempdir_in(root().join("target"))
-        .expect("a directory in the context");
-    let out = holder.path().join("bundle[dev]");
-    let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
-    let context = tempfile::Builder::new()
-        .prefix("gdl-bracket-context-")
-        .tempdir()
-        .expect("a context");
-    let exported = tempfile::Builder::new()
-        .prefix("gdl-bracket-export-")
-        .tempdir()
-        .expect("the exported files");
-    let deployment = out
-        .strip_prefix(root())
-        .expect("the bundle is under the repository")
-        .join("deployment.json");
-    let source = context.path().join(&deployment);
-    std::fs::create_dir_all(source.parent().expect("a parent")).expect("the source directory");
-    std::fs::write(&source, &files[Path::new("deployment.json")]).expect("the config");
-    let generated = files[Path::new("hub/Dockerfile")]
-        .lines()
-        .find(|line| line.starts_with("COPY ") && line.contains("/etc/gdl/config"))
-        .expect("the hub copies its config");
-    let generated_ignore = &files[Path::new("hub/Dockerfile.dockerignore")];
-    let escaped = deployment.to_str().expect("a path").replace('[', "[[]");
-    let control = format!(
-        "COPY {}",
-        serde_json::to_string(&[escaped, "/etc/gdl/config".into()]).expect("COPY arguments")
-    );
-    let mut failures = Vec::new();
-    for (case, copy, ignore) in [
-        ("control", control.as_str(), ""),
-        ("generated-copy", generated, ""),
-        (
-            "generated-ignore",
-            control.as_str(),
-            generated_ignore.as_str(),
-        ),
-    ] {
-        let dockerfile = context.path().join("Dockerfile");
-        std::fs::write(&dockerfile, format!("FROM scratch\n{copy}\n")).expect("a Dockerfile");
-        std::fs::write(context.path().join("Dockerfile.dockerignore"), ignore)
-            .expect("an ignore file");
-        let destination = exported.path().join(case);
-        let result = Command::new("timeout")
-            .args([
-                "30",
-                "docker",
-                "build",
-                "--network=none",
-                "--progress=plain",
-                "--output",
-            ])
-            .arg(format!("type=local,dest={}", destination.display()))
-            .arg("--file")
-            .arg(&dockerfile)
-            .arg(context.path())
-            .output()
-            .expect("docker build");
-        if !result.status.success() {
-            failures.push(format!(
-                "{case}: {copy}\n{ignore}\n{}",
-                String::from_utf8_lossy(&result.stderr)
-            ));
-            continue;
-        }
-        assert_eq!(
-            std::fs::read_to_string(destination.join("etc/gdl/config")).expect("the copied config"),
-            files[Path::new("deployment.json")]
-        );
-        eprintln!("{case}: copied the expected settings");
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Removes what one run of a bundle made, its containers, network, volume,
@@ -1185,6 +857,7 @@ fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
     let spec = http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
     offline_lock(holder.path());
     let out = holder.path().join("bundle");
+    checkout(holder.path());
     gdl_gen::compose(
         &spec,
         None,
@@ -1194,17 +867,20 @@ fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
     )
     .expect("a bundle");
 
-    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    let manifest =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.toml")).expect("the manifest");
     assert!(
         manifest.contains(&format!(
             "[patch.\"{url}\"]\ngdl = {{ path = \"../../../crates/gdl\" }}\ngdl-message = {{ path = \"../../../crates/gdl-message\" }}\n"
         )),
         "{manifest}"
     );
-    let contract = std::fs::read_to_string(out.join("contract/Cargo.toml")).expect("a manifest");
+    let contract =
+        std::fs::read_to_string(bundle(&out).join("contract/Cargo.toml")).expect("a manifest");
     assert!(!contract.contains("[patch"), "{contract}");
 
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     for name in ["gdl", "gdl-message"] {
         let entries = locked(&lock, name);
         assert_eq!(entries.len(), 1, "one {name} in:\n{lock}");
@@ -1225,7 +901,8 @@ fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
         "velo at the commit gdl's lock pins"
     );
 
-    let dockerfile = std::fs::read_to_string(out.join("main/Dockerfile")).expect("a Dockerfile");
+    let dockerfile =
+        std::fs::read_to_string(bundle(&out).join("main/Dockerfile")).expect("a Dockerfile");
     let run = dockerfile
         .lines()
         .find(|line| line.starts_with("RUN "))
@@ -1240,7 +917,7 @@ fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
     let metadata = std::process::Command::new(env!("CARGO"))
         .args(["metadata", "--locked", "--offline", "--format-version", "1"])
         .arg("--manifest-path")
-        .arg(out.join("main/Cargo.toml"))
+        .arg(bundle(&out).join("main/Cargo.toml"))
         .output()
         .expect("cargo metadata");
     assert!(
@@ -1280,6 +957,7 @@ fn a_local_bundle_that_reaches_gdl_from_git_only_through_git_is_refused() {
     offline_lock(holder.path());
 
     let out = holder.path().join("bundle");
+    checkout(holder.path());
     let error = gdl_gen::compose(
         &spec,
         None,
@@ -1317,6 +995,7 @@ fn a_local_bundle_whose_node_crate_takes_gdl_from_git_builds_and_answers() {
         name: format!("gdl-local-git-{}", std::process::id()),
         dir: holder.path().join("bundle"),
     };
+    checkout(holder.path());
     gdl_gen::compose(
         &spec,
         None,
@@ -1382,6 +1061,7 @@ fn a_local_bundle_does_not_require_a_transitive_crates_dev_dependencies() {
         String::from_utf8_lossy(&control.stderr)
     );
 
+    checkout(holder.path());
     gdl_gen::compose(
         &spec,
         None,
@@ -1499,6 +1179,7 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
         "",
     );
     let spec_dir = holder.path().join("http");
+    checkout(holder.path());
     let out = holder.path().join("bundle");
     let composed = Command::new("timeout")
         .args([
@@ -1522,10 +1203,11 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
         "{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let dockerfile = std::fs::read_to_string(out.join("main/Dockerfile")).expect("a Dockerfile");
+    let dockerfile =
+        std::fs::read_to_string(bundle(&out).join("main/Dockerfile")).expect("a Dockerfile");
     assert!(dockerfile.contains("FROM rust:1.93.1-slim-bookworm AS build"));
     assert!(dockerfile.contains("cargo build --locked --release"));
-    let lock = out.join("main/Cargo.lock");
+    let lock = bundle(&out).join("main/Cargo.lock");
     let from_host = std::fs::read_to_string(&lock).expect("the host's lock");
 
     // The image's previous resolve has a usable release in the same range.
@@ -1539,7 +1221,7 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
             "1",
         ])
         .arg("--manifest-path")
-        .arg(out.join("main/Cargo.toml"))
+        .arg(bundle(&out).join("main/Cargo.toml"))
         .env("RUSTC", &image_rustc)
         .output()
         .expect("the image compiler's resolve");
@@ -1571,7 +1253,7 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
         let build = Command::new("timeout")
             .args([CARGO_LIMIT, &image_cargo, "check", "--locked", "--offline"])
             .arg("--manifest-path")
-            .arg(out.join("main/Cargo.toml"))
+            .arg(bundle(&out).join("main/Cargo.toml"))
             .env("RUSTC", image_rustc)
             .env("CARGO_BUILD_JOBS", "2")
             .env("CARGO_TARGET_DIR", target("gdl-msrv"))
@@ -1666,6 +1348,7 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
         "Cargo reports the sparse source's identity"
     );
 
+    checkout(holder.path());
     let out = holder.path().join("bundle");
     let composed = Command::new("timeout")
         .args([
@@ -1770,6 +1453,7 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
             .output()
             .expect("compose")
     };
+    checkout(holder.path());
     let inside = holder.path().join("inside");
     let control = compose(holder.path(), &inside);
     assert!(
@@ -1781,7 +1465,10 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
         &std::fs::read_to_string(inside.join("compose.yaml")).expect("compose.yaml"),
     )
     .expect("JSON");
-    assert_eq!(compose_file["services"]["main"]["build"]["context"], "..");
+    assert_eq!(
+        compose_file["services"]["main"]["build"]["context"],
+        "context"
+    );
 
     let outside = compose(&root(), &holder.path().join("outside"));
     assert!(
@@ -1806,10 +1493,46 @@ fn pinned_crate(dir: &Path, name: &str) {
     .expect("a manifest");
 }
 
+/// Make `dir` a Git repository of its own, with every file committed:
+/// `--local` builds only what Git holds, and a holder in this checkout is
+/// a directory Git ignores in it.
+fn checkout(dir: &Path) {
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &["commit", "-q", "-m", "holder"][..],
+    ] {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=gdl", "-c", "user.email=gdl@localhost"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+}
+
+/// The path from a segment of the bundle, in gdl's workspace's
+/// `target/gdl-images`, to `name` in `holder`, a directory of this
+/// checkout.
+fn from_segment(holder: &Path, name: &str) -> String {
+    let holder = holder.file_name().expect("a name").to_string_lossy();
+    format!("../../../{holder}/{name}")
+}
+
+/// Where the bundle written into `out` is, in its tree: at the place in
+/// gdl's workspace that `images --local` gives it.
+fn bundle(out: &Path) -> PathBuf {
+    out.join("context/target/gdl-images")
+}
+
 /// `cargo gdl compose --local` of the spec in `holder/http` into `out`,
 /// offline: the host's own patch of a crate that crates.io lacks resolves
 /// only so, as Cargo otherwise reads the index to check it.
 fn compose_offline(holder: &Path, out: &Path) -> std::process::Output {
+    checkout(holder);
     Command::new("timeout")
         .args([
             CARGO_LIMIT,
@@ -1862,12 +1585,17 @@ fn a_local_bundle_carries_the_patch_of_its_node_crates_workspace() {
         "the segment resolves the host's pin offline:\n{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    let manifest =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.toml")).expect("the manifest");
     assert!(
-        manifest.contains("[patch.\"crates-io\"]\ngdl-host-pinned = { path = \"../../pinned\" }\n"),
+        manifest.contains(&format!(
+            "[patch.\"crates-io\"]\ngdl-host-pinned = {{ path = \"{}\" }}\n",
+            from_segment(holder.path(), "pinned")
+        )),
         "{manifest}"
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let entries = locked(&lock, "gdl-host-pinned");
     assert_eq!(entries.len(), 1, "one gdl-host-pinned in:\n{lock}");
     assert!(
@@ -1901,6 +1629,7 @@ fn gdls_patch_wins_over_the_hosts_patch_of_the_same_gdl_source() {
     offline_lock(holder.path());
 
     let out = holder.path().join("bundle");
+    checkout(holder.path());
     gdl_gen::compose(
         &spec_in(holder.path()),
         None,
@@ -1909,7 +1638,8 @@ fn gdls_patch_wins_over_the_hosts_patch_of_the_same_gdl_source() {
         gdl_gen::Sources::Local,
     )
     .expect("a bundle");
-    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    let manifest =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.toml")).expect("the manifest");
     assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
     assert!(
         manifest.contains(&format!(
@@ -1917,7 +1647,8 @@ fn gdls_patch_wins_over_the_hosts_patch_of_the_same_gdl_source() {
         )),
         "{manifest}"
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let entries = locked(&lock, "gdl");
     assert_eq!(entries.len(), 1, "one gdl in:\n{lock}");
     assert!(!entries[0].contains("source ="), "{}", entries[0]);
@@ -1999,6 +1730,7 @@ fn a_local_bundle_leaves_out_the_patch_of_a_transitive_crates_workspace() {
     offline_lock(holder.path());
 
     let out = holder.path().join("bundle");
+    checkout(holder.path());
     gdl_gen::compose(
         &spec_in(holder.path()),
         None,
@@ -2007,7 +1739,8 @@ fn a_local_bundle_leaves_out_the_patch_of_a_transitive_crates_workspace() {
         gdl_gen::Sources::Local,
     )
     .expect("a bundle");
-    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    let manifest =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.toml")).expect("the manifest");
     assert!(!manifest.contains("[patch"), "{manifest}");
 }
 
@@ -2037,6 +1770,7 @@ fn a_local_bundle_carries_a_version_string_patch() {
     offline_lock(holder.path());
 
     let out = holder.path().join("bundle");
+    checkout(holder.path());
     gdl_gen::compose(
         &spec_in(holder.path()),
         None,
@@ -2050,7 +1784,8 @@ fn a_local_bundle_carries_a_version_string_patch() {
     let host_entries = locked(&host_lock, "itoa");
     assert_eq!(host_entries.len(), 1, "{host_entries:#?}");
     assert!(host_entries[0].contains("registry+"), "{host_entries:#?}");
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let entries = locked(&lock, "itoa");
     assert!(
         entries.iter().all(|entry| !entry.contains("git+")),
@@ -2095,7 +1830,8 @@ fn a_local_bundle_merges_the_crates_io_index_url_with_its_gdl_patch() {
         "the segment must merge equivalent Cargo source keys: {}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    let manifest =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.toml")).expect("the manifest");
     assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
 }
 
@@ -2180,10 +1916,12 @@ fn a_renamed_host_gdl_patch_gives_way_to_the_runtime() {
     );
 }
 
-/// The segment replaces the host's gdl patch with its runtime's gdl.
-/// A discarded patch outside the context must not widen that context.
+/// The segment replaces the host's gdl patch with its runtime's gdl, but
+/// a host patch named by an absolute path is refused all the same, naming
+/// the manifest and the path: no manifest the images build from may name
+/// a source of this machine, whether or not the segment uses it.
 #[test]
-fn an_overridden_gdl_patch_does_not_widen_the_context() {
+fn an_overridden_gdl_patch_by_an_absolute_path_is_refused() {
     let holder = tempfile::Builder::new()
         .prefix("gdl-local-overridden-")
         .tempdir_in(root())
@@ -2235,14 +1973,16 @@ fn an_overridden_gdl_patch_does_not_widen_the_context() {
 
     let out = holder.path().join("bundle");
     let composed = compose_offline(holder.path(), &out);
-    assert!(
-        composed.status.success(),
-        "gdl's winning patch needs no discarded source in the context: {}",
-        String::from_utf8_lossy(&composed.stderr)
-    );
-    let manifest =
-        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment manifest");
-    assert!(!manifest.contains("gdl-local-discarded-"), "{manifest}");
+    let stderr = String::from_utf8_lossy(&composed.stderr);
+    assert!(!composed.status.success(), "{stderr}");
+    for named in [node, fork] {
+        assert!(
+            stderr.contains(&named.display().to_string()),
+            "{} in: {stderr}",
+            named.display()
+        );
+    }
+    assert!(!out.exists());
 }
 
 /// A patch alias can use a gdl package's name for another package.
@@ -2287,6 +2027,7 @@ fn a_host_patch_alias_does_not_replace_the_generated_gdl_entry() {
         String::from_utf8_lossy(&host.stderr)
     );
 
+    checkout(holder.path());
     gdl_gen::compose(
         &spec_in(holder.path()),
         None,
@@ -2350,6 +2091,7 @@ fn a_named_registry_patch_shares_the_generated_source_table() {
         String::from_utf8_lossy(&host.stderr)
     );
 
+    checkout(holder.path());
     let out = holder.path().join("bundle");
     let composed = Command::new("timeout")
         .args([
@@ -2373,8 +2115,8 @@ fn a_named_registry_patch_shares_the_generated_source_table() {
         "a host patch of gdl by registry name must not reach the segment: {}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let manifest =
-        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment manifest");
+    let manifest = std::fs::read_to_string(bundle(&out).join("main/Cargo.toml"))
+        .expect("the segment manifest");
     assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
 }
 
@@ -2461,13 +2203,16 @@ fn a_host_patch_below_the_seeded_lock_version_is_used() {
         "{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let manifest =
-        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment's manifest");
+    let manifest = std::fs::read_to_string(bundle(&out).join("main/Cargo.toml"))
+        .expect("the segment's manifest");
     assert!(
-        manifest.contains("itoa = { path = \"../../pinned\" }"),
+        manifest.contains(&format!(
+            "itoa = {{ path = \"{}\" }}",
+            from_segment(holder.path(), "pinned")
+        )),
         "{manifest}"
     );
-    let lock: toml::Table = std::fs::read_to_string(out.join("main/Cargo.lock"))
+    let lock: toml::Table = std::fs::read_to_string(bundle(&out).join("main/Cargo.lock"))
         .expect("the segment's lock")
         .parse()
         .expect("a lock file");
@@ -2484,10 +2229,11 @@ fn a_host_patch_below_the_seeded_lock_version_is_used() {
     assert_eq!(itoa["version"].as_str(), Some("1.0.17"));
 }
 
-/// An alias discarded because its name collides with gdl's patch needs
-/// no source directory in the context, just like a discarded gdl fork.
+/// An alias discarded because its name collides with gdl's patch, named
+/// by an absolute path, is refused as a discarded gdl fork is
+/// ([`an_overridden_gdl_patch_by_an_absolute_path_is_refused`]).
 #[test]
-fn a_discarded_patch_alias_does_not_widen_the_context() {
+fn a_discarded_patch_alias_by_an_absolute_path_is_refused() {
     let (_repo, url, rev) = stub_gdl(&[("gdl-host-pinned", "")]);
     let holder = tempfile::Builder::new()
         .prefix("gdl-local-alias-")
@@ -2531,14 +2277,23 @@ fn a_discarded_patch_alias_does_not_widen_the_context() {
         String::from_utf8_lossy(&host.stderr)
     );
 
-    gdl_gen::compose(
+    checkout(holder.path());
+    let error = gdl_gen::compose(
         &spec_in(holder.path()),
         None,
         &holder.path().join("bundle"),
         &target("gdl-gen-tests"),
         gdl_gen::Sources::Local,
     )
-    .expect("a discarded patch alias must not widen the context");
+    .expect_err("an absolute path in a manifest")
+    .to_string();
+    for named in [node, outside.path().to_path_buf()] {
+        assert!(
+            error.contains(&named.display().to_string()),
+            "{} in: {error}",
+            named.display()
+        );
+    }
 }
 
 /// A host's dev dependency uses its patch, but the segment does not build
@@ -2599,7 +2354,8 @@ fn a_patch_used_only_by_a_host_dev_dependency_allows_a_bundle() {
         "a host-only dev dependency must not prevent a segment's lock:\n{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let lock: toml::Table = lock.parse().expect("a lock file");
     assert!(
         lock["package"]
@@ -2675,7 +2431,8 @@ fn a_host_patch_allows_multiple_locked_versions_of_its_package() {
         "a second major version must not prevent selecting the host's patch:\n{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     assert!(
         locked(&lock, "thiserror")
             .iter()
@@ -2704,11 +2461,8 @@ fn a_patch_path_applies_parent_steps_before_following_symlinks() {
     let manifest = std::fs::read_to_string(&other).expect("the other crate's manifest");
     std::fs::write(other, manifest.replace("1.0.0", "1.0.1")).expect("a different version");
     std::fs::create_dir_all(holder.path().join("other/anchor")).expect("the symlink target");
-    std::os::unix::fs::symlink(
-        holder.path().join("other/anchor"),
-        holder.path().join("http/link"),
-    )
-    .expect("a symlink beside the host's pin");
+    std::os::unix::fs::symlink("../other/anchor", holder.path().join("http/link"))
+        .expect("a symlink beside the host's pin");
     let node = holder.path().join("http/Cargo.toml");
     let manifest = std::fs::read_to_string(&node).expect("the node's manifest");
     std::fs::write(
@@ -2757,7 +2511,8 @@ fn a_patch_path_applies_parent_steps_before_following_symlinks() {
         "{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let entries = locked(&lock, "gdl-host-pinned");
     assert_eq!(entries.len(), 1, "one patched crate: {lock}");
     assert!(
@@ -2849,8 +2604,8 @@ fn an_unreached_members_gdl_source_does_not_hide_a_carried_patch_path() {
         );
         return;
     }
-    let manifest =
-        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment's manifest");
+    let manifest = std::fs::read_to_string(bundle(&out).join("main/Cargo.toml"))
+        .expect("the segment's manifest");
     assert!(
         manifest.contains("package = \"gdl-host-pinned\""),
         "{manifest}"
@@ -2949,7 +2704,8 @@ fn dependent_host_patches_use_the_current_lock() {
         "updating the parent patch must not invalidate the next selector:\n{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     for name in ["thiserror", "thiserror-impl"] {
         assert!(
             locked(&lock, name).iter().any(|entry| {
@@ -2989,7 +2745,7 @@ fn a_symlinked_patch_keeps_its_relative_dependencies() {
     let text = std::fs::read_to_string(&other).expect("the other helper's manifest");
     std::fs::write(other, text.replace("1.0.0", "1.0.1"))
         .expect("a different sibling beside the target");
-    std::os::unix::fs::symlink(&pinned, holder.path().join("http/pinned"))
+    std::os::unix::fs::symlink("../vendor/pinned", holder.path().join("http/pinned"))
         .expect("a link to the patch");
     let node = holder.path().join("http/Cargo.toml");
     let text = std::fs::read_to_string(&node).expect("the node's manifest");
@@ -3037,7 +2793,8 @@ fn a_symlinked_patch_keeps_its_relative_dependencies() {
         "{}",
         String::from_utf8_lossy(&composed.stderr)
     );
-    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock =
+        std::fs::read_to_string(bundle(&out).join("main/Cargo.lock")).expect("the segment's lock");
     let helpers = locked(&lock, "gdl-host-helper");
     assert_eq!(helpers.len(), 1, "one helper: {lock}");
     assert!(

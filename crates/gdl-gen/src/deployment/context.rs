@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use super::io;
 use crate::dump::toml_string;
 use crate::paths::{display, normalize, relative};
-use crate::{Error, Files, emit};
+use crate::{Error, Files};
 
 /// Where a local bundle's images build from, or where `cargo gdl build`
 /// builds: the crates the generated manifests reach by path, their
@@ -239,6 +239,26 @@ impl Context {
             }
             unread.append(&mut more.unread);
         }
+        if image {
+            // Each crate the bundle reaches by path builds, through any
+            // number of path dependencies: the images build from what the
+            // sources hold, so they hold each, and its workspace.
+            let walked: Vec<PathBuf> = crates
+                .keys()
+                .filter(|dir| !dir.starts_with(out))
+                .cloned()
+                .collect();
+            let workspaces: Vec<PathBuf> =
+                walked.iter().filter_map(|dir| workspace_of(dir)).collect();
+            needed.extend(walked);
+            needed.extend(workspaces);
+            root = needed
+                .iter()
+                .map(PathBuf::as_path)
+                .reduce(common)
+                .unwrap_or(out)
+                .to_path_buf();
+        }
         if image && only_root(&root) {
             return Err(shared_only_the_root(&root, &needed));
         }
@@ -297,13 +317,6 @@ impl Context {
     /// How an error names the command.
     pub(crate) fn prefix(&self) -> &'static str {
         self.mode.prefix()
-    }
-
-    /// The context from the bundle, as `compose.yaml` names it.
-    pub(super) fn seen_from_bundle(&self) -> String {
-        let depth = self.bundle.components().count();
-        let up: PathBuf = std::iter::repeat_n("..", depth).collect();
-        display(&up)
     }
 
     /// `path`, a path in the bundle, from the context's root.
@@ -447,24 +460,6 @@ impl Context {
             })
             .collect();
         (gdl, host)
-    }
-
-    /// The ignore file of each of the bundle's Dockerfiles: build output
-    /// and git history stay out of the context, and the bundle stays in
-    /// even when it is written under a `target` or `.git` directory.
-    pub(super) fn ignore(&self) -> String {
-        let mut text = format!(
-            "# {}\n# What the build context leaves out: build output and git history.\n**/target\n**/.git\n",
-            emit::MARKER
-        );
-        if self
-            .bundle
-            .components()
-            .any(|c| c.as_os_str() == "target" || c.as_os_str() == ".git")
-        {
-            text.push_str(&format!("!{}\n", pattern(&display(&self.bundle))));
-        }
-        text
     }
 }
 

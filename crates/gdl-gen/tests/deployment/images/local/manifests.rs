@@ -117,20 +117,18 @@ fn depend(copy: &Copy, path: &str) {
     std::fs::write(&manifest, text).expect("a path dependency");
 }
 
-/// Build the copy's images, and return the refusal.
+/// Build the copy's images with each builder, and return the refusal,
+/// which no context precedes: one rule for both.
 fn refused(copy: &Copy) -> String {
-    let mut docker = Fake::default();
-    let error = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    )
-    .expect_err("refused");
-    assert!(docker.contexts.is_empty());
-    error.to_string()
+    let errors: Vec<String> = Builder::ALL
+        .iter()
+        .map(|builder| match builder.contexts(&copy.spec()) {
+            Err(error) => error.to_string(),
+            Ok(contexts) => panic!("{builder:?} built {} contexts", contexts.len()),
+        })
+        .collect();
+    assert_eq!(errors[0], errors[1], "one rule refuses for both");
+    errors[0].clone()
 }
 
 /// A manifest that names a dependency by an absolute path is refused,
@@ -153,38 +151,28 @@ fn an_absolute_path_dependency_is_refused() {
     }
 }
 
-/// A relative path dependency that leaves the sources, to a crate of this
-/// machine, is refused, naming the manifest and the path.
+/// A relative path that leaves the sources is refused, naming the
+/// manifest and the path, in every manifest the sources hold: here one
+/// that no build reads, which Cargo would still read if a later change
+/// made it a dependency.
 #[test]
-fn a_path_dependency_that_leaves_the_sources_is_refused() {
+fn a_path_that_leaves_the_sources_is_refused() {
     let copy = Copy::new();
-    let outside = tempfile::Builder::new()
-        .prefix("gdl-outside-")
-        .tempdir_in(copy.path().parent().expect("a parent"))
-        .expect("a directory beside the sources");
-    std::fs::create_dir(outside.path().join("src")).expect("a source directory");
+    let named = "../../../../gdl-outside";
+    let extra = copy.path().join("examples/api/extra");
+    std::fs::create_dir_all(&extra).expect("a directory");
     std::fs::write(
-        outside.path().join("Cargo.toml"),
-        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        extra.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"extra\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [dependencies.outside]\npath = \"{named}\"\n"
+        ),
     )
     .expect("a manifest");
-    std::fs::write(outside.path().join("src/lib.rs"), "").expect("a source");
-    let named = format!(
-        "../../../{}",
-        outside
-            .path()
-            .file_name()
-            .expect("a name")
-            .to_string_lossy()
-    );
-    let manifest = copy.path().join("examples/api/Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).expect("the node manifest")
-        + &format!("\n[dependencies.image-support]\npath = \"{named}\"\n");
-    std::fs::write(&manifest, text).expect("a path dependency");
     copy.add();
     let error = refused(&copy);
-    assert!(error.contains("examples/api/Cargo.toml"), "{error}");
-    assert!(error.contains(&named), "{error}");
+    assert!(error.contains("examples/api/extra/Cargo.toml"), "{error}");
+    assert!(error.contains(named), "{error}");
 }
 
 /// Parent components cannot disguise an absolute dependency outside the
@@ -218,21 +206,8 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
     };
     set_path(host.path());
     copy.add();
-    let mut docker = Fake::default();
-    let refused = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    )
-    .expect_err("an absolute dependency outside the sources is refused");
-    assert!(
-        refused.to_string().contains("outside the sources"),
-        "{refused}"
-    );
-    assert!(docker.contexts.is_empty());
+    let error = refused(&copy);
+    assert!(error.contains("outside the sources"), "{error}");
     let disguised = copy
         .path()
         .join("..")
@@ -243,25 +218,8 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
     );
     set_path(&disguised);
     copy.add();
-    let result = gdl_gen::images(
-        &copy.spec(),
-        &fleet(),
-        &target(),
-        false,
-        gdl_gen::Sources::Local,
-        &mut docker,
-    );
-    assert!(
-        result.is_err(),
-        "parent components admitted an absolute host dependency into {} contexts: {:?}",
-        docker.contexts.len(),
-        docker
-            .contexts
-            .values()
-            .filter_map(|context| context.get(Path::new("examples/api/Cargo.toml")))
-            .collect::<Vec<_>>()
-    );
-    assert!(docker.contexts.is_empty());
+    let error = refused(&copy);
+    assert!(error.contains("outside the sources"), "{error}");
 }
 
 /// A manifest reached through a link within the sources is checked as

@@ -45,8 +45,8 @@
 //! each pool's segments. With `--fleet` it runs the same check as `check`
 //! first, and writes nothing if it fails. With `--local` its images build
 //! the crates the spec names by path, and gdl and its hub from `[gdl]
-//! path`, from a build context that holds them and the bundle, so the
-//! bundle builds only on this machine. `k8s` writes a fleet's Kubernetes
+//! path`, from the tree it writes in the bundle's `context/`: those
+//! sources as Git holds them, and the bundle among them. `k8s` writes a fleet's Kubernetes
 //! objects, one directory per cluster, after the same check; each image
 //! is tagged `--tag`, else with the sha256 of what it is built from, and
 //! with `--images`, the file `images` writes, also named by its digest. It
@@ -57,8 +57,9 @@
 //! writes each image's digest to `--out`. It prints each image by
 //! reference and digest. With `--local`, `k8s`, `images`, and `deploy`
 //! build gdl and its hub from `[gdl] path`, and the crates the spec names
-//! by path, as they are on this machine, with no fetch of gdl; each tag
-//! covers those sources. `deploy` applies a fleet to its clusters with
+//! by path, as Git holds them on this machine (each commit, and each change
+//! to a tracked file; `git add` a new file to build it), with no fetch of
+//! gdl; each tag covers those sources. `deploy` applies a fleet to its clusters with
 //! `kubectl` and each cluster's kube context, and stops at the first step
 //! that fails: `check`, and each cluster's context; `images --push`; `k8s`,
 //! by the pushed digests, also written to `--out` when given; each
@@ -407,10 +408,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 true => gdl_gen::Sources::Local,
                 false => gdl_gen::Sources::Fetched,
             };
-            if let Some(root) = gdl_gen::compose(&spec, fleet.as_ref(), out, &target, sources)? {
+            if let Some(tree) = gdl_gen::compose(&spec, fleet.as_ref(), out, &target, sources)? {
                 eprintln!(
-                    "cargo gdl: --local: the images build from {}, so this bundle builds only on this machine",
-                    root.display()
+                    "cargo gdl: --local: the images build from {}, which holds the sources as Git holds them now: compose again to build a later change",
+                    tree.display()
                 );
             }
         }

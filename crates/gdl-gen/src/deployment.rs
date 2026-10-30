@@ -192,7 +192,14 @@ fn bundle_files(
             "`compose` deploys a spec {why} by pool, as its fleet file says: give it `--fleet <fleet.toml>`"
         )));
     }
-    let (spec, bundle) = Bundle::prepare(spec, out, target, sources)?;
+    // A bundle of local sources goes in its tree at the place `images`
+    // gives it ([`context::image_bundle`]), so that both build from the
+    // same tree, and nothing in it depends on where `out` is.
+    let at = match (sources, &spec.gdl) {
+        (Sources::Local, GdlDep::Path(runtime)) => context::image_bundle(runtime)?,
+        _ => out.to_path_buf(),
+    };
+    let (spec, bundle) = Bundle::prepare(spec, &at, target, sources)?;
     bundle.check_secrets(out)?;
     let local = bundle.context.clone();
     let mut files = match fleet {
@@ -241,11 +248,11 @@ fn yaml_safe(json: &str) -> String {
 }
 
 /// Say, in the bundle's `compose.yaml` and its README, that its images
-/// build local sources, and so build only on this machine. `compose.yaml`
-/// is JSON, which has no comments, so it says so in an extension field,
+/// build local sources, from the tree in `context/`. `compose.yaml` is
+/// JSON, which has no comments, so it says so in an extension field,
 /// which Compose ignores.
 fn mark_local(files: &mut Files) -> Result<(), Error> {
-    const NOTE: &str = "This bundle builds local sources: its images build from a context outside the bundle, which holds every crate it builds from by path. It builds only on the machine that wrote it, and every change to those crates rebuilds its images.";
+    const NOTE: &str = "This bundle builds local sources: its images build from `context/`, which holds gdl and every crate the spec names by path, as Git held them when the bundle was written (each committed file, and each change to a tracked file; `git add` a new file to build it), and the bundle's Dockerfiles and settings, under `context/` at the place `cargo gdl images --local` gives them. Write the bundle again to build a later change.";
     let path = Path::new("compose.yaml");
     let mut compose: serde_json::Value =
         serde_json::from_str(files.get(path).map_or("{}", String::as_str)).map_err(io)?;
@@ -390,19 +397,16 @@ impl Bundle {
     }
 
     /// The `build` of a service whose image the Dockerfile at `dockerfile`,
-    /// a path in the bundle, builds; and that Dockerfile's ignore file, for
-    /// a bundle of local sources.
+    /// a path in the bundle, builds: from the bundle, or, for a bundle of
+    /// local sources, from its tree in `context/`, where the bundle is at
+    /// its place among the sources.
     fn build(&mut self, dockerfile: &Path) -> serde_json::Value {
         let Some(context) = &self.context else {
             return json!({"context": ".", "dockerfile": display(dockerfile)});
         };
-        let mut ignore = dockerfile.as_os_str().to_owned();
-        ignore.push(".dockerignore");
-        self.files.insert(ignore.into(), context.ignore());
-        // Compose reads `$` as a variable, and `$$` as `$`. [`compose`]
-        // refuses the `${` that no escape keeps.
+        // Compose reads `$` as a variable, and `$$` as `$`.
         let dockerfile = context.in_bundle(dockerfile).replace('$', "$$");
-        json!({"context": context.seen_from_bundle(), "dockerfile": dockerfile})
+        json!({"context": CONTEXT, "dockerfile": dockerfile})
     }
 
     /// `path`, a path in the bundle, as the image build sees it under
@@ -852,9 +856,9 @@ fn quote(s: &str) -> String {
 }
 
 /// Write a Compose bundle into `out`, which must not exist, its images
-/// built from `sources`. Returns the root of the build context of a bundle
-/// of local sources, which the bundle names only relative to itself.
-/// Refuses a directory that Docker Compose cannot load a project from.
+/// built from `sources`. Returns the tree a bundle of local sources builds
+/// from, `out/context` ([`tree`]). Refuses a directory that Docker Compose
+/// cannot load a project from.
 pub fn compose(
     spec: &Spec,
     fleet: Option<&Fleet>,
@@ -912,17 +916,71 @@ fn write(
         }
         other => other.map_err(io)?,
     }
-    let written = crate::write(&out, &files)
-        .map(drop)
-        .and_then(|()| match &context {
-            Some(context) => locks::write(&out, &files, context),
-            None => Ok(()),
-        });
+    let written = match &context {
+        None => crate::write(&out, &files).map(drop),
+        Some(context) => local(&out, files, context),
+    };
     if let Err(error) = written {
         let _ = std::fs::remove_dir_all(&out);
         return Err(error);
     }
-    Ok(context.map(|context| context.root().to_path_buf()))
+    Ok(context.map(|_| out.join(CONTEXT)))
+}
+
+/// Where in a bundle of local sources its tree is ([`tree`]).
+const CONTEXT: &str = "context";
+
+/// Write the bundle of local sources `files` into `out`: `compose.yaml` and
+/// the README there, and the rest in its tree, in `out/context`, which
+/// [`tree::build`] makes as it does for `images`, with each segment's lock
+/// settled.
+fn local(out: &Path, mut files: Files, context: &context::Context) -> Result<(), Error> {
+    let mut top = Files::new();
+    for name in ["compose.yaml", "README.md"] {
+        if let Some(text) = files.remove(Path::new(name)) {
+            top.insert(name.into(), text);
+        }
+    }
+    crate::write(out, &top)?;
+    let segments: Vec<PathBuf> = files
+        .keys()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Dockerfile"))
+        .filter_map(|path| path.parent())
+        .filter(|dir| files.contains_key(&dir.join("Cargo.toml")))
+        .map(Path::to_path_buf)
+        .collect();
+    // Cargo reads the configuration of every directory above where it
+    // runs, and `out` may be among the sources: the tree is built and its
+    // locks settled away from them, as the image build sees only the tree.
+    let scratch = tempfile::Builder::new()
+        .prefix("gdl-compose-local-")
+        .tempdir()
+        .map_err(io)?;
+    tree::build(scratch.path(), context, &files, &segments)?;
+    place(scratch.path(), &out.join(CONTEXT))
+}
+
+/// Move the tree in `from` to `to`, or copy it, links as links, when the
+/// two are on different file systems.
+fn place(from: &Path, to: &Path) -> Result<(), Error> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::create_dir(to).map_err(io)?;
+    for entry in std::fs::read_dir(from).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let (path, into) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type().map_err(io)?;
+        if kind.is_dir() {
+            place(&path, &into)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&path).map_err(io)?, &into)
+                .map_err(io)?;
+        } else {
+            std::fs::copy(&path, &into).map_err(io)?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuse an output directory, absolute, from which Docker Compose cannot
