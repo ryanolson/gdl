@@ -34,7 +34,8 @@ pub use deployment::{
 };
 pub use encoding::Encoding;
 pub use fleet::{
-    Cluster, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors, FleetMetrics, FleetTable,
+    Cluster, ClusterResources, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors,
+    FleetMetrics, FleetTable, HUB, PoolResources, Quantities, Quantity, Resources, Toleration,
 };
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use metrics::{

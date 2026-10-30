@@ -11,6 +11,8 @@ use gdl_model::{
 
 #[path = "fleet/clusters.rs"]
 mod clusters;
+#[path = "fleet/placement.rs"]
+mod placement;
 
 /// The graph of a model served in pools (docs/src/concepts/pools.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`.

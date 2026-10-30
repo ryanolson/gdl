@@ -47,16 +47,35 @@
               }
             ],
             "image": "registry.example/gdl/api-hub:pinned",
-            "name": "tables"
+            "name": "tables",
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            }
           }
         ],
         "enableServiceLinks": false,
         "nodeSelector": {
+          "gdl.dev/node-group": "gdl-api",
           "kubernetes.io/arch": "amd64",
           "kubernetes.io/os": "linux"
         },
         "restartPolicy": "Never",
-        "serviceAccountName": "api"
+        "serviceAccountName": "api",
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "dedicated",
+            "operator": "Equal",
+            "value": "gdl-api"
+          }
+        ]
       }
     }
   }

@@ -130,6 +130,33 @@ Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for
 - **Ports.** An entry Service publishes each container port of `[deployment.segment.<name>] ports`, in Compose's short form. The host port is Compose's alone.
 - **Pods.** A pod runs as the fleet's ServiceAccount, which carries the cluster's `service_account_annotations`, on nodes of the cluster's platform (`kubernetes.io/os` and `kubernetes.io/arch`). Service links are off, so that no Service of the namespace adds variables to a container.
 
+## Node groups and resources
+
+On a shared cluster, a fleet can keep its pods on a node group of its own and give each pod its requests and limits, so that the scheduler sees what it uses and nothing of the fleet runs on another team's nodes:
+
+```toml
+[cluster.use1]
+# ...
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Equal", value = "gdl-api", effect = "NoSchedule" }]
+
+[cluster.use1.resources.default]          # every pod of the cluster: all four are required
+requests = { cpu = "100m", memory = "128Mi" }
+limits = { cpu = "500m", memory = "512Mi" }
+
+[cluster.use1.resources.segment.engine]   # a segment's own pods, or `hub` for the hubs
+requests = { cpu = "250m" }
+limits = { cpu = "1", memory = "1Gi" }
+
+[pool.model-x-us.resources.segment.engine]   # one pool's own, over its cluster's
+limits = { memory = "2Gi" }
+```
+
+- **Every pod.** The selector, beside the OS and architecture of the cluster's `platform`, and the tolerations go on every Pod template the render writes in the cluster: each pool's hub and segments, and the DynamoDB directory's Local and tables Job. With `resources`, every container gets CPU and memory requests and limits. A pod's own come from its pool's `resources.segment.<segment>`, then its cluster's, then the cluster's default, field by field. The Local and the Job take the default. Without `resources`, no pod gets any, as before.
+- **Checked first.** `cargo gdl check` refuses a value Kubernetes would refuse: a selector key that is not a label key, or `kubernetes.io/os` or `kubernetes.io/arch`, which the `platform` sets; a toleration operator other than `Equal` or `Exists`, an effect other than `NoSchedule`, `PreferNoSchedule`, or `NoExecute`, a value with `Exists`, and `toleration_seconds` without `NoExecute`; a quantity that does not parse; a default without all four; a limit below its request in any pod's merged resources; and a `resources.segment` key that is not a segment or `hub`. Write quantities in quotes, as Kubernetes does.
+- **CPU limits.** Every pod gets a CPU limit, so a busy segment is throttled at it. Give a segment a limit above its request where it bursts.
+- **A change replaces the pods.** The selector, the tolerations, and the resources are in the pod templates, so a change to them replaces the pods at the next `deploy`.
+
 ## Metrics
 
 A segment serves its metrics on its system port at `/metrics`, and a hub on its public port, 1337, at `/v1/ext/gdl-pool/metrics` ([Metrics reference](../appendix/metrics.md)). Every pod template says so in the annotations that a Prometheus's pod discovery reads by convention: `prometheus.io/scrape: "true"`, `prometheus.io/port`, and `prometheus.io/path`. The ports are named, `system` on a segment's container and `public` on a hub's.

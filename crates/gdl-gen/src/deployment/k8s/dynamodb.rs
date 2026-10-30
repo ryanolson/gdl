@@ -18,10 +18,10 @@
 //! table in one region would make a regional table there, and that region
 //! a directory of its own.
 
-use gdl_model::{Cluster, Fleet, FleetDirectory, Problem, dynamodb_tables};
+use gdl_model::{Cluster, Fleet, FleetDirectory, Problem, Resources, dynamodb_tables};
 use serde_json::{Value, json};
 
-use super::objects::{label_value, node_selector};
+use super::objects::{label_value, place, resources};
 use crate::deployment::pools::DYNAMODB_LOCAL;
 
 /// The Local's Deployment and Service, and the tables Job: a pool may not
@@ -95,9 +95,9 @@ fn pod(fleet: &str, cluster: &Cluster, container: Value, restart: Option<&str>) 
     let mut pod = json!({
         "serviceAccountName": fleet,
         "enableServiceLinks": false,
-        "nodeSelector": node_selector(cluster),
         "containers": [container],
     });
+    place(&mut pod, cluster);
     if let Some(restart) = restart {
         pod["restartPolicy"] = restart.into();
     }
@@ -106,11 +106,17 @@ fn pod(fleet: &str, cluster: &Cluster, container: Value, restart: Option<&str>) 
 
 /// The Local's Deployment and Service in cluster `name`: one pod, in
 /// memory, with `-sharedDb`, so that clients of every region see one
-/// database. Its readiness is its port's.
-pub(super) fn local(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
+/// database. Its readiness is its port's. It asks for `requests`, the
+/// cluster's default, when the cluster gives one.
+pub(super) fn local(
+    fleet: &str,
+    name: &str,
+    cluster: &Cluster,
+    requests: Option<&Resources>,
+) -> Vec<Value> {
     let labels = labels(fleet, name, LOCAL);
     let metadata = json!({"name": LOCAL, "namespace": cluster.namespace, "labels": labels});
-    let container = json!({
+    let mut container = json!({
         "name": LOCAL,
         "image": DYNAMODB_LOCAL,
         "args": ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb", "-port", PORT.to_string()],
@@ -122,6 +128,7 @@ pub(super) fn local(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
             "failureThreshold": 3,
         },
     });
+    resources(&mut container, requests);
     vec![
         json!({
             "apiVersion": "apps/v1",
@@ -153,13 +160,15 @@ pub(super) fn local(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
 /// The tables Job of `directory` in cluster `name`, run from `image`, the
 /// hub's: it makes the tables in the Local, and checks the keys of those
 /// that exist. It runs once: the step tries again itself while the Local
-/// does not answer, and a failure names its table in the pod's log.
+/// does not answer, and a failure names its table in the pod's log. It
+/// asks for `requests`, the cluster's default, when the cluster gives one.
 pub(super) fn tables_job(
     fleet: &str,
     name: &str,
     cluster: &Cluster,
     directory: &FleetDirectory,
     image: &str,
+    requests: Option<&Resources>,
 ) -> Value {
     let env = [
         ("GDL_POOL__RECORDS_TABLE", directory.records_table.clone()),
@@ -170,12 +179,13 @@ pub(super) fn tables_job(
     .map(|(name, value)| {
         json!({"name": name, "value": crate::deployment::variables::string(&value)})
     });
-    let container = json!({
+    let mut container = json!({
         "name": "tables",
         "image": image,
         "command": [super::objects::BINARY, "--tables"],
         "env": env,
     });
+    resources(&mut container, requests);
     let labels = labels(fleet, name, TABLES);
     json!({
         "apiVersion": "batch/v1",

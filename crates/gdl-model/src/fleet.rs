@@ -9,9 +9,13 @@ use crate::{
 
 mod cluster;
 mod errors;
+mod placement;
 
 pub use cluster::Cluster;
 pub use errors::{FleetError, FleetErrors, FleetTable};
+pub use placement::{
+    ClusterResources, HUB, PoolResources, Quantities, Quantity, Resources, Toleration,
+};
 
 use cluster::{Header, check_clusters};
 
@@ -30,6 +34,14 @@ use cluster::{Header, check_clusters};
 /// context = "kind-use1"
 /// namespace = "gdl-llm"
 /// region = "us-east-1"
+/// node_selector = { "gdl.dev/node-group" = "llm" }   # optional: beside the platform's OS and architecture
+/// tolerations = [{ key = "dedicated", operator = "Equal", value = "llm", effect = "NoSchedule" }]
+///
+/// [cluster.use1.resources.default]   # optional: then every pod of the cluster gets all four
+/// requests = { cpu = "250m", memory = "256Mi" }
+/// limits = { cpu = "1", memory = "1Gi" }
+/// [cluster.use1.resources.segment.e] # a segment's own, or `hub`, over the default
+/// limits = { memory = "4Gi" }
 ///
 /// [class.global]
 /// ready = { a = 2, b = 2, c = 2 }   # default quorum of a pool of this class, per segment
@@ -43,6 +55,7 @@ use cluster::{Header, check_clusters};
 /// home = "global-us-east-1"          # the parent pool, required when another class sends to this one: whose hub follows it
 /// # parents = "global"               # or, in place of `home`, the parent class: every pool of it follows this one
 /// ready = { e = 8 }                  # optional: overrides the class's default
+/// resources.segment.e = { limits = { memory = "8Gi" } }   # optional: over its cluster's
 ///
 /// [directory]                        # optional: without it, each child's hub reports to its parent's (`relay`)
 /// backend = "dynamodb"               # every pool's hub publishes to two DynamoDB tables
@@ -162,6 +175,9 @@ struct PoolSpec {
     parents: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
+    /// This pool's pods' requests and limits, over its cluster's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resources: Option<PoolResources>,
 }
 
 impl PoolSpec {
@@ -298,6 +314,25 @@ impl Fleet {
         }
         self.header.check(&mut errors);
         check_clusters(&self.clusters, &mut errors);
+        // A cluster's segment keys name a segment of any layout: which of
+        // its pools runs which is the pools' to say.
+        if let Some(laid) = &laid {
+            let members: BTreeSet<&str> = laid
+                .values()
+                .flatten()
+                .flat_map(|classes| classes.segments.values().flatten().copied())
+                .collect();
+            for (name, cluster) in &self.clusters {
+                if let Some(resources) = &cluster.resources {
+                    placement::check_segments(
+                        FleetTable::Cluster(name.clone()),
+                        resources.segment.keys(),
+                        &members,
+                        &mut errors,
+                    );
+                }
+            }
+        }
         // Each child by its home, its layout, and its class, and each
         // shared pool by its parents' class: a parent's children are the
         // pools that name it, or its class, in its own layout.
@@ -359,6 +394,25 @@ impl Fleet {
                         layout: classes.named.map(str::to_string),
                     }),
                 },
+            }
+            if let Some(resources) = &pool.resources {
+                let cluster = pool
+                    .cluster
+                    .as_ref()
+                    .and_then(|cluster| self.clusters.get(cluster))
+                    .and_then(|cluster| cluster.resources.as_ref());
+                placement::check_pool(name, resources, cluster, &mut errors);
+                if let Some(members) = runs
+                    .and_then(|runs| laid.as_ref()?.get(runs)?.as_ref())
+                    .and_then(|classes| classes.segments.get(pool.class.as_str()))
+                {
+                    placement::check_segments(
+                        table(),
+                        resources.segment.keys(),
+                        members,
+                        &mut errors,
+                    );
+                }
             }
             errors.extend(self.home_problem(name, pool, laid.as_ref()));
             // Under the fleet's DynamoDB directory every parent's hub reads
@@ -734,6 +788,34 @@ impl Fleet {
     /// The fleet's `[directory]` table, if it has one.
     pub fn directory(&self) -> Option<&FleetDirectory> {
         self.directory.as_ref()
+    }
+
+    /// The requests and limits of a pod of cluster `cluster`: of `pod`, a
+    /// segment or [`HUB`], of `pool`, merged field by field over the
+    /// cluster's for the segment and its default; a pod of no pool or
+    /// segment, as the DynamoDB directory's, takes the default. `None` when
+    /// the cluster gives no resources.
+    pub fn pod_resources(
+        &self,
+        cluster: &str,
+        pool: Option<&str>,
+        pod: Option<&str>,
+    ) -> Option<Resources> {
+        let resources = self.clusters.get(cluster)?.resources.as_ref()?;
+        let mut merged = resources.default.clone()?;
+        if let Some(pod) = pod {
+            if let Some(own) = resources.segment.get(pod) {
+                merged = own.over(&merged);
+            }
+            if let Some(own) = pool
+                .and_then(|pool| self.pools.get(pool))
+                .and_then(|pool| pool.resources.as_ref())
+                .and_then(|resources| resources.segment.get(pod))
+            {
+                merged = own.over(&merged);
+            }
+        }
+        Some(merged)
     }
 
     /// The fleet's `[metrics]` table.

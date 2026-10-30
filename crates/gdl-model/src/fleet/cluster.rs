@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::placement::{self, ClusterResources, Toleration};
 use super::{FleetError, FleetTable};
 use crate::pool::{check_label, check_region_name};
 
@@ -44,6 +45,16 @@ pub struct Cluster {
     /// Not for secret values: those go in `secrets`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Node labels every pod of the cluster is scheduled by, beside the
+    /// operating system and architecture its `platform` gives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_selector: BTreeMap<String, String>,
+    /// The taints every pod of the cluster tolerates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<Toleration>,
+    /// Every pod's CPU and memory requests and limits, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ClusterResources>,
 }
 
 impl Cluster {
@@ -136,6 +147,13 @@ pub(super) fn check_clusters(clusters: &BTreeMap<String, Cluster>, errors: &mut 
                 key: key.clone(),
             });
         }
+        placement::check_cluster(
+            name,
+            &cluster.node_selector,
+            &cluster.tolerations,
+            cluster.resources.as_ref(),
+            errors,
+        );
         for variable in cluster.env.keys().filter(|v| !variable_name(v)) {
             errors.push(FleetError::InvalidVariable {
                 cluster: name.clone(),
@@ -181,7 +199,7 @@ const ANNOTATION_NAME_LIMIT: usize = 63;
 /// Whether `key` is a Kubernetes annotation key: an optional DNS subdomain
 /// and `/`, then a name of letters, digits, `-`, `_`, and `.`, starting and
 /// ending with a letter or digit.
-fn annotation_key(key: &str) -> bool {
+pub(super) fn annotation_key(key: &str) -> bool {
     let (prefix, name) = match key.split_once('/') {
         Some((prefix, name)) => (Some(prefix), name),
         None => (None, key),

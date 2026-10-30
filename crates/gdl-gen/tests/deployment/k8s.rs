@@ -722,6 +722,8 @@ mod dynamodb;
 mod images;
 #[path = "k8s/labels.rs"]
 mod labels;
+#[path = "k8s/placement.rs"]
+mod placement;
 #[path = "k8s/probes.rs"]
 mod probes;
 #[path = "k8s/rollout.rs"]

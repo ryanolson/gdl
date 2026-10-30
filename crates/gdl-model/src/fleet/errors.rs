@@ -154,6 +154,16 @@ pub enum FleetError {
         /// The key.
         key: String,
     },
+    /// A cluster's node selector, tolerations, or resources, or a pool's
+    /// resources, hold a value Kubernetes refuses or that does not fit.
+    InvalidPlacement {
+        /// The cluster's or the pool's table.
+        table: FleetTable,
+        /// The key, as `tolerations[0]` or `resources.default`.
+        key: String,
+        /// Why it is refused.
+        reason: String,
+    },
     /// A cluster's `env` key is not a variable's name.
     InvalidVariable {
         /// The cluster.
@@ -450,6 +460,9 @@ impl FleetError {
                 Some(format!("service_account_annotations.{key}")),
                 "not an annotation key: an optional DNS subdomain and `/`, then at most 63 letters, digits, `-`, `_`, and `.`, starting and ending with a letter or digit".into(),
             ),
+            Self::InvalidPlacement { table, key, reason } => {
+                (Some(table.path()), Some(key.clone()), reason.clone())
+            }
             Self::InvalidVariable {
                 cluster: name,
                 variable,

@@ -1,7 +1,10 @@
 # The api example's fleet over two clusters under the DynamoDB directory,
 # in one DynamoDB Local that cluster `use1` runs. A model pool in `euw1` is
 # shared by both global pools, across clusters, which the relay directory
-# refuses: every hub reads every record from the tables.
+# refuses: every hub reads every record from the tables. Each cluster keeps
+# its pods on a node group of their own, by a selector and a toleration, and
+# gives each pod its requests and limits; the shared pool's engine gets
+# more memory than its cluster gives an engine.
 [fleet]
 name = "api"
 
@@ -12,6 +15,16 @@ region = "us-east-1"
 registry = "registry.example/gdl"
 platform = "linux/amd64"
 secrets = { fingerprint = "api-fingerprint" }
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Equal", value = "gdl-api", effect = "NoSchedule" }]
+
+[cluster.use1.resources.default]
+requests = { cpu = "100m", memory = "128Mi" }
+limits = { cpu = "500m", memory = "512Mi" }
+
+[cluster.use1.resources.segment.engine]
+requests = { cpu = "250m" }
+limits = { cpu = "1", memory = "1Gi" }
 
 [cluster.euw1]
 context = "kind-euw1"
@@ -20,6 +33,12 @@ region = "eu-west-1"
 registry = "registry.example/gdl-eu"
 platform = "linux/arm64"
 secrets = { fingerprint = "api-fingerprint-eu" }
+node_selector = { "gdl.dev/node-group" = "gdl-api" }
+tolerations = [{ key = "dedicated", operator = "Exists", effect = "NoSchedule" }]
+
+[cluster.euw1.resources.default]
+requests = { cpu = "100m", memory = "128Mi" }
+limits = { cpu = "500m", memory = "512Mi" }
 
 [directory]
 backend = "dynamodb"
@@ -51,3 +70,6 @@ cluster = "euw1"
 class = "model_x"
 cluster = "euw1"
 parents = "global"
+
+[pool.model-x-shared.resources.segment.engine]
+limits = { memory = "2Gi" }

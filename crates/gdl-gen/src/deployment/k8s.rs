@@ -325,12 +325,25 @@ impl Render<'_> {
             if let Some(directory) = self.fleet.directory()
                 && dynamodb::runs_local(self.fleet, name)
             {
-                base.extend(dynamodb::local(fleet_name, name, cluster));
+                let requests = self.fleet.pod_resources(name, None, None);
+                base.extend(dynamodb::local(
+                    fleet_name,
+                    name,
+                    cluster,
+                    requests.as_ref(),
+                ));
                 let registry = cluster.registry.as_deref().unwrap_or_default();
                 let platform = cluster.platform.as_deref().unwrap_or_default();
                 let image = naming.image(registry, &hub_repository, platform)?;
                 crate::deployment::validate_image(&image)?;
-                let job = dynamodb::tables_job(fleet_name, name, cluster, directory, &image);
+                let job = dynamodb::tables_job(
+                    fleet_name,
+                    name,
+                    cluster,
+                    directory,
+                    &image,
+                    requests.as_ref(),
+                );
                 self.files.insert(
                     Path::new(name).join("tables.yaml"),
                     objects::stream(&[job]).map_err(io)?,
@@ -441,6 +454,7 @@ impl Render<'_> {
             cluster_name,
             cluster,
             naming,
+            model: self.fleet,
         };
         // A pod's mount of a secret its cluster does not map could never
         // be filled.

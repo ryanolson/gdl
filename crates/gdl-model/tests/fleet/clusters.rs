@@ -121,6 +121,9 @@ fn a_fleets_clusters_are_read_whole() {
             secrets: BTreeMap::from([("sequence-key".into(), "llm-sequence-key".into())]),
             env: BTreeMap::from([("SET_RECORDS_TABLE".into(), "llm-pins-use1".into())]),
             pins_local: true,
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
+            resources: None,
         }
     );
     // Every key but the three that place it is optional.
@@ -137,6 +140,9 @@ fn a_fleets_clusters_are_read_whole() {
             secrets: BTreeMap::new(),
             env: BTreeMap::new(),
             pins_local: false,
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
+            resources: None,
         }
     );
     let names: Vec<&str> = fleet.clusters().map(|(name, _)| name).collect();

@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use gdl_model::{Cluster, Fleet, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, PoolSettings};
+use gdl_model::{Cluster, Fleet, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, PoolSettings, Resources};
 use serde_json::{Map, Value, json};
 
 use super::relay;
@@ -171,6 +171,8 @@ pub(super) struct Pod<'a> {
     pub(super) cluster_name: &'a str,
     pub(super) cluster: &'a Cluster,
     pub(super) naming: &'a super::Naming<'a>,
+    /// The fleet, for each pod's requests and limits.
+    pub(super) model: &'a Fleet,
 }
 
 impl Pod<'_> {
@@ -291,7 +293,7 @@ impl Pod<'_> {
                 "persistentVolumeClaim": {"claimName": relay::state_claim(&self.pool.name)},
             }));
         }
-        let container = json!({
+        let mut container = json!({
             "name": "hub",
             "image": self.image(repository)?,
             "command": [BINARY, format!("{CONFIG_DIR}/deployment.json")],
@@ -304,6 +306,7 @@ impl Pod<'_> {
             "readinessProbe": probe(2, 3),
             "volumeMounts": mounts,
         });
+        resources(&mut container, self.resources(gdl_model::HUB).as_ref());
         let mut pod = self.pod_spec(container, volumes);
         if state_dir.is_some() {
             pod["securityContext"] = json!({"fsGroup": STATE_GROUP});
@@ -376,7 +379,7 @@ impl Pod<'_> {
                 .collect();
             volumes.push(json!({"name": "secrets", "projected": {"sources": sources}}));
         }
-        let container = json!({
+        let mut container = json!({
             "name": "segment",
             "image": self.image(&segment.repository)?,
             "command": [BINARY, format!("{CONFIG_DIR}/{}.toml", segment.name)],
@@ -386,6 +389,7 @@ impl Pod<'_> {
             "readinessProbe": probe(&segment.probes.health, 5),
             "volumeMounts": mounts,
         });
+        resources(&mut container, self.resources(&segment.name).as_ref());
         let mut pod = self.pod_spec(container, volumes);
         pod["terminationGracePeriodSeconds"] = segment.grace.into();
         let scrape = Scrape {
@@ -461,13 +465,21 @@ impl Pod<'_> {
     /// platform. Service links are off: they would add a variable per
     /// Service in the namespace to every container.
     fn pod_spec(&self, container: Value, volumes: Vec<Value>) -> Value {
-        json!({
+        let mut pod = json!({
             "serviceAccountName": self.fleet,
             "enableServiceLinks": false,
-            "nodeSelector": node_selector(self.cluster),
             "containers": [container],
             "volumes": volumes,
-        })
+        });
+        place(&mut pod, self.cluster);
+        pod
+    }
+
+    /// The requests and limits of the pool's pods of `segment`, `hub` for
+    /// its hub's, when the cluster gives any.
+    fn resources(&self, segment: &str) -> Option<Resources> {
+        self.model
+            .pod_resources(self.cluster_name, Some(&self.pool.name), Some(segment))
     }
 
     fn config_volume(&self) -> Value {
@@ -616,16 +628,54 @@ pub(in crate::deployment) fn image(
     image
 }
 
-/// The node selector of a pod of `cluster`: its platform's OS and
-/// architecture, without a variant (`linux/arm64/v8` runs on `arm64`
-/// nodes), as the nodes' `kubernetes.io/os` and `kubernetes.io/arch`
-/// labels name them.
-pub(super) fn node_selector(cluster: &Cluster) -> Value {
+/// Place a pod of `cluster`, whose spec is `pod`: its node selector, the
+/// cluster's own beside its platform's OS and architecture, without a
+/// variant (`linux/arm64/v8` runs on `arm64` nodes), as the nodes'
+/// `kubernetes.io/os` and `kubernetes.io/arch` labels name them; and the
+/// cluster's tolerations. Every pod the render writes is placed here, so
+/// that none is left off a node group of the fleet's own.
+pub(super) fn place(pod: &mut Value, cluster: &Cluster) {
     let platform = cluster.platform.as_deref().unwrap_or_default();
     let mut parts = platform.split('/');
     let os = parts.next().unwrap_or_default();
     let arch = parts.next().unwrap_or_default();
-    json!({"kubernetes.io/os": os, "kubernetes.io/arch": arch})
+    let mut selector = json!({"kubernetes.io/os": os, "kubernetes.io/arch": arch});
+    for (key, value) in &cluster.node_selector {
+        selector[key] = value.as_str().into();
+    }
+    pod["nodeSelector"] = selector;
+    if !cluster.tolerations.is_empty() {
+        let tolerations: Vec<Value> = cluster
+            .tolerations
+            .iter()
+            .map(|toleration| {
+                let mut out = Map::new();
+                for (key, value) in [
+                    ("key", &toleration.key),
+                    ("operator", &toleration.operator),
+                    ("value", &toleration.value),
+                    ("effect", &toleration.effect),
+                ] {
+                    if !value.is_empty() {
+                        out.insert(key.into(), value.as_str().into());
+                    }
+                }
+                if let Some(seconds) = toleration.toleration_seconds {
+                    out.insert("tolerationSeconds".into(), seconds.into());
+                }
+                Value::Object(out)
+            })
+            .collect();
+        pod["tolerations"] = tolerations.into();
+    }
+}
+
+/// Give `container` its requests and limits, when its cluster gives any.
+pub(super) fn resources(container: &mut Value, resources: Option<&Resources>) {
+    if let Some(resources) = resources {
+        container["resources"] =
+            serde_json::to_value(resources).expect("resources are plain strings");
+    }
 }
 
 fn config_mount() -> Value {

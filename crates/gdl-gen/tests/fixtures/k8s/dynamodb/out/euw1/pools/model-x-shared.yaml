@@ -158,6 +158,16 @@
               "periodSeconds": 2,
               "timeoutSeconds": 2
             },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/etc/gdl/fleet",
@@ -169,10 +179,18 @@
         ],
         "enableServiceLinks": false,
         "nodeSelector": {
+          "gdl.dev/node-group": "gdl-api",
           "kubernetes.io/arch": "arm64",
           "kubernetes.io/os": "linux"
         },
         "serviceAccountName": "api",
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "dedicated",
+            "operator": "Exists"
+          }
+        ],
         "volumes": [
           {
             "configMap": {
@@ -351,6 +369,16 @@
               "periodSeconds": 5,
               "timeoutSeconds": 3
             },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/etc/gdl/fleet",
@@ -362,11 +390,19 @@
         ],
         "enableServiceLinks": false,
         "nodeSelector": {
+          "gdl.dev/node-group": "gdl-api",
           "kubernetes.io/arch": "arm64",
           "kubernetes.io/os": "linux"
         },
         "serviceAccountName": "api",
         "terminationGracePeriodSeconds": 120,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "dedicated",
+            "operator": "Exists"
+          }
+        ],
         "volumes": [
           {
             "configMap": {
