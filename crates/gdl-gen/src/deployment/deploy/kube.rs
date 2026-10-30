@@ -199,6 +199,14 @@ const MANAGER: &str = "--field-manager=gdl";
 pub(super) const KINDS: &str =
     "deployments.apps,services,configmaps,persistentvolumeclaims,serviceaccounts,jobs.batch";
 
+/// The Prometheus operator's PodMonitor, as `kubectl get` takes it: listed
+/// with [`KINDS`] only in a cluster that has its CRD, since `kubectl get`
+/// fails on a resource the cluster does not know.
+pub(super) const PODMONITORS: &str = "podmonitors.monitoring.coreos.com";
+
+/// The API group of [`PODMONITORS`].
+pub(super) const MONITORING: &str = "monitoring.coreos.com";
+
 /// The service port on which a hub serves its public routes, and its
 /// control routes, as the render names them.
 pub(super) const PUBLIC: &str = "public";
@@ -259,10 +267,21 @@ impl At<'_> {
         ])
     }
 
-    /// The namespace's objects of [`KINDS`] that `selector` selects, as a
-    /// JSON list.
-    pub(super) fn list(&self, selector: &str) -> Vec<String> {
-        self.namespaced(&["get", KINDS, "--selector", selector, "--output", "json"])
+    /// The resources of the Prometheus operator's group the cluster has,
+    /// one name a line.
+    pub(super) fn monitoring(&self) -> Vec<String> {
+        let group = format!("--api-group={MONITORING}");
+        self.cluster(&["api-resources", &group, "--output=name"])
+    }
+
+    /// The namespace's objects of [`KINDS`] that `selector` selects, and
+    /// its PodMonitors when `monitors`, as a JSON list.
+    pub(super) fn list(&self, selector: &str, monitors: bool) -> Vec<String> {
+        let kinds = match monitors {
+            true => format!("{KINDS},{PODMONITORS}"),
+            false => KINDS.to_string(),
+        };
+        self.namespaced(&["get", &kinds, "--selector", selector, "--output", "json"])
     }
 
     /// The namespace's pods that `selector` selects, as a JSON list.

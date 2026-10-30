@@ -82,6 +82,12 @@ struct Kube {
     /// The status `get job` prints for the tables Job, and its log.
     job: Value,
     job_log: &'static str,
+    /// The contexts whose cluster has no PodMonitor CRD: every other one
+    /// lists `podmonitors.monitoring.coreos.com` among its resources.
+    without_monitors: Vec<&'static str>,
+    /// The API group whose discovery fails: `api-resources` then prints
+    /// what it found and exits 1, as kubectl does.
+    undiscovered: Option<&'static str>,
 }
 
 impl Kube {
@@ -99,7 +105,14 @@ impl Kube {
             local_pods: json!({"items": [local_pod(true)]}),
             job: json!({"succeeded": 1}),
             job_log: "",
+            without_monitors: Vec::new(),
+            undiscovered: None,
         }
+    }
+
+    /// Whether `context`'s cluster has the PodMonitor CRD.
+    fn monitors(&self, context: &str) -> bool {
+        !self.without_monitors.contains(&context)
     }
 
     /// Put `object` in `context` as if an earlier deploy had applied it:
@@ -161,6 +174,27 @@ impl gdl_gen::Kube for Kube {
             .map(|i| rest[i + 1].as_str());
         let reply = match (verb, raw) {
             ("auth", _) => gdl_gen::Reply::ok(format!("{}\n", self.can_i)),
+            ("api-resources", _) => {
+                assert!(rest.contains(&"--api-group=monitoring.coreos.com".to_string()));
+                let found = match self.monitors(&context)
+                    && self.undiscovered != Some("monitoring.coreos.com/v1")
+                {
+                    true => {
+                        "podmonitors.monitoring.coreos.com\nprometheuses.monitoring.coreos.com\n"
+                    }
+                    false => "",
+                };
+                match self.undiscovered {
+                    None => gdl_gen::Reply::ok(found),
+                    Some(group) => gdl_gen::Reply {
+                        success: false,
+                        stdout: found.to_string(),
+                        stderr: format!(
+                            "error: unable to retrieve the complete list of server APIs: {group}: the server is currently unable to handle the request"
+                        ),
+                    },
+                }
+            }
             ("apply", _) => {
                 let mut applied = Vec::new();
                 for document in input.unwrap_or_default().split("---\n") {
@@ -168,6 +202,11 @@ impl gdl_gen::Kube for Kube {
                         continue;
                     }
                     let object: Value = serde_json::from_str(document).expect("JSON");
+                    if object["kind"] == "PodMonitor" && !self.monitors(&context) {
+                        return Ok(gdl_gen::Reply::failed(
+                            "error: resource mapping not found for kind \"PodMonitor\"",
+                        ));
+                    }
                     applied.push(self.holds(&context, object));
                 }
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": applied}).to_string())
@@ -225,6 +264,12 @@ impl gdl_gen::Kube for Kube {
             ("logs", None) => gdl_gen::Reply::ok(self.job_log),
             ("get", None) if rest[1] == "events" => gdl_gen::Reply::ok(self.events.to_string()),
             ("get", None) => {
+                let monitors = rest[1].contains("podmonitors.monitoring.coreos.com");
+                if monitors && !self.monitors(&context) {
+                    return Ok(gdl_gen::Reply::failed(
+                        "error: the server doesn't have a resource type \"podmonitors\"",
+                    ));
+                }
                 let selector = rest
                     .iter()
                     .position(|a| a == "--selector")
@@ -236,6 +281,7 @@ impl gdl_gen::Kube for Kube {
                     .into_iter()
                     .flat_map(|objects| objects.values())
                     .filter(|object| object["kind"] != "Namespace")
+                    .filter(|object| monitors || object["kind"] != "PodMonitor")
                     .filter(|object| {
                         selector.split(',').filter(|s| !s.is_empty()).all(|pair| {
                             let labels = &object["metadata"]["labels"];
@@ -357,6 +403,8 @@ fn steps(log: &Log) -> Vec<String> {
                 let context = &args[1];
                 let what = if args.contains(&"can-i".to_string()) {
                     "can-i"
+                } else if args.contains(&"api-resources".to_string()) {
+                    "crds"
                 } else if args.contains(&"apply".to_string()) && input.contains("\"Namespace\"") {
                     "base"
                 } else if args.contains(&"apply".to_string()) {
@@ -453,7 +501,8 @@ fn left(kind: &str, name: &str, pool: &str, segment: &str, home: Option<&str>) -
     object
 }
 
-/// `deploy` checks, builds and pushes, renders, lists each cluster's
+/// `deploy` checks each cluster's context and asks whether it has the
+/// PodMonitor CRD, builds and pushes, renders, lists each cluster's
 /// pools to refuse a move, applies each cluster's base and waits for its
 /// namespace, applies its pools, prunes, and waits for health, in that
 /// order.
@@ -474,7 +523,9 @@ fn a_deploy_runs_its_steps_in_order() {
         steps(&log),
         [
             "kind-euw1:can-i",
+            "kind-euw1:crds",
             "kind-use1:can-i",
+            "kind-use1:crds",
             "docker",
             "kind-euw1:list",
             "kind-use1:list",
@@ -539,7 +590,16 @@ fn a_deploy_stops_at_the_first_failure() {
 
     // A failed build: nothing is applied.
     let (steps_seen, _) = run(true, &|_| {});
-    assert_eq!(steps_seen, ["kind-euw1:can-i", "kind-use1:can-i", "docker"]);
+    assert_eq!(
+        steps_seen,
+        [
+            "kind-euw1:can-i",
+            "kind-euw1:crds",
+            "kind-use1:can-i",
+            "kind-use1:crds",
+            "docker"
+        ]
+    );
 
     // A failed apply of the first base: no other cluster is touched.
     let (steps_seen, error) = run(false, &|kube| kube.fail = Some("apply"));
@@ -805,6 +865,8 @@ fn down_drains_deletes_and_keeps_the_namespace() {
     assert_eq!(
         steps(&log),
         [
+            "kind-euw1:crds",
+            "kind-use1:crds",
             "kind-euw1:list",
             "kind-euw1:drain",
             "kind-euw1:held",
@@ -966,3 +1028,6 @@ mod renamed;
 
 #[path = "deploy/moved.rs"]
 mod moved;
+
+#[path = "deploy/monitors.rs"]
+mod monitors;

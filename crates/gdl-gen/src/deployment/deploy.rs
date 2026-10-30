@@ -24,7 +24,7 @@ use crate::{Error, Files, Spec};
 mod kube;
 mod live;
 
-use kube::{At, CONTROL, PUBLIC, bounded};
+use kube::{At, CONTROL, MONITORING, PODMONITORS, PUBLIC, bounded};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
 
@@ -88,6 +88,8 @@ impl Default for Waits {
 ///
 /// 1. check the spec and the fleet, as `cargo gdl check --fleet` does, and
 ///    that each cluster's context may create Deployments in its namespace;
+///    ask each cluster whether it has the PodMonitor CRD, and refuse a
+///    fleet that asks for a PodMonitor where it does not;
 /// 2. build the images and push them ([`images`]);
 /// 3. render the objects, each image named by its pushed digest
 ///    ([`k8s::k8s_files`]); then refuse a pool that the fleet places in
@@ -124,9 +126,16 @@ pub fn deploy(
     }
     let fleet = read_fleet(&how.fleet)?;
     let spec = Spec::load(&how.spec).map_err(|e| Error::from(e.in_file(how.spec.display())))?;
-    let clusters = Clusters::of(&fleet)?;
-    for cluster in &clusters.0 {
+    let mut clusters = Clusters::of(&fleet)?;
+    for cluster in &mut clusters.0 {
         cluster.check(kube, how.waits.objects)?;
+        cluster.find_monitors(kube, how.waits.objects)?;
+        if fleet.metrics().pod_monitor && !cluster.monitors {
+            return Err(Error::new(format!(
+                "cluster `{}`: the fleet asks for a PodMonitor (`[metrics] pod_monitor`), but the cluster has no `{PODMONITORS}`: install the Prometheus operator's CRDs there, or leave `pod_monitor` out",
+                cluster.name
+            )));
+        }
     }
     say("check: the spec, the fleet, and each cluster's context");
 
@@ -258,7 +267,10 @@ pub fn down(
     fleet
         .check(None)
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-    let clusters = Clusters::of(&fleet)?;
+    let mut clusters = Clusters::of(&fleet)?;
+    for cluster in &mut clusters.0 {
+        cluster.find_monitors(kube, waits.objects)?;
+    }
     let mut deleted = BTreeMap::new();
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
@@ -314,6 +326,7 @@ impl Clusters {
                         label_value(cluster)
                     ),
                     unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
+                    monitors: false,
                 })
                 .collect(),
         ))
@@ -338,6 +351,10 @@ struct Cluster {
     selector: String,
     /// The selector of the fleet's objects that name no cluster.
     unowned: String,
+    /// Whether the cluster has the Prometheus operator's PodMonitor CRD:
+    /// only then are the fleet's PodMonitors listed, pruned, and deleted,
+    /// whatever the fleet asks now, so that one it no longer asks for goes.
+    monitors: bool,
 }
 
 impl Cluster {
@@ -367,6 +384,31 @@ impl Cluster {
         }
     }
 
+    /// Ask the cluster, once, whether it has the PodMonitor CRD.
+    /// `kubectl api-resources` discovers every API group before it filters
+    /// by one, and exits 1 when another group's discovery fails, as a
+    /// stale metrics server's does, after printing what it found: what it
+    /// printed answers unless the failed groups include the operator's.
+    fn find_monitors(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
+        let args = bounded(self.at().monitoring(), budget);
+        let reply = kube.run(&args, None)?;
+        let found = reply.stdout.lines().any(|line| line.trim() == PODMONITORS);
+        let partial = reply
+            .stderr
+            .contains("unable to retrieve the complete list of server APIs")
+            && !reply.stderr.contains(MONITORING);
+        if !reply.success && !found && !partial {
+            return Err(Error::new(format!(
+                "cluster `{}`: asking whether it has `{PODMONITORS}`: `kubectl {}` failed: {}",
+                self.name,
+                args.join(" "),
+                reply.stderr.trim()
+            )));
+        }
+        self.monitors = found;
+        Ok(())
+    }
+
     /// The fleet's objects in the cluster's namespace that were rendered
     /// for this cluster. Refused when the namespace holds an object of the
     /// fleet that names no cluster, as a render before `gdl.dev/cluster`
@@ -376,7 +418,7 @@ impl Cluster {
     fn live(&self, kube: &mut dyn Kube, budget: Duration) -> Result<Vec<Live>, Error> {
         let reply = run(
             kube,
-            self.at().list(&self.unowned),
+            self.at().list(&self.unowned, self.monitors),
             budget,
             None,
             "listing the fleet's objects that name no cluster",
@@ -398,7 +440,7 @@ impl Cluster {
         }
         let reply = run(
             kube,
-            self.at().list(&self.selector),
+            self.at().list(&self.selector, self.monitors),
             budget,
             None,
             "listing the fleet's objects",
