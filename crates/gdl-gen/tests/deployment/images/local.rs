@@ -25,6 +25,8 @@ mod bypasses;
 mod git;
 #[path = "local/manifests.rs"]
 mod manifests;
+#[path = "local/safety.rs"]
+mod safety;
 #[path = "local/tags.rs"]
 mod tags;
 
