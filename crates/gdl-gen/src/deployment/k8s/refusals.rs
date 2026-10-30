@@ -4,7 +4,7 @@
 
 use gdl_model::{Fleet, Problem};
 
-use super::{objects, relay};
+use super::{dynamodb, objects, relay};
 use crate::deployment::Settings;
 
 /// Variables that the render sets in every pod: a cluster's `env` cannot
@@ -117,6 +117,11 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
             ));
         }
     }
-    problems.extend(relay::refusals(fleet));
+    // Under the DynamoDB directory every hub reads every record, so a
+    // child need not run in its parent's cluster.
+    if fleet.directory().is_none() {
+        problems.extend(relay::refusals(fleet));
+    }
+    problems.extend(dynamodb::refusals(fleet));
     problems
 }

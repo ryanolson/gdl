@@ -541,3 +541,49 @@ fn a_platform_without_a_cross_build_is_refused() {
     assert!(error.contains("linux/s390x"), "{error}");
     assert!(docker.calls.is_empty());
 }
+
+/// A fleet under the DynamoDB directory builds its hub with the hub's
+/// `dynamodb` feature, which the tables Job runs too, so the hub's tag
+/// moves; the segments' images do not change.
+#[test]
+fn a_dynamodb_fleets_hub_is_built_with_its_feature() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let directory = "[directory]\nbackend = \"dynamodb\"\nrecords_table = \"gdl-pools\"\nlists_table = \"gdl-pool-lists\"\n";
+    let mut relay = Fake::default();
+    run(&mirror, &spec, &fleet(&fleet_text()), false, &mut relay);
+    let mut dynamodb = Fake::default();
+    run(
+        &mirror,
+        &spec,
+        &fleet(&format!("{}{directory}", fleet_text())),
+        false,
+        &mut dynamodb,
+    );
+    let hub = |docker: &Fake| -> (String, String) {
+        let (reference, context) = docker
+            .contexts
+            .iter()
+            .find(|(reference, _)| reference.starts_with("registry.example/gdl/api-hub:"))
+            .expect("the hub's build");
+        let dockerfile = context[Path::new("Dockerfile")].clone();
+        (reference.clone(), dockerfile)
+    };
+    let (relay_hub, relay_file) = hub(&relay);
+    let (dynamodb_hub, dynamodb_file) = hub(&dynamodb);
+    assert!(!relay_file.contains("--features dynamodb"), "{relay_file}");
+    assert!(
+        dynamodb_file.contains("--features dynamodb"),
+        "{dynamodb_file}"
+    );
+    assert_ne!(relay_hub, dynamodb_hub);
+    let segments = |docker: &Fake| -> BTreeSet<String> {
+        docker
+            .contexts
+            .keys()
+            .filter(|reference| !reference.contains("-hub:"))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(segments(&relay), segments(&dynamodb));
+}

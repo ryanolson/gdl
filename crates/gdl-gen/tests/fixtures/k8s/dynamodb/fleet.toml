@@ -1,0 +1,53 @@
+# The api example's fleet over two clusters under the DynamoDB directory,
+# in one DynamoDB Local that cluster `use1` runs. A model pool in `euw1` is
+# shared by both global pools, across clusters, which the relay directory
+# refuses: every hub reads every record from the tables.
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+secrets = { fingerprint = "api-fingerprint" }
+
+[cluster.euw1]
+context = "kind-euw1"
+namespace = "gdl-api"
+region = "eu-west-1"
+registry = "registry.example/gdl-eu"
+platform = "linux/arm64"
+secrets = { fingerprint = "api-fingerprint-eu" }
+
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "use1"
+
+[class.global]
+ready = { front = 2 }
+
+[class.model_x]
+ready = { engine = 1 }
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.global-eu]
+class = "global"
+cluster = "euw1"
+
+[pool.model-x-shared]
+class = "model_x"
+cluster = "euw1"
+parents = "global"

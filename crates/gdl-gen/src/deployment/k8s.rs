@@ -18,6 +18,7 @@ use super::{Bundle, Sources, check_segment_name, io, pools, stdin_source};
 use crate::spec::Allocator;
 use crate::{Error, Files, Offers, Spec, export::image_problem};
 
+mod dynamodb;
 mod objects;
 mod refusals;
 mod relay;
@@ -315,10 +316,30 @@ impl Render<'_> {
         }
         let fleet_name = self.fleet.name().expect("refusals::fleet requires a name");
         for (name, cluster) in self.fleet.clusters() {
-            let base = objects::base(fleet_name, name, cluster);
+            let mut base = objects::base(fleet_name, name, cluster);
+            if let Some(directory) = self.fleet.directory()
+                && dynamodb::runs_local(self.fleet, name)
+            {
+                base.extend(dynamodb::local(fleet_name, name, cluster));
+                let registry = cluster.registry.as_deref().unwrap_or_default();
+                let platform = cluster.platform.as_deref().unwrap_or_default();
+                let image = naming.image(registry, &hub_repository, platform)?;
+                crate::deployment::validate_image(&image)?;
+                let job = dynamodb::tables_job(fleet_name, name, cluster, directory, &image);
+                self.files.insert(
+                    Path::new(name).join("tables.yaml"),
+                    objects::stream(&[job]).map_err(io)?,
+                );
+            }
             self.files.insert(
                 Path::new(name).join("base.yaml"),
                 objects::stream(&base).map_err(io)?,
+            );
+        }
+        if let Some(directory) = self.fleet.directory().filter(|d| !d.local) {
+            self.files.insert(
+                Path::new("dynamodb").join("tables.json"),
+                dynamodb::tables_json(self.fleet, directory),
             );
         }
         if !self.problems.is_empty() {
@@ -432,14 +453,17 @@ impl Render<'_> {
                 }
             }
         }
-        let relay = relay::Relay::of(pool, parent);
+        // Under the DynamoDB directory a hub reports to no parent's hub and
+        // keeps no children's records.
+        let relay = relay::Relay::of(pool, parent && self.fleet.directory().is_none());
+        let endpoint = dynamodb::endpoint(self.fleet, cluster_name);
         let variables = |hub: String| {
             pools::variables(
                 pool,
                 hub,
                 relay.parent_hub(),
                 relay.state_dir().is_some(),
-                None,
+                endpoint.clone(),
             )
         };
         let mut objects = Vec::new();

@@ -34,7 +34,7 @@ const CONFIG_DIR: &str = "/etc/gdl/fleet";
 const SECRETS_DIR: &str = "/run/secrets";
 
 /// The binary in every image, the hub's included.
-const BINARY: &str = "/usr/local/bin/segment";
+pub(super) const BINARY: &str = "/usr/local/bin/segment";
 
 /// The group a parent hub's claim is made writable for: the default
 /// image's user's. Kubernetes copies nothing from the image into a new
@@ -750,6 +750,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
         }
     }
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
+    text.push_str(&super::dynamodb::readme(fleet));
     text
 }
 

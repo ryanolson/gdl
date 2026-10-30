@@ -1,0 +1,126 @@
+---
+{
+  "apiVersion": "v1",
+  "kind": "Namespace",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "gdl-api"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "ServiceAccount",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "api",
+    "namespace": "gdl-api"
+  }
+}
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/directory": "dynamodb-local",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "dynamodb-local",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "gdl.dev/cluster": "use1",
+        "gdl.dev/directory": "dynamodb-local",
+        "gdl.dev/fleet": "api"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "gdl.dev/cluster": "use1",
+          "gdl.dev/directory": "dynamodb-local",
+          "gdl.dev/fleet": "api"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "args": [
+              "-jar",
+              "DynamoDBLocal.jar",
+              "-inMemory",
+              "-sharedDb",
+              "-port",
+              "8000"
+            ],
+            "image": "amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86",
+            "name": "dynamodb-local",
+            "ports": [
+              {
+                "containerPort": 8000,
+                "name": "dynamodb"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 2,
+              "tcpSocket": {
+                "port": 8000
+              },
+              "timeoutSeconds": 2
+            }
+          }
+        ],
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/os": "linux"
+        },
+        "serviceAccountName": "api"
+      }
+    }
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/directory": "dynamodb-local",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "dynamodb-local",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "ports": [
+      {
+        "name": "dynamodb",
+        "port": 8000,
+        "targetPort": 8000
+      }
+    ],
+    "selector": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/directory": "dynamodb-local",
+      "gdl.dev/fleet": "api"
+    },
+    "type": "ClusterIP"
+  }
+}

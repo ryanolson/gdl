@@ -51,7 +51,7 @@ cluster = "euw1"
 home = "global-eu"
 ```
 
-Each child runs in its parent's cluster. The hubs publish under the `relay` directory: a child's hub reports to its parent's hub by the parent's Service name, and that name does not resolve in another cluster.
+Each child runs in its parent's cluster. The hubs publish under the `relay` directory: a child's hub reports to its parent's hub by the parent's Service name, and that name does not resolve in another cluster. With a DynamoDB `[directory]`, a child may run in any cluster ([The DynamoDB directory](#the-dynamodb-directory)).
 
 ## 2. Build and push the images
 
@@ -109,7 +109,7 @@ Each file is a YAML stream of JSON documents. The pinned output of this fleet is
 | hub Service | `<pool>` | ClusterIP, ports 1337 (public) and 8337 (control) |
 | segment Deployment | `<pool>-<segment>` | the pool's quorum of the segment as replicas |
 | entry Service | `<pool>-<segment>` | ClusterIP, for a segment with `[deployment.segment.<name>] ports` only |
-| PersistentVolumeClaim | `<pool>-state` | 1Gi, for a parent's hub only |
+| PersistentVolumeClaim | `<pool>-state` | 1Gi, for a parent's hub only, under `relay` |
 
 Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for its cluster. Every object of a pool also carries `gdl.dev/pool` and `gdl.dev/class`. Every object of a pool but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class and the cluster are not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
 
@@ -117,7 +117,7 @@ Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for
 - **Variables.** A pool's hub and segments get the `GDL_POOL__*` variables that its Compose services get, from the same function. Only the addresses differ. A hub's `GDL_POOL__HUB` is `$(GDL_POD_IP):1337`, and `GDL_POD_IP` comes from `status.podIP`, so the pool's record names the hub's pod. A segment's `GDL_POOL__HUB` and `GDL_HUB__HOST` name the hub's Service. A child's `GDL_POOL__PARENT_HUB` is `<parent>:1337`, the parent hub's Service. The cluster's `env` comes after these. Kubernetes reads `$(NAME)` in a value as another variable, so the render writes each `$` of a cluster's value as `$$`.
 - **Probes.** A hub's live and ready probes ask its own `/v1/health` on port 1337. They never ask the pool's health: a parent answers that with 503 until its children are ready, and a parent that is never ready has no Service endpoint for its children to report to. A segment's probes ask its system listener, port 9090 unless its settings say otherwise: `/live` for liveness, and `/health` for readiness. The kubelet asks at the pod's IP, so the render sets `[system] host = "0.0.0.0"` in each segment's settings, whatever the spec sets. A segment whose settings turn the listener off, or give it port 0, is refused.
 - **Stop.** A segment's `terminationGracePeriodSeconds` is its drain bound and 30 s, read from its settings as generated, as the Compose bundle's `stop_grace_period` is.
-- **State.** A parent's hub keeps its children's records in its claim, mounted at `/var/lib/gdl-hub` (`GDL_POOL__STATE_DIR`). Its pod sets `fsGroup: 65532`, the default image's user, since a new claim is usually root's.
+- **State.** Under `relay`, a parent's hub keeps its children's records in its claim, mounted at `/var/lib/gdl-hub` (`GDL_POOL__STATE_DIR`). Its pod sets `fsGroup: 65532`, the default image's user, since a new claim is usually root's.
 - **Secrets.** A segment's secrets are one projected volume at `/run/secrets`, where Compose mounts them. Secret `<name>` is the file `/run/secrets/<name>`, taken from key `<name>` of the Kubernetes Secret that the cluster's `secrets` names. The objects name the Secret and hold no value. The spec's `file` is not read. Make the Secret with that key:
 
   ```bash
@@ -126,6 +126,21 @@ Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for
 
 - **Ports.** An entry Service publishes each container port of `[deployment.segment.<name>] ports`, in Compose's short form. The host port is Compose's alone.
 - **Pods.** A pod runs as the fleet's ServiceAccount, which carries the cluster's `service_account_annotations`, on nodes of the cluster's platform (`kubernetes.io/os` and `kubernetes.io/arch`). Service links are off, so that no Service of the namespace adds variables to a container.
+
+## The DynamoDB directory
+
+A fleet with a DynamoDB `[directory]` ([Use the DynamoDB directory](fleet.md#use-the-dynamodb-directory)) publishes every pool's record to two DynamoDB tables, which every hub reads, whatever its cluster. So no hub reports to a parent's hub or keeps a claim, a child may run in another cluster than its parents, and a shared pool (`parents`) is taken. Every hub and segment gets `GDL_POOL__DIRECTORY=dynamodb`, the two table names, and `GDL_POOL__AWS_REGION`, its cluster's region. The hub's image is built with the hub's `dynamodb` feature.
+
+**With `local = true`,** one DynamoDB Local runs in the cluster that `[directory] cluster` names, shared by every region, as the regions of a global table share one directory. A Local in each cluster would give each region a directory of its own.
+
+| Object | In | What it holds |
+|---|---|---|
+| Deployment and Service `dynamodb-local` | the directory's `base.yaml` | DynamoDB Local 3.3.2, pinned by digest, in memory, with `-sharedDb`, on port 8000; ready once its port answers |
+| Job `dynamodb-tables` | the directory's `tables.yaml` | `gdl-hub --tables` from the hub's image, against the Local: it makes the tables, and checks the keys of those that exist. `backoffLimit: 0`, since the step tries again itself while the Local does not answer |
+
+The directory's cluster's hubs reach the Local at its Service, `http://dynamodb-local:8000`. A Service name does not resolve in another cluster, so the other clusters' hubs reach it at its pod's IP, which every cluster routes to, as every pool's data path already needs. A pod's IP exists only once the pod runs, so `cargo gdl k8s` writes `http://DYNAMODB_LOCAL_POD_IP:8000` there, a host that resolves nowhere, and its README says so. `cargo gdl deploy` writes the pod's IP in its place ([Deploy the fleet](#4-deploy-the-fleet)). The value is in the pod template, so a new IP replaces the hubs. An internal load balancer was the other choice. It needs a cloud's controller and annotations of that cloud, kind has none, and its address too exists only after the apply. The Local keeps the tables in memory: a new Local pod starts empty, with a new IP, so deploy again.
+
+**On AWS (without `local`),** each hub takes its credentials from its service account's role. No Local and no Job are rendered: a Job that made an absent table in one region would make a regional table there, and that region would see a directory of its own. Before the first deploy, the owner of the AWS account makes the tables as global tables, with a replica in every region of the fleet, from `dynamodb/tables.json`, which the render writes: each table's keys, the lists table's TTL attribute, and the regions.
 
 ## Images
 

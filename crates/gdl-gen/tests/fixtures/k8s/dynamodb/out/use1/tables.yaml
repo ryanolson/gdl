@@ -1,0 +1,63 @@
+---
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/directory": "dynamodb-tables",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "dynamodb-tables",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "template": {
+      "metadata": {
+        "labels": {
+          "gdl.dev/cluster": "use1",
+          "gdl.dev/directory": "dynamodb-tables",
+          "gdl.dev/fleet": "api"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "/usr/local/bin/segment",
+              "--tables"
+            ],
+            "env": [
+              {
+                "name": "GDL_POOL__RECORDS_TABLE",
+                "value": "gdl-pools"
+              },
+              {
+                "name": "GDL_POOL__LISTS_TABLE",
+                "value": "gdl-pool-lists"
+              },
+              {
+                "name": "GDL_POOL__AWS_REGION",
+                "value": "us-east-1"
+              },
+              {
+                "name": "GDL_POOL__ENDPOINT",
+                "value": "http://dynamodb-local:8000"
+              }
+            ],
+            "image": "registry.example/gdl/api-hub:pinned",
+            "name": "tables"
+          }
+        ],
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/os": "linux"
+        },
+        "restartPolicy": "Never",
+        "serviceAccountName": "api"
+      }
+    }
+  }
+}

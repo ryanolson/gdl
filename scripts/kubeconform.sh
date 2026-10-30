@@ -5,7 +5,8 @@
 #
 #   bash scripts/kubeconform.sh [dir ...]
 #
-# Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out. With
+# Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out and
+# crates/gdl-gen/tests/fixtures/k8s/dynamodb/out. With
 # INSTALL_TOOLS=1 it first downloads the pinned kubeconform and the schemas of the kinds that `cargo gdl k8s`
 # writes into TOOLS_DIR (default: .k8s-tools at the repository's root, which git ignores).
 set -euo pipefail
@@ -15,7 +16,7 @@ KUBERNETES_VERSION="1.35.0"
 # The commit of github.com/yannh/kubernetes-json-schema the schemas are read from.
 SCHEMAS_COMMIT="47163ead3738a996c3e30be9691bb37b8071d9d3"
 # Each kind that `cargo gdl k8s` writes, as the schema repository names its file.
-KINDS=(namespace-v1 serviceaccount-v1 configmap-v1 persistentvolumeclaim-v1 service-v1 deployment-apps-v1)
+KINDS=(namespace-v1 serviceaccount-v1 configmap-v1 persistentvolumeclaim-v1 service-v1 deployment-apps-v1 job-batch-v1)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tools="${TOOLS_DIR:-${root}/.k8s-tools}"
@@ -48,7 +49,7 @@ fi
 "${kubeconform}" -v
 
 if [[ $# -eq 0 ]]; then
-  set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out"
+  set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out"
 fi
 # A kind with no schema here fails: -ignore-missing-schemas is not given.
 "${kubeconform}" -strict -summary -kubernetes-version "${KUBERNETES_VERSION}" \

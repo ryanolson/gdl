@@ -223,7 +223,7 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
     let graph = &bundle.graph;
     let hub = Rc::new(Files::from([(
         PathBuf::from("Dockerfile"),
-        hub_dockerfile(bundle),
+        hub_dockerfile(bundle, fleet),
     )]));
     let hub_repository = emit::package_name(graph, "hub");
     let pools: Vec<PoolSettings> = fleet.pools().collect();
@@ -351,10 +351,16 @@ fn placeless(text: &str) -> String {
 }
 
 /// The Dockerfile of the hub, installed as the spec's `[gdl]` names it.
-fn hub_dockerfile(bundle: &super::Bundle) -> String {
+fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
     let settings = &bundle.settings;
+    // The DynamoDB directory, and its tables step, are a feature of the
+    // hub, off by default, since it links the AWS SDK.
+    let features = match fleet.directory() {
+        Some(_) => " --features dynamodb",
+        None => "",
+    };
     let build = format!(
-        "cargo install {} --locked --root /build-tools --target \"$GDL_TARGET\" gdl-hub && cp /build-tools/bin/gdl-hub /gdl/segment",
+        "cargo install {}{features} --locked --root /build-tools --target \"$GDL_TARGET\" gdl-hub && cp /build-tools/bin/gdl-hub /gdl/segment",
         bundle.hub_install
     );
     dockerfile(

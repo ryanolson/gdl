@@ -293,7 +293,7 @@ const TABLES: &str = "dynamodb-tables";
 
 /// DynamoDB Local 3.3.2, pinned by the digest of its multi-architecture
 /// index, as `scripts/dynamodb-local.sh` runs it.
-const DYNAMODB_LOCAL: &str =
+pub(in crate::deployment) const DYNAMODB_LOCAL: &str =
     "amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86";
 
 /// Whether the bundle can carry `directory` for `pools`: only with

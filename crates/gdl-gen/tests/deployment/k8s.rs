@@ -146,6 +146,44 @@ fn pinned_text(mirror: &Mirror, text: &str) -> String {
         .replace(&mirror.rev, "<rev>")
 }
 
+/// `files` are the files pinned in `pinned`, a directory under the crate,
+/// file for file. `GDL_UPDATE_FIXTURES=1` writes them again.
+pub(super) fn assert_pinned(mirror: &Mirror, files: &gdl_gen::Files, pinned: &str) {
+    let dir = manifest_dir().join(pinned);
+    if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+            std::fs::write(path, pinned_text(mirror, text)).expect("a pinned file");
+        }
+        return;
+    }
+    let mut on_disk = Vec::new();
+    let mut pending = vec![dir.clone()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("the pinned objects") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                on_disk.push(path.strip_prefix(&dir).expect("inside").to_path_buf());
+            }
+        }
+    }
+    on_disk.sort();
+    let written: Vec<PathBuf> = files.keys().cloned().collect();
+    assert_eq!(written, on_disk, "the files differ from {pinned}");
+    for (path, text) in files {
+        let expected = std::fs::read_to_string(dir.join(path)).expect("a pinned file");
+        let found = pinned_text(mirror, text);
+        for (found, expected) in found.lines().zip(expected.lines()) {
+            assert_eq!(found, expected, "{} differs", path.display());
+        }
+        assert_eq!(found, expected, "{} differs", path.display());
+    }
+}
+
 /// Every file the render writes for [`FLEET`] is pinned, so that a change
 /// to any object is seen in review. `GDL_UPDATE_FIXTURES=1` writes them
 /// again.
@@ -153,39 +191,7 @@ fn pinned_text(mirror: &Mirror, text: &str) -> String {
 fn a_fleets_objects_are_pinned() {
     let mirror = Mirror::new();
     let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
-    let pinned = manifest_dir().join(PINNED);
-    if std::env::var_os("GDL_UPDATE_FIXTURES").is_some() {
-        let _ = std::fs::remove_dir_all(&pinned);
-        for (path, text) in &files {
-            let path = pinned.join(path);
-            std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
-            std::fs::write(path, pinned_text(&mirror, text)).expect("a pinned file");
-        }
-        return;
-    }
-    let mut on_disk = Vec::new();
-    let mut pending = vec![pinned.clone()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("the pinned objects") {
-            let path = entry.expect("an entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else {
-                on_disk.push(path.strip_prefix(&pinned).expect("inside").to_path_buf());
-            }
-        }
-    }
-    on_disk.sort();
-    let written: Vec<PathBuf> = files.keys().cloned().collect();
-    assert_eq!(written, on_disk, "the files differ from {PINNED}");
-    for (path, text) in &files {
-        let expected = std::fs::read_to_string(pinned.join(path)).expect("a pinned file");
-        let found = pinned_text(&mirror, text);
-        for (found, expected) in found.lines().zip(expected.lines()) {
-            assert_eq!(found, expected, "{} differs", path.display());
-        }
-        assert_eq!(found, expected, "{} differs", path.display());
-    }
+    assert_pinned(&mirror, &files, PINNED);
     // One directory per cluster, each with its base and one file per pool.
     for path in [
         "README.md",
@@ -710,6 +716,8 @@ fn a_source_that_reads_stdin_is_refused() {
 
 #[path = "k8s/credentials.rs"]
 mod credentials;
+#[path = "k8s/dynamodb.rs"]
+mod dynamodb;
 #[path = "k8s/images.rs"]
 mod images;
 #[path = "k8s/labels.rs"]
