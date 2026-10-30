@@ -52,7 +52,9 @@ fn external_symlinks_do_not_copy_host_credentials() {
 }
 
 #[test]
-#[ignore = "F2: listing a path-named crate admits untracked files below its hidden directory"]
+/// A crate named by path below a hidden directory of its checkout: its
+/// tracked sources are copied, but no untracked file below that directory,
+/// since hidden is judged from the checkout's root, not the crate's.
 fn a_hidden_crate_directory_does_not_admit_untracked_credentials() {
     let copy = Copy::new();
     let dir = copy.path().join("examples/.private");

@@ -540,6 +540,9 @@ fn source_files(
                 dir.display()
             ))
         })?;
+        // Each path from the checkout's root, so that a hidden directory
+        // above `dir` is seen, and the prefix that takes it to `dir`.
+        let prefix = PathBuf::from(git(dir, &["rev-parse", "--show-prefix"])?.trim_end());
         let tracked = git_files(dir, "--cached")?;
         let untracked = git_files(dir, "--others")?;
         let hidden = |name: &Path| {
@@ -547,9 +550,16 @@ fn source_files(
                 .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
         };
         let untracked = untracked.into_iter().filter(|name| !hidden(name));
-        for name in tracked.into_iter().chain(untracked) {
+        for full in tracked.into_iter().chain(untracked) {
+            let name = full.strip_prefix(&prefix).map_err(|_| {
+                Error::new(format!(
+                    "`--local`: git listed {} outside {}",
+                    full.display(),
+                    dir.display()
+                ))
+            })?;
             // A tracked file deleted in the checkout is not built.
-            if dir.join(&name).is_file() {
+            if dir.join(name).is_file() {
                 files.insert(from.join(name));
             }
         }
@@ -558,12 +568,26 @@ fn source_files(
 }
 
 /// The files `git ls-files <which> --exclude-standard` lists in `dir`,
-/// from `dir`. Refused, naming `dir` and Git's words, when Git fails.
+/// each from the checkout's root (`--full-name`).
 fn git_files(dir: &Path, which: &str) -> Result<Vec<PathBuf>, Error> {
+    let listed = git(
+        dir,
+        &["ls-files", "-z", "--full-name", which, "--exclude-standard"],
+    )?;
+    Ok(listed
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// What `git <args>` prints in `dir`. Refused, naming `dir` and Git's
+/// words, when Git fails.
+fn git(dir: &Path, args: &[&str]) -> Result<String, Error> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["ls-files", "-z", which, "--exclude-standard"])
+        .args(args)
         .output()
         .map_err(|e| Error::new(format!("`--local`: running git in {}: {e}", dir.display())))?;
     if !output.status.success() {
@@ -573,12 +597,7 @@ fn git_files(dir: &Path, which: &str) -> Result<Vec<PathBuf>, Error> {
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .map(|name| PathBuf::from(String::from_utf8_lossy(name).into_owned()))
-        .collect())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Each file under `dir`, at `from` joined with its path there, but those
