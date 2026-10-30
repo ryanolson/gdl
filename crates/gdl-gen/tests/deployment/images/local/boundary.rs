@@ -50,3 +50,35 @@ fn external_symlinks_do_not_copy_host_credentials() {
         );
     }
 }
+
+#[test]
+#[ignore = "F2: listing a path-named crate admits untracked files below its hidden directory"]
+fn a_hidden_crate_directory_does_not_admit_untracked_credentials() {
+    let copy = Copy::new();
+    let dir = copy.path().join("examples/.private");
+    std::fs::rename(copy.path().join("examples/api"), &dir).expect("a hidden crate directory");
+    tracked(&copy);
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("a spec");
+    let graph = std::fs::read_to_string(dir.join("api.gdl")).expect("a graph");
+    let spec = gdl_gen::Spec::from_text(&text.replace(SEGMENTS, SPLIT), &graph, &dir)
+        .expect("a spec naming the hidden crate by path");
+    let marker = ["hidden", "credential", "marker"].join("-");
+    std::fs::write(dir.join("credentials.txt"), &marker).expect("an untracked credential");
+    let mut docker = Fake::default();
+    run_with(
+        &spec,
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    );
+    assert_eq!(docker.contexts.len(), 3);
+    for (reference, context) in &docker.contexts {
+        assert!(context.contains_key(Path::new("examples/.private/src/lib.rs")));
+        assert!(
+            context.values().all(|text| !text.contains(&marker)),
+            "{reference}: an untracked credential below .private reached the build context"
+        );
+    }
+}
