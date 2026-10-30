@@ -68,6 +68,37 @@ fn a_directory_can_run_in_a_cluster_without_pools() {
     assert!(files.contains_key(Path::new("use1/tables.yaml")));
 }
 
+#[test]
+#[ignore = "F3: the Local and tables Job use arm64/v8 as a node architecture"]
+fn the_directory_pods_use_the_architecture_without_the_platform_variant() {
+    let mirror = Mirror::new();
+    let fleet = fleet(&dynamodb_text().replace("linux/amd64", "linux/arm64/v8"));
+    fleet.check(None).expect("a valid fleet");
+    let files = render(&mirror, &spec(&mirror), &fleet).expect("objects");
+    let objects = objects(&files);
+    let hub = &objects[&("Deployment".to_string(), "global-us".to_string())];
+    let expected = &hub["spec"]["template"]["spec"]["nodeSelector"];
+    assert_eq!(expected["kubernetes.io/arch"], "arm64");
+    let mut selectors = Vec::new();
+    for path in ["use1/base.yaml", "use1/tables.yaml"] {
+        for object in documents(&files[Path::new(path)]) {
+            if object["kind"] == "Deployment" || object["kind"] == "Job" {
+                selectors.push((
+                    object["metadata"]["name"].clone(),
+                    object["spec"]["template"]["spec"]["nodeSelector"].clone(),
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        selectors,
+        [
+            (Value::from("dynamodb-local"), expected.clone()),
+            (Value::from("dynamodb-tables"), expected.clone()),
+        ]
+    );
+}
+
 /// Every hub and segment publishes to the tables in its cluster's region:
 /// the directory's cluster at the Local's Service, the other at the
 /// placeholder. None reports to a parent's hub or keeps a state claim, so
