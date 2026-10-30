@@ -1,5 +1,5 @@
 //! `#[derive(Metrics)]`: a node's metrics, from a struct of prometheus
-//! metric fields. The definitions are read by `gdl_syntax::metric_fields`,
+//! metric fields and `gdl::ScrapeGaugeVec`s. The definitions are read by `gdl_syntax::metric_fields`,
 //! which the source reader shares, so the catalogue and the build agree.
 
 use proc_macro2::TokenStream;

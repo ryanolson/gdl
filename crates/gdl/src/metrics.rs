@@ -14,8 +14,9 @@ mod scrape;
 
 pub use scrape::{GaugeReadings, ScrapeGaugeVec};
 
-/// A node's metrics: a struct of prometheus metrics, registered by the
-/// runtime and handed to the node's [`Build::build`](crate::Build::build).
+/// A node's metrics: a struct of prometheus metrics and [`ScrapeGaugeVec`]s,
+/// registered by the runtime and handed to the node's
+/// [`Build::build`](crate::Build::build).
 ///
 /// Implemented only by `derive(gdl::Metrics)`, and by `()` for a node
 /// without metrics. The source reader takes a metrics type's definitions

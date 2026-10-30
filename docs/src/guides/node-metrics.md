@@ -4,7 +4,7 @@ A node defines its metrics as it defines its configuration. The segment register
 
 ## 1. Declare the metrics
 
-Derive `gdl::Metrics` on a struct of prometheus metric fields. Name the types through `gdl::prometheus`, the version the runtime registers and serves.
+Derive `gdl::Metrics` on a struct of metric fields. Name the types through `gdl::prometheus`, the version the runtime registers and serves.
 
 ```rust
 #[derive(gdl::Metrics)]
