@@ -157,3 +157,55 @@ fn another_groups_failed_discovery_does_not_stop_deploy_or_down() {
         "{error}"
     );
 }
+
+#[test]
+#[ignore = "F1: context aliases overwrite one cluster's PodMonitor with the other's"]
+fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
+    struct Aliases(Kube);
+    impl gdl_gen::Kube for Aliases {
+        fn run(
+            &mut self,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            let mut physical = args.to_vec();
+            physical[1] = "shared-cluster".into();
+            self.0.run(&physical, input)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_asking(true));
+    let log = Log::default();
+    let mut kube = Aliases(Kube::new(&log));
+    let how = gdl_gen::Deploy {
+        spec: files.spec.clone(),
+        fleet: files.fleet.clone(),
+        target: mirror.target(),
+        out: None,
+        waits: waits(),
+    };
+    gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {})
+        .expect("aliases permit a deploy");
+    for name in ["global-eu", "global-us", "model-x-eu", "model-x-us"] {
+        assert!(
+            kube.0.objects["shared-cluster"].contains_key(&("Deployment".into(), name.into())),
+            "{name} still runs"
+        );
+    }
+    let mut clusters: Vec<&str> = kube.0.objects["shared-cluster"]
+        .values()
+        .filter(|object| object["kind"] == "PodMonitor")
+        .map(|object| {
+            object["spec"]["selector"]["matchLabels"]["gdl.dev/cluster"]
+                .as_str()
+                .expect("the selected cluster")
+        })
+        .collect();
+    clusters.sort_unstable();
+    assert_eq!(
+        clusters,
+        ["euw1", "use1"],
+        "both clusters' pods still run, so both must be scraped"
+    );
+}
