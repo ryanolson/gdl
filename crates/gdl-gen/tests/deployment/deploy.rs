@@ -658,7 +658,9 @@ fn a_drain_that_does_not_end_stops_the_deploy() {
     let error = deploy(&mirror, &files, &mut docker, &mut kube).expect_err("a drain that hangs");
     let error = error.to_string();
     assert!(
-        error.contains("pool `model-x-old` did not withdraw from its parent `global-us`"),
+        error.contains(
+            "pool `model-x-old` is not known to have withdrawn from its parent `global-us`"
+        ) && error.contains("its hub still holds the record"),
         "{error}"
     );
     assert!(deletes(&log, "kind-use1").is_empty());
@@ -864,3 +866,6 @@ fn no_command_carries_a_credential() {
 
 #[path = "deploy/aliases.rs"]
 mod aliases;
+
+#[path = "deploy/parent.rs"]
+mod parent;

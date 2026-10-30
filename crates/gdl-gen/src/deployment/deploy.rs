@@ -452,31 +452,42 @@ fn stop(
 }
 
 /// Wait until the hub of `pool`'s parent no longer holds its record: the
-/// pool's drain has ended, and its hub has withdrawn it. A parent holds a
-/// pool that stopped without a drain, as missing, until an operator
-/// withdraws it.
+/// pool's drain has ended, and its hub has withdrawn it. Only the parent's
+/// hub's own 404 proves it. A parent holds a pool that stopped without a
+/// drain, as missing, until an operator withdraws it, so a parent that
+/// cannot be reached proves nothing: the wait stops at once when its
+/// Service does not exist, and at its bound when it does not answer,
+/// naming the pool either way. The relay directory is the one that serves
+/// this record: another directory needs another proof.
 fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) -> Result<(), Error> {
     let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
     let args = at.get(&pool.home, PUBLIC, &route);
     let bound = Duration::from_secs(pool.grace) + waits.drain;
     let deadline = Instant::now() + bound;
+    let unproven = |why: &str| {
+        Error::new(format!(
+            "pool `{}` is not known to have withdrawn from its parent `{}`, so it is not deleted: {why}",
+            pool.pool, pool.home
+        ))
+    };
     loop {
         let reply = kube.run(&args, None)?;
-        if reply.not_found() {
+        if reply.proxied_not_found() {
             return Ok(());
+        }
+        if reply.no_service(&pool.home) {
+            return Err(unproven(&format!(
+                "the parent's Service does not exist: {}",
+                reply.stderr.trim()
+            )));
         }
         if Instant::now() >= deadline {
             let last = if reply.success {
-                "it still holds the record".to_string()
+                "its hub still holds the record".to_string()
             } else {
-                reply.stderr.trim().to_string()
+                format!("its hub does not answer: {}", reply.stderr.trim())
             };
-            return Err(Error::new(format!(
-                "pool `{}` did not withdraw from its parent `{}` within {} s: {last}",
-                pool.pool,
-                pool.home,
-                bound.as_secs()
-            )));
+            return Err(unproven(&format!("after {} s, {last}", bound.as_secs())));
         }
         std::thread::sleep(waits.interval);
     }

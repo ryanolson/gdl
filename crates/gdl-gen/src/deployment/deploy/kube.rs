@@ -49,9 +49,25 @@ impl Reply {
         }
     }
 
-    /// Whether the API server, or the service it proxied to, answered 404.
-    pub(super) fn not_found(&self) -> bool {
-        !self.success && self.stderr.contains("(NotFound)")
+    /// Whether the service that the API server proxied to answered 404
+    /// itself. kubectl prints a proxied 404 with no body of its own as
+    /// "the server could not find the requested resource". The API
+    /// server's own 404 for a Service that does not exist names the
+    /// Service instead, and proves nothing about what the Service serves.
+    pub(super) fn proxied_not_found(&self) -> bool {
+        !self.success
+            && self
+                .stderr
+                .contains("(NotFound): the server could not find the requested resource")
+    }
+
+    /// Whether the API server answered that Service `service` does not
+    /// exist.
+    pub(super) fn no_service(&self, service: &str) -> bool {
+        !self.success
+            && self
+                .stderr
+                .contains(&format!("(NotFound): services \"{service}\" not found"))
     }
 }
 
