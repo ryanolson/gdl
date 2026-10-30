@@ -966,6 +966,9 @@ impl Runtime {
                         .choose_pool(crossing, cx, &mut envelope, super::pools::Left::NONE)
                         .await?
                         .map_err(|no| crossing.no_pool(no))?;
+                    // Read before the offer, so that a re-queue after it
+                    // sees every lease end since (`Leases::room`).
+                    let ends = held.pool_lease().map_or(0, super::pools::PoolLease::ends);
                     let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
                     return match super::pools::answer(offering.await, crossing, pool, &mut held) {
                         Answer::Accepted(accepted) => Ok(Handed {
@@ -976,12 +979,14 @@ impl Runtime {
                         Answer::Failed(error) => Err(error),
                         // Boxed, and only here, as for an instance.
                         Answer::Missed(missed) => {
+                            let seen = super::pools::Seen::of(held.pool_lease(), ends);
                             let choice = held.missed();
                             let declined = super::pools::Declined {
                                 pool,
                                 instance,
                                 choice,
                                 missed,
+                                seen,
                             };
                             let failover =
                                 self.fail_over(crossing, cx, &mut envelope, timed, declined);

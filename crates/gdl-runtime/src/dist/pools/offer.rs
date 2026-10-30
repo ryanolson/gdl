@@ -30,7 +30,7 @@ use velo::InstanceId;
 
 use super::crossing::{Again, Left, Walk};
 use super::meter::Outcome;
-use super::{Crossing, PoolLease};
+use super::{Crossing, PoolLease, Seen};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
 use crate::dist::offers::{Answer, Missed, delivered};
@@ -142,6 +142,7 @@ impl Runtime {
             mut instance,
             mut choice,
             mut missed,
+            mut seen,
         } = declined;
         let mut last = reason(&missed);
         let mut offered = Vec::new();
@@ -186,8 +187,15 @@ impl Runtime {
                         if last == Some(Decline::Full) {
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
-                                let requeued_for =
-                                    self.requeue(crossing, cx, envelope, timed, pool, &mut choice);
+                                let requeued_for = self.requeue(
+                                    crossing,
+                                    cx,
+                                    envelope,
+                                    timed,
+                                    pool,
+                                    &mut choice,
+                                    &mut seen,
+                                );
                                 match requeued_for.await? {
                                     Requeued::Handed(handed) => return Ok(handed),
                                     Requeued::Missed(to, then) => {
@@ -223,6 +231,7 @@ impl Runtime {
                     chosen
                 }
             };
+            let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, timed)?;
             let answer = answer(offering.await, crossing, at, &mut held);
             // Counted with the answer, so that an offer whose answer is
@@ -241,6 +250,7 @@ impl Runtime {
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
                     last = reason(&then);
+                    seen = Seen::of(held.pool_lease(), ends);
                     choice = held.missed();
                     (pool, instance) = (at, to);
                     missed = missed.then(then);
@@ -302,7 +312,11 @@ impl Runtime {
     /// `DeadlineExceeded`, and so does a cancel. A pool that no longer takes
     /// work, or whose follow is no longer offered, ends the re-queue
     /// ([`Requeued::Unavailable`]), as does a decline for another reason
-    /// ([`Requeued::Missed`]).
+    /// ([`Requeued::Missed`]). `seen` is what the request saw of the pool
+    /// before its last offer, kept up to date before each offer here, so
+    /// that each wait returns at once when an offer to the pool ended
+    /// since ([`Seen::room`]).
+    #[allow(clippy::too_many_arguments)]
     async fn requeue(
         &self,
         crossing: &Crossing,
@@ -311,11 +325,12 @@ impl Runtime {
         timed: bool,
         pool: u64,
         choice: &mut Option<ChoiceHeld>,
+        seen: &mut Seen,
     ) -> Result<Requeued> {
         let deadline = cx.deadline().map(gdl::Deadline::instant);
         loop {
             crossing
-                .room(pool, self.config.pool_requeue_backoff, deadline)
+                .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
             let chosen = match crossing.within() {
@@ -349,6 +364,7 @@ impl Runtime {
                 Again::Stale => continue,
                 Again::Unavailable => return Ok(Requeued::Unavailable),
             };
+            let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, timed)?;
             match answer(offering.await, crossing, pool, &mut held) {
                 Answer::Accepted(accepted) => {
@@ -360,6 +376,7 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
+                    *seen = Seen::of(held.pool_lease(), ends);
                     *choice = held.missed();
                     if !matches!(then, Missed::Declined(_, Decline::Full)) {
                         return Ok(Requeued::Missed(to, then));
@@ -386,12 +403,14 @@ enum Requeued {
 
 /// What a chooser's first offer into another class came to, when it
 /// missed: the pool and the instance it went to, the pool policy's lease
-/// on the choice of that pool, if it gave one, and the miss.
+/// on the choice of that pool, if it gave one, the miss, and what the
+/// request saw of the pool before the offer, for a re-queue's wait.
 pub(crate) struct Declined {
     pub(crate) pool: u64,
     pub(crate) instance: InstanceId,
     pub(crate) choice: Option<ChoiceHeld>,
     pub(crate) missed: Missed,
+    pub(crate) seen: Seen,
 }
 
 /// Record `last` as why `pool`, which the request left, declined it, in

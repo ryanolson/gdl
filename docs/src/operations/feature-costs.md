@@ -248,7 +248,7 @@ A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` 
 
 ### Re-queue for the same pool
 
-A pool policy can re-queue a request for the pool that declined it as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). Every offer into another class pays for it whether or not a request waits: the end of the offer's lease on the pool's follow reads the follow's count of waiters, and the lease checks that it was not ended as a decline. Measured with callgrind on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average about 30, rustc 1.93.1, release profile. Base `8b909c95` with the same test added, change `86775e35`, two rounds each, which gave identical totals:
+A pool policy can re-queue a request for the pool that declined it as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). Every offer into another class pays for it whether or not a request waits: before the offer, the chooser reads the follow's generation of lease ends; at the end of the offer's lease, it adds one to the generation, sequentially consistent, and reads the count of waits. Measured with callgrind on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 30, rustc 1.93.1, release profile, two rounds each, which agreed within 1 Ir per lease. Base `8b909c95` with the same test added; a first design that woke one waiter at a time, `86775e35`; the generation, this design:
 
 ```bash
 RUSTFLAGS="--cfg rustix_use_libc" cargo test --release -p gdl-runtime --all-features --lib --no-run
@@ -256,9 +256,11 @@ GDL_LEASES=100000 valgrind --tool=callgrind --callgrind-out-file=/dev/null <lib 
 GDL_LEASES=200000 valgrind ...   # per lease: (Ir at 200,000 - Ir at 100,000) / 100,000
 ```
 
-| Measure | Base | Change |
-|---|---|---|
-| a lease taken and ended, no request waiting | 59.0 Ir | 66.0 Ir |
+| Measure | Base | One waiter at a time | Generation |
+|---|---|---|---|
+| a lease taken and ended, no request waiting | 59.0 Ir | 66.0 Ir | 93.0 Ir |
+
+The generation's read crosses the offer's wait, so `send_forward`'s future grew from 896 to 912 bytes, the size it had before hand-offs were offers (`a_first_offer_is_no_larger_than_a_hand_off_was`). A 32-bit generation left it at 912 too.
 
 What a re-queued request allocates, against a failover, is counted by `a_wait_allocates_nothing_beyond_its_timer`: a timer allocates 0, an accepted first offer 7, a request that fails over once 19 and twice 28, and a request re-queued once 19, twice 28, and four times 46. So each round of a re-queue, a wait and an offer to the same pool again, costs the 9 allocations of one more failover offer, and the wait costs none. A policy whose `Head` decodes, such as a `Projected` one, decodes it once more on each full decline, to be asked whether to re-queue, whether or not it overrides `requeue`.
 

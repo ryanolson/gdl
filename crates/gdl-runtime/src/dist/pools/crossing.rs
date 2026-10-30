@@ -18,7 +18,7 @@ use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
 use super::damping::Damping;
-use super::lease::PoolLease;
+use super::lease::{PoolLease, Seen};
 use super::policy;
 use super::{EntryTable, PoolTable, Pools};
 use crate::dist::roster::{CHOICES, Policy, turn};
@@ -270,16 +270,17 @@ impl Crossing {
         target.policy.requeue(request, self.encoding, view)
     }
 
-    /// Wait for room in `pool`, which a request is re-queued for: until an
-    /// offer this chooser made to the pool ends, for at most `backoff`,
-    /// and never past `deadline` ([`Leases::room`](super::lease::Leases::room)).
-    /// Returns at once when the chooser no longer follows the pool. Holds
-    /// no lease on the pool's follow, so that a drain does not wait for
-    /// it. A wait that began under one follow of the pool is woken by that
-    /// follow's offers alone: under a newer follow, by its backoff.
+    /// Wait for room in `pool`, which a request is re-queued for and saw
+    /// as `seen` before its last offer: until an offer this chooser made
+    /// to the pool ends, unless one ended since, for at most `backoff`, and
+    /// never past `deadline` ([`Seen::room`]). Returns at once when the
+    /// chooser no longer follows the pool, or follows it under another
+    /// follow than the offer's. Holds no lease on the pool's follow, so
+    /// that a drain does not wait for it.
     pub(crate) async fn room(
         &self,
         pool: u64,
+        seen: &Seen,
         backoff: std::time::Duration,
         deadline: Option<tokio::time::Instant>,
     ) {
@@ -290,7 +291,7 @@ impl Crossing {
                 None => return,
             }
         };
-        leases.room(backoff, deadline).await;
+        seen.room(&leases, backoff, deadline).await;
     }
 
     /// An instance of `pool`, which a request is re-queued for, by

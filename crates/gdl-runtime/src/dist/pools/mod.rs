@@ -28,7 +28,7 @@ mod task;
 mod tests;
 
 pub(crate) use crossing::{Crossing, Left, Target, targets};
-pub(crate) use lease::PoolLease;
+pub(crate) use lease::{PoolLease, Seen};
 pub(crate) use meter::PoolMeters;
 pub(crate) use offer::{Declined, answer};
 pub(crate) use task::{REWATCH, REWATCH_CAP, follow, hub_address};
