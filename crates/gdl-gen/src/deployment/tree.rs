@@ -360,12 +360,34 @@ fn unpack(
 /// or `HEAD` when there are none. Untracked files are in neither: `git
 /// add` a new file to build it.
 fn commit(context: &Context, top: &Path) -> Result<OsString, Error> {
+    // `git stash create` writes the index it refreshes, under its lock,
+    // which another command, such as an editor's `git status`, can hold:
+    // it runs on a copy, and the checkout's index is never written.
+    let index = git(context, top, &["rev-parse", "--git-path", "index"])?;
+    let index = top.join(OsStr::from_bytes(trim(&index)));
+    let copy = tempfile::Builder::new()
+        .prefix("gdl-index-")
+        .tempfile()
+        .map_err(super::io)?;
+    let copied = match std::fs::copy(&index, copy.path()) {
+        Ok(_) => Some(copy.path()),
+        // A checkout with no index yet has nothing to copy.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(Error::new(format!(
+                "{}: {}: {e}",
+                context.prefix(),
+                index.display()
+            )));
+        }
+    };
     // The commit is never stored under a ref, so whose it is and whether
     // it is signed do not matter; the host's settings for them must not
     // stop the build.
-    let stash = git(
+    let stash = run(
         context,
         top,
+        copied,
         &[
             "-c",
             "user.name=gdl",
@@ -387,8 +409,8 @@ fn commit(context: &Context, top: &Path) -> Result<OsString, Error> {
 
 /// Refuse a link of the tree in `dir` that the file system resolves
 /// outside it. Each link's own target is within it, but a link can reach
-/// through another: `a/b/y -> x/../../..`, with `a/b/x -> ../../c`, reads
-/// as the root and resolves two levels above it. Cargo resolves the
+/// through another: in `a/b`, `x -> ../..` names the root, and `y ->
+/// x/../..` reads as `a`, but resolves two levels above the root. Cargo resolves the
 /// segments' locks in this tree, so it must not reach this machine's files
 /// through one.
 fn links(dir: &Path, context: &Context, entries: &BTreeMap<PathBuf, Entry>) -> Result<(), Error> {
@@ -524,11 +546,23 @@ fn digest(entries: &BTreeMap<PathBuf, Entry>) -> String {
 /// Git's words, when Git fails: the sources are a trust boundary, and
 /// nothing falls back to a copy Git did not make.
 fn git<S: AsRef<OsStr>>(context: &Context, dir: &Path, args: &[S]) -> Result<Vec<u8>, Error> {
+    run(context, dir, None, args)
+}
+
+/// [`git`], with the index in `index` when it names one.
+fn run<S: AsRef<OsStr>>(
+    context: &Context,
+    dir: &Path,
+    index: Option<&Path>,
+    args: &[S],
+) -> Result<Vec<u8>, Error> {
     let prefix = context.prefix();
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let mut command = std::process::Command::new("git");
+    command.arg("-C").arg(dir).args(args);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let output = command
         .output()
         .map_err(|e| Error::new(format!("{prefix}: running git in {}: {e}", dir.display())))?;
     if !output.status.success() {

@@ -535,3 +535,31 @@ fn siblings_build_without_what_their_parent_holds() {
     assert!(context.values().all(|text| !text.contains(&marker)));
     assert!(context.contains_key(Path::new("gdl/target/gdl-images/hub/Dockerfile")));
 }
+
+/// Another Git command holding the checkout's index, as an editor's `git
+/// status` does, does not stop the build: the commit of the changes is made
+/// with a copy of the index, and the checkout's index and its lock are as
+/// they were.
+#[test]
+fn a_held_index_lock_does_not_stop_the_build() {
+    let copy = Copy::new();
+    let lib = copy.path().join("crates/gdl/src/lib.rs");
+    let text = std::fs::read_to_string(&lib).expect("gdl's lib.rs") + "// Not staged.\n";
+    std::fs::write(&lib, &text).expect("written");
+    let index = copy.path().join(".git/index");
+    let lock = copy.path().join(".git/index.lock");
+    std::fs::write(&lock, "").expect("a held lock");
+    let before = std::fs::read(&index).expect("the index");
+    for builder in Builder::ALL {
+        let contexts = builder.contexts(&copy.spec()).expect("local images");
+        for (reference, context) in &contexts {
+            assert_eq!(
+                context[Path::new("crates/gdl/src/lib.rs")],
+                text,
+                "{builder:?}: {reference}"
+            );
+        }
+    }
+    assert!(lock.exists(), "the lock is another command's");
+    assert_eq!(std::fs::read(&index).expect("the index"), before);
+}
