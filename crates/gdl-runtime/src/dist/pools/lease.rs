@@ -75,17 +75,31 @@ impl Leases {
     }
 
     /// Wait for room in the follow's pool: until a lease on the follow
-    /// ends and this is the request that has waited longest, or for
-    /// `backoff`, or until `deadline`, whichever comes first. The backoff
-    /// sees room that another chooser frees, and a lease that ends while
-    /// the wait begins, which this wait may miss. Allocates nothing: the
+    /// ends and this is the request whose wait began first, or for
+    /// `backoff`, or until `deadline`, whichever comes first. A lease that
+    /// ends once the wait has counted itself, at its first poll, wakes a
+    /// waiter; the backoff sees room that another chooser frees, and a
+    /// lease that ended before the wait began. Allocates nothing: the
     /// waiter is held in this future, and the timer is the one sleep.
     pub(crate) async fn room(&self, backoff: Duration, deadline: Option<Instant>) {
         let room = &self.2;
+        // Counted before the waiter registers, so that no wake is lost in
+        // between: a lease that ends after the count reads it and calls
+        // `notify_one`, which, with no waiter registered yet, stores a
+        // permit that `enable` takes. One counter orders the two sides.
+        room.waiting.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        tests::ENABLING.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+        });
         let woken = room.woken.notified();
         let mut woken = std::pin::pin!(woken);
         woken.as_mut().enable();
-        room.waiting.fetch_add(1, Ordering::AcqRel);
+        // Declared after the waiter, so dropped before it: the count never
+        // shows a waiter that is gone, whose wake would be left as a permit
+        // that the next wait takes for room that was not freed.
         let _waiting = Waiting(&room.waiting);
         let after = Instant::now().checked_add(backoff);
         let until = match (after, deadline) {
@@ -106,7 +120,7 @@ impl Leases {
     /// One lease ended: wake the request that has waited longest, if any.
     fn end(&self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
-        if self.2.waiting.load(Ordering::Acquire) > 0 {
+        if self.2.waiting.load(Ordering::SeqCst) > 0 {
             self.2.woken.notify_one();
         }
     }
@@ -119,7 +133,7 @@ struct Waiting<'a>(&'a AtomicUsize);
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -212,6 +226,7 @@ impl std::fmt::Debug for PoolLease {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
@@ -221,6 +236,77 @@ mod tests {
 
     use super::{Leases, PoolLease};
     use crate::dist::counting::{counted, counting};
+
+    thread_local! {
+        /// Run once inside a wait's registration, after it counts itself
+        /// and before it registers its waiter: where a lease that another
+        /// thread ends lands between the two.
+        pub(super) static ENABLING: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// A lease that ends while a wait registers wakes that wait: the wait
+    /// counts itself before it registers its waiter, so the lease's end
+    /// sees the count and leaves a permit that the registration takes. The
+    /// control: a lease that ends after the registration wakes it too.
+    #[tokio::test]
+    async fn a_lease_ending_during_wait_registration_is_not_lost() {
+        let leases = Arc::new(Leases::default());
+        let hour = Duration::from_secs(3600);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        // A release after registration completes wakes the same wait.
+        let held = PoolLease::take(&leases).expect("offered");
+        let mut control = Box::pin(leases.room(hour, None));
+        assert!(control.as_mut().poll(&mut cx).is_pending());
+        drop(held);
+        assert!(control.as_mut().poll(&mut cx).is_ready());
+        drop(control);
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+
+        let held = PoolLease::take(&leases).expect("offered");
+        ENABLING.with_borrow_mut(|hook| *hook = Some(Box::new(move || drop(held))));
+        let mut waiting = Box::pin(leases.room(hour, None));
+        let polled = waiting.as_mut().poll(&mut cx);
+        assert_eq!(leases.held(), 0, "the pool's last offer ended");
+        assert!(
+            polled.is_ready(),
+            "the lease ended after Notify registration, but the request waits for the backoff"
+        );
+    }
+
+    /// A wait that ends by a drop or its deadline uncounts itself, a wake
+    /// that reached a dropped wait passes to the next, and no wait holds a
+    /// follow open.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_and_expired_waits_release_their_counts_and_wakes() {
+        let leases = Arc::new(Leases::default());
+        let hour = Duration::from_secs(3600);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let held = PoolLease::take(&leases).expect("offered");
+        let mut first = Box::pin(leases.room(hour, None));
+        let mut second = Box::pin(leases.room(hour, None));
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 2);
+        drop(held);
+        drop(first);
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 1);
+        assert!(
+            second.as_mut().poll(&mut cx).is_ready(),
+            "a cancelled waiter kept the notification"
+        );
+        drop(second);
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        leases.room(hour, Some(deadline)).await;
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+        let mut cancelled = Box::pin(leases.room(hour, None));
+        assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        drop(cancelled);
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+        leases.unoffer();
+        assert!(leases.idle(), "a waiter held the drain open");
+    }
 
     /// A waker that notes that it was woken.
     #[derive(Default)]
