@@ -40,11 +40,28 @@ pub(crate) struct Leases(AtomicUsize, Option<&'static PoolFigures>, Room);
 
 /// The requests that wait for room in a follow's pool: woken one at a
 /// time, the longest waiting first, as the follow's leases end. The count
-/// spares a lease's end the waiters' lock while none waits.
+/// of waiters spares a lease's end the waiters' lock while none waits.
+/// Each lease's end leaves one wake in `wakes`, which one waiter takes:
+/// `Notify` keeps at most one wake for waiters that have not registered,
+/// so two leases that ended before two waiters registered would wake one.
 #[derive(Debug, Default)]
 struct Room {
     waiting: AtomicUsize,
+    /// The wakes that ended leases left and no waiter took yet: never more
+    /// than the waiters a lease's end saw.
+    wakes: AtomicUsize,
     woken: Notify,
+}
+
+impl Room {
+    /// Take one wake that a lease's end left, if one is left.
+    fn take(&self) -> bool {
+        self.wakes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |wakes| {
+                wakes.checked_sub(1)
+            })
+            .is_ok()
+    }
 }
 
 impl Leases {
@@ -74,61 +91,82 @@ impl Leases {
         self.0.load(Ordering::Acquire) & !UNOFFERED
     }
 
-    /// Wait for room in the follow's pool: until a lease on the follow
-    /// ends and this is the request whose wait began first, or for
-    /// `backoff`, or until `deadline`, whichever comes first. A lease that
-    /// ends once the wait has counted itself, at its first poll, wakes a
-    /// waiter; the backoff sees room that another chooser frees, and a
-    /// lease that ended before the wait began. Allocates nothing: the
-    /// waiter is held in this future, and the timer is the one sleep.
+    /// Wait for room in the follow's pool: until this wait takes a wake
+    /// that a lease's end left, or for `backoff`, or until `deadline`,
+    /// whichever comes first. Each lease that ends once the wait has
+    /// counted itself, at its first poll, leaves a wake for one waiter, so
+    /// no lease's end is lost, however many end at once; the registered
+    /// waiter whose wait began first is woken first. The backoff sees room
+    /// that another chooser frees, and a lease that ended before the wait
+    /// began. Allocates nothing: the waiter is held in this future, and
+    /// the timer is the one sleep.
     pub(crate) async fn room(&self, backoff: Duration, deadline: Option<Instant>) {
         let room = &self.2;
-        // Counted before the waiter registers, so that no wake is lost in
-        // between: a lease that ends after the count reads it and calls
-        // `notify_one`, which, with no waiter registered yet, stores a
-        // permit that `enable` takes. One counter orders the two sides.
+        // Counted before the waiter registers: a lease that ends after the
+        // count reads it and leaves a wake, which the wait takes below,
+        // once it is registered, or is woken to take.
         room.waiting.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(&room.waiting);
         #[cfg(test)]
         tests::ENABLING.with_borrow_mut(|hook| {
             if let Some(hook) = hook.take() {
                 hook();
             }
         });
-        let woken = room.woken.notified();
-        let mut woken = std::pin::pin!(woken);
-        woken.as_mut().enable();
-        // Declared after the waiter, so dropped before it: the count never
-        // shows a waiter that is gone, whose wake would be left as a permit
-        // that the next wait takes for room that was not freed.
-        let _waiting = Waiting(&room.waiting);
         let after = Instant::now().checked_add(backoff);
         let until = match (after, deadline) {
             (Some(after), Some(deadline)) => Some(after.min(deadline)),
             (after, deadline) => after.or(deadline),
         };
-        match until {
-            Some(until) => {
-                tokio::select! {
-                    () = woken => {}
-                    () = tokio::time::sleep_until(until) => {}
-                }
+        loop {
+            let woken = room.woken.notified();
+            let mut woken = std::pin::pin!(woken);
+            // Registered before the wakes are read, so that a wake left
+            // after the read also notifies this waiter.
+            woken.as_mut().enable();
+            if room.take() {
+                return;
             }
-            None => woken.await,
+            match until {
+                Some(until) => {
+                    tokio::select! {
+                        () = woken => {}
+                        () = tokio::time::sleep_until(until) => return,
+                    }
+                }
+                None => woken.await,
+            }
+            // Woken: take the wake, unless another waiter took it first,
+            // and then wait again.
         }
     }
 
-    /// One lease ended: wake the request that has waited longest, if any.
+    /// One lease ended: leave a wake for a waiter, if one waits, and wake
+    /// the registered waiter whose wait began first. Wakes are counted up
+    /// to the waiters the end sees, so that wakes that no waiter took,
+    /// as when a waiter's wait ended on its backoff first, cannot pile up:
+    /// a later wait takes at most as many as there were waiters.
     fn end(&self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
-        if self.2.waiting.load(Ordering::SeqCst) > 0 {
-            self.2.woken.notify_one();
+        let room = &self.2;
+        let waiting = room.waiting.load(Ordering::SeqCst);
+        if waiting > 0
+            && room
+                .wakes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |wakes| {
+                    (wakes < waiting).then_some(wakes + 1)
+                })
+                .is_ok()
+        {
+            room.woken.notify_one();
         }
     }
 }
 
 /// One request's place among a follow's waiters, given up when its wait
-/// ends however it ends. A wake that reaches it after the wait ended
-/// passes to the next waiter, as tokio's `Notified` does when dropped.
+/// ends however it ends. A notification that reaches it after the wait
+/// ended passes to the next waiter, as tokio's `Notified` does when
+/// dropped, and a wake it did not take stays for the next waiter.
 struct Waiting<'a>(&'a AtomicUsize);
 
 impl Drop for Waiting<'_> {
@@ -272,6 +310,133 @@ mod tests {
             polled.is_ready(),
             "the lease ended after Notify registration, but the request waits for the backoff"
         );
+    }
+
+    /// The control: two leases that end once two waits registered wake
+    /// both.
+    #[tokio::test(start_paused = true)]
+    async fn registered_waits_keep_both_lease_releases() {
+        let leases = Arc::new(Leases::default());
+        let held = [
+            PoolLease::take(&leases).expect("offered"),
+            PoolLease::take(&leases).expect("offered"),
+        ];
+        let mut control = [
+            Box::pin(leases.room(Duration::from_secs(3600), None)),
+            Box::pin(leases.room(Duration::from_secs(3600), None)),
+        ];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        for wait in &mut control {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
+        drop(held);
+        for wait in &mut control {
+            assert!(wait.as_mut().poll(&mut cx).is_ready());
+        }
+        drop(control);
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+    }
+
+    /// Two leases that end while two waits are counted but not yet
+    /// registered wake both waits: each end leaves a wake that one wait
+    /// takes, where `Notify` alone keeps one permit for both.
+    #[test]
+    fn concurrent_registrations_keep_both_lease_releases() {
+        assert_eq!(
+            early_releases(2),
+            2,
+            "two rooms freed for two counted waits"
+        );
+    }
+
+    /// Four waits, and four leases that end before any wait registers: all
+    /// four are served at once, none on its backoff or deadline.
+    #[test]
+    fn every_lease_that_ends_before_the_waits_register_serves_one() {
+        assert_eq!(
+            early_releases(4),
+            4,
+            "four rooms freed for four counted waits"
+        );
+    }
+
+    /// Start `n` waits, each on its own thread and paused clock, with a
+    /// deadline of 1 s and a backoff of an hour; hold each between its
+    /// count and its registration while `n` leases end; then let them
+    /// register. How many were served at their first poll, with no time
+    /// passed. A wait that was not served must end at its deadline.
+    fn early_releases(n: usize) -> usize {
+        use std::sync::mpsc;
+
+        let leases = Arc::new(Leases::default());
+        let held: Vec<PoolLease> = (0..n)
+            .map(|_| PoolLease::take(&leases).expect("offered"))
+            .collect();
+        let (counted, counts) = mpsc::channel();
+        let mut resumes = Vec::new();
+        let mut workers = Vec::new();
+        for _ in 0..n {
+            let leases = Arc::clone(&leases);
+            let counted = counted.clone();
+            let (resume, resumed) = mpsc::channel();
+            resumes.push(resume);
+            workers.push(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .start_paused(true)
+                    .build()
+                    .expect("a runtime");
+                ENABLING.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        counted.send(()).expect("the observer");
+                        resumed
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("the releases precede registration");
+                    }));
+                });
+                runtime.block_on(async {
+                    let cx = gdl::Cx::new().with_timeout(Duration::from_secs(1));
+                    let deadline = cx.deadline().expect("a deadline").instant();
+                    let mut waiting =
+                        Box::pin(leases.room(Duration::from_secs(3600), Some(deadline)));
+                    let ready = waiting
+                        .as_mut()
+                        .poll(&mut Context::from_waker(std::task::Waker::noop()))
+                        .is_ready();
+                    if ready {
+                        assert!(cx.check().is_ok());
+                    } else {
+                        tokio::time::advance(Duration::from_secs(1)).await;
+                        waiting.await;
+                        assert_eq!(
+                            cx.check()
+                                .expect_err("the wait exhausted its deadline")
+                                .kind(),
+                            gdl::ErrorKind::DeadlineExceeded,
+                        );
+                    }
+                    ready
+                })
+            }));
+        }
+        for _ in 0..n {
+            counts
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every wait counted itself");
+        }
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), n);
+        drop(held);
+        assert_eq!(leases.held(), 0);
+        for resume in resumes {
+            resume.send(()).expect("a registering waiter");
+        }
+        let ready = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().expect("a waiter")))
+            .sum::<usize>();
+        assert_eq!(leases.2.waiting.load(Ordering::SeqCst), 0);
+        assert_eq!(leases.2.wakes.load(Ordering::SeqCst), 0, "a wake was left");
+        ready
     }
 
     /// A wait that ends by a drop or its deadline uncounts itself, a wake
