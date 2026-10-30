@@ -69,7 +69,8 @@ fn a_directory_can_run_in_a_cluster_without_pools() {
 }
 
 #[test]
-#[ignore = "F3: the Local and tables Job use arm64/v8 as a node architecture"]
+/// A platform with a variant, `linux/arm64/v8`, selects `arm64` nodes for
+/// the Local and the Job, as for a pool's pods.
 fn the_directory_pods_use_the_architecture_without_the_platform_variant() {
     let mirror = Mirror::new();
     let fleet = fleet(&dynamodb_text().replace("linux/amd64", "linux/arm64/v8"));

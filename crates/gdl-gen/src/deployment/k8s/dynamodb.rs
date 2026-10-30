@@ -21,7 +21,7 @@
 use gdl_model::{Cluster, Fleet, FleetDirectory, Problem, dynamodb_tables};
 use serde_json::{Value, json};
 
-use super::objects::label_value;
+use super::objects::{label_value, node_selector};
 use crate::deployment::pools::DYNAMODB_LOCAL;
 
 /// The Local's Deployment and Service, and the tables Job: a pool may not
@@ -92,12 +92,10 @@ fn labels(fleet: &str, cluster: &str, name: &str) -> Value {
 
 /// The pod's placement and account, as a pool's pods have them.
 fn pod(fleet: &str, cluster: &Cluster, container: Value, restart: Option<&str>) -> Value {
-    let platform = cluster.platform.as_deref().unwrap_or_default();
-    let (os, arch) = platform.split_once('/').unwrap_or_default();
     let mut pod = json!({
         "serviceAccountName": fleet,
         "enableServiceLinks": false,
-        "nodeSelector": {"kubernetes.io/os": os, "kubernetes.io/arch": arch},
+        "nodeSelector": node_selector(cluster),
         "containers": [container],
     });
     if let Some(restart) = restart {

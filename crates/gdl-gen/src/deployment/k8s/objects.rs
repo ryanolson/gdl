@@ -431,14 +431,10 @@ impl Pod<'_> {
     /// platform. Service links are off: they would add a variable per
     /// Service in the namespace to every container.
     fn pod_spec(&self, container: Value, volumes: Vec<Value>) -> Value {
-        let platform = self.cluster.platform.as_deref().unwrap_or_default();
-        let mut parts = platform.split('/');
-        let os = parts.next().unwrap_or_default();
-        let arch = parts.next().unwrap_or_default();
         json!({
             "serviceAccountName": self.fleet,
             "enableServiceLinks": false,
-            "nodeSelector": {"kubernetes.io/os": os, "kubernetes.io/arch": arch},
+            "nodeSelector": node_selector(self.cluster),
             "containers": [container],
             "volumes": volumes,
         })
@@ -493,6 +489,18 @@ pub(in crate::deployment) fn image(
         image.push_str(digest);
     }
     image
+}
+
+/// The node selector of a pod of `cluster`: its platform's OS and
+/// architecture, without a variant (`linux/arm64/v8` runs on `arm64`
+/// nodes), as the nodes' `kubernetes.io/os` and `kubernetes.io/arch`
+/// labels name them.
+pub(super) fn node_selector(cluster: &Cluster) -> Value {
+    let platform = cluster.platform.as_deref().unwrap_or_default();
+    let mut parts = platform.split('/');
+    let os = parts.next().unwrap_or_default();
+    let arch = parts.next().unwrap_or_default();
+    json!({"kubernetes.io/os": os, "kubernetes.io/arch": arch})
 }
 
 fn config_mount() -> Value {
