@@ -145,6 +145,22 @@ fn quantities_compare_by_value() {
     }
 }
 
+#[test]
+#[ignore = "F1: a long zero quantity overflows the divisor and panics in Fleet::check"]
+fn a_long_zero_quantity_does_not_panic_during_fleet_check() {
+    let check = |cpu: &str| {
+        let text = changed(r#"cpu = "250m""#, &format!("cpu = {cpu:?}"));
+        fleet(&text).check(Some(&laid()))
+    };
+    check("0").expect("a zero CPU request is valid");
+    assert!(check("fast").is_err(), "malformed quantities are refused");
+    let zero = format!("0.{}", "0".repeat(137));
+    assert!(
+        std::panic::catch_unwind(|| check(&zero)).is_ok(),
+        "Fleet::check must return success or diagnostics for a long quantity"
+    );
+}
+
 /// [`PLACED`] with `from` replaced by `to`, which must be in it.
 fn changed(from: &str, to: &str) -> String {
     assert!(PLACED.contains(from), "{from}");
