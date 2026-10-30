@@ -843,7 +843,7 @@ impl Followed {
                 let figures = self
                     .meters
                     .as_ref()
-                    .map(|meters| meters.figures(&key.0, &key.1));
+                    .map(|meters| meters.figures(&key.0, &key.1, &region));
                 // A newer generation replaces the older at once: nothing
                 // of the older one is carried over, and it holds its
                 // instances until the relay drops it.

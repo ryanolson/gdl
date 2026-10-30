@@ -152,6 +152,42 @@ pub async fn run_graph_in<H: Register + Send + Sync + 'static>(
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> gdl::Result<Running<H>> {
     let process = Process::start(config).await?;
+    launched(process, config, segment, segments, spec, runtime, assemble).await
+}
+
+/// [`run_graph`] for an instance whose settings turn its system listener
+/// on: its process's registry records the runtime's figures and its
+/// chooser's, and `/metrics` on the listener serves them, as a segment
+/// binary's does.
+#[allow(dead_code, reason = "not every test binary records")]
+pub async fn run_recorded<H: Register + Send + Sync + 'static>(
+    mut config: ProcessConfig<Nothing>,
+    segment: &'static str,
+    spec: &DeploymentSpec,
+    runtime: RuntimeConfig,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> gdl::Result<Running<H>> {
+    let process = Process::start(&config).await?;
+    let registry = process.registry(spec, segment)?;
+    config.runtime.metrics = Some(registry.clone());
+    let runtime = RuntimeConfig {
+        metrics: Some(registry),
+        ..runtime
+    };
+    launched(process, &config, segment, SEGMENTS, spec, runtime, assemble).await
+}
+
+/// Launch the started `process` as an instance of `segment`, and serve the
+/// graph `assemble` builds on it with `runtime`.
+async fn launched<H: Register + Send + Sync + 'static>(
+    process: Process,
+    config: &ProcessConfig<Nothing>,
+    segment: &'static str,
+    segments: &'static [&'static str],
+    spec: &DeploymentSpec,
+    runtime: RuntimeConfig,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> gdl::Result<Running<H>> {
     let launch = config
         .launch(&process, segment, segments, spec, async { Ok(()) })
         .await?;

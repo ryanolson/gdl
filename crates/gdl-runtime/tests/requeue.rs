@@ -6,6 +6,10 @@
 //! failover is counted, and the pool is not damped. A policy that does
 //! not ask for this fails over, as before.
 //!
+//! The chooser counts each re-queue, and each re-queued request that
+//! ended at its deadline, under the pool, on its metrics endpoint, beside
+//! what it holds of each pool and how long each offer took.
+//!
 //! The pinned pool has an admission limit of 1, and a request held in it
 //! by the test fills it. Every hub and instance runs in this process on
 //! OS-assigned ports; every wait is bounded and for something observed.
@@ -16,9 +20,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::boundary::{
-    Model, ModelPool, RUNTIME, Running, model_configured, model_of, placement, run_graph, spec_of,
+    Model, ModelPool, RUNTIME, Running, model_configured, model_of, placement, run_recorded,
+    spec_of,
 };
-use common::pools::{Resolving, followed, global_pool, pool_hub_of, settings, until};
+use common::pools::{REGION, Resolving, followed, global_pool, pool_hub_of, settings, until};
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use gdl::{
     Cx, Decline, Encoded, ErrorKind, Next, NoPool, Pool, PoolChoice, PoolPolicies, PoolPolicy,
@@ -71,7 +76,8 @@ fn spec() -> DeploymentSpec {
 
 /// A chooser at the global pool's hub that chooses by [`Pinned`], which
 /// re-queues if `requeue`, and waits up to `backoff_ms` before it offers
-/// a re-queued request again when no offer to its pool ends first.
+/// a re-queued request again when no offer to its pool ends first. Its
+/// system listener is on, and serves its metrics ([`scrape`]).
 async fn chooser(
     spec: &DeploymentSpec,
     hub: &velo_hub::Hub,
@@ -79,7 +85,7 @@ async fn chooser(
     backoff_ms: u64,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
     let extra = format!(
-        "{}{RUNTIME}pool_requeue_backoff_ms = {backoff_ms}\n",
+        "[system]\nhost = \"127.0.0.1\"\nport = 0\n{}{RUNTIME}pool_requeue_backoff_ms = {backoff_ms}\n",
         global_pool()
     );
     let mut config = settings(
@@ -94,11 +100,63 @@ async fn chooser(
         .expect("registered");
     config.runtime.pool_policies = policies;
     let quiet = Events::quiet();
-    run_graph(&config, "a", spec, config.runtime.clone(), &|deployment| {
+    let runtime = config.runtime.clone();
+    run_recorded(config, "a", spec, runtime, &|deployment| {
         reference_graph(deployment, &quiet)
     })
     .await
     .expect("the chooser serves")
+}
+
+/// The prefix every series of a segment's registry carries by default.
+const PREFIX: &str = "dynamo_component_";
+
+/// What `chooser`'s metrics endpoint serves now.
+async fn scrape<H>(chooser: &Running<H>) -> Scraped {
+    let address = chooser.process.system_address().expect("a system listener");
+    let (code, body) = common::system::get(address, "/metrics").await;
+    assert_eq!(code, 200, "{body}");
+    Scraped(body)
+}
+
+/// A scrape of a metrics endpoint, in Prometheus' text format.
+struct Scraped(String);
+
+impl Scraped {
+    /// The value of the series of `name` (without the prefix) whose
+    /// labels include `labels`; `None` when there is none.
+    fn value(&self, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        let name = format!("{PREFIX}{name}{{");
+        self.0
+            .lines()
+            .filter(|line| line.starts_with(&name))
+            .find(|line| {
+                labels
+                    .iter()
+                    .all(|(label, value)| line.contains(&format!("{label}=\"{value}\"")))
+            })
+            .map(|line| {
+                let value = line.rsplit(' ').next().expect("a value");
+                value.parse().unwrap_or_else(|_| panic!("a number: {line}"))
+            })
+    }
+
+    /// [`Scraped::value`] of a family of `M1`'s or `M2`'s series, which
+    /// carry the pool's class and region.
+    fn pool(&self, name: &str, pool: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        let mut all = vec![("class", "model_x"), ("pool", pool), ("region", REGION)];
+        all.extend_from_slice(labels);
+        self.value(name, &all)
+    }
+
+    /// The re-queues of requests for `M1`, and those that ended at their
+    /// deadline.
+    fn requeues(&self) -> (Option<f64>, Option<f64>) {
+        (
+            self.pool("pool_requeues_total", M1, &[]),
+            self.pool("pool_requeue_deadlines_total", M1, &[]),
+        )
+    }
 }
 
 /// `M1`, ready, whose one entry instance admits one request at a time;
@@ -330,6 +388,10 @@ async fn a_full_pool_serves_the_request_it_re_queued_once_room_returns() {
         (2, 0, 0)
     );
     assert_eq!(setup.declined(), 1, "offered again before room returned");
+    assert_eq!(
+        scrape(&setup.chooser).await.requeues(),
+        (Some(1.0), Some(0.0))
+    );
     setup.end().await;
 }
 
@@ -354,6 +416,11 @@ async fn a_pool_that_stays_full_fails_its_re_queued_request_at_the_deadline() {
     assert_eq!(error.kind(), ErrorKind::DeadlineExceeded, "{error}");
     assert!(setup.declined() >= 2, "offered once: {}", setup.declined());
     assert_eq!((offers(&setup.m2), setup.m1.forwards()), (0, 1));
+    // Re-queued once, however many times it was offered again.
+    assert_eq!(
+        scrape(&setup.chooser).await.requeues(),
+        (Some(1.0), Some(1.0))
+    );
     setup.end().await;
 }
 
@@ -371,6 +438,10 @@ async fn a_policy_that_does_not_re_queue_fails_over_from_a_full_pool() {
     assert_eq!((setup.m1.forwards(), setup.m2.forwards()), (1, 1));
     let m = followed(&setup.pools, "f", M1).expect("followed");
     assert!(m.damped.is_some(), "the full pool was not damped: {m:?}");
+    assert_eq!(
+        scrape(&setup.chooser).await.requeues(),
+        (Some(0.0), Some(0.0))
+    );
     setup.end().await;
 }
 
@@ -390,6 +461,10 @@ async fn a_re_queued_request_leaves_a_pool_that_drains() {
         .expect("the request's task")
         .expect("the other pool served it");
     assert_eq!((setup.m1.forwards(), setup.m2.forwards()), (1, 1));
+    assert_eq!(
+        scrape(&setup.chooser).await.requeues(),
+        (Some(1.0), Some(0.0))
+    );
     setup.end().await;
 }
 
@@ -467,7 +542,107 @@ async fn a_request_waits_for_its_pool_while_the_property_it_wants_starts() {
         .expect("the request's task")
         .expect("the pinned pool served it once the model was ready");
     assert_eq!((m1.forwards(), m2.forwards(), offers(&m2)), (1, 0, 0));
+    assert_eq!(scrape(&chooser).await.requeues(), (Some(1.0), Some(0.0)));
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
+}
+
+/// The chooser's metrics endpoint shows, for each of the two pools it
+/// follows, the load summary it holds, the summary's age, the pool's state
+/// and whether it takes work, each labelled with the pool's class, name
+/// and region; and the round trip of each offer, by how it ended, as many
+/// as `pool_offers_total` counts. Known offers: the held request to `M1`,
+/// accepted; then one that `M1` declines as full and `M2` takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_chooser_shows_what_it_holds_of_each_pool_and_its_offers_round_trips() {
+    let setup = setup(false, 60_000).await;
+    tokio::time::timeout(WAIT, send(&setup.chooser, asked("moved"), Cx::new()))
+        .await
+        .expect("answered in time")
+        .expect("the request's task")
+        .expect("the other pool served it");
+    // The held request holds `M1`'s one permit: its summary says so, once
+    // one made after it reached the chooser.
+    until(&setup.pools, "each pool's summary, M1's full", |pools| {
+        followed(pools, "f", M1)
+            .and_then(|m| m.load)
+            .is_some_and(|load| load.admitted == 1)
+            && followed(pools, "f", M2).is_some_and(|m| m.load.is_some())
+    })
+    .await;
+    let scraped = scrape(&setup.chooser).await;
+    let text = &scraped.0;
+
+    for (pool, admitted, limit) in [(M1, 1.0, 1.0), (M2, 0.0, 1024.0)] {
+        assert_eq!(
+            scraped.pool("pool_load_admitted", pool, &[]),
+            Some(admitted),
+            "{pool}: {text}"
+        );
+        assert_eq!(scraped.pool("pool_load_limit", pool, &[]), Some(limit));
+        assert_eq!(scraped.pool("pool_load_instances", pool, &[]), Some(1.0));
+        assert!(
+            scraped.pool("pool_load_refusals", pool, &[]).is_some(),
+            "{pool}: {text}"
+        );
+        // Made by the pool's hub at most a few periods ago.
+        let age = scraped
+            .pool("pool_load_age_seconds", pool, &[])
+            .expect("an age");
+        assert!((0.0..5.0).contains(&age), "{pool}: {age}");
+        assert_eq!(scraped.pool("pool_takes_work", pool, &[]), Some(1.0));
+    }
+    for (pool, state) in [(M1, "ready"), (M2, "degraded")] {
+        for other in ["ready", "degraded", "unavailable", "draining"] {
+            assert_eq!(
+                scraped.pool("pool_state", pool, &[("state", other)]),
+                Some(f64::from(u8::from(other == state))),
+                "{pool} {other}: {text}"
+            );
+        }
+    }
+
+    let outcomes = [
+        "accepted",
+        "declined_full",
+        "declined_gone",
+        "declined_instance",
+        "declined_not_present",
+        "unsent",
+        "outcome_unknown",
+        "failed",
+    ];
+    for (pool, made) in [
+        (M1, [("accepted", 1.0), ("declined_full", 1.0)].as_slice()),
+        (M2, [("accepted", 1.0)].as_slice()),
+    ] {
+        for outcome in outcomes {
+            let expected = made
+                .iter()
+                .find(|(of, _)| *of == outcome)
+                .map_or(0.0, |(_, count)| *count);
+            let offered = scraped.value(
+                "pool_offers_total",
+                &[("class", "model_x"), ("pool", pool), ("outcome", outcome)],
+            );
+            assert_eq!(offered, Some(expected), "{pool} {outcome}");
+            let by = [("outcome", outcome)];
+            let count = scraped.pool("pool_offer_round_trip_seconds_count", pool, &by);
+            assert_eq!(count, Some(expected), "{pool} {outcome}: {text}");
+            let inf = [("outcome", outcome), ("le", "+Inf")];
+            let inf = scraped.pool("pool_offer_round_trip_seconds_bucket", pool, &inf);
+            assert_eq!(inf, Some(expected), "{pool} {outcome}");
+            let sum = scraped
+                .pool("pool_offer_round_trip_seconds_sum", pool, &by)
+                .expect("a sum");
+            assert_eq!(sum > 0.0, expected > 0.0, "{pool} {outcome}: {sum}");
+        }
+    }
+    assert_eq!(
+        scraped.pool("pool_requeues_total", M2, &[]),
+        Some(0.0),
+        "{text}"
+    );
+    setup.end().await;
 }

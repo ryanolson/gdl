@@ -19,6 +19,7 @@ use velo::InstanceId;
 
 use super::damping::Damping;
 use super::lease::{PoolLease, Seen, Wake};
+use super::meter::PoolFigures;
 use super::policy;
 use super::{EntryTable, PoolTable, Pools};
 use crate::dist::roster::{CHOICES, Policy, turn};
@@ -293,6 +294,15 @@ impl Crossing {
             }
         };
         Some(seen.room(&leases, backoff, deadline).await)
+    }
+
+    /// The counts of `pool`'s offers, if the chooser records them and its
+    /// current table shows the pool: one load of the table and a search
+    /// of its pools, with no lock and no allocation.
+    pub(crate) fn figures(&self, pool: u64) -> Option<&'static PoolFigures> {
+        let table = self.target.table.load();
+        let shown = table.pools.iter().find(|shown| shown.id == pool)?;
+        shown.leases.figures()
     }
 
     /// An instance of `pool`, which a request is re-queued for, by

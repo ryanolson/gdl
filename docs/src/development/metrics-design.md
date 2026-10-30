@@ -105,6 +105,16 @@ A chooser counts each offer to a pool under the pool and how it ended ([A choose
 - **Rejected: an `Arc` to the counts in each offer's lease.** Its clone is one more atomic that every thread touches. The counts are leaked once per pool, as the runtime's figures are, and the follow holds a `&'static` reference.
 - **Rejected: a count of each choice as well as each outcome.** Every offer the chooser reads ends in exactly one outcome, so the outcomes add up to the choices, and a second add per offer would count nothing new.
 
+### Round trips, re-queues, and what the chooser holds
+
+These figures are for building pool policies from experiments: what a policy could read, measured before a policy reads it.
+
+- **A round trip starts at the instant the hand-off already keeps.** `deliver` takes the clock after the encoding when the hand-off is timed for its visit, and the hand-off keeps that instant across its wait for the answer. An offer whose pool counts its offers is timed too, so the round trip costs one clock read at the send, one at the answer, and two relaxed adds, with nothing more kept across the wait. **Rejected: an instant of the offer's own.** It would be one more value across the wait, and grow every hand-off's future, as an earlier field did (`a_first_offer_is_no_larger_than_a_hand_off_was`).
+- **One histogram per outcome.** A decline answers sooner than an acceptance, which waits for the entry's admission. One histogram over both would mix the two, and a distance-aware policy wants the acceptances.
+- **`region` on the new families only.** A pool's region is a fixed fact of where it runs. It is taken from the first follow, and the counts stay keyed by the pool's name. `pool_offers_total` and `pool_failovers_total` keep their labels, so their series do not change.
+- **A re-queue reaches its pool's counts through the pool's current table**, which the re-queue already searches for its wait: one load and a search of a few pools, with no lock. **Rejected: `PoolMeters::figures`.** It takes the map's lock.
+- **What the chooser holds is read at the scrape.** The load summary, its age, the state, and whether the pool takes work are already in the chooser's tables, which a choice loads with no lock. A collector loads the same tables when it is scraped, so an offer does nothing for them, and the series go with the follow, as the tables do. **Rejected: gauges the follower sets as each event arrives.** They would be a second copy that can disagree with the tables, and they would need the follower to drop each series when it drops a follow.
+
 ## Open: the cancel gap at the source
 
 When the source's own hop stays in its segment, nothing runs for the source's visit between the caller's reads. After a cancel or a deadline, the visit stays in flight until the caller reads or drops the stream. Where the source's hop crosses to another segment, the task that already watches the crossing ends the visit at no cost per request. Only the source's own hop does this: an operator's attempt carries the visit too, and one attempt's end is not the visit's end.

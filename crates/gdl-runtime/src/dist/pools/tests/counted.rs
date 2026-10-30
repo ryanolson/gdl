@@ -43,7 +43,7 @@ fn a_pools_counts_outlive_its_follows() {
     assert_eq!(offers(&registry, M1, "accepted"), Some(0.0));
     let first = lease(&pools, M1);
     let figures = first.figures().expect("counted");
-    figures.offered(Outcome::Accepted);
+    figures.offered(Outcome::Accepted, None);
 
     live(
         &mut follows,
@@ -55,12 +55,12 @@ fn a_pools_counts_outlive_its_follows() {
     second
         .figures()
         .expect("counted")
-        .offered(Outcome::Accepted);
+        .offered(Outcome::Accepted, None);
     // The answer to the offer made under the first generation lands late.
     first
         .figures()
         .expect("counted")
-        .offered(Outcome::DeclinedFull);
+        .offered(Outcome::DeclinedFull, None);
 
     follows.resnapshot(follows.snapshot(), now);
     live(
@@ -71,7 +71,7 @@ fn a_pools_counts_outlive_its_follows() {
     lease(&pools, M1)
         .figures()
         .expect("counted")
-        .offered(Outcome::Accepted);
+        .offered(Outcome::Accepted, None);
     live(&mut follows, now, [follow(M2, 1, PoolState::Ready)]);
     drop((first, second));
     live(

@@ -29,8 +29,8 @@ mod tests;
 
 pub(crate) use crossing::{Crossing, Left, Target, targets};
 pub(crate) use lease::{PoolLease, Seen};
-pub(crate) use meter::PoolMeters;
-pub(crate) use offer::{Declined, answer};
+pub(crate) use meter::{PoolGauges, PoolMeters};
+pub(crate) use offer::{Declined, answer, timed};
 pub(crate) use task::{REWATCH, REWATCH_CAP, follow, hub_address};
 // The membership's tests drive the follower beside their own.
 #[cfg(test)]

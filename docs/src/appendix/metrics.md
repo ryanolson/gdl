@@ -1,6 +1,6 @@
 # Metrics reference
 
-This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
+This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
 
 ## Names and labels
 
@@ -54,12 +54,17 @@ An entry is a node where a visit begins. The parts a visit has decide which fami
 
 ## A chooser's pool families
 
-A chooser registers two more families: what became of each offer it made to a pool of another class ([A hand-off is an offer](../concepts/pool-routing.md#a-hand-off-is-an-offer)). They have no `dynamo_endpoint`. The chooser registers them as its follower starts, when `RuntimeConfig::metrics` holds a registry, so a segment binary records them only while its listener is on.
+A chooser registers more families: what became of each offer it made to a pool of another class ([A hand-off is an offer](../concepts/pool-routing.md#a-hand-off-is-an-offer)), how long each took, and what it re-queued. They have no `dynamo_endpoint`. The chooser registers them as its follower starts, when `RuntimeConfig::metrics` holds a registry, so a segment binary records them only while its listener is on.
 
 | Name | Type | Extra labels | Meaning |
 |---|---|---|---|
 | `pool_offers_total` | counter | `class`, `pool`, `outcome` | Offers this chooser made to the pool, by how each ended. |
 | `pool_failovers_total` | counter | `class`, `pool` | Offers this chooser made to the pool after another offer of the request missed: another pool's, or another of this pool's instances' own decline. An offer of a request that the pool policy re-queued for the pool is not one. |
+| `pool_offer_round_trip_seconds` | histogram | `class`, `pool`, `region`, `outcome` | Time from the send of an offer to the pool, after its encoding, to its answer, by how it ended. Each offer that `pool_offers_total` counts is one observation, under the same `outcome`. |
+| `pool_requeues_total` | counter | `class`, `pool`, `region` | Requests this chooser re-queued for the pool after the pool declined them as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). A request counts once for each re-queue, however many times it is offered again while it waits. |
+| `pool_requeue_deadlines_total` | counter | `class`, `pool`, `region` | Re-queued requests that ended with `DeadlineExceeded` while re-queued for the pool. A cancel is not one. |
+
+`region` is the pool's region in the first follow of it the chooser saw. A pool's region is set where it is deployed, so its series keep the first. `pool_offers_total` and `pool_failovers_total` do not carry it, so that their series stay as they were.
 
 `outcome` has one series for each of these eight values:
 
@@ -79,6 +84,25 @@ A chooser registers two more families: what became of each offer it made to a po
 - A pool's series appear at zero when the chooser first follows the pool. They are kept by the pool's name, not its follow, so every generation of the pool counts into the same series. They stay for the life of the process, also after the pool's follow is dropped ([limitations](../operations/limitations.md#a-choosers-pool-series-stay-for-the-life-of-its-process)).
 - The pools bound the series: eight and one for each pool of each class the chooser sends to that its hub followed.
 - The chooser counts the decline that the entry gave, not what it did with it. A gone decline of an offer made under an earlier generation of the pool damps the pool, and still counts as `declined_gone`.
+- A round trip starts once the offer is encoded and given to velo, and ends when the chooser reads its answer. It holds the wire both ways and the entry's admission, and, for `outcome_unknown`, the wait up to the setup timeout. An offer over loopback takes about 20 to 30 µs, so it falls in the first bucket, 100 µs.
+
+### What a chooser holds of each pool
+
+A chooser also shows what it holds now of each pool it follows: the load summary of the pool's last report to it ([Load reports and the load summary](../concepts/pools.md#load-reports-and-the-load-summary)), the pool's state, and whether it takes work. These are gauges, read from the chooser's tables at each scrape, so an offer does nothing for them. Each has the labels `class`, `pool`, and `region`.
+
+| Name | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `pool_load_admitted` | gauge | | Requests the pool's entry instances held admitted, in the last load summary the chooser has of the pool. |
+| `pool_load_limit` | gauge | | The admission limit over the same entry instances, in that summary. |
+| `pool_load_refusals` | gauge | | Hand-offs the pool's entry instances declined in the summary's period, in that summary. A count for one period, not a total: it can go down. |
+| `pool_load_instances` | gauge | | The pool's usable entry instances, in that summary. |
+| `pool_load_age_seconds` | gauge | | Seconds since the pool's hub made that summary, on the chooser's clock, as the pool policy reads it. |
+| `pool_state` | gauge | `state` | 1 for the pool's state as its hub last sent it, 0 for each other state: `ready`, `degraded`, `unavailable`, `draining`. |
+| `pool_takes_work` | gauge | | 1 while a pool policy of the chooser sees the pool take work: `ready` or `degraded`, with an entry instance to route to (`gdl::Pool::takes_work`). |
+
+- A pool with no load summary yet has no `pool_load_*` series, rather than zeros, which would read as an idle pool.
+- A class can have more than one entry segment, and the chooser keeps one table per entry segment. A pool shows once. Its state and load are the same in each table, since they come from its one follow. It takes work when a pool policy sees it take work in any of them.
+- These series follow the tables: a pool's series go when its follow is dropped. The counts above stay for the life of the process.
 
 ## A pool hub's record tables
 
@@ -100,7 +124,7 @@ An instance under a pool's hub registers one more family: what became of each wr
 
 ## Buckets
 
-All five histograms use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
+All six histograms, the runtime's five and `pool_offer_round_trip_seconds`, use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
 
 ## `error_type` values
 
@@ -108,6 +132,6 @@ Each error family has one series for each of these ten values, at zero from the 
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 20 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the two pool families, `pool_record_writes_total`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 30 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the 12 families of a chooser's pools, `pool_record_writes_total`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.

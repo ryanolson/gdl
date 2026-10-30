@@ -101,8 +101,16 @@ A chooser counts each offer to a pool of another class under the pool and how it
 - **Instances that serve different requests:** a pool's `declined_instance` rises with its `pool_failovers_total`, and its other series do not change. Each such decline costs the request one round trip.
 - **A chooser's view of the pools' properties is out of date:** a pool's `declined_not_present` rises, and its other requests are still `accepted`. Each such decline costs the request one round trip and one of its `pool_failovers`.
 - **A transport fault:** `unsent` says velo refused to send. `outcome_unknown` says the request may have run, and failed for its caller.
+- **How far a pool is:** `pool_offer_round_trip_seconds{outcome="accepted"}` by `pool` and `region`: the wire both ways and the entry's admission. Declines are timed apart, under their own `outcome`.
+- **A pool that keeps a re-queued request waiting:** `pool_requeues_total` rises with its `declined_full`, and `pool_requeue_deadlines_total` counts the requests that waited until their deadline.
 
-The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)).
+A chooser also shows what it holds of each pool now, as gauges: the last load summary it has (`pool_load_admitted`, `pool_load_limit`, `pool_load_refusals`, `pool_load_instances`) and its age (`pool_load_age_seconds`), the pool's state (`pool_state`, one series per state), and whether a pool policy sees it take work (`pool_takes_work`). These are what a pool policy reads when it chooses, so a policy can be tried against them before it is written.
+
+- **A pool near its limit:** `pool_load_admitted` over `pool_load_limit`.
+- **A stale view:** `pool_load_age_seconds` past a few of the pool's summary periods. `home_first` passes over a pool whose summary is stale.
+- **A pool that stopped taking work:** `pool_takes_work` at 0, with `pool_state` saying why.
+
+The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, and two more for its round trip, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)). The gauges are read from the chooser's tables at each scrape and cost an offer nothing.
 
 ## Logs
 

@@ -291,7 +291,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **No listener:** a segment binary records the runtime's per-segment figures only when `[system] port` (or `DYN_SYSTEM_PORT`) turns its listener on. A node's own metrics are still counted, in a registry nobody serves. With no listener nothing can read the figures, so recording them would only cost.
 
 ### A chooser's pool series stay for the life of its process
-- **What:** a pool's `pool_offers_total` and `pool_failovers_total` series stay after the pool's follow is dropped, at their last counts. Each pool's counts take up to 8 KiB.
+- **What:** a pool's `pool_offers_total`, `pool_failovers_total`, `pool_offer_round_trip_seconds`, `pool_requeues_total`, and `pool_requeue_deadlines_total` series stay after the pool's follow is dropped, at their last counts. Each pool's counts take up to 104 KiB: one shard per thread, up to 64, and most of each is the round trips' buckets. The gauges of what the chooser holds of the pool go with its follow.
 - **When:** a chooser's hub follows many pools of different names over the chooser's life, for example pools named per deployment.
 - **Why:** an answer to an offer made before the drop can still arrive, and a scrape after the drop must still see the last counts. Dropping the series would lose them. See [Metrics reference](../appendix/metrics.md#a-choosers-pool-families).
 - **Workaround:** reuse pool names, or restart the chooser.

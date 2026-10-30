@@ -147,7 +147,8 @@ pub mod __runtime {
     pub use crate::followed::{PoolSource, PropertyKindsNow};
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{
-        END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
+        END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Spans, Visit, ended,
+        histogram, note,
     };
     pub use crate::policy::{ChoiceHeld, ErasedPolicy, TypedPolicy, Window, pool_id};
     pub use crate::properties::{Presence, Want};

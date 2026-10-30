@@ -25,7 +25,8 @@
 //! policy did not re-queue the request.
 
 use gdl::__runtime::ChoiceHeld;
-use gdl::{Cx, NoPool, Result};
+use gdl::{Cx, ErrorKind, NoPool, Result};
+use tokio::time::Instant;
 use velo::InstanceId;
 
 use super::crossing::{Again, Left, Walk};
@@ -47,11 +48,18 @@ use gdl::Decline;
 /// nothing of the pool, and changes nothing. An unknown outcome names the
 /// class, since it is not offered to another pool. Every answer counts
 /// under the pool and how it ended, when the chooser records its offers:
-/// one relaxed add to the counts the lease on the pool's follow reaches.
-pub(crate) fn answer(offered: Offered, crossing: &Crossing, pool: u64, held: &mut Held) -> Answer {
+/// one relaxed add to the counts the lease on the pool's follow reaches,
+/// and, with `sent`, when the offer left ([`timed`]), its round trip.
+pub(crate) fn answer(
+    offered: Offered,
+    crossing: &Crossing,
+    pool: u64,
+    held: &mut Held,
+    sent: Option<Instant>,
+) -> Answer {
     let answer = delivered(offered, Some(crossing.class()));
     if let Some(figures) = held.pool_lease().and_then(PoolLease::figures) {
-        figures.offered(Outcome::of(&answer));
+        figures.offered(Outcome::of(&answer), sent.map(|sent| sent.elapsed()));
     }
     match &answer {
         Answer::Accepted(_) => {
@@ -65,6 +73,15 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, pool: u64, held: &mu
         Answer::Missed(Missed::Unsent(_)) | Answer::Failed(_) => {}
     }
     answer
+}
+
+/// Whether an offer that `held` holds is timed: when the hand-off's own
+/// visit times it (`timed`), or when the chooser counts the pool's offers,
+/// which then measures its round trip from the same instant. One instant,
+/// which the hand-off already keeps across its wait, serves both.
+#[inline]
+pub(crate) fn timed(timed: bool, held: &Held) -> bool {
+    timed || held.pool_lease().and_then(PoolLease::figures).is_some()
 }
 
 impl Runtime {
@@ -187,6 +204,10 @@ impl Runtime {
                         if last == Some(Decline::Full) {
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
+                                let figures = crossing.figures(pool);
+                                if let Some(figures) = figures {
+                                    figures.requeued();
+                                }
                                 let requeued_for = self.requeue(
                                     crossing,
                                     cx,
@@ -196,7 +217,13 @@ impl Runtime {
                                     &mut choice,
                                     &mut seen,
                                 );
-                                match requeued_for.await? {
+                                let ended = requeued_for.await;
+                                if let (Some(figures), Err(error)) = (figures, &ended)
+                                    && error.kind() == ErrorKind::DeadlineExceeded
+                                {
+                                    figures.requeue_deadline();
+                                }
+                                match ended? {
                                     Requeued::Handed(handed) => return Ok(handed),
                                     Requeued::Missed(to, then) => {
                                         last = reason(&then);
@@ -232,8 +259,8 @@ impl Runtime {
                 }
             };
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
-            let (offering, sent) = self.deliver(to, envelope, timed)?;
-            let answer = answer(offering.await, crossing, at, &mut held);
+            let (offering, sent) = self.deliver(to, envelope, self::timed(timed, &held))?;
+            let answer = answer(offering.await, crossing, at, &mut held, sent);
             // Counted with the answer, so that an offer whose answer is
             // never read counts nothing.
             if let Some(figures) = held.pool_lease().and_then(PoolLease::figures) {
@@ -367,11 +394,11 @@ impl Runtime {
                 Again::Unavailable => return Ok(Requeued::Unavailable),
             };
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
-            let (offering, sent) = self.deliver(to, envelope, timed)?;
+            let (offering, sent) = self.deliver(to, envelope, self::timed(timed, &held))?;
             if let Some(woken) = woken {
                 woken.used();
             }
-            match answer(offering.await, crossing, pool, &mut held) {
+            match answer(offering.await, crossing, pool, &mut held, sent) {
                 Answer::Accepted(accepted) => {
                     return Ok(Requeued::Handed(Handed {
                         accepted,
@@ -554,8 +581,9 @@ mod tests {
     /// A chooser's first offer, accepted, allocates what the same hand-off
     /// routed by the roster does, with a policy and with a selector that
     /// replaces the request's own meta: nothing for a failover is made
-    /// before a pool declines, and counting the offer's outcome allocates
-    /// nothing.
+    /// before a pool declines, and counting the offer's outcome and its
+    /// round trip allocates nothing. The hand-off is not timed for a
+    /// visit, and its round trip is still measured.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accepted_first_offer_allocates_what_a_roster_hand_off_does() {
         let layout = layout();
@@ -613,7 +641,7 @@ mod tests {
                 revision: 1,
                 changes: 0,
                 leases: Arc::new(super::super::lease::Leases::counted(Some(
-                    meters.figures("model_x", "m1"),
+                    meters.figures("model_x", "m1", "home"),
                 ))),
             })])),
         );
@@ -655,6 +683,9 @@ mod tests {
             super::super::meter::tests::offers(&registry, "m1", "accepted"),
             Some(62.0)
         );
+        let round_trips = super::super::meter::tests::round_trips(&registry, "m1", "accepted")
+            .expect("a histogram");
+        assert_eq!(round_trips.get_sample_count(), 62);
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -892,7 +923,9 @@ mod tests {
                     offering: true,
                     revision: 1,
                     changes: 0,
-                    leases: Arc::new(Leases::counted(Some(meters.figures("model_x", name)))),
+                    leases: Arc::new(Leases::counted(Some(
+                        meters.figures("model_x", name, "home"),
+                    ))),
                 })
             })
             .collect();
@@ -1040,7 +1073,9 @@ mod tests {
                 offering: true,
                 revision: 1,
                 changes: 0,
-                leases: Arc::new(Leases::counted(Some(meters.figures("model_x", name)))),
+                leases: Arc::new(Leases::counted(Some(
+                    meters.figures("model_x", name, "home"),
+                ))),
             })
         })
         .collect();
@@ -1692,12 +1727,12 @@ mod tests {
         }
         // What an offer adds to count its outcome under its pool.
         let meters = super::super::PoolMeters::unregistered();
-        let figures = meters.figures("model_x", "m1");
+        let figures = meters.figures("model_x", "m1", "home");
         let mut best = Duration::MAX;
         for _ in 0..5 {
             let start = std::time::Instant::now();
             for _ in 0..PICKS {
-                std::hint::black_box(figures).offered(super::super::meter::Outcome::Accepted);
+                std::hint::black_box(figures).offered(super::super::meter::Outcome::Accepted, None);
             }
             best = best.min(start.elapsed());
         }

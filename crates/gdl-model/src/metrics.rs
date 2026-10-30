@@ -75,12 +75,13 @@ impl MetricKind {
 }
 
 /// The metrics the runtime records for each segment, those a chooser
-/// records of its offers to pools, the writes to a pool hub's record
-/// tables, and dynamo's `request_duration_seconds`,
+/// records of its offers to pools and shows of the pools it follows, the
+/// writes to a pool hub's record tables, and dynamo's
+/// `request_duration_seconds`,
 /// which it reserves. A node's own metrics may not take these names: they
 /// would collide in the registry, or, for the reserved one, a dashboard
 /// would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 20] = [
+pub const RUNTIME_METRICS: [&str; 30] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -99,6 +100,16 @@ pub const RUNTIME_METRICS: [&str; 20] = [
     "uptime_seconds",
     "pool_offers_total",
     "pool_failovers_total",
+    "pool_offer_round_trip_seconds",
+    "pool_requeues_total",
+    "pool_requeue_deadlines_total",
+    "pool_load_admitted",
+    "pool_load_limit",
+    "pool_load_refusals",
+    "pool_load_instances",
+    "pool_load_age_seconds",
+    "pool_state",
+    "pool_takes_work",
     "pool_record_writes_total",
     "request_duration_seconds",
 ];

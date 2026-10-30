@@ -209,15 +209,18 @@ impl Tally {
 }
 
 /// Durations, by the first bucket whose bound holds each; the last counts
-/// those longer than every bound.
+/// those longer than every bound. One shard's share of a histogram: a
+/// scrape sums the shards ([`histogram`]).
 #[derive(Default)]
-struct Spans {
+pub struct Spans {
     buckets: [AtomicU64; BUCKETS.len() + 1],
     nanos: AtomicU64,
 }
 
 impl Spans {
-    fn observe(&self, elapsed: Duration) {
+    /// Count `elapsed`: two relaxed adds.
+    #[inline]
+    pub fn observe(&self, elapsed: Duration) {
         let seconds = elapsed.as_secs_f64();
         let bucket = BUCKETS
             .iter()
@@ -760,27 +763,36 @@ fn series(entry: &str, shards: &[Shard], read: &Read, out: &mut Vec<proto::Metri
             out.push(metric);
         }
         Read::Histogram(read) => {
-            // The count is the sum of the buckets read, so that `_count`
-            // and the `+Inf` bucket agree whatever ends during the scrape.
-            let mut histogram = proto::Histogram::default();
-            let mut cumulative = 0;
-            let mut buckets = Vec::with_capacity(BUCKETS.len());
-            for (index, bound) in BUCKETS.iter().enumerate() {
-                cumulative += sum(shards, |s| read(s).buckets[index].load(Relaxed));
-                let mut bucket = proto::Bucket::default();
-                bucket.set_cumulative_count(cumulative);
-                bucket.set_upper_bound(*bound);
-                buckets.push(bucket);
-            }
-            cumulative += sum(shards, |s| read(s).buckets[BUCKETS.len()].load(Relaxed));
-            histogram.set_bucket(buckets);
-            histogram.set_sample_count(cumulative);
-            histogram.set_sample_sum(sum(shards, |s| read(s).nanos.load(Relaxed)) as f64 / 1e9);
             let mut metric = proto::Metric::from_label(vec![label(ENDPOINT_LABEL, entry)]);
-            metric.set_histogram(histogram);
+            metric.set_histogram(histogram(shards.iter().map(read)));
             out.push(metric);
         }
     }
+}
+
+/// The histogram of the durations in `shards`, summed, in the buckets
+/// every duration of the runtime's uses. The count is the sum of the
+/// buckets read, so that `_count` and the `+Inf` bucket agree whatever
+/// ends during the scrape.
+pub fn histogram<'a>(shards: impl Iterator<Item = &'a Spans> + Clone) -> proto::Histogram {
+    let total = |read: &dyn Fn(&Spans) -> &AtomicU64| -> u64 {
+        shards.clone().map(|spans| read(spans).load(Relaxed)).sum()
+    };
+    let mut histogram = proto::Histogram::default();
+    let mut cumulative = 0;
+    let mut buckets = Vec::with_capacity(BUCKETS.len());
+    for (index, bound) in BUCKETS.iter().enumerate() {
+        cumulative += total(&|spans| &spans.buckets[index]);
+        let mut bucket = proto::Bucket::default();
+        bucket.set_cumulative_count(cumulative);
+        bucket.set_upper_bound(*bound);
+        buckets.push(bucket);
+    }
+    cumulative += total(&|spans| &spans.buckets[BUCKETS.len()]);
+    histogram.set_bucket(buckets);
+    histogram.set_sample_count(cumulative);
+    histogram.set_sample_sum(total(&|spans| &spans.nanos) as f64 / 1e9);
+    histogram
 }
 
 impl Collector for Scrape {

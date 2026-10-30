@@ -58,6 +58,12 @@ impl Leases {
         Self(AtomicUsize::new(0), figures, Room::default())
     }
 
+    /// The counts of the pool's offers, if the chooser records them.
+    #[inline]
+    pub(crate) fn figures(&self) -> Option<&'static PoolFigures> {
+        self.1
+    }
+
     /// Mark the follow not offered: no lease is taken from now on. Every
     /// request that waits for room on it is woken, to choose again under
     /// the pool's current follow, or to leave the pool: no lease can end

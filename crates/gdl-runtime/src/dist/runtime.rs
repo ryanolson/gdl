@@ -969,8 +969,10 @@ impl Runtime {
                     // Read before the offer, so that a re-queue after it
                     // sees every lease end since (`Leases::room`).
                     let ends = held.pool_lease().map_or(0, super::pools::PoolLease::ends);
-                    let (offering, sent) = self.deliver(instance, &mut envelope, timed)?;
-                    return match super::pools::answer(offering.await, crossing, pool, &mut held) {
+                    let counted = super::pools::timed(timed, &held);
+                    let (offering, sent) = self.deliver(instance, &mut envelope, counted)?;
+                    let offered = offering.await;
+                    return match super::pools::answer(offered, crossing, pool, &mut held, sent) {
                         Answer::Accepted(accepted) => Ok(Handed {
                             accepted,
                             sent,

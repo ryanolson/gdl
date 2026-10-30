@@ -22,7 +22,7 @@ use velo::Velo;
 
 use super::damping::Damping;
 use super::follow::{Asked, Follows, Key};
-use super::{PoolMeters, Pools};
+use super::{PoolGauges, PoolMeters, Pools};
 use crate::RuntimeConfig;
 use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
@@ -98,6 +98,9 @@ pub(crate) fn follow(
         .as_ref()
         .map(PoolMeters::register)
         .transpose()?;
+    if let Some(registry) = &runtime.metrics {
+        PoolGauges::register(registry, pools.clone())?;
+    }
     let follows = Follows::new(
         pools.clone(),
         node.clone(),
