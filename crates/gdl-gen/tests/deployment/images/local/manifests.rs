@@ -171,3 +171,45 @@ fn parent_components_cannot_admit_an_absolute_host_dependency() {
     );
     assert!(docker.contexts.is_empty());
 }
+
+/// A manifest reached through an internal file link must still name its
+/// absolute dependencies within the prepared tree.
+#[cfg(unix)]
+#[test]
+#[ignore = "linked manifests still retain absolute host dependencies"]
+fn a_linked_manifest_resolves_without_the_host_sources() {
+    let copy = Copy::new();
+    let api = copy.path().join("examples/api");
+    let support = api.join("support");
+    std::fs::create_dir_all(support.join("src")).expect("a dependency directory");
+    std::fs::write(
+        support.join("Cargo.toml"),
+        "[package]\nname = \"image-support\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a dependency manifest");
+    std::fs::write(support.join("src/lib.rs"), "pub const VALUE: u8 = 1;\n")
+        .expect("a dependency source");
+    let manifest = api.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("the node manifest");
+    text.push_str(&format!(
+        "\n[dependencies.image-support]\npath = {}\n",
+        toml::Value::String(support.display().to_string())
+    ));
+    std::fs::write(&manifest, text).expect("an absolute path dependency");
+    std::fs::rename(&manifest, api.join("Manifest.toml")).expect("move the manifest text");
+    std::os::unix::fs::symlink("Manifest.toml", &manifest).expect("an internal manifest link");
+    let mut docker = Isolated {
+        host: &support,
+        checked: false,
+    };
+    gdl_gen::images(
+        &copy.spec(),
+        &fleet(),
+        &target(),
+        false,
+        gdl_gen::Sources::Local,
+        &mut docker,
+    )
+    .expect("local images");
+    assert!(docker.checked);
+}
