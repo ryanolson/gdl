@@ -17,6 +17,7 @@ use std::{
 };
 
 use aws_sdk_dynamodb::types::AttributeValue;
+use gdl_model::dynamodb_tables;
 use gdl_pools::{
     DirectoryError, PoolEvent, PoolProperty, PoolRecord, ResumeToken, Version, Withdrawal,
 };
@@ -26,9 +27,9 @@ use serde::{Deserialize, Serialize};
 pub(crate) type Item = HashMap<String, AttributeValue>;
 
 /// The records table's partition key: the pool's class.
-pub(crate) const CLASS: &str = "class";
+pub(crate) const CLASS: &str = dynamodb_tables::RECORDS_KEYS.0;
 /// The records table's sort key: the pool's name.
-pub(crate) const POOL: &str = "pool";
+pub(crate) const POOL: &str = dynamodb_tables::RECORDS_KEYS.1;
 const EPOCH: &str = "epoch";
 const SEQ: &str = "seq";
 const ORDER: &str = "order";
@@ -36,14 +37,14 @@ const KIND: &str = "kind";
 const BODY: &str = "body";
 const LIST: &str = "list";
 /// The lists table's partition key: `<class>/<pool>`.
-pub(crate) const OWNER: &str = "owner";
+pub(crate) const OWNER: &str = dynamodb_tables::LISTS_KEYS.0;
 /// The lists table's sort key.
-pub(crate) const LIST_KEY: &str = LIST;
+pub(crate) const LIST_KEY: &str = dynamodb_tables::LISTS_KEYS.1;
 /// The records table's attribute that holds the key of the record's list.
 pub(crate) const NAMES: &str = LIST;
 /// The lists table's TTL attribute: set only on a list its pool has moved
 /// past, never on one a record names.
-pub(crate) const EXPIRES_AT: &str = "expires_at";
+pub(crate) const EXPIRES_AT: &str = dynamodb_tables::TTL_ATTRIBUTE;
 
 const RECORD: &str = "record";
 const WITHDRAWN: &str = "withdrawn";

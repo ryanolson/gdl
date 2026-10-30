@@ -324,6 +324,20 @@ impl DirectoryBackend {
     };
 }
 
+/// The DynamoDB directory's tables, as `gdl-pools-dynamodb` makes and
+/// reads them: each table's partition and sort key, both strings, and the
+/// lists table's TTL attribute. Kept here, which both the backend and a
+/// generator's `dynamodb/tables.json` read, so that the two never differ.
+pub mod dynamodb_tables {
+    /// The records table's partition key, the pool's class, and sort key,
+    /// the pool's name.
+    pub const RECORDS_KEYS: (&str, &str) = ("class", "pool");
+    /// The lists table's partition key, `<class>/<pool>`, and sort key.
+    pub const LISTS_KEYS: (&str, &str) = ("owner", "list");
+    /// The lists table's TTL attribute.
+    pub const TTL_ATTRIBUTE: &str = "expires_at";
+}
+
 impl DirectoryBackend {
     /// The `dynamodb` backend with its keys, checked as reading `[pool]`
     /// checks them: each table's name is a DynamoDB table's, the region an
