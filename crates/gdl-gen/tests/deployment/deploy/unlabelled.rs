@@ -93,8 +93,8 @@ fn down_names_objects_without_a_cluster_and_deletes_nothing() {
         .to_string();
     for part in [
         "cluster `euw1`: namespace `gdl-api` holds objects of the fleet that carry no `gdl.dev/cluster` label",
-        "deployment/global-eu",
-        "label deployment/global-eu gdl.dev/cluster=euw1",
+        "deployments.apps/global-eu",
+        "label deployments.apps/global-eu gdl.dev/cluster=euw1",
     ] {
         assert!(error.contains(part), "{part} in {error}");
     }
@@ -125,6 +125,6 @@ fn a_prune_refuses_objects_without_a_cluster() {
     let error = deploy(&mirror, &files, &mut docker, &mut kube)
         .expect_err("an object of no known cluster")
         .to_string();
-    assert!(error.contains("deployment/global-old"), "{error}");
+    assert!(error.contains("deployments.apps/global-old"), "{error}");
     assert!(deletes(&log, "kind-use1").is_empty());
 }

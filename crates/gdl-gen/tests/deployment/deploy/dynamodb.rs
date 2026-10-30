@@ -44,9 +44,9 @@ fn order(log: &Log) -> Vec<String> {
             "pools"
         } else if has("pods") && args.iter().any(|a| a.contains("dynamodb-local")) {
             "local"
-        } else if has("delete") && args.iter().any(|a| a == "job/dynamodb-tables") {
+        } else if has("delete") && args.iter().any(|a| a == "jobs.batch/dynamodb-tables") {
             "delete-job"
-        } else if has("job") {
+        } else if has("jobs.batch") {
             "job"
         } else if has("logs") {
             "logs"
@@ -229,7 +229,10 @@ fn a_removed_dynamodb_pool_is_deleted_only_once_its_own_hub_says_withdrawn() {
     let reads = withdrawn_reads(&log, "model-x-old");
     assert_eq!(reads.len(), 3, "two false, then true: {reads:?}");
     assert!(reads[0] > drained, "read before the drain");
-    for object in ["deployment/model-x-old-engine", "deployment/model-x-old"] {
+    for object in [
+        "deployments.apps/model-x-old-engine",
+        "deployments.apps/model-x-old",
+    ] {
         let deleted = deleted_at(&log, "kind-use1", object).expect("deleted");
         assert!(
             deleted > *reads.last().expect("a read"),
@@ -265,7 +268,10 @@ fn a_dynamodb_pool_that_never_says_withdrawn_stops_the_deploy() {
         "{error}"
     );
     assert!(withdrawn_reads(&log, "model-x-old").len() > 1);
-    for object in ["deployment/model-x-old-engine", "deployment/model-x-old"] {
+    for object in [
+        "deployments.apps/model-x-old-engine",
+        "deployments.apps/model-x-old",
+    ] {
         assert_eq!(deleted_at(&log, "kind-use1", object), None, "{object}");
     }
 }
@@ -289,7 +295,7 @@ fn a_dynamodb_pool_without_its_hub_is_not_deleted() {
         deploy(&mirror, &files, &mut docker, &mut kube).expect_err("a pool without its hub");
     assert!(error.to_string().contains("`model-x-old`"), "{error}");
     assert_eq!(
-        deleted_at(&log, "kind-use1", "deployment/model-x-old-engine"),
+        deleted_at(&log, "kind-use1", "deployments.apps/model-x-old-engine"),
         None
     );
     assert!(
@@ -345,9 +351,9 @@ fn down_deletes_the_local_after_the_hubs() {
             .position(|batch| batch.iter().any(|o| o == object))
             .unwrap_or_else(|| panic!("{object} is not deleted: {batches:?}"))
     };
-    assert!(at("deployment/global-us-front") < at("deployment/global-us"));
-    assert!(at("deployment/global-us") < at("deployment/dynamodb-local"));
-    assert!(at("deployment/global-us") < at("job/dynamodb-tables"));
+    assert!(at("deployments.apps/global-us-front") < at("deployments.apps/global-us"));
+    assert!(at("deployments.apps/global-us") < at("deployments.apps/dynamodb-local"));
+    assert!(at("deployments.apps/global-us") < at("jobs.batch/dynamodb-tables"));
     // Only each namespace stays.
     for context in ["kind-use1", "kind-euw1"] {
         let left: Vec<&(String, String)> = kube.objects[context].keys().collect();
@@ -386,8 +392,8 @@ fn down_keeps_the_local_until_every_clusters_hubs_stop() {
             })
             .unwrap_or_else(|| panic!("{context}: {object} was not deleted"))
     };
-    let local = deletion("kind-euw1", "deployment/dynamodb-local");
-    for hub in ["deployment/global-us", "deployment/model-x-us"] {
+    let local = deletion("kind-euw1", "deployments.apps/dynamodb-local");
+    for hub in ["deployments.apps/global-us", "deployments.apps/model-x-us"] {
         let stopped = deletion("kind-use1", hub);
         assert!(
             stopped < local,

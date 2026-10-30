@@ -194,14 +194,27 @@ impl Kube for Kubectl {
 /// render no longer writes.
 const MANAGER: &str = "--field-manager=gdl";
 
-/// The kinds of namespaced object the render writes, as `kubectl get`
-/// takes them: what `deploy` prunes and `down` deletes.
-pub(super) const KINDS: &str =
-    "deployments.apps,services,configmaps,persistentvolumeclaims,serviceaccounts,jobs.batch";
+/// Each kind of namespaced object the render writes, and its resource,
+/// qualified by its API group, as `kubectl get` and `kubectl delete` take
+/// it: what `deploy` prunes and `down` deletes. A delete names the same
+/// resource the listing did: `podmonitor/<name>` alone could resolve to
+/// another group's kind of that name.
+pub(super) const RESOURCES: [(&str, &str); 7] = [
+    ("Deployment", "deployments.apps"),
+    ("Service", "services"),
+    ("ConfigMap", "configmaps"),
+    ("PersistentVolumeClaim", "persistentvolumeclaims"),
+    ("ServiceAccount", "serviceaccounts"),
+    ("Job", JOBS),
+    ("PodMonitor", PODMONITORS),
+];
+
+/// A Job, as its group qualifies it.
+pub(super) const JOBS: &str = "jobs.batch";
 
 /// The Prometheus operator's PodMonitor, as `kubectl get` takes it: listed
-/// with [`KINDS`] only in a cluster that has its CRD, since `kubectl get`
-/// fails on a resource the cluster does not know.
+/// only in a cluster that has its CRD, since `kubectl get` fails on a
+/// resource the cluster does not know.
 pub(super) const PODMONITORS: &str = "podmonitors.monitoring.coreos.com";
 
 /// The API group of [`PODMONITORS`].
@@ -274,13 +287,15 @@ impl At<'_> {
         self.cluster(&["api-resources", &group, "--output=name"])
     }
 
-    /// The namespace's objects of [`KINDS`] that `selector` selects, and
-    /// its PodMonitors when `monitors`, as a JSON list.
+    /// The namespace's objects of [`RESOURCES`] that `selector` selects,
+    /// PodMonitors only when `monitors`, as a JSON list.
     pub(super) fn list(&self, selector: &str, monitors: bool) -> Vec<String> {
-        let kinds = match monitors {
-            true => format!("{KINDS},{PODMONITORS}"),
-            false => KINDS.to_string(),
-        };
+        let kinds: Vec<&str> = RESOURCES
+            .iter()
+            .map(|(_, resource)| *resource)
+            .filter(|resource| monitors || *resource != PODMONITORS)
+            .collect();
+        let kinds = kinds.join(",");
         self.namespaced(&["get", &kinds, "--selector", selector, "--output", "json"])
     }
 
@@ -291,12 +306,12 @@ impl At<'_> {
 
     /// Job `name` of the namespace, as JSON.
     pub(super) fn job(&self, name: &str) -> Vec<String> {
-        self.namespaced(&["get", "job", name, "--output", "json"])
+        self.namespaced(&["get", JOBS, name, "--output", "json"])
     }
 
     /// The log of Job `name`'s pod.
     pub(super) fn job_log(&self, name: &str) -> Vec<String> {
-        let job = format!("job/{name}");
+        let job = format!("{JOBS}/{name}");
         self.namespaced(&["logs", &job])
     }
 

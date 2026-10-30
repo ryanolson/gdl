@@ -130,8 +130,8 @@ fn a_withdrawn_child_without_its_hub_is_pruned() {
     assert_eq!(
         deletes(&log, "kind-use1"),
         [
-            vec!["deployment/model-x-removed-engine".to_string()],
-            vec!["service/model-x-removed".into()],
+            vec!["deployments.apps/model-x-removed-engine".to_string()],
+            vec!["services/model-x-removed".into()],
         ]
     );
 }

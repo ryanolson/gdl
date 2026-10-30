@@ -20,7 +20,12 @@ fn rename_segment(segment: &str, replacement: &str, pool: &str) {
     let replaced: Vec<String> = kube.objects["kind-euw1"]
         .keys()
         .filter(|(_, name)| name == &format!("{pool}-{segment}"))
-        .map(|(kind, name)| format!("{}/{name}", kind.to_ascii_lowercase()))
+        .map(|(kind, name)| match kind.as_str() {
+            // Each by its resource, qualified by its group, as deletes name it.
+            "Deployment" => format!("deployments.apps/{name}"),
+            "Service" => format!("services/{name}"),
+            other => panic!("a {other} of the segment"),
+        })
         .collect();
     assert!(!replaced.is_empty(), "the initial segment exists");
 

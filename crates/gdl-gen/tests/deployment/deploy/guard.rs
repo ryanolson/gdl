@@ -45,8 +45,8 @@ fn aliases_prune_removed_objects_and_keep_applied_objects() {
     assert_eq!(
         deletes(&log, "shared-cluster"),
         [
-            vec!["deployment/removed-euw1".to_string()],
-            vec!["deployment/removed-use1".to_string()]
+            vec!["deployments.apps/removed-euw1".to_string()],
+            vec!["deployments.apps/removed-use1".to_string()]
         ]
     );
     for name in ["global-eu", "global-us", "model-x-eu", "model-x-us"] {

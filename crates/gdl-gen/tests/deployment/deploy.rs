@@ -258,7 +258,7 @@ impl gdl_gen::Kube for Kube {
                 gdl_gen::Reply::ok(self.local_pods.to_string())
             }
             ("get", None) if rest[1] == "pods" => gdl_gen::Reply::ok(self.pods.to_string()),
-            ("get", None) if rest[1] == "job" => {
+            ("get", None) if rest[1] == "jobs.batch" => {
                 gdl_gen::Reply::ok(json!({"kind": "Job", "status": self.job}).to_string())
             }
             ("logs", None) => gdl_gen::Reply::ok(self.job_log),
@@ -303,7 +303,14 @@ impl gdl_gen::Kube for Kube {
                     .iter()
                     .filter(|a| !a.starts_with("--") && *a != "delete")
                 {
-                    let (kind, name) = reference.split_once('/').expect("kind/name");
+                    let (resource, name) = reference.split_once('/').expect("resource/name");
+                    // `deployments.apps` names a Deployment, `podmonitor` a
+                    // PodMonitor.
+                    let kind = resource
+                        .split('.')
+                        .next()
+                        .expect("a resource")
+                        .trim_end_matches('s');
                     let objects = self.objects.entry(context.clone()).or_default();
                     let before = objects.len();
                     objects.retain(|(k, n), _| !(k.eq_ignore_ascii_case(kind) && n == name));
@@ -728,15 +735,15 @@ fn a_prune_drains_a_removed_pool_and_deletes_only_what_was_not_rendered() {
     assert_eq!(
         deletes(&log, "kind-use1"),
         [
-            vec!["deployment/model-x-old-engine".to_string()],
+            vec!["deployments.apps/model-x-old-engine".to_string()],
             vec![
-                "deployment/global-old".into(),
-                "deployment/model-x-old".into()
+                "deployments.apps/global-old".into(),
+                "deployments.apps/model-x-old".into()
             ],
             vec![
-                "configmap/model-x-old".into(),
-                "persistentvolumeclaim/global-old-state".into(),
-                "service/model-x-old".into(),
+                "configmaps/model-x-old".into(),
+                "persistentvolumeclaims/global-old-state".into(),
+                "services/model-x-old".into(),
             ],
         ]
     );
@@ -916,12 +923,12 @@ fn down_drains_deletes_and_keeps_the_namespace() {
         deletes(&log, "kind-use1")[..2],
         [
             vec![
-                "deployment/global-us-front".to_string(),
-                "deployment/model-x-us-engine".into(),
+                "deployments.apps/global-us-front".to_string(),
+                "deployments.apps/model-x-us-engine".into(),
             ],
             vec![
-                "deployment/global-us".into(),
-                "deployment/model-x-us".into()
+                "deployments.apps/global-us".into(),
+                "deployments.apps/model-x-us".into()
             ],
         ]
     );

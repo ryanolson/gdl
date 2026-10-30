@@ -95,9 +95,19 @@ impl Live {
         })
     }
 
-    /// The object as `kubectl delete` takes it: `<kind>/<name>`.
+    /// The object as `kubectl delete` takes it: `<resource>/<name>`, its
+    /// resource qualified by its group, as the listing named it
+    /// ([`super::kube::RESOURCES`]). Only a listed kind is deleted; another
+    /// is named by its kind, for a message.
     pub(super) fn reference(&self) -> String {
-        format!("{}/{}", self.kind.to_ascii_lowercase(), self.name)
+        let resource = super::kube::RESOURCES
+            .iter()
+            .find(|(kind, _)| *kind == self.kind)
+            .map_or_else(
+                || self.kind.to_ascii_lowercase(),
+                |(_, resource)| resource.to_string(),
+            );
+        format!("{resource}/{}", self.name)
     }
 
     /// Whether it is a pool's hub's Deployment.

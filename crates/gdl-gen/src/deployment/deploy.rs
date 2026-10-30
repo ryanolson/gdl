@@ -24,7 +24,7 @@ use crate::{Error, Files, Spec};
 mod kube;
 mod live;
 
-use kube::{At, CONTROL, MONITORING, PODMONITORS, PUBLIC, bounded};
+use kube::{At, CONTROL, JOBS, MONITORING, PODMONITORS, PUBLIC, bounded};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
 
@@ -575,7 +575,7 @@ fn run_tables(
     let seconds = waits.objects.as_secs();
     run(
         kube,
-        at.delete(&[format!("job/{job}")], seconds),
+        at.delete(&[format!("{JOBS}/{job}")], seconds),
         waits.objects,
         None,
         &format!("deleting the last tables Job in cluster `{}`", cluster.name),

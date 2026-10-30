@@ -52,7 +52,7 @@ fn a_pod_monitor_is_applied_where_asked_and_down_deletes_it() {
         let name = format!("api-{cluster}");
         let deleted: Vec<String> = deletes(&log, context).into_iter().flatten().collect();
         assert!(
-            deleted.contains(&format!("podmonitor/{name}")),
+            deleted.contains(&format!("podmonitors.monitoring.coreos.com/{name}")),
             "{deleted:?}"
         );
         assert!(!kube.objects[context].contains_key(&("PodMonitor".into(), name)));
@@ -79,7 +79,7 @@ fn a_pod_monitor_the_fleet_no_longer_asks_for_is_pruned() {
     kube.holds("kind-use1", earlier);
     deploy(&mirror, &files, &mut docker(&log), &mut kube).expect("deploy");
     let deleted: Vec<String> = deletes(&log, "kind-use1").into_iter().flatten().collect();
-    assert_eq!(deleted, ["podmonitor/api"]);
+    assert_eq!(deleted, ["podmonitors.monitoring.coreos.com/api"]);
     assert!(!kube.objects["kind-use1"].contains_key(&("PodMonitor".into(), "api".into())));
 }
 
@@ -347,13 +347,11 @@ fn assert_monitor_group(prune: bool) {
 }
 
 #[test]
-#[ignore = "F4: down deletes an unqualified PodMonitor in another API group"]
 fn down_deletes_only_the_operator_pod_monitor() {
     assert_monitor_group(false);
 }
 
 #[test]
-#[ignore = "F4: prune deletes an unqualified PodMonitor in another API group"]
 fn prune_deletes_only_the_operator_pod_monitor() {
     assert_monitor_group(true);
 }
