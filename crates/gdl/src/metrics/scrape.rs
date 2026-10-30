@@ -38,7 +38,9 @@ use super::{Construct, labels, opts};
 /// metrics.queued_sequences.fill_with(move |gauges| {
 ///     let _ = gauges.set(&["prefill"], f64::from(state.load(Ordering::Relaxed)));
 /// });
-/// assert_eq!(registry.gather()[0].get_metric()[0].get_gauge().value(), 3.0);
+/// let mut text = String::new();
+/// gdl::prometheus::TextEncoder::new().encode_utf8(&registry.gather(), &mut text)?;
+/// assert!(text.contains(r#"queued_sequences{dynamo_endpoint="Queue",queue="prefill"} 3"#));
 /// # Ok::<(), gdl::prometheus::Error>(())
 /// ```
 #[derive(Clone)]
