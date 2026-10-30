@@ -140,16 +140,30 @@ impl Resources {
 /// Kubernetes keeps, and few enough that every one fits the arithmetic.
 const MAX_DIGITS: usize = 30;
 
-/// A Kubernetes quantity's value, in billionths of its unit: exact, so
-/// that `1` equals `1000m` and `1Gi` is more than `1G`.
+/// The most a quantity may be, in thousandths of its unit: the largest
+/// signed 64-bit count of its units, where Kubernetes caps a larger one.
+const MAX_MILLIS: u128 = (i64::MAX as u128) * 1000;
+
+/// Why a quantity above [`MAX_MILLIS`] is refused.
+const TOO_LARGE: &str = "more than 9223372036854775807 of its unit, where Kubernetes would cap it";
+
+/// A Kubernetes quantity's value, in thousandths of its unit: exact, so
+/// that `1` equals `1000m` and `1Gi` is more than `1G`. Only a value that
+/// Kubernetes keeps as written is one: it rounds a finer one up to `1m`,
+/// and caps a larger one at the largest signed 64-bit count of units, and
+/// either would move a limit against its request unseen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Quantity(u128);
 
 impl Quantity {
     /// Parse `text` as Kubernetes reads a quantity: a non-negative decimal
     /// number, then a binary suffix (`Ki` to `Ei`), a decimal one (`n`,
-    /// `u`, `m`, `k`, `M` to `E`), an exponent (`e3`), or none.
+    /// `u`, `m`, `k`, `M` to `E`), an exponent (`e3`), or none. Refused
+    /// when Kubernetes would round it, being finer than `1m` of its unit,
+    /// or cap it, being more than 2^63 - 1 units.
     pub fn parse(text: &str) -> Result<Self, String> {
+        // A sign: `+` says nothing; a pod's resources cannot be negative.
+        let text = text.strip_prefix('+').unwrap_or(text);
         let digits = text
             .find(|c: char| !(c.is_ascii_digit() || c == '.'))
             .unwrap_or(text.len());
@@ -197,30 +211,42 @@ impl Quantity {
         } else {
             digits.parse().map_err(|_| "not a number".to_string())?
         };
-        // The value in billionths: mantissa x 2^(binary power) x 10^(9 +
+        // The value in thousandths: mantissa x 2^(binary power) x 10^(3 +
         // decimal power - fraction digits). The binary power goes first, so
         // that `0.0009765625Gi`, exactly `1Mi`, is exact before the decimal
         // scale asks.
         let mantissa = mantissa
             .checked_mul(1u128 << power_of_two)
-            .ok_or("too large")?;
+            .ok_or(TOO_LARGE)?;
         let fraction_digits = i32::try_from(fraction.len()).map_err(|_| "too long")?;
-        let scale = 9 + power_of_ten - fraction_digits;
+        let scale = 3 + power_of_ten - fraction_digits;
         let power = 10u128.checked_pow(scale.unsigned_abs());
         let mut value = mantissa;
         if mantissa != 0 {
             if scale >= 0 {
                 value = power
                     .and_then(|power| value.checked_mul(power))
-                    .ok_or("too large")?;
+                    .ok_or(TOO_LARGE)?;
             } else {
                 match power {
                     Some(divisor) if value.is_multiple_of(divisor) => value /= divisor,
-                    _ => return Err("finer than a billionth of its unit".into()),
+                    _ => {
+                        return Err(
+                            "finer than `1m` of its unit, which Kubernetes would round up".into(),
+                        );
+                    }
                 }
             }
         }
+        if value > MAX_MILLIS {
+            return Err(TOO_LARGE.into());
+        }
         Ok(Self(value))
+    }
+
+    /// The value in thousandths of its unit.
+    pub fn millis(&self) -> u128 {
+        self.0
     }
 }
 

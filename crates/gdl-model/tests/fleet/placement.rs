@@ -161,7 +161,6 @@ fn a_long_zero_quantity_does_not_panic_during_fleet_check() {
 }
 
 #[test]
-#[ignore = "F2: Fleet::check does not cap binary quantities as Kubernetes does"]
 fn binary_quantity_caps_cannot_hide_a_limit_below_its_request() {
     let resources = |request: &str, limit: &str| {
         changed(
@@ -323,4 +322,89 @@ fn malformed_resources_are_refused() {
         &without,
         &["[pool.model-x-us] resources", "gives no resources"],
     );
+}
+
+/// Edge quantities, each with its value in thousandths of its unit, or
+/// `None` where it is refused. Each outcome is what apimachinery v0.34.1's
+/// `resource.ParseQuantity` (`quantity.go`) gives, run on these inputs, with
+/// a quantity refused where Kubernetes would change it: finer than `1m`,
+/// which it rounds up, or above 2^63 - 1 units, which it caps (it parses
+/// `8Ei` as 9223372036854775807, and keeps `10E` above it only until it
+/// reads its value). It refuses no negative quantity; a pod's resources
+/// cannot be negative, so `-1` is refused here.
+#[test]
+fn edge_quantities_parse_as_kubernetes_keeps_them() {
+    const MAX: u128 = 9_223_372_036_854_775_807;
+    let zeros = format!("0.{}", "0".repeat(137));
+    let table: &[(&str, Option<u128>)] = &[
+        // Every suffix.
+        ("1n", None),
+        ("1000000n", Some(1)),
+        ("999999n", None),
+        ("1000u", Some(1)),
+        ("999u", None),
+        ("1m", Some(1)),
+        ("0.1m", None),
+        ("1", Some(1_000)),
+        ("1k", Some(1_000_000)),
+        ("1M", Some(1_000_000_000)),
+        ("1G", Some(1_000_000_000_000)),
+        ("1T", Some(1_000_000_000_000_000)),
+        ("1P", Some(1_000_000_000_000_000_000)),
+        ("1E", Some(1_000_000_000_000_000_000_000)),
+        ("1Ki", Some(1_024_000)),
+        ("1Mi", Some(1_048_576_000)),
+        ("1Gi", Some(1_073_741_824_000)),
+        ("1Ti", Some(1_099_511_627_776_000)),
+        ("1Pi", Some(1_125_899_906_842_624_000)),
+        ("1Ei", Some(1_152_921_504_606_846_976_000)),
+        ("1e3", Some(1_000_000)),
+        ("1E3", Some(1_000_000)),
+        ("1e-3", Some(1)),
+        ("1000000e-9", Some(1)),
+        // The smallest accepted, and the first refused below it.
+        ("0", Some(0)),
+        ("0.", Some(0)),
+        (&zeros, Some(0)),
+        ("0.001", Some(1)),
+        ("0.0001", None),
+        ("1e-4", None),
+        ("1e-9", None),
+        ("0.001Ki", Some(1_024)),
+        ("0.0001Ki", None),
+        // The largest accepted, and the first refused above it.
+        ("9223372036854775807", Some(MAX * 1000)),
+        ("9223372036854775807000m", Some(MAX * 1000)),
+        ("9223372036854775.807k", Some(MAX * 1000)),
+        ("9223372036854775807001m", None),
+        ("9223372036854775808", None),
+        ("9E", Some(9_000_000_000_000_000_000_000)),
+        ("10E", None),
+        ("1e18", Some(1_000_000_000_000_000_000_000)),
+        ("1e19", None),
+        ("7Ei", Some(8_070_450_532_247_928_832_000)),
+        ("8Ei", None),
+        // Fractions of a binary unit, scaled before their precision.
+        ("0.5Gi", Some(536_870_912_000)),
+        ("0.0009765625Gi", Some(1_048_576_000)),
+        ("0.5Ki", Some(512_000)),
+        // Forms of a number.
+        ("+1", Some(1_000)),
+        ("1.", Some(1_000)),
+        (".5", Some(500)),
+        ("1.5", Some(1_500)),
+        ("-1", None),
+        // Not quantities.
+        ("", None),
+        ("12Q", None),
+        ("1 Gi", None),
+        ("fast", None),
+        ("1e", None),
+        ("1.5.5", None),
+        ("0x10", None),
+    ];
+    for (text, expected) in table {
+        let parsed = Quantity::parse(text).map(|q| q.millis()).ok();
+        assert_eq!(parsed, *expected, "{text:?}");
+    }
 }
