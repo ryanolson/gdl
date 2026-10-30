@@ -197,7 +197,13 @@ impl Quantity {
         } else {
             digits.parse().map_err(|_| "not a number".to_string())?
         };
-        // The value in billionths: mantissa x 10^(9 + power - fraction digits).
+        // The value in billionths: mantissa x 2^(binary power) x 10^(9 +
+        // decimal power - fraction digits). The binary power goes first, so
+        // that `0.0009765625Gi`, exactly `1Mi`, is exact before the decimal
+        // scale asks.
+        let mantissa = mantissa
+            .checked_mul(1u128 << power_of_two)
+            .ok_or("too large")?;
         let fraction_digits = i32::try_from(fraction.len()).map_err(|_| "too long")?;
         let scale = 9 + power_of_ten - fraction_digits;
         let power = 10u128.checked_pow(scale.unsigned_abs());
@@ -214,9 +220,6 @@ impl Quantity {
                 }
             }
         }
-        value = value
-            .checked_mul(1u128 << power_of_two)
-            .ok_or("too large")?;
         Ok(Self(value))
     }
 }
