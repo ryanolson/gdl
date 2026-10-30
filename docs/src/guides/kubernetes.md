@@ -249,3 +249,11 @@ The script starts a local `registry:2` and a kind cluster of Kubernetes 1.35 tha
 - after `down`, no object with the fleet's label is left, and the namespace remains.
 
 The kubeconfig is in the script's scratch directory, so the script never reads or changes `~/.kube/config`. On exit it deletes the cluster and the registry. `TIMEOUT` bounds each `cargo gdl` run, in seconds (1800 by default).
+
+`DYNAMODB=1` then deploys the same pools under a DynamoDB directory in one DynamoDB Local in the cluster, with the model pools shared by their parents' class, which `relay` refuses. It checks that the tables Job succeeds, that every pool is healthy, which needs the global pool to find and follow both model pools through the tables, and that a request is answered, and that `down` then leaves no object with the fleet's label. The hub's image is then built with the hub's `dynamodb` feature, so `GDL_REV` must name a commit of the spec's `[gdl] git` that has it:
+
+```bash
+DYNAMODB=1 GDL_REV=<commit> bash scripts/kind-fleet.sh
+```
+
+kind runs one cluster, so the case covers only the hubs in the Local's own cluster, which reach it at its Service. The address of the other clusters' hubs, the Local's pod IP, is covered by the fake-kubectl tests in `crates/gdl-gen/tests/deployment/deploy/dynamodb.rs`.

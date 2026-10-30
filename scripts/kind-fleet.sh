@@ -14,6 +14,14 @@
 #     as they were;
 #   - after `down`, no object with the fleet's label is left, and the namespace stays.
 #
+# With DYNAMODB=1 it then deploys the same pools under a DynamoDB directory in one DynamoDB Local in the cluster, a
+# fleet that the relay refuses: the model pools are shared by their parents' class. It checks that the tables Job
+# succeeds, that every pool is healthy, which needs the global pool to find and follow both model pools through the
+# tables, and that a request is answered; then that `down` leaves no object with the fleet's label. The hub's image
+# is then built with the hub's `dynamodb` feature, from a gdl that has it: GDL_REV names a commit of the spec's
+# `[gdl] git` that does (examples/api/deploy.toml pins an older one). kind runs one cluster, so the case covers only
+# the hubs of the Local's own cluster, which reach it at its Service, not the pod-IP address of other clusters.
+#
 #   INSTALL_TOOLS=1 bash scripts/kind-fleet.sh      # first downloads the pinned kind into TOOLS_DIR
 #   bash scripts/kind-fleet.sh
 #
@@ -30,6 +38,11 @@ NODE_IMAGE="kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64
 # registry 2.8.3, by the digest of its multi-architecture index.
 REGISTRY_IMAGE="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 TIMEOUT="${TIMEOUT:-1800}"
+DYNAMODB="${DYNAMODB:-0}"
+if [[ "${DYNAMODB}" == "1" && -z "${GDL_REV:-}" ]]; then
+  echo "kind-fleet.sh: DYNAMODB=1 needs GDL_REV, a commit of the spec's [gdl] git with the hub's dynamodb feature" >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${root}"
@@ -242,4 +255,45 @@ labelled="$(k get namespaces,serviceaccounts,configmaps,persistentvolumeclaims,s
 [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left: ${labelled}"
 k get namespace gdl-api >/dev/null || fail "down deleted the namespace"
 echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays"
+
+if [[ "${DYNAMODB}" == "1" ]]; then
+  sed "s#^rev = \".*\"#rev = \"${GDL_REV}\"#" "${scratch}/gdl.toml" >"${scratch}/dynamodb.gdl.toml"
+  grep -q "^rev = \"${GDL_REV}\"" "${scratch}/dynamodb.gdl.toml" || fail "the spec names no [gdl] rev to replace"
+  sed 's/^home = "global"$/parents = "global"/' "${scratch}/fleet.toml" >"${scratch}/dynamodb.toml"
+  cat >>"${scratch}/dynamodb.toml" <<'TOML'
+
+[directory]
+backend = "dynamodb"
+records_table = "gdl-pools"
+lists_table = "gdl-pool-lists"
+local = true
+cluster = "kind"
+TOML
+  run deploy --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb.toml" --target-dir "${target}"
+  grep -q "tables: the DynamoDB directory's tables are ready" "${scratch}/deploy.err" \
+    || fail "the deploy ran no tables Job"
+  [[ "$(k --namespace gdl-api get job dynamodb-tables --output jsonpath='{.status.succeeded}')" == "1" ]] \
+    || fail "the tables Job did not succeed"
+  hub global /v1/ext/gdl-pool/health >/dev/null \
+    || fail "the global pool's health does not answer 200: it does not follow both model pools through DynamoDB"
+  k --namespace gdl-api port-forward service/global-front :8080 >"${scratch}/forward.out" 2>&1 &
+  forward=$!
+  for _ in $(seq 1 100); do
+    grep -q '^Forwarding from 127.0.0.1:' "${scratch}/forward.out" && break
+    sleep 0.1
+  done
+  local_port="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) .*/\1/p' "${scratch}/forward.out" | head -n 1)"
+  [[ -n "${local_port}" ]] || fail "the port-forward did not start: $(cat "${scratch}/forward.out")"
+  answer="$(curl -sS -m 30 -X POST -H 'content-type: application/json' -d '{"messages":["chat words"]}' \
+    "http://127.0.0.1:${local_port}/v1/chat/completions")"
+  [[ "${answer}" == $'{"delta":"chat"}\n{"delta":"words"}' ]] || fail "the request under DynamoDB got: ${answer}"
+  kill "${forward}"
+  forward=""
+  echo "kind-fleet.sh: under DynamoDB every pool is healthy, and a request is answered"
+  run down --spec "${scratch}/dynamodb.gdl.toml" --fleet "${scratch}/dynamodb.toml" --target-dir "${target}"
+  labelled="$(k get serviceaccounts,configmaps,services,deployments,replicasets,pods,jobs \
+    --all-namespaces --selector gdl.dev/fleet=api --output name)"
+  [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left under DynamoDB: ${labelled}"
+  echo "kind-fleet.sh: under DynamoDB, no object with the fleet's label is left"
+fi
 echo "kind-fleet.sh: passed"
