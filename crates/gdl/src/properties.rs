@@ -258,6 +258,9 @@ impl InstanceProperties {
     /// The runtime calls it once, when the segment starts.
     #[doc(hidden)]
     pub fn declare(&self, provided: Vec<PropertyType>) -> Result<()> {
+        // Held until the declaration is made, as `set` and `wants` hold it
+        // while they check it and write: each write is ordered before the
+        // declaration, and checked here, or after it, and checked there.
         let drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
         for (kind, key) in &drains.types {
             if let Some(why) = PropertyType::misfit(&provided, kind, *key, || unprovided(kind)) {
@@ -357,16 +360,6 @@ impl InstanceProperties {
                 format!("the want of property kind `{}` {why}", kind.name()),
             )
         })?;
-        // Held to the declaration as `set` is: a want of a kind its segment
-        // does not provide would decline every offer.
-        let typed = (TypeId::of::<T>(), std::any::type_name::<T>());
-        if let Some(provided) = self.declared.get()
-            && let Some(why) = PropertyType::misfit(provided, kind.name(), Some(typed), || {
-                unprovided(kind.name())
-            })
-        {
-            return Err(Error::new(ErrorKind::Node, why));
-        }
         let want: Arc<dyn Want> = Arc::new(wanted::Typed {
             kind: kind.name(),
             key,
@@ -375,12 +368,32 @@ impl InstanceProperties {
             head: std::marker::PhantomData::<fn(&H)>,
         });
         let drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
+        // Held to the declaration as `set` is: a want of a kind its segment
+        // does not provide would decline every offer.
+        self.fits(kind.name(), Some(want.key()))?;
         want.hold(&drains.lists());
         self.wanted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(want);
         Ok(())
+    }
+
+    /// Why kind `kind`, set or wanted with keys of type `key`, does not fit
+    /// the declaration, if the handle is declared and it does not. Called
+    /// with the lock on `drains` held, which [`InstanceProperties::declare`]
+    /// holds from its checks until the declaration is made: a write is then
+    /// either checked here against the declaration, or there by it.
+    fn fits(&self, kind: &str, key: Option<(TypeId, &'static str)>) -> Result<()> {
+        match self.declared.get() {
+            Some(provided) => {
+                match PropertyType::misfit(provided, kind, key, || unprovided(kind)) {
+                    Some(why) => Err(Error::new(ErrorKind::Node, why)),
+                    None => Ok(()),
+                }
+            }
+            None => Ok(()),
+        }
     }
 
     /// What the instance's offers want, for the runtime.
@@ -407,11 +420,6 @@ impl InstanceProperties {
         entries: Vec<PropertyEntry>,
     ) -> Result<()> {
         gdl_model::check_property_kind(kind).map_err(|why| Error::new(ErrorKind::Node, why))?;
-        if let Some(provided) = self.declared.get()
-            && let Some(why) = PropertyType::misfit(provided, kind, key, || unprovided(kind))
-        {
-            return Err(Error::new(ErrorKind::Node, why));
-        }
         let mut keys = BTreeSet::new();
         for entry in &entries {
             let key = entry.property();
@@ -432,6 +440,7 @@ impl InstanceProperties {
             }
         }
         let mut drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
+        self.fits(kind, key)?;
         let Drains {
             set,
             unreported,
