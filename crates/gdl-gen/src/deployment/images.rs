@@ -444,6 +444,17 @@ impl Local {
             .map_err(io)?;
         let root = dir.path();
         for (path, link) in source_files(context)? {
+            // The tree's root is the build's context. Docker reads its
+            // ignore rules there, from `.dockerignore`, or from
+            // `Dockerfile.dockerignore` beside the Dockerfile, which this
+            // writes there for each image: none of the checkout's applies,
+            // so no rule of it, such as `target/`, can leave the bundle out.
+            if [".dockerignore", "Dockerfile", "Dockerfile.dockerignore"]
+                .iter()
+                .any(|name| path == Path::new(name))
+            {
+                continue;
+            }
             let to = root.join(&path);
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent).map_err(io)?;

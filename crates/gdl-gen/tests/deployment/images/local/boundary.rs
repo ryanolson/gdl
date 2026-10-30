@@ -134,3 +134,37 @@ fn a_link_within_the_sources_is_copied_as_a_link() {
         assert_eq!(seen.as_deref(), Some(Path::new("NOTES.md")));
     }
 }
+
+/// A tracked `.dockerignore` at the root of the sources, which would leave
+/// `target/` and so the bundle out of the build, never reaches the context:
+/// the context's root holds only the Dockerfile `--local` writes, so no
+/// ignore file of the checkout applies to the build.
+#[test]
+fn a_tracked_root_dockerignore_does_not_drop_the_bundle() {
+    let copy = Copy::new();
+    std::fs::write(copy.path().join(".dockerignore"), "target/\n").expect("an ignore file");
+    std::fs::write(copy.path().join("Dockerfile.dockerignore"), "*\n").expect("an ignore file");
+    std::fs::write(copy.path().join("Dockerfile"), "FROM scratch\n").expect("a Dockerfile");
+    tracked(&copy);
+    let mut docker = Fake::default();
+    local(&copy, false, &mut docker);
+    assert_eq!(docker.contexts.len(), 3);
+    for (reference, context) in &docker.contexts {
+        for ignore in [".dockerignore", "Dockerfile.dockerignore"] {
+            assert!(
+                !context.contains_key(Path::new(ignore)),
+                "{reference}: {ignore} is in the context"
+            );
+        }
+        assert!(
+            !context[Path::new("Dockerfile")].starts_with("FROM scratch"),
+            "{reference}: the checkout's Dockerfile replaced the image's"
+        );
+        assert!(
+            context
+                .keys()
+                .any(|path| path.starts_with("target/gdl-images")),
+            "{reference}: the bundle is not in the context"
+        );
+    }
+}
