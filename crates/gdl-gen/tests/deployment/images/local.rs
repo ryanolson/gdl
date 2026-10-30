@@ -15,6 +15,8 @@ use crate::{SEGMENTS, SPLIT};
 
 #[path = "local/boundary.rs"]
 mod boundary;
+#[path = "local/manifests.rs"]
+mod manifests;
 #[path = "local/tags.rs"]
 mod tags;
 
