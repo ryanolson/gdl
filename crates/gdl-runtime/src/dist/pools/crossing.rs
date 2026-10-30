@@ -329,6 +329,10 @@ impl Crossing {
     /// pool's eligible entry instances. A selector may wait, so the choice
     /// is checked when it returns, as [`Crossing::choose`] checks its own.
     /// A request that ended while its selector chose is not handed on.
+    /// When the pool's instances changed under every one of its choices,
+    /// the pool still takes work, so the request stays with it
+    /// ([`Again::Stale`]): it is not a reason to leave a pool the policy
+    /// re-queued the request for.
     pub(crate) async fn choose_again(
         &self,
         pool: u64,
@@ -337,7 +341,7 @@ impl Crossing {
         head: &[u8],
         encoding: Encoding,
         choice: &mut Option<ChoiceHeld>,
-    ) -> Result<Option<(InstanceId, Picked, PoolLease)>> {
+    ) -> Result<Again<(InstanceId, Picked, PoolLease)>> {
         let target = &self.target;
         let policy = |current: &gdl::Pool| {
             target
@@ -352,10 +356,10 @@ impl Crossing {
                 .zip(&table.views)
                 .find(|(shown, _)| shown.id == pool)
             else {
-                return Ok(None);
+                return Ok(Again::Unavailable);
             };
             if shown.offered.is_empty() || !policy(view) {
-                return Ok(None);
+                return Ok(Again::Unavailable);
             }
             let shown = Arc::clone(shown);
             let picked = selector
@@ -373,10 +377,14 @@ impl Crossing {
             let lease = still_eligible(&current, &shown, chosen, policy)
                 .and_then(|now| PoolLease::take(&now.leases));
             if let Some(lease) = lease {
-                return Ok(Some((chosen, picked, lease.with_choice(choice.take()))));
+                return Ok(Again::Chosen((
+                    chosen,
+                    picked,
+                    lease.with_choice(choice.take()),
+                )));
             }
         }
-        Ok(None)
+        Ok(Again::Stale)
     }
 
     /// The pool `pool` accepted an offer: its damping, as the chooser has
@@ -594,6 +602,20 @@ fn still_eligible<'t>(
         .map(|(now, _)| now)
 }
 
+/// What the next choice of a re-queued request within its pool came to.
+pub(crate) enum Again<T> {
+    /// An instance of the pool, and what the offer to it holds.
+    Chosen(T),
+    /// The pool still takes work, but its entry instances changed under
+    /// the selector at each of its choices: the request waits another
+    /// round for the pool, and chooses again.
+    Stale,
+    /// The pool no longer takes work as the pool policy sees it, its
+    /// follow is not offered, or the chooser no longer follows it: the
+    /// request leaves it.
+    Unavailable,
+}
+
 /// A selector's choice within a pool: the instance, the pool's
 /// [`id`](PoolTable::id), what the selector picked, and the lease on the
 /// pool's follow.
@@ -781,6 +803,66 @@ mod tests {
             within,
             Default::default(),
         )
+    }
+
+    struct Replacing {
+        table: Arc<ArcSwap<EntryTable>>,
+        calls: AtomicUsize,
+    }
+
+    impl gdl::Selector for Replacing {
+        type Head = gdl::Encoded;
+
+        async fn select<'a>(
+            &'a self,
+            _: gdl::Request<'a, gdl::Encoded>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            let chosen = instances.get(0).expect("the pool always has an entry");
+            if self.calls.fetch_add(1, Ordering::SeqCst) < CHOICES {
+                // Each selection spans an entry replacement, with room in the same pool.
+                let current = self.table.load();
+                let mut next =
+                    Arc::try_unwrap(pool("m", PoolState::Ready, &[InstanceId::new_v4()]))
+                        .expect("one table owner");
+                next.leases = Arc::clone(&current.pools[0].leases);
+                next.turn = Arc::clone(&current.pools[0].turn);
+                self.table
+                    .store(Arc::new(EntryTable::new(Box::new([Arc::new(next)]))));
+            }
+            Ok(gdl::Choice::new(chosen))
+        }
+    }
+
+    #[tokio::test]
+    async fn requeue_does_not_leave_a_pool_after_stale_selector_choices() {
+        let crossing = crossing(
+            vec![pool("m", PoolState::Ready, &ids(1))],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let id = super::super::pool_id("model_x", "m");
+        let selector = gdl::__runtime::Typed(Arc::new(Replacing {
+            table: Arc::clone(&crossing.target.table),
+            calls: AtomicUsize::new(0),
+        }));
+        let cx = Cx::new().with_timeout(Duration::from_secs(5));
+        let result = crossing
+            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None)
+            .await;
+        assert!(selector.0.calls.load(Ordering::SeqCst) >= CHOICES);
+        assert!(cx.check().is_ok(), "the deadline has not passed");
+        let control = crossing
+            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None)
+            .await
+            .expect("the selector succeeds once the entries stop changing");
+        assert!(
+            matches!(control, Again::Chosen(_)),
+            "the same pinned pool still takes work"
+        );
+        assert!(
+            matches!(result, Ok(Again::Stale)),
+            "a full pinned pool still takes work, but choose_again reported it unavailable for failover"
+        );
     }
 
     #[derive(serde::Deserialize)]

@@ -376,7 +376,7 @@ sequenceDiagram
 - The request's deadline ends the wait, and the request fails with `DeadlineExceeded`. It is never offered to another pool while its pool takes work.
 - A waiting request holds no lease on the pool's follow, so a drain does not wait for it. It keeps the policy's lease on its choice, which learns of the acceptance. A wait allocates nothing beyond its timer.
 - The pool is not damped, and the waits count no failover and use none of `pool_failovers`. Each offer counts under its pool and outcome, as any offer does.
-- The request leaves the pool, and is failed over as before, once the pool declines it other than as full, or no longer takes work as the policy sees it, as when it drains, or its follow is not offered.
+- The request leaves the pool, and is failed over as before, once the pool declines it other than as full, or no longer takes work as the policy sees it, as when it drains, or its follow is not offered. Nothing else ends the wait: a selector whose choices go stale, because the pool's entry instances change while it chooses, keeps the request waiting a round more.
 
 ## A hand-off is an offer
 

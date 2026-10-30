@@ -28,7 +28,7 @@ use gdl::__runtime::ChoiceHeld;
 use gdl::{Cx, NoPool, Result};
 use velo::InstanceId;
 
-use super::crossing::{Left, Walk};
+use super::crossing::{Again, Left, Walk};
 use super::meter::Outcome;
 use super::{Crossing, PoolLease};
 use crate::dist::envelope::{Forward, WireCx};
@@ -319,9 +319,12 @@ impl Runtime {
                 .await;
             cx.check()?;
             let chosen = match crossing.within() {
-                Within::Policy(policy) => crossing
-                    .pick_again(pool, *policy, self.random(), choice)
-                    .map(|(to, lease)| (to, Held::pool(None, lease))),
+                Within::Policy(policy) => {
+                    match crossing.pick_again(pool, *policy, self.random(), choice) {
+                        Some((to, lease)) => Again::Chosen((to, Held::pool(None, lease))),
+                        None => Again::Unavailable,
+                    }
+                }
                 Within::Selector {
                     selector, encoding, ..
                 } => {
@@ -329,14 +332,22 @@ impl Runtime {
                     let chosen = crossing
                         .choose_again(pool, &**selector, cx, &envelope.payload, *encoding, choice)
                         .await?;
-                    chosen.map(|(to, picked, lease)| {
-                        envelope.cx.add_meta(picked.meta);
-                        (to, Held::pool(picked.lease, lease))
-                    })
+                    match chosen {
+                        Again::Chosen((to, picked, lease)) => {
+                            envelope.cx.add_meta(picked.meta);
+                            Again::Chosen((to, Held::pool(picked.lease, lease)))
+                        }
+                        Again::Stale => Again::Stale,
+                        Again::Unavailable => Again::Unavailable,
+                    }
                 }
             };
-            let Some((to, mut held)) = chosen else {
-                return Ok(Requeued::Unavailable);
+            let (to, mut held) = match chosen {
+                Again::Chosen(chosen) => chosen,
+                // The pool still takes work: the request waits a round
+                // for it, bounded by its deadline, and chooses again.
+                Again::Stale => continue,
+                Again::Unavailable => return Ok(Requeued::Unavailable),
             };
             let (offering, sent) = self.deliver(to, envelope, timed)?;
             match answer(offering.await, crossing, pool, &mut held) {
