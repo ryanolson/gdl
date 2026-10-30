@@ -110,33 +110,33 @@ pub(super) struct Stopping {
     pub(super) home: String,
     /// The longest stop grace of its Deployments, in seconds.
     pub(super) grace: u64,
+    /// Whether its hub's Deployment is there to drain it. A pool whose hub
+    /// is gone cannot drain: only its parent can show that it withdrew.
+    pub(super) hub: bool,
 }
 
 impl Stopping {
-    /// The pools of `objects` with a hub's Deployment there and a parent,
-    /// in name order.
+    /// The pools of `objects` that have a Deployment there and a parent, in
+    /// name order: every Deployment of a pool names its parent, so a pool
+    /// whose hub's Deployment is gone is still found by its segments'.
     pub(super) fn of(objects: &[&Live]) -> Vec<Self> {
-        let mut pools: Vec<Self> = objects
-            .iter()
-            .filter(|object| object.is_hub())
-            .filter_map(|hub| {
-                let pool = hub.pool.clone()?;
-                let grace = objects
-                    .iter()
-                    .filter(|object| object.kind == "Deployment")
-                    .filter(|object| object.pool.as_deref() == Some(pool.as_str()))
-                    .filter_map(|object| object.grace)
-                    .max()
-                    .unwrap_or_default();
-                Some(Self {
-                    class: hub.class.clone()?,
-                    home: hub.home.clone()?,
-                    pool,
-                    grace,
-                })
-            })
-            .collect();
-        pools.sort_by(|a, b| a.pool.cmp(&b.pool));
-        pools
+        let mut pools: std::collections::BTreeMap<String, Self> = Default::default();
+        for deployment in objects.iter().filter(|object| object.kind == "Deployment") {
+            let (Some(pool), Some(class), Some(home)) =
+                (&deployment.pool, &deployment.class, &deployment.home)
+            else {
+                continue;
+            };
+            let stopping = pools.entry(pool.clone()).or_insert_with(|| Self {
+                pool: pool.clone(),
+                class: class.clone(),
+                home: home.clone(),
+                grace: 0,
+                hub: false,
+            });
+            stopping.grace = stopping.grace.max(deployment.grace.unwrap_or_default());
+            stopping.hub |= deployment.is_hub();
+        }
+        pools.into_values().collect()
     }
 }

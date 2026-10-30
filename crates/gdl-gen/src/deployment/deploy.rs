@@ -422,7 +422,13 @@ fn stop(
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
     let at = cluster.at();
-    let draining = Stopping::of(objects);
+    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) =
+        Stopping::of(objects).into_iter().partition(|pool| pool.hub);
+    // Checked before any drain starts, so that a pool that cannot be shown
+    // to have withdrawn stops the step before anything changes.
+    for pool in &hubless {
+        withdrawn_without_hub(kube, at, pool, waits)?;
+    }
     for pool in &draining {
         run(
             kube,
@@ -511,6 +517,45 @@ fn withdrawn(kube: &mut dyn Kube, at: At<'_>, pool: &Stopping, waits: &Waits) ->
         }
         std::thread::sleep(waits.interval);
     }
+}
+
+/// Refuse to delete `pool`, whose hub's Deployment is gone, unless its
+/// parent's hub answers 404 for its record: with no hub, nothing can drain
+/// it, and a record its parent still holds is offered nothing, but waits
+/// for an operator to withdraw it.
+fn withdrawn_without_hub(
+    kube: &mut dyn Kube,
+    at: At<'_>,
+    pool: &Stopping,
+    waits: &Waits,
+) -> Result<(), Error> {
+    let route = format!("/v1/ext/gdl-pool/report/{}/{}", pool.class, pool.pool);
+    let reply = kube.run(
+        &bounded(at.get(&pool.home, PUBLIC, &route), waits.objects),
+        None,
+    )?;
+    if reply.proxied_not_found() {
+        return Ok(());
+    }
+    let why = if reply.success {
+        let withdraw = format!(
+            "/api/v1/namespaces/{}/services/http:{}:{CONTROL}/proxy/v1/ext/gdl-pool/children/{}/{}/withdraw",
+            at.namespace, pool.home, pool.class, pool.pool
+        );
+        format!(
+            "its hub's Deployment is gone, so it cannot drain, and its parent still holds its record. Withdraw it on the parent's hub (`POST /v1/ext/gdl-pool/children/{}/{}/withdraw` on the control port), for example with `kubectl --context {} create --raw {withdraw} -f /dev/null`, then deploy again",
+            pool.class, pool.pool, at.context
+        )
+    } else {
+        format!(
+            "its hub's Deployment is gone, and its parent's hub does not answer: {}",
+            reply.stderr.trim()
+        )
+    };
+    Err(Error::new(format!(
+        "pool `{}` is not known to have withdrawn from its parent `{}`, so nothing is deleted: {why}",
+        pool.pool, pool.home
+    )))
 }
 
 /// Wait until the health of each of `pools`, by its cluster, answers 200.

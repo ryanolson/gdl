@@ -884,3 +884,6 @@ mod deadline;
 
 #[path = "deploy/empty.rs"]
 mod empty;
+
+#[path = "deploy/hubless.rs"]
+mod hubless;
