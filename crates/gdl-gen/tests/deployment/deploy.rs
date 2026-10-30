@@ -769,9 +769,10 @@ fn a_health_timeout_names_the_pods_and_their_events() {
     );
 }
 
-/// `down` drains each pool that has a parent, deletes every object with
-/// the fleet's label, and removes the label from each namespace, which it
-/// keeps, with the Secrets in it.
+/// `down` drains each pool that has a parent and deletes the pools'
+/// objects, in every cluster, and only then deletes every other object
+/// with the fleet's label and removes the label from each namespace, which
+/// it keeps, with the Secrets in it.
 #[test]
 fn down_drains_deletes_and_keeps_the_namespace() {
     let mirror = Mirror::new();
@@ -793,10 +794,14 @@ fn down_drains_deletes_and_keeps_the_namespace() {
             "kind-euw1:drain",
             "kind-euw1:held",
             "kind-euw1:delete",
-            "kind-euw1:unlabel",
             "kind-use1:list",
             "kind-use1:drain",
             "kind-use1:held",
+            "kind-use1:delete",
+            "kind-euw1:list",
+            "kind-euw1:delete",
+            "kind-euw1:unlabel",
+            "kind-use1:list",
             "kind-use1:delete",
             "kind-use1:unlabel",
         ]

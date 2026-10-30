@@ -258,7 +258,8 @@ fn down_deletes_the_local_after_the_hubs() {
 }
 
 #[test]
-#[ignore = "F1: down deletes the Local before hubs in later clusters"]
+/// With the Local in `euw1`, which `down` reaches first, the Local still
+/// goes only after `use1`'s hubs, which use it, are deleted.
 fn down_keeps_the_local_until_every_clusters_hubs_stop() {
     let mirror = Mirror::new();
     let text = fleet_text().replace(

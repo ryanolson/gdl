@@ -248,10 +248,12 @@ pub fn deploy(
 }
 
 /// Take the fleet in the file `fleet` off its clusters with `kube`, saying
-/// each step to `say`: drain each pool that has a parent, delete every
-/// object in each cluster's namespace that carries the fleet's and the
-/// cluster's labels, and then remove both labels from the namespace,
-/// which stays, with any Secret in it.
+/// each step to `say`: in every cluster, drain each pool that has a parent
+/// and delete the pools' objects; then, in every cluster, delete the rest
+/// of the objects that carry the fleet's and the cluster's labels, and
+/// remove both labels from the namespace, which stays, with any Secret in
+/// it. The rest holds the DynamoDB directory's Local and tables Job, which
+/// the hubs of every cluster use: so it goes only once no hub runs in any.
 pub fn down(
     fleet: &Path,
     waits: &Waits,
@@ -263,13 +265,28 @@ pub fn down(
         .check(None)
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
     let clusters = Clusters::of(&fleet)?;
+    let mut deleted = BTreeMap::new();
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
-        let all: Vec<&Live> = live.iter().collect();
+        let pools: Vec<&Live> = live.iter().filter(|object| object.pool.is_some()).collect();
         stop(
             kube,
             cluster,
-            &all,
+            &pools,
+            &BTreeSet::new(),
+            Stop::Down,
+            waits,
+            say,
+        )?;
+        deleted.insert(cluster.name.clone(), pools.len());
+    }
+    for cluster in &clusters.0 {
+        let live = cluster.live(kube, waits.objects)?;
+        let rest: Vec<&Live> = live.iter().collect();
+        stop(
+            kube,
+            cluster,
+            &rest,
             &BTreeSet::new(),
             Stop::Down,
             waits,
@@ -284,7 +301,7 @@ pub fn down(
         )?;
         say(&format!(
             "down: deleted {} object(s) in cluster `{}`; namespace `{}` stays",
-            all.len(),
+            deleted[&cluster.name] + rest.len(),
             cluster.name,
             cluster.at().namespace
         ));
