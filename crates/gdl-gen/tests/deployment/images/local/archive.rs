@@ -2,7 +2,6 @@ use super::*;
 
 /// A generated lock must not copy data from a lock outside the Git snapshot.
 #[test]
-#[ignore = "F1: an ignored host Cargo.lock supplies metadata to generated locks"]
 fn an_ignored_lock_cannot_supply_bytes_to_the_context() {
     let copy = Copy::new();
     git(copy.path(), &["rm", "--cached", "Cargo.lock"]);

@@ -54,13 +54,14 @@ pub(super) fn build(
     if let Some(error) = unplaced {
         return Err(error);
     }
+    let seed = seed(context, &entries)?;
     let bundle = dir.join(context.bundle());
     crate::write(&bundle, files)
         .map_err(|e| Error::new(format!("{prefix}: writing the bundle: {e}")))?;
     for crate_dir in segments {
         let at = bundle.join(crate_dir);
-        if let Some(lock) = context.lock() {
-            std::fs::copy(lock, at.join("Cargo.lock"))
+        if let Some(lock) = &seed {
+            std::fs::copy(dir.join(lock), at.join("Cargo.lock"))
                 .map_err(|e| Error::new(format!("{prefix}: {}: {e}", lock.display())))?;
         }
         let carried = context.host_patches(files, std::slice::from_ref(crate_dir));
@@ -71,6 +72,27 @@ pub(super) fn build(
     }
     generated(&bundle, context.bundle(), &mut entries)?;
     Ok(digest(&entries))
+}
+
+/// gdl's lock, as a path in the tree, when the archive holds it: each
+/// segment's lock starts from it. Only bytes the archive holds reach the
+/// tree, so a lock that Git does not hold, such as one it ignores, seeds
+/// nothing, and each lock is settled from scratch.
+fn seed(context: &Context, entries: &BTreeMap<PathBuf, Entry>) -> Result<Option<PathBuf>, Error> {
+    let Some(lock) = context.lock() else {
+        return Ok(None);
+    };
+    let root = context.root().canonicalize().map_err(super::io)?;
+    let real = lock.canonicalize().map_err(super::io)?;
+    Ok(real
+        .strip_prefix(&root)
+        .ok()
+        .filter(|path| {
+            entries
+                .get(*path)
+                .is_some_and(|entry| entry.kind == Kind::File)
+        })
+        .map(Path::to_path_buf))
 }
 
 /// What one path of the tree is.
