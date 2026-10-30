@@ -30,7 +30,7 @@ use tokio::time::Instant;
 use velo::InstanceId;
 
 use super::crossing::{Again, Left, Walk};
-use super::meter::Outcome;
+use super::meter::{Outcome, PoolFigures};
 use super::{Crossing, PoolLease, Seen};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
@@ -204,10 +204,7 @@ impl Runtime {
                         if last == Some(Decline::Full) {
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
-                                let figures = crossing.figures(pool);
-                                if let Some(figures) = figures {
-                                    figures.requeued();
-                                }
+                                let requeueing = Requeueing::new(crossing.figures(pool), cx);
                                 let requeued_for = self.requeue(
                                     crossing,
                                     cx,
@@ -218,11 +215,7 @@ impl Runtime {
                                     &mut seen,
                                 );
                                 let ended = requeued_for.await;
-                                if let (Some(figures), Err(error)) = (figures, &ended)
-                                    && error.kind() == ErrorKind::DeadlineExceeded
-                                {
-                                    figures.requeue_deadline();
-                                }
+                                requeueing.ended(&ended);
                                 match ended? {
                                     Requeued::Handed(handed) => return Ok(handed),
                                     Requeued::Missed(to, then) => {
@@ -415,6 +408,52 @@ impl Runtime {
                     }
                 }
             }
+        }
+    }
+}
+
+/// A request re-queued for a pool, counted under the pool when the chooser
+/// records its offers: once as it is re-queued, and once more if it ends at
+/// its deadline while re-queued. That is when the re-queue fails with
+/// `DeadlineExceeded`, or when its future is dropped once the deadline has
+/// passed: a hop bounds its hand-off by the deadline, and that bound answers
+/// first, wherever the re-queue is. A drop before the deadline, as a
+/// cancel's, counts nothing more.
+struct Requeueing {
+    figures: Option<&'static PoolFigures>,
+    deadline: Option<Instant>,
+}
+
+impl Requeueing {
+    /// Count the re-queue of the request with `cx` into `figures`.
+    fn new(figures: Option<&'static PoolFigures>, cx: &Cx) -> Self {
+        if let Some(figures) = figures {
+            figures.requeued();
+        }
+        Self {
+            figures,
+            deadline: cx.deadline().map(gdl::Deadline::instant),
+        }
+    }
+
+    /// The re-queue ended with `ended`.
+    fn ended(mut self, ended: &Result<Requeued>) {
+        if let (Some(figures), Err(error)) = (self.figures.take(), ended)
+            && error.kind() == ErrorKind::DeadlineExceeded
+        {
+            figures.requeue_deadline();
+        }
+    }
+}
+
+impl Drop for Requeueing {
+    fn drop(&mut self) {
+        if let Some(figures) = self.figures
+            && self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            figures.requeue_deadline();
         }
     }
 }

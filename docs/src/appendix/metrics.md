@@ -62,7 +62,7 @@ A chooser registers more families: what became of each offer it made to a pool o
 | `pool_failovers_total` | counter | `class`, `pool` | Offers this chooser made to the pool after another offer of the request missed: another pool's, or another of this pool's instances' own decline. An offer of a request that the pool policy re-queued for the pool is not one. |
 | `pool_offer_round_trip_seconds` | histogram | `class`, `pool`, `region`, `outcome` | Time from the send of an offer to the pool, after its encoding, to its answer, by how it ended. Each offer that `pool_offers_total` counts is one observation, under the same `outcome`. |
 | `pool_requeues_total` | counter | `class`, `pool`, `region` | Requests this chooser re-queued for the pool after the pool declined them as full ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)). A request counts once for each re-queue, however many times it is offered again while it waits. |
-| `pool_requeue_deadlines_total` | counter | `class`, `pool`, `region` | Re-queued requests that ended with `DeadlineExceeded` while re-queued for the pool. A cancel is not one. |
+| `pool_requeue_deadlines_total` | counter | `class`, `pool`, `region` | Re-queued requests that ended at their deadline while re-queued for the pool: the re-queue failed with `DeadlineExceeded`, or the hop's bound on the hand-off ended it once the deadline had passed, in a wait or with an offer in flight. A cancel before the deadline is not one. |
 
 `region` is the pool's region in the first follow of it the chooser saw. A pool's region is set where it is deployed, so its series keep the first. `pool_offers_total` and `pool_failovers_total` do not carry it, so that their series stay as they were.
 

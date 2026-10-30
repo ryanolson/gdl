@@ -18,7 +18,7 @@ use velo::Velo;
 
 use super::super::lease::Leases;
 use super::super::meter::tests::{offers, scraped};
-use super::super::meter::{FAILOVERS, PoolMeters};
+use super::super::meter::{FAILOVERS, PoolMeters, REQUEUE_DEADLINES, REQUEUES};
 use super::super::{EntryTable, PoolTable, Pools, pool_id, targets};
 use super::tests::layout_under;
 use crate::dist::counting::Counted;
@@ -306,6 +306,14 @@ impl Fleet {
     }
 
     /// The failovers counted under each pool.
+    /// The requests re-queued for `m1`, and those of them that ended at
+    /// their deadline.
+    fn requeues(&self) -> (f64, f64) {
+        let labels = [("class", "model_x"), ("pool", POOLS[0]), ("region", "home")];
+        let count = |family| scraped(&self.registry, family, &labels).expect("a series");
+        (count(REQUEUES), count(REQUEUE_DEADLINES))
+    }
+
     fn failovers(&self) -> Vec<f64> {
         POOLS
             .iter()
@@ -380,6 +388,31 @@ async fn a_re_queued_request_fails_at_its_deadline() {
     let [m1, m2, m3] = fleet.offered();
     assert!(m1 > 1 && m2 == 0 && m3 == 0, "{:?}", fleet.offered());
     assert_eq!(fleet.failovers(), [0.0, 0.0, 0.0]);
+    assert_eq!(fleet.requeues(), (1.0, 1.0));
+}
+
+/// A hop bounds its hand-off by the request's deadline, as `bounded` in
+/// the hop does: once the deadline passes, the bound answers first, and
+/// the hand-off's future is dropped wherever it is, in a wait or with an
+/// offer in flight. The re-queued request still counts as ended at its
+/// deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_re_queue_dropped_by_the_hops_bound_counts_its_deadline() {
+    let fleet = Fleet::new(backoff()).await;
+    let router = fleet.router(Keeping {
+        requeue: true,
+        ..Keeping::default()
+    });
+    fleet.decline([usize::MAX, 0, 0]);
+    let cx = Cx::new().with_timeout(Duration::from_millis(200));
+    let sending = fleet.send(&router, &cx);
+    let error = tokio::select! {
+        biased;
+        reason = cx.done() => reason,
+        (sent, _) = sending => sent.expect_err("m1 never took it"),
+    };
+    assert_eq!(error.kind(), ErrorKind::DeadlineExceeded, "{error}");
+    assert_eq!(fleet.requeues(), (1.0, 1.0));
 }
 
 /// What a re-queued request allocates, against today's failover. Each
