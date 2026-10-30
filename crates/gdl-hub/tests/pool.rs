@@ -280,7 +280,7 @@ async fn the_pool_health_endpoint_answers_ready_only_once_the_pool_is() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F3: the rendered hub metrics path answers 404"]
+#[ignore = "needs the hub metrics route from the pool metrics change"]
 async fn the_rendered_hub_metrics_path_answers_a_scrape() {
     let objects = include_str!("../../gdl-gen/tests/fixtures/k8s/out/use1/pools/model-x-us.yaml");
     let deployment = objects
