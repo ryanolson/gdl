@@ -407,6 +407,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** give the fleet a DynamoDB `[directory]`, or run each child in its parent's cluster. Pin a frontend on a source. Name segments with lowercase letters, digits, and `-`.
 - **Lifts:** the DynamoGraphDeployment form, and a secret for Kubernetes alone, with no `file`. See [Deploy a fleet on Kubernetes](../guides/kubernetes.md).
 
+### Two fleets in one namespace can share an object's name
+- **What:** a pool's objects are named for the pool (`<pool>`, `<pool>-<segment>`, `<pool>-state`), and a DynamoDB directory's Local and tables Job are always `dynamodb-local` and `dynamodb-tables`. Two fleets deployed to one namespace that have a pool of the same name, or that both run a DynamoDB Local there, write the same objects, and each `deploy` changes the other's. Within one fleet, the render refuses two objects of one name in a cluster. A PodMonitor's name holds a hash of its fleet and cluster, so it never collides.
+- **Why:** the render reads one fleet, and cannot see another fleet's names.
+- **Workaround:** give each fleet a namespace of its own (`[cluster.<name>] namespace`).
+
 ### A fleet's DynamoDB Local is one pod in memory, pulled from Docker Hub
 - **What:** with `[directory] local = true`, `cargo gdl k8s` runs one DynamoDB Local, `amazon/dynamodb-local` by digest, which each cluster pulls from Docker Hub, not from its registry. It keeps the tables in memory: a new Local pod, after a restart or a move to another node, starts empty, with a new pod IP, which the other clusters' hubs still name. Its hubs then fail to publish until `cargo gdl deploy` runs again, which makes the tables again and writes the new IP.
 - **Why:** DynamoDB Local stands in for a global table in a trial or a proof, with no AWS account. A pod's IP is the one address of it that every cluster routes to without a load balancer.
