@@ -413,7 +413,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** give each fleet a namespace of its own (`[cluster.<name>] namespace`).
 
 ### Under `--local`, a change to any copied file moves every image's tag
-- **What:** `k8s`, `images`, and `deploy` with `--local` build every image from one copy of gdl's workspace and of each crate the spec names by path, with each one's workspace, and tag each image with a sha256 of every byte of it. A change to any file in it, a document or another crate of the workspace included, moves every tag, so the next run builds and pushes every image again. In a Git checkout an untracked file that Git does not ignore is in the copy too.
+- **What:** `k8s`, `images`, and `deploy` with `--local` build every image from one copy of gdl's workspace and of each crate the spec names by path, with each one's workspace, and tag each image with a sha256 of every byte of it. A change to any file in it, a document or another crate of the workspace included, moves every tag, so the next run builds and pushes every image again. An untracked file that Git does not ignore, and whose path has no hidden part, is in the copy too. The sources must be in a Git checkout that Git can list: a source outside one, a checkout Git refuses, a link to an absolute path or out of the copied tree, and a manifest that names a path outside the sources absolutely are each refused, naming it.
 - **Why:** each image copies the whole tree into its build, as `compose --local` does, and a tag that covered less could name an image built from other sources.
 - **Workaround:** keep scratch files out of the workspace, or in a path the checkout's `.gitignore` names.
 - **Lifts:** a context of only the files each build reads.
