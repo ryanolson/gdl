@@ -174,3 +174,97 @@ fn a_directory_records_dropped_properties_are_logged() {
         );
     });
 }
+
+/// Both paths can read the same malformed list. The link winning the
+/// version race must not hide a directory record's first diagnostic.
+#[test]
+#[ignore = "F1: the follow link version suppresses a later directory drop diagnostic"]
+fn a_later_directory_drop_is_logged_when_the_link_wins_the_race() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use gdl_watch::PropertyList;
+
+    #[derive(Clone)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("the log").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let read = |version, kind: &str| {
+        let mut wire = serde_json::to_value(record(version, Presence::Serving)).expect("a record");
+        wire["properties_version"] = serde_json::json!(version);
+        wire["properties"] = serde_json::json!([
+            {"kind": "shard", "key": {"name": "a"}, "state": "ready", "since": 1},
+            {"kind": kind, "key": {"ratio": 0.5}, "state": "ready", "since": 1}
+        ]);
+        let linked: PropertyList = serde_json::from_value(serde_json::json!({
+            "version": version,
+            "entries": wire["properties"].clone()
+        }))
+        .expect("the link reads the same property list");
+        let record: PoolRecord = serde_json::from_value(wire).expect("the record reads");
+        assert_eq!(record.dropped, [kind]);
+        assert_eq!(linked.dropped, [kind]);
+        assert_eq!(record.properties, linked.entries);
+        (record, linked)
+    };
+    let (first, _) = read(1, "first_bad");
+    let (later, linked) = read(2, "later_bad");
+
+    // The directory-first order is the control for the same two records.
+    for link_first in [false, true] {
+        let output = Log(Arc::default());
+        let captured = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut listings = Listings::default();
+            for _ in 0..3 {
+                listings.record(&first, None);
+            }
+            let logged =
+                String::from_utf8(output.0.lock().expect("the log").clone()).expect("utf8");
+            assert_eq!(logged.matches("first_bad").count(), 1, "{logged}");
+            assert!(logged.contains(CLASS) && logged.contains(POOL), "{logged}");
+
+            if link_first {
+                listings.link_properties(CLASS, POOL, &linked);
+            }
+            for _ in 0..3 {
+                listings.record(&later, None);
+            }
+            let shown = listings
+                .listing(CLASS, POOL, Instant::now())
+                .expect("listed");
+            assert_eq!(shown.properties.version, 2);
+            assert_eq!(shown.properties.entries, later.properties);
+            assert_eq!(shown.properties.entries.len(), 1, "the valid key stays");
+            let sent = serde_json::to_value(&shown).expect("a wire listing");
+            let received: gdl_watch::Listing =
+                serde_json::from_value(sent).expect("a received listing");
+            assert!(received.properties.dropped.is_empty());
+            assert_eq!(received.properties.entries, later.properties);
+
+            let logged =
+                String::from_utf8(output.0.lock().expect("the log").clone()).expect("utf8");
+            assert_eq!(logged.matches("first_bad").count(), 1, "{logged}");
+            assert_eq!(
+                logged.matches("later_bad").count(),
+                1,
+                "the later directory drop needs one diagnostic, link_first={link_first}: {logged}"
+            );
+        });
+    }
+}
