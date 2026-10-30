@@ -167,7 +167,7 @@ A second `deploy` with no change pushes no image and changes no object, so no po
 
 ### Prune
 
-kubectl refuses `--prune` together with `--server-side`, so `deploy` prunes by itself. A pool that the fleet no longer places in a cluster is drained first, when it has a parent:
+kubectl refuses `--prune` together with `--server-side`, so `deploy` prunes by itself. A pool that the fleet still places, in any cluster, keeps serving: only its objects that this render no longer writes, such as a renamed segment's, are deleted, with no drain and no question to its parent. A pool that the fleet places in no cluster is drained first, when it has a parent:
 
 1. `deploy` reads the pool's parent from `GDL_POOL__HOME` in any of its Deployments. A pool with no parent, such as a global pool, is not drained. A pool whose hub's Deployment is already gone cannot drain: `deploy` asks its parent's hub for its record once, before anything is drained or deleted. A 404 from that hub means the pool withdrew, and the prune goes on. Otherwise `deploy` stops, deletes nothing, and names the parent's withdraw route (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on the control port).
 2. It sends `POST /v1/ext/gdl-pool/drain` to the pool's hub, at its Service's `control` port, through the service proxy.

@@ -899,3 +899,6 @@ mod unlabelled;
 
 #[path = "deploy/guard.rs"]
 mod guard;
+
+#[path = "deploy/renamed.rs"]
+mod renamed;

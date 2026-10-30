@@ -161,6 +161,8 @@ pub fn deploy(
     }
     say("apply: each cluster's pools");
 
+    // Every pool this run renders, in any cluster.
+    let retained: BTreeSet<String> = fleet.pools().map(|pool| pool.name).collect();
     for cluster in &clusters.0 {
         let names = &rendered.0[&cluster.name].names;
         let live = cluster.live(kube, how.waits.objects)?;
@@ -177,7 +179,7 @@ pub fn deploy(
         if pruned.is_empty() {
             continue;
         }
-        stop(kube, cluster, &pruned, &how.waits, say)?;
+        stop(kube, cluster, &pruned, &retained, &how.waits, say)?;
         say(&format!(
             "prune: deleted {} object(s) in cluster `{}`",
             pruned.len(),
@@ -218,7 +220,7 @@ pub fn down(
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
         let all: Vec<&Live> = live.iter().collect();
-        stop(kube, cluster, &all, waits, say)?;
+        stop(kube, cluster, &all, &BTreeSet::new(), waits, say)?;
         run(
             kube,
             cluster.at().unlabel(&[FLEET_LABEL, CLUSTER_LABEL]),
@@ -441,19 +443,25 @@ fn apply(
 }
 
 /// Stop `objects` of `cluster`: drain each pool among them that has a
-/// parent, wait until its parent's hub no longer holds its record, and
-/// then delete them, segments first and hubs next, so that a hub outlives
-/// the instances that report to it.
+/// parent and is not `retained`, wait until its parent's hub no longer
+/// holds its record, and then delete them, segments first and hubs next,
+/// so that a hub outlives the instances that report to it.
 fn stop(
     kube: &mut dyn Kube,
     cluster: &Cluster,
     objects: &[&Live],
+    retained: &BTreeSet<String>,
     waits: &Waits,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
     let at = cluster.at();
-    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) =
-        Stopping::of(objects).into_iter().partition(|pool| pool.hub);
+    // A pool that this run still renders keeps serving: only objects it no
+    // longer has are deleted, such as a renamed segment's, and it is
+    // neither drained nor asked about at its parent.
+    let (draining, hubless): (Vec<Stopping>, Vec<Stopping>) = Stopping::of(objects)
+        .into_iter()
+        .filter(|pool| !retained.contains(&pool.pool))
+        .partition(|pool| pool.hub);
     // Checked before any drain starts, so that a pool that cannot be shown
     // to have withdrawn stops the step before anything changes.
     for pool in &hubless {
