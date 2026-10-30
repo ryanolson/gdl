@@ -549,20 +549,24 @@ fn dockerfile(builder: &str, base: &str, copies: bool, build: &str) -> String {
 
 /// The build stage's toolchain for the image's architecture: its Rust
 /// target in `GDL_TARGET`, and, when the build host's differs, the target's
-/// standard library, a C cross compiler and the target's C library, which
-/// link the binary and build mimalloc. `/gdl/target.env` sets them for
-/// the build. Debian names the packages, as the default build image is.
+/// standard library, a C and a C++ cross compiler, and the target's C
+/// library, which link the binary and build mimalloc and any crate that
+/// builds C or C++ with the `cc` crate, such as a tokenizer's `esaxx-rs`.
+/// The `cc` crate reads `CC_<target>` and `CXX_<target>`; without the
+/// latter it derives `<gnu>-g++` from the C compiler, which must then be
+/// installed. `/gdl/target.env` sets them for the build. Debian names the
+/// packages, as the default build image is.
 const TOOLCHAIN: &str = "set -eu; mkdir -p /gdl; \\
     case \"$TARGETARCH\" in \\
-      amd64) target=x86_64-unknown-linux-gnu; gnu=x86_64-linux-gnu; packages=\"gcc-x86-64-linux-gnu libc6-dev-amd64-cross\"; linker=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER; cc=CC_x86_64_unknown_linux_gnu ;; \\
-      arm64) target=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; packages=\"gcc-aarch64-linux-gnu libc6-dev-arm64-cross\"; linker=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER; cc=CC_aarch64_unknown_linux_gnu ;; \\
+      amd64) target=x86_64-unknown-linux-gnu; gnu=x86_64-linux-gnu; packages=\"gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross\"; linker=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER; cc=CC_x86_64_unknown_linux_gnu; cxx=CXX_x86_64_unknown_linux_gnu ;; \\
+      arm64) target=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu; packages=\"gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross\"; linker=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER; cc=CC_aarch64_unknown_linux_gnu; cxx=CXX_aarch64_unknown_linux_gnu ;; \\
       *) echo \"no Rust target for architecture $TARGETARCH\" >&2; exit 1 ;; \\
     esac; \\
     echo \"export GDL_TARGET=$target\" > /gdl/target.env; \\
     if [ \"$(rustc -vV | sed -n 's/^host: //p')\" != \"$target\" ]; then \\
       apt-get update && apt-get install -y --no-install-recommends $packages && rm -rf /var/lib/apt/lists/*; \\
       rustup target add \"$target\"; \\
-      echo \"export $linker=$gnu-gcc $cc=$gnu-gcc\" >> /gdl/target.env; \\
+      echo \"export $linker=$gnu-gcc $cc=$gnu-gcc $cxx=$gnu-g++\" >> /gdl/target.env; \\
     fi";
 
 #[cfg(test)]
@@ -664,5 +668,89 @@ mod tests {
         );
         let last = text.split("FROM base\n").nth(1).expect("a final stage");
         assert!(!last.contains("RUN"), "{last}");
+    }
+
+    /// The build stage's toolchain script, run on a host of another
+    /// architecture than the image's, with stand-ins for `rustc`, `apt-get`,
+    /// and `rustup`: it installs a C and a C++ cross compiler for the
+    /// image's architecture, with its C library, and names both to cargo
+    /// and to the `cc` crate, so that a crate that builds C++, such as
+    /// `esaxx-rs`, finds `<gnu>-g++` rather than the host's compiler.
+    #[cfg(unix)]
+    #[test]
+    fn a_cross_build_installs_and_names_a_c_and_a_cpp_compiler() {
+        for (arch, host, gnu, var) in [
+            (
+                "amd64",
+                "aarch64-unknown-linux-gnu",
+                "x86_64-linux-gnu",
+                "x86_64_unknown_linux_gnu",
+            ),
+            (
+                "arm64",
+                "x86_64-unknown-linux-gnu",
+                "aarch64-linux-gnu",
+                "aarch64_unknown_linux_gnu",
+            ),
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix("gdl-toolchain-")
+                .tempdir()
+                .expect("a directory");
+            let bin = dir.path().join("bin");
+            std::fs::create_dir(&bin).expect("a directory");
+            let log = dir.path().join("installed");
+            for (name, body) in [
+                ("rustc", format!("echo \"host: {host}\"")),
+                ("apt-get", format!("echo \"$@\" >> '{}'", log.display())),
+                ("rustup", "true".to_string()),
+            ] {
+                let path = bin.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a stand-in");
+                std::fs::set_permissions(
+                    &path,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                )
+                .expect("executable");
+            }
+            let gdl = dir.path().join("gdl");
+            let script = TOOLCHAIN
+                .replace("\\\n", "\n")
+                .replace("/gdl", &gdl.display().to_string())
+                .replace("rm -rf /var/lib/apt/lists/*", "true");
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("TARGETARCH", arch)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .output()
+                .expect("sh runs");
+            assert!(output.status.success(), "{arch}: {output:?}");
+            let installed = std::fs::read_to_string(&log).expect("apt-get ran");
+            for package in [
+                format!("gcc-{}", gnu.replace('_', "-")),
+                format!("g++-{}", gnu.replace('_', "-")),
+            ] {
+                assert!(
+                    installed.contains(&package),
+                    "{arch}: {package} in {installed}"
+                );
+            }
+            let env = std::fs::read_to_string(gdl.join("target.env")).expect("target.env");
+            for set in [
+                format!("CC_{var}={gnu}-gcc"),
+                format!("CXX_{var}={gnu}-g++"),
+                format!("CARGO_TARGET_{}_LINKER={gnu}-gcc", var.to_uppercase()),
+            ] {
+                assert!(env.contains(&set), "{arch}: {set} in {env}");
+            }
+        }
     }
 }
