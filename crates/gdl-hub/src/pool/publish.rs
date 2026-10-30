@@ -20,6 +20,9 @@ use super::health::PoolHealth;
 use super::properties::PropertyList;
 use crate::HubDirectory;
 
+#[cfg(test)]
+mod tests;
+
 /// The longest one read of the pool's last record may take before the
 /// publisher starts: a read that fails or takes longer is made again.
 const SNAPSHOT: Duration = Duration::from_secs(2);
