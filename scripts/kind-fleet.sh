@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy a fleet to a kind cluster with `cargo gdl deploy`, change it, and take it down with `cargo gdl down`,
 # outside the default suite. It runs the real kubectl against a cluster of its own. It needs Docker with buildx,
-# kubectl, network access for the image builds (crates.io, GitHub, and Debian's packages), and kind.
+# kubectl, jq, network access for the image builds (crates.io, GitHub, and Debian's packages) and the Prometheus image,
+# and kind.
 #
 # It starts a `registry:2` on a free loopback port and a kind cluster that pulls from it, each with a name of its
 # own, and writes the api example's spec in two classes and a fleet of one global pool and two model pools. From a
@@ -9,6 +10,10 @@
 #   - `deploy` builds and pushes the images, applies the objects, and waits until each pool's health answers 200;
 #   - the global pool's health answers 200 through the API server's service proxy, and a request through
 #     `kubectl port-forward` is answered;
+#   - a Prometheus without the operator, configured with the scrape job of docs/src/guides/prometheus.yml, finds
+#     every hub and segment of the fleet, each with its pool, class, region and segment, and scrapes each segment.
+#     A hub serves its metrics only from a gdl that has its route: with HUB_METRICS_REV, a commit of the spec's
+#     `[gdl] git` that does, the images are built from it and every hub must be scraped too;
 #   - a second `deploy`, with one model pool removed from the fleet, drains that pool, which withdraws: its parent's
 #     hub no longer holds its record. Its objects are deleted, and the other pools' Deployments and pods are left
 #     as they were;
@@ -37,6 +42,8 @@ KIND_VERSION="0.33.0"
 NODE_IMAGE="kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0"
 # registry 2.8.3, by the digest of its multi-architecture index.
 REGISTRY_IMAGE="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+# Prometheus 3.7.3, by the digest of its multi-architecture index.
+PROMETHEUS_IMAGE="prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038"
 TIMEOUT="${TIMEOUT:-1800}"
 DYNAMODB="${DYNAMODB:-0}"
 if [[ "${DYNAMODB}" == "1" && -z "${GDL_REV:-}" ]]; then
@@ -74,6 +81,7 @@ kind="${tools}/bin/kind"
 [[ -x "${kind}" ]] || fail "${kind} is missing; run with INSTALL_TOOLS=1"
 "${kind}" version | grep -q "v${KIND_VERSION} " || fail "${kind} is not kind ${KIND_VERSION}"
 command -v kubectl >/dev/null || fail "kubectl is not on the PATH"
+command -v jq >/dev/null || fail "jq is not on the PATH"
 
 cargo build -p gdl-gen --bin cargo-gdl
 gdl=("${target}/debug/cargo-gdl" gdl)
@@ -143,6 +151,10 @@ fi
 # each segment drains within 20 s.
 sed "s#^path = \"api.gdl\"#path = \"${root}/examples/api/api.gdl\"#" examples/api/deploy.toml >"${scratch}/gdl.toml"
 grep -q "^path = \"${root}/examples/api/api.gdl\"" "${scratch}/gdl.toml" || fail "examples/api/deploy.toml names no api.gdl"
+if [[ -n "${HUB_METRICS_REV:-}" ]]; then
+  sed -i "s#^rev = \".*\"#rev = \"${HUB_METRICS_REV}\"#" "${scratch}/gdl.toml"
+  grep -q "^rev = \"${HUB_METRICS_REV}\"" "${scratch}/gdl.toml" || fail "the spec names no [gdl] rev to replace"
+fi
 cat >>"${scratch}/gdl.toml" <<'EOF'
 [class.global]
 segments = ["front"]
@@ -222,6 +234,91 @@ answer="$(curl -sS -m 30 -X POST -H 'content-type: application/json' -d '{"messa
 kill "${forward}"
 forward=""
 echo "kind-fleet.sh: a request through the port-forward is answered"
+
+# A Prometheus without the operator, in a namespace of its own, with the chapter's scrape job: it must find each
+# of the six pods (three pools, each a hub and one segment) by their annotations, with their labels.
+k create namespace gdl-metrics >/dev/null
+k --namespace gdl-metrics create configmap prometheus \
+  --from-file=prometheus.yml="${root}/docs/src/guides/prometheus.yml" >/dev/null
+k apply --filename - >/dev/null <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus, namespace: gdl-metrics}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: gdl-kind-prometheus}
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: gdl-kind-prometheus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: gdl-kind-prometheus}
+subjects:
+- {kind: ServiceAccount, name: prometheus, namespace: gdl-metrics}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus, namespace: gdl-metrics}
+spec:
+  selector: {matchLabels: {app: prometheus}}
+  template:
+    metadata: {labels: {app: prometheus}}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: ${PROMETHEUS_IMAGE}
+        args: [--config.file=/etc/prometheus/prometheus.yml]
+        ports: [{name: web, containerPort: 9090}]
+        volumeMounts: [{name: config, mountPath: /etc/prometheus}]
+      volumes: [{name: config, configMap: {name: prometheus}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus, namespace: gdl-metrics}
+spec:
+  selector: {app: prometheus}
+  ports: [{name: web, port: 9090, targetPort: 9090}]
+YAML
+timeout 300 kubectl --context "${context}" --namespace gdl-metrics rollout status deployment/prometheus \
+  --timeout=240s >/dev/null || fail "Prometheus did not start"
+# Each active target of job gdl as one line: pool, class, region, segment, and health.
+targets() {
+  k get --raw "/api/v1/namespaces/gdl-metrics/services/http:prometheus:9090/proxy/api/v1/targets?state=active" \
+    | jq -r '.data.activeTargets[] | select(.labels.job == "gdl")
+        | [.labels.in_pool, .labels.in_class, .labels.in_region, .labels.segment, .health] | join(" ")' \
+    | sort
+}
+expected="global global local front
+global global local hub
+model-a model local engine
+model-a model local hub
+model-b model local engine
+model-b model local hub"
+# Whether `found` holds every target with its labels, each segment scraped, and with HUB_METRICS_REV each hub too.
+complete() {
+  [[ "$(cut -d' ' -f1-4 <<<"$1")" == "${expected}" ]] || return 1
+  ! grep -v ' hub ' <<<"$1" | grep -qv ' up$' || return 1
+  [[ -z "${HUB_METRICS_REV:-}" ]] || ! grep ' hub ' <<<"$1" | grep -qv ' up$'
+}
+# A scrape every 5 s: 120 s is ample once Prometheus runs.
+found=""
+for _ in $(seq 1 120); do
+  found="$(targets || true)"
+  complete "${found}" && break
+  sleep 1
+done
+complete "${found}" || fail "Prometheus found these targets (pool, class, region, segment, health):
+${found}
+expected each of:
+${expected}
+with each segment up$([[ -n "${HUB_METRICS_REV:-}" ]] && echo ", and each hub")"
+echo "kind-fleet.sh: Prometheus finds every hub and segment with its labels, and scrapes each segment$([[ -n "${HUB_METRICS_REV:-}" ]] && echo " and hub"):"
+echo "${found}"
 
 # What a second deploy must leave alone: the other pools' Deployments (uid and generation) and pods (uid).
 kept() {
