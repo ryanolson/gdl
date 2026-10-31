@@ -64,3 +64,60 @@ async fn a_victim_that_dies_does_not_cost_the_last_ready_frontend() {
         "the remaining ready frontend already satisfies the desired count"
     );
 }
+
+struct PausedProbe<'a> {
+    fake: &'a Fake,
+    arrived: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl Probe for PausedProbe<'_> {
+    async fn instances(&self, pool: &str) -> Result<Instances, String> {
+        self.fake.instances(pool).await
+    }
+
+    async fn metrics(&self, ip: &str, port: u16) -> Result<String, String> {
+        if ip == "10.0.0.1" {
+            self.arrived.notify_one();
+            self.resume.notified().await;
+        }
+        self.fake.metrics(ip, port).await
+    }
+}
+
+#[tokio::test]
+#[ignore = "F3: a second operator's stale reconcile overwrites a newer HPA scale"]
+async fn concurrent_operators_preserve_a_newer_scale() {
+    let fake = Fake::with(&[5, 5, 5, 0]);
+    let probe = PausedProbe {
+        fake: &fake,
+        arrived: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    };
+    let victims = Victims::default();
+    let cx = Context {
+        cluster: &fake,
+        probe: &probe,
+        victims: &victims,
+    };
+    let stale = GdlScaler::new("global-front", spec(Some(3)));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (result, ()) = tokio::join!(reconcile(&cx, &stale, 0), async {
+            probe.arrived.notified().await;
+            // The HPA changes the scaler while this operator awaits a scrape.
+            once(&fake, &spec(Some(5)), 1_000).await;
+            fake.settle(false);
+            assert_eq!(fake.state().replicas, 5);
+            assert_eq!(fake.state().pods.len(), 5);
+            probe.resume.notify_one();
+        });
+        result.expect("both operators reconcile successfully");
+    })
+    .await
+    .expect("the interleaving completes");
+    assert_eq!(
+        fake.state().replicas,
+        5,
+        "the paused operator must not undo the scale that the other operator applied"
+    );
+}
