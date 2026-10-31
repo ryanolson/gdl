@@ -1522,6 +1522,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "gdl-k8s",
  "gdl-model",
  "gdl-watch",
  "http 1.5.0",

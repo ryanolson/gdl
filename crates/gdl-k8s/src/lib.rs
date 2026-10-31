@@ -10,7 +10,10 @@ mod render;
 mod settings;
 
 pub use labels::{LABEL_LIMIT, LABEL_PREFIX, checksum, fnv, label_value};
-pub use pool::{Env, Hub, Pool, Port, Protocol, Resources, Secret, Segment, Toleration};
+pub use pool::{
+    Dynamodb, Env, Hub, Parent, Pool, Port, Presence, Protocol, Resources, Secret, Segment,
+    Toleration,
+};
 pub use render::{
     BINARY, HUB_METRICS, POD_IP, PUBLIC, ROUTABLE, SEGMENT_METRICS, SYSTEM, Scaling, children,
     hub_address, object_name, place, pod_hub, resources, state_claim,

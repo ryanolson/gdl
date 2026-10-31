@@ -387,3 +387,576 @@
     ]
   }
 }
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "labels": {
+      "gdl.dev/setup": "gdl-operator"
+    },
+    "name": "gdlpools.gdl.dev"
+  },
+  "spec": {
+    "group": "gdl.dev",
+    "names": {
+      "kind": "GdlPool",
+      "plural": "gdlpools",
+      "shortNames": [
+        "gpool"
+      ],
+      "singular": "gdlpool"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.class",
+            "name": "Class",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for GdlPoolSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "description": "What a `GdlPool` asks for: one pool of a fleet, every value resolved,\nas `cargo gdl k8s` renders it.",
+                "properties": {
+                  "allowPoolRestart": {
+                    "description": "Whether a change that replaces the pool's hub may be applied. A hub\nrestart drains its pool, so without this the change is held, and\nthe pool's status says so (`PoolRestartPending`).",
+                    "type": "boolean"
+                  },
+                  "class": {
+                    "description": "The pool's class.",
+                    "type": "string"
+                  },
+                  "cluster": {
+                    "description": "The fleet's name for the cluster the pool runs in.",
+                    "type": "string"
+                  },
+                  "deployment": {
+                    "description": "The pool's layout as its hub admits it: the `DeploymentSpec` as\nJSON text, kept verbatim, since its checksum decides when pods are\nreplaced.",
+                    "type": "string"
+                  },
+                  "dynamodb": {
+                    "description": "The DynamoDB tables the pool's hub publishes its record to: absent\nunder the relay directory, where it reports to its parent's hub.",
+                    "nullable": true,
+                    "properties": {
+                      "awsRegion": {
+                        "description": "The AWS region whose copy of the tables the hub reads and writes.",
+                        "type": "string"
+                      },
+                      "listsTable": {
+                        "description": "The table of lists.",
+                        "type": "string"
+                      },
+                      "recordsTable": {
+                        "description": "The table of records.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "awsRegion",
+                      "listsTable",
+                      "recordsTable"
+                    ],
+                    "type": "object"
+                  },
+                  "fleet": {
+                    "description": "The fleet's name.",
+                    "type": "string"
+                  },
+                  "hub": {
+                    "description": "The pool's hub.",
+                    "properties": {
+                      "env": {
+                        "description": "Its variables, after the pod's IP, which every hub is given.",
+                        "items": {
+                          "description": "A container's variable, as Kubernetes reads it: `$(NAME)` in a value\nis another variable's, and `$$` is `$`.",
+                          "properties": {
+                            "name": {
+                              "description": "Its name.",
+                              "type": "string"
+                            },
+                            "value": {
+                              "description": "Its value.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "image": {
+                        "description": "Its image.",
+                        "type": "string"
+                      },
+                      "resources": {
+                        "description": "Its requests and limits.",
+                        "nullable": true,
+                        "properties": {
+                          "limits": {
+                            "additionalProperties": {
+                              "type": "string"
+                            },
+                            "description": "The most the container may use.",
+                            "type": "object"
+                          },
+                          "requests": {
+                            "additionalProperties": {
+                              "type": "string"
+                            },
+                            "description": "What the scheduler reserves for the container.",
+                            "type": "object"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "stateDir": {
+                        "description": "Where it keeps its children's records, on a claim of its own, when\nit is a parent under the relay directory.",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "image"
+                    ],
+                    "type": "object"
+                  },
+                  "nodeSelector": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "The node labels every pod of the pool must match: the cluster's\nplatform's OS and architecture, and the cluster's own.",
+                    "type": "object"
+                  },
+                  "parent": {
+                    "description": "The pool whose hub holds its record, or the class of its parents:\nabsent for a top pool, whose hub refuses a drain.",
+                    "nullable": true,
+                    "oneOf": [
+                      {
+                        "required": [
+                          "home"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "parents"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "home": {
+                        "description": "The one pool whose hub holds the pool's record.",
+                        "type": "string"
+                      },
+                      "parents": {
+                        "description": "The class of the pools it serves, for a shared pool.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "podMonitor": {
+                    "description": "Whether the pool has a PodMonitor of its pods, for a cluster that\nruns the Prometheus operator.",
+                    "type": "boolean"
+                  },
+                  "presence": {
+                    "default": "serving",
+                    "description": "Whether the pool serves, or is scaled to 0 and says so in its\nrecord.",
+                    "enum": [
+                      "serving",
+                      "scaledToZero"
+                    ],
+                    "type": "string"
+                  },
+                  "region": {
+                    "description": "The pool's region.",
+                    "type": "string"
+                  },
+                  "segments": {
+                    "description": "Each segment of the pool's class, in name order.",
+                    "items": {
+                      "description": "A segment of a pool.",
+                      "properties": {
+                        "env": {
+                          "description": "Its variables.",
+                          "items": {
+                            "description": "A container's variable, as Kubernetes reads it: `$(NAME)` in a value\nis another variable's, and `$$` is `$`.",
+                            "properties": {
+                              "name": {
+                                "description": "Its name.",
+                                "type": "string"
+                              },
+                              "value": {
+                                "description": "Its value.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "value"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "image": {
+                          "description": "Its image.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Its name.",
+                          "type": "string"
+                        },
+                        "ports": {
+                          "description": "The container ports it publishes, which a Service of its own lists.",
+                          "items": {
+                            "description": "A container port that a segment publishes.",
+                            "properties": {
+                              "port": {
+                                "description": "The port.",
+                                "format": "uint16",
+                                "maximum": 65535.0,
+                                "minimum": 1.0,
+                                "type": "integer"
+                              },
+                              "protocol": {
+                                "description": "Its protocol.",
+                                "enum": [
+                                  "TCP",
+                                  "UDP",
+                                  "SCTP"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "port",
+                              "protocol"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "quorum": {
+                          "description": "How many instances the pool needs ready.",
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "resources": {
+                          "description": "Its requests and limits.",
+                          "nullable": true,
+                          "properties": {
+                            "limits": {
+                              "additionalProperties": {
+                                "type": "string"
+                              },
+                              "description": "The most the container may use.",
+                              "type": "object"
+                            },
+                            "requests": {
+                              "additionalProperties": {
+                                "type": "string"
+                              },
+                              "description": "What the scheduler reserves for the container.",
+                              "type": "object"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "secrets": {
+                          "description": "The spec's secrets it mounts, each from a Kubernetes Secret.",
+                          "items": {
+                            "description": "One of the spec's secrets that a segment mounts.",
+                            "properties": {
+                              "holder": {
+                                "description": "The Kubernetes Secret that holds it.",
+                                "type": "string"
+                              },
+                              "name": {
+                                "description": "The spec's name for it: the file it is mounted as, and its key in\nthe Kubernetes Secret.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "holder",
+                              "name"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "settings": {
+                          "description": "Its settings file, TOML, kept verbatim. Its probes, its stop grace,\nits drain bound, and its metrics prefix are read from it.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "image",
+                        "name",
+                        "quorum",
+                        "settings"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "serviceAccountName": {
+                    "description": "The ServiceAccount every pod of the pool runs as: the fleet's.",
+                    "type": "string"
+                  },
+                  "tolerations": {
+                    "description": "The taints every pod of the pool tolerates.",
+                    "items": {
+                      "description": "A taint a pod tolerates, as Kubernetes spells it.",
+                      "properties": {
+                        "effect": {
+                          "description": "The effect it matches; absent matches every effect.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "key": {
+                          "description": "The taint's key; absent, with `Exists`, tolerates every taint.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "operator": {
+                          "description": "`Equal` or `Exists`.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "tolerationSeconds": {
+                          "description": "How long a pod stays bound once a `NoExecute` taint is added.",
+                          "format": "int64",
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "value": {
+                          "description": "The taint's value, for `Equal`.",
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "class",
+                  "cluster",
+                  "deployment",
+                  "fleet",
+                  "hub",
+                  "region",
+                  "segments",
+                  "serviceAccountName"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "What the operator observed of a pool and did to it.",
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "description": "`Applied`, `Healthy`, `Draining`, `Withdrawn`, `HubGone`,\n`PodMonitor`, `PoolRestartPending`, `ForegroundDelete`, and\n`Adopted` when a child is not the pool's to change.",
+                    "items": {
+                      "description": "Condition contains details for one aspect of the current state of this API Resource.",
+                      "properties": {
+                        "lastTransitionTime": {
+                          "description": "lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "message": {
+                          "description": "message is a human readable message indicating details about the transition. This may be an empty string.",
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "description": "observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.",
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "reason": {
+                          "description": "reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.",
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "status of the condition, one of True, False, Unknown.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "type of condition in CamelCase or in foo.example.com/CamelCase.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "lastTransitionTime",
+                        "message",
+                        "reason",
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "held": {
+                    "description": "The generation held because it would replace the pool's hub: none\nof it was applied.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "missing": {
+                    "description": "The objects the pool renders that do not exist, each as\n`<Kind>/<name>`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "observedGeneration": {
+                    "description": "The generation of the spec it last acted on: applied, or held.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "phase": {
+                    "description": "Where a pool is.",
+                    "enum": [
+                      "Pending",
+                      "Ready",
+                      "Degraded",
+                      "Unavailable",
+                      "Draining",
+                      "Stopping",
+                      "Withdrawn"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "segments": {
+                    "additionalProperties": {
+                      "description": "One segment of a pool, as its hub counts it.",
+                      "properties": {
+                        "quorum": {
+                          "description": "How many the pool needs ready.",
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "usable": {
+                          "description": "Its instances that are members and ready.",
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "quorum",
+                        "usable"
+                      ],
+                      "type": "object"
+                    },
+                    "description": "Each segment's usable instances and quorum, as its hub counts them.",
+                    "type": "object"
+                  },
+                  "stop": {
+                    "description": "The pool's stop, once it is deleted: the step it is at, written\nbefore the step is taken.",
+                    "nullable": true,
+                    "properties": {
+                      "at": {
+                        "description": "When the step was written, RFC 3339.",
+                        "type": "string"
+                      },
+                      "objects": {
+                        "description": "The objects the step acts on.",
+                        "items": {
+                          "description": "An object a step acts on, by its uid: one made again under the same\nname is another object.",
+                          "properties": {
+                            "kind": {
+                              "description": "Its kind: `Deployment` or `GdlScaler`.",
+                              "type": "string"
+                            },
+                            "name": {
+                              "description": "Its name.",
+                              "type": "string"
+                            },
+                            "uid": {
+                              "description": "Its uid.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "name",
+                            "uid"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "since": {
+                        "description": "When the stop began, RFC 3339: the drain's bound counts from here.",
+                        "type": "string"
+                      },
+                      "step": {
+                        "description": "The step.",
+                        "enum": [
+                          "drain",
+                          "segments",
+                          "hub",
+                          "release"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "at",
+                      "since",
+                      "step"
+                    ],
+                    "type": "object"
+                  },
+                  "withdrawn": {
+                    "description": "Whether the pool's hub says its drained record is withdrawn.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "GdlPool",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

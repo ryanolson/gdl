@@ -1,14 +1,19 @@
 //! What a cluster's owner applies to run the operator in one namespace:
-//! the `GdlScaler` CRD, the operator's ServiceAccount, its Role and
-//! RoleBinding there, and its Deployment. The CRD is the one cluster-scoped
-//! object. The Role grants only what the scaler uses, in its namespace:
-//! no Secrets, no ServiceAccounts, nothing cluster-wide, and no service
-//! proxy, since the operator reaches hubs and pods from inside the cluster.
+//! the `GdlScaler` and `GdlPool` CRDs, the operator's ServiceAccount, its
+//! Role and RoleBinding there, and its StatefulSet. The CRDs are the only
+//! cluster-scoped objects. The Role grants only what the operator uses,
+//! in its namespace: a pool's objects, which it makes and deletes, its
+//! pods, which it reads and labels, and events. No Secrets, no
+//! ServiceAccounts, nothing cluster-wide, and no service proxy, since the
+//! operator reaches hubs and pods from inside the cluster. PodMonitors are
+//! granted whether or not the cluster has their CRD: a rule for a kind the
+//! cluster does not serve grants nothing.
 
 use kube::CustomResourceExt;
 use serde_json::{Value, json};
 
 use crate::crd::GdlScaler;
+use crate::pool::GdlPool;
 
 /// The name of the operator's ServiceAccount, Role, RoleBinding and
 /// Deployment.
@@ -20,9 +25,17 @@ const SETUP: &str = "gdl.dev/setup";
 
 /// The CRDs, cluster-scoped: installed once per cluster by its owner.
 pub fn crds() -> Vec<Value> {
-    let mut crd = serde_json::to_value(GdlScaler::crd()).expect("a CRD encodes as JSON");
-    crd["metadata"]["labels"] = json!({SETUP: NAME});
-    vec![crd]
+    [
+        serde_json::to_value(GdlScaler::crd()),
+        serde_json::to_value(GdlPool::crd()),
+    ]
+    .into_iter()
+    .map(|crd| {
+        let mut crd = crd.expect("a CRD encodes as JSON");
+        crd["metadata"]["labels"] = json!({SETUP: NAME});
+        crd
+    })
+    .collect()
 }
 
 /// The operator's objects in `namespace`, its image `image`: the
@@ -35,16 +48,25 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
     let meta = || json!({"name": NAME, "namespace": namespace, "labels": {SETUP: NAME}});
     let rule = |group: &str, resources: &[&str], verbs: &[&str]| json!({"apiGroups": [group], "resources": resources, "verbs": verbs});
     let read = ["get", "list", "watch"];
+    let write = [
+        "get", "list", "watch", "create", "update", "patch", "delete",
+    ];
     let role = json!({
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "Role",
         "metadata": meta(),
         "rules": [
-            rule("gdl.dev", &["gdlscalers"], &["get", "list", "watch", "update", "patch"]),
+            rule("gdl.dev", &["gdlpools"], &["get", "list", "watch", "update", "patch"]),
+            rule("gdl.dev", &["gdlpools/status"], &["get", "update", "patch"]),
+            rule("gdl.dev", &["gdlpools/finalizers"], &["update"]),
+            rule("gdl.dev", &["gdlscalers"], &write),
             rule("gdl.dev", &["gdlscalers/status"], &["get", "update", "patch"]),
-            rule("apps", &["deployments"], &["get", "list", "watch", "patch"]),
+            rule("apps", &["deployments"], &write),
+            rule("", &["services", "configmaps", "persistentvolumeclaims"], &write),
             rule("", &["pods"], &["get", "list", "watch", "patch"]),
             rule("discovery.k8s.io", &["endpointslices"], &read),
+            rule("monitoring.coreos.com", &["podmonitors"], &write),
+            rule("events.k8s.io", &["events"], &["create", "patch"]),
         ],
     });
     let binding = json!({

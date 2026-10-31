@@ -8,7 +8,7 @@ The operator is a Rust binary, `gdl-operator`, that runs in the fleet's namespac
 
 ## Install it
 
-The operator needs one cluster-scoped object, the `GdlScaler` CRD (`gdlscalers.gdl.dev`), and five objects in the fleet's namespace: its ServiceAccount, a Role, a RoleBinding, a StatefulSet of one replica, and the StatefulSet's headless Service. A cluster's owner applies them, since a deployer cannot grant rights it does not hold. `gdl-operator manifests` prints all six, each labelled `gdl.dev/setup=gdl-operator`:
+The operator needs two cluster-scoped objects, the `GdlScaler` CRD (`gdlscalers.gdl.dev`) and the `GdlPool` CRD (`gdlpools.gdl.dev`), and five objects in the fleet's namespace: its ServiceAccount, a Role, a RoleBinding, a StatefulSet of one replica, and the StatefulSet's headless Service. A cluster's owner applies them, since a deployer cannot grant rights it does not hold. `gdl-operator manifests` prints all seven, each labelled `gdl.dev/setup=gdl-operator`:
 
 ```bash
 gdl-operator manifests --namespace gdl-api --image registry.example/gdl/gdl-operator:<tag> \
@@ -21,17 +21,23 @@ The image is built from `crates/gdl-operator/Dockerfile`, at the repository's ro
 docker build -f crates/gdl-operator/Dockerfile -t registry.example/gdl/gdl-operator:<tag> .
 ```
 
-The Role grants only what the scaler uses, in its namespace:
+The Role grants only what the operator uses, in its namespace:
 
 | Resource | Verbs | Why |
 |---|---|---|
-| `gdl.dev` `gdlscalers` | get, list, watch, update, patch | Read each scaler |
+| `gdl.dev` `gdlpools` | get, list, watch, update, patch | Read each pool, and add its finalizer |
+| `gdl.dev` `gdlpools/status` | get, update, patch | Report what it observed and did, and the step of a pool's stop |
+| `gdl.dev` `gdlpools/finalizers` | update | Remove a pool's finalizer once its stop has ended |
+| `gdl.dev` `gdlscalers` | get, list, watch, create, update, patch, delete | A pool's scalers, which it makes and deletes, and suspends at a pool's stop |
 | `gdl.dev` `gdlscalers/status` | get, update, patch | Report what it observed and did |
-| `apps` `deployments` | get, list, watch, patch | Read the target, and write its `replicas` |
+| `apps` `deployments` | get, list, watch, create, update, patch, delete | A pool's Deployments, and each one's `replicas` |
+| core `services`, `configmaps`, `persistentvolumeclaims` | get, list, watch, create, update, patch, delete | A pool's other objects |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
+| `monitoring.coreos.com` `podmonitors` | get, list, watch, create, update, patch, delete | A pool's PodMonitor, where the cluster runs the Prometheus operator |
+| `events.k8s.io` `events` | create, patch | Say what it held, refused, or could not prove |
 
-It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
+It deletes only a pool's own objects, and never a pod. It has nothing on Secrets, ServiceAccounts, Namespaces, or Leases. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
 The operator runs as a StatefulSet of one replica. A StatefulSet never runs two pods of one identity: it starts the replacement of its pod only once the old one is confirmed gone. So at most one operator acts at a time, through a rollout, a restart, or a node failure. While the operator's node does not answer, its pod is not confirmed gone, and no replacement starts: scaling pauses, the safe way, until the node answers again or Kubernetes removes it. Scaling pauses, and nothing else does: the segments serve on, and a pod that leaves meanwhile drains on its own SIGTERM.
 

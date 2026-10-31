@@ -1,7 +1,8 @@
 //! A pool as its objects are rendered from it: every value resolved, so
 //! that `cargo gdl k8s` on a laptop and the operator in a cluster render
 //! the same objects from it alone. Nothing here is read from a fleet, a
-//! spec, or a build.
+//! spec, or a build. It is a `GdlPool`'s spec, so what only the operator
+//! acts on, such as the pool's parent and its presence, is here too.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +38,88 @@ pub struct Pool {
     /// The taints every pod of the pool tolerates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tolerations: Vec<Toleration>,
+    /// The pool whose hub holds its record, or the class of its parents:
+    /// absent for a top pool, whose hub refuses a drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Parent>,
+    /// The DynamoDB tables the pool's hub publishes its record to: absent
+    /// under the relay directory, where it reports to its parent's hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamodb: Option<Dynamodb>,
+    /// Whether the pool has a PodMonitor of its pods, for a cluster that
+    /// runs the Prometheus operator.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pod_monitor: bool,
+    /// Whether the pool serves, or is scaled to 0 and says so in its
+    /// record.
+    #[serde(default)]
+    pub presence: Presence,
+    /// Whether a change that replaces the pool's hub may be applied. A hub
+    /// restart drains its pool, so without this the change is held, and
+    /// the pool's status says so (`PoolRestartPending`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_pool_restart: bool,
+}
+
+/// A pool's parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Parent {
+    /// The one pool whose hub holds the pool's record.
+    Home(String),
+    /// The class of the pools it serves, for a shared pool.
+    Parents(String),
+}
+
+impl Dynamodb {
+    /// The tables of `directory`, when it is DynamoDB.
+    pub fn of(directory: &gdl_model::DirectoryBackend) -> Option<Self> {
+        match directory {
+            gdl_model::DirectoryBackend::DynamoDb {
+                records_table,
+                lists_table,
+                aws_region,
+                ..
+            } => Some(Self {
+                records_table: records_table.clone(),
+                lists_table: lists_table.clone(),
+                aws_region: aws_region.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl From<&gdl_model::Parent> for Parent {
+    fn from(parent: &gdl_model::Parent) -> Self {
+        match parent {
+            gdl_model::Parent::Pool(home) => Self::Home(home.clone()),
+            gdl_model::Parent::Class(class) => Self::Parents(class.clone()),
+        }
+    }
+}
+
+/// The DynamoDB tables a pool's hub publishes its record to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Dynamodb {
+    /// The table of records.
+    pub records_table: String,
+    /// The table of lists.
+    pub lists_table: String,
+    /// The AWS region whose copy of the tables the hub reads and writes.
+    pub aws_region: String,
+}
+
+/// Whether a pool serves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Presence {
+    /// It serves.
+    #[default]
+    Serving,
+    /// Its segments are held at 0, and its record says so.
+    ScaledToZero,
 }
 
 /// A pool's hub.

@@ -11,6 +11,7 @@
 mod cluster;
 mod crd;
 mod manifests;
+mod pool;
 mod probe;
 mod run;
 mod scaler;
@@ -21,6 +22,9 @@ pub use crd::{
     Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
 };
 pub use manifests::{NAME, crds, namespaced, stream};
+pub use pool::{
+    FINALIZER, GdlPool, GdlPoolSpec, GdlPoolStatus, Object, Phase, SegmentStatus, Stop, StopStep,
+};
 pub use probe::{Instance, InstanceLoad, Instances};
 pub use run::run;
 pub use victim::{Candidate, FEWEST_ADMITTED, NEWEST, VictimPolicy, Victims};

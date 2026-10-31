@@ -71,10 +71,12 @@ fn the_schema_refuses_what_the_scaler_cannot_do() {
     assert_eq!(required, ["pool", "segment", "targetRef"]);
 }
 
-/// The Role grants only what the scaler uses, in its namespace: nothing
-/// on Secrets or ServiceAccounts, no delete, and no service proxy.
+/// The Role grants only what the operator uses, in its namespace: a
+/// pool's objects, which it makes and deletes; pods, which it reads and
+/// labels but never deletes; and events. Nothing on Secrets or
+/// ServiceAccounts, no Lease, and no service proxy.
 #[test]
-fn the_role_grants_only_what_the_scaler_uses() {
+fn the_role_grants_only_what_the_operator_uses() {
     let objects = gdl_operator::namespaced("gdl-api", "registry/gdl-operator:tag");
     let kinds: Vec<&str> = objects
         .iter()
@@ -96,42 +98,98 @@ fn the_role_grants_only_what_the_scaler_uses() {
     let rules = objects[1]["rules"].as_array().expect("rules");
     let mut granted = Vec::new();
     for rule in rules {
+        let group = rule["apiGroups"][0].as_str().expect("a group");
+        let verbs: Vec<&str> = rule["verbs"]
+            .as_array()
+            .expect("verbs")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
         for resource in rule["resources"].as_array().expect("resources") {
-            let verbs: Vec<&str> = rule["verbs"]
-                .as_array()
-                .expect("verbs")
-                .iter()
-                .filter_map(Value::as_str)
-                .collect();
-            granted.push((resource.as_str().expect("a resource").to_string(), verbs));
+            let resource = resource.as_str().expect("a resource");
+            granted.push((format!("{group}/{resource}"), verbs.join(",")));
         }
     }
     for (resource, verbs) in &granted {
-        assert!(!verbs.contains(&"delete"), "{resource} may be deleted");
-        assert!(!verbs.contains(&"*"), "{resource} has every verb");
+        assert!(!verbs.contains('*'), "{resource} has every verb");
         for refused in [
-            "secrets",
-            "serviceaccounts",
-            "services/proxy",
-            "namespaces",
-            "leases",
+            "/secrets",
+            "/serviceaccounts",
+            "/services/proxy",
+            "/namespaces",
+            "coordination.k8s.io/leases",
         ] {
             assert_ne!(resource, refused);
         }
     }
-    let resources: Vec<&str> = granted
+    let write = "get,list,watch,create,update,patch,delete";
+    let granted: Vec<(&str, &str)> = granted
         .iter()
-        .map(|(resource, _)| resource.as_str())
+        .map(|(resource, verbs)| (resource.as_str(), verbs.as_str()))
         .collect();
     assert_eq!(
-        resources,
+        granted,
         [
-            "gdlscalers",
-            "gdlscalers/status",
-            "deployments",
-            "pods",
-            "endpointslices"
+            ("gdl.dev/gdlpools", "get,list,watch,update,patch"),
+            ("gdl.dev/gdlpools/status", "get,update,patch"),
+            ("gdl.dev/gdlpools/finalizers", "update"),
+            ("gdl.dev/gdlscalers", write),
+            ("gdl.dev/gdlscalers/status", "get,update,patch"),
+            ("apps/deployments", write),
+            ("/services", write),
+            ("/configmaps", write),
+            ("/persistentvolumeclaims", write),
+            ("/pods", "get,list,watch,patch"),
+            ("discovery.k8s.io/endpointslices", "get,list,watch"),
+            ("monitoring.coreos.com/podmonitors", write),
+            ("events.k8s.io/events", "create,patch"),
         ]
+    );
+}
+
+/// A `GdlPool` is namespaced, has a status of its own and no scale, and
+/// its schema requires what a pool's objects are rendered from.
+#[test]
+fn the_pool_crd_holds_a_resolved_pool() {
+    let crds = gdl_operator::crds();
+    let crd = &crds[1];
+    assert_eq!(crd["spec"]["names"]["kind"], "GdlPool");
+    assert_eq!(crd["spec"]["scope"], "Namespaced");
+    let version = &crd["spec"]["versions"][0];
+    assert!(version["subresources"]["status"].is_object());
+    assert!(version["subresources"].get("scale").is_none());
+    let schema = &version["schema"]["openAPIV3Schema"]["properties"]["spec"];
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required fields")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        [
+            "class",
+            "cluster",
+            "deployment",
+            "fleet",
+            "hub",
+            "region",
+            "segments",
+            "serviceAccountName"
+        ]
+    );
+    let spec = &schema["properties"];
+    assert_eq!(
+        spec["presence"]["enum"],
+        serde_json::json!(["serving", "scaledToZero"])
+    );
+    assert_eq!(spec["parent"]["properties"]["home"]["type"], "string");
+    assert_eq!(spec["parent"]["properties"]["parents"]["type"], "string");
+    assert_eq!(spec["allowPoolRestart"]["type"], "boolean");
+    let status = &version["schema"]["openAPIV3Schema"]["properties"]["status"]["properties"];
+    assert_eq!(
+        status["stop"]["properties"]["step"]["enum"],
+        serde_json::json!(["drain", "segments", "hub", "release"])
     );
 }
 

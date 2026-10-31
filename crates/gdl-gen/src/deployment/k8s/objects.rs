@@ -141,6 +141,11 @@ impl Pod<'_> {
             service_account_name: self.fleet.to_string(),
             node_selector: node_selector(self.cluster),
             tolerations: self.cluster.tolerations.iter().map(Into::into).collect(),
+            parent: self.pool.parent.as_ref().map(Into::into),
+            dynamodb: gdl_k8s::Dynamodb::of(&self.pool.directory),
+            pod_monitor: self.model.metrics().pod_monitor,
+            presence: gdl_k8s::Presence::Serving,
+            allow_pool_restart: false,
         })
     }
 
