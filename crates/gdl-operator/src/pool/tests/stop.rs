@@ -282,3 +282,42 @@ async fn a_refused_drain_keeps_the_finalizer() {
     assert_eq!(step(&fake), Some(StopStep::Drain));
     assert!(!released(&fake));
 }
+
+#[tokio::test]
+#[ignore = "F7: resuming the hub step scales the hub down after recreated segment children start pods"]
+async fn a_resumed_hub_step_stops_recreated_segments_before_scaling_the_hub() {
+    let fake = running(false).await;
+    fake.delete(false);
+    fake.reconcile(1_000).await.expect("suspend segments");
+    fake.settle();
+    let writes = fake.state().status_writes;
+    fake.state().crash_after = Some(writes + 1);
+    assert!(
+        fake.reconcile(2_000).await.is_err(),
+        "crash after storing the hub step"
+    );
+    assert_eq!(step(&fake), Some(StopStep::Hub));
+    {
+        let mut state = fake.state();
+        state.crashed = false;
+        state.crash_after = None;
+        state.log.clear();
+    }
+    fake.recreate(Kind::Deployment, "p-engine");
+    fake.recreate(Kind::GdlScaler, "p-engine");
+    fake.settle();
+    assert_eq!(fake.state().pods.get("engine"), Some(&2));
+
+    fake.reconcile(3_000)
+        .await
+        .expect("resume persisted hub step");
+    let replicas = fake.state().objects[&(Kind::Deployment, "p".into())]
+        .live
+        .replicas;
+    assert_eq!(
+        replicas,
+        Some(1),
+        "the recreated engine has running pods, so the stop must revisit segments first: {:?}",
+        fake.log(),
+    );
+}
