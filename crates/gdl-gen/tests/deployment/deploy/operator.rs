@@ -543,3 +543,86 @@ fn a_write_ahead_status_does_not_finish_the_deploy_before_the_apply() {
         "the operator stopped before applying generation 2, but deploy reported success: {result:?}",
     );
 }
+
+fn assert_parent_survives_child_conflict(prune: bool) {
+    struct Recreated {
+        kube: Kube,
+        replaced: bool,
+    }
+
+    impl gdl_gen::Kube for Recreated {
+        fn run(
+            &mut self,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            if !self.replaced
+                && args[1] == "kind-use1"
+                && args.contains(&"delete".to_string())
+                && args.contains(&pool_path("model-x-us"))
+            {
+                let object = self
+                    .kube
+                    .objects
+                    .get_mut("kind-use1")
+                    .expect("cluster")
+                    .get_mut(&("GdlPool".into(), "model-x-us".into()))
+                    .expect("child pool");
+                // The new child still belongs to this fleet and needs
+                // global-us. Its replacement is not a completed stop.
+                object["metadata"]["uid"] = "replacement-child".into();
+                self.replaced = true;
+            }
+            gdl_gen::Kube::run(&mut self.kube, args, input)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    let mut raced = Recreated {
+        kube,
+        replaced: false,
+    };
+    let result = if prune {
+        let mut next: toml::Table = toml::from_str(&fleet_text()).expect("fleet");
+        let pools = next["pool"].as_table_mut().expect("pools");
+        pools.remove("global-us");
+        pools.remove("model-x-us");
+        let next = super::files(&mirror, &toml::to_string(&next).expect("fleet text"));
+        let how = gdl_gen::Deploy {
+            spec: next.spec,
+            fleet: next.fleet,
+            target: mirror.target(),
+            out: None,
+            waits: waits(),
+            sources: gdl_gen::Sources::Fetched,
+            allow_pool_restart: false,
+        };
+        gdl_gen::deploy(&how, &mut docker, &mut raced, &mut |_| {})
+    } else {
+        gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {})
+    };
+    assert!(raced.replaced, "replace the child after it is listed");
+    let held = &raced.kube.objects["kind-use1"];
+    if held.contains_key(&("GdlPool".into(), "model-x-us".into())) {
+        assert!(
+            held.contains_key(&("GdlPool".into(), "global-us".into())),
+            "the replacement child still needs global-us, but its parent was deleted: prune={prune}, result={result:?}",
+        );
+    }
+}
+
+#[test]
+#[ignore = "F11: a child UID conflict still lets down delete the child's live parent"]
+fn a_recreated_child_keeps_its_parent_while_down_leaves_the_child_running() {
+    assert_parent_survives_child_conflict(false);
+}
+
+#[test]
+#[ignore = "F11: a child UID conflict still lets prune delete the child's live parent"]
+fn a_recreated_child_keeps_its_parent_while_prune_leaves_the_child_running() {
+    assert_parent_survives_child_conflict(true);
+}
