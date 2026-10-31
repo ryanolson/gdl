@@ -826,6 +826,13 @@ async fn a_property_command_is_refused_until_the_first_write_is_stored() {
     directory.open();
     let first = records.next().await;
     assert!(first.revoked.is_empty(), "nothing was taken: {first:?}");
+    // The directory shows the write before the hub marks it stored: the
+    // hub's health says when it waits for the directory no longer.
+    let mut health = readiness.health();
+    tokio::time::timeout(WAIT, health.wait_for(|health| health.waiting.is_none()))
+        .await
+        .expect("the first write is stored in time")
+        .expect("the hub runs");
     readiness
         .revoke(key("acme-legal"), true)
         .await
