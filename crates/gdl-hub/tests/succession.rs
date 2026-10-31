@@ -1,5 +1,5 @@
 //! A pool's successor hub numbers past its predecessor: a later epoch, and a
-//! property-list version that is not below the predecessor's last, so that a
+//! property-list version above the predecessor's last, so that a
 //! reader that compares versions or epochs across the two hubs never sees one
 //! go back. Each case starts a real hub over a directory that holds what a
 //! predecessor left: its record, the tombstone of its withdrawal, or nothing.
@@ -107,8 +107,7 @@ async fn successor_over<D: PoolDirectory>(
     first
 }
 
-/// Neither the epoch nor the list version went back from `last` to `next`,
-/// and the epoch moved on.
+/// Both the epoch and the list version moved on from `last` to `next`.
 fn assert_past(last: &PoolRecord, next: &PoolRecord) {
     assert!(
         next.epoch > last.epoch,
@@ -117,8 +116,8 @@ fn assert_past(last: &PoolRecord, next: &PoolRecord) {
         next.epoch
     );
     assert!(
-        next.properties_version >= last.properties_version,
-        "the successor's list version must not go back: {} -> {}",
+        next.properties_version > last.properties_version,
+        "the successor's list version must be higher: {} -> {}",
         last.properties_version,
         next.properties_version
     );
@@ -126,9 +125,9 @@ fn assert_past(last: &PoolRecord, next: &PoolRecord) {
 
 /// A predecessor that made more than 2^20 list changes in its epoch has a
 /// version past the next epoch's floor. While its record is kept, the
-/// successor reads the version from it and counts from it.
+/// successor reads the version from it and counts past it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_successor_behind_a_kept_record_keeps_a_version_past_many_list_changes() {
+async fn a_successor_behind_a_kept_record_numbers_past_many_list_changes() {
     let epoch = millis_now() + 600_000;
     let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
     let directory = MemoryDirectory::new();
@@ -140,7 +139,7 @@ async fn a_successor_behind_a_kept_record_keeps_a_version_past_many_list_changes
 /// with the epoch, and the successor reads it, so it counts past it rather
 /// than from the next epoch's floor, which is below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_successor_behind_a_kept_withdrawal_keeps_a_version_past_many_list_changes() {
+async fn a_successor_behind_a_kept_withdrawal_numbers_past_many_list_changes() {
     let epoch = millis_now() + 600_000;
     let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
     let directory = MemoryDirectory::new();
