@@ -179,19 +179,19 @@ pub(crate) fn given_offer(
 }
 
 /// Whether `source`, as a lockfile names a git package, is `url` at
-/// `rev`. Cargo writes `git+<url>?rev=<as bound>#<full commit>`, so a
-/// revision bound short or in full names the offer's commit when it begins
-/// that commit; two revisions that name different commits never match.
+/// `rev`. Cargo writes `git+<url>?rev=<as bound>#<resolved commit>` and
+/// identifies a git source by the revision as written, not by the commit
+/// it names: a short revision and the full one for the same commit are two
+/// sources, which the generated manifests must not mix. So the revision
+/// must equal the offer's text for text. The last `#` ends it, since the
+/// revision may be a tag that holds one.
 fn git_source_is(source: &str, url: &str, rev: &str) -> bool {
-    let Some((bound, commit)) = source
+    source
         .strip_prefix("git+")
         .and_then(|s| s.strip_prefix(url))
         .and_then(|s| s.strip_prefix("?rev="))
-        .and_then(|s| s.split_once('#'))
-    else {
-        return false;
-    };
-    !rev.is_empty() && commit.starts_with(rev) && commit.starts_with(bound)
+        .and_then(|s| s.rsplit_once('#'))
+        .is_some_and(|(bound, _)| bound == rev)
 }
 
 #[cfg(test)]
@@ -313,17 +313,19 @@ mod tests {
         }
     }
 
-    /// A git package is matched by its commit, whether the spec binds the
-    /// revision short or in full: cargo records the source as the revision
-    /// as bound, then the full commit, and pool policies and selectors
+    /// Cargo identifies a git source by the revision as written: a spec
+    /// matches the offer catalogued at that same text, short or full, and
+    /// a short revision and the full one for the same commit are two
+    /// bindings, each needing its own offer. Pool policies and selectors
     /// share the match.
     #[test]
-    fn a_short_revision_and_its_full_form_match_one_offer() {
+    fn a_git_revision_matches_the_offer_catalogued_at_that_text() {
         const URL: &str = "https://example.com/router";
         const COMMIT: &str = "dec58f81ac7f4b7a9c0d1e2f3a4b5c6d7e8f9a0b";
-        let git = |short: &str| spec::CrateSource::Git {
+        let short = &COMMIT[..12];
+        let git = |rev: &str| spec::CrateSource::Git {
             url: URL.into(),
-            rev: short.into(),
+            rev: rev.into(),
         };
         let entry = gdl_extract::PolicyEntry {
             name: "ByText".into(),
@@ -331,10 +333,10 @@ mod tests {
             head: gdl_extract::PolicyHead::Encoded,
             needs: Vec::new(),
         };
-        let empty = Offer {
+        let empty = |bound: &str| Offer {
             package: "router".into(),
             version: "0.1.0".into(),
-            source: format!("git+{URL}?rev={}#{COMMIT}", &COMMIT[..12]),
+            source: format!("git+{URL}?rev={bound}#{COMMIT}"),
             messages: Vec::new(),
             exports: Vec::new(),
             nodes: Vec::new(),
@@ -344,50 +346,54 @@ mod tests {
             selectors: Vec::new(),
             skipped_selectors: Vec::new(),
         };
-        let policy = Offer {
-            policies: vec![entry.clone()],
-            ..empty.clone()
-        };
-        let selector = Offer {
-            selectors: vec![entry],
-            ..empty
-        };
-        let full = Offer {
-            source: format!("git+{URL}?rev={COMMIT}#{COMMIT}"),
-            ..policy.clone()
-        };
-        for offer in [&policy, &selector, &full] {
-            for rev in [&COMMIT[..12], &COMMIT[..8], COMMIT] {
-                let found = given_offer(&[offer], "router", "router", &git(rev));
-                assert_eq!(
-                    found.as_ref().map(|o| &o.source),
-                    Ok(&offer.source),
-                    "{rev}"
-                );
-            }
-            // Another commit, short or full, is another offer.
-            for rev in [
-                "0123456789ab",
-                "dec58f81ac7e",
-                "dec58f81ac7f4b7a9c0d1e2f3a4b5c6d7e8f9a0c",
-                "",
-            ] {
-                assert!(
-                    given_offer(&[offer], "router", "router", &git(rev)).is_err(),
-                    "{rev}"
-                );
-            }
-            // Another repository at the same commit is another offer.
-            let elsewhere = spec::CrateSource::Git {
-                url: "https://example.com/other".into(),
-                rev: COMMIT.into(),
-            };
-            assert!(given_offer(&[offer], "router", "router", &elsewhere).is_err());
+        for (what, offer) in [
+            (
+                "policy",
+                Offer {
+                    policies: vec![entry.clone()],
+                    ..empty(short)
+                },
+            ),
+            (
+                "selector",
+                Offer {
+                    selectors: vec![entry.clone()],
+                    ..empty(short)
+                },
+            ),
+        ] {
+            let found = given_offer(&[&offer], "router", "router", &git(short));
+            assert_eq!(
+                found.as_ref().map(|o| &o.source),
+                Ok(&offer.source),
+                "{what}"
+            );
+            // The same commit, bound in full, is another source.
+            assert!(
+                given_offer(&[&offer], "router", "router", &git(COMMIT)).is_err(),
+                "{what}"
+            );
         }
+        let full = empty(COMMIT);
+        assert!(given_offer(&[&full], "router", "router", &git(COMMIT)).is_ok());
+        assert!(given_offer(&[&full], "router", "router", &git(short)).is_err());
+        // Another revision, a prefix of the bound one, or none, is another offer.
+        let offer = empty(short);
+        for rev in ["0123456789ab", "dec58f81ac7e", &short[..8], ""] {
+            assert!(
+                given_offer(&[&offer], "router", "router", &git(rev)).is_err(),
+                "{rev}"
+            );
+        }
+        // Another repository at the same revision is another offer.
+        let elsewhere = spec::CrateSource::Git {
+            url: "https://example.com/other".into(),
+            rev: short.into(),
+        };
+        assert!(given_offer(&[&offer], "router", "router", &elsewhere).is_err());
     }
 
     #[test]
-    #[ignore = "F1: the catalogue accepts unresolved and ambiguous commit prefixes"]
     fn a_given_git_revision_must_be_resolvable_and_unambiguous() {
         let repo = GitFixture::new();
         let first = repo.offer(&repo.first);
@@ -435,7 +441,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "F2: a hex-named Git ref can match an offer from another commit"]
     fn a_hex_named_ref_must_not_select_a_different_commit() {
         let repo = GitFixture::new();
         let rev = &repo.first[..12];
@@ -462,7 +467,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "F3: a hash in the bound Git ref is mistaken for the resolved commit"]
     fn a_hash_inside_a_git_ref_must_not_replace_the_resolved_commit() {
         let repo = GitFixture::new();
         let rev = format!("{}#{}", &repo.first[..12], repo.first);
@@ -490,7 +494,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "F4: matching different Git references hides incompatible message origins"]
     fn a_rebound_git_offer_must_preserve_message_origin_checks() {
         // Comparing both providers requires repeated Git imports and source reads.
         let repo = GitFixture::new();
