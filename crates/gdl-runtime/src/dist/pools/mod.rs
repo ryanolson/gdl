@@ -440,6 +440,11 @@ pub(crate) struct EntryTable {
     /// The pools of the class whose listing says they drain, by name,
     /// sorted, followed or not: kept beside the pools for the same reason.
     pub(crate) draining: Box<[Box<str>]>,
+    /// The hub epoch of each pool of the class the hub lists, followed or
+    /// not, or said withdrew, by name, sorted: kept beside the pools for
+    /// the same reason, and shared by the tables made while no listing or
+    /// withdrawal changes, since a table is stored on every summary.
+    pub(crate) epochs: Arc<[(Box<str>, u64)]>,
     /// The class's property indexes, shared by the tables of each of its
     /// entry segments, and made again only when what they list, or the
     /// kinds they decode, change.
@@ -455,8 +460,24 @@ impl EntryTable {
             views,
             withdrawn: Box::default(),
             draining: Box::default(),
+            epochs: Arc::default(),
             properties: Arc::default(),
         }
+    }
+
+    /// `request` with what the table holds of the class beside its pools:
+    /// its property indexes, and its draining and withdrawn pools and
+    /// their epochs. Every request a pool policy reads is filled here, so
+    /// that what it reads of the class is the same table's as its pools.
+    pub(crate) fn fill<'t, H>(
+        &'t self,
+        request: gdl::PoolRequest<'t, H>,
+    ) -> gdl::PoolRequest<'t, H> {
+        request
+            .with_properties(&self.properties)
+            .with_draining(&self.draining)
+            .with_withdrawn(&self.withdrawn)
+            .with_epochs(&self.epochs)
     }
 
     /// The table with the class's `withdrawn` pools, sorted.
@@ -468,6 +489,12 @@ impl EntryTable {
     /// The table with the class's `draining` pools, sorted.
     pub(crate) fn with_draining(mut self, draining: Box<[Box<str>]>) -> Self {
         self.draining = draining;
+        self
+    }
+
+    /// The table with the hub epochs of the class's pools, sorted by name.
+    pub(crate) fn with_epochs(mut self, epochs: Arc<[(Box<str>, u64)]>) -> Self {
+        self.epochs = epochs;
         self
     }
 

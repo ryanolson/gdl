@@ -571,3 +571,95 @@ fn a_policy_registers_only_the_kinds_its_needs_names() {
         "nothing registered: {kinds:?}"
     );
 }
+
+/// Keeps a request with its pin, accepted under the pin's hub epoch, and
+/// moves it only on evidence at least as new as the pin, as the endpoints'
+/// set router does: here, a withdrawal of the pinned pool at or past the
+/// pin's epoch. A withdrawal of an earlier hub of the pool says nothing of
+/// the hub the pin was accepted under.
+struct Pinned {
+    pool: &'static str,
+    epoch: u64,
+}
+
+impl PoolPolicy for Pinned {
+    type Head = Projected<Hinted>;
+
+    fn choose(
+        &self,
+        request: PoolRequest<'_, Projected<Hinted>>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
+        let gone = request.is_withdrawn(self.pool)
+            && request.epoch(self.pool).is_some_and(|at| at >= self.epoch);
+        if !gone {
+            return pools
+                .iter()
+                .position(|pool| pool.name() == self.pool)
+                .map(PoolChoice::new)
+                .ok_or_else(|| NoPool::because("the pin has no row"));
+        }
+        HomeFirst
+            .choose_where(request, pools, |pool| pool.name() != self.pool)
+            .map(PoolChoice::new)
+            .ok_or_else(|| NoPool::because("the pin withdrew, and no other pool takes work"))
+    }
+}
+
+/// A policy reads each pool's hub epoch and whether it withdrew from its
+/// request, by name, followed or not. A withdrawn pool reads the epoch of
+/// the hub that withdrew it, so a policy can hold a withdrawal against the
+/// epoch it pinned a request under. A request built without them reads no
+/// epoch and no withdrawal.
+#[test]
+fn a_policy_reads_epochs_and_withdrawals_from_its_request() {
+    let now = Instant::now();
+    let pools = [pool("llama-1", HOME, now), pool("llama-2", AWAY, now)];
+    let cx = Cx::new();
+    let head = hinted("llama");
+    // `llama-0` withdrew at epoch 7; `llama-3` is listed, with no row.
+    let epochs: [(Box<str>, u64); 4] = [
+        ("llama-0".into(), 7),
+        ("llama-1".into(), 5),
+        ("llama-2".into(), 0),
+        ("llama-3".into(), 9),
+    ];
+    let withdrawn: [Box<str>; 1] = ["llama-0".into()];
+    let request = PoolRequest::new(&cx, &head, HOME, now)
+        .with_epochs(&epochs)
+        .with_withdrawn(&withdrawn);
+    assert_eq!(request.epoch("llama-0"), Some(7), "the withdrawing hub's");
+    assert_eq!(request.epoch("llama-1"), Some(5));
+    assert_eq!(
+        request.epoch("llama-2"),
+        Some(0),
+        "a hub of an earlier build"
+    );
+    assert_eq!(request.epoch("llama-3"), Some(9), "listed, with no row");
+    assert_eq!(request.epoch("llama-4"), None, "no word of it");
+    assert!(request.is_withdrawn("llama-0"));
+    assert!(!request.is_withdrawn("llama-1"));
+    assert!(!request.is_withdrawn("llama-3"));
+
+    let bare = PoolRequest::new(&cx, &head, HOME, now);
+    assert_eq!(bare.epoch("llama-1"), None);
+    assert!(!bare.is_withdrawn("llama-0"));
+
+    // A pin on `llama-0` at its withdrawal's epoch, or an earlier one,
+    // moves; a pin from a later hub of it holds.
+    let choose = |epoch| {
+        Pinned {
+            pool: "llama-0",
+            epoch,
+        }
+        .choose(request, &pools)
+        .map(|c| c.at())
+    };
+    assert_eq!(choose(7), Ok(0), "withdrawn at the pin's epoch");
+    assert_eq!(choose(6), Ok(0), "withdrawn past it");
+    assert_eq!(
+        choose(8),
+        Err(NoPool::because("the pin has no row")),
+        "a withdrawal older than the pin says nothing of it"
+    );
+}

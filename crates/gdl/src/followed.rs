@@ -523,7 +523,9 @@ impl<'a> ClassPools<'a> {
     /// Whether the pool named `name` withdrew its record after its drain
     /// ended, as the chooser's hub saw it in the pool directory: a pool
     /// drained on purpose. A pool whose lease expired, whose link failed,
-    /// or that this chooser never saw is not withdrawn.
+    /// or that this chooser never saw is not withdrawn. A later follow of
+    /// the pool, or a listing of it from a later hub of it, ends the
+    /// withdrawal: the pool was started again.
     pub fn is_withdrawn(&self, name: &str) -> bool {
         self.withdrawn
             .binary_search_by(|withdrawn| (**withdrawn).cmp(name))

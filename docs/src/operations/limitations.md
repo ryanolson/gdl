@@ -772,6 +772,12 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Workaround:** a gate reads the property index instead ([The property index](../concepts/pool-routing.md#the-property-index)): a pool that withdrew is no longer listed, and a key whose every pool drained shows only `drained` entries.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
+### A withdrawal read late from a pool's own watch is dated by the next hub
+- **What:** a chooser dates a pool's withdrawal by the epoch of the pool's last listing, which its hub sends just before the withdrawal ([What the chooser builds](../concepts/pool-routing.md#what-the-chooser-builds)). While the chooser reads a pool from a watch of its own, after an event of a kind it does not know, a withdrawal can arrive on that watch after the relay's watch has listed the pool again from a later hub. The chooser then reads the pool as withdrawn at the later hub's epoch, until that pool is followed again.
+- **Why:** the relay's `withdrawn` event carries no epoch. The two watches are not ordered with each other, and the generation that fences a late withdrawal is the same for a pool listed again before it is followed.
+- **Impact:** a policy that moves a request off a pool withdrawn at or past the request's epoch can move one that the later hub took. It needs a pool read from its own watch, which happens only between builds that differ in their relay events, and a pool started again in that window.
+- **Lifts:** a withdrawal that carries the epoch of the hub that withdrew.
+
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
 - **What:** nothing checks the class, pool, run, and generation a caller names, or the chooser that a watch of the relay names. Anyone who can reach a pool's hub can hold a draining pool's early end off until the bound, or bring it forward by releasing a watch it did not open. A watch of the relay in a chooser's name can only keep the hub waiting for that chooser, as it would if the chooser watched. It can also tell the hub that the pools following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another pool.
 - **Lifts:** a credential across pools, which waits for the private CA. Hub listeners have no TLS. See [Pool hub routes and watch events](../appendix/hub-api.md).

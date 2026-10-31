@@ -126,12 +126,16 @@ pub(crate) struct Follows<R> {
     /// The number of the last watch of its own asked for.
     watches: u64,
     /// The pools the hub said withdrew their records after a drain, each
-    /// with the generation its withdrawal named: kept when the relay is
-    /// watched again, since a snapshot holds no withdrawal, until a later
-    /// generation of the pool is shown, which only a newer record of the
-    /// pool starts. Generations are the hub's, and a chooser does not
-    /// outlive its hub, so they only grow while it runs.
-    withdrawn: BTreeMap<Key, u64>,
+    /// with the generation its withdrawal named and the epoch of the hub
+    /// of the pool that withdrew: kept when the relay is watched again,
+    /// since a snapshot holds no withdrawal, until a later generation of
+    /// the pool is shown, or a listing from a later hub of it, which only
+    /// a newer record of the pool starts. Generations are the hub's, and a
+    /// chooser does not outlive its hub, so they only grow while it runs.
+    withdrawn: BTreeMap<Key, (u64, u64)>,
+    /// Raised on every change of `withdrawn`, so that the follower makes a
+    /// class's epochs again only when they may have changed.
+    withdrawals_changed: u64,
     /// The newest generation of each pool this follower was shown, over
     /// every watch: what fences a withdrawal of an earlier one, which may
     /// arrive late on another watch, also after a snapshot that no longer
@@ -141,10 +145,16 @@ pub(crate) struct Follows<R> {
     /// made from: the count of the listings' changes, each followed pool
     /// with whether it is offered, and the count of the kinds' changes.
     indexes: HashMap<String, IndexMade>,
+    /// Each class's pools' epochs as last made, with the counts of the
+    /// listings' and the withdrawals' changes they were made from.
+    epochs: HashMap<String, EpochsMade>,
 }
 
 /// A class's property indexes, and what they were made from.
 type IndexMade = ((u64, Vec<(String, bool)>, u64), Arc<PropertyIndexes>);
+
+/// A class's pools' epochs, by name, and what they were made from.
+type EpochsMade = ((u64, u64), Arc<[(Box<str>, u64)]>);
 
 impl<R: Registry> Follows<R> {
     pub(crate) fn new(
@@ -177,8 +187,10 @@ impl<R: Registry> Follows<R> {
             asked: Vec::new(),
             watches: 0,
             withdrawn: BTreeMap::new(),
+            withdrawals_changed: 0,
             newest: BTreeMap::new(),
             indexes: HashMap::new(),
+            epochs: HashMap::new(),
         }
     }
 
@@ -250,8 +262,16 @@ impl<R: Registry> Follows<R> {
                 {
                     return;
                 }
-                let named = self.withdrawn.entry(key.clone()).or_insert(generation);
-                *named = (*named).max(generation);
+                // The hub unlists the pool just before it says so, so the
+                // epoch of its last listing is that of the hub that
+                // withdrew.
+                let epoch = self.followed.listings.last_epoch(&key).unwrap_or(0);
+                let named = self
+                    .withdrawn
+                    .entry(key.clone())
+                    .or_insert((generation, epoch));
+                *named = (named.0.max(generation), named.1.max(epoch));
+                self.withdrawals_changed += 1;
             }
             Change::Ended(follow) => {
                 self.publish(&key);
@@ -654,6 +674,7 @@ impl<R: Registry> Follows<R> {
             self.pools.store(segment, EntryTable::new(pools));
             return;
         };
+        self.relisted();
         let withdrawn = self
             .withdrawn
             .keys()
@@ -667,13 +688,59 @@ impl<R: Registry> Follows<R> {
             .map(Box::from)
             .collect();
         let properties = self.index(&class);
+        let epochs = self.epochs(&class);
         self.pools.store(
             segment,
             EntryTable::new(pools)
                 .with_withdrawn(withdrawn)
                 .with_draining(draining)
+                .with_epochs(epochs)
                 .with_properties(properties),
         );
+    }
+
+    /// End each withdrawal that a listing from a later hub of its pool
+    /// supersedes: the hub lists a pool again only from a record newer
+    /// than its withdrawal, and a later hub numbers its epoch past every
+    /// write of the pool before it. A listing of the same epoch, as from a
+    /// hub of an earlier build that numbers none, ends nothing: a later
+    /// follow of the pool does ([`Follows::shown`]). The withdrawal is
+    /// removed, not passed over, so that the pool unlisted later does not
+    /// read as withdrawn again.
+    fn relisted(&mut self) {
+        let listings = &self.followed.listings;
+        let before = self.withdrawn.len();
+        self.withdrawn
+            .retain(|key, (_, epoch)| listings.epoch(key).is_none_or(|listed| listed <= *epoch));
+        if self.withdrawn.len() != before {
+            self.withdrawals_changed += 1;
+        }
+    }
+
+    /// `class`'s pools' epochs, by name: each listed pool's, and each
+    /// withdrawn pool's, the later of the two for a pool that is both.
+    /// The ones made last, unless a listing or a withdrawal changed since.
+    fn epochs(&mut self, class: &str) -> Arc<[(Box<str>, u64)]> {
+        let made = (self.followed.listings_changed, self.withdrawals_changed);
+        if let Some((at, epochs)) = self.epochs.get(class)
+            && *at == made
+        {
+            return Arc::clone(epochs);
+        }
+        let mut epochs: BTreeMap<&str, u64> = self.followed.listings.epochs(class).collect();
+        for ((of, pool), (_, epoch)) in &self.withdrawn {
+            if of == class {
+                let held = epochs.entry(pool.as_str()).or_insert(*epoch);
+                *held = (*held).max(*epoch);
+            }
+        }
+        let epochs: Arc<[(Box<str>, u64)]> = epochs
+            .into_iter()
+            .map(|(pool, epoch)| (Box::from(pool), epoch))
+            .collect();
+        self.epochs
+            .insert(class.to_string(), (made, Arc::clone(&epochs)));
+        epochs
     }
 
     /// `class`'s property indexes: the ones made last, unless what they
@@ -725,9 +792,10 @@ impl<R: Registry> Follows<R> {
         if self
             .withdrawn
             .get(key)
-            .is_some_and(|named| *named < generation)
+            .is_some_and(|(named, _)| *named < generation)
         {
             self.withdrawn.remove(key);
+            self.withdrawals_changed += 1;
         }
     }
 }

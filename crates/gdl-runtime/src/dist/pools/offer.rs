@@ -1893,8 +1893,8 @@ mod tests {
     }
 
     /// Chooses as `home_first` or `round_robin` among every pool its
-    /// request does not list as draining, and builds a reason when none is
-    /// left.
+    /// request does not list as draining or withdrawn, and that its hub
+    /// numbered past epoch 0, and builds a reason when none is left.
     struct KeptBut(bool);
 
     impl gdl::PoolPolicy for KeptBut {
@@ -1905,7 +1905,12 @@ mod tests {
             request: gdl::PoolRequest<'_, gdl::Encoded>,
             pools: &[gdl::Pool],
         ) -> std::result::Result<gdl::PoolChoice, NoPool> {
-            let keep = |pool: &gdl::Pool| !request.is_draining(pool.name());
+            let keep = |pool: &gdl::Pool| {
+                let name = pool.name();
+                !request.is_draining(name)
+                    && !request.is_withdrawn(name)
+                    && request.epoch(name).is_some_and(|epoch| epoch > 0)
+            };
             let at = if self.0 {
                 gdl::HomeFirst.choose_where(request, pools, keep)
             } else {
@@ -1918,7 +1923,7 @@ mod tests {
 
     /// A pick allocates nothing under either policy the runtime provides,
     /// nor under a registered one that runs either over the pools it
-    /// keeps, here those not draining, also while a pool's damping window
+    /// keeps, here those not draining or withdrawn, by their epochs, also while a pool's damping window
     /// lasts, which takes the pass that sets which damped pools are passed
     /// over, with a pool excluded, and with a pool gone, which is never
     /// chosen. The registered ones build a reason when they choose no
@@ -1946,11 +1951,17 @@ mod tests {
             });
             let (crossing, pools) =
                 followed_with(&layout, &["m1", "m2", "m3", "m4", "m5"], &policies);
-            // `m0`'s follow was dropped while it drains.
+            // `m0`'s follow was dropped while it drains, and `m6` withdrew.
             let followed = pools.table("d").expect("a table").pools.clone();
+            let epochs = ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]
+                .map(|name| (Box::from(name), 1))
+                .into();
             pools.store(
                 "d",
-                EntryTable::new(followed).with_draining(Box::new(["m0".into(), "m2".into()])),
+                EntryTable::new(followed)
+                    .with_draining(Box::new(["m0".into(), "m2".into()]))
+                    .with_withdrawn(Box::new(["m6".into()]))
+                    .with_epochs(epochs),
             );
             let excluded = [pool_id("model_x", "m4")];
             crossing.declined(pool_id("model_x", "m1"), Decline::Full, None);

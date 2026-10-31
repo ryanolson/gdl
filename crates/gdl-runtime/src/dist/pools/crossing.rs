@@ -266,9 +266,8 @@ impl Crossing {
             .with_bytes(head)
             .with_excluded(left.excluded)
             .with_declines(left.declines)
-            .with_damped(&damped)
-            .with_properties(&table.properties)
-            .with_draining(&table.draining);
+            .with_damped(&damped);
+        let request = table.fill(request);
         target.policy.requeue(request, self.encoding, view)
     }
 
@@ -539,9 +538,8 @@ impl Crossing {
             .with_declines(left.declines)
             .with_damped(damped)
             .with_turn(turn)
-            .with_random(&self.random)
-            .with_properties(&table.properties)
-            .with_draining(&table.draining);
+            .with_random(&self.random);
+        let request = table.fill(request);
         let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
             Ok(choice) => choice.into_parts(),
             Err(no) => return Ok(Err(no)),
@@ -1633,10 +1631,16 @@ mod tests {
     /// next of `newer`, if any: a table made while it chooses. It records
     /// the tag of the rows it chose from and whether `m1` drained, for
     /// each choice and each re-queue it is asked.
+    /// The tag of a read's rows, whether `m1` withdrew, and `m1`'s and
+    /// `m3`'s epochs.
+    type Evidence = (u64, bool, Option<u64>, Option<u64>);
+
     struct Pinned {
         table: Arc<ArcSwap<EntryTable>>,
         newer: std::sync::Mutex<std::collections::VecDeque<EntryTable>>,
         seen: std::sync::Mutex<Vec<(u64, bool)>>,
+        /// What each read saw: `m3` is listed, with no row.
+        evidence: std::sync::Mutex<Vec<Evidence>>,
     }
 
     impl Pinned {
@@ -1648,6 +1652,7 @@ mod tests {
                 table: Arc::clone(table),
                 newer: std::sync::Mutex::new(newer.into_iter().collect()),
                 seen: std::sync::Mutex::default(),
+                evidence: std::sync::Mutex::default(),
             }
         }
 
@@ -1659,7 +1664,17 @@ mod tests {
             }
             let draining = request.is_draining("m1");
             self.seen.lock().expect("unpoisoned").push((tag, draining));
+            self.evidence.lock().expect("unpoisoned").push((
+                tag,
+                request.is_withdrawn("m1"),
+                request.epoch("m1"),
+                request.epoch("m3"),
+            ));
             draining
+        }
+
+        fn evidence(&self) -> Vec<Evidence> {
+            self.evidence.lock().expect("unpoisoned").clone()
         }
 
         fn seen(&self) -> Vec<(u64, bool)> {
@@ -1779,6 +1794,52 @@ mod tests {
         let seen = policy.seen();
         let one_table: Vec<(u64, bool)> = (0..TABLES).map(|tag| (tag, tag % 2 == 1)).collect();
         assert_eq!(seen, one_table);
+    }
+
+    /// Whether a pool withdrew and each pool's epoch are read from the
+    /// same table as the rows, through each table the chooser stores, for
+    /// a choice and for a re-queue alike: both paths that build a request.
+    /// Each table here withdraws `m1` when its tag is odd, and numbers
+    /// `m1` and `m3`, which is listed with no row, by its tag; a new one is
+    /// stored while each read is under way.
+    #[test]
+    fn withdrawals_epochs_and_the_rows_are_read_from_one_table() {
+        const TABLES: u64 = 8;
+        let ids = ids(2);
+        let table = |tag: u64| {
+            let made = EntryTable::new(Box::new([
+                tagged("m1", PoolState::Ready, &ids[..1], tag),
+                tagged("m2", PoolState::Ready, &ids[1..], tag),
+            ]))
+            .with_epochs(Arc::from([
+                ("m1".into(), tag),
+                ("m2".into(), 1),
+                ("m3".into(), 100 + tag),
+            ]));
+            if tag % 2 == 1 {
+                made.with_withdrawn(Box::new(["m1".into()]))
+            } else {
+                made
+            }
+        };
+        let (crossing, policy) = pinned((0..TABLES).map(table));
+        let cx = Cx::new();
+        let random = RandomState::new();
+        let m1 = super::super::pool_id("model_x", "m1");
+        for tag in 0..TABLES {
+            if tag % 3 == 2 {
+                crossing.requeue(&cx, &[], Left::NONE, m1).expect("asked");
+            } else {
+                crossing
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .expect("a pick")
+                    .expect("a pool");
+            }
+        }
+        let one_table: Vec<_> = (0..TABLES)
+            .map(|tag| (tag, tag % 2 == 1, Some(tag), Some(100 + tag)))
+            .collect();
+        assert_eq!(policy.evidence(), one_table);
     }
 
     #[tokio::test]

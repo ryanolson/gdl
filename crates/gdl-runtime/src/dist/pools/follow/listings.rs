@@ -21,6 +21,10 @@
 //! version, and after a directory that forgot the pool, a later hub can
 //! list a version the hub before it listed, when that hub ran ahead of its
 //! clock.
+//!
+//! The epoch of each pool's last listing is kept once the hub unlists it,
+//! until it is listed again: the hub unlists a pool just before it says
+//! the pool withdrew, and the follower dates the withdrawal by that epoch.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -36,6 +40,8 @@ use super::Key;
 #[derive(Default)]
 pub(super) struct Listings {
     held: BTreeMap<Key, (Listing, Option<Instant>)>,
+    /// The epoch of each unlisted pool's last listing.
+    unlisted: BTreeMap<Key, u64>,
 }
 
 impl Listings {
@@ -45,6 +51,7 @@ impl Listings {
     /// instant.
     pub(super) fn take(&mut self, key: Key, mut listing: Listing, now: Instant) {
         keep_newer(self.held.get(&key), &mut listing);
+        self.unlisted.remove(&key);
         let silent = listing
             .missing_age_ms
             .filter(|_| listing.condition == PoolCondition::Missing)
@@ -55,7 +62,9 @@ impl Listings {
     /// The hub withdrew `key`'s pool from its listings: it holds no list,
     /// so listed again it starts afresh.
     pub(super) fn withdraw(&mut self, key: &Key) {
-        self.held.remove(key);
+        if let Some((listing, _)) = self.held.remove(key) {
+            self.unlisted.insert(key.clone(), listing.epoch);
+        }
     }
 
     /// These listings, a snapshot's, take the place of `held`: each pool
@@ -63,6 +72,11 @@ impl Listings {
     /// A pool it does not name is forgotten only if the snapshot is
     /// `whole`, and otherwise keeps its held listing.
     pub(super) fn carry(&mut self, held: Self, whole: bool) {
+        for (key, epoch) in held.unlisted {
+            if !self.held.contains_key(&key) {
+                self.unlisted.entry(key).or_insert(epoch);
+            }
+        }
         for (key, entry) in held.held {
             match self.held.get_mut(&key) {
                 Some((listing, _)) => keep_newer(Some(&entry), listing),
@@ -79,6 +93,32 @@ impl Listings {
         self.held
             .get(key)
             .map_or(0, |(listing, _)| listing.properties.version)
+    }
+
+    /// The epoch of `key`'s pool's listing, or, once it is unlisted, of
+    /// its last one: `None` if it was never listed.
+    pub(super) fn last_epoch(&self, key: &Key) -> Option<u64> {
+        match self.held.get(key) {
+            Some((listing, _)) => Some(listing.epoch),
+            None => self.unlisted.get(key).copied(),
+        }
+    }
+
+    /// The epoch of `key`'s pool's listing, if it is listed.
+    pub(super) fn epoch(&self, key: &Key) -> Option<u64> {
+        self.held.get(key).map(|(listing, _)| listing.epoch)
+    }
+
+    /// The names of `class`'s listed pools, in order, each with the epoch
+    /// of its listing.
+    pub(super) fn epochs<'a>(
+        &'a self,
+        class: &'a str,
+    ) -> impl Iterator<Item = (&'a str, u64)> + 'a {
+        self.held
+            .range((class.to_string(), String::new())..)
+            .take_while(move |((of, _), _)| of == class)
+            .map(|((_, pool), (listing, _))| (pool.as_str(), listing.epoch))
     }
 
     /// The names of `class`'s pools whose listing says they drain, in

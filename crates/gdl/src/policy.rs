@@ -464,8 +464,9 @@ pub fn pool_id(class: &str, pool: &str) -> u64 {
 /// What a pool policy sees of one attempt: the request's context and
 /// head, the chooser's region, the pools the request excluded and why
 /// each that declined it did, the pools the chooser damps, the chooser's
-/// clock, the attempt's turn, and the class's property indexes and
-/// draining pools from the table it chooses from.
+/// clock, the attempt's turn, and the class's property indexes, draining
+/// and withdrawn pools, and its pools' hub epochs, from the table it
+/// chooses from.
 pub struct PoolRequest<'a, H> {
     cx: &'a Cx,
     head: &'a H,
@@ -479,6 +480,8 @@ pub struct PoolRequest<'a, H> {
     random: Option<&'a RandomState>,
     properties: &'a PropertyIndexes,
     draining: &'a [Box<str>],
+    withdrawn: &'a [Box<str>],
+    epochs: &'a [(Box<str>, u64)],
 }
 
 impl<H> Clone for PoolRequest<'_, H> {
@@ -510,6 +513,8 @@ impl<'a, H> PoolRequest<'a, H> {
             random: None,
             properties: &NO_PROPERTIES,
             draining: &[],
+            withdrawn: &[],
+            epochs: &[],
         }
     }
 
@@ -613,6 +618,78 @@ impl<'a, H> PoolRequest<'a, H> {
             .is_ok()
     }
 
+    /// The request with the names of the class's pools that its hub said
+    /// withdrew their records, sorted: the runtime gives those of the
+    /// table the policy chooses from, as for
+    /// [`with_draining`](Self::with_draining).
+    #[inline]
+    pub fn with_withdrawn(mut self, withdrawn: &'a [Box<str>]) -> Self {
+        self.withdrawn = withdrawn;
+        self
+    }
+
+    /// Whether the chooser's hub said the pool named `name` withdrew its
+    /// record after its drain ([`ClassPools::is_withdrawn`](crate::ClassPools::is_withdrawn)),
+    /// from the same table as the pools the policy chooses from: a pool
+    /// drained on purpose, which has no row. A pool whose lease expired,
+    /// whose link failed, or that the chooser never saw is not withdrawn.
+    /// A listing of the pool from a later hub of it, or a later follow,
+    /// ends the withdrawal: the pool was started again. `false` for a
+    /// request built without them.
+    #[inline]
+    pub fn is_withdrawn(&self, name: &str) -> bool {
+        !self.withdrawn.is_empty() && self.withdrawn_in(name)
+    }
+
+    /// [`is_withdrawn`](Self::is_withdrawn) once some pool withdrew, out
+    /// of line, as for [`is_draining`](Self::is_draining).
+    #[cold]
+    #[inline(never)]
+    fn withdrawn_in(&self, name: &str) -> bool {
+        self.withdrawn
+            .binary_search_by(|withdrawn| (**withdrawn).cmp(name))
+            .is_ok()
+    }
+
+    /// The request with the hub epochs of the class's pools, by name,
+    /// sorted by name: the runtime gives those of the table the policy
+    /// chooses from, as for [`with_draining`](Self::with_draining).
+    #[inline]
+    pub fn with_epochs(mut self, epochs: &'a [(Box<str>, u64)]) -> Self {
+        self.epochs = epochs;
+        self
+    }
+
+    /// The epoch of the newest hub of the pool named `name` that the
+    /// chooser's hub has word of, from the same table as the pools the
+    /// policy chooses from, followed or not: the epoch of its listing, or,
+    /// for a withdrawn pool ([`is_withdrawn`](Self::is_withdrawn)), of the
+    /// hub that withdrew it. A pool's hub numbers its epoch past every
+    /// write its pool made before, so an epoch orders the hubs of one pool:
+    /// a policy that keeps the epoch a request was accepted under can tell
+    /// evidence about that hub, or a later one, from evidence about an
+    /// earlier one. `Some(0)` for a pool listed by a hub of an earlier
+    /// build, which sends none. `None` when the chooser holds no word of
+    /// the pool, and for a request built without them.
+    #[inline]
+    pub fn epoch(&self, name: &str) -> Option<u64> {
+        if self.epochs.is_empty() {
+            return None;
+        }
+        self.epoch_in(name)
+    }
+
+    /// [`epoch`](Self::epoch) once some pool is listed: a search of the
+    /// names, out of line.
+    #[cold]
+    #[inline(never)]
+    fn epoch_in(&self, name: &str) -> Option<u64> {
+        self.epochs
+            .binary_search_by(|(listed, _)| (**listed).cmp(name))
+            .ok()
+            .map(|at| self.epochs[at].1)
+    }
+
     /// The same attempt, with `head` read from its bytes.
     fn with_head<'b, G>(&self, head: &'b G) -> PoolRequest<'b, G>
     where
@@ -631,6 +708,8 @@ impl<'a, H> PoolRequest<'a, H> {
             random: self.random,
             properties: self.properties,
             draining: self.draining,
+            withdrawn: self.withdrawn,
+            epochs: self.epochs,
         }
     }
 
