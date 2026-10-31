@@ -228,3 +228,83 @@ fn an_unanswered_namespace_question_applies_nothing() {
         commands(&log)
     );
 }
+
+#[test]
+#[ignore = "F1: a namespace created after the lookup is server-side applied"]
+fn a_namespace_created_after_the_lookup_is_not_applied() {
+    struct CreatedAfterLookup {
+        inner: Kube,
+        created: bool,
+        applied_existing: bool,
+    }
+
+    impl gdl_gen::Kube for CreatedAfterLookup {
+        fn run(
+            &mut self,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            if args.iter().any(|arg| arg == "apply") {
+                let input = std::str::from_utf8(input.unwrap_or_default()).expect("UTF-8");
+                for document in input.split("---\n").filter(|doc| !doc.trim().is_empty()) {
+                    let object: Value = serde_json::from_str(document).expect("an object");
+                    if object["kind"] == "Namespace"
+                        && self
+                            .inner
+                            .objects
+                            .get(&args[1])
+                            .is_some_and(|objects| objects.contains_key(&key(&object)))
+                    {
+                        self.applied_existing = true;
+                    }
+                }
+            }
+            let reply = self.inner.run(args, input)?;
+            if !self.created
+                && args.iter().any(|arg| arg == "get")
+                && args.iter().any(|arg| arg == "namespace/gdl-api")
+                && reply.success
+                && reply.stdout.trim().is_empty()
+            {
+                self.inner
+                    .objects
+                    .entry(args[1].clone())
+                    .or_default()
+                    .insert(key(&owned()), owned());
+                self.created = true;
+            }
+            Ok(reply)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let mut docker = Docker {
+        log: Rc::clone(&log),
+        fail: false,
+    };
+    let mut kube = CreatedAfterLookup {
+        inner: Kube::new(&log),
+        created: false,
+        applied_existing: false,
+    };
+    let how = gdl_gen::Deploy {
+        spec: files.spec.clone(),
+        fleet: files.fleet.clone(),
+        target: mirror.target(),
+        out: None,
+        waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
+    };
+    let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
+    assert!(kube.created, "the namespace creation raced the lookup");
+    assert!(
+        !kube.applied_existing,
+        "deploy server-side applied an owner's namespace created after its lookup: {result:?}"
+    );
+    assert_eq!(
+        namespace(&kube.inner, "kind-euw1")["metadata"]["annotations"],
+        owned()["metadata"]["annotations"]
+    );
+}
