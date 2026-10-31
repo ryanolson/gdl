@@ -235,13 +235,17 @@ pub(super) fn delete(
                     pool.name, cluster.name
                 ),
             )?;
-            // Gone, or another object of its name: this one is gone.
             let read = match reply.stdout.trim().is_empty() {
                 true => Vec::new(),
                 false => Operated::list(&reply.stdout)?,
             };
-            if read.iter().any(|read| read.uid == pool.uid) {
-                still.push(pool);
+            // The listed one still stops; another of its name, made after
+            // its delete, is a replacement, as a refused delete shows one;
+            // none: it is gone.
+            match read.first() {
+                Some(read) if read.uid == pool.uid => still.push(pool),
+                Some(read) => replaced.push((pool.name.as_str(), read.uid.clone())),
+                None => {}
             }
         }
         waiting = still;

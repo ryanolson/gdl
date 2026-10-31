@@ -102,13 +102,11 @@ fn assert_parent_survives_replacement_after_delete(prune: bool) {
 }
 
 #[test]
-#[ignore = "F12: down treats a child replaced after DELETE as stopped and deletes its parent"]
 fn down_keeps_a_parent_when_its_child_is_replaced_during_the_delete_wait() {
     assert_parent_survives_replacement_after_delete(false);
 }
 
 #[test]
-#[ignore = "F12: prune treats a child replaced after DELETE as stopped and deletes its parent"]
 fn prune_keeps_a_parent_when_its_child_is_replaced_during_the_delete_wait() {
     assert_parent_survives_replacement_after_delete(true);
 }
