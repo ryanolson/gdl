@@ -70,6 +70,56 @@ fn state(state: PoolState) -> PoolWatchEvent {
     }
 }
 
+#[test]
+#[ignore = "F2: draining from a link without a property list never reaches its listing"]
+fn a_link_without_properties_still_lists_its_pool_draining() {
+    let record: gdl_pools::PoolRecord = serde_json::from_value(serde_json::json!({
+        "name": "m",
+        "class": "model_x",
+        "region": "r",
+        "home": "global",
+        "contract": 1,
+        "placement": 1,
+        "state": "ready",
+        "epoch": 1,
+        "seq": 1,
+        "hub": "hub:1"
+    }))
+    .expect("a record from a hub that sends no properties");
+    assert_eq!(record.properties_version, 0);
+    let relay = held();
+    relay.record(&record, None);
+    let (generation, _) = relay.begin("model_x", "m");
+    relay.install(generation, installed(PoolState::Ready));
+    relay.apply("model_x", "m", generation, state(PoolState::Draining));
+    assert!(
+        pending(&mut relay.watch(None)).iter().any(|event| matches!(
+            event,
+            FollowEvent::Follow {
+                state: PoolState::Draining,
+                ..
+            }
+        )),
+        "the follow itself knows the pool drains"
+    );
+    let linked = relay
+        .lock()
+        .listings
+        .listing("model_x", "m", std::time::Instant::now())
+        .expect("still listed");
+    relay.end("model_x", "m", generation);
+    let lost = relay
+        .lock()
+        .listings
+        .listing("model_x", "m", std::time::Instant::now())
+        .expect("a lost link keeps the listing");
+    assert_eq!(
+        (linked.draining, lost.draining),
+        (true, true),
+        "the ready record lags the draining link, then the link is lost"
+    );
+}
+
 /// The events the watch has now.
 fn pending(watch: &mut super::FollowsWatch) -> Vec<FollowEvent> {
     let mut events = Vec::new();
