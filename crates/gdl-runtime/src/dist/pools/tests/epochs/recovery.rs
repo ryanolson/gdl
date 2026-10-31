@@ -268,7 +268,7 @@ fn a_stale_listing_after_an_unlisting_does_not_hide_a_heard_drain() {
 /// A snapshot taken before a drain must not clear it when its marker
 /// arrives after an unlisting that fenced the same hub.
 #[test]
-#[ignore = "F11: a stale snapshot at the fence clears a drain heard before the unlisting"]
+#[ignore = "known limit: a snapshot of a pool's own hub, taken before its drain and delivered after an unlisting that forgot the drain, reads that hub live until its next word (operations/limitations.md)"]
 fn a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
@@ -320,5 +320,60 @@ fn a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain() {
     assert!(
         after.is_none_or(|after| after.epoch() != 6 || after.is_draining()),
         "hub 6 was heard to drain and never withdrew: {after:?}"
+    );
+}
+
+/// The window of the limit above closes: the pool's own watch, whose
+/// snapshot was taken before its hub drained, says the drain after the
+/// snapshot, as the hub's own test shows, and the pool reads draining from
+/// then.
+#[test]
+fn a_stale_snapshot_at_the_fence_reads_draining_once_its_watch_says_so() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("an own watch");
+    follows.own(
+        asked.key.clone(),
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(followed(M1, 2, 6))),
+        now,
+    );
+    let mut draining = listing(6);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+            listing: Some(draining),
+        },
+        now,
+    );
+    follows.take(listed(M1, None), now);
+    for event in [
+        FollowEvent::Synced { listed: true },
+        state_of(M1, 2, PoolState::Draining),
+    ] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    assert_eq!(
+        evidence(&pools, M1),
+        (
+            Some(at(6, PoolCondition::Live).with_draining(true)),
+            Some(6)
+        ),
+        "the window closes at the follow's own drain"
     );
 }

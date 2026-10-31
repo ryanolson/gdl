@@ -752,3 +752,37 @@ fn an_uninstalled_follow_cannot_mark_a_successor_hub_missing() {
         "a failed pending epoch-5 link must not become epoch-6 missing evidence (epoch, actual, expected): {failures:?}"
     );
 }
+
+/// A watch of one follow, opened before its pool drains, says the drain
+/// after its snapshot: what ends a chooser's window in which that follow's
+/// snapshot, taken before the drain, reads the pool live.
+#[test]
+fn a_watch_of_one_follow_says_a_drain_after_its_snapshot() {
+    let relay = held();
+    relay.record(&record_of(6, PoolState::Ready), None);
+    let (generation, _) = relay.begin("model_x", "m", 6);
+    relay.install(generation, installed_at(6, PoolState::Ready));
+    let mut one = relay.watch_of("model_x", "m");
+    let snapshot = pending(&mut one);
+    assert!(
+        snapshot.iter().any(|event| matches!(
+            event,
+            FollowEvent::Follow {
+                state: PoolState::Ready,
+                epoch: 6,
+                ..
+            }
+        )),
+        "{snapshot:?}"
+    );
+    relay.apply("model_x", "m", generation, state(PoolState::Draining));
+    assert!(
+        pending(&mut one).contains(&FollowEvent::State {
+            class: "model_x".into(),
+            pool: "m".into(),
+            generation,
+            state: PoolState::Draining,
+        }),
+        "the drain, after the snapshot"
+    );
+}
