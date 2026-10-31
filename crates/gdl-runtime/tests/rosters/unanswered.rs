@@ -195,3 +195,60 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
         "the engine took {exited:?} to leave\n{report}"
     );
 }
+
+/// A stop interrupts `ready` after the hub stores it. The test spends
+/// the drain's 3 s bound and the leave's 5 s limit with that answer held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "F1: cancelling ready detaches its task and blocks leave past the limit"]
+async fn a_stop_during_an_unanswered_ready_still_leaves_the_hub() {
+    let placement = two();
+    let hub = hub(&placement).await;
+    let control = Proxy::new(hub.control_addr()).await;
+    let config = settings(&hub, 20_000, "");
+    let through = settings_through(&hub, control.port, 5_000, DRAIN.as_millis() as u64);
+    let events = Events::quiet();
+    let ((front_process, front), (first_process, first), (second_process, second)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&through, "engine", &placement),
+        launch(&config, "engine", &placement),
+    );
+    let first_id = first.node().instance_id();
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let first_segment = start(&first, "engine", &placement, &events, patient());
+    let second_segment = start(&second, "engine", &placement, &events, patient());
+    control.withhold_answers(b"PUT /v1/services/gdl-ready-");
+    let (front_rx, front_served) = serve(front, front_segment);
+    let (first_rx, first_served) = serve(first, first_segment);
+    let (second_rx, second_served) = serve(second, second_segment);
+    tokio::time::timeout(WAIT, control.withholding())
+        .await
+        .expect("the hub stored ready before the stop");
+    let _front = ready(front_rx).await;
+    let _second = ready(second_rx).await;
+    let services = client(&hub).services();
+    assert!(listed(&services, first_id).await.usable());
+
+    first_process.stop();
+    let _first = ready(first_rx).await;
+    left(first_served).await;
+    let after_leave = listed(&services, first_id).await;
+    let (joiner_process, joiner) = launch(&settings(&hub, 20_000, ""), "front", &placement).await;
+    let routes = joiner
+        .roster()
+        .instances("engine")
+        .iter()
+        .any(|peer| peer.instance_id() == first_id);
+
+    control.answer();
+    for process in [&front_process, &second_process, &joiner_process] {
+        process.stop();
+    }
+    drop(joiner);
+    left(front_served).await;
+    left(second_served).await;
+
+    assert!(
+        !after_leave.usable() && !routes,
+        "the stopped engine is still routable: {after_leave:?}; a joining front routes to it: {routes}"
+    );
+}
