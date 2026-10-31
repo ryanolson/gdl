@@ -35,6 +35,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-macros` | Internal | `graph!`, the generated segments' `segment!`, and the derives |
 | `gdl-extract` | Tools | The source reader and the working catalogue |
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `k8s`, `export` |
+| `gdl-k8s` | `cargo gdl k8s` and the operator | A pool's Kubernetes objects, rendered from the pool alone. No velo |
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-pools` | `gdl`, hub, and runtime | The pool plane's shared types: the pool record, a pool's state, load summary, presence, and properties, the `PoolDirectory` backends, and an operator's commands for a pool whose hub is gone. No velo |
 | `gdl-pools-dynamodb` | Deployments across regions | A pool directory in DynamoDB global tables, which the `gdl-hub` binary takes with its `dynamodb` feature |

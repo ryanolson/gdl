@@ -1,0 +1,20 @@
+[package]
+name = "gdl-k8s"
+description = "A gdl pool's Kubernetes objects, rendered from the pool alone: shared by `cargo gdl k8s` and the gdl operator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The operator renders a pool's objects with this crate, and it must never
+# link velo (`tests/dependencies.rs`): so neither may this one.
+[dependencies]
+gdl-model = { path = "../gdl-model" }
+schemars = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

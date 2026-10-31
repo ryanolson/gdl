@@ -20,6 +20,7 @@ figment = { workspace = true }
 flate2 = "1"
 gdl-model = { path = "../gdl-model" }
 gdl-extract = { path = "../gdl-extract" }
+gdl-k8s = { path = "../gdl-k8s" }
 gdl-message = { path = "../gdl-message" }
 gdl-syntax = { path = "../gdl-syntax" }
 icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }

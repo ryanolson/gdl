@@ -1425,6 +1425,7 @@ dependencies = [
  "flate2",
  "gdl-extract",
  "gdl-hub",
+ "gdl-k8s",
  "gdl-message",
  "gdl-model",
  "gdl-syntax",
@@ -1469,6 +1470,17 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "velo-hub",
+]
+
+[[package]]
+name = "gdl-k8s"
+version = "0.1.0"
+dependencies = [
+ "gdl-model",
+ "schemars",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

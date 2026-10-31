@@ -11,7 +11,7 @@ use crate::deployment::Settings;
 /// set one, nor any under these prefixes. `GDL_POOL` and `GDL_HUB` alone
 /// would set the whole `[pool]` or `[hub]` table. Matched without regard
 /// to case, as the settings readers match a key.
-const SET: &[&str] = &[objects::POD_IP, "GDL_POOL", "GDL_HUB"];
+const SET: &[&str] = &[gdl_k8s::POD_IP, "GDL_POOL", "GDL_HUB"];
 const SET_PREFIXES: &[&str] = &["GDL_POOL__", "GDL_HUB__"];
 
 /// Variables that hold a static cloud credential, which the objects would
@@ -102,7 +102,7 @@ pub(super) fn fleet(fleet: &Fleet, settings: &Settings) -> Vec<Problem> {
                     Some("env".into()),
                     format!(
                         "`{variable}` is a variable the render sets in every pod (`{}`, `GDL_POOL`, `GDL_HUB`, `GDL_POOL__*`, `GDL_HUB__*`): set a pool's settings in the fleet's `[pool]` and `[class]` tables",
-                        objects::POD_IP
+                        gdl_k8s::POD_IP
                     ),
                 ));
             }

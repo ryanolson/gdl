@@ -25,8 +25,9 @@ mod refusals;
 mod relay;
 
 pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
-use objects::{Names, Pod, Port, Segment};
-pub(super) use objects::{ROUTABLE, image, label_value, stream};
+pub(super) use gdl_k8s::{ROUTABLE, label_value};
+use objects::{Names, Pod, Segment};
+pub(super) use objects::{image, stream};
 
 /// The objects of `fleet`'s pools, which run `spec`, by path from the
 /// output directory: `<cluster>/base.yaml`, `<cluster>/pools/<pool>.yaml`
@@ -405,7 +406,7 @@ impl Render<'_> {
             return Err(Error::new(problem));
         }
         let path = laid.dir().join(segment).join("config.toml");
-        let grace = self.bundle.segment_config(&path, segment, None, None)?;
+        self.bundle.segment_config(&path, segment, None, None)?;
         let mut table: toml::Table = toml::from_str(&self.bundle.files[&path]).map_err(io)?;
         // The probes ask the pod's IP, so a listener on loopback alone
         // would never answer them.
@@ -416,8 +417,8 @@ impl Render<'_> {
             system.insert("host".into(), objects::SYSTEM_HOST.into());
         }
         let config = toml::to_string_pretty(&table).map_err(io)?;
-        let probes = match objects::Probes::of(&table) {
-            Ok(probes) => probes,
+        let settings = match gdl_k8s::Settings::of(&table) {
+            Ok(settings) => settings,
             Err(message) => {
                 self.problems.push(Problem::at(
                     Some(format!("deployment.segment.{segment}.config.system")),
@@ -429,12 +430,13 @@ impl Render<'_> {
         };
         let mut ports = Vec::new();
         for published in self.bundle.ports(segment) {
-            match Port::parse(published) {
+            match objects::parse_port(published) {
                 // A host publication of the system port is Compose's route
                 // to it from the host. A pod publishes nothing to a host,
                 // and already declares the port as `system`; `check`
                 // refuses a bare one.
-                Ok(port) if port.system(&probes) && Published::of(published).host => {}
+                Ok(port)
+                    if objects::is_system(&port, &settings) && Published::of(published).host => {}
                 Ok(port) if !ports.contains(&port) => ports.push(port),
                 Ok(_) => {}
                 Err(message) => self.problems.push(Problem::at(
@@ -444,19 +446,10 @@ impl Render<'_> {
                 )),
             }
         }
-        let metrics_prefix = table
-            .get("system")
-            .and_then(|system| system.get("metrics_prefix"))
-            .and_then(toml::Value::as_str)
-            .map(str::to_string);
         Ok(Some(Segment {
             name: segment.to_string(),
             repository: package,
             config,
-            grace,
-            drain_ms: super::drain_bound(&table).as_millis(),
-            metrics_prefix,
-            probes,
             ports,
             secrets: self.bundle.secrets(segment).to_vec(),
         }))
@@ -516,28 +509,20 @@ impl Render<'_> {
                 endpoint.clone(),
             )
         };
-        let mut objects = Vec::new();
-        let config = pod.config_map(deployment, segments);
-        let checksum = objects::checksum(&config);
-        objects.push(config);
-        objects.extend(relay.state_claim(&pod));
-        objects.push(pod.hub(
-            &variables(objects::pod_hub())?,
+        let spec = pod.pool(
+            deployment,
             hub_repository,
-            &checksum,
+            &variables(gdl_k8s::pod_hub())?,
             relay.state_dir(),
-        )?);
-        objects.push(pod.hub_service());
-        for segment in segments {
-            let variables = variables(objects::hub_address(&pool.name))?;
-            objects.push(pod.segment(segment, &variables, &checksum)?);
-            if !segment.ports.is_empty() {
-                objects.push(pod.entry_service(segment));
-            }
-            if cluster.scaler {
-                objects.push(pod.scaler(segment));
-            }
-        }
+            segments,
+            &variables(gdl_k8s::hub_address(&pool.name))?,
+        )?;
+        let scaling = match cluster.scaler {
+            true => gdl_k8s::Scaling::Operator,
+            false => gdl_k8s::Scaling::Fixed,
+        };
+        let objects = gdl_k8s::children(&pool.name, &cluster.namespace, &spec, scaling)
+            .map_err(Error::new)?;
         for object in &objects {
             if let Err(message) = self.names.claim(cluster_name, &pool.name, object) {
                 self.problems.push(Problem::at(

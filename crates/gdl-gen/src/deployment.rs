@@ -650,7 +650,7 @@ impl Bundle {
         // drain for its bound, read here from its settings as generated (an environment
         // override at run time is not seen).
         let config: toml::Table = toml::from_str(&files[path]).map_err(io)?;
-        Ok(drain_bound(&config).as_secs() + 30)
+        Ok(gdl_k8s::stop_grace(gdl_k8s::drain_bound(&config)))
     }
 
     /// Refuse a secret whose file lies in the build context, the bundle or
@@ -886,22 +886,6 @@ fn hub_healthcheck() -> serde_json::Value {
 /// A segment's health check, which its binary answers from its settings.
 fn segment_healthcheck() -> serde_json::Value {
     json!({"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"})
-}
-
-/// How long a segment with these settings may drain: `runtime.drain_ms`,
-/// else `runtime.default_deadline_ms`, else the runtime's defaults.
-fn drain_bound(config: &toml::Table) -> std::time::Duration {
-    let runtime = config.get("runtime").and_then(toml::Value::as_table);
-    let ms = |key: &str| {
-        runtime
-            .and_then(|runtime| runtime.get(key))
-            .and_then(toml::Value::as_integer)
-            .and_then(|ms| u64::try_from(ms).ok())
-    };
-    ms("drain_ms").or_else(|| ms("default_deadline_ms")).map_or(
-        gdl_model::DEFAULT_DEADLINE,
-        std::time::Duration::from_millis,
-    )
 }
 
 /// A Dockerfile that runs `build` in `builder`, and copies the `binary`

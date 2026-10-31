@@ -21,8 +21,9 @@
 use gdl_model::{Cluster, Fleet, FleetDirectory, Problem, Resources, dynamodb_tables};
 use serde_json::{Value, json};
 
-use super::objects::{label_value, place, resources};
+use super::objects::{place, resources};
 use crate::deployment::pools::DYNAMODB_LOCAL;
+use gdl_k8s::label_value;
 
 /// The Local's Deployment and Service, and the tables Job: a pool may not
 /// take either name.
@@ -182,7 +183,7 @@ pub(super) fn tables_job(
     let mut container = json!({
         "name": "tables",
         "image": image,
-        "command": [super::objects::BINARY, "--tables"],
+        "command": [gdl_k8s::BINARY, "--tables"],
         "env": env,
     });
     resources(&mut container, requests);

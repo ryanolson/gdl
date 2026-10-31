@@ -1,178 +1,73 @@
-//! The Kubernetes objects themselves, as JSON: each is also YAML, and a
-//! file of them is a YAML stream that `kubectl apply` and `kubeconform`
-//! read. Every object carries the labels `gdl.dev/fleet` and
+//! The fleet's Kubernetes objects that are not a pool's own, and a
+//! pool as [`gdl_k8s`] renders its objects: each is JSON, which is also
+//! YAML, and a file of them is a YAML stream that `kubectl apply` and
+//! `kubeconform` read. Every object carries the labels `gdl.dev/fleet` and
 //! `gdl.dev/cluster`, the fleet's name for the cluster it is rendered for:
 //! `deploy` prunes only the objects of its own cluster, so that two
 //! clusters whose contexts reach one namespace never prune each other's.
-//! Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`,
-//! `gdl.dev/region`, and `gdl.dev/segment` (`hub` for its hub's, which no
-//! segment can be named). Every pod says where it serves its metrics, in
-//! the `prometheus.io` annotations that a Prometheus's pod discovery reads
-//! by convention. A Deployment and a Service
-//! select pods only by the labels that name them, `gdl.dev/fleet`,
-//! `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects
-//! share: a Deployment's selector cannot change, and a class's name can.
+//! A pool's objects carry more labels, which `gdl_k8s` names.
 
 use std::collections::BTreeMap;
 
-use gdl_model::{Cluster, Fleet, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, PoolSettings, Resources};
+use gdl_k8s::{
+    Env, HUB_METRICS, LABEL_LIMIT, LABEL_PREFIX, PUBLIC, Pool, Port, Protocol, SEGMENT_METRICS,
+    SYSTEM, Settings, fnv, label_value,
+};
+use gdl_model::{Cluster, Fleet, PoolSettings, Resources};
 use serde_json::{Map, Value, json};
 
-use super::relay;
 use crate::Error;
 use crate::deployment::Published;
-
-/// The variable that holds a hub's pod IP, which the hub's record names:
-/// only the pod knows it, from the downward API.
-pub(super) const POD_IP: &str = "GDL_POD_IP";
 
 /// The address every segment's system listener binds in a pod: every
 /// interface, so that the kubelet's probes reach it at the pod's IP.
 pub(super) const SYSTEM_HOST: &str = "0.0.0.0";
 
-/// Where a pod mounts its pool's ConfigMap.
-const CONFIG_DIR: &str = "/etc/gdl/fleet";
-
-/// Where a pod mounts its segment's secrets, each a file named for the
-/// spec's secret, as Compose mounts them.
-const SECRETS_DIR: &str = "/run/secrets";
-
-/// The binary in every image, the hub's included.
-pub(super) const BINARY: &str = "/usr/local/bin/segment";
-
-/// The group a parent hub's claim is made writable for: the default
-/// image's user's. Kubernetes copies nothing from the image into a new
-/// claim, which a provisioner usually gives to root.
-const STATE_GROUP: u32 = 65532;
-
-/// The longest name of a Service: a DNS label's.
-const LABEL_LIMIT: usize = 63;
-
-/// Where a hub serves its metrics, on its public port.
-const HUB_METRICS: &str = "/v1/ext/gdl-pool/metrics";
-
-/// Where a segment serves its metrics, on its system port.
-const SEGMENT_METRICS: &str = "/metrics";
-
-/// The label a segment's pods carry under the operator, `true` while they
-/// take connections, which their entry Service selects on.
-pub(in crate::deployment) const ROUTABLE: &str = "gdl.dev/routable";
-
-/// The names of the container ports a hub and a segment serve their
-/// metrics on, which a PodMonitor scrapes by name.
-const PUBLIC: &str = "public";
-const SYSTEM: &str = "system";
-
-/// One segment of a layout, as its pods run it.
+/// One segment of a layout, as its pods run it: what [`gdl_k8s::Segment`]
+/// takes from the spec, before a pool's cluster names its image and its
+/// secrets' holders.
 pub(super) struct Segment {
     pub(super) name: String,
     /// Its image's repository: the package it builds.
     pub(super) repository: String,
     /// Its settings file.
     pub(super) config: String,
-    /// How long its pod is let stop, in seconds: its drain bound and a
-    /// margin.
-    pub(super) grace: u64,
-    /// Its drain bound, in milliseconds.
-    pub(super) drain_ms: u128,
-    /// Its `[system] metrics_prefix`, when its settings set one.
-    pub(super) metrics_prefix: Option<String>,
-    pub(super) probes: Probes,
     /// The container ports it publishes.
     pub(super) ports: Vec<Port>,
     /// The spec's secrets it mounts.
     pub(super) secrets: Vec<String>,
 }
 
-/// Where a segment answers its probes: its system listener, as its
-/// settings set it.
-pub(super) struct Probes {
-    port: u16,
-    live: String,
-    health: String,
-}
-
-impl Probes {
-    /// The probes of a segment with settings `config`: refused
-    /// when its system listener is off or takes an ephemeral port, since a
-    /// probe needs a port it knows.
-    pub(super) fn of(config: &toml::Table) -> Result<Self, String> {
-        let system = config.get("system").and_then(toml::Value::as_table);
-        let text = |key: &str, default: &str| {
-            system
-                .and_then(|system| system.get(key))
-                .and_then(toml::Value::as_str)
-                .unwrap_or(default)
-                .to_string()
-        };
-        let port = system
-            .and_then(|system| system.get("port"))
-            .and_then(toml::Value::as_integer)
-            .and_then(|port| u16::try_from(port).ok())
-            .filter(|port| *port > 0)
-            .ok_or("a pod's probes ask the segment's system listener, so it takes a fixed port")?;
-        Ok(Self {
-            port,
-            live: text("live_path", "/live"),
-            health: text("health_path", "/health"),
-        })
+/// `port`, in Compose's short form `[[IP:][HOST]:]CONTAINER[/PROTOCOL]`,
+/// as a segment publishes it in a cluster: its container port. The host
+/// port is Compose's alone. A range is refused: a Service lists each port.
+pub(super) fn parse_port(port: &str) -> Result<Port, String> {
+    let refuse = |why: &str| format!("`{port}` {why}");
+    let published = Published::of(port);
+    let protocol = match published.protocol {
+        "tcp" => Protocol::Tcp,
+        "udp" => Protocol::Udp,
+        "sctp" => Protocol::Sctp,
+        _ => return Err(refuse("names a protocol that is not tcp, udp, or sctp")),
+    };
+    match published.container.parse::<u16>() {
+        Ok(number) if number > 0 => Ok(Port {
+            port: number,
+            protocol,
+        }),
+        _ => Err(refuse(
+            "is not one container port: a Kubernetes Service lists each port it publishes, so publish a range as its ports",
+        )),
     }
 }
 
-/// A container port that a segment publishes, from Compose's short form:
-/// a ClusterIP Service of each pool that runs the segment publishes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Port {
-    port: u16,
-    protocol: &'static str,
+/// Whether `port` is the port of the system listener that `settings` ask
+/// the probes at, which the pod declares as `system`.
+pub(super) fn is_system(port: &Port, settings: &Settings) -> bool {
+    port.port == settings.port && port.protocol == Protocol::Tcp
 }
 
-impl Port {
-    /// `port`, in Compose's short form `[[IP:][HOST]:]CONTAINER[/PROTOCOL]`,
-    /// as a segment publishes it in a cluster: its container port.
-    /// The host port is Compose's alone. A range is refused: a Service
-    /// lists each port.
-    pub(super) fn parse(port: &str) -> Result<Self, String> {
-        let refuse = |why: &str| format!("`{port}` {why}");
-        let published = Published::of(port);
-        let protocol = match published.protocol {
-            "tcp" => "TCP",
-            "udp" => "UDP",
-            "sctp" => "SCTP",
-            _ => return Err(refuse("names a protocol that is not tcp, udp, or sctp")),
-        };
-        match published.container.parse::<u16>() {
-            Ok(number) if number > 0 => Ok(Self {
-                port: number,
-                protocol,
-            }),
-            _ => Err(refuse(
-                "is not one container port: a Kubernetes Service lists each port it publishes, so publish a range as its ports",
-            )),
-        }
-    }
-
-    /// Whether it is the port of the system listener that `probes` ask,
-    /// which the pod declares as `system`.
-    pub(super) fn system(&self, probes: &Probes) -> bool {
-        self.port == probes.port && self.protocol == "TCP"
-    }
-
-    fn container(&self) -> Value {
-        json!({"containerPort": self.port, "protocol": self.protocol})
-    }
-
-    fn service(&self) -> Value {
-        json!({
-            "name": format!("{}-{}", self.protocol.to_ascii_lowercase(), self.port),
-            "port": self.port,
-            "targetPort": self.port,
-            "protocol": self.protocol,
-        })
-    }
-}
-
-/// The pods of one pool in its cluster.
+/// The pods of one pool in its cluster, as the fleet places them.
 pub(super) struct Pod<'a> {
     pub(super) fleet: &'a str,
     pub(super) pool: &'a PoolSettings,
@@ -185,361 +80,77 @@ pub(super) struct Pod<'a> {
 }
 
 impl Pod<'_> {
-    /// The selector of the pool's pods of `segment`, `hub` for its hub's:
-    /// the labels that name the pods, and not the class, which a fleet can
-    /// rename while Kubernetes refuses a change to a Deployment's selector.
-    fn selector(&self, segment: &str) -> Value {
-        let labels = self.labels(Some(segment));
-        ["gdl.dev/fleet", "gdl.dev/pool", "gdl.dev/segment"]
-            .into_iter()
-            .map(|key| (key.to_string(), labels[key].clone()))
-            .collect::<Map<_, _>>()
-            .into()
-    }
-
-    /// The labels of the pool's objects of `segment`, `hub` for its hub's.
-    fn labels(&self, segment: Option<&str>) -> Value {
-        self.named(segment)
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), label_value(value).into()))
-            .collect::<Map<_, _>>()
-            .into()
-    }
-
-    /// Each label's key and its whole value, a label's value or not.
-    fn named<'s>(&'s self, segment: Option<&'s str>) -> Vec<(&'static str, &'s str)> {
-        let mut named = vec![
-            ("gdl.dev/fleet", self.fleet),
-            ("gdl.dev/cluster", self.cluster_name),
-            ("gdl.dev/pool", self.pool.name.as_str()),
-            ("gdl.dev/class", self.pool.class.as_str()),
-            ("gdl.dev/region", self.pool.region.as_str()),
-        ];
-        named.extend(segment.map(|segment| ("gdl.dev/segment", segment)));
-        named
-    }
-
-    /// The annotations that hold each label's whole value where the label
-    /// holds a shortened one ([`label_value`]), under the label's key.
-    fn whole(&self, segment: Option<&str>) -> Map<String, Value> {
-        self.named(segment)
-            .into_iter()
-            .filter(|(_, value)| value.len() > LABEL_LIMIT)
-            .map(|(key, value)| (key.to_string(), value.into()))
-            .collect()
-    }
-
-    /// The metadata of the pool's object `name` of `segment`, if it has
-    /// one.
-    fn meta(&self, name: &str, segment: Option<&str>) -> Value {
-        let mut metadata = json!({
-            "name": name,
-            "namespace": self.cluster.namespace,
-            "labels": self.labels(segment),
-        });
-        let whole = self.whole(segment);
-        if !whole.is_empty() {
-            metadata["annotations"] = whole.into();
-        }
-        metadata
-    }
-
-    /// The metadata of the pool's object `name` of `segment`.
-    pub(super) fn metadata(&self, name: &str, segment: &str) -> Value {
-        self.meta(name, Some(segment))
-    }
-
-    /// The pool's ConfigMap, named for the pool: its layout's deployment,
-    /// which its hub admits, and each of its segments' settings.
-    pub(super) fn config_map(&self, deployment: &str, segments: &[&Segment]) -> Value {
-        let mut data = Map::new();
-        data.insert("deployment.json".into(), deployment.into());
-        for segment in segments {
-            data.insert(
-                format!("{}.toml", segment.name),
-                segment.config.clone().into(),
-            );
-        }
-        json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": self.meta(&self.pool.name, None),
-            "data": data,
-        })
-    }
-
-    /// The pool's hub: one replica, which `Recreate` stops before it starts
-    /// another, since a pool's record has one writer. Its probes ask its own
-    /// health, never the pool's, which a parent answers 503 until its
-    /// children are ready: a parent that was never ready would have no
-    /// Service endpoint for its children to report to.
-    pub(super) fn hub(
+    /// The pool as [`gdl_k8s::children`] renders it: its layout's
+    /// `deployment`, its hub's image of `hub_repository` and `hub` its
+    /// variables, a parent hub's `state_dir`, and `segments`, each with
+    /// `variables`.
+    pub(super) fn pool(
         &self,
-        variables: &Map<String, Value>,
-        repository: &str,
-        checksum: &str,
+        deployment: &str,
+        hub_repository: &str,
+        hub: &Map<String, Value>,
         state_dir: Option<&str>,
-    ) -> Result<Value, Error> {
-        let mut env = vec![json!({
-            "name": POD_IP,
-            "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
-        })];
-        env.extend(self.env(variables));
-        let probe = |period: u32, failures: u32| {
-            json!({
-                "httpGet": {"path": "/v1/health", "port": HUB_PUBLIC_PORT},
-                "periodSeconds": period,
-                "timeoutSeconds": 2,
-                "failureThreshold": failures,
-            })
-        };
-        let mut mounts = vec![config_mount()];
-        let mut volumes = vec![self.config_volume()];
-        if let Some(state_dir) = state_dir {
-            mounts.push(json!({"name": "state", "mountPath": state_dir}));
-            volumes.push(json!({
-                "name": "state",
-                "persistentVolumeClaim": {"claimName": relay::state_claim(&self.pool.name)},
-            }));
-        }
-        let mut container = json!({
-            "name": "hub",
-            "image": self.image(repository)?,
-            "command": [BINARY, format!("{CONFIG_DIR}/deployment.json")],
-            "env": env,
-            "ports": [
-                {"name": PUBLIC, "containerPort": HUB_PUBLIC_PORT},
-                {"name": "control", "containerPort": HUB_CONTROL_PORT},
-            ],
-            "livenessProbe": probe(2, 30),
-            "readinessProbe": probe(2, 3),
-            "volumeMounts": mounts,
-        });
-        resources(&mut container, self.resources(gdl_model::HUB).as_ref());
-        let mut pod = self.pod_spec(container, volumes);
-        if state_dir.is_some() {
-            pod["securityContext"] = json!({"fsGroup": STATE_GROUP});
-        }
-        let scrape = Scrape {
-            port: HUB_PUBLIC_PORT,
-            path: HUB_METRICS,
-        };
-        Ok(self.deployment(&self.pool.name, "hub", Some(1), true, checksum, scrape, pod))
-    }
-
-    /// The Service of the pool's hub, named for the pool: where its
-    /// segments, and its children's hubs, reach it.
-    pub(super) fn hub_service(&self) -> Value {
-        json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": self.metadata(&self.pool.name, "hub"),
-            "spec": {
-                "type": "ClusterIP",
-                "selector": self.selector("hub"),
-                "ports": [
-                    {"name": "public", "port": HUB_PUBLIC_PORT, "targetPort": HUB_PUBLIC_PORT},
-                    {"name": "control", "port": HUB_CONTROL_PORT, "targetPort": HUB_CONTROL_PORT},
-                ],
-            },
-        })
-    }
-
-    /// The Deployment of the pool's `segment`: the pool's quorum of it, let
-    /// stop for its drain bound and a margin, and probed on its system
-    /// port, live from its start and ready while it serves.
-    pub(super) fn segment(
-        &self,
-        segment: &Segment,
+        segments: &[&Segment],
         variables: &Map<String, Value>,
-        checksum: &str,
-    ) -> Result<Value, Error> {
+    ) -> Result<Pool, Error> {
         let mut variables = variables.clone();
         variables.insert(
             "GDL_HUB__HOST".into(),
             crate::deployment::variables::string(&self.pool.name).into(),
         );
-        let probe = |path: &str, period: u32| {
-            json!({
-                "httpGet": {"path": path, "port": segment.probes.port},
-                "periodSeconds": period,
-                "timeoutSeconds": 3,
-                "failureThreshold": 3,
-            })
-        };
-        let mut ports = vec![json!({"name": SYSTEM, "containerPort": segment.probes.port})];
-        ports.extend(segment.ports.iter().map(Port::container));
-        let mut mounts = vec![config_mount()];
-        let mut volumes = vec![self.config_volume()];
-        if !segment.secrets.is_empty() {
-            mounts.push(json!({"name": "secrets", "mountPath": SECRETS_DIR, "readOnly": true}));
-            let sources: Vec<Value> = segment
-                .secrets
-                .iter()
-                .map(|secret| {
-                    let holder = self
-                        .cluster
+        let segments = segments
+            .iter()
+            .map(|segment| {
+                Ok(gdl_k8s::Segment {
+                    name: segment.name.clone(),
+                    image: self.image(&segment.repository)?,
+                    settings: segment.config.clone(),
+                    quorum: self.pool.quorum(&segment.name),
+                    ports: segment.ports.clone(),
+                    env: self.env(&variables),
+                    secrets: segment
                         .secrets
-                        .get(secret)
-                        .cloned()
-                        .unwrap_or_default();
-                    json!({"secret": {"name": holder, "items": [{"key": secret, "path": secret}]}})
+                        .iter()
+                        .map(|secret| gdl_k8s::Secret {
+                            name: secret.clone(),
+                            holder: self
+                                .cluster
+                                .secrets
+                                .get(secret)
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                        .collect(),
+                    resources: self.resources(&segment.name),
                 })
-                .collect();
-            volumes.push(json!({"name": "secrets", "projected": {"sources": sources}}));
-        }
-        let mut container = json!({
-            "name": "segment",
-            "image": self.image(&segment.repository)?,
-            "command": [BINARY, format!("{CONFIG_DIR}/{}.toml", segment.name)],
-            "env": self.env(&variables),
-            "ports": ports,
-            "livenessProbe": probe(&segment.probes.live, 10),
-            "readinessProbe": probe(&segment.probes.health, 5),
-            "volumeMounts": mounts,
-        });
-        resources(&mut container, self.resources(&segment.name).as_ref());
-        let mut pod = self.pod_spec(container, volumes);
-        pod["terminationGracePeriodSeconds"] = segment.grace.into();
-        let scrape = Scrape {
-            port: segment.probes.port,
-            path: SEGMENT_METRICS,
-        };
-        // Under the operator, the scaler owns `replicas`, and its pods say
-        // that they take connections, which their entry Service selects
-        // on.
-        let replicas = (!self.cluster.scaler).then(|| self.pool.quorum(&segment.name));
-        let mut deployment = self.deployment(
-            &object_name(&self.pool.name, &segment.name),
-            &segment.name,
-            replicas,
-            false,
-            checksum,
-            scrape,
-            pod,
-        );
-        if self.cluster.scaler {
-            deployment["spec"]["template"]["metadata"]["labels"][ROUTABLE] = "true".into();
-        }
-        Ok(deployment)
-    }
-
-    /// The `GdlScaler` of the pool's `segment`, named after its
-    /// Deployment, without `replicas`, which only its bootstrap and then
-    /// its HPA or a person write: the segment's quorum as its minimum, its
-    /// drain bound, its entry Service when it publishes ports, and its
-    /// metrics' prefix.
-    pub(super) fn scaler(&self, segment: &Segment) -> Value {
-        let name = object_name(&self.pool.name, &segment.name);
-        let mut spec = json!({
-            "pool": self.pool.name,
-            "segment": segment.name,
-            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
-            "minReplicas": self.pool.quorum(&segment.name).max(1),
-            "drainBound": format!("{}ms", segment.drain_ms),
-        });
-        if !segment.ports.is_empty() {
-            spec["service"] = name.clone().into();
-        }
-        if let Some(prefix) = &segment.metrics_prefix {
-            spec["metricsPrefix"] = prefix.clone().into();
-        }
-        json!({
-            "apiVersion": "gdl.dev/v1alpha1",
-            "kind": "GdlScaler",
-            "metadata": self.metadata(&name, &segment.name),
-            "spec": spec,
-        })
-    }
-
-    /// The ClusterIP Service of the ports the pool's `segment` publishes.
-    /// Under the operator it selects only the pods that take connections
-    /// (`gdl.dev/routable: "true"`), so that a pod the operator removes
-    /// leaves its endpoints before it goes. `deploy` leaves that label out
-    /// of a live Service's selector until every ready pod carries it.
-    pub(super) fn entry_service(&self, segment: &Segment) -> Value {
-        let mut selector = self.selector(&segment.name);
-        if self.cluster.scaler {
-            selector[ROUTABLE] = "true".into();
-        }
-        json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": self.metadata(&object_name(&self.pool.name, &segment.name), &segment.name),
-            "spec": {
-                "type": "ClusterIP",
-                "selector": selector,
-                "ports": segment.ports.iter().map(Port::service).collect::<Vec<_>>(),
+            })
+            .collect::<Result<_, Error>>()?;
+        Ok(Pool {
+            fleet: self.fleet.to_string(),
+            cluster: self.cluster_name.to_string(),
+            class: self.pool.class.clone(),
+            region: self.pool.region.clone(),
+            deployment: deployment.to_string(),
+            hub: gdl_k8s::Hub {
+                image: self.image(hub_repository)?,
+                env: self.env(hub),
+                resources: self.resources(gdl_model::HUB),
+                state_dir: state_dir.map(str::to_string),
             },
+            segments,
+            service_account_name: self.fleet.to_string(),
+            node_selector: node_selector(self.cluster),
+            tolerations: self.cluster.tolerations.iter().map(Into::into).collect(),
         })
-    }
-
-    /// A Deployment of `replicas` pods of `segment` with `pod` as their
-    /// spec, which `checksum`, the pool's ConfigMap's, replaces when the
-    /// settings change: a ConfigMap's change alone restarts no pod. Each pod
-    /// says where it serves its metrics (`scrape`). Without `replicas`, the
-    /// Deployment leaves the field to the one manager that owns it.
-    #[allow(clippy::too_many_arguments)]
-    fn deployment(
-        &self,
-        name: &str,
-        segment: &str,
-        replicas: Option<u32>,
-        recreate: bool,
-        checksum: &str,
-        scrape: Scrape,
-        pod: Value,
-    ) -> Value {
-        let labels = self.labels(Some(segment));
-        let mut annotations = self.whole(Some(segment));
-        annotations.insert("gdl.dev/config".into(), checksum.into());
-        annotations.insert("prometheus.io/scrape".into(), "true".into());
-        annotations.insert("prometheus.io/port".into(), scrape.port.to_string().into());
-        annotations.insert("prometheus.io/path".into(), scrape.path.into());
-        let mut spec = json!({
-            "selector": {"matchLabels": self.selector(segment)},
-            "template": {
-                "metadata": {"labels": labels, "annotations": annotations},
-                "spec": pod,
-            },
-        });
-        if let Some(replicas) = replicas {
-            spec["replicas"] = replicas.into();
-        }
-        if recreate {
-            spec["strategy"] = json!({"type": "Recreate"});
-        }
-        json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": self.metadata(name, segment),
-            "spec": spec,
-        })
-    }
-
-    /// A pod of the fleet's service account, on nodes of the cluster's
-    /// platform. Service links are off: they would add a variable per
-    /// Service in the namespace to every container.
-    fn pod_spec(&self, container: Value, volumes: Vec<Value>) -> Value {
-        let mut pod = json!({
-            "serviceAccountName": self.fleet,
-            "enableServiceLinks": false,
-            "containers": [container],
-            "volumes": volumes,
-        });
-        place(&mut pod, self.cluster);
-        pod
     }
 
     /// The requests and limits of the pool's pods of `segment`, `hub` for
     /// its hub's, when the cluster gives any.
-    fn resources(&self, segment: &str) -> Option<Resources> {
+    fn resources(&self, segment: &str) -> Option<gdl_k8s::Resources> {
         self.model
             .pod_resources(self.cluster_name, Some(&self.pool.name), Some(segment))
-    }
-
-    fn config_volume(&self) -> Value {
-        json!({"name": "config", "configMap": {"name": self.pool.name}})
+            .as_ref()
+            .map(Into::into)
     }
 
     /// `variables`, and then the cluster's own, as a container's `env`.
@@ -547,17 +158,18 @@ impl Pod<'_> {
     /// `$$` as `$`: a cluster's values are written so that they read as
     /// given. A pool's own values hold no `$`, except the hub's reference
     /// to its pod's IP.
-    fn env(&self, variables: &Map<String, Value>) -> Vec<Value> {
-        let mut env: Vec<Value> = variables
+    fn env(&self, variables: &Map<String, Value>) -> Vec<Env> {
+        let mut env: Vec<Env> = variables
             .iter()
-            .map(|(name, value)| json!({"name": name, "value": value}))
+            .map(|(name, value)| Env {
+                name: name.clone(),
+                value: value.as_str().unwrap_or_default().to_string(),
+            })
             .collect();
-        env.extend(
-            self.cluster
-                .env
-                .iter()
-                .map(|(name, value)| json!({"name": name, "value": value.replace('$', "$$")})),
-        );
+        env.extend(self.cluster.env.iter().map(|(name, value)| Env {
+            name: name.clone(),
+            value: value.replace('$', "$$"),
+        }));
         env
     }
 
@@ -570,12 +182,6 @@ impl Pod<'_> {
         crate::deployment::validate_image(&image)?;
         Ok(image)
     }
-}
-
-/// Where a pod serves its metrics.
-struct Scrape {
-    port: u16,
-    path: &'static str,
 }
 
 /// The labels a PodMonitor copies from each pod onto every series it
@@ -684,75 +290,38 @@ pub(in crate::deployment) fn image(
     image
 }
 
-/// Place a pod of `cluster`, whose spec is `pod`: its node selector, the
-/// cluster's own beside its platform's OS and architecture, without a
-/// variant (`linux/arm64/v8` runs on `arm64` nodes), as the nodes'
-/// `kubernetes.io/os` and `kubernetes.io/arch` labels name them; and the
-/// cluster's tolerations. Every pod the render writes is placed here, so
-/// that none is left off a node group of the fleet's own.
-pub(super) fn place(pod: &mut Value, cluster: &Cluster) {
+/// The node selector of a pod of `cluster`: the cluster's own beside its
+/// platform's OS and architecture, without a variant (`linux/arm64/v8`
+/// runs on `arm64` nodes), as the nodes' `kubernetes.io/os` and
+/// `kubernetes.io/arch` labels name them.
+fn node_selector(cluster: &Cluster) -> BTreeMap<String, String> {
     let platform = cluster.platform.as_deref().unwrap_or_default();
     let mut parts = platform.split('/');
     let os = parts.next().unwrap_or_default();
     let arch = parts.next().unwrap_or_default();
-    let mut selector = json!({"kubernetes.io/os": os, "kubernetes.io/arch": arch});
+    let mut selector = BTreeMap::from([
+        ("kubernetes.io/os".to_string(), os.to_string()),
+        ("kubernetes.io/arch".to_string(), arch.to_string()),
+    ]);
     for (key, value) in &cluster.node_selector {
-        selector[key] = value.as_str().into();
+        selector.insert(key.clone(), value.clone());
     }
-    pod["nodeSelector"] = selector;
-    if !cluster.tolerations.is_empty() {
-        let tolerations: Vec<Value> = cluster
-            .tolerations
-            .iter()
-            .map(|toleration| {
-                let mut out = Map::new();
-                for (key, value) in [
-                    ("key", &toleration.key),
-                    ("operator", &toleration.operator),
-                    ("value", &toleration.value),
-                    ("effect", &toleration.effect),
-                ] {
-                    if !value.is_empty() {
-                        out.insert(key.into(), value.as_str().into());
-                    }
-                }
-                if let Some(seconds) = toleration.toleration_seconds {
-                    out.insert("tolerationSeconds".into(), seconds.into());
-                }
-                Value::Object(out)
-            })
-            .collect();
-        pod["tolerations"] = tolerations.into();
-    }
+    selector
+}
+
+/// Place a pod of `cluster`, whose spec is `pod`, as a pool's pods are
+/// placed: on the cluster's nodes ([`node_selector`]), with its
+/// tolerations. Every pod the render writes is placed so, so that none is
+/// left off a node group of the fleet's own.
+pub(super) fn place(pod: &mut Value, cluster: &Cluster) {
+    let tolerations: Vec<gdl_k8s::Toleration> =
+        cluster.tolerations.iter().map(Into::into).collect();
+    gdl_k8s::place(pod, &node_selector(cluster), &tolerations);
 }
 
 /// Give `container` its requests and limits, when its cluster gives any.
 pub(super) fn resources(container: &mut Value, resources: Option<&Resources>) {
-    if let Some(resources) = resources {
-        container["resources"] =
-            serde_json::to_value(resources).expect("resources are plain strings");
-    }
-}
-
-fn config_mount() -> Value {
-    json!({"name": "config", "mountPath": CONFIG_DIR, "readOnly": true})
-}
-
-/// The address at which a pool's hub records itself: its pod's IP, which
-/// the hub's pod reads from [`POD_IP`]. A pod IP is IPv4 here: an IPv6
-/// address would need brackets before the port.
-pub(super) fn pod_hub() -> String {
-    format!("$({POD_IP}):{HUB_PUBLIC_PORT}")
-}
-
-/// The address at which pool `pool`'s segments reach its hub: its Service.
-pub(super) fn hub_address(pool: &str) -> String {
-    format!("{pool}:{HUB_PUBLIC_PORT}")
-}
-
-/// The name of pool `pool`'s object of segment `segment`.
-fn object_name(pool: &str, segment: &str) -> String {
-    format!("{pool}-{segment}")
+    gdl_k8s::resources(container, resources.map(Into::into).as_ref());
 }
 
 /// The Namespace of `cluster`, which the fleet names `name`, and the
@@ -793,36 +362,6 @@ pub(in crate::deployment) fn stream(objects: &[Value]) -> serde_json::Result<Str
         text.push('\n');
     }
     Ok(text)
-}
-
-/// A checksum of a ConfigMap's data, FNV-1a over its JSON text, as hex.
-pub(super) fn checksum(config: &Value) -> String {
-    format!("{:016x}", fnv(&config["data"].to_string()))
-}
-
-/// FNV-1a of `text`.
-fn fnv(text: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
-
-/// The characters of a long value that its label keeps.
-const LABEL_PREFIX: usize = 52;
-
-/// `value` as a label's value, which is at most 63 characters: itself when
-/// it fits, else its first 52 characters, `-`, and 10 hex digits of its
-/// hash, so that two long values that share their start still differ. The
-/// whole value is then in the annotation of the label's key.
-pub(in crate::deployment) fn label_value(value: &str) -> String {
-    if value.len() <= LABEL_LIMIT {
-        return value.to_string();
-    }
-    let hash = format!("{:016x}", fnv(value));
-    format!("{}-{}", &value[..LABEL_PREFIX], &hash[..10])
 }
 
 /// Refuse a segment whose name a Kubernetes object cannot hold: its
@@ -1021,28 +560,16 @@ mod tests {
             ("[::1]:9000:8080/udp", 8080, "UDP"),
             ("8080/sctp", 8080, "SCTP"),
         ] {
-            let parsed = Port::parse(port).expect(port);
-            assert_eq!((parsed.port, parsed.protocol), (number, protocol), "{port}");
+            let parsed = parse_port(port).expect(port);
+            assert_eq!(
+                (parsed.port, parsed.protocol.name()),
+                (number, protocol),
+                "{port}"
+            );
         }
         for port in ["8080-8081", "80-90:80-90", "0", "8080/http", "x"] {
-            assert!(Port::parse(port).is_err(), "{port}");
+            assert!(parse_port(port).is_err(), "{port}");
         }
-    }
-
-    /// A value of up to 63 characters is its own label; a longer one is its
-    /// first 52 characters, `-`, and 10 hex digits of its hash, and two
-    /// that share those 52 characters still differ.
-    #[test]
-    fn a_long_value_is_labelled_by_its_start_and_hash() {
-        let fits = "m".repeat(63);
-        assert_eq!(label_value(&fits), fits);
-        let long = "m".repeat(64);
-        let label = label_value(&long);
-        assert_eq!(label.len(), 63, "{label}");
-        let (start, hash) = label.split_at(LABEL_PREFIX);
-        assert_eq!(start, &long[..LABEL_PREFIX]);
-        assert!(hash.starts_with('-') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_ne!(label_value(&"m".repeat(65)), label);
     }
 
     /// A registry is a host and a path, or a path alone; a scheme, a tag,

@@ -1,6 +1,6 @@
 # Workspace crates
 
-The root workspace has fifteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
+The root workspace has sixteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
 
 | Crate | Depends on | Contents |
 |---|---|---|
@@ -11,7 +11,8 @@ The root workspace has fifteen crates. Each example is its own workspace, outsid
 | `gdl-message` | `gdl-model` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue |
 | `gdl-macros` | `gdl-model`, `gdl-syntax` | `graph!`, `segment!` (a generated segment crate's library), `derive(Message)`, `derive(Node)`, `derive(Config)`, `derive(Metrics)`, `derive(Endpoints)`, and `#[export]` |
 | `gdl-extract` | `gdl-model`, `gdl-syntax` | The source reader and the working catalogue |
-| `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `k8s`, `images`, `deploy`, `down`, `export` |
+| `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract`, `gdl-k8s` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `build`, `check`, `diagram`, `compose`, `k8s`, `images`, `deploy`, `down`, `export` |
+| `gdl-k8s` | `gdl-model` (no velo) | A pool's Kubernetes objects, rendered from the pool alone (`Pool`): its ConfigMap, its hub's Deployment, Service and claim, and each segment's Deployment, entry Service, and `GdlScaler`. `cargo gdl k8s` renders with it, so that the operator can render the same objects in the cluster. `crates/gdl-k8s/tests/dependencies.rs` fails if velo, `gdl-watch`, `gdl-runtime` or `gdl-hub` is in its normal dependencies |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
 | `gdl-pools` | `gdl-model` | The pool plane's shared types: the pool record, the `PoolDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a pool whose hub is gone (`PoolCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `PoolState` and `LoadSummary` from it |
 | `gdl-pools-dynamodb` | `gdl-pools`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` pool directory backend, in DynamoDB global tables. By default the only crate that links the AWS SDK: only `gdl-hub`'s `dynamodb` feature, off by default, depends on it. Its tests against DynamoDB Local, and the hub's, run outside the default suite (`scripts/dynamodb-local.sh`) |
