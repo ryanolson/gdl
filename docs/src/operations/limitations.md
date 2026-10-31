@@ -772,6 +772,11 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Workaround:** a gate reads the property index instead ([The property index](../concepts/pool-routing.md#the-property-index)): a pool that withdrew is no longer listed, and a key whose every pool drained shows only `drained` entries.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
+### A pool unlisted while its own watch lags can read unknown
+- **What:** when the relay unlists a pool that a pool's own watch still shows a follow of, and what the chooser holds of the pool is of another hub than that follow's, the pool reads unknown (`PoolRequest::evidence` gives `None`) beside the row until a later word: the follow's drop, a later follow, or a listing.
+- **Why:** the drain of the follow's hub may be known only through a word of another hub that the chooser has since replaced. A record kept of every hub's drain would grow by one for each hub of the pool, since a lagging watch can show a follow of any earlier hub ([Pools design](../development/pools-design.md)).
+- **Impact:** a policy that moves a request on a drain at or past the epoch it kept holds the request instead, while the pool reads unknown. It needs a pool read from its own watch, which happens only between builds that differ in their relay events.
+
 ### Evidence of one hub of a pool is taken in the order it arrives
 - **What:** a chooser keeps what its hub says of a pool by the epoch of the pool's hub it is about ([What the chooser builds](../concepts/pool-routing.md#what-the-chooser-builds)). Of one hub, the later word wins, whichever watch it came on: a `missing` from the relay's watch and a live follow from a pool's own watch, both of one hub, are taken in the order they arrive. Only a withdrawal and a drain last, since the hub that said them cannot undo them.
 - **Why:** the epoch orders the hubs of a pool, not the changes within one hub's life, and the relay's watch and a pool's own watch are not ordered with each other.

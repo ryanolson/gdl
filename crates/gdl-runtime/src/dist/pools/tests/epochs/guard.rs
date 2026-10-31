@@ -18,12 +18,15 @@
 //! - (b) an acceptance's epoch is never older than the epoch of the row
 //!   whose follow took the offer;
 //! - (c) the evidence is never of an earlier hub than the row beside it,
-//!   as a policy reads both from one table;
-//! - (d) once the follower has heard the hub of a shown row drain, and has
-//!   not heard it withdraw, the evidence beside the row shows the drain:
-//!   a drain lasts for its hub's life. What the follower has heard is
-//!   kept from the walk, as each watch delivers it. Not for a relay of an
-//!   earlier build, which dates every hub 0.
+//!   and never unknown beside it, as a policy reads both from one table,
+//!   with one exception: after an unlisting that found evidence of another
+//!   hub than the follow shown, or none, the pool may read unknown beside
+//!   that row until a later word;
+//! - (d) evidence of a hub that the follower has heard drain, and not
+//!   withdraw, never reads not draining: a drain lasts for its hub's life.
+//!   Unknown is allowed. What the follower has heard is kept from the walk,
+//!   as each watch delivers it. Not for a relay of an earlier build, which
+//!   dates every hub 0.
 //!
 //! On a failure it prints the seed and the steps. `GDL_EPOCH_GUARD_SEEDS`
 //! sets how many seeds run (a soak), and `GDL_EPOCH_GUARD_SEED` runs one.
@@ -389,6 +392,9 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         own: None,
     };
     let mut heard = Heard::default();
+    // Whether an unlisting found evidence of another hub than the follow
+    // shown, which (c) then allows to read unknown until a later word.
+    let mut unknown = false;
     // Steps for which the pool's own watch, a slow socket, delivers
     // nothing.
     let mut slow = 0_u32;
@@ -662,7 +668,13 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     {
                         heard.hear(&event);
                     }
+                    let unlisting = unlisting_beside(&pools, &event);
+                    unknown |= unlisting.is_some_and(|(another, _)| another);
                     follows.take(event, now);
+                    if let Err(broke) = kept_at_unlisting(&pools, unlisting) {
+                        trace.push("an unlisting is delivered".into());
+                        return Err((trace, broke));
+                    }
                     if unlisted {
                         break;
                     }
@@ -743,7 +755,13 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     // follower watches it again.
                     while let Some(event) = wire.relay.pop_front() {
                         heard.hear(&event);
+                        let unlisting = unlisting_beside(&pools, &event);
+                        unknown |= unlisting.is_some_and(|(another, _)| another);
                         follows.take(event, now);
+                        if let Err(broke) = kept_at_unlisting(&pools, unlisting) {
+                            trace.push("an unlisting is delivered".into());
+                            return Err((trace, broke));
+                        }
                     }
                     follow.state = PoolState::Unavailable;
                     hub.follow = Some(follow);
@@ -819,7 +837,13 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     {
                         heard.hear(&event);
                     }
+                    let unlisting = unlisting_beside(&pools, &event);
+                    unknown |= unlisting.is_some_and(|(another, _)| another);
                     follows.take(event, now);
+                    if let Err(broke) = kept_at_unlisting(&pools, unlisting) {
+                        trace.push("an unlisting is delivered".into());
+                        return Err((trace, broke));
+                    }
                     said
                 }
                 None => "the relay is quiet".into(),
@@ -910,13 +934,14 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         };
         trace.push(what);
         let (evidence, row) = read(&pools);
-        if let Err(broke) = check(&hub, evidence, row).and_then(|()| {
+        unknown &= evidence.is_none();
+        if let Err(broke) = check(&hub, evidence, row, unknown).and_then(|()| {
             // A relay of an earlier build dates every hub 0: a drain
             // cannot be tied to one hub.
             if hub.earlier {
                 Ok(())
             } else {
-                lasts(&heard, evidence, row)
+                lasts(&heard, evidence)
             }
         }) {
             return Err((trace, broke));
@@ -932,9 +957,13 @@ fn check(
     hub: &Hub,
     evidence: Option<gdl::PoolEvidence>,
     row: Option<(u64, u64)>,
+    unknown: bool,
 ) -> Result<(), String> {
     if let Some((generation, of)) = row
-        && evidence.is_none_or(|evidence| evidence.epoch() < of)
+        && match evidence {
+            Some(evidence) => evidence.epoch() < of,
+            None => !unknown,
+        }
     {
         return Err(format!(
             "(c) {evidence:?} beside the row of follow {generation} of epoch {of}"
@@ -963,24 +992,47 @@ fn check(
     Ok(())
 }
 
-/// (d): the evidence beside a row of a hub the follower heard drain, and
-/// not withdraw, shows the drain.
-fn lasts(
-    heard: &Heard,
-    evidence: Option<gdl::PoolEvidence>,
-    row: Option<(u64, u64)>,
-) -> Result<(), String> {
-    match (evidence, row) {
-        (Some(evidence), Some((generation, epoch)))
-            if evidence.epoch() == epoch
-                && heard.drained.contains(&epoch)
-                && !heard.withdrawn.contains(&epoch)
+/// (d): evidence of a hub the follower heard drain, and not withdraw,
+/// never reads not draining. Unknown is allowed.
+fn lasts(heard: &Heard, evidence: Option<gdl::PoolEvidence>) -> Result<(), String> {
+    match evidence {
+        Some(evidence)
+            if heard.drained.contains(&evidence.epoch())
+                && !heard.withdrawn.contains(&evidence.epoch())
                 && !evidence.is_draining() =>
         {
             Err(format!(
-                "(d) {evidence:?} beside the row of follow {generation} of epoch {epoch}, whose hub the follower heard drain"
+                "(d) {evidence:?}, of a hub the follower heard drain"
             ))
         }
+        _ => Ok(()),
+    }
+}
+
+/// If delivering `event` unlists the pool while a follow of it is shown:
+/// whether the evidence beside it is of another hub, or none, which (c)
+/// then allows to read unknown beside its row, and the follow's epoch.
+fn unlisting_beside(pools: &Pools, event: &FollowEvent) -> Option<(bool, u64)> {
+    if !matches!(event, FollowEvent::Listed { listing: None, .. }) {
+        return None;
+    }
+    let (evidence, row) = read(pools);
+    let (_, of) = row?;
+    let another =
+        evidence.is_none_or(|evidence| !evidence.is_withdrawn() && evidence.epoch() != of);
+    Some((another, of))
+}
+
+/// (c), at an unlisting beside a follow of epoch `of`: the evidence kept is
+/// that follow's hub's, or a withdrawal, or none.
+fn kept_at_unlisting(pools: &Pools, unlisting: Option<(bool, u64)>) -> Result<(), String> {
+    let Some((_, of)) = unlisting else {
+        return Ok(());
+    };
+    match read(pools).0 {
+        Some(evidence) if !evidence.is_withdrawn() && evidence.epoch() != of => Err(format!(
+            "(c) {evidence:?} kept by an unlisting beside a follow of epoch {of}"
+        )),
         _ => Ok(()),
     }
 }

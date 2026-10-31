@@ -851,12 +851,11 @@ fn a_withheld_follow_keeps_its_reported_drain_when_unlisted() {
     );
 }
 
-/// A drain that only a listing said of the hub a follow links to is the
-/// follow's too: when a later hub's listing has replaced that evidence and
-/// the relay then unlists the pool, the follow a pool's own watch still
-/// shows says its word again with the drain. Found by the guard (seed 593).
+/// A follow whose hub's drain only a listing said, once a later hub's
+/// listing has replaced that evidence, reads unknown when the relay unlists
+/// the pool: never live in place of its drain. Found by the guard.
 #[test]
-fn a_shown_follow_keeps_a_drain_its_hubs_listing_said() {
+fn a_shown_follow_reads_unknown_when_a_later_hub_was_listed() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.take(follow_at(M1, 1, 5, PoolState::Unavailable), now);
@@ -894,15 +893,14 @@ fn a_shown_follow_keeps_a_drain_its_hubs_listing_said() {
     let (after, row) = evidence(&pools, M1);
     assert_eq!(row, Some(5), "the own watch still holds its follow");
     assert_eq!(
-        after,
-        Some(at(5, PoolCondition::Live).with_draining(true)),
-        "the drain its hub's listing said"
+        after, None,
+        "held evidence of hub 6, beside a follow of hub 5"
     );
 }
 
 /// A drain said of a later hub of the pool is not the drain of an earlier
 /// hub's follow that a pool's own watch still shows: when the relay
-/// unlists the pool, that follow says its word again without it.
+/// unlists the pool, it reads unknown.
 #[test]
 fn a_shown_follow_does_not_take_a_later_hubs_drain() {
     let (mut follows, pools, _, _) = follower();
@@ -935,9 +933,40 @@ fn a_shown_follow_does_not_take_a_later_hubs_drain() {
         now,
     );
     follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1), (None, Some(5)), "hub 5 never drained");
+}
+
+/// A withdrawal a pool's own watch delivers before the relay's unlisting,
+/// here an operator's past the shown follow's hub, lasts through it: the
+/// pool reads withdrawn, not unknown.
+#[test]
+fn a_withdrawal_heard_first_on_a_pools_own_watch_outlives_the_unlisting() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a watch of its own");
+    for event in [
+        followed(M1, 1, 5),
+        FollowEvent::Synced { listed: true },
+        withdrawn(M1, 1, 6),
+    ] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    follows.take(listed(M1, None), now);
     assert_eq!(
-        evidence(&pools, M1),
-        (Some(at(5, PoolCondition::Live)), Some(5)),
-        "hub 5 never drained"
+        evidence(&pools, M1).0,
+        Some(at(6, PoolCondition::Live).with_withdrawn(true)),
+        "withdrawn by an operator past the follow's hub"
     );
 }

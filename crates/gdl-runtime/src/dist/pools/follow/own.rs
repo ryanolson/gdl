@@ -196,8 +196,6 @@ impl<R: Registry> Follows<R> {
         // installs with an earlier hub's epoch.
         let listed = self.followed.listings.take_from(&mut filling.listings, key);
         let witnessed = self.followed.evidence.take_from(&mut filling.evidence, key);
-        let shown = filling.follows.get(key).map(|follow| follow.epoch);
-        self.followed.evidence.settle(key, shown);
         if listed || witnessed {
             self.followed.listings_changed += 1;
         }

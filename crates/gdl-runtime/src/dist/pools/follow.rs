@@ -406,19 +406,6 @@ impl<R: Registry> Follows<R> {
         followed.listings.carry(held, followed.listed);
         let held = std::mem::take(&mut self.followed.evidence);
         followed.evidence.carry(held, followed.listed);
-        let shown: Vec<(Key, Option<u64>)> = followed
-            .evidence
-            .pools()
-            .map(|key| {
-                (
-                    key.clone(),
-                    followed.follows.get(key).map(|follow| follow.epoch),
-                )
-            })
-            .collect();
-        for (key, epoch) in shown {
-            followed.evidence.settle(&key, epoch);
-        }
         followed.listings_changed += self.followed.listings_changed + 1;
         self.followed = followed;
         let shown: Vec<(Key, u64)> = self
@@ -940,7 +927,6 @@ impl Followed {
                         figures,
                     ),
                 );
-                self.evidence.settle(&key, Some(epoch));
                 let Some(mut older) = older else {
                     return Some((key, Change::Table));
                 };
@@ -1064,7 +1050,6 @@ impl Followed {
                 let key = (class, pool);
                 if self.current(&key, generation).is_some() {
                     let follow = self.follows.remove(&key)?;
-                    self.evidence.settle(&key, None);
                     return Some((key, Change::Ended(Box::new(follow))));
                 }
                 let follow = self.closing.remove(&(key.clone(), generation))?;
@@ -1118,8 +1103,8 @@ impl Followed {
     /// List `key`'s pool as `listing`, which arrived at `now`, says, or
     /// no longer ([`Listings`]); and take what it says of the pool's hub of
     /// its epoch ([`Evidence`]). A pool no longer listed forgets what was
-    /// said of it, as its list, unless it withdrew; a follow of it still
-    /// shown says its own word again.
+    /// said of it, as its list, unless it withdrew, or what is held is of
+    /// the hub of its follow still shown.
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
             Some(listing) => {
@@ -1137,23 +1122,16 @@ impl Followed {
                 let evidence = gdl::PoolEvidence::new(listing.epoch, listing.condition)
                     .with_draining(listing.draining);
                 self.evidence.take(&key, evidence, silent);
-                let shown = self.follows.get(&key).map(|follow| follow.epoch);
-                self.evidence.settle(&key, shown);
                 self.listings.take(key, listing);
             }
             None => {
                 self.listings.withdraw(&key);
-                self.evidence.unlist(&key);
                 // A follow still shown, as one a pool's own watch has yet
-                // to drop, keeps its own word: its row is never read with
-                // no word of its hub, and a drain said of that hub, by any
-                // source, lasts.
+                // to drop, keeps what is held of its own hub, drain and
+                // condition as held; anything else is forgotten, and the
+                // pool reads unknown until a later word.
                 let shown = self.follows.get(&key).map(|follow| follow.epoch);
-                if let Some(epoch) = shown {
-                    let drained = self.evidence.said_draining(&key, epoch);
-                    self.witness(&key, epoch, drained);
-                }
-                self.evidence.settle(&key, shown);
+                self.evidence.unlist(&key, shown);
             }
         }
         self.listings_changed += 1;

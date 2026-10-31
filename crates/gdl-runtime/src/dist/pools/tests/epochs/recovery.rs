@@ -1,8 +1,10 @@
 use super::*;
 
+/// A follow a lagging own snapshot installs, of a hub the evidence has
+/// moved past, reads unknown when the relay unlists the pool: what is held
+/// is of a later hub, and the drain of its own hub is not kept apart.
 #[test]
-#[ignore = "F10: a later listing drops the drain of a follow whose own snapshot is still filling"]
-fn a_lagging_own_snapshot_keeps_its_hubs_drain_past_a_later_listing() {
+fn a_lagging_own_snapshot_reads_unknown_past_a_later_listing() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.take(followed(M1, 1, 5), now);
@@ -59,21 +61,18 @@ fn a_lagging_own_snapshot_keeps_its_hubs_drain_past_a_later_listing() {
     follows.take(listed(M1, None), now);
     assert_eq!(
         evidence(&pools, M1),
-        (
-            Some(at(6, PoolCondition::Live).with_draining(true)),
-            Some(6)
-        ),
-        "the epoch-6 drain was heard before its follow was installed"
+        (None, Some(6)),
+        "held evidence of hub 7, beside a follow of hub 6: unknown, never live"
     );
 }
 
 /// A relay's snapshot can show a draining follow of one hub beside a
-/// listing of a later hub, as the hub's own test shows. The follow's drain
-/// lasts with it: when the relay unlists the pool while the follow is shown,
-/// it says its drain again, though the snapshot's evidence was the later
-/// hub's.
+/// listing of a later hub, as the hub's own test shows. When the relay
+/// unlists the pool while the follow is shown, the pool reads unknown: what
+/// is held is the later hub's, and it never reads live in place of the
+/// follow's drain.
 #[test]
-fn a_draining_snapshot_follow_beside_a_later_listing_keeps_its_drain() {
+fn a_draining_snapshot_follow_beside_a_later_listing_reads_unknown_when_unlisted() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.take(followed(M1, 1, 5), now);
@@ -101,20 +100,14 @@ fn a_draining_snapshot_follow_beside_a_later_listing_keeps_its_drain() {
         (Some(at(6, PoolCondition::Live)), Some(5))
     );
     follows.take(listed(M1, None), now);
-    assert_eq!(
-        evidence(&pools, M1),
-        (
-            Some(at(5, PoolCondition::Live).with_draining(true)),
-            Some(5)
-        )
-    );
+    assert_eq!(evidence(&pools, M1), (None, Some(5)));
 }
 
-/// The drain of a hub whose follow is gone is not said again by a later
-/// follow of that hub's epoch shown by a new relay's snapshot that does not
-/// drain.
+/// After a rewatch shows an earlier hub's follow beside a later hub's
+/// evidence, an unlisting leaves the pool unknown: neither the earlier
+/// hub's drain nor a live word of it is made up.
 #[test]
-fn a_retired_drain_is_not_said_again_after_a_relay_restart() {
+fn a_rewatch_then_an_unlisting_reads_unknown_beside_an_earlier_follow() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.take(follow_at(M1, 1, 5, PoolState::Draining), now);
@@ -125,12 +118,12 @@ fn a_retired_drain_is_not_said_again_after_a_relay_restart() {
     }
     follows.resnapshot(snapshot, now);
     follows.take(listed(M1, None), now);
-    assert_eq!(
-        evidence(&pools, M1),
-        (Some(at(5, PoolCondition::Live)), Some(5))
-    );
+    assert_eq!(evidence(&pools, M1), (None, Some(5)));
 }
 
+/// An own snapshot that installs while a drain of its hub was heard keeps
+/// the drain at that hub's epoch; when a later hub is listed and the pool
+/// unlisted, the pool reads unknown, never live.
 #[test]
 fn an_own_snapshot_keeps_a_drain_heard_while_it_filled() {
     let mut failures = Vec::new();
@@ -180,23 +173,21 @@ fn an_own_snapshot_keeps_a_drain_heard_while_it_filled() {
         follows.take(listed(M1, Some(7)), now);
         follows.take(listed(M1, None), now);
         let actual = evidence(&pools, M1);
-        if actual != (expected, Some(epoch)) {
+        if actual != (None, Some(epoch)) {
             failures.push((generation, epoch, actual));
         }
     }
     assert!(
         failures.is_empty(),
-        "a recovered follow must keep a drain heard of its hub while its snapshot filled: {failures:?}"
+        "held evidence of hub 7 beside a recovered follow of an earlier hub reads unknown: {failures:?}"
     );
 }
 
-/// A drain the follower heard before it watches the relay again outlives
-/// a snapshot that shows the follow withheld, unavailable, beside a later
-/// hub's listing: the snapshot no longer says the drain, so only what was
-/// heard keeps it. Found by the guard (seed 2373, with the rewatch's drain
-/// transfer dropped).
+/// A follow that drained and was withheld, shown by a rewatch beside a
+/// later hub's listing and then by its own watch, reads unknown when the
+/// relay unlists the pool: never live in place of its drain.
 #[test]
-fn a_rewatch_keeps_a_drain_its_snapshot_no_longer_says() {
+fn a_withheld_follow_behind_a_later_hub_reads_unknown_when_unlisted() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.take(followed(M1, 1, 5), now);
@@ -228,11 +219,5 @@ fn a_rewatch_keeps_a_drain_its_snapshot_no_longer_says() {
         );
     }
     follows.take(listed(M1, None), now);
-    assert_eq!(
-        evidence(&pools, M1),
-        (
-            Some(at(5, PoolCondition::Live).with_draining(true)),
-            Some(5)
-        )
-    );
+    assert_eq!(evidence(&pools, M1), (None, Some(5)));
 }
