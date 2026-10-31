@@ -362,7 +362,6 @@ impl PoolDirectory for Outage {
 /// go back below what a follower already read, and the parent that took
 /// the newer list must come to list the successor's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "a restart that changes nothing keeps the held record's version, below one its predecessor sent over its link"]
 async fn a_restart_counts_past_a_version_its_predecessor_sent_but_did_not_store() {
     let resolving = Resolving::new();
     let directory = Outage {

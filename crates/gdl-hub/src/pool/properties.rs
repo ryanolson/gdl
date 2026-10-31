@@ -63,17 +63,20 @@ impl Properties {
     }
 
     /// Take the pool's last record's properties, `held` with their version
-    /// and the revoked properties, or none, and count each later change from
-    /// at least `floor`. A restart keeps each entry's history: `starting`
-    /// and `drained` stay, `draining` goes on, and `ready` and
-    /// `unavailable` are `unavailable` until an instance reports. A
-    /// declared property the record lacks is `starting`. A revoked property stays
-    /// revoked.
+    /// and the revoked properties, or none, with the version raised to at
+    /// least `floor`, even when nothing changes. A restart keeps each
+    /// entry's history: `starting` and `drained` stay, `draining` goes on,
+    /// and `ready` and `unavailable` are `unavailable` until an instance
+    /// reports. A declared property the record lacks is `starting`. A
+    /// revoked property stays revoked.
     pub(super) fn restore(&mut self, held: Option<Held<'_>>, floor: u64) {
-        // With no record read, the list counts from the floor, so that its
-        // version is above any that a hub before this one published.
+        // The list counts from at least the floor, so that its version is
+        // above any that a hub before this one sent: that hub sends each
+        // list over its links before its record holds it, so one that
+        // stopped in between sent a version above the record's. A held
+        // version above the floor, as after the clock stepped back, is kept.
         let (entries, version, revoked) = held.unwrap_or((&[], floor, &[]));
-        self.version = version;
+        self.version = version.max(floor);
         self.floor = floor;
         self.restored = true;
         // A revocation or a lift taken before the record was read is

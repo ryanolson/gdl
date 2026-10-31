@@ -562,6 +562,13 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Workaround:** restart the hub, whose new watch's snapshot no longer holds the record.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
+### A hub with no record numbers its properties by its clock
+- **What:** a hub that restarts and reads no record of its pool counts the version of the pool's property list from its own clock (epoch × 2^20). This happens when the pool withdrew, or under `relay` when the parent restarted and holds no record. If its host's clock is behind the last hub's clock at that hub's last change, its versions can be lower than ones the last hub published.
+- **Impact:** a follower never sees it. A follower drops a pool's listing when the pool withdraws, and a parent that restarted starts afresh. A reader that stores a version across that gap, such as a record that keeps the version a writer saw, can hold one above the new hub's until the new hub's versions pass it.
+- **Why:** with no record there is nothing else to count from. With a record, the epoch is raised past the record's, so the clock plays no part.
+- **Workaround:** keep the hosts' clocks in sync. Drop a stored version when its pool withdraws.
+- **Test:** `a_restart_without_a_record_does_not_reuse_a_properties_version` in `crates/gdl-hub/src/pool/properties/tests.rs`.
+
 ### A drain not stored while its instance stops can be lost
 - **What:** an instance that stops waits while it drains, before it retires, until its hub has stored each drain it reported: for at most two summary periods, and never past its drain bound. If the hub's writes take longer than that, and the hub restarts before it stores the drain, the restarted hub reads the record from before the drain: the property is `unavailable`, not `drained`, until the pool withdraws. An instance that loses its lease does not wait.
 - **Impact:** it fails safe. The property stays listed, and nothing is removed.
@@ -776,7 +783,7 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **What:** the DynamoDB backend sets a list to expire only when its pool's record is stored at a higher `properties_version`, and each put of a list makes an item of its own. Three kinds of list stay in the lists table for good:
   - A withdrawn pool's last list: one per withdrawn pool, about 78 KB for 1,000 properties of about 80 bytes each, and at most 400 KB.
   - The list of a write that was refused as not newer, or that failed after its list was written, when no later write of the pool names it: one per such write.
-  - The list replaced by a write at the same or a lower `properties_version` that names a list of its own, such as a command that copied the record, a restarted hub whose properties did not change, or a heartbeat after another writer's write: one per such write.
+  - The list replaced by a write at the same or a lower `properties_version` that names a list of its own, such as a command that copied the record, a restarted hub whose clock is behind its predecessor's and whose properties did not change, or a heartbeat after another writer's write: one per such write.
 - **Why:** a rule that expired more raced with writes of the same pool through other handles and other regions, and could expire the list that a live record names.
-- **Workaround:** none needed: each is bounded by the pool's withdrawals, refused or failed writes, and writes at the same or a lower `properties_version` that name a list of their own (commands, restarts that kept the properties, heartbeats after another writer's write), which are rare. No sweeper removes them.
+- **Workaround:** none needed: each is bounded by the pool's withdrawals, refused or failed writes, and writes at the same or a lower `properties_version` that name a list of their own (commands, restarts behind the clock that kept the properties, heartbeats after another writer's write), which are rare. No sweeper removes them.
 - **Lifts:** a sweeper that deletes the lists that no record names.

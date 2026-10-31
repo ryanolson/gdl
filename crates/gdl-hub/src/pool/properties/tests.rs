@@ -241,7 +241,8 @@ fn nothing_is_computed_before_the_last_record_is_read() {
     assert_eq!(state(&properties, "m"), Some(Ready));
 }
 
-/// Restart row: a `starting` entry stays `starting`, with its version.
+/// Restart row: a `starting` entry stays `starting`, since when it was, and
+/// the list counts from the floor.
 #[test]
 fn a_restart_keeps_a_starting_entry_starting() {
     let properties = restarted(Starting);
@@ -250,19 +251,19 @@ fn a_restart_keeps_a_starting_entry_starting() {
         PropertyList {
             dropped: Vec::new(),
             entries: vec![entry("m", Starting, 7)],
-            version: 7,
+            version: 50,
             revoked: Vec::new(),
         }
     );
 }
 
-/// Restart row: a `drained` entry stays `drained`, with its version.
+/// Restart row: a `drained` entry stays `drained`, since when it was.
 #[test]
 fn a_restart_keeps_a_drained_entry_drained() {
     let mut properties = restarted(Drained);
     assert_eq!(properties.list().entries, [entry("m", Drained, 7)]);
     assert!(!properties.update([Offer::Listed(&lists(&[]))]));
-    assert_eq!(properties.list().version, 7);
+    assert_eq!(properties.list().version, 50);
 }
 
 /// Restart row: a `draining` entry goes on draining until an instance
@@ -280,8 +281,8 @@ fn a_restart_goes_on_draining_a_draining_entry() {
         properties.list(),
         PropertyList {
             dropped: Vec::new(),
-            entries: vec![entry("m", Drained, 50)],
-            version: 50,
+            entries: vec![entry("m", Drained, 51)],
+            version: 51,
             revoked: Vec::new(),
         }
     );
@@ -296,8 +297,8 @@ fn a_restart_makes_a_ready_entry_unavailable() {
         properties.list(),
         PropertyList {
             dropped: Vec::new(),
-            entries: vec![entry("m", Unavailable, 50)],
-            version: 50,
+            entries: vec![entry("m", Unavailable, 51)],
+            version: 51,
             revoked: Vec::new(),
         }
     );
@@ -309,8 +310,8 @@ fn a_restart_makes_a_ready_entry_unavailable() {
     assert_eq!(state(&properties, "m"), Some(Ready));
 }
 
-/// Restart row: an `unavailable` entry stays `unavailable`, with its
-/// version, and never `starting`.
+/// Restart row: an `unavailable` entry stays `unavailable`, since when it
+/// was, and never `starting`.
 #[test]
 fn a_restart_keeps_an_unavailable_entry_unavailable() {
     let mut properties = restarted(Unavailable);
@@ -319,7 +320,7 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
         PropertyList {
             dropped: Vec::new(),
             entries: vec![entry("m", Unavailable, 7)],
-            version: 7,
+            version: 50,
             revoked: Vec::new(),
         }
     );
@@ -328,12 +329,16 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
     assert_eq!(state(&properties, "m"), Some(Unavailable));
 }
 
-/// A restart whose rules change nothing keeps the version: the list is
-/// the one readers hold at it. One that reads no record counts from the
-/// floor, so that its versions are above any an earlier hub of the pool
-/// published, as when a relay parent that restarted holds none.
+/// A restart whose rules change nothing keeps the entries, and counts
+/// from the floor all the same: an earlier hub may have sent a later
+/// version than its record holds
+/// (`a_restart_counts_past_a_version_sent_but_not_stored`). A held version
+/// above the floor, as after the clock stepped back, is kept. One that
+/// reads no record counts from the floor too, so that its versions are
+/// above any an earlier hub of the pool published, as when a relay parent
+/// that restarted holds none.
 #[test]
-fn a_restart_that_changes_nothing_keeps_the_version() {
+fn a_restart_that_changes_nothing_counts_from_the_floor() {
     let held = [entry("a", Starting, 3), entry("b", Drained, 4)];
     let mut properties = Properties::new(Vec::new());
     properties.restore(Some((&held, 4, &[])), 50);
@@ -342,13 +347,19 @@ fn a_restart_that_changes_nothing_keeps_the_version() {
         PropertyList {
             dropped: Vec::new(),
             entries: held.to_vec(),
-            version: 4,
+            version: 50,
             revoked: Vec::new(),
         }
     );
     let ready = [says("a", SaysReady)];
     properties.update([Offer::Listed(&lists(&ready))]);
-    assert_eq!(properties.list().version, 50);
+    assert_eq!(properties.list().version, 51);
+
+    let mut ahead = Properties::new(Vec::new());
+    ahead.restore(Some((&held, 90, &[])), 50);
+    assert_eq!(ahead.list().version, 90, "a held version above the floor");
+    ahead.update([Offer::Listed(&lists(&ready))]);
+    assert_eq!(ahead.list().version, 91);
 
     let mut unread = Properties::new(Vec::new());
     unread.restore(None, 70);
@@ -665,7 +676,7 @@ fn a_restart_keeps_the_revocations() {
     );
     let restored = properties.list();
     assert_eq!(restored.revoked, [key("acme-legal")]);
-    assert_eq!(restored.entries, [entry("llama-70b", Unavailable, 50)]);
+    assert_eq!(restored.entries, [entry("llama-70b", Unavailable, 51)]);
     let both = [says("acme-legal", SaysReady), says("llama-70b", SaysReady)];
     properties.update([Offer::Listed(&lists(&both))]);
     assert_eq!(states(&properties), [("llama-70b".to_string(), Ready)]);
@@ -765,7 +776,7 @@ fn a_declared_property_recreated_at_startup_takes_the_new_version() {
     let mut unchanged = Properties::new(vec![key("acme-legal")]);
     unchanged.restore(Some((&held, 9, &[])), 50);
     assert_eq!(unchanged.list().entries, held);
-    assert_eq!(unchanged.list().version, 9);
+    assert_eq!(unchanged.list().version, 50);
 
     let mut properties = Properties::new(vec![key("acme-legal")]);
     assert!(properties.revoke(key("acme-legal")));
@@ -773,7 +784,7 @@ fn a_declared_property_recreated_at_startup_takes_the_new_version() {
     properties.restore(Some((&held, 9, &[])), 50);
     let recreated = properties.list();
     assert!(recreated.revoked.is_empty());
-    assert!(recreated.version > 9);
+    assert!(recreated.version > unchanged.list().version);
     assert_eq!(
         recreated.entries,
         [entry("acme-legal", Starting, recreated.version)],
@@ -790,7 +801,6 @@ fn a_declared_property_recreated_at_startup_takes_the_new_version() {
 /// higher version, and a fresh follower reads a lower version than an
 /// older one did.
 #[test]
-#[ignore = "restore keeps the held version when nothing changes, below one the predecessor sent over its link"]
 fn a_restart_counts_past_a_version_sent_but_not_stored() {
     let mut before = Properties::new(Vec::new());
     before.restore(None, floor(1_000));

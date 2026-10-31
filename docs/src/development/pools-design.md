@@ -247,7 +247,9 @@ A property loaded again while it drains starts afresh, as it does after `drained
 
 **Rejected: a record written before the last one is read.** A read that failed would look like a pool with no record, and the write would drop the properties no instance has reported yet.
 
-The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A hub that reads no record, as from a relay parent that restarted, still publishes versions above any its predecessor did, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version.
+The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A restarted hub raises the version it read to that floor, even when nothing in the list changes. A hub that reads no record, as from a relay parent that restarted, starts at the floor. Either way it publishes versions above any its predecessor sent, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version, and a version only grows. With no record, the floor is the host's clock ([Limitations](../operations/limitations.md#a-hub-with-no-record-numbers-its-properties-by-its-clock)).
+
+**Rejected: keep the version read when the restore changes nothing.** A hub sends each new list over its follow links at once, and its record holds the list only after the write. A hub that stops in between, or while the directory refuses its writes, sent a version above its record's. A successor that kept the record's version went back below what a follower already read, and the parent, which takes only a higher version, kept the dead hub's list until the next change (`a_restart_counts_past_a_version_its_predecessor_sent_but_did_not_store` in `crates/gdl-hub/tests/numbering.rs`).
 
 **Rejected: the epoch itself as the floor.** Several changes can fall in one millisecond, so a later hub could reuse a version for another list.
 

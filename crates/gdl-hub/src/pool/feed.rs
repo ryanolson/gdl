@@ -128,8 +128,8 @@ impl Feed {
     }
 
     /// Take the property entries of the pool's last record, `held` with their
-    /// version and the revoked properties, or none, and count later versions
-    /// from at least `floor`: from then on, what the instances say of
+    /// version and the revoked properties, or none, with the version raised
+    /// to at least `floor`: from then on, what the instances say of
     /// their properties makes the entries.
     pub(super) fn restore(&self, held: Option<super::properties::Held<'_>>, floor: u64) {
         let mut shared = self.lock();
