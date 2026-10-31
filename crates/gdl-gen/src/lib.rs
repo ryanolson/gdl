@@ -71,7 +71,7 @@ pub use fleet::check_files;
 /// its source.
 pub use gdl_extract::{Catalog, Entry, Offer};
 use offers::offers;
-pub use offers::{CRATES_IO, Offers};
+pub use offers::{CRATES_IO, GitSource, Offers, git_source};
 pub use output::{drift, write};
 pub use resolve::Resolved;
 pub use spec::{Spec, runtime_at};

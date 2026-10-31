@@ -178,20 +178,49 @@ pub(crate) fn given_offer(
     Ok((*offer).clone())
 }
 
-/// Whether `source`, as a lockfile names a git package, is `url` at
-/// `rev`. Cargo writes `git+<url>?rev=<as bound>#<resolved commit>` and
-/// identifies a git source by the revision as written, not by the commit
-/// it names: a short revision and the full one for the same commit are two
-/// sources, which the generated manifests must not mix. So the revision
-/// must equal the offer's text for text. The last `#` ends it, since the
-/// revision may be a tag that holds one.
+/// A git source as a lockfile writes it: `git+<url>?rev=<as bound>#<commit>`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GitSource<'a> {
+    /// The repository.
+    pub url: &'a str,
+    /// The revision as bound, which Cargo identifies the source by. `None`
+    /// for a source bound by a branch or a tag, or by none.
+    pub rev: Option<&'a str>,
+    /// The commit the source resolved to.
+    pub commit: &'a str,
+}
+
+/// Parse `source` as a lockfile git source, or `None` when it is not one.
+///
+/// The last `#` ends the revision, since a tag may hold one; a ref name
+/// never holds `?`, so the last `?` before it begins the query.
+pub fn git_source(source: &str) -> Option<GitSource<'_>> {
+    let (rest, commit) = source.strip_prefix("git+")?.rsplit_once('#')?;
+    let queried = rest.rsplit_once('?').and_then(|(url, query)| {
+        let (key, value) = query.split_once('=')?;
+        matches!(key, "rev" | "branch" | "tag").then_some((url, key, value))
+    });
+    Some(match queried {
+        Some((url, key, value)) => GitSource {
+            url,
+            rev: (key == "rev").then_some(value),
+            commit,
+        },
+        None => GitSource {
+            url: rest,
+            rev: None,
+            commit,
+        },
+    })
+}
+
+/// Whether `source` is `url` at `rev`. Cargo identifies a git source by
+/// the revision as written, not by the commit it names: a short revision
+/// and the full one for the same commit are two sources, which the
+/// generated manifests must not mix. So the revision must equal the
+/// offer's text for text.
 fn git_source_is(source: &str, url: &str, rev: &str) -> bool {
-    source
-        .strip_prefix("git+")
-        .and_then(|s| s.strip_prefix(url))
-        .and_then(|s| s.strip_prefix("?rev="))
-        .and_then(|s| s.rsplit_once('#'))
-        .is_some_and(|(bound, _)| bound == rev)
+    git_source(source).is_some_and(|git| git.url == url && git.rev == Some(rev))
 }
 
 #[cfg(test)]
@@ -646,6 +675,49 @@ impl gdl::Build for Model {
             offers(&[self.listed(rev)], self.dir.path(), Offers::Read)
                 .expect("read the Git fixture")
                 .remove(0)
+        }
+    }
+
+    #[test]
+    fn a_lockfile_git_source_is_parsed_into_its_parts() {
+        let commit = "dec58f81ac7f4b7a9c0d1e2f3a4b5c6d7e8f9a0b";
+        let url = "https://example.com/router";
+        let source = |query: &str| format!("git+{url}{query}#{commit}");
+        let parsed = |query: &str| {
+            let text = source(query);
+            let git = git_source(&text).expect("a git source");
+            (
+                git.url.to_string(),
+                git.rev.map(str::to_string),
+                git.commit.to_string(),
+            )
+        };
+        let rev = |rev: &str| (url.to_string(), Some(rev.to_string()), commit.to_string());
+        assert_eq!(parsed("?rev=dec58f81ac7f"), rev("dec58f81ac7f"));
+        assert_eq!(parsed(&format!("?rev={commit}")), rev(commit));
+        // A tag that holds a `#` and one that looks like a hash.
+        assert_eq!(parsed("?rev=ab#cd"), rev("ab#cd"));
+        // A branch, a tag, or none is bound by no revision.
+        for query in ["?branch=main", "?tag=v1", ""] {
+            assert_eq!(
+                parsed(query),
+                (url.to_string(), None, commit.to_string()),
+                "{query}"
+            );
+        }
+        // A `?` in the URL itself stays in the URL.
+        let text = format!("git+https://example.com/r?x=1?rev=ab#{commit}");
+        let git = git_source(&text).expect("a git source");
+        assert_eq!(
+            (git.url, git.rev),
+            ("https://example.com/r?x=1", Some("ab"))
+        );
+        for other in [
+            "registry+https://example.com/index",
+            "path+file:///a",
+            "git+no-commit",
+        ] {
+            assert!(git_source(other).is_none(), "{other}");
         }
     }
 }

@@ -1134,7 +1134,6 @@ async fn git_catalog_entries_export_fetchable_dependencies() {
 }
 
 #[tokio::test]
-#[ignore = "F5: the composer replaces the offer's bound revision with its resolved commit"]
 async fn a_draft_retains_the_catalogued_git_revision() {
     let commit = "0123456789abcdef0123456789abcdef01234567ab";
     let mut failures = Vec::new();

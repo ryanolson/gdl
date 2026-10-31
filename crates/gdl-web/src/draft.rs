@@ -917,7 +917,7 @@ fn topology(hop: &Hop) -> String {
 }
 
 /// Entries as a spec lists them: a registry crate by `name@version`, a
-/// path crate by its directory, and a Git crate by its URL and commit.
+/// path crate by its directory, and a Git crate by its URL and revision.
 fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value> {
     entries
         .iter()
@@ -925,13 +925,15 @@ fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value
             let offer = &entry.offer;
             if gdl_gen::CRATES_IO.contains(&offer.source.as_str()) {
                 Some(format!("{}@{}", offer.package, offer.version).into())
-            } else if let Some(git) = offer.source.strip_prefix("git+") {
-                let (repository, commit) = git.rsplit_once('#')?;
-                let url = repository.split('?').next()?;
+            } else if offer.source.starts_with("git+") {
+                let git = gdl_gen::git_source(&offer.source)?;
                 let mut entry = toml::map::Map::new();
                 entry.insert("package".into(), offer.package.clone().into());
-                entry.insert("git".into(), url.to_string().into());
-                entry.insert("rev".into(), commit.to_string().into());
+                entry.insert("git".into(), git.url.to_string().into());
+                // The revision as bound, which Cargo identifies the source
+                // by and the catalogue matches. A source bound by a branch
+                // or a tag, or by none, has none: it keeps the commit.
+                entry.insert("rev".into(), git.rev.unwrap_or(git.commit).to_string().into());
                 let lib = offer.messages.iter().map(|m| m.path.as_str())
                     .chain(offer.nodes.iter().map(|n| n.ty.as_str()))
                     .chain(offer.exports.iter().map(|e| e.path.as_str()))
