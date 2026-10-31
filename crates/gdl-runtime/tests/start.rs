@@ -3,7 +3,9 @@
 //! that asking again cannot change.
 //!
 //! The hubs and the instances run in this process on OS-assigned ports;
-//! every wait is bounded.
+//! every wait is bounded. A hub that is not up yet is a running hub behind
+//! proxies that close every connection: the proxies hold their ports from
+//! the start, so no other process can take one while the segment waits.
 
 mod common;
 
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::WAIT;
 use common::pools::{Nothing, SEGMENTS, global_pool, hub_config, spec};
-use common::proxy::Proxy;
+use common::proxy::{Mode, Proxy};
 use common::system::get;
 use figment::providers::Format as _;
 use gdl_runtime::{DeploymentSpec, Process, ProcessConfig};
@@ -32,15 +34,6 @@ fn settings(public: u16, control: u16, hub_wait_ms: u64) -> ProcessConfig<Nothin
     .expect("settings")
 }
 
-/// Two ports that nothing listens on: taken from the OS, then let go, so
-/// that a connection to them is refused until a hub binds them.
-fn free_ports() -> (u16, u16) {
-    let take = || std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
-    let (public, control) = (take(), take());
-    let port = |listener: &std::net::TcpListener| listener.local_addr().expect("its port").port();
-    (port(&public), port(&control))
-}
-
 /// A hub that admits `deployment`'s segments, on these ports.
 async fn hub_on(public: u16, control: u16, deployment: DeploymentSpec) -> velo_hub::Hub {
     let mut config = hub_config();
@@ -51,6 +44,27 @@ async fn hub_on(public: u16, control: u16, deployment: DeploymentSpec) -> velo_h
         .serve()
         .await
         .expect("the hub serves")
+}
+
+/// A hub for `spec()` that is not up yet, as a segment sees it: behind a
+/// proxy on each of its ports that closes every connection, until
+/// [`up`] lets them through. The hub, then its public and control
+/// proxies.
+async fn down_hub() -> (velo_hub::Hub, Proxy, Proxy) {
+    let hub = hub_on(0, 0, spec()).await;
+    let (public, control) = (
+        Proxy::new(hub.public_addr()).await,
+        Proxy::new(hub.control_addr()).await,
+    );
+    public.set(Mode::Refuse);
+    control.set(Mode::Refuse);
+    (hub, public, control)
+}
+
+/// Let a [`down_hub`]'s connections through: the hub is up.
+fn up(public: &Proxy, control: &Proxy) {
+    public.set(Mode::Forward);
+    control.set(Mode::Forward);
 }
 
 /// Resolves once `process`'s health probe says it waits for its hub, and
@@ -78,18 +92,18 @@ async fn waiting(process: &Process) {
 /// an event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_segment_started_before_its_hub_waits_for_it() {
-    let (public, control) = free_ports();
-    let config = settings(public, control, 20_000);
+    let (hub, public, control) = down_hub().await;
+    let config = settings(public.port, control.port, 20_000);
     let process = Process::start(&config).await.expect("the process starts");
     let deployment = spec();
     let launch = config.launch(&process, "a", SEGMENTS, &deployment, async { Ok(()) });
-    let hub = async {
+    let starts = async {
         waiting(&process).await;
         tokio::time::sleep(Duration::from_secs(2)).await;
-        hub_on(public, control, spec()).await
+        up(&public, &control);
     };
-    let (launched, hub) = tokio::time::timeout(WAIT + Duration::from_secs(2), async {
-        tokio::join!(launch, hub)
+    let (launched, ()) = tokio::time::timeout(WAIT + Duration::from_secs(2), async {
+        tokio::join!(launch, starts)
     })
     .await
     .expect("the launch ended within the wait");
@@ -126,8 +140,9 @@ async fn a_segment_waits_for_a_hub_that_is_not_ready() {
 /// naming the hub and what the last attempt met.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_segment_whose_hub_never_starts_ends_at_its_deadline() {
-    let (public, control) = free_ports();
-    let config = settings(public, control, 1_000);
+    let (hub, public, control) = down_hub().await;
+    let control_port = control.port;
+    let config = settings(public.port, control.port, 1_000);
     let process = Process::start(&config).await.expect("the process starts");
     let started = Instant::now();
     let launched = tokio::time::timeout(
@@ -145,7 +160,10 @@ async fn a_segment_whose_hub_never_starts_ends_at_its_deadline() {
         started.elapsed()
     );
     let error = error.to_string();
-    assert!(error.contains(&format!("127.0.0.1:{control}")), "{error}");
+    assert!(
+        error.contains(&format!("127.0.0.1:{control_port}")),
+        "{error}"
+    );
     assert!(error.contains("hub request failed"), "{error}");
     let address = process.system_address().expect("a system listener");
     let (_, body) = get(address, "/health").await;
@@ -153,6 +171,7 @@ async fn a_segment_whose_hub_never_starts_ends_at_its_deadline() {
         !body.contains("waiting"),
         "a start past its deadline: {body}"
     );
+    hub.shutdown().await.expect("valid test fixture");
 }
 
 /// A hub that refuses the segment, here because it serves another graph,
@@ -267,8 +286,8 @@ async fn a_refused_start_stops_reporting_a_hub_wait() {
 /// with it: the probe no longer says the process waits for the hub.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_while_waiting_for_the_hub_ends_the_wait() {
-    let (public, control) = free_ports();
-    let config = settings(public, control, 20_000);
+    let (hub, public, control) = down_hub().await;
+    let config = settings(public.port, control.port, 20_000);
     let process = Process::start(&config).await.expect("the process starts");
     let deployment = spec();
     let launch = config.launch(&process, "a", SEGMENTS, &deployment, async { Ok(()) });
@@ -289,4 +308,5 @@ async fn a_stop_while_waiting_for_the_hub_ends_the_wait() {
     let address = process.system_address().expect("a system listener");
     let (_, body) = get(address, "/health").await;
     assert!(!body.contains("waiting"), "a stopped start: {body}");
+    hub.shutdown().await.expect("valid test fixture");
 }
