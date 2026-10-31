@@ -139,11 +139,12 @@ impl Relay {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Begin a new follow of the pool `pool` of `class`: its generation,
+    /// Begin a new follow of the pool `pool` of `class`, from its record of
+    /// `epoch`, which its link refuses any other hub than: its generation,
     /// and the signal that the relay closed it, on which its link ends.
     /// The pool's earlier follow, if any, ends first, as
     /// [`Relay::end`] ends it.
-    pub(crate) fn begin(&self, class: &str, pool: &str) -> (u64, CancellationToken) {
+    pub(crate) fn begin(&self, class: &str, pool: &str, epoch: u64) -> (u64, CancellationToken) {
         let mut shared = self.lock();
         let generation = shared
             .generations
@@ -161,6 +162,7 @@ impl Relay {
             pool.to_string(),
             Follow {
                 generation,
+                epoch,
                 installed: None,
                 offer: Offer::new(true),
                 avoiding: Avoiding::default(),
@@ -694,6 +696,10 @@ struct Shared {
 /// its link once it closes.
 struct Follow {
     generation: u64,
+    /// The epoch of the record the follow began from: the only hub its
+    /// link takes, so what its link's end says is of that hub, installed
+    /// or not.
+    epoch: u64,
     installed: Option<Installed>,
     offer: Offer,
     /// The retirements its choosers have yet to avoid.
@@ -744,6 +750,7 @@ impl Shared {
             return;
         }
         let Follow {
+            epoch,
             installed,
             mut offer,
             avoiding,
@@ -751,8 +758,9 @@ impl Shared {
         } = pools.remove(pool).expect("the follow was just found");
         // The relay closes a follow in `settle`, never here: a follow that
         // ends here lost its link, or was replaced, so its pool is missing
-        // until a later one is installed, as a word of the hub it linked to.
-        let epoch = installed.as_ref().map(Installed::epoch);
+        // until a later one is installed, as a word of the hub it linked to:
+        // the hub of the record it began from, whether or not its snapshot
+        // came.
         self.listings
             .lose(class, pool, Some((std::time::Instant::now(), epoch)));
         self.relist(class, pool);

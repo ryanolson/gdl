@@ -89,7 +89,7 @@ fn a_link_without_properties_still_lists_its_pool_draining() {
     assert_eq!(record.properties_version, 0);
     let relay = held();
     relay.record(&record, None);
-    let (generation, _) = relay.begin("model_x", "m");
+    let (generation, _) = relay.begin("model_x", "m", 1);
     relay.install(generation, installed(PoolState::Ready));
     relay.apply("model_x", "m", generation, state(PoolState::Draining));
     assert!(
@@ -183,7 +183,7 @@ fn a_relay_sends_a_drain_only_with_its_hubs_epoch() {
     let relay = held();
     let mut watch = relay.watch(None);
     relay.record(&record_of(1, PoolState::Ready), None);
-    let (generation, _) = relay.begin("model_x", "m");
+    let (generation, _) = relay.begin("model_x", "m", 1);
     relay.install(generation, installed(PoolState::Ready));
     relay.apply("model_x", "m", generation, state(PoolState::Draining));
     let linked = drains(&pending(&mut watch));
@@ -412,11 +412,11 @@ fn only_the_current_generation_writes() {
     let relay = held();
     let mut watch = relay.watch(None);
     assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
-    let (first, _) = relay.begin("model_x", "m");
+    let (first, _) = relay.begin("model_x", "m", 1);
     let instance = peer();
     relay.install(first, installed_pool("m", PoolState::Ready));
     relay.apply("model_x", "m", first, ready(&instance));
-    let (second, _) = relay.begin("model_x", "m");
+    let (second, _) = relay.begin("model_x", "m", 1);
     assert!(second > first);
     relay.install(first, installed_pool("m", PoolState::Ready));
     relay.apply("model_x", "m", first, ready(&peer()));
@@ -452,7 +452,7 @@ fn only_the_current_generation_writes() {
         ]
     );
     relay.end("model_x", "m", second);
-    let (third, _) = relay.begin("model_x", "m");
+    let (third, _) = relay.begin("model_x", "m", 1);
     assert!(third > second, "numbered past every earlier follow");
     assert_eq!(pending(&mut watch), [], "both kept, not offered already");
     assert_eq!(
@@ -494,7 +494,7 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
     );
     let mut watch = relay.watch(None);
     assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
-    let (first, close) = relay.begin("model_x", "m");
+    let (first, close) = relay.begin("model_x", "m", 1);
     relay.install(first, installed_pool("m", PoolState::Ready));
     relay.apply("model_x", "m", first, state(PoolState::Draining));
     let events = pending(&mut watch);
@@ -527,7 +527,10 @@ fn a_class_counts_its_installed_ready_pools() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
+    let (m, n) = (
+        relay.begin("model_x", "m", 1).0,
+        relay.begin("model_x", "n", 1).0,
+    );
     relay.install(m, installed_pool("m", PoolState::Ready));
     relay.install(n, installed_pool("n", PoolState::Degraded));
     assert_eq!(met(), 1);
@@ -539,7 +542,7 @@ fn a_class_counts_its_installed_ready_pools() {
     assert_eq!(met(), 1);
     relay.end("model_x", "m", m);
     assert_eq!(met(), 1, "m was not ready");
-    let (later, _) = relay.begin("model_x", "n");
+    let (later, _) = relay.begin("model_x", "n", 1);
     assert_eq!(met(), 0, "the new generation dropped the ready one");
     relay.apply("model_x", "n", n, state(PoolState::Ready));
     relay.end("model_x", "n", n);
@@ -609,7 +612,7 @@ fn a_follow_says_the_epoch_of_the_hub_it_follows() {
     let mut live = relay.watch(None);
     pending(&mut live);
     relay.record(&record_of(5, PoolState::Ready), None);
-    let (generation, _) = relay.begin("model_x", "m");
+    let (generation, _) = relay.begin("model_x", "m", 5);
     relay.install(generation, installed_at(5, PoolState::Ready));
     assert_eq!(follow_epochs(&pending(&mut live)), [5], "installed");
     assert_eq!(
@@ -631,7 +634,7 @@ fn a_withdrawal_says_its_epoch() {
     let relay = held();
     let mut live = relay.watch(None);
     pending(&mut live);
-    let (generation, _) = relay.begin("model_x", "m");
+    let (generation, _) = relay.begin("model_x", "m", 1);
     relay.withdrawn(&gdl_pools::Withdrawal {
         class: "model_x".into(),
         pool: "m".into(),
@@ -666,7 +669,7 @@ fn a_lost_link_makes_only_its_own_hub_missing() {
     };
     let relay = held();
     relay.record(&record_of(5, PoolState::Ready), None);
-    let (generation, _) = relay.begin("model_x", "m");
+    let (generation, _) = relay.begin("model_x", "m", 5);
     relay.install(generation, installed_at(5, PoolState::Ready));
     assert_eq!(listing(&relay), (5, gdl_pools::PoolCondition::Live));
     relay.end("model_x", "m", generation);
@@ -693,13 +696,12 @@ fn a_lost_link_makes_only_its_own_hub_missing() {
 /// Replacing a follow before its snapshot arrives says nothing about the
 /// successor hub. The directory lists it before ending the pending link.
 #[test]
-#[ignore = "F5: an uninstalled epoch-5 link is reported missing at the successor listing's epoch 6"]
 fn an_uninstalled_follow_cannot_mark_a_successor_hub_missing() {
     let mut failures = Vec::new();
     for epoch in [5, 6] {
         let relay = held();
         relay.record(&record_of(5, PoolState::Ready), None);
-        let (generation, _) = relay.begin("model_x", "m");
+        let (generation, _) = relay.begin("model_x", "m", 5);
         relay.record(&record_of(epoch, PoolState::Ready), None);
         relay.end("model_x", "m", generation);
         let listing = relay

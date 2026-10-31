@@ -378,7 +378,7 @@ impl<D: PoolDirectory> Follows<'_, D> {
         let backoff = backoff
             .unwrap_or_else(|| Backoff::new(self.follower.refollow, PoolTiming::REFOLLOW_CAP));
         let relay = &self.follower.relay;
-        let (generation, close) = relay.begin(&record.class, &record.name);
+        let (generation, close) = relay.begin(&record.class, &record.name, record.epoch);
         let name = record.name.clone();
         let (epoch, seq) = (record.epoch, record.seq);
         let closed = close.clone();

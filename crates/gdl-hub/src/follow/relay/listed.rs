@@ -268,17 +268,13 @@ impl Listings {
     }
 
     /// The pool's follow was lost at `lost`, its link to the hub of the
-    /// epoch given, or of the listing's epoch for a follow whose link never
-    /// came up; or, with `None`, a new one installed. A loss while the
+    /// epoch given; or, with `None`, a new one installed. A loss while the
     /// pool is already lost to the same hub keeps the first.
-    pub(super) fn lose(&mut self, class: &str, pool: &str, lost: Option<(Instant, Option<u64>)>) {
+    pub(super) fn lose(&mut self, class: &str, pool: &str, lost: Option<(Instant, u64)>) {
         if let Some(listed) = self.get_mut(class, pool) {
-            let lost = lost.map(|(at, epoch)| {
-                let epoch = epoch.unwrap_or(listed.epoch);
-                match listed.lost {
-                    Some((first, of)) if of == epoch => (first, of),
-                    _ => (at, epoch),
-                }
+            let lost = lost.map(|(at, epoch)| match listed.lost {
+                Some((first, of)) if of == epoch => (first, of),
+                _ => (at, epoch),
             });
             Listed::set(&mut listed.lost, lost, &mut listed.dirty);
         }

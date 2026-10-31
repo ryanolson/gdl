@@ -130,7 +130,10 @@ fn a_withheld_pool_is_unavailable_until_it_is_read_again() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
+    let (m, n) = (
+        relay.begin("model_x", "m", 1).0,
+        relay.begin("model_x", "n", 1).0,
+    );
     let (kept, retiring, gone, joined, other) = (peer(), peer(), peer(), peer(), peer());
     let mut pool = installed("m", PoolState::Ready);
     for instance in [&kept, &retiring, &gone] {
@@ -287,7 +290,7 @@ fn a_reading_ends_what_left_and_keeps_what_retired() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let m = relay.begin("model_x", "m").0;
+    let m = relay.begin("model_x", "m", 1).0;
     let (left, kept) = (peer(), peer());
     let mut pool = installed("m", PoolState::Ready);
     pool.apply(m, retired(left.instance_id()), |_| {});
@@ -332,7 +335,7 @@ fn a_watch_of_one_follow_receives_its_changes_alone() {
         let pools: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
         let mut watches = Vec::new();
         for pool in &pools {
-            let generation = relay.begin("model_x", pool).0;
+            let generation = relay.begin("model_x", pool, 1).0;
             relay.install(generation, installed(pool, PoolState::Ready));
             let mut watch = relay.watch_of("model_x", pool);
             let _ = pending(&mut watch);
@@ -376,7 +379,7 @@ fn a_closed_watch_of_one_follow_releases_its_channel() {
     );
     for i in 0..128 {
         let pool = format!("m{i}");
-        let generation = relay.begin("model_x", &pool).0;
+        let generation = relay.begin("model_x", &pool, 1).0;
         relay.install(generation, installed(&pool, PoolState::Ready));
         let mut watch = relay.watch_of("model_x", &pool);
         relay.end("model_x", &pool, generation);
@@ -394,7 +397,7 @@ fn a_closed_watch_of_one_follow_releases_its_channel() {
     }
     assert_eq!(relay.channels(), 0);
     // A channel watched twice is kept until its last watch closes.
-    let generation = relay.begin("model_x", "n").0;
+    let generation = relay.begin("model_x", "n", 1).0;
     relay.install(generation, installed("n", PoolState::Ready));
     let (first, second) = (
         relay.watch_of("model_x", "n"),
@@ -422,7 +425,7 @@ fn an_instance_a_reading_exposes_is_sent_its_left() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let m = relay.begin("model_x", "m").0;
+    let m = relay.begin("model_x", "m", 1).0;
     relay.install(m, installed("m", PoolState::Ready));
     let mut watch = relay.watch(None);
     let _ = pending(&mut watch);
@@ -470,7 +473,7 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let earlier = relay.begin("model_x", "m").0;
+    let earlier = relay.begin("model_x", "m", 1).0;
     relay.install(earlier, installed("m", PoolState::Ready));
     // Its link is lost, while a chooser that never acknowledges is a
     // member, so it closes only once acknowledged.
@@ -483,7 +486,7 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
         .declare(id, epoch)
         .expect("a member of a chooser's segment");
     relay.end("model_x", "m", earlier);
-    let later = relay.begin("model_x", "m").0;
+    let later = relay.begin("model_x", "m", 1).0;
     relay.install(later, installed("m", PoolState::Ready));
     let mut alone = relay.watch_of("model_x", "m");
     let seen = pending(&mut alone);
@@ -518,7 +521,7 @@ fn a_snapshot_shows_offering_only_for_a_follow_not_offered() {
         tokio::sync::mpsc::unbounded_channel().0,
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let m = relay.begin("model_x", "m").0;
+    let m = relay.begin("model_x", "m", 1).0;
     relay.install(m, installed("m", PoolState::Ready));
     relay.withhold("model_x", "m", m);
     relay.restore("model_x", "m", m, installed("m", PoolState::Ready));

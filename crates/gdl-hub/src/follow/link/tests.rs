@@ -104,7 +104,7 @@ async fn linked(
     TcpStream,
 ) {
     let relay = relay();
-    let (generation, close) = relay.begin("model_x", "m");
+    let (generation, close) = relay.begin("model_x", "m", 1);
     let me = Follower {
         class: "global".into(),
         pool: "g".into(),
