@@ -314,7 +314,7 @@ impl<R: Registry> Follows<R> {
     /// restarted numbers its follows again from 1. Its new instances are
     /// registered before any table shows them; an instance that no follow
     /// holds any more is unregistered after the drain. A follow shown
-    /// again in its generation keeps what this instance holds of it: its
+    /// again in its generation, of the same hub, keeps what this instance holds of it: its
     /// turns, its leases, its acknowledgement of the same revision, and
     /// the instances its state hides, which the snapshot does not show.
     pub(super) fn resnapshot(&mut self, snapshot: Snapshot, now: Instant) {
@@ -353,12 +353,12 @@ impl<R: Registry> Follows<R> {
             }
         }
         for (key, follow) in &mut followed.follows {
-            if let Some(held) = self.followed.find(key, follow.generation) {
+            if let Some(held) = self.followed.same(key, follow) {
                 follow.carry(held);
             }
         }
-        for ((key, generation), follow) in &mut followed.closing {
-            if let Some(held) = self.followed.find(key, *generation) {
+        for ((key, _), follow) in &mut followed.closing {
+            if let Some(held) = self.followed.same(key, follow) {
                 follow.carry(held);
             }
         }
@@ -374,7 +374,7 @@ impl<R: Registry> Follows<R> {
                     .iter()
                     .map(|((key, _), follow)| (key, follow)),
             )
-            .filter(|(key, follow)| followed.find(key, follow.generation).is_none())
+            .filter(|(key, follow)| followed.same(key, follow).is_none())
             .map(|(_, follow)| Leased::of(follow))
             .collect();
         let mut held: HashMap<InstanceId, usize> = HashMap::new();
@@ -629,14 +629,12 @@ impl<R: Registry> Follows<R> {
             follows
                 .iter()
                 .find(|(key, _)| super::pool_id(&key.0, &key.1) == pool)
-                .map(|(_, follow)| (follow.generation, follow.changes))
+                .map(|(_, follow)| (follow.epoch, follow.generation, follow.changes))
         };
         let only = only.map(|key| super::pool_id(&key.0, &key.1));
-        self.pools
-            .damping()
-            .forget_gone(|pool, generation, changes| {
-                only.is_some_and(|id| id != pool) || current(pool) == Some((generation, changes))
-            });
+        self.pools.damping().forget_gone(|pool, follow| {
+            only.is_some_and(|id| id != pool) || current(pool) == Some(follow)
+        });
     }
 
     /// Swap `segment`'s table for one of its pools as they are now: a new
@@ -1237,6 +1235,15 @@ impl Followed {
             Some(follow) if follow.generation == generation => Some(follow),
             _ => self.closing.get(&(key.clone(), generation)),
         }
+    }
+
+    /// The follow this view holds that is `follow`, shown by another
+    /// watch: of the same generation and the same hub. A hub that restarted
+    /// numbers its follows from 1 again, so a generation alone can name a
+    /// later hub's follow, which shares nothing with the earlier one.
+    fn same(&self, key: &Key, follow: &Follow) -> Option<&Follow> {
+        self.find(key, follow.generation)
+            .filter(|held| held.epoch == follow.epoch)
     }
 
     fn find_mut(&mut self, key: &Key, generation: u64) -> Option<&mut Follow> {

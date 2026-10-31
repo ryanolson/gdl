@@ -716,3 +716,23 @@ fn evidence_of_an_earlier_hub_is_dropped_whole() {
         "a later hub of the pool ends it"
     );
 }
+
+/// A pool that declined an offer as gone in a follow of one hub is not
+/// gone in the follow of a later hub of it, though that hub numbers its
+/// follows from 1 again and the two share a generation and a count of
+/// changes; nor does a decline in the earlier hub's follow replace a mark
+/// made in the later one.
+#[test]
+fn a_gone_mark_is_of_one_hubs_follow() {
+    let pool = |epoch| {
+        Pool::new("model", "llama-1", HOME, PoolState::Draining)
+            .with_follow(1, 0)
+            .with_epoch(epoch)
+    };
+    let gone = Damped::EMPTY.with_gone(&pool(5));
+    assert!(gone.is_gone(&pool(5)));
+    assert!(!gone.is_gone(&pool(6)), "a later hub's follow");
+    let later = Damped::EMPTY.with_gone(&pool(6));
+    assert!(later.holds_gone_since(&pool(5)), "the earlier hub's is older");
+    assert!(!gone.holds_gone_since(&pool(6)));
+}

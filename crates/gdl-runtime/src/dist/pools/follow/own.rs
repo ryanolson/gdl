@@ -180,7 +180,7 @@ impl<R: Registry> Follows<R> {
     /// their generations, and sets the generation the pool's later events
     /// are fenced by, as a snapshot of the relay does: the watch may be to
     /// a hub that restarted, which numbers its follows from 1 again. A
-    /// follow shown again in its generation keeps what this instance holds
+    /// follow shown again in its generation, of the same hub, keeps what this instance holds
     /// of it, as [`Follows::resnapshot`] keeps it: its turns, its leases,
     /// its acknowledgement of the same revision, and the instances its
     /// state hides. The pool is unread if `unread`. Its new instances are
@@ -221,7 +221,7 @@ impl<R: Registry> Follows<R> {
             for id in unreachable {
                 follow.exposed.remove(&id);
             }
-            if let Some(held) = self.followed.find(key, follow.generation) {
+            if let Some(held) = self.followed.same(key, follow) {
                 follow.carry(held);
             }
             for id in follow.held().collect::<Vec<_>>() {
@@ -252,9 +252,7 @@ impl<R: Registry> Follows<R> {
         // A follow the reading shows again was carried; one it no longer
         // shows is let go of once no table shows it.
         let gone: Vec<Leased> = replaced
-            .extract_if(.., |follow| {
-                self.followed.find(key, follow.generation).is_none()
-            })
+            .extract_if(.., |follow| self.followed.same(key, follow).is_none())
             .map(|follow| Leased::of(&follow))
             .collect();
         for replaced in &replaced {

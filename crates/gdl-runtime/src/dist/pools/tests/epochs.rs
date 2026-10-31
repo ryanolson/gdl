@@ -670,7 +670,6 @@ fn a_rewatch_stamps_each_pools_epoch() {
 /// A relay restart can reuse a generation for a different pool hub. Its
 /// leases must date new acceptances by that hub, on either recovery path.
 #[test]
-#[ignore = "F4: a recovered epoch-6 row reuses epoch-5 leases when the generation matches"]
 fn a_rewatch_never_reuses_an_earlier_hubs_acceptance_epoch() {
     use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -47,11 +47,15 @@ enum Mark {
     Gone(Follow),
 }
 
-/// A pool's follow as a chooser's table shows it, and how many times the
-/// relay changed its state or offered state: what a decline as gone holds
-/// until either changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A pool's follow as a chooser's table shows it, by the epoch of the hub
+/// it links to and its generation, and how many times the relay changed
+/// its state or offered state: what a decline as gone holds until either
+/// changes. The epoch is part of the follow's name, since a hub that
+/// restarted numbers its follows from 1 again: a generation alone could
+/// name a later hub's follow. Ordered as the hubs and their changes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Follow {
+    epoch: u64,
     generation: u64,
     changes: u64,
 }
@@ -59,6 +63,7 @@ struct Follow {
 impl Follow {
     fn of(pool: &Pool) -> Self {
         Self {
+            epoch: pool.epoch,
             generation: pool.generation,
             changes: pool.changes,
         }
@@ -139,9 +144,7 @@ impl Damped {
     #[inline]
     pub fn holds_gone_since(&self, pool: &Pool) -> bool {
         let shown = Follow::of(pool);
-        self.gone
-            && matches!(self.mark(pool.id), Some(Mark::Gone(held))
-                if (held.generation, held.changes) >= (shown.generation, shown.changes))
+        self.gone && matches!(self.mark(pool.id), Some(Mark::Gone(held)) if held >= shown)
     }
 
     /// The list with `pool` gone in the follow it is shown in, in place of
@@ -151,12 +154,12 @@ impl Damped {
     }
 
     /// The list without each gone mark that `keep` refuses, given the
-    /// pool's id and the generation and count of changes it declined in,
-    /// or `None` when it refuses none. Windows stay.
+    /// pool's id and the epoch, generation and count of changes of the
+    /// follow it declined in, or `None` when it refuses none. Windows stay.
     #[doc(hidden)]
-    pub fn retain_gone(&self, keep: impl Fn(u64, u64, u64) -> bool) -> Option<Self> {
+    pub fn retain_gone(&self, keep: impl Fn(u64, (u64, u64, u64)) -> bool) -> Option<Self> {
         let stale = |(id, mark): &(u64, Mark)| match mark {
-            Mark::Gone(follow) => !keep(*id, follow.generation, follow.changes),
+            Mark::Gone(follow) => !keep(*id, (follow.epoch, follow.generation, follow.changes)),
             Mark::Window(_) => false,
         };
         if !self.gone || !self.pools.iter().any(stale) {

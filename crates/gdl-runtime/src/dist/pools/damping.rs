@@ -125,7 +125,7 @@ impl Damping {
     /// mark already matches no pool; forgetting it keeps a choice on the
     /// path that reads nothing for gone pools. Nothing is written while
     /// no mark is refused.
-    pub(crate) fn forget_gone(&self, keep: impl Fn(u64, u64, u64) -> bool) {
+    pub(crate) fn forget_gone(&self, keep: impl Fn(u64, (u64, u64, u64)) -> bool) {
         self.change(|damped| damped.retain_gone(&keep));
     }
 
