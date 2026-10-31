@@ -220,11 +220,12 @@
                         "type": "integer"
                       },
                       "outcome": {
-                        "description": "`removed`, `overran` (gone, after its drain bound), or\n`kubernetesChoseAnother`.",
+                        "description": "How it ended.",
                         "enum": [
                           "removed",
                           "overran",
-                          "kubernetesChoseAnother"
+                          "kubernetesChoseAnother",
+                          "cancelled"
                         ],
                         "type": "string"
                       },
@@ -272,21 +273,21 @@
                       "properties": {
                         "admitted": {
                           "default": 0,
-                          "description": "Its admitted requests when chosen.",
+                          "description": "Its admitted requests, as its `/metrics` last said: when chosen,\nthen while it drains.",
                           "format": "uint64",
                           "minimum": 0.0,
                           "type": "integer"
                         },
                         "anchors": {
                           "default": 0,
-                          "description": "Its open anchors when chosen.",
+                          "description": "Its open anchors, read as `admitted` is.",
                           "format": "uint64",
                           "minimum": 0.0,
                           "type": "integer"
                         },
                         "egress": {
                           "default": 0,
-                          "description": "Its egress permits in use when chosen.",
+                          "description": "Its egress permits in use, read as `admitted` is.",
                           "format": "uint64",
                           "minimum": 0.0,
                           "type": "integer"
@@ -306,6 +307,11 @@
                         },
                         "pod": {
                           "description": "Its pod's name.",
+                          "type": "string"
+                        },
+                        "scaled": {
+                          "description": "When the scaler scaled the target down for it, RFC 3339: its pod's\ndelete, and so its drain, starts here.",
+                          "nullable": true,
                           "type": "string"
                         },
                         "since": {

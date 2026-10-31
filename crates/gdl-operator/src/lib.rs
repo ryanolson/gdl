@@ -8,14 +8,24 @@
 //! The operator talks to the Kubernetes API and to the pool hub's HTTP
 //! routes alone, and never links velo. See `docs/src/guides/operator.md`.
 
+mod cluster;
 mod crd;
 mod manifests;
+mod probe;
+mod run;
+mod scaler;
 mod victim;
 
+pub use cluster::{Cluster, KubeCluster, PodView, Target};
 pub use crd::{
     DEFAULT_PREFIX, DELETION_COST, GROUP, GdlScaler, GdlScalerSpec, GdlScalerStatus, Last, Outcome,
     ROUTABLE, Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
     parse_duration,
 };
 pub use manifests::{NAME, crds, namespaced, stream};
-pub use victim::{FEWEST_ADMITTED, NEWEST};
+pub use probe::{Held, HttpProbe, Instance, InstanceLoad, Instances, Probe, held, sum};
+pub use run::run;
+pub use scaler::{Context, EXIT_MARGIN, VICTIM_COST, reconcile};
+pub use victim::{
+    Candidate, FEWEST_ADMITTED, FewestAdmitted, NEWEST, Newest, VictimPolicy, Victims,
+};

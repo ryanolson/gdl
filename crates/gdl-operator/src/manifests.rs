@@ -43,7 +43,6 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("apps", &["deployments"], &["get", "list", "watch", "patch"]),
             rule("", &["pods"], &["get", "list", "watch", "patch"]),
             rule("discovery.k8s.io", &["endpointslices"], &read),
-            rule("", &["events"], &["create", "patch"]),
         ],
     });
     let binding = json!({

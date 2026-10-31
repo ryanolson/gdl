@@ -527,6 +527,22 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** install `ca-certificates` in the runtime stage of the `Dockerfile`, or deploy with `cargo gdl compose`, whose default runtime image is `gcr.io/distroless/cc-debian12:nonroot`.
 - **Lifts:** building one exported image end to end, and adding what its first run shows it needs.
 
+### The operator's victim is a hint to the ReplicaSet
+- **What:** the operator steers the ReplicaSet with the victim's `controller.kubernetes.io/pod-deletion-cost`, which the ReplicaSet reads from its own cache, after unscheduled, pending, and not-ready pods. A pod that fails at the moment of the scale-down, or a cache that has not seen the cost yet, can make it delete another pod.
+- **Workaround:** none needed for correctness: the victim never retired, the pod that went drains on its own SIGTERM, and the operator gives the victim back its cost and its routing and records `kubernetesChoseAnother` ([Why a deletion cost](../guides/operator.md#why-a-deletion-cost)).
+
+### A frontend's victim keeps its open connections, and a load balancer's withdrawal is a wait
+- **What:** the operator takes a frontend's victim out of its Service's endpoints before its pod goes, so no new connection reaches it through kube-proxy. A keep-alive connection that is already open stays, and the frontend learns that it retires only at its SIGTERM, so a request on it can race the close. A load balancer in front of the Service reports no withdrawal, so the operator waits `routingGrace` for it.
+- **Workaround:** close keep-alive connections while the frontend drains, in its own drain policy. Behind the AWS load balancer controller, use IP targets, and set `routingGrace` to its reconcile time plus the target group's deregistration delay.
+
+### The operator runs one replica, and scales only Deployments in signal mode
+- **What:** the operator does not elect a leader: its Deployment runs one replica with `Recreate`, so a node that loses touch with the cluster can leave its pod running while another starts. A `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
+- **Workaround:** none yet.
+
+### A scale-down waits for a rollout, and for every pod to be ready
+- **What:** the operator chooses a victim only while no rollout of the target is in progress and every other pod runs and is ready, since only then does the deletion cost decide the ReplicaSet's choice. A pod that never becomes ready blocks the scale-down (`Blocked: PodNotReady`).
+- **Workaround:** fix or delete the pod that is not ready.
+
 ## Pools
 
 These entries concern the pool plane. See [Classes and pools](../concepts/pools.md), [Following and choosing pools](../concepts/pool-routing.md), and [Deploy a fleet of pools](../guides/fleet.md).

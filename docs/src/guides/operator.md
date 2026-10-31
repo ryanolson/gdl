@@ -30,7 +30,6 @@ The Role grants only what the scaler uses, in its namespace:
 | `apps` `deployments` | get, list, watch, patch | Read the target, and write its `replicas` |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
-| core `events` | create, patch | Events |
 
 It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
@@ -61,3 +60,82 @@ Group `gdl.dev`, version `v1alpha1`, namespaced. One scaler per segment of a poo
 | `status.conditions` | `Scaling`, `Blocked`, and `Suspended` |
 
 A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses any other, a `retire` other than `signal`, and a `minReplicas` below 1.
+
+## How a scale-down runs
+
+```mermaid
+sequenceDiagram
+    participant A as HPA or person
+    participant O as gdl operator
+    participant K as Kubernetes (API, ReplicaSet, EndpointSlices)
+    participant H as Pool hub
+    participant V as Victim instance
+    A->>K: GdlScaler /scale: replicas 3 to 2
+    K-->>O: watch event
+    O->>O: check: no rollout, no pod terminating, every pod ready
+    O->>H: GET /v1/ext/gdl-pool/instances
+    O->>V: GET /metrics on each pod
+    O->>O: victim: the lowest rank of the policy, ties to the newest pod
+    opt the segment has an entry Service
+        O->>K: label V gdl.dev/routable=false
+        K-->>O: the EndpointSlices no longer list V
+        O->>O: wait routingGrace
+    end
+    O->>K: annotate V pod-deletion-cost = -2147483648
+    O->>K: Deployment replicas 3 to 2
+    K->>V: SIGTERM (V has the lowest cost)
+    V->>H: withdraw ready and loaded, announce retired
+    V->>V: drain, then leave
+    K-->>O: V is gone
+    O->>O: status.last: chosen, deleted, duration, outcome
+```
+
+The scaler keeps its target at `max(spec.replicas, spec.minReplicas)`. A scale-up writes the target's `replicas` at once. A scale-down removes one victim at a time, or `maxConcurrentDrains` at a time, in these steps.
+
+1. **Wait until it is safe.** The scaler chooses a victim only while no rollout of the target is in progress, no other pod of it is terminating, and every other pod is ready. Otherwise its `Blocked` condition says why (`RolloutInProgress`, `PodTerminating`, `PodNotReady`), and it looks again every 5 s. Every pod being ready is also what makes the ReplicaSet's choice predictable, below.
+2. **Choose.** The scaler reads each pod's `/metrics`, at its IP, on its container port named `system`, and the hub's instance list (`GET /v1/ext/gdl-pool/instances`, [Listing the instances](../concepts/pools.md#listing-the-instances)), which maps a pod to its instance by the pod's IP. A pod's load is the larger of `admission_admitted` and its `inflight_requests`, summed over its entries: a source's own requests are only in the second, and an entry's admitted requests stay in the first while velo still holds their output ([Reading a drain](../operations/observability.md#reading-a-drain)). When a pod's `/metrics` does not answer, the hub's latest load report of it stands in. The names carry the segment's `metricsPrefix`, and are read by their whole name. The victim policy ranks each pod, and the lowest rank goes. A tie goes to the newest pod, then the greater uid.
+3. **Take it out of routing.** For a segment with an entry Service, the scaler sets the victim's label `gdl.dev/routable` to `false`. Entry Services select on `gdl.dev/routable: "true"`, so the EndpointSlice controller drops the pod. The label is not in the Deployment's selector, so the ReplicaSet still owns the pod. The scaler waits until no EndpointSlice of the Service lists the pod, and then `routingGrace`, for kube-proxy and load balancers to stop sending to it.
+4. **Delete exactly that pod.** The scaler sets the victim's `controller.kubernetes.io/pod-deletion-cost` to `-2147483648`, the lowest, and then writes the target's `replicas` one lower. The ReplicaSet deletes the pod, which retires and drains on its SIGTERM ([Stopping](../concepts/lifecycle.md#stopping)), bounded by the pod's grace: the drain bound and 30 s.
+5. **Record it.** Once the pod is gone, `status.last` holds the pod chosen, the pod deleted, the time from the choice, and the outcome: `removed`, or `overran` when the pod went more than `drainBound` and 10 s after the scale-down. The 10 s are the runtime's margin past its bound ([The bound](../concepts/lifecycle.md#the-bound)).
+
+Each victim is in `status.retiring` from its choice until its pod is gone, with what its `/metrics` last said it holds. The status is all the scaler remembers, so an operator that restarts carries on.
+
+### Victim policies
+
+| Policy | Removes first |
+|---|---|
+| `fewestAdmitted` (the default) | The pod with the least load: the shortest drain. A pod whose load could not be read ranks last |
+| `newest` | The newest pod |
+
+A policy is registered by name, as pool policies are: `Victims::add(name, policy)` with a `VictimPolicy`, which ranks one candidate. A scaler that names a policy no one registered is blocked (`UnknownVictimPolicy`).
+
+### Why a deletion cost
+
+A ReplicaSet deletes, in order: unscheduled pods, then Pending, Unknown, and Running pods, then pods that are not ready, then pods of a lower `controller.kubernetes.io/pod-deletion-cost`. Only after those does it look at nodes, readiness time, restarts, and age. The scaler acts only while every other pod runs and is ready, so the victim's cost decides. The rejected alternatives: a StatefulSet always removes the highest ordinal, so it cannot choose; and pods the operator owns directly would mean writing a ReplicaSet again, with adoption, template hashes, and rollout pacing.
+
+The cost is a hint: the ReplicaSet reads pods from its own cache, and a pod that fails at that moment comes first. If it deletes another pod, nothing is lost. The victim never retired, since only its SIGTERM retires it. The pod that went drains on its own SIGTERM. The scaler sees that the target reached its count while the victim still runs, clears the victim's cost, sets its `gdl.dev/routable` back to `true`, and records `kubernetesChoseAnother` with the pod that went. A victim left out of its Service for good would stay counted in the replicas and take no connection. A scale-up while a victim is still being taken out of its Service takes that victim back the same way, before any new pod. One already scaled away cannot be taken back: its retirement is final, so the scale-up starts a new pod.
+
+### Frontends
+
+A frontend takes its requests from its Service, not from a gdl chooser. So "out of the routing table" means out of the Service's endpoints. Leaving the endpoints first means the pod stops getting new connections before its SIGTERM stops it taking requests, so a new connection is never refused once routing has converged.
+
+That promise has two limits ([Known limitations](../operations/limitations.md)):
+
+- **A load balancer is best effort.** Nothing in Kubernetes acknowledges that a load balancer has stopped sending to a pod: `routingGrace` is a wait, not a signal. With the AWS load balancer controller, use IP targets, and set `routingGrace` to the controller's reconcile time plus the target group's deregistration delay.
+- **Open connections stay.** Leaving the endpoints moves no open connection. A keep-alive client keeps sending on its connection, and the frontend learns that it retires only at its SIGTERM. Closing keep-alive connections while it drains is the frontend's own drain policy ([Hosted frontends](frontends.md)).
+
+## With an HPA
+
+Point the HPA at the scaler, never at the Deployment, whose `replicas` the scaler owns:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: model-a-engine, namespace: gdl-api}
+spec:
+  scaleTargetRef: {apiVersion: gdl.dev/v1alpha1, kind: GdlScaler, name: model-a-engine}
+  minReplicas: 1
+  maxReplicas: 4
+```
+
+Set the HPA's `minReplicas` to at least the segment's quorum. The scaler drains `maxConcurrentDrains` at a time, so a larger step down drains in waves, and the HPA's stabilization window (300 s by default) keeps it from flapping. A drain cannot be undone: a scale-up while a victim drains starts a new pod.

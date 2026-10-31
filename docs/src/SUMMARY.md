@@ -33,6 +33,7 @@
 - [Deploy with Docker Compose](guides/compose-deploy.md)
 - [Deploy a fleet of pools](guides/fleet.md)
 - [Deploy a fleet on Kubernetes](guides/kubernetes.md)
+- [Scale a segment with the operator](guides/operator.md)
 - [Run the examples](guides/examples.md)
 
 # Operations

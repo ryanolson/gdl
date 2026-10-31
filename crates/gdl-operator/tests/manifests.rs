@@ -118,8 +118,7 @@ fn the_role_grants_only_what_the_scaler_uses() {
             "gdlscalers/status",
             "deployments",
             "pods",
-            "endpointslices",
-            "events"
+            "endpointslices"
         ]
     );
     let container = &objects[3]["spec"]["template"]["spec"]["containers"][0];

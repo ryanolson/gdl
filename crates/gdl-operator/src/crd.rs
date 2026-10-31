@@ -180,13 +180,18 @@ pub struct Retiring {
     /// grace counts from here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unrouted: Option<String>,
-    /// Its admitted requests when chosen.
+    /// When the scaler scaled the target down for it, RFC 3339: its pod's
+    /// delete, and so its drain, starts here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaled: Option<String>,
+    /// Its admitted requests, as its `/metrics` last said: when chosen,
+    /// then while it drains.
     #[serde(default)]
     pub admitted: u64,
-    /// Its egress permits in use when chosen.
+    /// Its egress permits in use, read as `admitted` is.
     #[serde(default)]
     pub egress: u64,
-    /// Its open anchors when chosen.
+    /// Its open anchors, read as `admitted` is.
     #[serde(default)]
     pub anchors: u64,
 }
@@ -217,8 +222,7 @@ pub struct Last {
     pub reason: String,
     /// From the choice until the pod was gone.
     pub duration_ms: u64,
-    /// `removed`, `overran` (gone, after its drain bound), or
-    /// `kubernetesChoseAnother`.
+    /// How it ended.
     pub outcome: Outcome,
 }
 
@@ -233,6 +237,8 @@ pub enum Outcome {
     /// The ReplicaSet deleted another pod. In signal mode the victim was
     /// never retired, so nothing was lost.
     KubernetesChoseAnother,
+    /// The scale-down was undone before the ReplicaSet deleted a pod.
+    Cancelled,
 }
 
 impl GdlScalerSpec {
