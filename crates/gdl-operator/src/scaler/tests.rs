@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use super::*;
-use crate::cluster::Target;
+use crate::cluster::{Fence, Refused, Target};
 use crate::{GdlScalerSpec, Suspend, TargetRef};
 
 const SERVICE: &str = "global-front";
@@ -31,8 +31,15 @@ struct State {
     /// pod that is not routable only when the test says it has caught up.
     listed: BTreeSet<String>,
     status: Option<GdlScalerStatus>,
-    /// Every write, in order.
+    /// The scaler's resourceVersion, moved by each status write.
+    scaler_version: u64,
+    /// The Deployment's uid and resourceVersion, moved by each write.
+    deployment: String,
+    version: u64,
+    /// Every write to a pod or the target, in order.
     writes: Vec<String>,
+    /// Every write, status writes included, in order.
+    events: Vec<String>,
     next: u32,
 }
 
@@ -58,6 +65,7 @@ impl Fake {
                 state.pods.push(FakePod { load: *load, ..pod });
             }
             state.listed = state.pods.iter().map(|p| p.view.uid.clone()).collect();
+            state.deployment = "deployment-a".into();
         }
         fake
     }
@@ -158,6 +166,7 @@ impl State {
                 created_ms: i64::from(n) * 1_000,
                 ready: true,
                 terminating: false,
+                routable: Some(true),
                 system_port: Some(9090),
             },
             cost: None,
@@ -172,6 +181,10 @@ impl Cluster for Fake {
         assert_eq!(name, "global-front");
         let state = self.state();
         Ok(Some(Target {
+            fence: Fence {
+                uid: state.deployment.clone(),
+                resource_version: state.version.to_string(),
+            },
             replicas: state.replicas,
             selector: "gdl.dev/pool=global,gdl.dev/segment=front".into(),
             rolling: state.rolling,
@@ -179,7 +192,15 @@ impl Cluster for Fake {
     }
 
     async fn pods(&self, _: &str) -> Result<Vec<PodView>, String> {
-        Ok(self.state().pods.iter().map(|p| p.view.clone()).collect())
+        Ok(self
+            .state()
+            .pods
+            .iter()
+            .map(|p| PodView {
+                routable: Some(p.routable),
+                ..p.view.clone()
+            })
+            .collect())
     }
 
     async fn endpoints(&self, service: &str) -> Result<BTreeSet<String>, String> {
@@ -187,42 +208,67 @@ impl Cluster for Fake {
         Ok(self.state().listed.clone())
     }
 
-    async fn scale(&self, _: &str, replicas: i32) -> Result<(), String> {
+    async fn scale(&self, _: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
         let mut state = self.state();
+        if fence.uid != state.deployment || fence.resource_version != state.version.to_string() {
+            return Err(Refused::Stale("the Deployment changed".into()));
+        }
         state.replicas = replicas;
+        state.version += 1;
         state.writes.push(format!("replicas {replicas}"));
-        Ok(())
+        state.events.push(format!("replicas {replicas}"));
+        Ok(state.version.to_string())
     }
 
-    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), String> {
+    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), Refused> {
         let mut state = self.state();
         let fake = state
             .pods
             .iter_mut()
             .find(|p| p.view.uid == pod.uid)
-            .ok_or("no pod")?;
+            .ok_or(Refused::Stale("no pod".into()))?;
         fake.routable = routable;
-        state
-            .writes
-            .push(format!("{} routable {routable}", pod.name));
+        let write = format!("{} routable {routable}", pod.name);
+        state.writes.push(write.clone());
+        state.events.push(write);
         Ok(())
     }
 
-    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), String> {
+    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), Refused> {
         let mut state = self.state();
         let fake = state
             .pods
             .iter_mut()
             .find(|p| p.view.uid == pod.uid)
-            .ok_or("no pod")?;
+            .ok_or(Refused::Stale("no pod".into()))?;
         fake.cost = cost;
-        state.writes.push(format!("{} cost {cost:?}", pod.name));
+        let write = format!("{} cost {cost:?}", pod.name);
+        state.writes.push(write.clone());
+        state.events.push(write);
         Ok(())
     }
 
-    async fn status(&self, _: &str, status: &GdlScalerStatus) -> Result<(), String> {
-        self.state().status = Some(status.clone());
-        Ok(())
+    async fn status(
+        &self,
+        _: &str,
+        status: &GdlScalerStatus,
+        version: Option<&str>,
+    ) -> Result<Option<String>, Refused> {
+        let mut state = self.state();
+        if version.is_some_and(|v| v != state.scaler_version.to_string()) {
+            return Err(Refused::Stale("the scaler changed".into()));
+        }
+        state.scaler_version += 1;
+        state.status = Some(status.clone());
+        let victims: Vec<String> = status
+            .retiring
+            .iter()
+            .map(|v| format!("{:?} {}", v.phase, v.uid).to_lowercase())
+            .collect();
+        state
+            .events
+            .push(format!("status [{}]", victims.join(", ")));
+        Ok(Some(state.scaler_version.to_string()))
     }
 }
 
@@ -281,6 +327,7 @@ async fn once(fake: &Fake, spec: &GdlScalerSpec, now_ms: i64) -> Duration {
     let mut scaler = GdlScaler::new("global-front", spec.clone());
     scaler.metadata.generation = Some(1);
     scaler.status = fake.state().status.clone();
+    scaler.metadata.resource_version = Some(fake.state().scaler_version.to_string());
     let victims = Victims::default();
     let cx = Context {
         cluster: fake,
@@ -322,7 +369,7 @@ async fn a_scale_down_removes_the_pod_it_chose() {
             victim.admitted,
             victim.egress
         ),
-        ("pod-2", RetiringPhase::Deleting, 1, 1)
+        ("pod-2", RetiringPhase::Removing, 1, 1)
     );
     fake.settle(false);
     assert!(fake.pod("pod-2").view.terminating);
@@ -392,12 +439,21 @@ async fn a_scale_down_waits_for_a_rollout_a_terminating_pod_and_a_pod_not_ready(
         ("True".into(), "RolloutInProgress".into())
     );
     fake.state().rolling = false;
-    fake.state().pods[0].view.terminating = true;
+    // A pod terminating that is no victim: the excess counts the pods that
+    // stay, so a fourth is needed for there to be one to remove.
+    {
+        let mut state = fake.state();
+        state.replicas = 4;
+        let pod = state.make();
+        state.pods.push(pod);
+        state.pods[0].view.terminating = true;
+    }
     once(&fake, &spec, 0).await;
     assert_eq!(
         condition(&fake, "Blocked"),
         ("True".into(), "PodTerminating".into())
     );
+    fake.state().replicas = 3;
     fake.exit();
     fake.settle(false);
     fake.state().pods[0].view.ready = false;
@@ -476,7 +532,7 @@ async fn a_wrong_pick_gives_the_victim_back() {
     fake.unlist();
     once(&fake, &spec, 1_000).await;
     once(&fake, &spec, 2_000).await;
-    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Deleting);
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Removing);
     fake.take_writes();
     // The ReplicaSet deletes another pod, as it would for a pod that
     // failed at that moment.
@@ -648,7 +704,7 @@ async fn a_victim_found_terminating_is_not_scaled_down_twice() {
     fake.take_writes();
     once(&fake, &spec, 3_000).await;
     assert_eq!(fake.state().replicas, 2, "{:?}", fake.take_writes());
-    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Deleting);
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Removing);
     fake.exit();
     once(&fake, &spec, 4_000).await;
     let last = status(&fake).last.expect("ended");
@@ -716,4 +772,134 @@ async fn a_removal_ends_once_the_hub_no_longer_lists_the_instance() {
             );
         }
     }
+}
+
+fn events(fake: &Fake) -> Vec<String> {
+    std::mem::take(&mut fake.state().events)
+}
+
+/// Each step is stored before it is taken: the victim before its label,
+/// and its commit before its cost and the count.
+#[tokio::test]
+async fn each_step_is_stored_before_it_is_taken() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut spec = spec(Some(2));
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    // The reconcile ends with a status write of its counts and conditions.
+    assert_eq!(
+        events(&fake)[..2],
+        ["status [unrouting uid-2]", "pod-2 routable false"]
+    );
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    events(&fake);
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(
+        events(&fake),
+        [
+            "status [committing uid-2]",
+            "pod-2 cost Some(-2147483648)",
+            "replicas 2",
+            "status [removing uid-2]"
+        ]
+    );
+    // Without a Service, the commit is stored before anything is written.
+    let fake = Fake::with(&[9, 0, 9]);
+    once(&fake, &spec_without_service(), 0).await;
+    assert_eq!(
+        events(&fake),
+        [
+            "status [committing uid-2]",
+            "pod-2 cost Some(-2147483648)",
+            "replicas 2",
+            "status [removing uid-2]"
+        ]
+    );
+}
+
+fn spec_without_service() -> GdlScalerSpec {
+    spec(Some(2))
+}
+
+/// A pod that goes unready after the commit is the one the ReplicaSet
+/// deletes, ranking readiness before cost. The ReplicaSet then has
+/// nothing left to delete, so the victim, which never retired, gets its
+/// cost and its Service back.
+#[tokio::test]
+async fn a_victim_passed_over_for_a_pod_gone_unready_serves_again() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut spec = spec(Some(2));
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Removing);
+    fake.state().pods[0].view.ready = false;
+    fake.settle(false);
+    assert!(fake.pod("pod-1").view.terminating);
+    assert!(!fake.pod("pod-2").view.terminating);
+    fake.take_writes();
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(
+        fake.take_writes(),
+        ["pod-2 routable true", "pod-2 cost None"]
+    );
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(last.outcome, Outcome::KubernetesChoseAnother);
+    assert_eq!(
+        (last.chosen.as_str(), last.deleted.as_str()),
+        ("uid-2", "uid-1")
+    );
+}
+
+/// The control: the count lowered, the victim alive, and one more pod than
+/// the count. The ReplicaSet has not acted yet, and the victim stays out
+/// of its Service.
+#[tokio::test]
+async fn a_committed_victim_stays_out_while_the_replicaset_lags() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut spec = spec(Some(2));
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    once(&fake, &spec, 2_000).await;
+    fake.take_writes();
+    for at in [3_000, 4_000, 5_000] {
+        once(&fake, &spec, at).await;
+    }
+    assert!(fake.take_writes().is_empty());
+    assert!(!fake.pod("pod-2").routable);
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Removing);
+}
+
+/// A Deployment made again under the same name: the victim chosen from
+/// the old one is abandoned, and its pod gets back its Service and cost.
+#[tokio::test]
+async fn a_victim_of_a_deployment_made_again_is_abandoned() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut spec = spec(Some(2));
+    spec.service = Some(SERVICE.into());
+    once(&fake, &spec, 0).await;
+    assert_eq!(status(&fake).retiring[0].deployment, "deployment-a");
+    {
+        let mut state = fake.state();
+        state.deployment = "deployment-b".into();
+        state.pods[1].cost = Some(VICTIM_COST);
+    }
+    fake.take_writes();
+    spec.replicas = Some(3);
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(
+        fake.take_writes(),
+        ["pod-2 routable true", "pod-2 cost None"]
+    );
+    let status = status(&fake);
+    assert!(status.retiring.is_empty());
+    assert_eq!(status.last.expect("ended").outcome, Outcome::Abandoned);
 }

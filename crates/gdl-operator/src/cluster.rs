@@ -17,6 +17,9 @@ use crate::{DELETION_COST, GdlScaler, GdlScalerStatus, ROUTABLE, SCALER_MANAGER}
 /// A target Deployment, as the scaler reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
+    /// Its uid and its resourceVersion when read: every write the scaler
+    /// decides on from this read carries them.
+    pub fence: Fence,
     /// Its `spec.replicas`, which the scaler owns.
     pub replicas: i32,
     /// Its selector's labels as a label selector, `key=value,...`.
@@ -54,10 +57,47 @@ impl Target {
             || status.updated_replicas.unwrap_or(0) < replicas
             || status.replicas.unwrap_or(0) > status.updated_replicas.unwrap_or(0);
         Some(Self {
+            fence: Fence {
+                uid: deployment.metadata.uid.clone()?,
+                resource_version: deployment.metadata.resource_version.clone()?,
+            },
             replicas,
             selector,
             rolling,
         })
+    }
+}
+
+/// The read of an object a write was decided on: the API server refuses
+/// the write if the object was made again (another uid) or changed since
+/// (another resourceVersion).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fence {
+    /// The object's uid.
+    pub uid: String,
+    /// Its resourceVersion.
+    pub resource_version: String,
+}
+
+/// Why a write did not land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// The view it was decided on is out of date: the object changed (409),
+    /// was made again (422 on its uid), or is gone (404). The reconcile
+    /// stops, and the next one reads again and decides again.
+    Stale(String),
+    /// Anything else.
+    Failed(String),
+}
+
+impl Refused {
+    fn of(what: &str, error: kube::Error) -> Self {
+        match &error {
+            kube::Error::Api(status) if [404, 409, 422].contains(&status.code) => {
+                Self::Stale(format!("{what}: {error}"))
+            }
+            _ => Self::Failed(format!("{what}: {error}")),
+        }
     }
 }
 
@@ -76,6 +116,8 @@ pub struct PodView {
     pub ready: bool,
     /// Whether it is being deleted.
     pub terminating: bool,
+    /// Its [`ROUTABLE`] label: `None` without one.
+    pub routable: Option<bool>,
     /// The port of its container port named `system`, where it serves
     /// `/metrics`.
     pub system_port: Option<u16>,
@@ -109,6 +151,12 @@ impl PodView {
                 .map_or(0, |time| time.0.as_millisecond()),
             ready,
             terminating: pod.metadata.deletion_timestamp.is_some(),
+            routable: pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(ROUTABLE))
+                .map(|value| value == "true"),
             system_port,
         })
     }
@@ -130,29 +178,38 @@ pub trait Cluster {
         service: &str,
     ) -> impl Future<Output = Result<BTreeSet<String>, String>> + Send;
 
-    /// Set the Deployment `name`'s `replicas`, as its one owner.
-    fn scale(&self, name: &str, replicas: i32) -> impl Future<Output = Result<(), String>> + Send;
+    /// Set the Deployment `name`'s `replicas`, as its one owner, only if
+    /// it is still as `fence` read it: its resourceVersion after.
+    fn scale(
+        &self,
+        name: &str,
+        replicas: i32,
+        fence: &Fence,
+    ) -> impl Future<Output = Result<String, Refused>> + Send;
 
-    /// Set `pod`'s [`ROUTABLE`] label.
+    /// Set `pod`'s [`ROUTABLE`] label, only on the pod of its uid.
     fn routable(
         &self,
         pod: &PodView,
         routable: bool,
-    ) -> impl Future<Output = Result<(), String>> + Send;
+    ) -> impl Future<Output = Result<(), Refused>> + Send;
 
-    /// Set `pod`'s deletion cost, or remove it.
+    /// Set `pod`'s deletion cost, or remove it, only on the pod of its uid.
     fn cost(
         &self,
         pod: &PodView,
         cost: Option<i32>,
-    ) -> impl Future<Output = Result<(), String>> + Send;
+    ) -> impl Future<Output = Result<(), Refused>> + Send;
 
-    /// Write the status of the scaler `name`.
+    /// Write the status of the scaler `name`, only if it is still at
+    /// `version` when one is given: its resourceVersion after, when the
+    /// answer has one.
     fn status(
         &self,
         name: &str,
         status: &GdlScalerStatus,
-    ) -> impl Future<Output = Result<(), String>> + Send;
+        version: Option<&str>,
+    ) -> impl Future<Output = Result<Option<String>, Refused>> + Send;
 }
 
 /// [`Cluster`] over the Kubernetes API, in one namespace.
@@ -181,7 +238,7 @@ impl KubeCluster {
         &self,
         pod: &PodView,
         mut metadata: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refused> {
         metadata["uid"] = pod.uid.clone().into();
         self.pods
             .patch(
@@ -191,7 +248,7 @@ impl KubeCluster {
             )
             .await
             .map(drop)
-            .map_err(|e| format!("pod `{}`: {e}", pod.name))
+            .map_err(|e| Refused::of(&format!("pod `{}`", pod.name), e))
     }
 }
 
@@ -234,44 +291,56 @@ impl Cluster for KubeCluster {
             .collect())
     }
 
-    async fn scale(&self, name: &str, replicas: i32) -> Result<(), String> {
+    async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
         // A forced apply of the one field: the scaler is its designated
-        // owner, so force is its normal mode and it never meets a
-        // conflict, and it changes no other field.
+        // owner, so force is its normal mode and it meets no field
+        // conflict, and it changes no other field. Its uid and
+        // resourceVersion make it a write of what the decision read: a
+        // Deployment made again or changed since refuses it.
         let patch = json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
-            "metadata": {"name": name},
+            "metadata": {
+                "name": name,
+                "uid": fence.uid,
+                "resourceVersion": fence.resource_version,
+            },
             "spec": {"replicas": replicas},
         });
-        self.deployments
+        let written = self
+            .deployments
             .patch(
                 name,
                 &PatchParams::apply(SCALER_MANAGER).force(),
                 &Patch::Apply(patch),
             )
             .await
-            .map(drop)
-            .map_err(|e| format!("Deployment `{name}`: {e}"))
+            .map_err(|e| Refused::of(&format!("Deployment `{name}`"), e))?;
+        Ok(written.metadata.resource_version.unwrap_or_default())
     }
 
-    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), String> {
+    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), Refused> {
         self.patch_pod(pod, json!({"labels": {ROUTABLE: routable.to_string()}}))
             .await
     }
 
-    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), String> {
+    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), Refused> {
         let value = cost.map(|cost| cost.to_string());
         self.patch_pod(pod, json!({"annotations": {DELETION_COST: value}}))
             .await
     }
 
-    async fn status(&self, name: &str, status: &GdlScalerStatus) -> Result<(), String> {
+    async fn status(
+        &self,
+        name: &str,
+        status: &GdlScalerStatus,
+        version: Option<&str>,
+    ) -> Result<Option<String>, Refused> {
         // A merge patch replaces a list whole, and removes a field set to
         // null: the encoding leaves out an empty list and an absent
         // field, which the patch would then keep as they were, so each is
         // named.
-        let mut value = serde_json::to_value(status).map_err(|e| e.to_string())?;
+        let mut value = serde_json::to_value(status).map_err(|e| Refused::Failed(e.to_string()))?;
         if let Some(fields) = value.as_object_mut() {
             for list in ["retiring", "conditions"] {
                 fields.entry(list).or_insert_with(|| json!([]));
@@ -280,15 +349,18 @@ impl Cluster for KubeCluster {
                 fields.entry(field).or_insert(serde_json::Value::Null);
             }
         }
-        self.scalers
-            .patch_status(
-                name,
-                &PatchParams::default(),
-                &Patch::Merge(json!({"status": value})),
-            )
+        // With a resourceVersion, the merge patch is refused if another
+        // write came between the read and this one.
+        let mut patch = json!({"status": value});
+        if let Some(version) = version {
+            patch["metadata"] = json!({"resourceVersion": version});
+        }
+        let written = self
+            .scalers
+            .patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
             .await
-            .map(drop)
-            .map_err(|e| format!("GdlScaler `{name}` status: {e}"))
+            .map_err(|e| Refused::of(&format!("GdlScaler `{name}` status"), e))?;
+        Ok(written.metadata.resource_version)
     }
 }
 

@@ -169,6 +169,14 @@ pub struct Retiring {
     pub pod: String,
     /// Its pod's uid, by which the scaler tracks it.
     pub uid: String,
+    /// The uid of the Deployment it was chosen from. A Deployment made
+    /// again under the same name has another, and the scaler abandons the
+    /// removal.
+    pub deployment: String,
+    /// The Deployment's `replicas` once it is removed: one below the count
+    /// when it was chosen. A count at or below it shows that its scale-down
+    /// was written.
+    pub target: i32,
     /// Its instance's velo address, `ip:port`, when the hub listed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
@@ -201,16 +209,23 @@ pub struct Retiring {
     pub anchors: u64,
 }
 
-/// Where a victim's removal is.
+/// Where a victim's removal is. The scaler stores each phase before the
+/// step it names, so that a step a lost write leaves half done is finished
+/// or undone from what the status says, never guessed from counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum RetiringPhase {
-    /// Taken out of its entry Service: the scaler waits until the
-    /// endpoints no longer list it, and then the routing grace.
+    /// Being taken out of its entry Service: its label is set to `false`,
+    /// and the scaler waits until the endpoints no longer list it, and
+    /// then the routing grace. A scale-up takes it back.
     Unrouting,
-    /// Its cost is set and the target scaled down: the ReplicaSet deletes
-    /// it, and it drains on its SIGTERM.
-    Deleting,
+    /// Its cost and the target's `replicas` at `target` are being
+    /// written. Once the count is at or below `target`, the removal is
+    /// committed.
+    Committing,
+    /// Committed: the ReplicaSet deletes it, and it drains on its SIGTERM.
+    /// It stays out of its Service until its pod is gone.
+    Removing,
 }
 
 /// How the last removal ended.
@@ -242,8 +257,13 @@ pub enum Outcome {
     /// The ReplicaSet deleted another pod. In signal mode the victim was
     /// never retired, so nothing was lost.
     KubernetesChoseAnother,
-    /// The scale-down was undone before the ReplicaSet deleted a pod.
+    /// The scale-down was undone before it was committed.
     Cancelled,
+    /// Its pod went before its removal was committed.
+    Lost,
+    /// Its Deployment was made again under the same name: the scaler put
+    /// back what it had changed on the pod, and starts over.
+    Abandoned,
 }
 
 impl GdlScalerSpec {

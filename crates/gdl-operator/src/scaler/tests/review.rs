@@ -31,7 +31,6 @@ async fn cancellation_restores_a_victim_whose_status_was_stored() {
 }
 
 #[tokio::test]
-#[ignore = "F1: a lost status write leaves a live frontend permanently unroutable"]
 async fn cancellation_restores_a_victim_after_a_lost_status_write() {
     let fake = cancel_after_label_write(true).await;
     assert!(
@@ -41,7 +40,6 @@ async fn cancellation_restores_a_victim_after_a_lost_status_write() {
 }
 
 #[tokio::test]
-#[ignore = "F2: after a victim disappears, a stale Deployment count unroutes the only ready frontend"]
 async fn a_victim_that_dies_does_not_cost_the_last_ready_frontend() {
     let fake = Fake::with(&[5, 0]);
     let mut wanted = spec(Some(1));
@@ -86,7 +84,6 @@ impl Probe for PausedProbe<'_> {
 }
 
 #[tokio::test]
-#[ignore = "F3: a second operator's stale reconcile overwrites a newer HPA scale"]
 async fn concurrent_operators_preserve_a_newer_scale() {
     let fake = Fake::with(&[5, 5, 5, 0]);
     let probe = PausedProbe {
@@ -123,7 +120,6 @@ async fn concurrent_operators_preserve_a_newer_scale() {
 }
 
 #[tokio::test]
-#[ignore = "F5: a restart after scaling restores routing before the ReplicaSet deletes the victim"]
 async fn a_committed_removal_keeps_the_victim_out_of_its_service() {
     let fake = Fake::with(&[9, 0, 9]);
     let mut wanted = spec(Some(2));

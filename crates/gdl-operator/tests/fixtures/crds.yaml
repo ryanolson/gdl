@@ -225,7 +225,9 @@
                           "removed",
                           "overran",
                           "kubernetesChoseAnother",
-                          "cancelled"
+                          "cancelled",
+                          "lost",
+                          "abandoned"
                         ],
                         "type": "string"
                       },
@@ -285,6 +287,10 @@
                           "minimum": 0.0,
                           "type": "integer"
                         },
+                        "deployment": {
+                          "description": "The uid of the Deployment it was chosen from. A Deployment made\nagain under the same name has another, and the scaler abandons the\nremoval.",
+                          "type": "string"
+                        },
                         "egress": {
                           "default": 0,
                           "description": "Its egress permits in use, read as `admitted` is.",
@@ -306,7 +312,8 @@
                           "description": "Where its removal is.",
                           "enum": [
                             "unrouting",
-                            "deleting"
+                            "committing",
+                            "removing"
                           ],
                           "type": "string"
                         },
@@ -323,6 +330,11 @@
                           "description": "When it was chosen, RFC 3339.",
                           "type": "string"
                         },
+                        "target": {
+                          "description": "The Deployment's `replicas` once it is removed: one below the count\nwhen it was chosen. A count at or below it shows that its scale-down\nwas written.",
+                          "format": "int32",
+                          "type": "integer"
+                        },
                         "uid": {
                           "description": "Its pod's uid, by which the scaler tracks it.",
                           "type": "string"
@@ -334,9 +346,11 @@
                         }
                       },
                       "required": [
+                        "deployment",
                         "phase",
                         "pod",
                         "since",
+                        "target",
                         "uid"
                       ],
                       "type": "object"

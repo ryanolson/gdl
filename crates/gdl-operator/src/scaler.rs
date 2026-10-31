@@ -4,17 +4,25 @@
 //! Service and waits until it has left the endpoints and the routing
 //! grace has passed, then sets its deletion cost to the lowest and writes
 //! the target's `replicas` one lower, so that the ReplicaSet deletes that
-//! pod. The instance retires and drains on its SIGTERM. Everything the
-//! scaler must remember between reconciles is in its status, so an
-//! operator that restarts carries on. See `docs/src/guides/operator.md`.
+//! pod. The instance retires and drains on its SIGTERM.
+//!
+//! Write ahead, never infer. Before each step that changes a pod or the
+//! target, the scaler stores in its status the victim, its pod's uid, the
+//! Deployment's uid, the target count, and the phase that names the step;
+//! each step can be taken again; and a reconcile that finds a step half
+//! done finishes or undoes it from what the status says. Every write
+//! carries the read it was decided on: the status the scaler's
+//! resourceVersion, the target its uid and resourceVersion, a pod its uid.
+//! A write refused as stale ends the reconcile, and the next one reads
+//! again and decides again. See `docs/src/guides/operator.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use k8s_openapi::jiff::Timestamp;
 
-use crate::cluster::{Cluster, PodView};
+use crate::cluster::{Cluster, Fence, PodView, Refused};
 use crate::probe::{Held, Instances, Probe};
 use crate::victim::{Candidate, Victims};
 use crate::{GdlScaler, GdlScalerSpec, GdlScalerStatus, Last, Outcome, Retiring, RetiringPhase};
@@ -41,6 +49,10 @@ const BLOCKED: Duration = Duration::from_secs(5);
 /// When to look again with nothing in progress: a change to the scaler or
 /// its target wakes it sooner.
 const IDLE: Duration = Duration::from_secs(60);
+
+/// When to look again after a write was refused as stale: soon, with a
+/// fresh read.
+const STALE: Duration = Duration::from_millis(250);
 
 /// What a reconcile reads and writes through.
 pub struct Context<'a, C, P> {
@@ -69,6 +81,7 @@ pub async fn reconcile<C: Cluster, P: Probe>(
     let mut run = Run {
         cx,
         spec: &scaler.spec,
+        name,
         now_ms,
         status: GdlScalerStatus {
             observed_generation: scaler.metadata.generation,
@@ -76,6 +89,9 @@ pub async fn reconcile<C: Cluster, P: Probe>(
         },
         conditions: old.conditions.clone(),
         generation: scaler.metadata.generation,
+        version: scaler.metadata.resource_version.clone(),
+        written: old.clone(),
+        restored: BTreeSet::new(),
     };
     let requeue = match run.step(old.retiring.clone()).await {
         Ok(requeue) => requeue,
@@ -83,13 +99,21 @@ pub async fn reconcile<C: Cluster, P: Probe>(
             run.condition("Blocked", true, reason, &message);
             BLOCKED
         }
+        Err(Stop::Stale(why)) => {
+            tracing::debug!(scaler = %run.name, %why, "a write was stale; reading again");
+            return Ok(STALE);
+        }
         Err(Stop::Failed(error)) => return Err(error),
     };
-    run.status.conditions = run.conditions;
-    if run.status != old {
-        cx.cluster.status(&name, &run.status).await?;
+    match run.write().await {
+        Ok(()) => Ok(requeue),
+        Err(Stop::Stale(why)) => {
+            tracing::debug!(scaler = %run.name, %why, "the status was stale; reading again");
+            Ok(STALE)
+        }
+        Err(Stop::Failed(error)) => Err(error),
+        Err(Stop::Blocked(..)) => unreachable!("a status write does not block"),
     }
-    Ok(requeue)
 }
 
 /// Why a reconcile stopped early.
@@ -97,6 +121,8 @@ enum Stop {
     /// It cannot act until something changes: the reason and the message
     /// of the `Blocked` condition.
     Blocked(&'static str, String),
+    /// A write was refused: what it was decided on changed.
+    Stale(String),
     /// A read or a write failed.
     Failed(String),
 }
@@ -107,13 +133,30 @@ impl From<String> for Stop {
     }
 }
 
+impl From<Refused> for Stop {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::Stale(why) => Self::Stale(why),
+            Refused::Failed(error) => Self::Failed(error),
+        }
+    }
+}
+
 struct Run<'a, 'c, C, P> {
     cx: &'a Context<'c, C, P>,
     spec: &'a GdlScalerSpec,
+    name: String,
     now_ms: i64,
     status: GdlScalerStatus,
     conditions: Vec<Condition>,
     generation: Option<i64>,
+    /// The scaler's resourceVersion: each status write is conditional on
+    /// it, and moves it.
+    version: Option<String>,
+    /// The status as last stored.
+    written: GdlScalerStatus,
+    /// The pods this reconcile put back in their Service, by uid.
+    restored: BTreeSet<String>,
 }
 
 impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
@@ -148,9 +191,25 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             })?;
         self.status.selector = target.selector.clone();
         let pods = self.cx.cluster.pods(&target.selector).await?;
+        let mut fence = target.fence.clone();
         let mut replicas = target.replicas;
 
-        let mut kept = self.follow(retiring, &pods, replicas, bound).await?;
+        // A victim of a Deployment since made again under the same name is
+        // abandoned: what the scaler changed on its pod is put back.
+        let mut current = Vec::new();
+        for victim in retiring {
+            if victim.deployment == fence.uid {
+                current.push(victim);
+                continue;
+            }
+            if let Some(pod) = alive(&pods, &victim.uid) {
+                self.put_back(pod, true).await?;
+            }
+            let reason = "its Deployment was made again under the same name".to_string();
+            self.finish(victim, Outcome::Abandoned, String::new(), reason);
+        }
+        let mut kept = self.follow(current, &pods, replicas, bound).await?;
+        self.sweep(&pods, &kept).await?;
 
         let suspended = spec.suspend.is_some();
         self.condition(
@@ -169,11 +228,11 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         );
         let Some(asked) = spec.replicas.filter(|_| !suspended) else {
             if suspended {
-                for victim in kept.extract_if(.., |v| v.phase == RetiringPhase::Unrouting) {
-                    self.restore(&pods, &victim).await?;
+                while let Some(at) = kept.iter().position(uncommitted) {
+                    self.cancel(&mut kept, at, &pods).await?;
                 }
                 if replicas != 0 {
-                    self.cx.cluster.scale(&target_ref.name, 0).await?;
+                    self.cx.cluster.scale(&target_ref.name, 0, &fence).await?;
                 }
             }
             self.count(&pods, kept);
@@ -192,142 +251,105 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         };
         let desired = asked.max(spec.min_replicas());
 
-        // A scale-up first takes back the victims still being taken out of
-        // their Service, the latest chosen first: none has retired.
-        let unrouting = |kept: &[Retiring]| {
-            let count = kept
-                .iter()
-                .filter(|v| v.phase == RetiringPhase::Unrouting)
-                .count();
-            i32::try_from(count).unwrap_or(i32::MAX)
+        // A scale-up first takes back the victims not yet committed, the
+        // latest chosen first: none has retired. It writes the count up
+        // only once every committed victim's pod is being deleted: a count
+        // raised before that would leave the ReplicaSet nothing to delete,
+        // and the victim out of its Service for good.
+        let pending = |kept: &[Retiring]| {
+            i32::try_from(kept.iter().filter(|v| uncommitted(v)).count()).unwrap_or(i32::MAX)
         };
-        while desired > replicas - unrouting(&kept) {
+        while desired > replicas - pending(&kept) {
             let Some(at) = kept
                 .iter()
                 .enumerate()
-                .filter(|(_, v)| v.phase == RetiringPhase::Unrouting)
+                .filter(|(_, v)| uncommitted(v))
                 .max_by(|(_, a), (_, b)| a.since.cmp(&b.since))
                 .map(|(at, _)| at)
             else {
                 break;
             };
-            let victim = kept.remove(at);
-            self.restore(&pods, &victim).await?;
+            self.cancel(&mut kept, at, &pods).await?;
         }
+        let mut waiting = false;
         if desired > replicas {
-            self.cx.cluster.scale(&target_ref.name, desired).await?;
-            replicas = desired;
-        }
-
-        // Victims out of their Service, past the routing grace, are
-        // deleted: the lowest cost, then one replica fewer.
-        if kept.iter().any(|v| v.phase == RetiringPhase::Unrouting) {
-            let service = spec.service.as_deref().unwrap_or_default();
-            let listed = self.cx.cluster.endpoints(service).await?;
-            for victim in &mut kept {
-                if victim.phase != RetiringPhase::Unrouting || listed.contains(&victim.uid) {
-                    continue;
-                }
-                let Some(unrouted) = victim.unrouted.as_deref().and_then(millis) else {
-                    victim.unrouted = Some(rfc3339(self.now_ms));
-                    continue;
-                };
-                if self.now_ms - unrouted < millis_of(grace) {
-                    continue;
-                }
-                let pod = pods
-                    .iter()
-                    .find(|p| p.uid == victim.uid)
-                    .expect("follow keeps only victims whose pod exists");
-                replicas -= 1;
-                self.delete(pod, replicas).await?;
-                victim.phase = RetiringPhase::Deleting;
-                victim.scaled = Some(rfc3339(self.now_ms));
+            if kept.iter().any(|v| alive(&pods, &v.uid).is_some()) {
+                waiting = true;
+            } else {
+                fence.resource_version = self
+                    .cx
+                    .cluster
+                    .scale(&target_ref.name, desired, &fence)
+                    .await?;
+                replicas = desired;
             }
         }
 
-        // New victims.
-        let effective = replicas - unrouting(&kept);
+        // The one victim not yet committed goes on: out of its Service, the
+        // routing grace, then its commit. A commit stored but not written
+        // is written again.
+        if let Some(at) = kept.iter().position(uncommitted) {
+            let pod = alive(&pods, &kept[at].uid)
+                .expect("follow keeps a victim not yet committed only while its pod is alive");
+            let mut commit = kept[at].phase == RetiringPhase::Committing;
+            if kept[at].phase == RetiringPhase::Unrouting {
+                if pod.routable != Some(false) {
+                    self.cx.cluster.routable(pod, false).await?;
+                }
+                let service = spec.service.as_deref().unwrap_or_default();
+                let listed = self.cx.cluster.endpoints(service).await?;
+                if !listed.contains(&pod.uid) {
+                    match kept[at].unrouted.as_deref().and_then(millis) {
+                        None => kept[at].unrouted = Some(rfc3339(self.now_ms)),
+                        Some(unrouted) => commit = self.now_ms - unrouted >= millis_of(grace),
+                    }
+                }
+            }
+            if commit {
+                replicas = self
+                    .commit(&mut kept, at, pod, replicas, &mut fence)
+                    .await?;
+            }
+        }
+
+        // New victims, while none is uncommitted: the live pods that are
+        // not leaving, against the desired count.
         let mut blocked = None;
-        if desired < effective {
+        if !waiting && !kept.iter().any(uncommitted) {
+            let leaving = |pod: &PodView| kept.iter().any(|v| v.uid == pod.uid);
+            let staying: Vec<&PodView> = pods
+                .iter()
+                .filter(|p| !p.terminating && !leaving(p))
+                .collect();
+            let excess =
+                usize::try_from(i32::try_from(staying.len()).unwrap_or(i32::MAX) - desired)
+                    .unwrap_or(0);
             let room = usize::try_from(spec.max_concurrent_drains())
                 .unwrap_or(1)
                 .saturating_sub(kept.len());
-            let ours = |pod: &PodView| kept.iter().any(|v| v.uid == pod.uid);
-            if room == 0 {
-                // The drains in progress pace the scale-down.
+            if excess == 0 || room == 0 {
+                // Nothing to remove, or the drains in progress pace it.
             } else if target.rolling {
                 blocked = Some((
                     "RolloutInProgress",
                     "a rollout of the target is in progress".to_string(),
                 ));
-            } else if let Some(pod) = pods.iter().find(|p| p.terminating && !ours(p)) {
+            } else if let Some(pod) = pods.iter().find(|p| p.terminating && !leaving(p)) {
                 blocked = Some((
                     "PodTerminating",
                     format!("pod `{}` is terminating", pod.name),
                 ));
-            } else if let Some(pod) = pods.iter().find(|p| !p.terminating && !ours(p) && !p.ready) {
+            } else if let Some(pod) = staying.iter().find(|p| !p.ready) {
                 blocked = Some(("PodNotReady", format!("pod `{}` is not ready", pod.name)));
             } else {
-                let count = room.min(usize::try_from(effective - desired).unwrap_or(0));
-                let candidates: Vec<&PodView> = pods.iter().filter(|p| !ours(p)).collect();
-                let held = self.held(&candidates).await;
-                let instances = self.cx.probe.instances(&spec.pool).await.ok();
-                let ranked: Vec<Candidate> = candidates
-                    .iter()
-                    .map(|pod| Candidate {
-                        pod: pod.name.clone(),
-                        uid: pod.uid.clone(),
-                        created_ms: pod.created_ms,
-                        load: crate::probe::load_of(
-                            held.get(&pod.uid),
-                            instance_of(instances.as_ref(), pod),
-                        ),
-                    })
-                    .collect();
-                let Some(chosen) = self.cx.victims.choose(spec.victim(), &ranked, count) else {
-                    return Err(Stop::Blocked(
-                        "UnknownVictimPolicy",
-                        format!("no victim policy is registered as `{}`", spec.victim()),
-                    ));
+                // A victim leaves its Service before it commits, and only
+                // one is ever uncommitted: one at a time with a Service.
+                let count = match spec.service {
+                    Some(_) => 1,
+                    None => room.min(excess),
                 };
-                for candidate in chosen {
-                    let pod = candidates
-                        .iter()
-                        .find(|p| p.uid == candidate.uid)
-                        .expect("a candidate is a pod");
-                    let held = held.get(&pod.uid).copied().unwrap_or_default();
-                    let mut victim = Retiring {
-                        pod: pod.name.clone(),
-                        uid: pod.uid.clone(),
-                        instance: instance_of(instances.as_ref(), pod)
-                            .and_then(|i| i.addresses.first())
-                            .map(ToString::to_string),
-                        since: rfc3339(self.now_ms),
-                        phase: RetiringPhase::Unrouting,
-                        unrouted: None,
-                        scaled: None,
-                        gone: None,
-                        admitted: held.admitted,
-                        egress: held.egress,
-                        anchors: held.anchors,
-                    };
-                    if spec.service.is_some() {
-                        self.cx.cluster.routable(pod, false).await?;
-                    } else {
-                        replicas -= 1;
-                        self.delete(pod, replicas).await?;
-                        victim.phase = RetiringPhase::Deleting;
-                        victim.scaled = Some(rfc3339(self.now_ms));
-                    }
-                    tracing::info!(
-                        pod = %pod.name,
-                        load = ?candidate.load,
-                        policy = spec.victim(),
-                        "chose a victim"
-                    );
-                    kept.push(victim);
-                }
+                self.choose(&mut kept, &staying, count, replicas, &mut fence)
+                    .await?;
             }
         }
 
@@ -338,8 +360,11 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             None => self.condition("Blocked", false, "NotBlocked", ""),
         }
         let live = self.status.replicas;
-        let scaling = busy || live != desired;
-        let message = format!("{live} of {desired}");
+        let scaling = busy || live != desired || waiting;
+        let message = match waiting {
+            true => format!("{live} of {desired}: waiting for a removed pod to be deleted"),
+            false => format!("{live} of {desired}"),
+        };
         self.condition(
             "Scaling",
             scaling,
@@ -361,12 +386,144 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         })
     }
 
+    /// Choose up to `count` victims among `staying`, with the target at
+    /// `replicas`: each is stored before anything is done to it, then
+    /// taken out of its Service, or, without one, committed at once.
+    async fn choose(
+        &mut self,
+        kept: &mut Vec<Retiring>,
+        staying: &[&PodView],
+        count: usize,
+        mut replicas: i32,
+        fence: &mut Fence,
+    ) -> Result<(), Stop> {
+        let spec = self.spec;
+        let held = self.held(staying).await;
+        let instances = self.cx.probe.instances(&spec.pool).await.ok();
+        let ranked: Vec<Candidate> = staying
+            .iter()
+            .map(|pod| Candidate {
+                pod: pod.name.clone(),
+                uid: pod.uid.clone(),
+                created_ms: pod.created_ms,
+                load: crate::probe::load_of(
+                    held.get(&pod.uid),
+                    instance_of(instances.as_ref(), pod),
+                ),
+            })
+            .collect();
+        let Some(chosen) = self.cx.victims.choose(spec.victim(), &ranked, count) else {
+            return Err(Stop::Blocked(
+                "UnknownVictimPolicy",
+                format!("no victim policy is registered as `{}`", spec.victim()),
+            ));
+        };
+        for candidate in chosen {
+            let pod = staying
+                .iter()
+                .find(|p| p.uid == candidate.uid)
+                .expect("a candidate is a pod");
+            // The last ready pod of a segment never leaves its Service.
+            let others = staying
+                .iter()
+                .filter(|p| p.uid != pod.uid && p.ready && !kept.iter().any(|v| v.uid == p.uid))
+                .count();
+            if others == 0 {
+                break;
+            }
+            let held = held.get(&pod.uid).copied().unwrap_or_default();
+            kept.push(Retiring {
+                pod: pod.name.clone(),
+                uid: pod.uid.clone(),
+                deployment: fence.uid.clone(),
+                target: replicas - 1,
+                instance: instance_of(instances.as_ref(), pod)
+                    .and_then(|i| i.addresses.first())
+                    .map(ToString::to_string),
+                since: rfc3339(self.now_ms),
+                phase: match spec.service {
+                    Some(_) => RetiringPhase::Unrouting,
+                    None => RetiringPhase::Committing,
+                },
+                unrouted: None,
+                scaled: None,
+                gone: None,
+                admitted: held.admitted,
+                egress: held.egress,
+                anchors: held.anchors,
+            });
+            tracing::info!(
+                pod = %pod.name,
+                load = ?candidate.load,
+                policy = spec.victim(),
+                "chose a victim"
+            );
+            self.persist(kept).await?;
+            let at = kept.len() - 1;
+            match kept[at].phase {
+                RetiringPhase::Unrouting => self.cx.cluster.routable(pod, false).await?,
+                _ => replicas = self.commit(kept, at, pod, replicas, fence).await?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit the removal of `kept[at]`, whose pod is `pod`, with the
+    /// target at `replicas`: store `committing` at one below it, then set
+    /// the pod's cost to the lowest, then write the count. The target's
+    /// count after.
+    async fn commit(
+        &mut self,
+        kept: &mut [Retiring],
+        at: usize,
+        pod: &PodView,
+        replicas: i32,
+        fence: &mut Fence,
+    ) -> Result<i32, Stop> {
+        let target = replicas - 1;
+        if kept[at].phase != RetiringPhase::Committing || kept[at].target != target {
+            kept[at].phase = RetiringPhase::Committing;
+            kept[at].target = target;
+            self.persist(kept).await?;
+        }
+        self.cx.cluster.cost(pod, Some(VICTIM_COST)).await?;
+        fence.resource_version = self
+            .cx
+            .cluster
+            .scale(&self.spec.target_ref.name, target, fence)
+            .await?;
+        kept[at].phase = RetiringPhase::Removing;
+        kept[at].scaled = Some(rfc3339(self.now_ms));
+        Ok(target)
+    }
+
+    /// Take back `kept[at]`, a victim not yet committed: it never retired.
+    async fn cancel(
+        &mut self,
+        kept: &mut Vec<Retiring>,
+        at: usize,
+        pods: &[PodView],
+    ) -> Result<(), Stop> {
+        let victim = kept.remove(at);
+        if let Some(pod) = alive(pods, &victim.uid) {
+            let cost = victim.phase == RetiringPhase::Committing;
+            self.put_back(pod, cost).await?;
+        }
+        let reason = "the scale-down was undone before it was committed".to_string();
+        self.finish(victim, Outcome::Cancelled, String::new(), reason);
+        Ok(())
+    }
+
     /// Carry each victim of `retiring` on, by its pod among `pods`, with
-    /// the target at `replicas`: the victims still being removed. A victim
-    /// whose pod is gone ends in `status.last`. One whose pod the
-    /// ReplicaSet passed over, since another pod went or the scale-down
-    /// was undone, gets its cost and its label back: in signal mode it
-    /// never retired.
+    /// the target at `replicas`, from what its status says and what the
+    /// target shows: a count at or below its target means its commit was
+    /// written. A victim whose pod is gone ends in `status.last`: removed
+    /// if committed, lost if not. A committed victim stays out of its
+    /// Service until its pod is gone, except one the ReplicaSet passed
+    /// over: its pod is alive, the count is at or below its target, and no
+    /// more pods live than the count, so the ReplicaSet has nothing left to
+    /// delete. In signal mode it never retired, and it gets its cost and
+    /// its label back.
     async fn follow(
         &mut self,
         retiring: Vec<Retiring>,
@@ -377,7 +534,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let mut kept = Vec::new();
         let mut listed: Option<Option<Instances>> = None;
         for mut victim in retiring {
+            let committed = victim.phase == RetiringPhase::Removing || replicas <= victim.target;
             let Some(pod) = pods.iter().find(|p| p.uid == victim.uid) else {
+                if !committed {
+                    let reason = "its pod went before its removal was committed".to_string();
+                    self.finish(victim, Outcome::Lost, String::new(), reason);
+                    continue;
+                }
                 // The removal ends with the pod's exit and the instance's
                 // leaving its hub. A hub that does not answer cannot say.
                 let mut reason = String::new();
@@ -430,15 +593,11 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 self.finish(victim, outcome, deleted, reason);
                 continue;
             };
+            if pod.terminating || committed {
+                victim.phase = RetiringPhase::Removing;
+                victim.scaled.get_or_insert_with(|| rfc3339(self.now_ms));
+            }
             if pod.terminating {
-                // Being deleted, whatever the status says: a status read
-                // before the write that scaled it down still says
-                // `unrouting`, and a victim taken for one would be scaled
-                // down again, or taken back.
-                if victim.phase == RetiringPhase::Unrouting {
-                    victim.phase = RetiringPhase::Deleting;
-                    victim.scaled.get_or_insert_with(|| rfc3339(self.now_ms));
-                }
                 if let Some(held) = self.held(&[pod]).await.remove(&pod.uid) {
                     victim.admitted = held.admitted;
                     victim.egress = held.egress;
@@ -448,50 +607,80 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 continue;
             }
             let live = pods.iter().filter(|p| !p.terminating).count();
-            let passed_over = victim.phase == RetiringPhase::Deleting
-                && i32::try_from(live).unwrap_or(i32::MAX) <= replicas;
+            let passed_over = committed && i32::try_from(live).unwrap_or(i32::MAX) <= replicas;
             if !passed_over {
                 kept.push(victim);
                 continue;
             }
-            self.restore(pods, &victim).await?;
-            self.cx.cluster.cost(pod, None).await?;
-            match pods.iter().find(|p| {
+            self.put_back(pod, true).await?;
+            let other = pods.iter().find(|p| {
                 p.terminating && p.uid != victim.uid && !kept.iter().any(|v| v.uid == p.uid)
-            }) {
-                Some(other) => {
-                    let reason = format!("kubernetes chose pod `{}`", other.name);
-                    let deleted = other.uid.clone();
-                    self.finish(victim, Outcome::KubernetesChoseAnother, deleted, reason);
-                }
-                None => {
-                    let reason = "the scale-down was undone before the pod went".to_string();
-                    self.finish(victim, Outcome::Cancelled, String::new(), reason);
-                }
-            }
+            });
+            let (deleted, reason) = match other {
+                Some(other) => (
+                    other.uid.clone(),
+                    format!("kubernetes chose pod `{}`", other.name),
+                ),
+                None => (
+                    String::new(),
+                    "another pod went, so the ReplicaSet deleted none".to_string(),
+                ),
+            };
+            self.finish(victim, Outcome::KubernetesChoseAnother, deleted, reason);
         }
         Ok(kept)
     }
 
-    /// Delete `pod` through its ReplicaSet: the lowest cost, then the
-    /// target at `replicas`.
-    async fn delete(&self, pod: &PodView, replicas: i32) -> Result<(), Stop> {
-        self.cx.cluster.cost(pod, Some(VICTIM_COST)).await?;
-        self.cx
-            .cluster
-            .scale(&self.spec.target_ref.name, replicas)
-            .await?;
+    /// Give back their Service to the live pods that are out of it and
+    /// that no victim names: a victim is stored before its label changes,
+    /// so such a pod is one whose removal was undone or lost.
+    async fn sweep(&self, pods: &[PodView], kept: &[Retiring]) -> Result<(), Stop> {
+        for pod in pods {
+            if !pod.terminating
+                && pod.routable == Some(false)
+                && !kept.iter().any(|v| v.uid == pod.uid)
+                && !self.restored.contains(&pod.uid)
+            {
+                self.cx.cluster.routable(pod, true).await?;
+            }
+        }
         Ok(())
     }
 
-    /// Put `victim`, which never retired, back in its entry Service.
-    async fn restore(&self, pods: &[PodView], victim: &Retiring) -> Result<(), Stop> {
-        if self.spec.service.is_none() {
+    /// Put `pod`, which never retired, back in its entry Service, and
+    /// clear its cost when `cost`.
+    async fn put_back(&mut self, pod: &PodView, cost: bool) -> Result<(), Stop> {
+        if self.spec.service.is_some() || pod.routable == Some(false) {
+            self.cx.cluster.routable(pod, true).await?;
+            self.restored.insert(pod.uid.clone());
+        }
+        if cost {
+            self.cx.cluster.cost(pod, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Store the status with `kept` as its victims, conditional on the
+    /// scaler's resourceVersion: the intent of the step that follows.
+    async fn persist(&mut self, kept: &[Retiring]) -> Result<(), Stop> {
+        self.status.retiring = kept.to_vec();
+        self.write().await
+    }
+
+    /// Store the status if it changed since it was last stored.
+    async fn write(&mut self) -> Result<(), Stop> {
+        self.status.conditions = self.conditions.clone();
+        if self.status == self.written {
             return Ok(());
         }
-        if let Some(pod) = pods.iter().find(|p| p.uid == victim.uid) {
-            self.cx.cluster.routable(pod, true).await?;
-        }
+        let version = self
+            .cx
+            .cluster
+            .status(&self.name, &self.status, self.version.as_deref())
+            .await?;
+        // An answer without a version leaves the next write unconditional.
+        self.version = version;
+        self.written = self.status.clone();
         Ok(())
     }
 
@@ -553,6 +742,17 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             None => self.conditions.push(condition),
         }
     }
+}
+
+/// Whether `victim` is not yet committed: the target's count may still be
+/// above its target.
+fn uncommitted(victim: &Retiring) -> bool {
+    victim.phase != RetiringPhase::Removing
+}
+
+/// The pod of `uid` among `pods`, while it is alive and not being deleted.
+fn alive<'p>(pods: &'p [PodView], uid: &str) -> Option<&'p PodView> {
+    pods.iter().find(|p| p.uid == uid && !p.terminating)
 }
 
 /// The instance `instances` lists at `pod`'s IP.

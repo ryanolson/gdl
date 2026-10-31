@@ -151,7 +151,6 @@ async fn an_unchanged_deployment_scales_normally() {
 }
 
 #[tokio::test]
-#[ignore = "F4: a stale forced apply changes a recreated Deployment with a new UID"]
 async fn a_recreated_deployment_keeps_its_new_replica_count() {
     let deployment = reconcile_across_recreation(true).await;
     assert_eq!(deployment["metadata"]["uid"], "deployment-b");
