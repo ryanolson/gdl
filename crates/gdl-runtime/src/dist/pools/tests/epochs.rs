@@ -803,3 +803,50 @@ fn a_row_on_a_pools_own_watch_keeps_its_evidence_when_the_relay_unlists_it() {
         "a row read with no evidence of its hub"
     );
 }
+
+#[test]
+#[ignore = "F7: unlisting a withheld follow forgets the drain it reported at the same epoch"]
+fn a_withheld_follow_keeps_its_reported_drain_when_unlisted() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a watch of its own");
+    for event in [followed(M1, 1, 5), FollowEvent::Synced { listed: true }] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    // A relay withholds an unread pool as unavailable while its hub still drains.
+    for state in [PoolState::Draining, PoolState::Unavailable] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(state_of(M1, 1, state))),
+            now,
+        );
+    }
+    let before = evidence(&pools, M1).0.expect("the follow's word");
+    assert_eq!(before.epoch(), 5);
+    assert!(before.is_draining(), "withholding cannot undo its drain");
+    assert!(!before.is_withdrawn());
+
+    follows.take(listed(M1, None), now);
+    let (after, row) = evidence(&pools, M1);
+    let after = after.expect("the follow still shown restates its word");
+    assert_eq!(row, Some(5), "the own watch still holds its follow");
+    assert_eq!(after.epoch(), 5);
+    assert!(!after.is_withdrawn());
+    assert!(
+        after.is_draining(),
+        "unlisting must retain the drain this follow reported: {after:?}"
+    );
+}
