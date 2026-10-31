@@ -447,6 +447,11 @@ impl Hubs for Fake {
     }
 }
 
+/// The spec of pool `p`, as [`pool`] gives it without a parent.
+pub(super) fn spec() -> gdl_k8s::Pool {
+    pool(false).spec.pool
+}
+
 /// Pool `p`, the render test's two segments, with a parent when `parent`.
 fn pool(parent: bool) -> GdlPool {
     let segment = |name: &str, ports: Vec<gdl_k8s::Port>| gdl_k8s::Segment {

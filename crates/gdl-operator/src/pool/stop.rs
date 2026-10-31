@@ -108,7 +108,12 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     StopStep::Release
                 }
                 StopStep::Release => {
-                    let selector = pod_selector(&self.pool.spec.pool.fleet, &self.name, None);
+                    let selector = pod_selector(
+                        &self.pool.spec.pool.fleet,
+                        &self.pool.spec.pool.cluster,
+                        &self.name,
+                        None,
+                    );
                     if !self.cx.pools.pods(&selector).await?.is_empty() {
                         // A pod of the pool runs again: the stop starts its
                         // segments over.
@@ -277,7 +282,12 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 _ => {}
             }
         }
-        let selector = pod_selector(&self.pool.spec.pool.fleet, &self.name, Some(false));
+        let selector = pod_selector(
+            &self.pool.spec.pool.fleet,
+            &self.pool.spec.pool.cluster,
+            &self.name,
+            Some(false),
+        );
         Ok(!self.cx.pools.pods(&selector).await?.is_empty())
     }
 
@@ -300,7 +310,12 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 )
                 .await?;
         }
-        let selector = pod_selector(&self.pool.spec.pool.fleet, &self.name, Some(true));
+        let selector = pod_selector(
+            &self.pool.spec.pool.fleet,
+            &self.pool.spec.pool.cluster,
+            &self.name,
+            Some(true),
+        );
         Ok(!self.cx.pools.pods(&selector).await?.is_empty())
     }
 }

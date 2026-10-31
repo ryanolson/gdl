@@ -50,6 +50,9 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 .finalizers(&self.name, &with, &self.version)
                 .await?;
         }
+        // Acted on, whether it is applied, held, or refused: a reader of
+        // the status knows its conditions speak of this generation.
+        self.status.observed_generation = Some(self.generation());
         let mut objects = gdl_k8s::children(
             &self.name,
             self.cx.namespace,
@@ -127,7 +130,6 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             if running.template.as_deref() != next && !spec.allow_pool_restart {
                 let generation = self.generation();
                 self.status.held = Some(generation);
-                self.status.observed_generation = Some(generation);
                 self.warn(
                     "PoolRestartPending",
                     true,
@@ -142,7 +144,6 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         }
         self.status.held = None;
         self.condition("PoolRestartPending", false, "NoHubChange", "");
-        self.status.observed_generation = Some(self.generation());
         self.condition("Applied", false, "Applying", "");
         // Every write below rests on this read of the pool.
         self.confirm().await?;

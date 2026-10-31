@@ -2,8 +2,6 @@
 //! [`KubePools`] is the real one, and the tests give a fake. Each read
 //! returns only what the controller decides on.
 
-use std::collections::BTreeMap;
-
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{
     ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, Preconditions,
@@ -451,16 +449,23 @@ impl Pools for KubePools {
     }
 }
 
-/// The labels by which a pool's pods are listed: `pool`'s, of fleet
-/// `fleet`, and, for `hub`, its hub's alone or its segments' alone.
-pub fn pod_selector(fleet: &str, pool: &str, hub: Option<bool>) -> String {
-    let mut selector = BTreeMap::from([
-        ("gdl.dev/fleet", gdl_k8s::label_value(fleet)),
-        ("gdl.dev/pool", gdl_k8s::label_value(pool)),
-    ])
+#[cfg(test)]
+#[path = "api/tests.rs"]
+mod tests;
+
+/// The labels by which a pool's pods are listed: pool `pool`'s, of fleet
+/// `fleet` in its cluster `cluster`, and, for `hub`, its hub's alone or
+/// its segments' alone. The cluster keeps apart another cluster's pool of
+/// the same name, where two clusters' contexts reach one namespace.
+pub fn pod_selector(fleet: &str, cluster: &str, pool: &str, hub: Option<bool>) -> String {
+    let mut selector: Vec<String> = [
+        ("gdl.dev/fleet", fleet),
+        ("gdl.dev/cluster", cluster),
+        ("gdl.dev/pool", pool),
+    ]
     .into_iter()
-    .map(|(key, value)| format!("{key}={value}"))
-    .collect::<Vec<_>>();
+    .map(|(key, value)| format!("{key}={}", gdl_k8s::label_value(value)))
+    .collect();
     match hub {
         Some(true) => selector.push("gdl.dev/segment=hub".into()),
         Some(false) => selector.push("gdl.dev/segment!=hub".into()),

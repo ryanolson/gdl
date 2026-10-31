@@ -1,0 +1,153 @@
+//! What [`KubePools`] sends the API server: each write's fence, its field
+//! manager, whether it is forced, and a delete's propagation.
+
+use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
+
+use http::{Request, Response};
+use kube::client::Body;
+use tower::service_fn;
+
+use super::*;
+
+/// A request: its method, its path and query, and its body.
+type Seen = (String, String, Value);
+
+/// A client whose every request is recorded and answered with an object
+/// of the path's kind, named and with a uid.
+fn recording() -> (KubePools, Arc<Mutex<Vec<Seen>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let service = service_fn(move |request: Request<Body>| {
+        let log = Arc::clone(&log);
+        async move {
+            let method = request.method().to_string();
+            let uri = request.uri().to_string();
+            let bytes = request.into_body().collect_bytes().await.expect("body");
+            let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            log.lock().expect("log").push((method, uri.clone(), body));
+            let reply = if uri.contains("/gdlpools/") {
+                json!({
+                    "apiVersion": "gdl.dev/v1alpha1", "kind": "GdlPool",
+                    "metadata": {"name": "p", "namespace": "ns", "uid": "pool", "resourceVersion": "8"},
+                    "spec": serde_json::to_value(crate::pool::tests::spec()).expect("spec"),
+                })
+            } else {
+                json!({
+                    "apiVersion": "v1", "kind": "ConfigMap",
+                    "metadata": {"name": "p", "namespace": "ns", "uid": "u", "resourceVersion": "9"},
+                })
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(200)
+                    .body(Body::from(reply.to_string().into_bytes()))
+                    .expect("response"),
+            )
+        }
+    });
+    let pools = KubePools::new(Client::new(service, "ns"), "ns", false);
+    (pools, seen)
+}
+
+#[tokio::test]
+async fn a_delete_is_in_the_background_and_fenced_by_uid() {
+    let (pools, seen) = recording();
+    pools
+        .delete(Kind::Deployment, "p-engine", "u1")
+        .await
+        .expect("a delete");
+    let (method, uri, body) = seen.lock().expect("log")[0].clone();
+    assert_eq!(method, "DELETE");
+    assert_eq!(uri, "/apis/apps/v1/namespaces/ns/deployments/p-engine?");
+    assert_eq!(body["propagationPolicy"], "Background");
+    assert_eq!(body["preconditions"]["uid"], "u1");
+}
+
+#[tokio::test]
+async fn the_finalizers_and_the_status_carry_the_version_read() {
+    let (pools, seen) = recording();
+    pools
+        .finalizers("p", &["gdl.dev/stop".into()], "7")
+        .await
+        .expect("finalizers");
+    pools
+        .status("p", &crate::GdlPoolStatus::default(), "8")
+        .await
+        .expect("status");
+    let seen = seen.lock().expect("log").clone();
+    assert_eq!(
+        seen[0].1,
+        "/apis/gdl.dev/v1alpha1/namespaces/ns/gdlpools/p?"
+    );
+    assert_eq!(
+        seen[0].2,
+        json!({"metadata": {"resourceVersion": "7", "finalizers": ["gdl.dev/stop"]}})
+    );
+    assert_eq!(
+        seen[1].1,
+        "/apis/gdl.dev/v1alpha1/namespaces/ns/gdlpools/p/status?"
+    );
+    assert_eq!(seen[1].2["metadata"]["resourceVersion"], "8");
+    // An absent field is named, so the merge patch removes it.
+    for field in ["stop", "held", "observedGeneration", "phase"] {
+        assert!(seen[1].2["status"][field].is_null(), "{field}");
+        assert!(seen[1].2["status"].get(field).is_some(), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn an_apply_is_forced_under_gdl_and_a_bootstrap_is_not() {
+    let (pools, seen) = recording();
+    let object = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "p", "namespace": "ns"}, "data": {},
+    });
+    pools.apply(&object, Some("u2")).await.expect("an apply");
+    pools
+        .write(
+            Kind::GdlScaler,
+            "p-engine",
+            "gdl-bootstrap",
+            json!({"replicas": 2}),
+            "u3",
+            Some("5"),
+            false,
+        )
+        .await
+        .expect("a bootstrap");
+    pools
+        .write(
+            Kind::GdlScaler,
+            "p-engine",
+            "gdl-pool",
+            json!({"suspend": "zero"}),
+            "u3",
+            None,
+            true,
+        )
+        .await
+        .expect("a suspend");
+    let seen = seen.lock().expect("log").clone();
+    assert_eq!(
+        seen[0].1,
+        "/api/v1/namespaces/ns/configmaps/p?&force=true&fieldManager=gdl"
+    );
+    assert_eq!(seen[0].2["metadata"]["uid"], "u2");
+    assert_eq!(
+        seen[1].1,
+        "/apis/gdl.dev/v1alpha1/namespaces/ns/gdlscalers/p-engine?&fieldManager=gdl-bootstrap"
+    );
+    assert_eq!(
+        seen[1].2["metadata"],
+        json!({"name": "p-engine", "uid": "u3", "resourceVersion": "5"})
+    );
+    assert_eq!(
+        seen[2].1,
+        "/apis/gdl.dev/v1alpha1/namespaces/ns/gdlscalers/p-engine?&force=true&fieldManager=gdl-pool"
+    );
+    assert_eq!(
+        seen[2].2["metadata"],
+        json!({"name": "p-engine", "uid": "u3"})
+    );
+}

@@ -60,6 +60,7 @@ async fn a_hub_change_without_allow_pool_restart_is_held() {
         "{log:?}"
     );
     assert_eq!(fake.status().held, Some(2));
+    assert_eq!(fake.status().observed_generation, Some(2));
     assert_eq!(
         condition(&fake, "PoolRestartPending"),
         Some(("True".into(), "HubChange".into()))
@@ -131,6 +132,60 @@ async fn an_object_the_pool_did_not_make_is_never_changed() {
         "{log:?}"
     );
     assert_eq!(fake.state().events, ["NotThePools"]);
+    // The refusal speaks of this generation, so a reader of the status
+    // need not wait for it.
+    assert_eq!(fake.status().observed_generation, Some(1));
+}
+
+/// An object that carries the pool's labels and that the pool did not
+/// make, such as a plain deploy's object of another cluster's pool of the
+/// same name, is neither changed nor pruned.
+#[tokio::test]
+async fn a_labelled_object_the_pool_did_not_make_is_left_alone() {
+    let fake = Fake::with(pool(false));
+    let planted = Live {
+        kind: Kind::Deployment,
+        name: "p-old".into(),
+        uid: "theirs".into(),
+        version: "1".into(),
+        controller: None,
+        template: None,
+        replica_owners: Vec::new(),
+        suspended: false,
+        replicas: Some(1),
+        deleting: false,
+    };
+    fake.state().objects.insert(
+        (Kind::Deployment, "p-old".into()),
+        Obj {
+            live: planted,
+            labelled: true,
+        },
+    );
+    fake.reconcile(0).await.expect("a reconcile");
+    fake.reconcile(1_000).await.expect("a reconcile");
+    let log = fake.log();
+    assert!(log.iter().all(|e| !e.contains("p-old")), "{log:?}");
+    assert!(
+        fake.state()
+            .objects
+            .contains_key(&(Kind::Deployment, "p-old".into()))
+    );
+    // And a stop leaves it too.
+    fake.settle();
+    fake.state().pods.remove("old");
+    fake.delete(false);
+    for now in 2..=8 {
+        fake.reconcile(now * 1_000).await.expect("a reconcile");
+        fake.settle();
+        fake.state().pods.remove("old");
+    }
+    assert!(released(&fake), "{:?}", fake.log());
+    assert!(
+        fake.log()
+            .iter()
+            .all(|e| !e.contains("p-old") && !e.contains("theirs"))
+    );
 }
 
 /// A segment the pool no longer renders, as after a rename, is deleted by
