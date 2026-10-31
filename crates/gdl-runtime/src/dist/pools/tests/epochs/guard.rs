@@ -406,8 +406,11 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         // withdrawal, which unlists a pool a lagging own watch still shows;
         // a same-epoch follow of a new generation; and a pool read from
         // its own watch; and a later hub's whole life, drain and withdrawal,
-        // told on the relay's watch while the pool's own watch lags.
-        let what = match rng.below(28) {
+        // told on the relay's watch while the pool's own watch lags; and a
+        // later hub's record read before the follower ends the earlier
+        // hub's follow, which may drain after, so that a snapshot shows the
+        // two together and only the follow says the drain.
+        let what = match rng.below(34) {
             // The pool's next hub writes its record: listed at once, and
             // its follow begun, which may never install.
             0 => {
@@ -448,7 +451,13 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                             state: PoolState::Draining,
                         },
                     );
-                    if let Some(listing) = &mut hub.listing {
+                    let of = hub.wire(follow.epoch);
+                    // A state names a generation, not an epoch: what the
+                    // hub of the follow said is noted here.
+                    hub.said.entry(of).or_default().drained = true;
+                    if let Some(listing) = &mut hub.listing
+                        && listing.0 == of
+                    {
                         listing.2 = true;
                     }
                     let listed = hub.listed_event();
@@ -663,6 +672,120 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     hub.epoch
                 )
             }
+            // A later hub's record, then the earlier hub's follow drains,
+            // and the pool's own watch is opened again: its snapshot shows
+            // the draining follow beside the later listing, and only the
+            // follow says the drain.
+            30 | 31 => match (hub.follow, read(&pools).1) {
+                (Some(mut follow), Some((generation, _))) if follow.installed => {
+                    hub.epoch += 1;
+                    hub.listing = Some((hub.wire(hub.epoch), PoolCondition::Live, false));
+                    let listed = hub.listed_event();
+                    wire.send(&mut hub, listed);
+                    follow.state = PoolState::Draining;
+                    hub.follow = Some(follow);
+                    hub.said.entry(hub.wire(follow.epoch)).or_default().drained = true;
+                    wire.send(
+                        &mut hub,
+                        FollowEvent::State {
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation: follow.generation,
+                            state: PoolState::Draining,
+                        },
+                    );
+                    match wire.own.take() {
+                        Some((asked, _)) => {
+                            follows.own(asked.key, asked.watch, Err(WatchEnd::Closed), now);
+                        }
+                        None => follows.unknown(UnknownFollowEvent {
+                            kind: "paused".into(),
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation,
+                        }),
+                    }
+                    heard.filling = None;
+                    match follows.asked().pop() {
+                        Some(asked) => {
+                            let snapshot = hub.own_snapshot().into();
+                            wire.own = Some((asked, snapshot));
+                            heard.filling = Some(Vec::new());
+                            format!(
+                                "hub of epoch {} lists; follow {} of epoch {} drains; its own watch opens",
+                                hub.epoch, follow.generation, follow.epoch
+                            )
+                        }
+                        None => "no own watch asked".into(),
+                    }
+                }
+                _ => "no follow to drain behind a later hub".into(),
+            },
+            // A follow drains and is withheld, a later hub's record comes,
+            // and the follower watches the relay again, whole: the new
+            // snapshot shows the follow unavailable beside the later
+            // listing, and no longer says the drain the follower heard.
+            // Then the pool is read from its own watch.
+            32 | 33 => match hub.follow {
+                Some(mut follow) if follow.installed && wire.own.is_none() => {
+                    let of = hub.wire(follow.epoch);
+                    hub.said.entry(of).or_default().drained = true;
+                    for state in [PoolState::Draining, PoolState::Unavailable] {
+                        let event = FollowEvent::State {
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation: follow.generation,
+                            state,
+                        };
+                        wire.send(&mut hub, event);
+                    }
+                    // The relay delivers all it holds, in order, before the
+                    // follower watches it again.
+                    while let Some(event) = wire.relay.pop_front() {
+                        heard.hear(&event);
+                        follows.take(event, now);
+                    }
+                    follow.state = PoolState::Unavailable;
+                    hub.follow = Some(follow);
+                    hub.epoch += 1;
+                    hub.listing = Some((hub.wire(hub.epoch), PoolCondition::Live, false));
+                    let listed = hub.listed_event();
+                    wire.send(&mut hub, listed);
+                    rewatch(&mut follows, &mut hub, &mut wire, &mut heard, true, now);
+                    let generation = read(&pools)
+                        .1
+                        .map_or(follow.generation, |(generation, _)| generation);
+                    follows.unknown(UnknownFollowEvent {
+                        kind: "paused".into(),
+                        class: "model_x".into(),
+                        pool: M1.into(),
+                        generation,
+                    });
+                    if let Some(asked) = follows.asked().pop() {
+                        let snapshot = hub.own_snapshot().into();
+                        wire.own = Some((asked, snapshot));
+                        heard.filling = Some(Vec::new());
+                    }
+                    format!(
+                        "follow {} of epoch {} drains and is withheld; hub of epoch {} lists; rewatched whole; own watch opens",
+                        follow.generation, follow.epoch, hub.epoch
+                    )
+                }
+                _ => "no follow to withhold behind a later hub".into(),
+            },
+            28 | 29 => match hub.follow {
+                Some(follow) if follow.installed => {
+                    hub.epoch += 1;
+                    hub.listing = Some((hub.wire(hub.epoch), PoolCondition::Live, false));
+                    let listed = hub.listed_event();
+                    wire.send(&mut hub, listed);
+                    format!(
+                        "hub of epoch {} writes its record; follow {} of epoch {} is not yet ended",
+                        hub.epoch, follow.generation, follow.epoch
+                    )
+                }
+                _ => "no follow to outlive".into(),
+            },
             // The link is replaced: a follow of a new generation of the
             // same hub, installed, as after a link that came back.
             22 | 23 => match hub.follow {

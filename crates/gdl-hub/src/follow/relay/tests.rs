@@ -11,6 +11,32 @@ use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
 mod guard;
 
+/// A watch of one follow can show a draining follow of one hub beside the
+/// listing of a later hub whose record the hub read before its follow of
+/// that hub was installed: what a chooser must keep the drain through.
+#[test]
+fn a_snapshot_can_show_a_draining_follow_beside_a_later_listing() {
+    let relay = held();
+    relay.record(&record_of(5, PoolState::Ready), None);
+    let (generation, _) = relay.begin("model_x", "m", 5);
+    relay.install(generation, installed_at(5, PoolState::Ready));
+    relay.apply("model_x", "m", generation, state(PoolState::Draining));
+    relay.record(&record_of(6, PoolState::Ready), None);
+    let snapshot = relay.lock().followed("model_x", "m");
+    assert!(
+        snapshot.iter().any(|event| matches!(
+            event,
+            FollowEvent::Follow {
+                epoch: 5,
+                state: PoolState::Draining,
+                listing: Some(listing),
+                ..
+            } if listing.epoch == 6 && !listing.draining
+        )),
+        "{snapshot:?}"
+    );
+}
+
 fn peer() -> PeerInfo {
     PeerInfo::new(
         InstanceId::new_v4(),
