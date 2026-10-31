@@ -484,3 +484,64 @@ async fn a_local_request_is_not_reported_as_drained_while_its_body_still_holds_i
         "draining and every holding zero while a local request is held: {held:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "F3: the producer-anchor release fixture never gives the producer an anchor to release"]
+async fn the_producer_anchor_release_fixture_first_exercises_a_producer_owned_anchor() {
+    let nodes = [common::velo_node().await, common::velo_node().await];
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C", "D"]);
+    let registry = gdl::prometheus::Registry::new();
+    let events = Events::new();
+    let cluster = common::deploy_configured(
+        &[
+            ("front".to_string(), nodes[0].clone()),
+            ("side".to_string(), nodes[1].clone()),
+        ],
+        &placement,
+        &events,
+        &|segment| RuntimeConfig {
+            metrics: (segment == "side").then(|| registry.clone()),
+            ..RuntimeConfig::default()
+        },
+    );
+    let cx = Cx::new();
+    let mut out = cluster
+        .segment("front")
+        .call(
+            cx.clone(),
+            prompt(
+                "producer-anchor",
+                Plan {
+                    tokens: 2,
+                    hold_at_end: true,
+                    ..Plan::default()
+                },
+            ),
+        )
+        .await
+        .expect("request");
+    for _ in 0..2 {
+        assert!(out.next().await.is_some_and(|item| item.is_ok()));
+    }
+    assert!(cluster.segment("front").active_anchors() > 0);
+    assert_eq!(cluster.segment("side").egress_in_use(), 1);
+    let anchors = cluster.segment("side").active_anchors();
+    let families = registry.gather();
+    let exposed = families
+        .iter()
+        .find(|family| family.name() == "active_anchors")
+        .expect("the producer exposes its anchor gauge")
+        .get_metric()[0]
+        .get_gauge()
+        .value();
+    assert_eq!(exposed, anchors as f64);
+    cx.request_stop();
+    assert!(collect(out).await.iter().all(Result::is_ok));
+    assert!(common::settles(&cluster).await);
+    assert!(
+        anchors > 0,
+        "the producer-side zero check starts at zero: {anchors}; it exercises no anchor release"
+    );
+}
