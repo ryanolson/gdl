@@ -899,3 +899,45 @@ fn a_shown_follow_keeps_a_drain_its_hubs_listing_said() {
         "the drain its hub's listing said"
     );
 }
+
+/// A drain said of a later hub of the pool is not the drain of an earlier
+/// hub's follow that a pool's own watch still shows: when the relay
+/// unlists the pool, that follow says its word again without it.
+#[test]
+fn a_shown_follow_does_not_take_a_later_hubs_drain() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a watch of its own");
+    for event in [followed(M1, 1, 5), FollowEvent::Synced { listed: true }] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    let mut draining = listing(6);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+            listing: Some(draining),
+        },
+        now,
+    );
+    follows.take(listed(M1, None), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(5, PoolCondition::Live)), Some(5)),
+        "hub 5 never drained"
+    );
+}

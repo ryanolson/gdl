@@ -1,7 +1,6 @@
 use super::*;
 
 #[test]
-#[ignore = "F8: installing another generation loses a drain heard while the own snapshot filled"]
 fn an_own_snapshot_keeps_a_drain_heard_while_it_filled() {
     let mut failures = Vec::new();
     for (generation, epoch) in [(1, 5), (2, 5), (2, 6)] {

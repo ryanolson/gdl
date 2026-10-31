@@ -10,8 +10,15 @@
 //! whichever watch it came on, and never dates one event by another's
 //! arrival: the relay's watch and a pool's own watch are not ordered with
 //! each other.
+//!
+//! It also keeps, per pool, the epochs of the hubs said to drain, by any
+//! source: a drain lasts for its hub's life, so a follow of that hub that
+//! says its word again, when the relay unlists a pool its own watch still
+//! shows, says the drain whatever order the words came in. An epoch is
+//! forgotten once neither the pool's evidence nor its shown follow is of
+//! that hub or an earlier one, or the pool is forgotten.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gdl::{PoolCondition, PoolEvidence};
@@ -23,6 +30,8 @@ use super::Key;
 #[derive(Default)]
 pub(super) struct Evidence {
     held: BTreeMap<Key, (PoolEvidence, Option<Instant>)>,
+    /// The epochs of each pool's hubs said to drain.
+    drained: BTreeMap<Key, BTreeSet<u64>>,
 }
 
 impl Evidence {
@@ -36,6 +45,12 @@ impl Evidence {
         silent: Option<Instant>,
     ) -> bool {
         let silent = silent.filter(|_| incoming.condition() == PoolCondition::Missing);
+        if incoming.is_draining() {
+            self.drained
+                .entry(key.clone())
+                .or_default()
+                .insert(incoming.epoch());
+        }
         match self.held.get_mut(key) {
             None => {
                 self.held.insert(key.clone(), (incoming, silent));
@@ -77,6 +92,41 @@ impl Evidence {
         }
     }
 
+    /// Whether the hub of `epoch` of `key`'s pool was said to drain.
+    pub(super) fn said_draining(&self, key: &Key, epoch: u64) -> bool {
+        self.drained
+            .get(key)
+            .is_some_and(|drained| drained.contains(&epoch))
+    }
+
+    /// Forget the drains of `key`'s pool's hubs earlier than both its
+    /// evidence and `shown`, the epoch of its follow shown, if any: every
+    /// one once neither is held.
+    pub(super) fn settle(&mut self, key: &Key, shown: Option<u64>) {
+        let held = self.get(key).map(|evidence| evidence.epoch());
+        let floor = match (held, shown) {
+            (Some(held), Some(shown)) => Some(held.min(shown)),
+            (held, shown) => held.or(shown),
+        };
+        match (floor, self.drained.get_mut(key)) {
+            (Some(floor), Some(drained)) => drained.retain(|epoch| *epoch >= floor),
+            (None, Some(_)) => {
+                self.drained.remove(key);
+            }
+            (_, None) => {}
+        }
+    }
+
+    /// The pools that hold evidence or drains.
+    pub(super) fn pools(&self) -> impl Iterator<Item = &Key> {
+        let held = self.held.keys();
+        let drained = self
+            .drained
+            .keys()
+            .filter(|key| !self.held.contains_key(*key));
+        held.chain(drained)
+    }
+
     /// What is held of `key`'s pool.
     pub(super) fn get(&self, key: &Key) -> Option<PoolEvidence> {
         self.held.get(key).map(|(evidence, _)| *evidence)
@@ -93,6 +143,9 @@ impl Evidence {
     /// or if it withdrew, since a snapshot holds no withdrawal; it is
     /// forgotten otherwise, as its listing is.
     pub(super) fn carry(&mut self, held: Self, whole: bool) {
+        for (key, drained) in held.drained {
+            self.drained.entry(key).or_default().extend(drained);
+        }
         for (key, entry) in held.held {
             match self.held.get_mut(&key) {
                 Some(shown) => {
@@ -115,6 +168,9 @@ impl Evidence {
     /// Take `key`'s value from `from`, the snapshot of a watch of the
     /// pool's own, after what is held: whether it held one.
     pub(super) fn take_from(&mut self, from: &mut Self, key: &Key) -> bool {
+        if let Some(drained) = from.drained.remove(key) {
+            self.drained.entry(key.clone()).or_default().extend(drained);
+        }
         match from.held.remove(key) {
             Some((evidence, silent)) => {
                 self.take(key, evidence, silent);
