@@ -17,6 +17,7 @@ use super::{M1, M2, dropped, follow, follower};
 
 mod guard;
 mod hub;
+mod recovery;
 
 /// What `pool`'s hub lists of it, from its hub of `epoch`.
 fn listing(epoch: u64) -> Listing {
