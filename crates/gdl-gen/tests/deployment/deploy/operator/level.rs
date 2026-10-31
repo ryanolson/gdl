@@ -117,13 +117,11 @@ fn assert_level_finishes_before_the_conflict_is_returned(prune: bool) {
 }
 
 #[test]
-#[ignore = "F13: down returns a replacement error before stopping the same level in later clusters"]
 fn down_stops_the_whole_level_when_a_child_in_the_first_cluster_is_replaced() {
     assert_level_finishes_before_the_conflict_is_returned(false);
 }
 
 #[test]
-#[ignore = "F13: prune returns a replacement error before stopping the same level in later clusters"]
 fn prune_stops_the_whole_level_when_a_child_in_the_first_cluster_is_replaced() {
     assert_level_finishes_before_the_conflict_is_returned(true);
 }

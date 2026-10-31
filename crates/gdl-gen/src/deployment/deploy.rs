@@ -426,6 +426,9 @@ fn stop_in_order(
         .max();
     if let Some(deepest) = deepest {
         for depth in (0..=deepest).rev() {
+            // Pools made again since the list: the level finishes in every
+            // cluster, and then the run stops before the level above.
+            let mut replaced = Vec::new();
             for (cluster, objects) in plain {
                 let batch: Vec<&Live> = objects
                     .iter()
@@ -440,7 +443,10 @@ fn stop_in_order(
                     .iter()
                     .filter(|pool| order.depth(&pool.name) == depth)
                     .collect();
-                operated::delete(kube, cluster, &batch, waits, say)?;
+                replaced.extend(operated::delete(kube, cluster, &batch, waits, say)?);
+            }
+            if !replaced.is_empty() {
+                return Err(Error::all(replaced));
             }
         }
     }

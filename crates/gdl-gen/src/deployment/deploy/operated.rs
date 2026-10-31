@@ -173,8 +173,9 @@ pub(super) fn pools(
 /// Delete `pools` of `cluster`, each with background propagation and only
 /// the object of the uid listed, and wait until each is gone: its
 /// finalizer has stopped it. A pool made again under its name since the
-/// list, another object, is left in place, and the delete fails naming it
-/// and its uid once the others are gone, so that no pool above it stops. A wait that runs out
+/// list, another object, is left in place, and returned, named with both
+/// uids, once the others are gone: its level is not done, and no pool
+/// above it may stop. A wait that runs out
 /// names the step of each pool's stop and why it waits.
 pub(super) fn delete(
     kube: &mut dyn Kube,
@@ -182,9 +183,9 @@ pub(super) fn delete(
     pools: &[&Operated],
     waits: &Waits,
     say: &mut dyn FnMut(&str),
-) -> Result<(), Error> {
+) -> Result<Vec<String>, Error> {
     if pools.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut deleted = Vec::new();
     // A pool made again since the list: its level is not done, and a
@@ -279,8 +280,9 @@ pub(super) fn delete(
             cluster.name
         ));
     }
-    if !replaced.is_empty() {
-        return Err(Error::all(replaced.into_iter().map(|(name, uid)| {
+    Ok(replaced
+        .into_iter()
+        .map(|(name, uid)| {
             let listed = pools
                 .iter()
                 .find(|pool| pool.name == name)
@@ -289,9 +291,8 @@ pub(super) fn delete(
                 "pool `{name}` in cluster `{}` was made again since it was listed (uid {uid}, where {listed} was listed): it is left in place, and no pool above it is stopped. Find who made it, then run again",
                 cluster.name
             )
-        })));
-    }
-    Ok(())
+        })
+        .collect())
 }
 
 /// The uid the API server says the object it holds has, when it refused a
