@@ -268,6 +268,22 @@ impl At<'_> {
         ])
     }
 
+    /// Print `namespace/<name>` when the namespace exists, and nothing
+    /// when it does not.
+    pub(super) fn namespace(&self) -> Vec<String> {
+        let namespace = format!("namespace/{}", self.namespace);
+        self.cluster(&["get", &namespace, "--ignore-not-found", "--output", "name"])
+    }
+
+    /// Set `labels`, each `(key, value)`, on the namespace: a patch of
+    /// those labels alone.
+    pub(super) fn label(&self, labels: &[(String, String)]) -> Vec<String> {
+        let namespace = format!("namespace/{}", self.namespace);
+        let mut args = self.cluster(&["label", &namespace, "--overwrite"]);
+        args.extend(labels.iter().map(|(key, value)| format!("{key}={value}")));
+        args
+    }
+
     /// Wait, at most `seconds`, until the namespace is active.
     pub(super) fn namespace_active(&self, seconds: u64) -> Vec<String> {
         let namespace = format!("namespace/{}", self.namespace);

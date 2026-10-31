@@ -5,8 +5,11 @@
 # and kind.
 #
 # It starts a `registry:2` on a free loopback port and a kind cluster that pulls from it, each with a name of its
-# own, and writes the api example's spec in two classes and a fleet of one global pool and two model pools. From a
-# cluster with no fleet namespace, it checks that:
+# own, and writes the api example's spec in two classes and a fleet of one global pool and two model pools. It makes
+# the fleet's namespace first, as a cluster's owner would, with a client-side `kubectl apply` and a label and an
+# annotation of its own. It checks that:
+#   - `deploy` and `down` leave the owner's label and annotations, the last-applied one among them, as they were:
+#     `deploy` applies no Namespace that exists, and only labels it with the fleet's labels, which `down` removes;
 #   - `deploy` builds and pushes the images, applies the objects, and waits until each pool's health answers 200;
 #   - the global pool's health answers 200 through the API server's service proxy, and a request through
 #     `kubectl port-forward` is answered;
@@ -157,6 +160,25 @@ hub() {
 if k get namespace gdl-api >/dev/null 2>&1; then
   fail "the new cluster already has namespace gdl-api"
 fi
+# The fleet's namespace as its owner's setup makes it. A server-side apply of it by gdl would take over the fields
+# this client-side apply set, and drop the label and the annotations.
+k apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gdl-api
+  labels: {example.com/setup: kind-fleet}
+  annotations: {example.com/owner: kind-fleet}
+EOF
+owner() {
+  k get namespace gdl-api --output json | jq -c '{
+    setup: .metadata.labels["example.com/setup"],
+    owner: .metadata.annotations["example.com/owner"],
+    applied: (.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] != null)
+  }'
+}
+owned='{"setup":"kind-fleet","owner":"kind-fleet","applied":true}'
+[[ "$(owner)" == "${owned}" ]] || fail "the owner's namespace is not as applied: $(owner)"
 
 # The node as a node group of the fleet's own: labelled, and tainted so that only a pod that tolerates it is
 # scheduled there. The fleet places every pod on it by its cluster's node selector and toleration.
@@ -257,6 +279,10 @@ run() {
 }
 
 run deploy --spec "${scratch}/gdl.toml" --fleet "${scratch}/fleet.toml" --target-dir "${target}"
+[[ "$(owner)" == "${owned}" ]] || fail "deploy changed the owner's label or annotations: $(owner)"
+fleet_labels="$(k get namespace gdl-api --output json \
+  | jq -c '.metadata.labels | {fleet: .["gdl.dev/fleet"], cluster: .["gdl.dev/cluster"]}')"
+[[ "${fleet_labels}" == '{"fleet":"api","cluster":"kind"}' ]] || fail "deploy did not label the namespace: ${fleet_labels}"
 hub global /v1/ext/gdl-pool/health >/dev/null || fail "the global pool's health does not answer 200"
 for pool in model-a model-b; do
   hub global "/v1/ext/gdl-pool/report/model/${pool}" >/dev/null || fail "the global pool's hub does not hold ${pool}"
@@ -439,7 +465,8 @@ labelled="$(k get namespaces,serviceaccounts,configmaps,persistentvolumeclaims,s
   --all-namespaces --selector gdl.dev/fleet=api --output name)"
 [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left: ${labelled}"
 k get namespace gdl-api >/dev/null || fail "down deleted the namespace"
-echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays"
+[[ "$(owner)" == "${owned}" ]] || fail "down changed the owner's label or annotations: $(owner)"
+echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays as its owner made it"
 
 if [[ "${DYNAMODB}" == "1" ]]; then
   if [[ "${LOCAL}" == "1" ]]; then

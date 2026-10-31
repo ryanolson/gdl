@@ -100,8 +100,12 @@ impl Default for Waits {
 ///    another cluster than one that holds any of its Deployments, before
 ///    anything is applied;
 /// 4. apply each cluster's base objects, and wait until its namespace is
-///    active: the DynamoDB directory's cluster first, whose base holds the
-///    directory's DynamoDB Local, which is waited for until it is ready.
+///    active. The Namespace is applied only where none exists; an existing
+///    one only gets the fleet's labels, with `kubectl label`, since an
+///    apply would take over the fields its owner set and drop those the
+///    render does not list. The DynamoDB directory's cluster goes first,
+///    whose base holds the directory's DynamoDB Local, which is waited for
+///    until it is ready.
 ///    Its pod's IP then replaces the placeholder in the other clusters'
 ///    objects, before their base is applied. The objects, so complete, are
 ///    written to `out` if given;
@@ -170,8 +174,21 @@ pub fn deploy(
     order.sort_by_key(|cluster| Some(&cluster.name) != home.as_ref());
     let mut local = None;
     for cluster in order {
-        let base = &rendered.0[&cluster.name];
-        applied.extend(apply(kube, cluster, &base.base, how.waits.objects)?);
+        let objects = &rendered.0[&cluster.name];
+        let base = match cluster.namespace_exists(kube, how.waits.objects)? {
+            true => {
+                run(
+                    kube,
+                    cluster.at().label(&objects.labels),
+                    how.waits.objects,
+                    None,
+                    "adding the fleet's labels to the namespace",
+                )?;
+                objects.base.clone()
+            }
+            false => format!("{}{}", objects.namespace, objects.base),
+        };
+        applied.extend(apply(kube, cluster, &base, how.waits.objects)?);
         run(
             kube,
             cluster.at().namespace_active(how.waits.objects.as_secs()),
@@ -422,6 +439,23 @@ impl Cluster {
         Ok(())
     }
 
+    /// Whether the cluster's namespace exists. A question that fails
+    /// stops the deploy: taken for a namespace to make, it would apply
+    /// over another owner's.
+    fn namespace_exists(&self, kube: &mut dyn Kube, budget: Duration) -> Result<bool, Error> {
+        let reply = run(
+            kube,
+            self.at().namespace(),
+            budget,
+            None,
+            &format!(
+                "cluster `{}`: asking whether the namespace exists",
+                self.name
+            ),
+        )?;
+        Ok(!reply.stdout.trim().is_empty())
+    }
+
     /// The fleet's objects in the cluster's namespace that were rendered
     /// for this cluster. Refused when the namespace holds an object of the
     /// fleet that names no cluster, as a render before `gdl.dev/cluster`
@@ -462,12 +496,17 @@ impl Cluster {
     }
 }
 
-/// The objects of one render, by cluster: the base's, and the pools', each
-/// as one YAML stream, and the kind and name of each namespaced object.
+/// The objects of one render, by cluster: the Namespace, the rest of the
+/// base, and the pools', each as one YAML stream, and the kind and name of
+/// each namespaced object.
 struct Rendered(BTreeMap<String, Objects>);
 
 #[derive(Default)]
 struct Objects {
+    /// The Namespace, applied only where none exists.
+    namespace: String,
+    /// The Namespace's labels, which an existing namespace gets instead.
+    labels: Vec<(String, String)>,
     base: String,
     /// The tables Job, in the DynamoDB directory's cluster alone.
     tables: String,
@@ -492,22 +531,33 @@ impl Rendered {
             if path.extension().is_none_or(|e| e != "yaml") {
                 continue;
             }
-            if path.ends_with("base.yaml") {
-                objects.base.push_str(text);
-            } else if path.ends_with("tables.yaml") {
-                objects.tables.push_str(text);
-            } else {
-                objects.pools.push_str(text);
-            }
             for document in text.split("---\n").filter(|doc| !doc.trim().is_empty()) {
                 let object: Value = serde_json::from_str(document)
                     .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
                 let kind = object["kind"].as_str().unwrap_or_default();
-                if kind == "Namespace" {
-                    continue;
+                let stream = if kind == "Namespace" {
+                    objects.labels = object["metadata"]["labels"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(key, value)| {
+                            (key.clone(), value.as_str().unwrap_or_default().to_string())
+                        })
+                        .collect();
+                    &mut objects.namespace
+                } else if path.ends_with("base.yaml") {
+                    &mut objects.base
+                } else if path.ends_with("tables.yaml") {
+                    &mut objects.tables
+                } else {
+                    &mut objects.pools
+                };
+                stream.push_str("---\n");
+                stream.push_str(document);
+                if kind != "Namespace" {
+                    let name = object["metadata"]["name"].as_str().unwrap_or_default();
+                    objects.names.insert((kind.to_string(), name.to_string()));
                 }
-                let name = object["metadata"]["name"].as_str().unwrap_or_default();
-                objects.names.insert((kind.to_string(), name.to_string()));
             }
         }
         Ok(Self(rendered))

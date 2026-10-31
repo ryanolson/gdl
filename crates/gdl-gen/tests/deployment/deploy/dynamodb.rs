@@ -36,7 +36,7 @@ fn order(log: &Log) -> Vec<String> {
             continue;
         };
         let has = |word: &str| args.iter().any(|a| a == word);
-        let what = if has("apply") && input.contains("\"Namespace\"") {
+        let what = if has("apply") && input.contains("\"ServiceAccount\"") {
             "base"
         } else if has("apply") && input.contains("\"Job\"") {
             "tables"
@@ -71,7 +71,7 @@ fn pools_applied(log: &Log, context: &str) -> String {
             Call::Kube { args, input }
                 if args[1] == context
                     && args.iter().any(|a| a == "apply")
-                    && !input.contains("\"Namespace\"")
+                    && !input.contains("\"ServiceAccount\"")
                     && !input.contains("\"Job\"") =>
             {
                 Some(input.clone())

@@ -913,7 +913,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     let mut text = format!(
         "# Kubernetes objects of fleet `{name}`\n\n\
          One directory per cluster. `base.yaml` holds the cluster's Namespace and the fleet's ServiceAccount; `pools/<pool>.yaml` holds each pool's ConfigMap, its hub's Deployment and Service, a Deployment for each segment of its class, and a Service for each segment that publishes ports. Every object is labelled `gdl.dev/fleet={name}`.\n\n\
-         Apply the base first, since every other object is in its Namespace:\n"
+         Apply the base first, since every other object is in its Namespace. Where a cluster's namespace already exists, leave its Namespace out of the apply and label the namespace instead, with `kubectl label namespace/<namespace> gdl.dev/fleet=<fleet> gdl.dev/cluster=<cluster>`: an apply would take over the fields its owner set, and drop the labels and annotations this Namespace does not list. `cargo gdl deploy` does so itself.\n"
     );
     for (cluster, settings) in fleet.clusters() {
         text.push_str(&format!(

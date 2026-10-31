@@ -350,6 +350,15 @@ fn assert_monitor_group(prune: bool) {
         };
         gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {}).expect("deploy");
     } else {
+        // `down` labels each cluster's namespace, which must exist.
+        for context in ["kind-euw1", "kind-use1"] {
+            let namespace = json!({
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": "gdl-api", "labels": {"gdl.dev/fleet": "api"}},
+            });
+            kube.inner.holds(context, namespace);
+        }
         gdl_gen::down(&files.fleet, &waits(), &mut kube, &mut |_| {}).expect("down");
     }
     assert!(

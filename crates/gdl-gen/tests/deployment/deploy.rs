@@ -211,7 +211,45 @@ impl gdl_gen::Kube for Kube {
                 }
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": applied}).to_string())
             }
-            ("wait" | "label", _) => gdl_gen::Reply::ok(""),
+            ("wait", _) => gdl_gen::Reply::ok(""),
+            ("label", _) => {
+                // Sets or removes the namespace's labels, and nothing else.
+                let name = rest[1].strip_prefix("namespace/").expect("a namespace");
+                let held = self
+                    .objects
+                    .get_mut(&context)
+                    .and_then(|objects| objects.get_mut(&("Namespace".to_string(), name.into())));
+                let Some(held) = held else {
+                    return Ok(gdl_gen::Reply::failed(format!(
+                        "Error from server (NotFound): namespaces \"{name}\" not found"
+                    )));
+                };
+                let labels = held["metadata"]["labels"]
+                    .as_object_mut()
+                    .expect("a namespace's labels");
+                for change in rest[2..].iter().filter(|a| !a.starts_with("--")) {
+                    match change.split_once('=') {
+                        Some((key, value)) => {
+                            labels.insert(key.into(), value.into());
+                        }
+                        None => {
+                            labels.remove(change.strip_suffix('-').expect("`key-`"));
+                        }
+                    }
+                }
+                gdl_gen::Reply::ok("")
+            }
+            ("get", None) if rest[1].starts_with("namespace/") => {
+                assert!(rest.contains(&"--ignore-not-found".to_string()), "{args:?}");
+                let name = &rest[1]["namespace/".len()..];
+                let found = self.objects.get(&context).is_some_and(|objects| {
+                    objects.contains_key(&("Namespace".to_string(), name.to_string()))
+                });
+                match found {
+                    true => gdl_gen::Reply::ok(format!("namespace/{name}\n")),
+                    false => gdl_gen::Reply::ok(""),
+                }
+            }
             ("create", Some(path)) => {
                 assert!(path.ends_with("/proxy/v1/ext/gdl-pool/drain"), "{path}");
                 gdl_gen::Reply::ok("{\"state\":\"draining\"}")
@@ -413,7 +451,9 @@ fn steps(log: &Log) -> Vec<String> {
                     "can-i"
                 } else if args.contains(&"api-resources".to_string()) {
                     "crds"
-                } else if args.contains(&"apply".to_string()) && input.contains("\"Namespace\"") {
+                } else if args.contains(&"apply".to_string())
+                    && input.contains("\"ServiceAccount\"")
+                {
                     "base"
                 } else if args.contains(&"apply".to_string()) {
                     "pools"
@@ -427,8 +467,14 @@ fn steps(log: &Log) -> Vec<String> {
                     "held"
                 } else if args.contains(&"delete".to_string()) {
                     "delete"
+                } else if args.contains(&"label".to_string())
+                    && args.iter().any(|a| a.contains('=') && !a.starts_with("--"))
+                {
+                    "label"
                 } else if args.contains(&"label".to_string()) {
                     "unlabel"
+                } else if args.iter().any(|a| a.starts_with("namespace/")) {
+                    "namespace"
                 } else if args.contains(&"get".to_string()) {
                     "list"
                 } else {
@@ -537,8 +583,10 @@ fn a_deploy_runs_its_steps_in_order() {
             "docker",
             "kind-euw1:list",
             "kind-use1:list",
+            "kind-euw1:namespace",
             "kind-euw1:base",
             "kind-euw1:wait-namespace",
+            "kind-use1:namespace",
             "kind-use1:base",
             "kind-use1:wait-namespace",
             "kind-euw1:pools",
@@ -1039,3 +1087,6 @@ mod moved;
 
 #[path = "deploy/monitors.rs"]
 mod monitors;
+
+#[path = "deploy/namespace.rs"]
+mod namespace;
