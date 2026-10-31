@@ -173,7 +173,8 @@ pub(super) fn pools(
 /// Delete `pools` of `cluster`, each with background propagation and only
 /// the object of the uid listed, and wait until each is gone: its
 /// finalizer has stopped it. A pool made again under its name since the
-/// list, another object, is left in place and said. A wait that runs out
+/// list, another object, is left in place, and the delete fails naming it
+/// and its uid once the others are gone, so that no pool above it stops. A wait that runs out
 /// names the step of each pool's stop and why it waits.
 pub(super) fn delete(
     kube: &mut dyn Kube,
@@ -186,6 +187,9 @@ pub(super) fn delete(
         return Ok(());
     }
     let mut deleted = Vec::new();
+    // A pool made again since the list: its level is not done, and a
+    // parent may still serve it.
+    let mut replaced = Vec::new();
     for pool in pools {
         let args = bounded(cluster.at().delete_pool(&pool.name), waits.objects);
         let body = serde_json::json!({
@@ -197,11 +201,8 @@ pub(super) fn delete(
         let reply = kube.run(&args, Some(body.to_string().as_bytes()))?;
         if reply.success || reply.stderr.contains("(NotFound)") {
             deleted.push(*pool);
-        } else if reply.stderr.contains("does not match the UID in record") {
-            say(&format!(
-                "stop: pool `{}` in cluster `{}` was made again since it was listed: the new one is left in place",
-                pool.name, cluster.name
-            ));
+        } else if let Some(uid) = recorded_uid(&reply.stderr) {
+            replaced.push((pool.name.as_str(), uid.to_string()));
         } else {
             return Err(Error::new(format!(
                 "cluster `{}`: deleting GdlPool `{}`: `kubectl {}` failed: {}",
@@ -262,13 +263,38 @@ pub(super) fn delete(
         }
         std::thread::sleep(waits.interval);
     }
-    let names: Vec<&str> = pools.iter().map(|pool| pool.name.as_str()).collect();
-    say(&format!(
-        "stop: pool(s) {} in cluster `{}` stopped and deleted",
-        names.join(", "),
-        cluster.name
-    ));
+    let names: Vec<&str> = pools
+        .iter()
+        .map(|pool| pool.name.as_str())
+        .filter(|name| !replaced.iter().any(|(other, _)| other == name))
+        .collect();
+    if !names.is_empty() {
+        say(&format!(
+            "stop: pool(s) {} in cluster `{}` stopped and deleted",
+            names.join(", "),
+            cluster.name
+        ));
+    }
+    if !replaced.is_empty() {
+        return Err(Error::all(replaced.into_iter().map(|(name, uid)| {
+            let listed = pools
+                .iter()
+                .find(|pool| pool.name == name)
+                .map_or("", |pool| pool.uid.as_str());
+            format!(
+                "pool `{name}` in cluster `{}` was made again since it was listed (uid {uid}, where {listed} was listed): it is left in place, and no pool above it is stopped. Find who made it, then run again",
+                cluster.name
+            )
+        })));
+    }
     Ok(())
+}
+
+/// The uid the API server says the object it holds has, when it refused a
+/// delete whose precondition named another: `the UID in record (<uid>)`.
+fn recorded_uid(stderr: &str) -> Option<&str> {
+    let (_, rest) = stderr.split_once("does not match the UID in record (")?;
+    rest.split_once(')').map(|(uid, _)| uid)
 }
 
 /// Wait until `pool` of `cluster` is ready: the operator has applied its

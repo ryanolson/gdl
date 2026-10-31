@@ -606,6 +606,15 @@ fn assert_parent_survives_child_conflict(prune: bool) {
         gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {})
     };
     assert!(raced.replaced, "replace the child after it is listed");
+    let error = result
+        .as_ref()
+        .expect_err("a replaced child fails the run")
+        .to_string();
+    assert!(
+        error.contains("pool `model-x-us` in cluster `use1`")
+            && error.contains("replacement-child"),
+        "{error}"
+    );
     let held = &raced.kube.objects["kind-use1"];
     if held.contains_key(&("GdlPool".into(), "model-x-us".into())) {
         assert!(
@@ -616,13 +625,11 @@ fn assert_parent_survives_child_conflict(prune: bool) {
 }
 
 #[test]
-#[ignore = "F11: a child UID conflict still lets down delete the child's live parent"]
 fn a_recreated_child_keeps_its_parent_while_down_leaves_the_child_running() {
     assert_parent_survives_child_conflict(false);
 }
 
 #[test]
-#[ignore = "F11: a child UID conflict still lets prune delete the child's live parent"]
 fn a_recreated_child_keeps_its_parent_while_prune_leaves_the_child_running() {
     assert_parent_survives_child_conflict(true);
 }
