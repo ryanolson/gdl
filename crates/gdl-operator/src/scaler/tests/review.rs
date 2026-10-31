@@ -149,3 +149,20 @@ async fn a_committed_removal_keeps_the_victim_out_of_its_service() {
         "the committed victim is deleted after the restarted operator put it back in its Service"
     );
 }
+
+#[test]
+#[ignore = "F6: the fake ReplicaSet ranks deletion cost before readiness, unlike Kubernetes"]
+fn the_fake_replicaset_deletes_an_unready_pod_before_a_cheaper_ready_pod() {
+    let fake = Fake::with(&[9, 0]);
+    {
+        let mut state = fake.state();
+        state.replicas = 1;
+        state.pods[0].view.ready = false;
+        state.pods[1].cost = Some(VICTIM_COST);
+    }
+    fake.settle(false);
+    assert!(
+        fake.pod("pod-1").view.terminating,
+        "Kubernetes ActivePodsWithRanks checks readiness before deletion cost"
+    );
+}
