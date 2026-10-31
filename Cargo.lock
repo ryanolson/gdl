@@ -1161,6 +1161,7 @@ dependencies = [
 name = "gdl-cgroup"
 version = "0.1.0"
 dependencies = [
+ "gdl-model",
  "prometheus",
  "tempfile",
 ]
@@ -1217,6 +1218,7 @@ dependencies = [
  "aws-smithy-http-client",
  "figment",
  "futures",
+ "gdl-cgroup",
  "gdl-model",
  "gdl-pools",
  "gdl-pools-dynamodb",
@@ -1309,6 +1311,7 @@ dependencies = [
  "figment",
  "futures",
  "gdl",
+ "gdl-cgroup",
  "gdl-hub",
  "gdl-macros",
  "gdl-model",

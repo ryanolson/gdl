@@ -25,6 +25,8 @@ figment.workspace = true
 arc-swap = { workspace = true }
 dashmap = { workspace = true }
 gdl = { path = "../gdl" }
+# The process's own and its cgroup's figures, served beside the registry.
+gdl-cgroup = { path = "../gdl-cgroup" }
 gdl-macros = { path = "../gdl-macros" }
 gdl-model = { path = "../gdl-model" }
 # A chooser's tables of the pools its hub follows, read from the hub's

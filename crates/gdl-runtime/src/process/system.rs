@@ -162,6 +162,11 @@ pub(crate) struct Health {
     /// until then `/metrics` answers with no metrics, not an error, which
     /// a scrape would take for a target that is down.
     registry: OnceLock<prometheus::Registry>,
+    /// The process's own figures (`process_*`, `process_cgroup_*`), made
+    /// with `registry` and gathered with it. A registry of their own keeps
+    /// them out of `registry`'s prefix: a hub serves the same names, and
+    /// dashboards know them unprefixed.
+    own: OnceLock<prometheus::Registry>,
     /// How long a scrape may take before it is answered with 503.
     scrape_limit: Duration,
     /// `SCRAPES` permits: the scrapes whose gathers run.
@@ -174,6 +179,7 @@ impl Health {
             phase: AtomicU8::new(Phase::Starting as u8),
             started: Instant::now(),
             registry: OnceLock::new(),
+            own: OnceLock::new(),
             scrape_limit: SCRAPE_LIMIT,
             scrapes: Arc::new(tokio::sync::Semaphore::new(SCRAPES)),
         }
@@ -182,6 +188,12 @@ impl Health {
     /// Seconds since the process started.
     pub(crate) fn uptime(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
+    }
+
+    /// Gather `own`, the process's own figures, with the served registry;
+    /// `false` if they are set already.
+    pub(crate) fn own_metrics(&self, own: prometheus::Registry) -> bool {
+        self.own.set(own).is_ok()
     }
 
     /// Serve `registry` on `/metrics`; `false` if a registry is served
@@ -206,14 +218,19 @@ impl Health {
         let Some(registry) = self.registry.get().cloned() else {
             return (200, String::new());
         };
+        let own = self.own.get().cloned();
         let Ok(permit) = Arc::clone(&self.scrapes).try_acquire_owned() else {
             return (503, "a scrape is in progress".into());
         };
         let gather = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut text = String::new();
+            let mut families = registry.gather();
+            if let Some(own) = own {
+                families.extend(own.gather());
+            }
             prometheus::TextEncoder::new()
-                .encode_utf8(&registry.gather(), &mut text)
+                .encode_utf8(&families, &mut text)
                 .map(|()| text)
         });
         match tokio::time::timeout(self.scrape_limit, gather).await {

@@ -1373,7 +1373,9 @@ impl Process {
     /// eight hex digits of the placement hash), `dynamo_component` (the
     /// segment), and `worker_id` (the instance id). It holds
     /// `uptime_seconds` from the start. `/metrics` serves it only once it
-    /// is given to [`serve_metrics`](Self::serve_metrics).
+    /// is given to [`serve_metrics`](Self::serve_metrics), and with it the
+    /// process's own figures (`process_*`, `process_cgroup_*`), under the
+    /// same labels but never the prefix.
     pub fn registry(
         &self,
         deployment: &gdl_model::DeploymentSpec,
@@ -1397,9 +1399,11 @@ impl Process {
         ]
         .into_iter()
         .map(|(name, value)| (name.to_string(), value))
-        .collect();
-        let registry = prometheus::Registry::new_custom(self.metrics_prefix.clone(), Some(labels))
-            .map_err(metrics_error)?;
+        .collect::<std::collections::HashMap<_, _>>();
+        let registry =
+            prometheus::Registry::new_custom(self.metrics_prefix.clone(), Some(labels.clone()))
+                .map_err(metrics_error)?;
+        let own = prometheus::Registry::new_custom(None, Some(labels)).map_err(metrics_error)?;
         let health = Arc::clone(&self.health);
         let uptime = prometheus::PullingGauge::new(
             "uptime_seconds",
@@ -1417,6 +1421,8 @@ impl Process {
             ));
         }
         registry.register(Box::new(uptime)).map_err(metrics_error)?;
+        gdl_cgroup::register(&own).map_err(metrics_error)?;
+        self.health.own_metrics(own);
         Ok(registry)
     }
 

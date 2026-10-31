@@ -1,6 +1,6 @@
 # Metrics reference
 
-This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
+This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). The process's own figures are in `crates/gdl-cgroup`. [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
 
 ## Names and labels
 
@@ -138,6 +138,32 @@ A pool's hub serves its own metrics on its public listener, at `GET /v1/ext/gdl-
 - The pool labels of `hub_pool_load_*` are the hub's own pool's. Those of `hub_follow_up` are the followed pool's, with its region from its follow, or from its record while no follow of it is installed.
 - A pool leaves `hub_follow_up` when the hub no longer follows it, as when it withdraws its record.
 - The names carry no prefix, and the series no `dynamo_namespace`, `dynamo_component`, or `worker_id`. Those come from a segment's `[system]` settings and its instance, and a hub has neither: it is one process per pool, and its pool's labels name it.
+- The route also serves the hub's [own figures](#a-processs-own-figures), with no labels.
+
+## A process's own figures
+
+Every segment serves these beside its registry, and every pool's hub on its metrics route ([The process's own figures](../operations/observability.md#the-processs-own-figures)). They are read at each scrape. None takes the registry's prefix. A segment's carry its identity labels. A hub's carry no labels. A figure that cannot be read is absent.
+
+| Name | Type | Source | Meaning |
+|---|---|---|---|
+| `process_cpu_seconds_total` | counter | `/proc/self/stat` | User and system CPU time, in whole seconds. |
+| `process_resident_memory_bytes` | gauge | `/proc/self/stat` | Resident memory. |
+| `process_virtual_memory_bytes` | gauge | `/proc/self/stat` | Virtual memory. |
+| `process_open_fds` | gauge | `/proc/self/fd` | Open file descriptors. |
+| `process_max_fds` | gauge | `/proc/self/limits` | The soft limit on open file descriptors. |
+| `process_threads` | gauge | `/proc/self/stat` | OS threads. |
+| `process_start_time_seconds` | gauge | `/proc/self/stat` | When the process started, in seconds since the Unix epoch. |
+| `process_cgroup_cpu_periods_total` | counter | `cpu.stat` `nr_periods` | Quota periods that have elapsed with the cgroup runnable. |
+| `process_cgroup_cpu_throttled_periods_total` | counter | `cpu.stat` `nr_throttled` | Periods in which the cgroup used its quota and was throttled. |
+| `process_cgroup_cpu_throttled_seconds_total` | counter | `cpu.stat` `throttled_usec` | Time the cgroup's threads waited for its quota, in seconds. |
+| `process_cgroup_cpu_quota_cores` | gauge | `cpu.max` | The quota over the period: the CPU limit in cores. Absent when the quota is `max`. |
+| `process_cgroup_cpu_period_seconds` | gauge | `cpu.max` | The quota's period. |
+| `process_cgroup_memory_bytes` | gauge | `memory.current` | Memory charged to the cgroup, page cache included. |
+| `process_cgroup_memory_peak_bytes` | gauge | `memory.peak` | The most memory charged to the cgroup since it was made. |
+
+- The `process_*` figures need Linux. Off Linux, none is served.
+- The `process_cgroup_*` figures need cgroup v2, mounted at `/sys/fs/cgroup`. The process's cgroup is the path on the `0::` line of `/proc/self/cgroup`. Under cgroup v1 none is served. The `cpu.stat` keys are present only where the cgroup's CPU controller is on.
+- The cgroup is the container's, so in a pod of one container its figures are the process's.
 
 ## Buckets
 
@@ -165,6 +191,6 @@ A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node ga
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 30 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the 12 families of a chooser's pools, `pool_record_writes_total`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 44 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the 12 families of a chooser's pools, `pool_record_writes_total`, the 14 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.

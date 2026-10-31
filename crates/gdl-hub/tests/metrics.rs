@@ -158,3 +158,45 @@ async fn a_hub_shows_its_pools_summary_and_its_follows_links() {
     );
     global_hub.shutdown().await.expect("the hub stops");
 }
+
+/// A pool's hub serves its process's own figures beside the pool's,
+/// unprefixed and unlabelled (`process_*`, and `process_cgroup_*` where
+/// the process has a cgroup v2), and no family twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_shows_its_process_figures() {
+    let directory = Resolving::new();
+    let (hub, _pool) = serve_pool(pool(), &directory, timing()).await;
+    let text = scrape(&hub).await;
+    let mut families: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("# TYPE "))
+        .collect();
+    let count = families.len();
+    families.sort_unstable();
+    families.dedup();
+    assert_eq!(families.len(), count, "a family twice in:\n{text}");
+    let served = |name: &str| {
+        text.lines()
+            .any(|line| line.starts_with(&format!("{name} ")))
+    };
+    if cfg!(target_os = "linux") {
+        assert!(served("process_cpu_seconds_total"), "{text}");
+        assert!(served("process_resident_memory_bytes"), "{text}");
+    }
+    // The cgroup's memory, where this host has it for this process.
+    let memory = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("0::").map(str::to_string))
+        })
+        .map(|own| {
+            std::path::Path::new("/sys/fs/cgroup")
+                .join(own.trim_start_matches('/'))
+                .join("memory.current")
+        });
+    if memory.is_some_and(|file| file.exists()) {
+        assert!(served("process_cgroup_memory_bytes"), "{text}");
+    }
+    hub.shutdown().await.expect("the hub stops");
+}

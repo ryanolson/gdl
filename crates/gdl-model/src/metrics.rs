@@ -76,12 +76,13 @@ impl MetricKind {
 
 /// The metrics the runtime records for each segment, those a chooser
 /// records of its offers to pools and shows of the pools it follows, the
-/// writes to a pool hub's record tables, and dynamo's
+/// writes to a pool hub's record tables, the process's own figures
+/// (`gdl-cgroup`'s, served unprefixed beside the registry), and dynamo's
 /// `request_duration_seconds`,
 /// which it reserves. A node's own metrics may not take these names: they
-/// would collide in the registry, or, for the reserved one, a dashboard
-/// would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 30] = [
+/// would collide in the registry or in the scrape, or, for the reserved
+/// one, a dashboard would read a node's figure as a handler's.
+pub const RUNTIME_METRICS: [&str; 44] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -111,6 +112,20 @@ pub const RUNTIME_METRICS: [&str; 30] = [
     "pool_state",
     "pool_takes_work",
     "pool_record_writes_total",
+    "process_cpu_seconds_total",
+    "process_open_fds",
+    "process_max_fds",
+    "process_virtual_memory_bytes",
+    "process_resident_memory_bytes",
+    "process_start_time_seconds",
+    "process_threads",
+    "process_cgroup_cpu_periods_total",
+    "process_cgroup_cpu_throttled_periods_total",
+    "process_cgroup_cpu_throttled_seconds_total",
+    "process_cgroup_cpu_quota_cores",
+    "process_cgroup_cpu_period_seconds",
+    "process_cgroup_memory_bytes",
+    "process_cgroup_memory_peak_bytes",
     "request_duration_seconds",
 ];
 

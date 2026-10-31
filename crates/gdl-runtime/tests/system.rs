@@ -418,3 +418,72 @@ async fn a_process_launches_once() {
     };
     assert!(error.to_string().contains("launches once"), "{error}");
 }
+
+/// The process's own figures (`process_*`, and `process_cgroup_*` where
+/// the process has a cgroup v2) are served beside the registry's, under
+/// their own names, unprefixed, with the instance's identity; no family
+/// appears twice in one scrape.
+#[tokio::test]
+async fn the_process_figures_are_served_unprefixed() {
+    let dir = roster();
+    let config = config(dir.path(), "host = \"127.0.0.1\"\nport = 0\n");
+    let process = Process::start(&config).await.expect("process");
+    let address = process.system_address().expect("a listener");
+    let registry = process.registry(&deployment(), "only").expect("a registry");
+    let (_, scrape) = get(address, "/metrics").await;
+    assert_eq!(scrape, "", "made, not served");
+    process.serve_metrics(registry).expect("served");
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!(code, 200);
+
+    let mut families: Vec<&str> = scrape
+        .lines()
+        .filter_map(|line| line.strip_prefix("# TYPE "))
+        .collect();
+    let count = families.len();
+    families.sort_unstable();
+    families.dedup();
+    assert_eq!(families.len(), count, "a family twice in:\n{scrape}");
+    assert!(
+        !scrape.contains("dynamo_component_process_"),
+        "prefixed:\n{scrape}"
+    );
+    let identity = |name: &str| series(&scrape, name).map(|(labels, _)| labels);
+    if cfg!(target_os = "linux") {
+        let (labels, _) = series(&scrape, "process_cpu_seconds_total").expect(&scrape);
+        let (served, _) = series(&scrape, "dynamo_component_uptime_seconds").expect(&scrape);
+        assert_eq!(labels, served, "the identity labels");
+        assert!(
+            identity("process_resident_memory_bytes").is_some(),
+            "{scrape}"
+        );
+    }
+
+    // The cgroup figures, where this host has them for this process.
+    let Some(own) = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("0::").map(str::to_string))
+        })
+    else {
+        return;
+    };
+    let cgroup = std::path::Path::new("/sys/fs/cgroup").join(own.trim_start_matches('/'));
+    let stat = std::fs::read_to_string(cgroup.join("cpu.stat")).unwrap_or_default();
+    if stat.lines().any(|line| line.starts_with("nr_periods ")) {
+        for name in [
+            "process_cgroup_cpu_periods_total",
+            "process_cgroup_cpu_throttled_periods_total",
+            "process_cgroup_cpu_throttled_seconds_total",
+        ] {
+            assert!(identity(name).is_some(), "{name} missing from:\n{scrape}");
+        }
+    }
+    if cgroup.join("memory.current").exists() {
+        assert!(
+            identity("process_cgroup_memory_bytes").is_some(),
+            "{scrape}"
+        );
+    }
+}

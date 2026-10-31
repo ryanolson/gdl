@@ -5,9 +5,13 @@
 //! is asked, from the state the hub already keeps, so nothing is recorded
 //! on a watch's or a report's path.
 //!
+//! Beside them, the hub's process's own figures (`process_*`, and
+//! `process_cgroup_*` where its cgroup v2 has them), which `gdl-cgroup`
+//! reads from /proc and the cgroup's files on the same scrape.
+//!
 //! The names carry no prefix and the series no identity labels: a hub has
 //! no `[system]` settings, unlike a segment, and its pool's class, name and
-//! region label every series.
+//! region label every series of the pool's.
 
 use std::sync::Arc;
 
@@ -61,10 +65,18 @@ pub(super) fn routes(record: &PoolRecord, feed: Arc<Feed>, relay: Arc<Relay>) ->
         record.name.clone(),
         record.region.clone(),
     ];
+    // The pool's families are made by hand; this registry holds only the
+    // process's figures. A scrape reads them from a few small kernel
+    // files, so the handler reads them in place, as it reads the summary.
+    let process = prometheus::Registry::new();
+    if let Err(error) = gdl_cgroup::register(&process) {
+        tracing::warn!(%error, "the hub's metrics leave out its process's figures");
+    }
     Router::new().route(
         ROUTE,
         get(move || {
-            let families = families(&own, feed.summary(), &relay);
+            let mut families = families(&own, feed.summary(), &relay);
+            families.extend(process.gather());
             async move {
                 let mut text = Vec::new();
                 match TextEncoder::new().encode(&families, &mut text) {

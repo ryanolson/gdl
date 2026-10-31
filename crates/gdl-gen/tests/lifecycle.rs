@@ -399,6 +399,13 @@ fn a_running_engine_serves_its_metrics() {
         1,
         "{scrape}"
     );
+    // The process's own figures, unprefixed, with the same identity.
+    if cfg!(target_os = "linux") {
+        let cpu = series("process_cpu_seconds_total");
+        assert_eq!(cpu.len(), 1, "{scrape}");
+        assert!(cpu[0].contains("dynamo_component=\"engine\""), "{}", cpu[0]);
+    }
+    assert!(!scrape.contains("dynamo_component_process_"), "{scrape}");
 
     drop(front.0.stdin.take());
     assert!(front.exits_within(EXIT).success());

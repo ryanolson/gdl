@@ -310,6 +310,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** an answer to an offer made before the drop can still arrive, and a scrape after the drop must still see the last counts. Dropping the series would lose them. See [Metrics reference](../appendix/metrics.md#a-choosers-pool-families).
 - **Workaround:** reuse pool names, or restart the chooser.
 
+### A process's CPU seconds count whole seconds
+- **What:** `process_cpu_seconds_total` rises in steps of one second. A rate over a short window, or of a process that uses little CPU, reads 0 or 1 by turns.
+- **Why:** prometheus's process collector divides the kernel's clock ticks by the tick rate in integers, and its counter holds integers. The cgroup's throttled time, `process_cgroup_cpu_throttled_seconds_total`, is in microseconds.
+- **Workaround:** read the rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
+- **Lifts:** a prometheus release whose collector counts fractions of a second.
+
 ## Tooling
 
 ### The composer does not list marked message re-exports

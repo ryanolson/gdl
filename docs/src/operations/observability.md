@@ -53,11 +53,32 @@ The registry holds:
 - the runtime's figures for each segment a request passes through;
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
+Beside the registry, `/metrics` serves the process's own figures ([The process's own figures](#the-processs-own-figures)), with the same identity labels but never the prefix.
+
 The listener gathers the registry on a blocking thread, so a node's `ScrapeGaugeVec` closure does not run on a runtime worker. A scrape answered with 503 for its time still runs until its closures return. Up to 4 scrapes run at once, enough for an HA pair of Prometheus servers and a person. Each runs the closures on vectors of its own, so their values do not mix. A scrape that takes longer than 5 s is answered with 503 and the reason. A scrape that finds 4 running is answered with 503 at once ("a scrape is in progress"). Waiting, it would hold one of the listener's 64 connections, and enough waiting scrapes would keep the probes from being answered. A closure that panics is answered with 500.
 
 The identity labels are applied when the registry gathers, in a hash map's order. Parse the text in tests. Do not compare it as a string.
 
 A segment binary records the runtime's figures only while its listener is on: with no listener, nobody can read them. A node's own metrics are still built and counted. A program that embeds a segment turns recording on by setting `RuntimeConfig::metrics`.
+
+## The process's own figures
+
+Every segment and every pool's hub serves figures of its own process, read when `/metrics` is scraped, so nothing runs on the request path. A segment serves them beside its registry, with its identity labels. A hub serves them on its metrics route, with no labels. Neither adds a prefix, so the names are the same in every component, and dashboards built for the Prometheus client libraries read them as they are.
+
+- **The process**, from prometheus's process collector, on Linux only: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_threads`, and `process_start_time_seconds`.
+- **Its cgroup**, from the cgroup v2 files of the process's own cgroup, which `/proc/self/cgroup` names: CPU throttling from `cpu.stat`, the quota from `cpu.max`, and memory from `memory.current` and `memory.peak` ([A process's own figures](../appendix/metrics.md#a-processs-own-figures)).
+
+A figure that cannot be read is left out, and the scrape goes on: under cgroup v1, off Linux, or when a file is missing or unreadable. `cpu.stat` has the throttling keys only where the cgroup's CPU controller is on, as it is for a container with a CPU limit. A quota of `max` is no quota: `process_cgroup_cpu_quota_cores` is absent.
+
+**A segment's real CPU need under a limit.** A process limited to a CPU quota uses at most its quota in CPU seconds, however much more it needs. Throttled time is the rest. Read the need over a window as CPU seconds plus throttled seconds:
+
+```promql
+rate(process_cpu_seconds_total[1m]) + rate(process_cgroup_cpu_throttled_seconds_total[1m])
+```
+
+The first term alone flattens at `process_cgroup_cpu_quota_cores`. A window in which `process_cgroup_cpu_throttled_periods_total` rises is capped: the process waited for its quota, and its latency includes the wait. `process_cgroup_memory_peak_bytes` is the most the cgroup has held since it started, so a step of a load test reads its peak against a fresh process, or as the rise over the step.
+
+`process_cpu_seconds_total` counts whole seconds: prometheus's collector rounds the kernel's ticks down. Read it as a rate over a minute or more. The cgroup's throttled time is in microseconds.
 
 ## Reading the runtime's figures
 

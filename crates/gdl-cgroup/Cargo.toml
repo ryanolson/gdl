@@ -15,6 +15,8 @@ publish.workspace = true
 prometheus = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
+# The names a node's own metric cannot take, which must hold these.
+gdl-model = { path = "../gdl-model" }
 tempfile.workspace = true
 
 [lints]
