@@ -1,9 +1,10 @@
 //! Two operators at once on one scaler and its Deployment: what a
 //! StatefulSet of one replica rules out, unless a person force-deletes the
 //! operator's pod or removes its node while the pod still runs. The
-//! per-object fences alone must keep them from both committing a victim,
-//! both lowering the count, undoing a newer scale, or undoing each other's
-//! write to a pod.
+//! per-object fences keep a stale decision from overwriting a newer one in
+//! the cases the live tests run. The ignored tests are the known limit:
+//! two operators at once can still lose a scale-up, delete the wrong pod,
+//! or leave a deletion cost behind, until one of them stops.
 
 use super::*;
 
@@ -289,7 +290,7 @@ async fn a_count_write_is_refused_when_the_other_operator_changes_the_deployment
 }
 
 #[tokio::test]
-#[ignore = "F1: a count write lands after the other operator cancels its victim for a newer scale"]
+#[ignore = "a known limit: two operators at once, possible only after a forced deletion of the operator's pod, can lower the count after the other cancelled its victim, losing a newer scale-up"]
 async fn a_count_write_after_cancellation_preserves_the_newer_scale() {
     let fake = count_across_cancellation(3).await;
     let state = fake.state();
@@ -402,7 +403,7 @@ async fn cancellation_without_a_concurrent_sweep_clears_the_cost() {
 }
 
 #[tokio::test]
-#[ignore = "F2: a concurrent sweep interrupts cost restoration after the victim leaves status"]
+#[ignore = "a known limit: two operators at once, possible only after a forced deletion of the operator's pod, can interrupt a cost restore and let the next deletion take the wrong pod"]
 async fn a_sweep_during_cancellation_preserves_the_next_victim() {
     let fake = cancel_across_sweep(true).await;
     let retained_cost = fake.pod("pod-2").cost;
@@ -453,7 +454,7 @@ async fn a_changed_cost_refuses_the_other_operators_stale_write() {
 }
 
 #[tokio::test]
-#[ignore = "F3: an unchanged cost restore preserves the pod version and admits a delayed victim cost"]
+#[ignore = "a known limit: two operators at once, possible only after a forced deletion of the operator's pod, can leave the lowest deletion cost on a pod after an unchanged restore"]
 async fn an_unchanged_cost_restore_refuses_the_other_operators_stale_write() {
     let fake = cost_across_cancellation(None).await;
     assert_eq!(fake.state().replicas, 4);

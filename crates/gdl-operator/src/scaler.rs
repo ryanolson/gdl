@@ -16,9 +16,10 @@
 //! and resourceVersion. Each reconcile stores its status, conditionally,
 //! before its first pod write, so one whose read of the scaler predates
 //! another's stored step writes no pod. A write refused as stale ends the
-//! reconcile, and the next one reads again and decides again. So even two
-//! operators at once cannot both act on one scaler. See
-//! `docs/src/guides/operator.md`.
+//! reconcile, and the next one reads again and decides again. That keeps
+//! a stale decision from overwriting a newer one in most cases, but not
+//! every case of two operators at once, which only a forced deletion of
+//! the operator's pod makes possible (`docs/src/guides/operator.md`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

@@ -1,9 +1,9 @@
 //! The operator's controller: every `GdlScaler` in one namespace,
 //! reconciled when it or its target Deployment changes, and again when a
 //! reconcile asks. The operator runs as a StatefulSet of one replica,
-//! which Kubernetes never runs twice at once; every write also carries the
-//! read it was decided on, so that even two operators at once could not
-//! both act on one scaler (`crate::scaler`).
+//! which Kubernetes never runs twice at once, unless a person force-deletes
+//! its pod; every write also carries the read it was decided on
+//! (`crate::scaler`).
 
 use std::sync::Arc;
 use std::time::Duration;
