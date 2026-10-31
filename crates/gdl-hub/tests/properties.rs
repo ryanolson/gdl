@@ -781,10 +781,14 @@ async fn two_encodings_of_a_key_name_one_property() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A revoke that times out must still reach the next write, as the
-/// public method promises. This waits for its documented 5 s timeout.
+/// Until the hub has stored its first write, it may read the pool's last
+/// write again and take it whole, so it takes no operator's change: a
+/// revoke or a lift is refused at once, with what the hub waits for, as
+/// its health says it, and leaves nothing behind. A revoke, a lift then a
+/// revoke, and a lift alone are each refused. Once the first write is
+/// stored, the same revoke is taken and stored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
+async fn a_property_command_is_refused_until_the_first_write_is_stored() {
     let directory = common::Gated::new();
     directory.close();
     let settings = PoolSettings {
@@ -793,36 +797,47 @@ async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
     };
     let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
     directory.holding().await;
-    let answer = tokio::time::timeout(
-        WAIT + Duration::from_secs(1),
-        readiness.revoke(key("acme-legal"), true),
-    )
-    .await
-    .expect("the revoke answers within its documented bound");
-    assert!(answer.is_err(), "the directory has stored no record yet");
+    for revoked in [true, false, true] {
+        let refused = tokio::time::timeout(WAIT, readiness.revoke(key("acme-legal"), revoked))
+            .await
+            .expect("refused at once");
+        assert_eq!(
+            refused.map_err(|error| error.waiting()),
+            Err(Some(gdl_hub::Waiting::Directory)),
+            "revoked={revoked}"
+        );
+    }
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-pool{}",
+        hub.control_addr().port(),
+        gdl_watch::REVOKE_ROUTE
+    );
+    let answer = reqwest::Client::new()
+        .post(&url)
+        .json(&key("acme-legal"))
+        .send()
+        .await
+        .expect("the hub answers");
+    assert_eq!(answer.status(), 503);
+    let body: serde_json::Value = answer.json().await.expect("a JSON body");
+    assert_eq!(body["waiting"], "directory", "{body}");
 
-    // The write held at the gate was made before the revoke; the next one
-    // carries it.
     let mut records = Records::new(&directory.inner);
     directory.open();
-    let recovered = loop {
+    let first = records.next().await;
+    assert!(first.revoked.is_empty(), "nothing was taken: {first:?}");
+    readiness
+        .revoke(key("acme-legal"), true)
+        .await
+        .expect("taken once the first write is stored");
+    let revoked = loop {
         let record = records.next().await;
         if !record.revoked.is_empty() {
             break record;
         }
     };
     hub.shutdown().await.expect("the hub stops");
-    assert_eq!(
-        recovered.revoked,
-        [key("acme-legal")],
-        "the timed-out revoke must hold when the directory recovers: {recovered:?}"
-    );
-    assert!(
-        recovered
-            .properties
-            .iter()
-            .all(|entry| entry.property.key()["name"] != "acme-legal")
-    );
+    assert_eq!(revoked.revoked, [key("acme-legal")]);
 }
 
 /// A declared property needs no usable instance to stay listed as starting.

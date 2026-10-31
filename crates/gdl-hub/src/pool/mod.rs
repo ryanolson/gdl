@@ -628,14 +628,25 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// Refused when the directory has not stored such a record within 5
     /// s, or a later request replaced it, or the hub has stopped: the
     /// revocation holds all the same, and the next write carries it.
+    ///
+    /// Refused at once, and taken nowhere, until the hub has stored its
+    /// first write ([`PoolError::waiting`]): until then the hub may read
+    /// the pool's last write again and take it whole, and a change taken
+    /// before would be lost or merged in the wrong order. That lasts while
+    /// the hub's health says `"waiting":"directory"`; the operator asks
+    /// again.
     pub async fn revoke(
         &self,
         key: gdl_model::PropertyKey,
         revoked: bool,
     ) -> Result<(), PoolError> {
         let mut stored = self.stored.subscribe();
-        // Taken at once: before the pool's last record is read, the table
-        // keeps it to apply over the record's own revocations.
+        if stored.borrow().is_none() {
+            return Err(PoolError {
+                message: "the hub has not stored its first write: ask again once it has".into(),
+                waiting: Some(Waiting::Directory),
+            });
+        }
         let version = self.feed.revoke(key.clone(), revoked);
         let answered = tokio::time::timeout(SETTLE, async {
             stored
@@ -1399,6 +1410,15 @@ async fn revoke<D: PoolDirectory>(pool: &PoolReadiness<D>, body: &[u8], revoked:
     };
     match pool.revoke(key, revoked).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        // As the health endpoint says it: the operator asks again.
+        Err(error) if error.waiting().is_some() => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "waiting": error.waiting(),
+                "error": error.to_string(),
+            })),
+        )
+            .into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 }
@@ -1423,19 +1443,32 @@ fn serve_follows(
     }
 }
 
-/// Why a pool's hub cannot start.
+/// Why a pool's hub cannot start, or refused a request.
 #[derive(Clone, PartialEq, Eq)]
-pub struct PoolError(String);
+pub struct PoolError {
+    message: String,
+    waiting: Option<Waiting>,
+}
 
 impl PoolError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            waiting: None,
+        }
+    }
+
+    /// What the hub waits for before it takes the request, if that is why
+    /// it refused it, as its health says ([`PoolHealth::waiting`]): the
+    /// caller asks again once the hub waits for nothing.
+    pub fn waiting(&self) -> Option<Waiting> {
+        self.waiting
     }
 }
 
 impl std::fmt::Display for PoolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -1444,7 +1477,7 @@ impl std::fmt::Display for PoolError {
 // escape the message.
 impl std::fmt::Debug for PoolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 

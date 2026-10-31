@@ -30,18 +30,10 @@ pub(super) struct Properties {
     /// The properties the pool's settings declare, which every instance that
     /// reports no list of its own serves.
     declared: Vec<PropertyKey>,
-    /// The properties an operator revoked: never in `entries`.
+    /// The properties an operator revoked: never in `entries`. An operator
+    /// revokes or lifts only once the hub has stored its first write, so
+    /// until then they are the last record's.
     revoked: BTreeSet<PropertyKey>,
-    /// The revocations lifted before the last record was read, which
-    /// the record may still hold.
-    lifted: BTreeSet<PropertyKey>,
-    /// The properties revoked before the last record was read: their history
-    /// in it is dropped, even if the revocation was lifted since.
-    discarded: BTreeSet<PropertyKey>,
-    /// The revocations the last record read held: those revoked or lifted
-    /// since are the operator's, kept over a record read again
-    /// ([`Properties::adopt`]).
-    read_revoked: BTreeSet<PropertyKey>,
     /// Whether the last record has been read: nothing is computed before.
     restored: bool,
     /// Whether an instance has reported in its current registration since
@@ -59,9 +51,6 @@ impl Properties {
             floor: 0,
             declared,
             revoked: BTreeSet::new(),
-            lifted: BTreeSet::new(),
-            discarded: BTreeSet::new(),
-            read_revoked: BTreeSet::new(),
             restored: false,
             heard: false,
         }
@@ -85,18 +74,10 @@ impl Properties {
         self.version = version.max(floor);
         self.floor = floor;
         self.restored = true;
-        // A revocation or a lift taken before the record was read is
-        // applied over the record's own.
-        let read: BTreeSet<PropertyKey> = revoked.iter().cloned().collect();
-        self.read_revoked.clone_from(&read);
-        self.revoked.extend(read.iter().cloned());
-        for key in std::mem::take(&mut self.lifted) {
-            self.revoked.remove(&key);
-        }
-        let mut changed = self.revoked != read;
-        let discarded = std::mem::take(&mut self.discarded);
+        self.revoked = revoked.iter().cloned().collect();
+        let mut changed = false;
         for entry in entries {
-            if self.revoked.contains(&entry.property) || discarded.contains(&entry.property) {
+            if self.revoked.contains(&entry.property) {
                 changed = true;
                 continue;
             }
@@ -124,10 +105,7 @@ impl Properties {
         if changed {
             let version = self.bump();
             for (key, tracked) in &mut self.entries {
-                // A discarded entry was not kept, so its state is new.
-                let read = entries
-                    .iter()
-                    .find(|entry| entry.property == *key && !discarded.contains(key));
+                let read = entries.iter().find(|entry| entry.property == *key);
                 if read.is_none_or(|entry| entry.state != tracked.state) {
                     tracked.since = version;
                 }
@@ -137,27 +115,13 @@ impl Properties {
 
     /// Take the pool's last write again, `held`, after a write of this hub
     /// was refused because another landed after its first read: its
-    /// entries and revocations replace those read before, as at
+    /// entries and revocations replace those read before, whole, as at
     /// [`Properties::restore`], and the version rises past both `floor` and
-    /// every version this table has had. A revocation or a lift an operator
-    /// made here since the first read is applied over it, as one made
-    /// before a read is. So no revocation the other write stored is lost.
+    /// every version this table has had. No operator's change is lost: the
+    /// hub takes none before its first write is stored.
     pub(super) fn adopt(&mut self, held: Option<Held<'_>>, floor: u64) {
-        let revoked: BTreeSet<PropertyKey> = self
-            .revoked
-            .difference(&self.read_revoked)
-            .cloned()
-            .collect();
-        let lifted = self
-            .read_revoked
-            .difference(&self.revoked)
-            .cloned()
-            .collect();
         let floor = floor.max(self.version.saturating_add(1));
         self.entries.clear();
-        self.discarded.clone_from(&revoked);
-        self.revoked = revoked;
-        self.lifted = lifted;
         self.restored = false;
         self.restore(held, floor);
     }
@@ -254,28 +218,16 @@ impl Properties {
     /// Whether it was not revoked already.
     pub(super) fn revoke(&mut self, key: PropertyKey) -> bool {
         self.entries.remove(&key);
-        self.lifted.remove(&key);
-        if !self.restored {
-            self.discarded.insert(key.clone());
-        }
         if !self.revoked.insert(key) {
             return false;
         }
-        if self.restored {
-            self.bump();
-        }
+        self.bump();
         true
     }
 
     /// Lift the revocation of `key`: the next [`Properties::update`] lists it
-    /// as the instances say, starting afresh. Whether it was revoked; before
-    /// the last record is read, the lift is kept to apply over it.
+    /// as the instances say, starting afresh. Whether it was revoked.
     pub(super) fn lift(&mut self, key: &PropertyKey) -> bool {
-        if !self.restored {
-            self.revoked.remove(key);
-            self.lifted.insert(key.clone());
-            return true;
-        }
         if !self.revoked.remove(key) {
             return false;
         }

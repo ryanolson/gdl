@@ -155,10 +155,10 @@ impl Feed {
                 true
             }
         };
-        // Before the last record is read the table only keeps it: the list
-        // is sent once the record is read. After, it goes to the record and
-        // over every live link at once, as a change an instance reports does.
-        if changed && shared.properties.restored() {
+        // The hub takes a change only once it has stored its first write,
+        // so after the record is read: it goes to the record and over every
+        // live link at once, as a change an instance reports does.
+        if changed {
             self.properties_changed(&mut shared);
         }
         shared.properties.list().version

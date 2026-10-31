@@ -585,28 +585,25 @@ fn a_restored_drain_keeps_an_empty_report_after_its_reporter_leaves() {
 }
 
 /// A hub refused because another write landed after its first read takes
-/// that write again whole: its entries and its revocations, with the
-/// version past the floor and past every version the table had. A
-/// revocation or a lift the operator made here since the first read is
-/// kept over it.
+/// that write again whole: its entries and its revocations replace those
+/// read before, with the version past the floor and past every version the
+/// table had. The hub takes no operator's change before its first write is
+/// stored, so there is none to keep.
 #[test]
-fn a_write_read_again_is_adopted_with_its_revocations() {
+fn a_write_read_again_is_adopted_whole() {
     let mut properties = Properties::new(Vec::new());
     let first = [entry("a", Ready, 7)];
     properties.restore(Some((&first, 7, &[key("lifted")])), 100);
-    assert!(properties.revoke(key("mine")));
-    assert!(properties.lift(&key("lifted")));
     let before = properties.list().version;
 
     let again = [entry("a", Ready, 9), entry("b", Drained, 9)];
-    let revoked = [key("theirs"), key("lifted")];
-    properties.adopt(Some((&again, 9, &revoked)), 50);
+    properties.adopt(Some((&again, 9, &[key("theirs")])), 50);
     let list = properties.list();
     assert!(list.version > before, "{} -> {}", before, list.version);
     assert_eq!(
         list.revoked,
-        [key("mine"), key("theirs")],
-        "the write's revocation, and the operator's since the read, but not one it lifted"
+        [key("theirs")],
+        "the write's revocations alone"
     );
     assert_eq!(
         states(&properties),
@@ -615,46 +612,11 @@ fn a_write_read_again_is_adopted_with_its_revocations() {
     );
     properties.adopt(None, list.version + 1_000);
     assert!(properties.list().version >= list.version + 1_000);
-    assert_eq!(
-        properties.list().revoked,
-        [key("mine")],
+    assert!(
+        properties.list().revoked.is_empty(),
         "a withdrawal holds none"
     );
-}
-
-#[test]
-#[ignore = "F9: set differences erase local revoke intent after a matching reread or a local lift/revoke"]
-fn a_local_revoke_survives_refused_first_writes() {
-    let property = key("mine");
-    let mut repeated = Properties::new(Vec::new());
-    repeated.restore(None, 100);
-    assert!(repeated.revoke(property.clone()));
-
-    repeated.adopt(Some((&[], 200, std::slice::from_ref(&property))), 300);
-    assert_eq!(
-        repeated.list().revoked.as_slice(),
-        std::slice::from_ref(&property)
-    );
-    repeated.adopt(Some((&[entry("mine", Ready, 400)], 400, &[])), 500);
-
-    let mut toggled = Properties::new(Vec::new());
-    toggled.restore(Some((&[], 50, std::slice::from_ref(&property))), 100);
-    assert!(toggled.lift(&property));
-    assert!(toggled.revoke(property.clone()));
-    toggled.adopt(Some((&[entry("mine", Ready, 200)], 200, &[])), 300);
-
-    assert_eq!(
-        [
-            repeated.list().revoked.contains(&property),
-            toggled.list().revoked.contains(&property),
-        ],
-        [true, true],
-        "a local revoke must survive repeated rereads and a local lift/revoke before a reread"
-    );
-    assert_eq!(
-        [state(&repeated, "mine"), state(&toggled, "mine")],
-        [None, None]
-    );
+    assert!(properties.list().entries.is_empty());
 }
 
 /// A pool declares that it serves each property on its own: one property that
@@ -763,88 +725,21 @@ fn a_lifted_property_is_listed_again_as_the_instances_say() {
     assert!(!properties.lift(&key("acme-legal")), "lifted already");
 }
 
-/// A revocation or a lift taken before the last record is read applies
-/// over the record's own: the hub answers it once its first record is
-/// stored.
+/// A revoke followed by a lift discards the property's history.
 #[test]
-fn a_revocation_or_lift_before_the_record_is_read_applies_over_it() {
-    let mut properties = Properties::new(Vec::new());
-    assert!(properties.revoke(key("qwen-32b")));
-    assert!(properties.lift(&key("acme-legal")));
-    properties.restore(
-        Some((&[entry("llama-70b", Ready, 9)], 9, &[key("acme-legal")])),
-        50,
-    );
-    let restored = properties.list();
-    assert_eq!(restored.revoked, [key("qwen-32b")]);
-    assert!(restored.version > 9, "the revocations changed");
-    let all = [
-        says("acme-legal", SaysReady),
-        says("llama-70b", SaysReady),
-        says("qwen-32b", SaysReady),
-    ];
-    properties.update([Offer::Listed(&lists(&all))]);
-    assert_eq!(
-        states(&properties),
-        [
-            ("acme-legal".to_string(), Ready),
-            ("llama-70b".to_string(), Ready)
-        ]
-    );
-}
-
-fn revoke_then_lift_history(before_read: bool) {
+fn a_revoke_then_lift_discards_the_properties_history() {
     let held = [entry("acme-legal", Unavailable, 9)];
     let loading = [says("acme-legal", SaysStarting)];
     let mut properties = Properties::new(Vec::new());
-    if !before_read {
-        properties.restore(Some((&held, 9, &[])), 50);
-    }
+    properties.restore(Some((&held, 9, &[])), 50);
     assert!(properties.revoke(key("acme-legal")));
     assert!(properties.lift(&key("acme-legal")));
-    if before_read {
-        properties.restore(Some((&held, 9, &[])), 50);
-    }
     properties.update([Offer::Listed(&lists(&loading))]);
     assert_eq!(
         state(&properties, "acme-legal"),
         Some(Starting),
-        "a lifted property starts afresh, including before the restart read: before_read={before_read}, list={:?}",
+        "a lifted property starts afresh: list={:?}",
         properties.list()
-    );
-}
-
-#[test]
-fn a_revoke_then_lift_discards_history_after_the_record_is_read() {
-    revoke_then_lift_history(false);
-}
-
-/// A revoke followed by a lift discards the property's history, whether
-/// the hub has read its last record yet or still waits for it.
-#[test]
-fn a_startup_revoke_then_lift_discards_the_properties_history() {
-    revoke_then_lift_history(true);
-}
-
-#[test]
-fn a_declared_property_recreated_at_startup_takes_the_new_version() {
-    let held = [entry("acme-legal", Starting, 9)];
-    let mut unchanged = Properties::new(vec![key("acme-legal")]);
-    unchanged.restore(Some((&held, 9, &[])), 50);
-    assert_eq!(unchanged.list().entries, held);
-    assert_eq!(unchanged.list().version, 50);
-
-    let mut properties = Properties::new(vec![key("acme-legal")]);
-    assert!(properties.revoke(key("acme-legal")));
-    assert!(properties.lift(&key("acme-legal")));
-    properties.restore(Some((&held, 9, &[])), 50);
-    let recreated = properties.list();
-    assert!(recreated.revoked.is_empty());
-    assert!(recreated.version > unchanged.list().version);
-    assert_eq!(
-        recreated.entries,
-        [entry("acme-legal", Starting, recreated.version)],
-        "a recreated property takes the version of its fresh state"
     );
 }
 
