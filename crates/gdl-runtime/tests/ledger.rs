@@ -359,3 +359,40 @@ async fn velos_families_are_served_beside_the_registry_when_asked() {
             .expect("it served");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "F1: the velo_streaming prefix serves active_anchors twice when velo metrics are enabled"]
+async fn a_runtime_gauge_cannot_collide_with_the_velo_bridge() {
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C", "D"]);
+    let manifest = reference_manifest(|_| true);
+    let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
+    let (_dir, instances) = launched(
+        &spec,
+        "velo_metrics = true\nmetrics_prefix = \"velo_streaming\"\n",
+    )
+    .await;
+    for ((process, launch, registry), segment) in instances.into_iter().zip(["front", "side"]) {
+        let _deployment = Deployment::new(
+            launch.node(),
+            &manifest,
+            &placement,
+            segment,
+            launch.roster(),
+            RuntimeConfig {
+                metrics: Some(registry.clone()),
+                ..RuntimeConfig::default()
+            },
+        )
+        .expect("deployment");
+        process.serve_metrics(registry).expect("served");
+        let scrape = scrape(&process).await;
+        let family = "# TYPE velo_streaming_active_anchors gauge";
+        assert_eq!(
+            scrape.lines().filter(|line| *line == family).count(),
+            1,
+            "a runtime gauge and velo's bridge serve the same family: {scrape}"
+        );
+    }
+}
