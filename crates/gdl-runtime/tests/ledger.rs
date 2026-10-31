@@ -37,45 +37,46 @@ const WAIT: Duration = Duration::from_secs(10);
 /// the scrape is seen to read the instance's own.
 const ADMISSION_LIMIT: usize = 8;
 
-/// One instance each of `front` and `side`, each a process of its own with
-/// a system listener and the further `[system]` settings `system`, met in
-/// a roster directory, with the process's registry made for its segment.
+/// One instance of each of `segments`, each a process of its own with a
+/// system listener and the further `[system]` settings `system`, met in a
+/// roster directory, with the process's registry made for its segment.
 async fn launched(
     spec: &DeploymentSpec,
+    segments: &'static [&'static str],
     system: &str,
 ) -> (
     tempfile::TempDir,
-    [(Process, Launch, gdl::prometheus::Registry); 2],
+    Vec<(Process, Launch, gdl::prometheus::Registry)>,
 ) {
     let dir = tempfile::Builder::new()
         .prefix("gdl-ledger-")
         .tempdir()
         .expect("roster directory");
+    let instances: String = segments.iter().map(|s| format!("{s} = 1\n")).collect();
     let settings = format!(
-        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nside = 1\n[runtime]\ndrain_ms = 10000\n[system]\nport = 0\n{system}",
+        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\n{instances}[runtime]\ndrain_ms = 10000\n[system]\nport = 0\n{system}",
         dir.path().display()
     );
     let config: ProcessConfig<Nothing> =
         ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
             .expect("settings");
-    let (front, side) = (
-        Process::start(&config).await.expect("process"),
-        Process::start(&config).await.expect("process"),
-    );
-    let registry = |process: &Process, segment| process.registry(spec, segment).expect("registry");
-    let (front_registry, side_registry) = (registry(&front, "front"), registry(&side, "side"));
-    let segments: &[&str] = &["front", "side"];
-    let (front_launch, side_launch) = tokio::join!(
-        config.launch(&front, "front", segments, spec, async { Ok(()) }),
-        config.launch(&side, "side", segments, spec, async { Ok(()) })
-    );
-    (
-        dir,
-        [
-            (front, front_launch.expect("front meets"), front_registry),
-            (side, side_launch.expect("side meets"), side_registry),
-        ],
-    )
+    let mut made = Vec::new();
+    for segment in segments {
+        let process = Process::start(&config).await.expect("process");
+        let registry = process.registry(spec, segment).expect("registry");
+        made.push((process, registry));
+    }
+    let launches =
+        futures::future::join_all(made.iter().zip(segments).map(|((process, _), segment)| {
+            config.launch(process, segment, segments, spec, async { Ok(()) })
+        }))
+        .await;
+    let launched = made
+        .into_iter()
+        .zip(launches)
+        .map(|((process, registry), launch)| (process, launch.expect("met"), registry))
+        .collect();
+    (dir, launched)
 }
 
 /// The value of the series of `name`, with the default prefix, in the
@@ -134,26 +135,27 @@ async fn reaches(process: &Process, name: &str, phase: Option<&str>, value: f64)
     }
 }
 
-/// A streamed request held open in the engine holds its root in the
-/// engine's ledger and its egress permit, and the front holds the anchor
-/// the stream comes to. A stop moves the engine's instance to draining
-/// while it still holds them. Once the stream ends and velo has handed its
-/// output on, the ledger and the permits are empty, and the phase stays
-/// draining.
+/// A streamed request held open in the engine passes through `side`,
+/// which receives the engine's stream on an anchor of its own and
+/// produces its response to the front: the side holds the request's root
+/// in its ledger, an egress permit, and an anchor, and the front holds the
+/// anchor the response comes to. A stop moves the side to draining while
+/// it still holds them. Once the stream ends and velo has handed its
+/// output on, the ledger, the permits and the anchors are empty, and the
+/// phase stays draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     let placement = Placement::new()
-        .segment("front", ["A", "B", "F", "E", "G"])
-        .segment("side", ["C", "D"]);
+        .segment("front", ["A", "B", "C", "G"])
+        .segment("engine", ["D"])
+        .segment("side", ["F", "E"]);
     let manifest = reference_manifest(|_| true);
     let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
-    let (
-        _dir,
-        [
-            (front, front_launch, front_registry),
-            (side, side_launch, side_registry),
-        ],
-    ) = launched(&spec, "").await;
+    let (_dir, instances) = launched(&spec, &["front", "engine", "side"], "").await;
+    let mut instances = instances.into_iter();
+    let (front, front_launch, front_registry) = instances.next().expect("front");
+    let (engine, engine_launch, engine_registry) = instances.next().expect("engine");
+    let (side, side_launch, side_registry) = instances.next().expect("side");
     let events = Events::new();
     let start = |launch: &Launch, name: &str, registry: &gdl::prometheus::Registry| {
         let deployment = Deployment::new(
@@ -173,8 +175,10 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
         deployment.start(root).expect("start")
     };
     let front_segment = start(&front_launch, "front", &front_registry);
+    let engine_segment = start(&engine_launch, "engine", &engine_registry);
     let side_segment = start(&side_launch, "side", &side_registry);
     front.serve_metrics(front_registry).expect("served");
+    engine.serve_metrics(engine_registry).expect("served");
     side.serve_metrics(side_registry).expect("served");
     let (holding, held) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel::<()>();
@@ -204,10 +208,12 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
             Ok(())
         },
     ));
-    let side_served = tokio::spawn(side_launch.serve(side_segment, |_, shutdown| async move {
+    let idle = |_, shutdown: Cx| async move {
         shutdown.cancelled().await;
         Ok(())
-    }));
+    };
+    let engine_served = tokio::spawn(engine_launch.serve(engine_segment, idle));
+    let side_served = tokio::spawn(side_launch.serve(side_segment, idle));
     tokio::time::timeout(WAIT, held)
         .await
         .expect("the request is held in time")
@@ -232,11 +238,16 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
         !off.contains("velo_"),
         "velo's metrics are off by default: {off}"
     );
-    let anchors = read(&front, "active_anchors", None).await;
-    assert!(
-        anchors.is_some_and(|anchors| anchors >= 1.0),
-        "the front holds the anchor its response comes to: {anchors:?}"
-    );
+    for (process, whose) in [
+        (&front, "the front's response"),
+        (&side, "the engine's stream"),
+    ] {
+        let anchors = read(process, "active_anchors", None).await;
+        assert!(
+            anchors.is_some_and(|anchors| anchors >= 1.0),
+            "no anchor for {whose}: {anchors:?}"
+        );
+    }
 
     // Retired: the side drains, and still holds the request.
     side.stop();
@@ -247,12 +258,15 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     );
     assert_eq!(read(&side, "admission_admitted", None).await, Some(1.0));
     assert_eq!(read(&side, "egress_in_use", None).await, Some(1.0));
+    assert!(read(&side, "active_anchors", None).await >= Some(1.0));
 
     // The stream ends, the front reads it to its end, and velo retires it.
     let _ = release.send(());
     reaches(&side, "admission_admitted", None, 0.0).await;
     reaches(&side, "egress_in_use", None, 0.0).await;
     reaches(&front, "admission_admitted", None, 0.0).await;
+    reaches(&engine, "admission_admitted", None, 0.0).await;
+    reaches(&engine, "egress_in_use", None, 0.0).await;
     reaches(&front, "active_anchors", None, 0.0).await;
     reaches(&side, "active_anchors", None, 0.0).await;
     assert_eq!(
@@ -261,7 +275,8 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     );
 
     front.stop();
-    for served in [front_served, side_served] {
+    engine.stop();
+    for served in [front_served, engine_served, side_served] {
         tokio::time::timeout(WAIT, served)
             .await
             .expect("the instance left")
@@ -280,13 +295,10 @@ async fn velos_families_are_served_beside_the_registry_when_asked() {
         .segment("side", ["C", "D"]);
     let manifest = reference_manifest(|_| true);
     let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
-    let (
-        _dir,
-        [
-            (front, front_launch, front_registry),
-            (side, side_launch, side_registry),
-        ],
-    ) = launched(&spec, "velo_metrics = true\n").await;
+    let (_dir, instances) = launched(&spec, &["front", "side"], "velo_metrics = true\n").await;
+    let mut instances = instances.into_iter();
+    let (front, front_launch, front_registry) = instances.next().expect("front");
+    let (side, side_launch, side_registry) = instances.next().expect("side");
     let events = Events::new();
     let start = |launch: &Launch, name: &str, registry: &gdl::prometheus::Registry| {
         let deployment = Deployment::new(
@@ -528,18 +540,23 @@ async fn a_local_request_is_not_reported_as_drained_while_its_body_still_holds_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F3: the producer-anchor release fixture never gives the producer an anchor to release"]
 async fn the_producer_anchor_release_fixture_first_exercises_a_producer_owned_anchor() {
-    let nodes = [common::velo_node().await, common::velo_node().await];
+    let nodes = [
+        common::velo_node().await,
+        common::velo_node().await,
+        common::velo_node().await,
+    ];
     let placement = Placement::new()
-        .segment("front", ["A", "B", "F", "E", "G"])
-        .segment("side", ["C", "D"]);
+        .segment("front", ["A", "B", "C", "G"])
+        .segment("engine", ["D"])
+        .segment("side", ["F", "E"]);
     let registry = gdl::prometheus::Registry::new();
     let events = Events::new();
     let cluster = common::deploy_configured(
         &[
             ("front".to_string(), nodes[0].clone()),
-            ("side".to_string(), nodes[1].clone()),
+            ("engine".to_string(), nodes[1].clone()),
+            ("side".to_string(), nodes[2].clone()),
         ],
         &placement,
         &events,
