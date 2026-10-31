@@ -467,3 +467,36 @@ async fn an_unknown_kept_write_is_replaced_only_by_a_write_that_reads_nothing() 
         Ok(Some(gdl_pools::LastWrite::Withdrawn(_)))
     ));
 }
+
+#[tokio::test]
+#[ignore = "F10: repairing a kept file never clears the relay's unknown state without another write or parent restart"]
+async fn a_repaired_relay_file_can_be_read_without_restarting_the_parent() {
+    let temp = temp();
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    let last = record("m1", 1, Duration::from_secs(30));
+    directory.publish(last.clone()).await.expect("the record");
+    let path = temp.path().join("model_x").join("m1.json");
+    let kept = std::fs::read(&path).expect("the stored record");
+    drop(directory);
+
+    std::fs::write(&path, "{").expect("a file cut short");
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("reopens");
+    assert!(matches!(
+        directory.last_write("model_x", "m1").await,
+        Err(DirectoryError::Unavailable(_))
+    ));
+
+    std::fs::write(&path, kept).expect("restore the retained write");
+    let expected = Ok(Some(gdl_pools::LastWrite::Record(Box::new(last))));
+    let reopened = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("reopens");
+    assert_eq!(
+        reopened.last_write("model_x", "m1").await,
+        expected,
+        "the repaired file holds the complete retained write"
+    );
+    assert_eq!(
+        directory.last_write("model_x", "m1").await,
+        expected,
+        "a child's repeated read must recover once its retained write can be read"
+    );
+}
