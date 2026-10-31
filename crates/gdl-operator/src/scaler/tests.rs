@@ -202,8 +202,10 @@ impl Fake {
         if fake.view.resource_version != version {
             return Err(Refused::Stale(format!("{} changed", pod.name)));
         }
+        let before = (fake.routable, fake.cost);
         change(fake);
-        let next = fake.view.resource_version.parse::<u64>().unwrap_or(0) + 1;
+        let changed = (fake.routable, fake.cost) != before;
+        let next = fake.view.resource_version.parse::<u64>().unwrap_or(0) + u64::from(changed);
         fake.view.resource_version = next.to_string();
         state.writes.push(write.clone());
         state.events.push(write);

@@ -159,3 +159,105 @@ async fn a_recreated_deployment_keeps_its_new_replica_count() {
         "the removal belongs to deployment-a"
     );
 }
+
+#[tokio::test]
+async fn a_pod_patch_refuses_a_stale_version_and_a_recreated_uid() {
+    let mut initial = pod(1);
+    initial["metadata"]["resourceVersion"] = json!("10");
+    initial["metadata"]["labels"] = json!({ROUTABLE: "true"});
+    initial["metadata"]["annotations"] = json!({});
+    let read =
+        PodView::of(&serde_json::from_value(initial.clone()).expect("pod JSON")).expect("pod view");
+    let state = Arc::new(Mutex::new(initial));
+    let server_state = Arc::clone(&state);
+    let service = service_fn(move |request: Request<Body>| {
+        let state = Arc::clone(&server_state);
+        async move {
+            assert_eq!(request.method(), http::Method::PATCH);
+            assert_eq!(request.uri().path(), "/api/v1/namespaces/test/pods/pod-1");
+            let bytes = request
+                .into_body()
+                .collect_bytes()
+                .await
+                .expect("patch body");
+            let patch: Value = serde_json::from_slice(&bytes).expect("patch JSON");
+            let mut pod = state.lock().expect("pod state");
+            let metadata = &patch["metadata"];
+            let refused = ["uid", "resourceVersion"].into_iter().any(|field| {
+                metadata
+                    .get(field)
+                    .is_some_and(|v| *v != pod["metadata"][field])
+            });
+            let (code, body) = if refused {
+                (
+                    StatusCode::CONFLICT,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Conflict", "message": "the pod changed", "code": 409}),
+                )
+            } else {
+                let before = pod.clone();
+                for field in ["labels", "annotations"] {
+                    if let Some(fields) = metadata[field].as_object() {
+                        for (key, value) in fields {
+                            let stored = pod["metadata"][field]
+                                .as_object_mut()
+                                .expect("pod metadata map");
+                            if value.is_null() {
+                                stored.remove(key);
+                            } else {
+                                stored.insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+                if *pod != before {
+                    let version = before["metadata"]["resourceVersion"]
+                        .as_str()
+                        .expect("pod version")
+                        .parse::<u64>()
+                        .expect("numeric version");
+                    pod["metadata"]["resourceVersion"] = json!((version + 1).to_string());
+                }
+                (StatusCode::OK, pod.clone())
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(code)
+                    .body(Body::from(body.to_string().into_bytes()))
+                    .expect("pod patch succeeds"),
+            )
+        }
+    });
+    let cluster = KubeCluster::new(Client::new(service, "test"), "test");
+    let labelled = cluster
+        .routable(&read, "10", false)
+        .await
+        .expect("pod patch succeeds");
+    assert_eq!(labelled, "11");
+    let priced = cluster
+        .cost(&read, &labelled, Some(i32::MIN))
+        .await
+        .expect("pod patch succeeds");
+    assert_eq!(priced, "12");
+    let unchanged = cluster
+        .cost(&read, &priced, Some(i32::MIN))
+        .await
+        .expect("pod patch succeeds");
+    assert_eq!(unchanged, priced);
+    assert!(matches!(
+        cluster.cost(&read, &labelled, None).await,
+        Err(Refused::Stale(_))
+    ));
+    {
+        let mut pod = state.lock().expect("pod state");
+        pod["metadata"]["uid"] = json!("replacement");
+        pod["metadata"]["resourceVersion"] = json!("20");
+    }
+    assert!(matches!(
+        cluster.routable(&read, "20", true).await,
+        Err(Refused::Stale(_))
+    ));
+    assert_eq!(
+        state.lock().expect("pod state")["metadata"]["labels"][ROUTABLE],
+        "false"
+    );
+}

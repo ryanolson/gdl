@@ -229,6 +229,9 @@ impl Cluster for PausedWrite<'_> {
         version: &str,
         cost: Option<i32>,
     ) -> Result<String, Refused> {
+        if cost.is_some() {
+            self.before("cost").await;
+        }
         self.fake.cost(pod, version, cost).await
     }
 
@@ -410,4 +413,102 @@ async fn a_sweep_during_cancellation_preserves_the_next_victim() {
         "the cancelled victim retains cost {retained_cost:?}: {:?}",
         fake.state().events
     );
+}
+
+async fn cost_across_cancellation(initial: Option<i32>) -> Fake {
+    let fake = Fake::with(&[9, 0, 9]);
+    fake.state().pods[1].cost = initial;
+    let paused = PausedWrite::new(&fake, "cost");
+    let victims = Victims::default();
+    let cx = Context {
+        cluster: &paused,
+        probe: &fake,
+        victims: &victims,
+    };
+    let read = snapshot(&fake, &spec(Some(2)));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (result, ()) = tokio::join!(reconcile(&cx, &read, 0), async {
+            paused.arrived.notified().await;
+            assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Committing);
+            assert_eq!(fake.pod("pod-2").cost, initial);
+            fake.state().scaler_version += 1;
+            once(&fake, &spec(Some(4)), 1_000).await;
+            assert_eq!(fake.state().replicas, 4);
+            assert!(status(&fake).retiring.is_empty());
+            assert_eq!(fake.pod("pod-2").cost, None);
+            paused.resume.notify_one();
+        });
+        result.expect("the stale operator reconciles");
+    })
+    .await
+    .expect("the cost interleaving completes");
+    fake
+}
+
+#[tokio::test]
+async fn a_changed_cost_refuses_the_other_operators_stale_write() {
+    let fake = cost_across_cancellation(Some(37)).await;
+    assert_eq!(fake.state().replicas, 4);
+    assert_eq!(fake.pod("pod-2").cost, None);
+}
+
+#[tokio::test]
+#[ignore = "F3: an unchanged cost restore preserves the pod version and admits a delayed victim cost"]
+async fn an_unchanged_cost_restore_refuses_the_other_operators_stale_write() {
+    let fake = cost_across_cancellation(None).await;
+    assert_eq!(fake.state().replicas, 4);
+    assert!(status(&fake).retiring.is_empty());
+    assert_eq!(
+        fake.pod("pod-2").cost,
+        None,
+        "the delayed write must not undo a completed cost restore: {:?}",
+        fake.state().events
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_pod_write_preserves_its_version_and_a_stale_one_is_refused() {
+    let fake = Fake::with(&[0]);
+    let pod = fake.pod("pod-1").view;
+    let version = fake
+        .routable(&pod, &pod.resource_version, true)
+        .await
+        .expect("current write succeeds");
+    assert_eq!(version, pod.resource_version);
+    let version = fake
+        .cost(&pod, &version, None)
+        .await
+        .expect("current write succeeds");
+    assert_eq!(version, pod.resource_version);
+    let changed = fake
+        .routable(&pod, &version, false)
+        .await
+        .expect("current write succeeds");
+    assert_ne!(changed, version);
+    assert!(matches!(
+        fake.routable(&pod, &version, false).await,
+        Err(Refused::Stale(_))
+    ));
+}
+
+#[tokio::test]
+async fn an_unchanged_status_preserves_its_version_and_a_stale_one_is_refused() {
+    let fake = Fake::with(&[0]);
+    let desired = GdlScalerStatus::default();
+    let initial = fake.state().scaler_version.to_string();
+    let version = fake
+        .status("global-front", &desired, Some(&initial))
+        .await
+        .expect("current write succeeds");
+    let repeated = fake
+        .status("global-front", &desired, version.as_deref())
+        .await
+        .expect("current write succeeds");
+    assert_eq!(repeated, version);
+    fake.state().scaler_version += 1;
+    assert!(matches!(
+        fake.status("global-front", &desired, version.as_deref())
+            .await,
+        Err(Refused::Stale(_))
+    ));
 }
