@@ -98,6 +98,18 @@ tools="${TOOLS_DIR:-${root}/.k8s-tools}"
 
 fail() {
   echo "kind-fleet.sh: $*" >&2
+  # In the operator case, what explains a failure: the operator's pod and log, and the pools.
+  if [[ "${OPERATOR}" == "1" && -n "${context:-}" ]]; then
+    {
+      echo "--- the operator's pod"
+      kubectl --context "${context}" --namespace gdl-api describe pod gdl-operator-0 | tail -n 30 || true
+      echo "--- the operator's log"
+      kubectl --context "${context}" --namespace gdl-api logs statefulset/gdl-operator --tail=80 || true
+      echo "--- the pools"
+      kubectl --context "${context}" --namespace gdl-api get gdlpools --output json \
+        | jq -c '.items[] | {name: .metadata.name, status}' || true
+    } >&2 2>&1
+  fi
   exit 1
 }
 
@@ -312,13 +324,13 @@ if [[ "${OPERATOR}" == "1" ]]; then
   timeout "${TIMEOUT}" docker build --quiet -f crates/gdl-operator/Dockerfile -t "${image}" . >/dev/null \
     || fail "the operator's image did not build"
   timeout 300 docker push --quiet "${image}" >/dev/null
-  "${target}/debug/gdl-operator" manifests --namespace gdl-api --image "${image}" \
-    | k apply --server-side -f - >/dev/null
-  # The owner places the operator on the fleet's node group too, which is tainted.
-  k --namespace gdl-api patch statefulset gdl-operator --type=merge -p '{"spec": {"template": {"spec": {
-    "nodeSelector": {"gdl.dev/node-group": "gdl-api"},
-    "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "gdl-api", "effect": "NoSchedule"}]}}}}' \
-    >/dev/null
+  # The owner places the operator on the fleet's node group too, which is tainted, before its pod is made: a
+  # StatefulSet does not replace a pod that never became ready.
+  "${target}/debug/gdl-operator" manifests --namespace gdl-api --image "${image}" | sed '/^---$/d' \
+    | jq -c 'if .kind == "StatefulSet" then .spec.template.spec += {
+        nodeSelector: {"gdl.dev/node-group": "gdl-api"},
+        tolerations: [{key: "dedicated", operator: "Equal", value: "gdl-api", effect: "NoSchedule"}]} else . end' \
+    | sed 's/^/---\n/' | k apply --server-side -f - >/dev/null
   for crd in gdlpools gdlscalers; do
     k wait --for=condition=Established "crd/${crd}.gdl.dev" --timeout=50s >/dev/null || fail "CRD ${crd} not established"
   done
