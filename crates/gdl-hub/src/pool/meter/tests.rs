@@ -38,7 +38,6 @@ async fn the_thread_probe_observes_a_blocking_worker() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "F2: the hub gathers process collectors on its async runtime worker"]
 async fn process_collectors_run_off_the_async_worker() {
     let (process, observed) = observed_process();
     let period = Duration::from_secs(1);
