@@ -258,8 +258,9 @@ pub trait Pools {
         uid: &str,
     ) -> impl Future<Output = Result<(), Refused>> + Send;
 
-    /// The pods of `deployment`: those its ReplicaSets control, each
-    /// ReplicaSet one that `deployment` controls, by uid.
+    /// The pods of `deployment` that have not ended (`Succeeded` or
+    /// `Failed`): those its ReplicaSets control, each ReplicaSet one that
+    /// `deployment` controls, by uid.
     fn pods(&self, deployment: &Live) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
 
     /// Whether the cluster serves PodMonitors, as asked once when the
@@ -574,6 +575,12 @@ impl Pools for KubePools {
             .items
             .iter()
             .filter(|pod| controller(&pod.metadata).is_some_and(|uid| sets.contains(&uid)))
+            // A pod that has ended runs nothing, though its object stays;
+            // one being deleted runs until its phase says it ended.
+            .filter(|pod| {
+                let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+                !matches!(phase, Some("Succeeded" | "Failed"))
+            })
             .filter_map(PodView::of)
             .collect())
     }

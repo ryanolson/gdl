@@ -161,7 +161,6 @@ async fn an_apply_is_forced_under_gdl_and_a_bootstrap_is_not() {
 }
 
 #[tokio::test]
-#[ignore = "F10: terminal segment pods keep the pool stop waiting forever"]
 async fn a_pool_stop_does_not_wait_for_terminal_pods() {
     for phase in ["Running", "Pending", "Failed", "Succeeded"] {
         let service = service_fn(move |request: Request<Body>| async move {
