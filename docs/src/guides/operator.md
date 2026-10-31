@@ -30,10 +30,11 @@ The Role grants only what the scaler uses, in its namespace:
 | `apps` `deployments` | get, list, watch, patch | Read the target, and write its `replicas` |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
+| `coordination.k8s.io` `leases` | get, create, update, patch | Hold the Lease `gdl-operator`, so that one operator acts at a time |
 
 It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
-The operator runs as one replica, which its Deployment's `Recreate` strategy stops before it starts another, so two operators never act on one scaler. It does not elect a leader.
+The operator acts only while it holds the Lease `gdl-operator` in its namespace, which names it by its pod (`POD_NAME`, from the downward API). It renews the lease every 10 s, and the lease lapses 15 s after the last renewal, so a second operator, during a rollout or once a node loses touch, waits until the first lets go or lapses. An operator that loses the lease exits, and a clean stop frees it at once. The lease keeps two operators from deciding at once; the write fences below keep a decision made just before the lease went from landing.
 
 ## Let `deploy` make the scalers
 

@@ -535,8 +535,8 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the operator takes a frontend's victim out of its Service's endpoints before its pod goes, so no new connection reaches it through kube-proxy. A keep-alive connection that is already open stays, and the frontend learns that it retires only at its SIGTERM, so a request on it can race the close. A load balancer in front of the Service reports no withdrawal, so the operator waits `routingGrace` for it.
 - **Workaround:** close keep-alive connections while the frontend drains, in its own drain policy. Behind the AWS load balancer controller, use IP targets, and set `routingGrace` to its reconcile time plus the target group's deregistration delay.
 
-### The operator runs one replica, and scales only Deployments in signal mode
-- **What:** the operator does not elect a leader: its Deployment runs one replica with `Recreate`, so a node that loses touch with the cluster can leave its pod running while another starts. A `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
+### The operator scales only Deployments, in signal mode
+- **What:** a `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
 - **Workaround:** none.
 
 ### A scale-down waits for a rollout, and for every pod to be ready

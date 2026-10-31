@@ -118,7 +118,8 @@ fn the_role_grants_only_what_the_scaler_uses() {
             "gdlscalers/status",
             "deployments",
             "pods",
-            "endpointslices"
+            "endpointslices",
+            "leases"
         ]
     );
     let container = &objects[3]["spec"]["template"]["spec"]["containers"][0];
@@ -127,5 +128,25 @@ fn the_role_grants_only_what_the_scaler_uses() {
         container["args"],
         serde_json::json!(["run", "--namespace", "gdl-api"])
     );
-    assert_eq!(objects[3]["spec"]["strategy"]["type"], "Recreate");
+    // One operator acts at a time by its Lease, which names it by its pod.
+    assert_eq!(objects[3]["spec"]["replicas"], 1);
+    let identity = container["env"]
+        .as_array()
+        .expect("env")
+        .iter()
+        .find(|var| var["name"] == "POD_NAME")
+        .expect("the pod's name");
+    assert_eq!(
+        identity["valueFrom"]["fieldRef"]["fieldPath"],
+        "metadata.name"
+    );
+    let leases = rules
+        .iter()
+        .find(|rule| rule["resources"][0] == "leases")
+        .expect("a rule for leases");
+    assert_eq!(leases["apiGroups"][0], "coordination.k8s.io");
+    assert_eq!(
+        leases["verbs"],
+        serde_json::json!(["get", "create", "update", "patch"])
+    );
 }

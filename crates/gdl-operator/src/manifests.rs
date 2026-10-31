@@ -27,8 +27,8 @@ pub fn crds() -> Vec<Value> {
 
 /// The operator's objects in `namespace`, its image `image`: the
 /// ServiceAccount, the Role, the RoleBinding, and the Deployment of one
-/// replica, which `Recreate` stops before it starts another, so that two
-/// operators never act on one scaler.
+/// replica. Two operators never act together: each acts only while it
+/// holds the Lease `gdl-operator`, which names it by its pod.
 pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
     let meta = || json!({"name": NAME, "namespace": namespace, "labels": {SETUP: NAME}});
     let rule = |group: &str, resources: &[&str], verbs: &[&str]| json!({"apiGroups": [group], "resources": resources, "verbs": verbs});
@@ -43,6 +43,7 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("apps", &["deployments"], &["get", "list", "watch", "patch"]),
             rule("", &["pods"], &["get", "list", "watch", "patch"]),
             rule("discovery.k8s.io", &["endpointslices"], &read),
+            rule("coordination.k8s.io", &["leases"], &["get", "create", "update", "patch"]),
         ],
     });
     let binding = json!({
@@ -59,7 +60,6 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
         "metadata": meta(),
         "spec": {
             "replicas": 1,
-            "strategy": {"type": "Recreate"},
             "selector": {"matchLabels": labels},
             "template": {
                 "metadata": {"labels": labels},
@@ -70,7 +70,10 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
                         "name": "operator",
                         "image": image,
                         "args": ["run", "--namespace", namespace],
-                        "env": [{"name": "RUST_LOG", "value": "info"}],
+                        "env": [
+                            {"name": "RUST_LOG", "value": "info"},
+                            {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                        ],
                     }],
                 },
             },
