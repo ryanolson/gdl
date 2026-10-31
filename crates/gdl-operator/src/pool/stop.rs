@@ -12,7 +12,9 @@
 //!   until no segment pod runs. Each instance drains on its SIGTERM while
 //!   the hub still runs.
 //! - The hub's Deployment is then scaled to 0, and the stop waits until
-//!   its pod is gone.
+//!   its pod is gone. Before it is, no segment pod the pool owns may run,
+//!   and the hub of a pool with a parent must say, when asked then, that
+//!   its record is withdrawn: one that restarted drains again.
 //! - Last, the finalizer is removed once no pod of the pool runs, and
 //!   garbage collection deletes what is left.
 //!
@@ -109,6 +111,25 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     let pool = self.name.clone();
                     if self.running(&owned, |d| d.name != pool).await? {
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
+                        continue;
+                    }
+                    // A pool with a parent lets its hub go only on the
+                    // current hub's word, read now, that its record is
+                    // withdrawn: a hub that restarted since the drain has
+                    // published a record again, so the pool drains again,
+                    // with a bound of its own.
+                    if self.pool.spec.pool.parent.is_some()
+                        && hub_of(&owned, &self.name).is_some_and(|hub| hub.replicas != Some(0))
+                        && !self.cx.hubs.withdrawn(&self.name).await.unwrap_or(false)
+                    {
+                        self.status.withdrawn = false;
+                        self.condition(
+                            "Withdrawn",
+                            false,
+                            "HubRestarted",
+                            "the pool's hub no longer says its record is withdrawn: the pool drains again",
+                        );
+                        self.ahead(StopStep::Drain, &owned, None).await?;
                         continue;
                     }
                     if self.hub(&owned).await? {

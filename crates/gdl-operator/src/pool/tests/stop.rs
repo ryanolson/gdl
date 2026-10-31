@@ -322,7 +322,6 @@ async fn a_resumed_hub_step_stops_recreated_segments_before_scaling_the_hub() {
 }
 
 #[tokio::test]
-#[ignore = "F8: a hub restarted after withdrawal is stopped without withdrawing its new record"]
 async fn a_hub_restart_during_the_segments_step_requires_fresh_withdrawal() {
     let fake = running(true).await;
     fake.delete(false);
