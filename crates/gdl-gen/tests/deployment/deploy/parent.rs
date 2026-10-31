@@ -27,7 +27,7 @@ fn missing_parent_does_not_prove_a_drain_finished() {
         .tempdir()
         .expect("a directory");
     let fleet = dir.path().join("fleet.toml");
-    std::fs::write(&fleet, fleet_text()).expect("the fleet");
+    std::fs::write(&fleet, plain_fleet()).expect("the fleet");
     let log = Log::default();
     let mut kube = MissingParent(Kube::new(&log));
     kube.0.holds(
@@ -74,7 +74,7 @@ fn a_parent_that_does_not_answer_does_not_prove_a_drain_finished() {
         .tempdir()
         .expect("a directory");
     let fleet = dir.path().join("fleet.toml");
-    std::fs::write(&fleet, fleet_text()).expect("the fleet");
+    std::fs::write(&fleet, plain_fleet()).expect("the fleet");
     let log = Log::default();
     let mut kube = Silent(Kube::new(&log));
     kube.0.holds(

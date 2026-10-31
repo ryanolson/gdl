@@ -13,7 +13,7 @@ mod upgrade;
 
 /// [`fleet_text`], which asks for a PodMonitor, or the same without.
 fn fleet_asking(pod_monitor: bool) -> String {
-    let text = fleet_text();
+    let text = plain_fleet();
     assert!(text.contains("[metrics]\npod_monitor = true\n"), "{text}");
     match pod_monitor {
         true => text,
@@ -200,6 +200,7 @@ fn context_aliases_keep_a_pod_monitor_for_each_cluster() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {})
         .expect("aliases permit a deploy");
@@ -258,6 +259,7 @@ fn deploy_stops_when_operator_discovery_is_incomplete() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let result = gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {});
     assert!(
@@ -347,6 +349,7 @@ fn assert_monitor_group(prune: bool) {
             out: None,
             waits: waits(),
             sources: gdl_gen::Sources::Fetched,
+            allow_pool_restart: false,
         };
         gdl_gen::deploy(&how, &mut docker(&log), &mut kube, &mut |_| {}).expect("deploy");
     } else {

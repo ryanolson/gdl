@@ -29,7 +29,7 @@ fn drain_deadline_bounds_a_stalled_kubectl() {
         .tempdir()
         .expect("a directory");
     let fleet = dir.path().join("fleet.toml");
-    std::fs::write(&fleet, fleet_text()).expect("the fleet");
+    std::fs::write(&fleet, plain_fleet()).expect("the fleet");
     let objects = dir.path().join("objects.json");
     let mut hub = left(
         "Deployment",

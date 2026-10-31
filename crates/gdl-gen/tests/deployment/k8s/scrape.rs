@@ -78,8 +78,10 @@ fn every_pod_says_where_it_serves_its_metrics() {
     );
 }
 
-/// A fleet with `[metrics] pod_monitor = true` gets one PodMonitor in each
-/// cluster's namespace. It selects the fleet's pods in that cluster, and
+/// A fleet with `[metrics] pod_monitor = true` gets one PodMonitor in the
+/// namespace of each cluster the gdl operator does not run (`euw1`), and
+/// one for each pool where it does (`use1`), named after the pool. It
+/// selects the fleet's pods in that cluster, or the pool's, and
 /// scrapes a segment's system port and a hub's public port, each where it
 /// serves. Each series gets the pod's fleet and cluster as `fleet` and
 /// `cluster`, as the chapter's scrape job without the operator gives them,
@@ -98,22 +100,35 @@ fn a_fleet_that_asks_gets_a_pod_monitor_in_each_cluster() {
             })
             .map(|(_, monitor)| monitor)
             .collect();
-        assert_eq!(monitors.len(), 1, "{cluster}");
+        let names: Vec<&str> = monitors
+            .iter()
+            .map(|monitor| monitor["metadata"]["name"].as_str().expect("a name"))
+            .collect();
+        if cluster == "use1" {
+            assert_eq!(names, ["global-us", "model-x-us"], "{cluster}");
+        } else {
+            assert_eq!(names.len(), 1, "{cluster}");
+            let name = names[0];
+            assert!(
+                name.starts_with(&format!("api-{cluster}-"))
+                    && name.len() == format!("api-{cluster}-").len() + 10,
+                "{name}"
+            );
+        }
+        for monitor in &monitors {
+            let name = monitor["metadata"]["name"].as_str().expect("a name");
+            assert_eq!(monitor["apiVersion"], "monitoring.coreos.com/v1");
+            assert_eq!(monitor["metadata"]["namespace"], "gdl-api");
+            assert_eq!(monitor["metadata"]["labels"]["gdl.dev/fleet"], "api");
+            assert_eq!(monitor["metadata"]["labels"]["gdl.dev/cluster"], cluster);
+            let mut selected =
+                serde_json::json!({"gdl.dev/fleet": "api", "gdl.dev/cluster": cluster});
+            if cluster == "use1" {
+                selected["gdl.dev/pool"] = name.into();
+            }
+            assert_eq!(monitor["spec"]["selector"]["matchLabels"], selected);
+        }
         let monitor = monitors[0];
-        let name = monitor["metadata"]["name"].as_str().expect("a name");
-        assert!(
-            name.starts_with(&format!("api-{cluster}-"))
-                && name.len() == format!("api-{cluster}-").len() + 10,
-            "{name}"
-        );
-        assert_eq!(monitor["apiVersion"], "monitoring.coreos.com/v1");
-        assert_eq!(monitor["metadata"]["namespace"], "gdl-api");
-        assert_eq!(monitor["metadata"]["labels"]["gdl.dev/fleet"], "api");
-        assert_eq!(monitor["metadata"]["labels"]["gdl.dev/cluster"], cluster);
-        assert_eq!(
-            monitor["spec"]["selector"]["matchLabels"],
-            serde_json::json!({"gdl.dev/fleet": "api", "gdl.dev/cluster": cluster})
-        );
         let endpoints = monitor["spec"]["podMetricsEndpoints"]
             .as_array()
             .expect("endpoints");
@@ -156,6 +171,41 @@ fn a_fleet_that_asks_gets_a_pod_monitor_in_each_cluster() {
                 assert!(short < whole, "the annotation is read after the label");
                 assert_eq!(relabelings[whole]["regex"], "(.+)");
             }
+        }
+    }
+}
+
+/// A fleet whose clusters all run without the gdl operator gets the
+/// objects it got before the operator could run a cluster's pools: the
+/// README says only the base's PodMonitor, and no file holds a GdlPool.
+#[test]
+fn a_fleet_without_the_operator_renders_as_before() {
+    let mirror = Mirror::new();
+    let plain = fleet_text().replace("operator = true\n", "");
+    let files = render(&mirror, &spec(&mirror), &fleet(&plain)).expect("objects");
+    let readme = &files[Path::new("README.md")];
+    assert!(
+        readme.contains("Each `base.yaml` also holds a PodMonitor `api-<cluster>-<hash>`"),
+        "{readme}"
+    );
+    assert!(!readme.contains("GdlPool"), "{readme}");
+    assert!(files.values().all(|text| !text.contains("\"GdlPool\"")));
+    // Its euw1 files are the pinned ones, file for file.
+    for (path, text) in &files {
+        if path.starts_with("euw1") {
+            let pinned = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/k8s/out")
+                    .join(path),
+            )
+            .expect("a pinned file");
+            assert_eq!(
+                text.replace(&mirror.url, "<url>")
+                    .replace(&mirror.rev, "<rev>"),
+                pinned,
+                "{}",
+                path.display()
+            );
         }
     }
 }

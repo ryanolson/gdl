@@ -7,7 +7,7 @@ use super::*;
 /// parent still holds its record: nothing is deleted, and deploy fails.
 fn prune_with_child_hub(hub_present: bool) {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -65,7 +65,7 @@ fn a_held_child_without_its_hub_blocks_prune() {
 #[test]
 fn a_held_child_without_its_hub_names_the_withdraw_route() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -104,7 +104,7 @@ fn a_held_child_without_its_hub_names_the_withdraw_route() {
 #[test]
 fn a_withdrawn_child_without_its_hub_is_pruned() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),

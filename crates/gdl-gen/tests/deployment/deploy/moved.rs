@@ -11,7 +11,7 @@ use super::*;
 #[test]
 fn a_pool_that_moves_between_clusters_is_refused() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -23,7 +23,7 @@ fn a_pool_that_moves_between_clusters_is_refused() {
 
     // Both of euw1's pools move to use1: a child runs in its parent's
     // cluster.
-    let moved = fleet_text().replace("cluster = \"euw1\"", "cluster = \"use1\"");
+    let moved = plain_fleet().replace("cluster = \"euw1\"", "cluster = \"use1\"");
     std::fs::write(&files.fleet, moved).expect("the moved fleet");
     log.borrow_mut().clear();
     let error = deploy(&mirror, &files, &mut docker, &mut kube)
@@ -58,7 +58,7 @@ fn move_child(hub_present: bool) {
     let mirror = Mirror::new();
     let initial = format!(
         "{}\n[pool.model-y-eu]\nclass = \"model_x\"\ncluster = \"euw1\"\nhome = \"global-eu\"\n",
-        fleet_text()
+        plain_fleet()
     );
     let files = files(&mirror, &initial);
     let log = Log::default();

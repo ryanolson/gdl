@@ -83,7 +83,7 @@ fn labels(log: &Log, context: &str) -> Vec<Vec<String>> {
 #[test]
 fn an_existing_namespace_is_only_labelled() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -171,7 +171,7 @@ fn an_existing_namespace_is_only_labelled() {
 #[test]
 fn a_missing_namespace_is_created() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -220,7 +220,7 @@ fn an_unanswered_namespace_question_applies_nothing() {
     }
 
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -234,6 +234,7 @@ fn an_unanswered_namespace_question_applies_nothing() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
         .expect_err("an unanswered question")
@@ -299,7 +300,7 @@ fn a_namespace_created_after_the_lookup_is_not_applied() {
     }
 
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -317,6 +318,7 @@ fn a_namespace_created_after_the_lookup_is_not_applied() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
     assert!(kube.created, "the namespace creation raced the lookup");
@@ -362,7 +364,7 @@ fn a_failed_namespace_create_stops_the_deploy() {
     }
 
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -376,6 +378,7 @@ fn a_failed_namespace_create_stops_the_deploy() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
         .expect_err("a refused create")

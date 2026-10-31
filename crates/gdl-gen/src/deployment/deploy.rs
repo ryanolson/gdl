@@ -23,11 +23,12 @@ use crate::{Error, Files, Sources, Spec};
 
 mod kube;
 mod live;
-mod scaled;
+mod operated;
 
-use kube::{At, CONTROL, GDL, JOBS, MONITORING, PODMONITORS, PUBLIC, SCALERS, bounded};
+use kube::{At, CONTROL, GDL, JOBS, MONITORING, PODMONITORS, POOLS, PUBLIC, SCALERS, bounded};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
+use operated::{Operated, Order};
 
 /// The label every object of a fleet carries, with the fleet's name.
 const FLEET_LABEL: &str = "gdl.dev/fleet";
@@ -59,6 +60,11 @@ pub struct Deploy {
     /// [`Sources::Local`], from the spec's `[gdl] path` and its crates by
     /// path, as they are on this machine.
     pub sources: Sources,
+    /// Whether a change that replaces a pool's hub, which drains the pool,
+    /// may be applied where the gdl operator runs the pools: it sets each
+    /// `GdlPool`'s `allowPoolRestart`. Without it, the operator holds such
+    /// a change, and the deploy stops naming the pool and why.
+    pub allow_pool_restart: bool,
 }
 
 /// How long `deploy` and `down` wait for what they wait on, and how often
@@ -145,10 +151,10 @@ pub fn deploy(
                 cluster.name
             )));
         }
-        cluster.find_scalers(kube, how.waits.objects)?;
-        if cluster.operator && !cluster.scalers {
+        cluster.find_operator(kube, how.waits.objects)?;
+        if cluster.operator && !(cluster.pools && cluster.scalers) {
             return Err(Error::new(format!(
-                "cluster `{}`: the fleet asks the gdl operator to scale its segments (`[cluster.{}] operator`), but the cluster has no `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `operator` out",
+                "cluster `{}`: the fleet asks the gdl operator to run its pools (`[cluster.{}] operator`), but the cluster lacks `{POOLS}` or `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `operator` out",
                 cluster.name, cluster.name
             )));
         }
@@ -166,11 +172,21 @@ pub fn deploy(
         Some(&Digests::of(&built)),
         how.sources,
     )?;
+    if how.allow_pool_restart {
+        allow_restart(&mut files, &clusters)?;
+    }
     let rendered = Rendered::of(&files, &clusters)?;
     unmoved(kube, &fleet, &clusters, &how.waits)?;
-    for cluster in clusters.0.iter().filter(|cluster| !cluster.operator) {
-        let pools = &rendered.0[&cluster.name].pools;
-        scaled::refuse_opted_out(kube, cluster, pools, &how.waits)?;
+    // A cluster that changes its kind is refused before anything is
+    // applied, in any cluster.
+    for cluster in &clusters.0 {
+        match cluster.operator {
+            true => operated::refuse_opted_in(cluster, &cluster.live(kube, how.waits.objects)?)?,
+            false => {
+                let pools = documents(&rendered.0[&cluster.name].pools)?;
+                operated::refuse_opted_out(kube, cluster, &pools, &how.waits)?;
+            }
+        }
     }
     // Every object this run applied, in any cluster, by its uid: none is
     // pruned, even where two clusters' contexts reach one namespace.
@@ -234,38 +250,63 @@ pub fn deploy(
         if pools.trim().is_empty() {
             continue;
         }
-        if cluster.operator {
-            applied.extend(scaled::apply(kube, cluster, pools, &how.waits, say)?);
-        } else {
-            applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
-        }
+        applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
     }
     say("apply: each cluster's pools");
 
     // Every pool this run renders, in any cluster.
     let retained: BTreeSet<String> = fleet.pools().map(|pool| pool.name).collect();
+    let mut order = Order::default();
+    order.fleet(&fleet);
+    let mut plain = Vec::new();
+    let mut operated = Vec::new();
     for cluster in &clusters.0 {
         let names = &rendered.0[&cluster.name].names;
         let live = cluster.live(kube, how.waits.objects)?;
-        let pruned: Vec<&Live> = live
-            .iter()
+        order.live(&live);
+        let pruned: Vec<Live> = live
+            .into_iter()
             .filter(|object| !names.contains(&(object.kind.clone(), object.name.clone())))
             .collect();
-        if let Some(object) = pruned.iter().find(|object| applied.contains(&object.uid)) {
+        let pools = operated::pools(kube, cluster, how.waits.objects)?;
+        order.operated(&pools);
+        let removed: Vec<Operated> = pools
+            .into_iter()
+            .filter(|pool| !names.contains(&("GdlPool".to_string(), pool.name.clone())))
+            .collect();
+        let foreign = pruned
+            .iter()
+            .map(|object| {
+                (
+                    object.kind.as_str(),
+                    object.name.as_str(),
+                    object.uid.as_str(),
+                )
+            })
+            .chain(
+                removed
+                    .iter()
+                    .map(|pool| ("GdlPool", pool.name.as_str(), pool.uid.as_str())),
+            )
+            .find(|(_, _, uid)| applied.contains(*uid));
+        if let Some((kind, name, _)) = foreign {
             return Err(Error::new(format!(
-                "cluster `{}`: this deploy applied {} `{}` in another cluster, so it will not prune it: two clusters' contexts reach namespace `{}` of one cluster",
-                cluster.name, object.kind, object.name, cluster.namespace
+                "cluster `{}`: this deploy applied {kind} `{name}` in another cluster, so it will not prune it: two clusters' contexts reach namespace `{}` of one cluster",
+                cluster.name, cluster.namespace
             )));
         }
-        if pruned.is_empty() {
-            continue;
+        plain.push((cluster, pruned));
+        operated.push((cluster, removed));
+    }
+    stop_in_order(kube, &order, &plain, &operated, &retained, &how.waits, say)?;
+    for ((cluster, pruned), (_, removed)) in plain.iter().zip(&operated) {
+        if pruned.len() + removed.len() > 0 {
+            say(&format!(
+                "prune: deleted {} object(s) in cluster `{}`",
+                pruned.len() + removed.len(),
+                cluster.name
+            ));
         }
-        stop(kube, cluster, &pruned, &retained, &how.waits, say)?;
-        say(&format!(
-            "prune: deleted {} object(s) in cluster `{}`",
-            pruned.len(),
-            cluster.name
-        ));
     }
 
     let pools: Vec<(&Cluster, String)> = fleet
@@ -302,15 +343,34 @@ pub fn down(
     let mut clusters = Clusters::of(&fleet)?;
     for cluster in &mut clusters.0 {
         cluster.find_monitors(kube, waits.objects)?;
-        cluster.find_scalers(kube, waits.objects)?;
+        cluster.find_operator(kube, waits.objects)?;
     }
+    // Every pool of the fleet stops, children first across the fleet,
+    // whatever kind of cluster each runs in.
+    let mut order = Order::default();
+    order.fleet(&fleet);
+    let mut plain = Vec::new();
+    let mut operated = Vec::new();
     let mut deleted = BTreeMap::new();
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
-        let pools: Vec<&Live> = live.iter().filter(|object| object.pool.is_some()).collect();
-        stop(kube, cluster, &pools, &BTreeSet::new(), waits, say)?;
-        deleted.insert(cluster.name.clone(), pools.len());
+        order.live(&live);
+        let pools: Vec<Live> = live.into_iter().filter(|o| o.pool.is_some()).collect();
+        let ours = operated::pools(kube, cluster, waits.objects)?;
+        order.operated(&ours);
+        deleted.insert(cluster.name.clone(), pools.len() + ours.len());
+        plain.push((cluster, pools));
+        operated.push((cluster, ours));
     }
+    stop_in_order(
+        kube,
+        &order,
+        &plain,
+        &operated,
+        &BTreeSet::new(),
+        waits,
+        say,
+    )?;
     for cluster in &clusters.0 {
         let live = cluster.live(kube, waits.objects)?;
         let rest: Vec<&Live> = live.iter().collect();
@@ -330,6 +390,103 @@ pub fn down(
         ));
     }
     Ok(())
+}
+
+/// Stop the pools of `plain`, each cluster's objects that no `GdlPool`
+/// controls, and delete `operated`, each cluster's `GdlPool`s, children
+/// first across the fleet, by `order`: every pool at one depth before any
+/// at the depth above, whatever kind of cluster each runs in. A plain
+/// pool is stopped from here ([`stop`]); a `GdlPool` is deleted, with
+/// background propagation, and its finalizer stops it. The objects of
+/// `plain` of no pool, or of a pool `retained`, go last, undrained.
+fn stop_in_order(
+    kube: &mut dyn Kube,
+    order: &Order,
+    plain: &[(&Cluster, Vec<Live>)],
+    operated: &[(&Cluster, Vec<Operated>)],
+    retained: &BTreeSet<String>,
+    waits: &Waits,
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Error> {
+    let stopped = |object: &Live| {
+        object
+            .pool
+            .as_ref()
+            .filter(|pool| !retained.contains(*pool))
+            .map(|pool| order.depth(pool))
+    };
+    let deepest = plain
+        .iter()
+        .flat_map(|(_, objects)| objects.iter().filter_map(stopped))
+        .chain(
+            operated
+                .iter()
+                .flat_map(|(_, pools)| pools.iter().map(|pool| order.depth(&pool.name))),
+        )
+        .max();
+    if let Some(deepest) = deepest {
+        for depth in (0..=deepest).rev() {
+            for (cluster, objects) in plain {
+                let batch: Vec<&Live> = objects
+                    .iter()
+                    .filter(|object| stopped(object) == Some(depth))
+                    .collect();
+                if !batch.is_empty() {
+                    stop(kube, cluster, &batch, retained, waits, say)?;
+                }
+            }
+            for (cluster, pools) in operated {
+                let batch: Vec<&Operated> = pools
+                    .iter()
+                    .filter(|pool| order.depth(&pool.name) == depth)
+                    .collect();
+                operated::delete(kube, cluster, &batch, waits, say)?;
+            }
+        }
+    }
+    for (cluster, objects) in plain {
+        let rest: Vec<&Live> = objects.iter().filter(|o| stopped(o).is_none()).collect();
+        if !rest.is_empty() {
+            stop(kube, cluster, &rest, retained, waits, say)?;
+        }
+    }
+    Ok(())
+}
+
+/// Set `allowPoolRestart` on each `GdlPool` of `files`, the objects of a
+/// render: only a cluster the gdl operator runs has them.
+fn allow_restart(files: &mut Files, clusters: &Clusters) -> Result<(), Error> {
+    for (path, text) in files.iter_mut() {
+        let Some(cluster) = path.iter().next().and_then(|c| c.to_str()) else {
+            continue;
+        };
+        if !clusters.0.iter().any(|c| c.name == cluster && c.operator) {
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "yaml") {
+            continue;
+        }
+        let mut objects = documents(text)?;
+        if !objects.iter().any(|o| o["kind"] == "GdlPool") {
+            continue;
+        }
+        for object in objects.iter_mut().filter(|o| o["kind"] == "GdlPool") {
+            object["spec"]["allowPoolRestart"] = true.into();
+        }
+        *text = k8s::stream(&objects).map_err(super::io)?;
+    }
+    Ok(())
+}
+
+/// The objects of `text`, a YAML stream of JSON documents.
+fn documents(text: &str) -> Result<Vec<Value>, Error> {
+    text.split("---\n")
+        .filter(|document| !document.trim().is_empty())
+        .map(|document| {
+            serde_json::from_str(document)
+                .map_err(|e| Error::new(format!("a rendered object is not JSON: {e}")))
+        })
+        .collect()
 }
 
 fn read_fleet(path: &Path) -> Result<Fleet, Error> {
@@ -362,6 +519,7 @@ impl Clusters {
                     monitors: false,
                     operator: settings.operator,
                     scalers: false,
+                    pools: false,
                 })
                 .collect(),
         ))
@@ -397,6 +555,9 @@ struct Cluster {
     /// then are the fleet's scalers listed, pruned, and deleted, so that a
     /// cluster that no longer asks for them loses them.
     scalers: bool,
+    /// Whether the cluster has the gdl operator's `GdlPool` CRD: only then
+    /// are the fleet's `GdlPool`s listed there.
+    pools: bool,
 }
 
 impl Cluster {
@@ -433,9 +594,10 @@ impl Cluster {
     }
 
     /// Ask the cluster, once, whether it has the gdl operator's
-    /// `GdlScaler` CRD.
-    fn find_scalers(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
+    /// `GdlScaler` and `GdlPool` CRDs.
+    fn find_operator(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
         self.scalers = self.discover(kube, GDL, SCALERS, budget)?;
+        self.pools = self.discover(kube, GDL, POOLS, budget)?;
         Ok(())
     }
 
@@ -561,7 +723,11 @@ impl Cluster {
             None,
             "listing the fleet's objects",
         )?;
-        Live::list(&reply.stdout).map_err(|e| Error::new(format!("cluster `{}`: {e}", self.name)))
+        // What the gdl operator made is its own: only it changes or
+        // deletes it.
+        let live = Live::list(&reply.stdout)
+            .map_err(|e| Error::new(format!("cluster `{}`: {e}", self.name)))?;
+        Ok(live.into_iter().filter(|object| !object.operated).collect())
     }
 }
 
@@ -761,7 +927,8 @@ fn unmoved(
 ) -> Result<(), Error> {
     let mut moved = Vec::new();
     for cluster in &clusters.0 {
-        // Each pool with a Deployment here, and whether its hub's is one.
+        // Each pool with a Deployment or a GdlPool here, and whether its
+        // hub's Deployment, or its GdlPool, is one.
         let mut live: BTreeMap<String, bool> = BTreeMap::new();
         for deployment in cluster.live(kube, waits.objects)? {
             if deployment.kind != "Deployment" {
@@ -770,6 +937,9 @@ fn unmoved(
             if let Some(pool) = &deployment.pool {
                 *live.entry(pool.clone()).or_default() |= deployment.is_hub();
             }
+        }
+        for pool in operated::pools(kube, cluster, waits.objects)? {
+            live.insert(pool.name, true);
         }
         for (pool, hub) in live {
             if let Some((placed, _)) = fleet.cluster_of(&pool)
@@ -1053,10 +1223,21 @@ fn withdrawn_without_hub(
 fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> Result<(), Error> {
     let deadline = Instant::now() + waits.health;
     let mut waiting: Vec<&(&Cluster, String)> = pools.iter().collect();
+    // Why each pool the operator runs is not ready yet, as its status said.
+    let mut reasons: BTreeMap<String, String> = BTreeMap::new();
     loop {
         let mut still = Vec::new();
         for entry in waiting {
             let (cluster, pool) = entry;
+            if cluster.operator {
+                // The operator reads the hub's health in the cluster, and
+                // says it in the pool's status.
+                if let Some(why) = operated::ready(kube, cluster, pool, deadline)? {
+                    reasons.insert(pool.clone(), why);
+                    still.push(entry);
+                }
+                continue;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             let args = bounded(cluster.at().get(pool, PUBLIC, HEALTH), left);
             if !kube.run(&args, None)?.success {
@@ -1075,6 +1256,9 @@ fn healthy(kube: &mut dyn Kube, pools: &[(&Cluster, String)], waits: &Waits) -> 
             );
             for (cluster, pool) in waiting {
                 message.push_str(&format!("\n- pool `{pool}` in cluster `{}`", cluster.name));
+                if let Some(why) = reasons.get(pool) {
+                    message.push_str(&format!(": {why}"));
+                }
                 for line in why_not_ready(kube, cluster, pool, waits.objects)? {
                     message.push_str(&format!("\n  {line}"));
                 }

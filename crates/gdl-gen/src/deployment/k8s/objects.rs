@@ -458,7 +458,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
         ));
         if settings.operator {
             text.push_str(&format!(
-                "\nThe gdl operator scales the segments of cluster `{cluster}`: it needs the `GdlScaler` CRD and the operator in namespace `{namespace}` (`gdl-operator manifests`). Each segment has a `GdlScaler` named after its Deployment, and neither carries `replicas`: write each once, under a manager of its own, and only while no other manager owns it, as `cargo gdl deploy` does. For a new segment, `kubectl --context {context} --namespace {namespace} apply --server-side --field-manager=gdl-scaler` the Deployment's `{{\"spec\": {{\"replicas\": <quorum>}}}}`, and the same under `--field-manager=gdl-bootstrap` for its `GdlScaler`; the quorum is the scaler's `minReplicas`. Its pods carry `gdl.dev/routable`, and its entry Service selects on it: where the Service exists and its pods do not carry the label yet, apply the Service's selector only once the segment's rollout has ended.\n",
+                "\nThe gdl operator runs the pools of cluster `{cluster}`: it needs the `GdlPool` and `GdlScaler` CRDs and the operator in namespace `{namespace}` (`gdl-operator manifests`). Each `pools/<pool>.yaml` there holds the pool's one `GdlPool`, from which the operator makes the pool's objects, and which it stops in order when it is deleted. Delete a `GdlPool` with background propagation, the default of `kubectl delete`, child pools first: `kubectl --context {context} --namespace {namespace} delete gdlpools.gdl.dev/<pool>`. A change that replaces a pool's hub is held until its `allowPoolRestart` is set.\n",
                 namespace = settings.namespace,
                 context = settings.context
             ));
@@ -479,7 +479,11 @@ pub(super) fn readme(fleet: &Fleet) -> String {
     text.push_str("\nEach image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.\n");
     text.push_str("\nEvery pod says where it serves its metrics, in its `prometheus.io/scrape`, `prometheus.io/port`, and `prometheus.io/path` annotations.");
     if fleet.metrics().pod_monitor {
-        text.push_str(&format!(" Each `base.yaml` also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
+        if fleet.clusters().any(|(_, cluster)| cluster.operator) {
+            text.push_str(&format!(" Each `base.yaml` of a cluster the gdl operator does not run also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, and in a cluster it runs each pool has a PodMonitor named after it. Both need the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply them where the operator runs."));
+        } else {
+            text.push_str(&format!(" Each `base.yaml` also holds a PodMonitor `{name}-<cluster>-<hash>` of the fleet's pods in its cluster, which needs the Prometheus operator's CRD (`monitoring.coreos.com/v1`) there: apply it where the operator runs."));
+        }
     }
     text.push('\n');
     text.push_str(&super::dynamodb::readme(fleet));

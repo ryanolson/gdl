@@ -97,6 +97,21 @@ struct Kube {
     /// another writer beats: each bumps the object's resourceVersion just
     /// before it lands, as a scale between the read and the write would.
     raced: usize,
+    /// What the gdl operator says in the status of each `GdlPool` it is
+    /// given.
+    operator: Operator,
+}
+
+/// What the fake's gdl operator does with a `GdlPool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Operator {
+    /// Acts on each generation at once, and says the pool is ready.
+    Ready,
+    /// Holds each generation after the first, as a hub change without
+    /// `allowPoolRestart` is held, with this message.
+    Holds(&'static str),
+    /// Never acts: the operator does not run.
+    Absent,
 }
 
 impl Kube {
@@ -119,7 +134,25 @@ impl Kube {
             without_scalers: Vec::new(),
             owners: BTreeMap::new(),
             raced: 0,
+            operator: Operator::Ready,
         }
+    }
+
+    /// Act on `pool`, a `GdlPool` just applied, as the operator would.
+    fn operate(&self, pool: &mut Value) {
+        let generation = pool["metadata"]["generation"].as_i64().unwrap_or(1);
+        let condition = |kind: &str, on: bool, message: &str| json!({"type": kind, "status": if on { "True" } else { "False" }, "observedGeneration": generation, "message": message});
+        pool["status"] = match &self.operator {
+            Operator::Absent => Value::Null,
+            Operator::Holds(message)
+                if generation > 1 && pool["spec"]["allowPoolRestart"] != true =>
+            {
+                json!({"observedGeneration": generation, "phase": "Ready", "held": generation,
+                       "conditions": [condition("PoolRestartPending", true, message)]})
+            }
+            _ => json!({"observedGeneration": generation, "phase": "Ready",
+                        "conditions": [condition("PoolRestartPending", false, "")]}),
+        };
     }
 
     /// Whether `context`'s cluster has the `GdlScaler` CRD.
@@ -216,6 +249,25 @@ impl Kube {
             .unwrap_or(0)
             + 1;
         object["metadata"]["resourceVersion"] = version.to_string().into();
+        if key.0 == "GdlPool" {
+            // A field the apply leaves out that another manager set, as a
+            // person's patch of `presence`, stays.
+            if let Some(held) = &held
+                && object["spec"].get("presence").is_none()
+                && let Some(presence) = held["spec"].get("presence")
+            {
+                object["spec"]["presence"] = presence.clone();
+            }
+            let generation = match &held {
+                None => 1,
+                Some(held) => {
+                    let before = held["metadata"]["generation"].as_i64().unwrap_or(1);
+                    before + i64::from(held["spec"] != object["spec"])
+                }
+            };
+            object["metadata"]["generation"] = generation.into();
+            self.operate(&mut object);
+        }
         Ok(self.holds(context, object))
     }
 
@@ -285,7 +337,7 @@ impl gdl_gen::Kube for Kube {
             ("auth", _) => gdl_gen::Reply::ok(format!("{}\n", self.can_i)),
             ("api-resources", _) if rest.contains(&"--api-group=gdl.dev".to_string()) => {
                 match self.scalers(&context) {
-                    true => gdl_gen::Reply::ok("gdlscalers.gdl.dev\n"),
+                    true => gdl_gen::Reply::ok("gdlpools.gdl.dev\ngdlscalers.gdl.dev\n"),
                     false => gdl_gen::Reply::ok(""),
                 }
             }
@@ -327,7 +379,10 @@ impl gdl_gen::Kube for Kube {
                             "error: resource mapping not found for kind \"PodMonitor\"",
                         ));
                     }
-                    if object["kind"] == "GdlScaler" && !self.scalers(&context) {
+                    if ["GdlScaler", "GdlPool"]
+                        .contains(&object["kind"].as_str().unwrap_or_default())
+                        && !self.scalers(&context)
+                    {
                         return Ok(gdl_gen::Reply::failed(
                             "error: resource mapping not found for kind \"GdlScaler\"",
                         ));
@@ -453,6 +508,7 @@ impl gdl_gen::Kube for Kube {
                 let kind = match resource {
                     "deployments.apps" => "Deployment",
                     "gdlscalers.gdl.dev" => "GdlScaler",
+                    "gdlpools.gdl.dev" => "GdlPool",
                     "services" => "Service",
                     _ => panic!("an unexpected read: {args:?}"),
                 };
@@ -490,8 +546,13 @@ impl gdl_gen::Kube for Kube {
                         "error: the server doesn't have a resource type \"podmonitors\"",
                     ));
                 }
+                let pools = rest[1] == "gdlpools.gdl.dev";
+                assert!(
+                    pools || !rest[1].contains("gdlpools"),
+                    "a GdlPool is listed alone: {args:?}"
+                );
                 let scalers = rest[1].contains("gdlscalers.gdl.dev");
-                if scalers && !self.scalers(&context) {
+                if (scalers || pools) && !self.scalers(&context) {
                     return Ok(gdl_gen::Reply::failed(
                         "error: the server doesn't have a resource type \"gdlscalers\"",
                     ));
@@ -507,6 +568,7 @@ impl gdl_gen::Kube for Kube {
                     .into_iter()
                     .flat_map(|objects| objects.values())
                     .filter(|object| object["kind"] != "Namespace")
+                    .filter(|object| (object["kind"] == "GdlPool") == pools)
                     .filter(|object| monitors || object["kind"] != "PodMonitor")
                     .filter(|object| scalers || object["kind"] != "GdlScaler")
                     .filter(|object| {
@@ -526,6 +588,26 @@ impl gdl_gen::Kube for Kube {
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": items}).to_string())
             }
             ("delete", _) => {
+                // A GdlPool's finalizer holds its delete until its stop
+                // ends, which only background propagation lets run in
+                // order: a GdlPool is deleted alone, and so.
+                let pools = rest
+                    .iter()
+                    .filter(|a| a.starts_with("gdlpools.gdl.dev/"))
+                    .count();
+                if pools > 0 {
+                    assert!(
+                        rest.contains(&"--cascade=background".to_string()),
+                        "{args:?}"
+                    );
+                    assert_eq!(
+                        pools,
+                        rest.iter()
+                            .filter(|a| !a.starts_with("--") && *a != "delete")
+                            .count(),
+                        "{args:?}"
+                    );
+                }
                 for reference in rest
                     .iter()
                     .filter(|a| !a.starts_with("--") && *a != "delete")
@@ -553,6 +635,16 @@ impl gdl_gen::Kube for Kube {
         };
         Ok(reply)
     }
+}
+
+/// The fixture fleet without the gdl operator in any cluster: `deploy`
+/// and `down` run each pool from the deploying machine, as in a cluster
+/// without the operator. The fixture's own fleet lets the operator run
+/// `use1` (`deploy/operator.rs`).
+fn plain_fleet() -> String {
+    let text = fleet_text();
+    assert!(text.contains("operator = true\n"));
+    text.replace("operator = true\n", "")
 }
 
 /// The spec and fleet files of a deploy: the api example in two classes,
@@ -613,6 +705,7 @@ fn deploy(
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let mut said = Vec::new();
     gdl_gen::deploy(&how, docker, kube, &mut |step| said.push(step.to_string()))?;
@@ -753,14 +846,15 @@ fn left(kind: &str, name: &str, pool: &str, segment: &str, home: Option<&str>) -
 }
 
 /// `deploy` checks each cluster's context and asks whether it has the
-/// PodMonitor and `GdlScaler` CRDs, builds and pushes, renders, lists each cluster's
-/// pools to refuse a move, applies each cluster's base and waits for its
-/// namespace, applies its pools, prunes, and waits for health, in that
-/// order.
+/// PodMonitor and gdl operator CRDs, builds and pushes, renders, lists
+/// each cluster's pools to refuse a move, reads each cluster without the
+/// operator to refuse one the operator still runs pools in, applies each
+/// cluster's base and waits for its namespace, applies its pools, prunes,
+/// and waits for health, in that order.
 #[test]
 fn a_deploy_runs_its_steps_in_order() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let (mut docker, mut kube) = (
         Docker {
@@ -780,9 +874,10 @@ fn a_deploy_runs_its_steps_in_order() {
             "docker",
             "kind-euw1:list",
             "kind-use1:list",
-            // euw1 does not ask for the operator: its segment Deployments
-            // are read for an owner of `replicas` that would conflict.
+            "kind-euw1:list",
             "kind-euw1:read",
+            "kind-use1:list",
+            "kind-use1:read",
             "kind-euw1:namespace",
             "kind-euw1:create-namespace",
             "kind-euw1:base",
@@ -792,20 +887,7 @@ fn a_deploy_runs_its_steps_in_order() {
             "kind-use1:base",
             "kind-use1:wait-namespace",
             "kind-euw1:pools",
-            // use1's segments are scaled by the operator: what exists is
-            // bootstrapped before the apply, the entry Service's pods are
-            // read, and what the apply made is bootstrapped after it.
-            "kind-use1:read",
-            "kind-use1:list",
             "kind-use1:pools",
-            "kind-use1:read",
-            "kind-use1:bootstrap",
-            "kind-use1:read",
-            "kind-use1:bootstrap",
-            "kind-use1:read",
-            "kind-use1:bootstrap",
-            "kind-use1:read",
-            "kind-use1:bootstrap",
             "kind-euw1:list",
             "kind-use1:list",
             "kind-euw1:health",
@@ -838,7 +920,7 @@ fn a_deploy_runs_its_steps_in_order() {
 #[test]
 fn a_deploy_stops_at_the_first_failure() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let run = |docker_fails: bool, setup: &dyn Fn(&mut Kube)| {
         let log = Log::default();
         let mut docker = Docker {
@@ -899,7 +981,7 @@ fn a_deploy_stops_at_the_first_failure() {
     // A fleet that fails the check: neither Docker nor kubectl runs.
     let broken = self::files(
         &mirror,
-        &fleet_text().replace("cluster = \"use1\"", "cluster = \"nowhere\""),
+        &plain_fleet().replace("cluster = \"use1\"", "cluster = \"nowhere\""),
     );
     let log = Log::default();
     let mut docker = Docker {
@@ -919,7 +1001,7 @@ fn a_deploy_stops_at_the_first_failure() {
 #[test]
 fn a_prune_drains_a_removed_pool_and_deletes_only_what_was_not_rendered() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -999,16 +1081,16 @@ fn a_prune_drains_a_removed_pool_and_deletes_only_what_was_not_rendered() {
     assert_eq!(
         deletes(&log, "kind-use1"),
         [
+            // The child pool, segments first and its hub next, wholly
+            // before the top pool: children stop first across the fleet.
             vec!["deployments.apps/model-x-old-engine".to_string()],
-            vec![
-                "deployments.apps/global-old".into(),
-                "deployments.apps/model-x-old".into()
-            ],
+            vec!["deployments.apps/model-x-old".into()],
             vec![
                 "configmaps/model-x-old".into(),
-                "persistentvolumeclaims/global-old-state".into(),
                 "services/model-x-old".into(),
             ],
+            vec!["deployments.apps/global-old".into()],
+            vec!["persistentvolumeclaims/global-old-state".into()],
         ]
     );
     assert!(deletes(&log, "kind-euw1").is_empty());
@@ -1027,7 +1109,7 @@ fn a_prune_drains_a_removed_pool_and_deletes_only_what_was_not_rendered() {
 #[test]
 fn a_drain_that_does_not_end_stops_the_deploy() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -1063,7 +1145,7 @@ fn a_drain_that_does_not_end_stops_the_deploy() {
 #[test]
 fn a_health_timeout_names_the_pods_and_their_events() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -1121,13 +1203,13 @@ fn a_health_timeout_names_the_pods_and_their_events() {
 }
 
 /// `down` drains each pool that has a parent and deletes the pools'
-/// objects, in every cluster, and only then deletes every other object
-/// with the fleet's label and removes the label from each namespace, which
-/// it keeps, with the Secrets in it.
+/// objects, children's pools first across every cluster, and only then
+/// deletes every other object with the fleet's label and removes the label
+/// from each namespace, which it keeps, with the Secrets in it.
 #[test]
 fn down_drains_deletes_and_keeps_the_namespace() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -1144,12 +1226,15 @@ fn down_drains_deletes_and_keeps_the_namespace() {
             "kind-euw1:crds",
             "kind-use1:crds",
             "kind-euw1:list",
+            "kind-use1:list",
+            // The child pools in every cluster, then their parents.
             "kind-euw1:drain",
             "kind-euw1:held",
             "kind-euw1:delete",
-            "kind-use1:list",
             "kind-use1:drain",
             "kind-use1:held",
+            "kind-use1:delete",
+            "kind-euw1:delete",
             "kind-use1:delete",
             "kind-euw1:list",
             "kind-euw1:delete",
@@ -1187,18 +1272,16 @@ fn down_drains_deletes_and_keeps_the_namespace() {
             "--request-timeout=5000ms"
         ]
     );
-    // Segments go first, so that each hub outlives its instances.
+    // Segments go first, so that each hub outlives its instances; and the
+    // child pool goes wholly before its parent.
     assert_eq!(
-        deletes(&log, "kind-use1")[..2],
+        deletes(&log, "kind-use1")[..5],
         [
-            vec![
-                "deployments.apps/global-us-front".to_string(),
-                "deployments.apps/model-x-us-engine".into(),
-            ],
-            vec![
-                "deployments.apps/global-us".into(),
-                "deployments.apps/model-x-us".into()
-            ],
+            vec!["deployments.apps/model-x-us-engine".to_string()],
+            vec!["deployments.apps/model-x-us".into()],
+            vec!["configmaps/model-x-us".into(), "services/model-x-us".into()],
+            vec!["deployments.apps/global-us-front".into()],
+            vec!["deployments.apps/global-us".into()],
         ]
     );
 }
@@ -1210,7 +1293,7 @@ fn down_drains_deletes_and_keeps_the_namespace() {
 #[test]
 fn no_command_carries_a_credential() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -1308,8 +1391,8 @@ mod moved;
 #[path = "deploy/monitors.rs"]
 mod monitors;
 
-#[path = "deploy/scalers.rs"]
-mod scalers;
-
 #[path = "deploy/namespace.rs"]
 mod namespace;
+
+#[path = "deploy/operator.rs"]
+mod operator;

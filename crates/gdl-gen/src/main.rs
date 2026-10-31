@@ -11,7 +11,7 @@
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
 //! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
-//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--target-dir <dir>]
+//! cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
 //! cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
@@ -66,8 +66,13 @@
 //! cluster's base objects; its pools, applied server-side; a prune of the
 //! objects labelled with the fleet that it did not render, after a drain
 //! of each pool it removes; and a wait until each pool's health answers
-//! 200. `down` drains every pool that has a parent, deletes every object
-//! labelled with the fleet, and removes the label from each namespace,
+//! 200. In a cluster the gdl operator runs (`[cluster.<name>] operator`),
+//! its pools are `GdlPool`s, which it deletes with background propagation
+//! so that the operator stops each in order, and a pool is ready when its
+//! status says so; `--allow-pool-restart` lets the operator apply a
+//! change that restarts a pool's hub. `down` drains every pool that has a
+//! parent, deletes every object labelled with the fleet, children's pools
+//! first across the fleet, and removes the label from each namespace,
 //! which it keeps; with `--spec`, it first runs the same check as `check`.
 //! `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
@@ -88,7 +93,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
        cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
-       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--target-dir <dir>]
+       cargo gdl deploy --spec <gdl.toml> --fleet <fleet.toml> [--out <directory>] [--local] [--allow-pool-restart] [--target-dir <dir>]
        cargo gdl down --fleet <fleet.toml> [--spec <gdl.toml>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
@@ -118,6 +123,7 @@ enum Command {
         fleet: PathBuf,
         out: Option<PathBuf>,
         local: bool,
+        allow_pool_restart: bool,
     },
     Down {
         fleet: PathBuf,
@@ -166,6 +172,7 @@ fn args() -> Result<Args, String> {
     let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
     let mut push = false;
     let mut release = false;
+    let mut allow_pool_restart = false;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -191,6 +198,7 @@ fn args() -> Result<Args, String> {
             Some("--verify") => verify = true,
             Some("--probe") => probe = true,
             Some("--local") => local = true,
+            Some("--allow-pool-restart") => allow_pool_restart = true,
             Some("--release") => release = true,
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
@@ -250,6 +258,7 @@ fn args() -> Result<Args, String> {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
             out: out.take(),
             local: std::mem::take(&mut local),
+            allow_pool_restart: std::mem::take(&mut allow_pool_restart),
         },
         "down" => Command::Down {
             fleet: fleet.take().ok_or_else(|| USAGE.to_string())?,
@@ -487,7 +496,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     .map_err(|e| format!("{}: {e}", out.display()))?;
             }
         }
-        Command::Deploy { fleet, out, local } => {
+        Command::Deploy {
+            fleet,
+            out,
+            local,
+            allow_pool_restart,
+        } => {
             let file = args.spec.as_ref().ok_or(USAGE)?;
             let how = gdl_gen::Deploy {
                 spec: file.clone(),
@@ -496,6 +510,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 out: out.clone(),
                 waits: gdl_gen::Waits::default(),
                 sources: sources(*local),
+                allow_pool_restart: *allow_pool_restart,
             };
             let mut say = |step: &str| eprintln!("cargo gdl: {step}");
             if let Err(error) =

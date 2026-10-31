@@ -25,7 +25,7 @@ mod refusals;
 mod relay;
 
 pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
-pub(super) use gdl_k8s::{ROUTABLE, label_value};
+pub(super) use gdl_k8s::label_value;
 use objects::{Names, Pod, Segment};
 pub(super) use objects::{image, stream};
 
@@ -339,7 +339,8 @@ impl Render<'_> {
         let fleet_name = self.fleet.name().expect("refusals::fleet requires a name");
         for (name, cluster) in self.fleet.clusters() {
             let mut base = objects::base(fleet_name, name, cluster);
-            if self.fleet.metrics().pod_monitor {
+            // Under the operator, each pool has a PodMonitor of its own.
+            if self.fleet.metrics().pod_monitor && !cluster.operator {
                 base.push(objects::pod_monitor(fleet_name, name, cluster));
             }
             if let Some(directory) = self.fleet.directory()
@@ -517,13 +518,26 @@ impl Render<'_> {
             segments,
             &variables(gdl_k8s::hub_address(&pool.name))?,
         )?;
-        let scaling = match cluster.operator {
-            true => gdl_k8s::Scaling::Operator,
-            false => gdl_k8s::Scaling::Fixed,
+        // Under the operator the pool's one object is its GdlPool, which
+        // the operator renders the same objects from in the cluster: their
+        // names are still claimed here, so two pools never share one.
+        let (scaling, written) = match cluster.operator {
+            true => (
+                gdl_k8s::Scaling::Operator,
+                vec![gdl_k8s::pool_object(&pool.name, &cluster.namespace, &spec)],
+            ),
+            false => (gdl_k8s::Scaling::Fixed, Vec::new()),
         };
         let objects = gdl_k8s::children(&pool.name, &cluster.namespace, &spec, scaling)
             .map_err(Error::new)?;
-        for object in &objects {
+        let written = match cluster.operator {
+            true => written,
+            false => objects.clone(),
+        };
+        for object in objects
+            .iter()
+            .chain(written.iter().filter(|o| o["kind"] == "GdlPool"))
+        {
             if let Err(message) = self.names.claim(cluster_name, &pool.name, object) {
                 self.problems.push(Problem::at(
                     Some(format!("pool.{}", pool.name)),
@@ -536,7 +550,7 @@ impl Render<'_> {
             Path::new(cluster_name)
                 .join("pools")
                 .join(format!("{}.yaml", pool.name)),
-            objects::stream(&objects).map_err(io)?,
+            objects::stream(&written).map_err(io)?,
         );
         Ok(())
     }

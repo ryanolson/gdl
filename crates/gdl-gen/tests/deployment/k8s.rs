@@ -18,6 +18,11 @@ const FLEET: &str = "tests/fixtures/k8s/fleet.toml";
 /// `scripts/kubeconform.sh` validates by default.
 const PINNED: &str = "tests/fixtures/k8s/out";
 
+/// The pinned objects the gdl operator makes from each `GdlPool` of
+/// [`PINNED`], one file per pool: what `scripts/kubeconform.sh` also
+/// validates, so that the operator's objects keep the API's schemas.
+const OPERATED: &str = "tests/fixtures/k8s/operated";
+
 /// A file whose text is [`MARKER`]: the fleet's secret on the host, which
 /// no generated file may hold.
 const SECRET: &str = "tests/fixtures/k8s/secret";
@@ -88,9 +93,24 @@ fn documents(text: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Every object of `files`, by its kind and name. A pool's objects are
-/// named for it, and so for one cluster; each cluster's base objects are
-/// named `<cluster>/<name>` here.
+/// The objects the gdl operator makes in its cluster from a `GdlPool`
+/// that `cargo gdl k8s` wrote: what `gdl-k8s` renders from its spec.
+pub(super) fn operated_of(pool: &Value) -> Vec<Value> {
+    let name = pool["metadata"]["name"].as_str().expect("a name");
+    let namespace = pool["metadata"]["namespace"].as_str().expect("a namespace");
+    let spec: gdl_k8s::Pool = serde_json::from_value(pool["spec"].clone()).expect("a pool");
+    let mut objects =
+        gdl_k8s::children(name, namespace, &spec, gdl_k8s::Scaling::Operator).expect("objects");
+    if spec.pod_monitor {
+        objects.push(gdl_k8s::pool_monitor(name, namespace, &spec));
+    }
+    objects
+}
+
+/// Every object of `files`, by its kind and name, and each object the
+/// gdl operator makes from a `GdlPool` of them. A pool's objects are
+/// named for it, and so for one cluster; each cluster's base objects, and
+/// each PodMonitor, are named `<cluster>/<name>` here.
 pub(super) fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Value> {
     let mut objects = BTreeMap::new();
     for (path, text) in files {
@@ -98,7 +118,13 @@ pub(super) fn objects(files: &gdl_gen::Files) -> BTreeMap<(String, String), Valu
             continue;
         }
         let cluster = path.iter().next().expect("a cluster").to_string_lossy();
-        for object in documents(text) {
+        let written = documents(text);
+        let made = written
+            .iter()
+            .filter(|object| object["kind"] == "GdlPool")
+            .flat_map(operated_of)
+            .collect::<Vec<_>>();
+        for object in written.into_iter().chain(made) {
             let kind = object["kind"].as_str().expect("a kind").to_string();
             let name = object["metadata"]["name"].as_str().expect("a name");
             let name = match kind.as_str() {
@@ -213,6 +239,36 @@ fn a_fleets_objects_are_pinned() {
     }
 }
 
+/// The objects the operator makes from each pinned `GdlPool` are pinned
+/// too, file for file, for kubeconform to check.
+#[test]
+fn the_objects_the_operator_makes_are_pinned() {
+    let mirror = Mirror::new();
+    let files = render(&mirror, &spec(&mirror), &fleet(&fleet_text())).expect("objects");
+    let mut operated = gdl_gen::Files::new();
+    for (path, text) in &files {
+        if path.extension().is_none_or(|e| e != "yaml") {
+            continue;
+        }
+        let cluster = path.iter().next().expect("a cluster");
+        for pool in documents(text).iter().filter(|o| o["kind"] == "GdlPool") {
+            let name = pool["metadata"]["name"].as_str().expect("a name");
+            let stream: String = operated_of(pool)
+                .iter()
+                .map(|object| {
+                    format!(
+                        "---\n{}\n",
+                        serde_json::to_string_pretty(object).expect("JSON")
+                    )
+                })
+                .collect();
+            operated.insert(Path::new(cluster).join(format!("{name}.yaml")), stream);
+        }
+    }
+    assert_eq!(operated.len(), 2, "{:?}", operated.keys());
+    assert_pinned(&mirror, &operated, OPERATED);
+}
+
 /// Each object carries the fleet's label, and each of a pool's objects
 /// its pool's, class's, region's, and segment's; a Deployment's selector picks its
 /// own pods only, by the labels that name them, and a hub's is never a
@@ -232,10 +288,11 @@ fn every_object_is_labelled_and_selects_its_own_pods() {
         for key in ["gdl.dev/pool", "gdl.dev/class", "gdl.dev/region"] {
             assert!(labels[key].is_string(), "{kind} {name}: {key}");
         }
-        // A pool's settings are all its segments'.
+        // A pool's settings are all its segments', and so is its
+        // GdlPool.
         assert_eq!(
             labels["gdl.dev/segment"].is_string(),
-            kind != "ConfigMap",
+            !matches!(kind.as_str(), "ConfigMap" | "GdlPool"),
             "{kind} {name}"
         );
         // A selector names its pods by fleet, pool, and segment only: a

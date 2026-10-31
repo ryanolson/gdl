@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Validate the Kubernetes objects that `cargo gdl k8s` writes with kubeconform, against the schemas of a pinned
-# Kubernetes version, a PodMonitor against the Prometheus operator's CRD schema at a pinned commit, and a GdlScaler
-# against the gdl operator's pinned CRD, in strict mode, offline. Outside the default suite: the objects' contents are pinned by
+# Kubernetes version, a PodMonitor against the Prometheus operator's CRD schema at a pinned commit, and a GdlPool and
+# a GdlScaler against the gdl operator's pinned CRDs, in strict mode, offline. Outside the default suite: the objects' contents are pinned by
 # `crates/gdl-gen/tests/deployment/k8s.rs`, and this checks that the Kubernetes API accepts each one.
 #
 #   bash scripts/kubeconform.sh [dir ...]
 #
-# Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out and
-# crates/gdl-gen/tests/fixtures/k8s/dynamodb/out. With
+# Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out,
+# crates/gdl-gen/tests/fixtures/k8s/dynamodb/out, and crates/gdl-gen/tests/fixtures/k8s/operated, the objects the
+# gdl operator makes from the pinned GdlPools. With
 # INSTALL_TOOLS=1 it first downloads the pinned kubeconform and the schemas of the kinds that `cargo gdl k8s`
 # writes, and of the PodMonitor, into TOOLS_DIR (default: .k8s-tools at the repository's root, which git ignores).
 set -euo pipefail
@@ -59,18 +60,22 @@ if [[ ! -x "${kubeconform}" ]]; then
 fi
 "${kubeconform}" -v
 
-# The gdl operator's GdlScaler: its schema is the CRD the operator pins (crates/gdl-operator/tests/fixtures/crds.yaml),
-# read from the working tree, so it never drifts from the objects it checks.
+# The gdl operator's GdlPool and GdlScaler: each schema is the CRD the operator pins
+# (crates/gdl-operator/tests/fixtures/crds.yaml), read from the working tree, so it never drifts from the objects it
+# checks.
 command -v jq >/dev/null || { echo "kubeconform.sh: jq is not on the PATH" >&2; exit 1; }
 gdl_schemas="$(mktemp -d)"
 trap 'rm -rf "${gdl_schemas}"' EXIT
 mkdir -p "${gdl_schemas}/gdl.dev"
-sed '/^---$/d' "${root}/crates/gdl-operator/tests/fixtures/crds.yaml" \
-  | jq 'select(.spec.names.kind == "GdlScaler") | .spec.versions[0].schema.openAPIV3Schema' \
-  >"${gdl_schemas}/gdl.dev/gdlscaler_v1alpha1.json"
+for kind in GdlPool GdlScaler; do
+  sed '/^---$/d' "${root}/crates/gdl-operator/tests/fixtures/crds.yaml" \
+    | jq --arg kind "${kind}" 'select(.spec.names.kind == $kind) | .spec.versions[0].schema.openAPIV3Schema' \
+    >"${gdl_schemas}/gdl.dev/${kind,,}_v1alpha1.json"
+done
 
 if [[ $# -eq 0 ]]; then
-  set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out"
+  set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out" \
+    "${root}/crates/gdl-gen/tests/fixtures/k8s/operated"
 fi
 # A kind with no schema here fails: -ignore-missing-schemas is not given. A custom resource's schema is found by its
 # group, as the catalog files it.

@@ -47,9 +47,9 @@ The operator runs as a StatefulSet of one replica. A StatefulSet never runs two 
 
 The rejected alternative is an election of the operator's own, by a Kubernetes Lease. Three review passes each found a new way for it to let two operators act at once: a renewal that hung left the old holder acting after another took the lapsed lease; a delayed first read let a successor take over inside the holder's hold; and a write that passed the holder's check could land after the handoff. Kubernetes already keeps one pod of a StatefulSet's identity, and the operator needs nothing more.
 
-## Let `deploy` make the scalers
+## Let the operator run a cluster's pools
 
-Set `operator = true` on a cluster in the fleet file. `cargo gdl deploy` then gives each segment of that cluster a `GdlScaler` named after its Deployment, writes each one's `replicas` once at the segment's quorum, and labels the pods for their entry Service ([The operator](kubernetes.md#the-operator) in the Kubernetes guide). It refuses a cluster that sets `operator` and has no `GdlScaler` CRD. A cluster without `operator` keeps its segments at the quorum, with no scaler.
+Set `operator = true` on a cluster in the fleet file. `cargo gdl deploy` then applies one `GdlPool` per pool of that cluster, and the operator makes each pool's objects from it, a `GdlScaler` per segment among them, and stops the pool in order when `deploy` or `down` deletes its `GdlPool` ([The operator](kubernetes.md#the-operator) in the Kubernetes guide). `deploy` refuses a cluster that sets `operator` and lacks the `GdlPool` or `GdlScaler` CRD. A cluster without `operator` gets its pools' objects from `deploy`, with each segment at the quorum and no scaler.
 
 ```toml
 [cluster.use1]

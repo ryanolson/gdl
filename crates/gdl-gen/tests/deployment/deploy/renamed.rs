@@ -8,7 +8,7 @@ use super::*;
 /// `pool`'s objects of the old segment are deleted.
 fn rename_segment(segment: &str, replacement: &str, pool: &str) {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),

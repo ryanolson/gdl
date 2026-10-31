@@ -12,12 +12,12 @@ fn down_from_render(cluster_label: bool) {
         .tempdir()
         .expect("a directory");
     let fleet = dir.path().join("fleet.toml");
-    std::fs::write(&fleet, fleet_text()).expect("the fleet");
+    std::fs::write(&fleet, plain_fleet()).expect("the fleet");
     let log = Log::default();
     let mut kube = Kube::new(&log);
     let rendered = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/k8s/out/use1/pools/global-us.yaml"),
+            .join("tests/fixtures/k8s/operated/use1/global-us.yaml"),
     )
     .expect("the rendered pool");
     for doc in rendered.split("---\n").filter(|doc| !doc.trim().is_empty()) {
@@ -80,7 +80,7 @@ fn down_names_objects_without_a_cluster_and_deletes_nothing() {
         .tempdir()
         .expect("a directory");
     let fleet = dir.path().join("fleet.toml");
-    std::fs::write(&fleet, fleet_text()).expect("the fleet");
+    std::fs::write(&fleet, plain_fleet()).expect("the fleet");
     let log = Log::default();
     let mut kube = Kube::new(&log);
     kube.holds(
@@ -106,7 +106,7 @@ fn down_names_objects_without_a_cluster_and_deletes_nothing() {
 #[test]
 fn a_prune_refuses_objects_without_a_cluster() {
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),

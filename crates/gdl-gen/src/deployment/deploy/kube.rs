@@ -228,6 +228,12 @@ pub(super) const SCALERS: &str = "gdlscalers.gdl.dev";
 /// The API group of [`SCALERS`].
 pub(super) const GDL: &str = "gdl.dev";
 
+/// The gdl operator's `GdlPool`, as `kubectl get` takes it: listed only in
+/// a cluster that has its CRD, and never with [`RESOURCES`], since a
+/// `GdlPool` is deleted only with background propagation
+/// ([`At::delete_pools`]).
+pub(super) const POOLS: &str = "gdlpools.gdl.dev";
+
 /// The service port on which a hub serves its public routes, and its
 /// control routes, as the render names them.
 pub(super) const PUBLIC: &str = "public";
@@ -344,14 +350,6 @@ impl At<'_> {
         ])
     }
 
-    /// Apply the objects on stdin, server-side, under the field manager
-    /// `manager`, never forced: an object whose stdin carries its uid and
-    /// resourceVersion is refused with a conflict if either changed.
-    pub(super) fn apply_as(&self, manager: &str) -> Vec<String> {
-        let manager = format!("--field-manager={manager}");
-        self.namespaced(&["apply", "--server-side", &manager, "-f", "-"])
-    }
-
     /// The namespace's pods that `selector` selects, as a JSON list.
     pub(super) fn pods(&self, selector: &str) -> Vec<String> {
         self.namespaced(&["get", "pods", "--selector", selector, "--output", "json"])
@@ -419,6 +417,29 @@ impl At<'_> {
             &timeout,
         ]);
         args.extend(objects.iter().cloned());
+        args
+    }
+
+    /// The namespace's `GdlPool`s that `selector` selects, as a JSON list.
+    pub(super) fn pools(&self, selector: &str) -> Vec<String> {
+        self.namespaced(&["get", POOLS, "--selector", selector, "--output", "json"])
+    }
+
+    /// Delete the `GdlPool`s `names`, and wait, at most `seconds`, until
+    /// they are gone. With background propagation, Kubernetes' default:
+    /// a pool's finalizer stops it in order while its objects still
+    /// exist, and garbage collection deletes them only after. Foreground
+    /// propagation would delete them while the pool still stops.
+    pub(super) fn delete_pools(&self, names: &[String], seconds: u64) -> Vec<String> {
+        let timeout = format!("--timeout={seconds}s");
+        let mut args = self.namespaced(&[
+            "delete",
+            "--cascade=background",
+            "--wait=true",
+            "--ignore-not-found",
+            &timeout,
+        ]);
+        args.extend(names.iter().map(|name| format!("{POOLS}/{name}")));
         args
     }
 

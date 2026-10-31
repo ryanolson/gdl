@@ -28,7 +28,7 @@ fn deploy_prunes_a_cluster_with_no_remaining_pools() {
     let mirror = Mirror::new();
     // euw1 stays in the fleet with no pool: its pools are removed, not
     // moved, since a pool cannot move between clusters.
-    let text = fleet_text();
+    let text = plain_fleet();
     let fleet = &text[..text.find("[pool.global-eu]").expect("euw1's pools")];
     assert!(!fleet.contains("cluster = \"euw1\""), "{fleet}");
     let files = files(&mirror, fleet);
@@ -60,6 +60,7 @@ fn deploy_prunes_a_cluster_with_no_remaining_pools() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     let result = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {});
     assert!(

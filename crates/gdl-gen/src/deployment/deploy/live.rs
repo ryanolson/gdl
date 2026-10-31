@@ -35,6 +35,9 @@ pub(super) struct Live {
     /// For a pool's Deployment, whether its pool publishes to the DynamoDB
     /// directory (`GDL_POOL__DIRECTORY=dynamodb`).
     pub(super) dynamodb: bool,
+    /// Whether a `GdlPool` controls it: the gdl operator made it, and
+    /// only the operator changes or deletes it.
+    pub(super) operated: bool,
 }
 
 impl Live {
@@ -78,6 +81,11 @@ impl Live {
                 .find(|var| var["name"] == name)
                 .and_then(|var| text(&var["value"]))
         };
+        let operated = metadata["ownerReferences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|owner| owner["kind"] == "GdlPool" && owner["controller"] == true);
         let home = variable("GDL_POOL__HOME");
         let parents = variable("GDL_POOL__PARENTS");
         let dynamodb = variable("GDL_POOL__DIRECTORY").as_deref() == Some("dynamodb");
@@ -89,6 +97,7 @@ impl Live {
             parents: (kind == "Deployment").then_some(parents).flatten(),
             grace: pod["terminationGracePeriodSeconds"].as_u64(),
             dynamodb: kind == "Deployment" && dynamodb,
+            operated,
             kind,
             name,
             uid,

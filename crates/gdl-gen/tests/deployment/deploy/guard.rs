@@ -20,7 +20,7 @@ fn aliases_prune_removed_objects_and_keep_applied_objects() {
     }
 
     let mirror = Mirror::new();
-    let files = files(&mirror, &fleet_text());
+    let files = files(&mirror, &plain_fleet());
     let log = Log::default();
     let mut docker = Docker {
         log: Rc::clone(&log),
@@ -40,6 +40,7 @@ fn aliases_prune_removed_objects_and_keep_applied_objects() {
         out: None,
         waits: waits(),
         sources: gdl_gen::Sources::Fetched,
+        allow_pool_restart: false,
     };
     gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
         .expect("aliases permit a legitimate prune");
