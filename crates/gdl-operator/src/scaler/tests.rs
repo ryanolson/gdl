@@ -11,6 +11,9 @@ use crate::{GdlScalerSpec, Suspend, TargetRef};
 
 const SERVICE: &str = "global-front";
 
+#[path = "tests/review.rs"]
+mod review;
+
 #[derive(Debug, Clone)]
 struct FakePod {
     view: PodView,
