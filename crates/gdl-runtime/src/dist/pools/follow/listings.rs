@@ -59,6 +59,19 @@ impl Listings {
         self.held.insert(key, (listing, silent));
     }
 
+    /// Take `key`'s listing from `from`, the snapshot of a watch of the
+    /// pool's own, if it holds one, by the rules of [`Listings::take`]:
+    /// whether it did. The silence it holds was dated back on arrival.
+    pub(super) fn take_from(&mut self, from: &mut Listings, key: &Key) -> bool {
+        let Some((mut listing, silent)) = from.held.remove(key) else {
+            return false;
+        };
+        keep_newer(self.held.get(key), &mut listing);
+        self.unlisted.remove(key);
+        self.held.insert(key.clone(), (listing, silent));
+        true
+    }
+
     /// The hub withdrew `key`'s pool from its listings: it holds no list,
     /// so listed again it starts afresh.
     pub(super) fn withdraw(&mut self, key: &Key) {
@@ -140,7 +153,9 @@ impl Listings {
 /// Keep `held`'s property list in place of `listing`'s when it has a
 /// higher version. Keep whether the pool drains, with its epoch, when
 /// `held` is of a later hub, and keep a drain of the same hub, since it
-/// cannot be cancelled. Take every other field of `listing`.
+/// cannot be cancelled. Take every other field of `listing`. So the epoch
+/// is the later of the two whichever list is kept: a request reads it
+/// beside the row of the hub it names.
 fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
     let Some((held, _)) = held else {
         return;

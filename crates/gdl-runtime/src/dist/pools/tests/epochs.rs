@@ -217,7 +217,6 @@ fn epochs_are_made_again_only_when_a_listing_or_withdrawal_changes() {
 }
 
 #[test]
-#[ignore = "F1: a recovery snapshot installs its row but discards its listing and epoch"]
 fn an_own_watch_snapshot_keeps_the_epoch_of_its_new_row() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
@@ -252,5 +251,68 @@ fn an_own_watch_snapshot_keeps_the_epoch_of_its_new_row() {
         read(&pools, M1),
         (false, Some(6)),
         "a pin accepted under the recovered row needs that hub's epoch"
+    );
+}
+
+/// `pool` listed by its hub of `epoch`, with a property list at `version`.
+fn listed_version(pool: &str, epoch: u64, version: u64) -> FollowEvent {
+    let mut listing = listing(epoch);
+    listing.properties.version = version;
+    FollowEvent::Listed {
+        class: "model_x".into(),
+        pool: pool.into(),
+        generation: 0,
+        listing: Some(listing),
+    }
+}
+
+/// The version of the property list of `pool`'s row.
+fn list_version(pools: &Pools, pool: &str) -> u64 {
+    let table = pools.table("f").expect("a table");
+    table
+        .pools
+        .iter()
+        .find(|row| row.pool == pool)
+        .expect("a row")
+        .properties_version
+}
+
+/// The epoch is ordered on its own, by its own number: a listing whose
+/// list is older than the one held still moves the epoch on, and one from
+/// an earlier hub never moves it back, whether it arrives on the relay's
+/// watch or in a new watch's snapshot. The list keeps its own order.
+#[test]
+fn an_epoch_moves_on_its_own_past_a_held_list() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.apply(followed(M1, 1, 5), now);
+    follows.apply(listed_version(M1, 5, 10), now);
+    assert_eq!(
+        (read(&pools, M1).1, list_version(&pools, M1)),
+        (Some(5), 10)
+    );
+
+    follows.apply(listed_version(M1, 6, 3), now);
+    assert_eq!(
+        (read(&pools, M1).1, list_version(&pools, M1)),
+        (Some(6), 10),
+        "an older list, from a later hub"
+    );
+
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(followed(M1, 1, 7), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        (read(&pools, M1).1, list_version(&pools, M1)),
+        (Some(7), 10),
+        "a rewatch's"
+    );
+
+    follows.apply(listed_version(M1, 4, 12), now);
+    assert_eq!(
+        (read(&pools, M1).1, list_version(&pools, M1)),
+        (Some(7), 12),
+        "a newer list, from an earlier hub"
     );
 }
