@@ -250,3 +250,5 @@ Last, an HPA on the engine's `GdlScaler` scales it to 3 and back to 2 through `/
 ```bash
 INSTALL_TOOLS=1 bash scripts/kind-operator.sh
 ```
+
+A pool's stop through its `GdlPool`'s finalizer, in a prune and in `down`, under load, is proven on kind by `LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh` ([Test a fleet on kind](kubernetes.md#test-a-fleet-on-kind)).

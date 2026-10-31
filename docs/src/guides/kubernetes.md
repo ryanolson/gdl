@@ -345,3 +345,15 @@ DYNAMODB=1 GDL_REV=<commit> bash scripts/kind-fleet.sh
 ```
 
 `LOCAL=1` builds every image from this working tree, with `cargo gdl deploy --local` and the spec `examples/api/gdl.toml`, so the DynamoDB case needs no `GDL_REV`: `LOCAL=1 DYNAMODB=1 bash scripts/kind-fleet.sh`. The DynamoDB case also removes a model pool, which the next deploy drains and deletes once its own hub says that its record is withdrawn. kind runs one cluster, so the case covers only the hubs in the Local's own cluster, which reach it at its Service. The address of the other clusters' hubs, the Local's pod IP, is covered by the fake-kubectl tests in `crates/gdl-gen/tests/deployment/deploy/dynamodb.rs`.
+
+`OPERATOR=1`, with `LOCAL=1`, runs the same pools in a cluster the gdl operator runs (`operator = true`) instead. As the cluster's owner, the script builds the operator's image from this working tree, applies `gdl-operator manifests`, and places the operator on the fleet's node group. A pod in the cluster then sends a load of streamed requests, each on a new connection to the global pool's entry Service, each streaming for about 2 s. A request is admitted once it gets its 200: before that the frontend answers 502, or the connection is refused. It checks that:
+
+- `deploy` applies one `GdlPool` per pool, each `Ready`, and the operator owns every object of every pool by a controller reference;
+- a second `deploy`, with one model pool removed, deletes that pool's `GdlPool` alone, in the background: its finalizer drains the pool, the global pool's hub then answers 404 for its record, and garbage collection deletes its objects. The other pools' Deployments and pods keep their uids and generations, and no request is refused or cut;
+- a change of the global pool's hub, patched into its `GdlPool` without `allowPoolRestart`, is held, with `PoolRestartPending` naming the held generation, and does not reach the hub's Deployment;
+- `down`, under the load, deletes the model pool's `GdlPool` before the global pool's, and a sampler of the running pods shows each pool's segment gone before its hub, and the model pool gone before the global pool's frontend. No admitted request is cut; requests that arrive once no pool can admit them are refused;
+- no object with the fleet's label is left, and the namespace remains as its owner made it.
+
+```bash
+LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh
+```

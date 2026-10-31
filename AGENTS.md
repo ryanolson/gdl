@@ -37,6 +37,7 @@ bash scripts/build-book.sh                         # the book, with its link and
 bash scripts/dynamodb-local.sh                     # gdl-pools-dynamodb, and gdl-hub with its dynamodb feature, against DynamoDB Local in Docker, outside the default suite (TIMEOUT=<limit>)
 bash scripts/kubeconform.sh                        # the pinned Kubernetes objects against Kubernetes 1.35 schemas, offline (INSTALL_TOOLS=1 fetches kubeconform and the schemas)
 bash scripts/kind-fleet.sh                         # cargo gdl deploy and down on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
+LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh     # the same, in a cluster the gdl operator runs: prune and down through GdlPool finalizers, under load
 bash scripts/kind-operator.sh                      # the operator's scale-down under load on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
 ```
 
