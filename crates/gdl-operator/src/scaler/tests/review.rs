@@ -39,3 +39,28 @@ async fn cancellation_restores_a_victim_after_a_lost_status_write() {
         "the scale-down was cancelled, but the first victim never rejoins its Service"
     );
 }
+
+#[tokio::test]
+#[ignore = "F2: after a victim disappears, a stale Deployment count unroutes the only ready frontend"]
+async fn a_victim_that_dies_does_not_cost_the_last_ready_frontend() {
+    let fake = Fake::with(&[5, 0]);
+    let mut wanted = spec(Some(1));
+    wanted.service = Some(SERVICE.into());
+    once(&fake, &wanted, 0).await;
+    assert_eq!(status(&fake).retiring[0].uid, "uid-2");
+    {
+        // Pod deletion is visible before the Deployment controller updates status.
+        let mut state = fake.state();
+        state.pods.retain(|pod| pod.view.uid != "uid-2");
+        state.listed.remove("uid-2");
+        assert_eq!(state.replicas, 2);
+        assert!(!state.rolling);
+    }
+    once(&fake, &wanted, 1_000).await;
+    assert_eq!(fake.state().pods.len(), 1);
+    assert!(fake.pod("pod-1").view.ready);
+    assert!(
+        fake.pod("pod-1").routable,
+        "the remaining ready frontend already satisfies the desired count"
+    );
+}
