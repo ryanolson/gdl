@@ -71,6 +71,63 @@ impl Settings {
         }
         problems
     }
+
+    /// What is wrong with the ports the segments publish: a bare port that
+    /// is the segment's system port adds nothing. A pod already declares
+    /// it as `system`, and under Compose a bare port only publishes to a
+    /// host port Docker chooses. A host publication of it is Compose's
+    /// only route to the system listener from the host, and is allowed.
+    pub(crate) fn port_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (segment, image) in &self.segment {
+            let Some(system) = image.system_port() else {
+                continue;
+            };
+            for port in &image.ports {
+                let published = Published::of(port);
+                if !published.host
+                    && published.protocol == "tcp"
+                    && published.container.parse() == Ok(system)
+                {
+                    problems.push(format!(
+                        "[deployment.segment.{segment}]: port `{port}` is segment `{segment}`'s system port, which gdl already exposes: Kubernetes declares it as port `system`, and under Compose publish it to the host as `<host port>:{system}`"
+                    ));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// The port of a segment's system listener when its settings do not set
+/// one: [`Bundle::segment_config`] writes it.
+const SYSTEM_PORT: u16 = 9090;
+
+/// A port of `[deployment.segment.<name>] ports`, in Compose's short form
+/// `[[IP:][HOST]:]CONTAINER[/PROTOCOL]`, split into its parts.
+struct Published<'a> {
+    /// Whether it names an IP or a host port: it publishes to the host
+    /// as it says, where a bare one publishes to a port Docker chooses.
+    host: bool,
+    /// Its container port, or range of them.
+    container: &'a str,
+    /// Its protocol as written: `tcp` when it names none.
+    protocol: &'a str,
+}
+
+impl<'a> Published<'a> {
+    fn of(port: &'a str) -> Self {
+        let (rest, protocol) = port.rsplit_once('/').unwrap_or((port, "tcp"));
+        let (host, container) = match rest.rsplit_once(':') {
+            Some((_, container)) => (true, container),
+            None => (false, rest),
+        };
+        Self {
+            host,
+            container,
+            protocol,
+        }
+    }
 }
 
 /// Whether `name` can name a secret: Compose mounts it at
@@ -104,6 +161,22 @@ struct Image {
     config: toml::Table,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     secrets: Vec<String>,
+}
+
+impl Image {
+    /// The port of the segment's system listener: [`SYSTEM_PORT`], unless
+    /// its `config` replaces `[system]`; `None` when that names no fixed
+    /// port.
+    fn system_port(&self) -> Option<u16> {
+        match self.config.get("system") {
+            None => Some(SYSTEM_PORT),
+            Some(system) => system
+                .get("port")
+                .and_then(toml::Value::as_integer)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port > 0),
+        }
+    }
 }
 
 /// A secret a segment can mount: a file on the Docker host, which the
@@ -554,7 +627,7 @@ impl Bundle {
         files.insert(
             path.to_path_buf(),
             format!(
-                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = 9090\n{unawaited}",
+                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = {SYSTEM_PORT}\n{unawaited}",
                 emit::MARKER
             ),
         );

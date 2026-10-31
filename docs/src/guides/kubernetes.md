@@ -152,7 +152,7 @@ Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for
   kubectl --context kind-use1 -n gdl-api create secret generic api-fingerprint --from-file=fingerprint=/path/to/file
   ```
 
-- **Ports.** An entry Service publishes each container port of `[deployment.segment.<name>] ports`, in Compose's short form. The host port is Compose's alone.
+- **Ports.** An entry Service publishes each container port of `[deployment.segment.<name>] ports`, in Compose's short form. The host port is Compose's alone. The system port is gdl's: every segment's container declares it as port `system`, so `check` refuses it bare in `ports` (`"9090"`), naming the segment. Kubernetes refuses a pod that declares one port twice. A host publication of it (`"127.0.0.1:9091:9090"`) is Compose's only route from the host to the segment's `/metrics` and `/health`, so it passes, and the render leaves it out of the pod and the entry Service.
 - **Pods.** A pod runs as the fleet's ServiceAccount, which carries the cluster's `service_account_annotations`, on nodes of the cluster's platform (`kubernetes.io/os` and `kubernetes.io/arch`). Service links are off, so that no Service of the namespace adds variables to a container.
 
 ## Node groups and resources

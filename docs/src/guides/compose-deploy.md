@@ -30,6 +30,8 @@ listen = "0.0.0.0:8082"
 base_image = "nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04"
 ```
 
+Each segment serves its metrics and health on its system port, 9090 unless its `config` sets `[system] port`. Compose does not publish it. To reach it from the host, publish it with a host port, as `examples/film/deploy.toml` does: `ports = ["127.0.0.1:9091:9090"]`. `check` refuses the system port bare (`"9090"`): it would publish to a host port that Docker chooses, and on Kubernetes the pod already declares it as `system`.
+
 ### Secrets
 
 A segment can mount a secret: a file on the Docker host that Compose mounts read-only at `/run/secrets/<name>` in each of the segment's containers. Declare it once, name it in each segment that reads it, and point the node's setting at the mount:

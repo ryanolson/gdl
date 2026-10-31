@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 use super::relay;
 use crate::Error;
+use crate::deployment::Published;
 
 /// The variable that holds a hub's pod IP, which the hub's record names:
 /// only the pod knows it, from the downward API.
@@ -125,20 +126,14 @@ impl Port {
     /// lists each port.
     pub(super) fn parse(port: &str) -> Result<Self, String> {
         let refuse = |why: &str| format!("`{port}` {why}");
-        let (rest, protocol) = match port.rsplit_once('/') {
-            Some((rest, protocol)) => (rest, protocol),
-            None => (port, "tcp"),
-        };
-        let protocol = match protocol {
+        let published = Published::of(port);
+        let protocol = match published.protocol {
             "tcp" => "TCP",
             "udp" => "UDP",
             "sctp" => "SCTP",
             _ => return Err(refuse("names a protocol that is not tcp, udp, or sctp")),
         };
-        let container = rest
-            .rsplit_once(':')
-            .map_or(rest, |(_, container)| container);
-        match container.parse::<u16>() {
+        match published.container.parse::<u16>() {
             Ok(number) if number > 0 => Ok(Self {
                 port: number,
                 protocol,
@@ -147,6 +142,12 @@ impl Port {
                 "is not one container port: a Kubernetes Service lists each port it publishes, so publish a range as its ports",
             )),
         }
+    }
+
+    /// Whether it is the port of the system listener that `probes` ask,
+    /// which the pod declares as `system`.
+    pub(super) fn system(&self, probes: &Probes) -> bool {
+        self.port == probes.port && self.protocol == "TCP"
     }
 
     fn container(&self) -> Value {

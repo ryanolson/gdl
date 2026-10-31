@@ -65,6 +65,7 @@ pub(crate) fn unbound(
         }
     }
     problems.extend(spec.deployment.iter().flat_map(|d| d.secret_problems()));
+    problems.extend(spec.deployment.iter().flat_map(|d| d.port_problems()));
     // One segment's settings serve it in every layout that has it.
     for name in spec.deployment.iter().flat_map(|d| d.segments()) {
         let placed = spec.layouts().any(|laid| {

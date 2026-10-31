@@ -15,7 +15,7 @@ use std::path::Path;
 use gdl_model::{Fleet, PoolSettings, Problem};
 
 use super::images::{self, Digests, Image};
-use super::{Bundle, Sources, check_segment_name, io, pools, stdin_source};
+use super::{Bundle, Published, Sources, check_segment_name, io, pools, stdin_source};
 use crate::spec::Allocator;
 use crate::{Error, Files, Offers, Spec, export::image_problem};
 
@@ -428,8 +428,13 @@ impl Render<'_> {
             }
         };
         let mut ports = Vec::new();
-        for port in self.bundle.ports(segment) {
-            match Port::parse(port) {
+        for published in self.bundle.ports(segment) {
+            match Port::parse(published) {
+                // A host publication of the system port is Compose's route
+                // to it from the host. A pod publishes nothing to a host,
+                // and already declares the port as `system`; `check`
+                // refuses a bare one.
+                Ok(port) if port.system(&probes) && Published::of(published).host => {}
                 Ok(port) if !ports.contains(&port) => ports.push(port),
                 Ok(_) => {}
                 Err(message) => self.problems.push(Problem::at(
