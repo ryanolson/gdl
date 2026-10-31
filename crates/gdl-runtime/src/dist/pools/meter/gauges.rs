@@ -252,6 +252,7 @@ mod tests {
             revision: 1,
             changes: 0,
             leases: Arc::new(Leases::counted(None)),
+            properties_version: 0,
         })
     }
 

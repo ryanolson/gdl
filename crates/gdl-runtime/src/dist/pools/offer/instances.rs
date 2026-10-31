@@ -225,6 +225,7 @@ impl Fleet {
                 revision: 1,
                 changes: 0,
                 leases: Arc::default(),
+                properties_version: 0,
             }));
         }
         tables.store("d", EntryTable::new(followed.into()));

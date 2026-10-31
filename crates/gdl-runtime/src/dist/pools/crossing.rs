@@ -795,6 +795,7 @@ mod tests {
             revision: 1,
             changes: 0,
             leases: Arc::default(),
+            properties_version: 0,
         })
     }
 

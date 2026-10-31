@@ -503,6 +503,9 @@ pub(crate) struct PoolTable {
     /// of the follow: an offer takes a lease from the table it was chosen
     /// from, and is refused one once the follow is not offered.
     pub(crate) leases: Arc<Leases>,
+    /// The version of the pool's property list in the hub's listing, which
+    /// the class's indexes of the same table are made from: 0 with none.
+    pub(crate) properties_version: u64,
 }
 
 impl PoolTable {
@@ -510,6 +513,7 @@ impl PoolTable {
     fn view(&self) -> gdl::Pool {
         let view = gdl::Pool::new(&*self.class, &*self.pool, &*self.region, self.state)
             .with_entries(self.eligible.len())
+            .with_properties_version(self.properties_version)
             .with_follow(self.generation, self.changes);
         match self.load {
             Some(load) => view.with_load(load),

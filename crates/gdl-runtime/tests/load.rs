@@ -537,6 +537,165 @@ async fn a_kind_a_node_registers_reaches_the_choosers_index() {
     shut([hub, m1.hub]).await;
 }
 
+/// A node reads a followed pool's property-list version, and it is the
+/// version the pool's record, its follow link, and the global hub's relay
+/// give for the same list: one numbering, whichever path the list took.
+/// The version and the index a node reads in one read are of one list, and
+/// a change raises the version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_reads_the_pools_property_version_every_path_gives() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let properties = gdl::InstanceProperties::new();
+    properties
+        .set(&SHARD, [(shard("a"), gdl::EntryState::Ready)])
+        .expect("a list");
+    let mut records = directory.watch("model_x", None);
+    let quiet = Events::quiet();
+    let given = properties.clone();
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        properties: given.clone(),
+        ..limited(runtime)
+    };
+    let pool = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        pool,
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let (hub, readiness) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let extra = format!("{}{RUNTIME}", global_pool());
+    let mut config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let followed = gdl::FollowedPools::new();
+    followed
+        .scope(async { gdl::FollowedPools::current().register(&SHARD) })
+        .await
+        .expect("registered");
+    config.runtime.followed = followed.clone();
+    let chooser = run_graph(&config, "a", &spec, config.runtime.clone(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await
+    .expect("the chooser serves");
+    // In one read: the pool's version, and the shard's state in the index.
+    let read = || {
+        followed
+            .read("model_x", |pools| {
+                let version = pools.pool(M1)?.properties_version();
+                let index = pools.properties().get(&SHARD)?;
+                let listed = index.get(&shard("a")).first()?;
+                Some((version, listed.1.state()))
+            })
+            .flatten()
+    };
+
+    let mut seen = Vec::new();
+    for (said, state) in [
+        (gdl::EntryState::Ready, gdl::PropertyState::Ready),
+        (gdl::EntryState::Draining, gdl::PropertyState::Draining),
+    ] {
+        properties
+            .set(&SHARD, [(shard("a"), said)])
+            .expect("a list");
+        until(
+            &tables(&chooser),
+            "the state in the chooser's index",
+            |_| read().is_some_and(|(_, read)| read == state),
+        )
+        .await;
+        let (version, _) = read().expect("read");
+        let states = |list: &[gdl_pools::PoolProperty]| -> Vec<gdl::PropertyState> {
+            list.iter().map(|entry| entry.state).collect()
+        };
+
+        let recorded = tokio::time::timeout(WAIT, async {
+            loop {
+                match records.next().await {
+                    Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }))
+                        if record.name == M1 && record.properties_version >= version =>
+                    {
+                        return record;
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("the directory's watch ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the record of the version in time");
+        assert_eq!(
+            (recorded.properties_version, states(&recorded.properties)),
+            (version, vec![state]),
+            "the record"
+        );
+
+        let mut link = tokio::time::timeout(WAIT, m1.readiness.watch())
+            .await
+            .expect("the watch begins in time")
+            .expect("the hub runs");
+        let linked = match tokio::time::timeout(WAIT, link.next()).await {
+            Ok(Some(PoolWatchEvent::Pool {
+                properties: Some(list),
+                ..
+            })) => list,
+            other => panic!("the link's first event: {other:?}"),
+        };
+        assert_eq!(
+            (linked.version, states(&linked.entries)),
+            (version, vec![state]),
+            "the link"
+        );
+
+        let mut relay = readiness.follows();
+        let relayed = tokio::time::timeout(WAIT, async {
+            loop {
+                match relay.next().await.expect("the relay goes on") {
+                    FollowEvent::Follow {
+                        pool,
+                        listing: Some(listing),
+                        ..
+                    }
+                    | FollowEvent::Listed {
+                        pool,
+                        listing: Some(listing),
+                        ..
+                    } if pool == M1 => return listing.properties,
+                    FollowEvent::Synced { .. } => panic!("no listing of the pool"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the relay's snapshot in time");
+        assert_eq!(
+            (relayed.version, states(&relayed.entries)),
+            (version, vec![state]),
+            "the relay"
+        );
+        seen.push(version);
+    }
+    assert!(
+        seen[0] > 0 && seen[1] > seen[0],
+        "a change raises it: {seen:?}"
+    );
+    drop(chooser);
+    shut([hub, m1.hub]).await;
+}
+
 /// What an entry instance's nodes say of its properties reaches its pool's
 /// record with its load reports: a property it can serve is `ready` there,
 /// and one it says it is removing is `draining` as soon as it says so,

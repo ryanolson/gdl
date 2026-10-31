@@ -231,9 +231,9 @@ pub trait ChoiceLease: Send + 'static {
 }
 
 /// One followed pool of the class a hand-off enters, as a policy sees it:
-/// its name, region, state, load summary, and how many entry instances it
-/// has to route to. The runtime makes one for each pool when its table
-/// changes, never per request.
+/// its name, region, state, load summary, how many entry instances it
+/// has to route to, and the version of its property list. The runtime
+/// makes one for each pool when its table changes, never per request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
     class: String,
@@ -243,6 +243,7 @@ pub struct Pool {
     state: PoolState,
     load: Option<Load>,
     entries: usize,
+    properties_version: u64,
     /// The follow the chooser's table holds the pool in, and how many
     /// times the relay changed it: a pool that declined an offer as gone
     /// is passed over until either changes ([`Damped::is_gone`]).
@@ -268,6 +269,7 @@ impl Pool {
             state,
             load: None,
             entries: 0,
+            properties_version: 0,
             generation: 0,
             changes: 0,
         }
@@ -294,6 +296,14 @@ impl Pool {
     #[inline]
     pub fn with_load(mut self, load: Load) -> Self {
         self.load = Some(load);
+        self
+    }
+
+    /// The pool with the version of its property list
+    /// ([`properties_version`](Pool::properties_version)).
+    #[inline]
+    pub fn with_properties_version(mut self, version: u64) -> Self {
+        self.properties_version = version;
         self
     }
 
@@ -341,6 +351,19 @@ impl Pool {
     #[inline]
     pub fn entries(&self) -> usize {
         self.entries
+    }
+
+    /// The version of the pool's property list, as this chooser holds it: the
+    /// list that [`crate::ClassPools::properties`] reads in the same read. The
+    /// pool's hub raises it on every change of the list, a revocation too,
+    /// and it is the same number however the list reached the chooser's
+    /// hub, from the pool's record or from its follow link. It never goes
+    /// down, also across a restart of the pool's hub. So a reader that saw
+    /// a pool at a version, and now reads a lower one, reads an older list.
+    /// 0 when the chooser holds no list of the pool.
+    #[inline]
+    pub fn properties_version(&self) -> u64 {
+        self.properties_version
     }
 
     /// Whether the pool takes work: `ready` or `degraded`, with an entry

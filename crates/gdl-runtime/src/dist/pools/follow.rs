@@ -419,11 +419,12 @@ impl<R: Registry> Follows<R> {
         }
         let mut tables: BTreeMap<String, BTreeMap<Key, Arc<PoolTable>>> = BTreeMap::new();
         for (key, follow) in &self.followed.follows {
+            let version = self.followed.properties_version(key);
             for segment in &self.wanted[&key.0] {
                 tables
                     .entry(segment.clone())
                     .or_default()
-                    .insert(key.clone(), Arc::new(follow.table(key, segment)));
+                    .insert(key.clone(), Arc::new(follow.table(key, segment, version)));
             }
         }
         self.tables = tables;
@@ -590,11 +591,12 @@ impl<R: Registry> Follows<R> {
             return;
         };
         let follow = self.followed.follows.get(key);
+        let version = self.followed.properties_version(key);
         for segment in segments {
             let pools = self.tables.entry(segment.clone()).or_default();
             match follow {
                 Some(follow) => {
-                    pools.insert(key.clone(), Arc::new(follow.table(key, segment)));
+                    pools.insert(key.clone(), Arc::new(follow.table(key, segment, version)));
                 }
                 None => {
                     pools.remove(key);
@@ -1067,6 +1069,14 @@ impl Followed {
         self.listings_changed += 1;
     }
 
+    /// The version of the property list the hub lists for `key`'s pool: 0
+    /// with no listing.
+    fn properties_version(&self, key: &Key) -> u64 {
+        self.listings
+            .get(key)
+            .map_or(0, |(listing, _)| listing.properties.version)
+    }
+
     /// Every property `class`'s pools list, as this view lists them, each
     /// with its pool and whether this instance offers that pool work: what
     /// the class's indexes decode.
@@ -1323,8 +1333,9 @@ impl Follow {
     }
 
     /// The follow's table for `segment`, its instances in id order: none
-    /// eligible while it is not offered.
-    fn table(&self, key: &Key, segment: &str) -> PoolTable {
+    /// eligible while it is not offered. `properties_version` is that of the
+    /// pool's listing, which the follow does not hold.
+    fn table(&self, key: &Key, segment: &str, properties_version: u64) -> PoolTable {
         #[cfg(test)]
         READ.with(|read| read.set(read.get() + self.exposed.len() + self.retired.len()));
         let mut eligible: Vec<InstanceId> = self
@@ -1359,6 +1370,7 @@ impl Follow {
             revision: self.revision,
             changes: self.changes,
             leases: Arc::clone(&self.leases),
+            properties_version,
         }
     }
 }

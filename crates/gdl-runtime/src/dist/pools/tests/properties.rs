@@ -448,6 +448,49 @@ fn a_listing_reaches_a_pool_read_from_its_own_watch() {
     );
 }
 
+/// A followed pool's property-list version is its listing's, in the table
+/// its index is read from: 0 before any listing and once the listing is
+/// gone, and the listing's version after each event or snapshot.
+#[test]
+fn a_pools_property_version_is_its_listings() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let read = || {
+        node.read("model_x", |pools| {
+            pools.pool(M1).map(gdl::Pool::properties_version)
+        })
+        .flatten()
+    };
+    let now = Instant::now();
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
+    assert_eq!(read(), Some(0), "no listing");
+    for version in [3, 5] {
+        let listed = listing(
+            PoolCondition::Live,
+            &[("qwen-32b", PropertyState::Ready)],
+            version,
+        );
+        follows.apply(listed_event(M1, Some(listed)), now);
+        assert_eq!(read(), Some(version));
+    }
+    follows.apply(listed_event(M1, None), now);
+    assert_eq!(read(), Some(0), "the listing is gone");
+
+    let mut snapshot = follows.snapshot();
+    let mut first = follow(M1, 1, PoolState::Ready);
+    if let FollowEvent::Follow { listing: shown, .. } = &mut first {
+        *shown = Some(listing(
+            PoolCondition::Live,
+            &[("qwen-32b", PropertyState::Ready)],
+            7,
+        ));
+    }
+    snapshot.apply(first, now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(read(), Some(7), "from a snapshot's follow");
+}
+
 /// Looking a property up in the index allocates nothing.
 #[test]
 fn a_property_lookup_allocates_nothing() {
@@ -495,6 +538,7 @@ fn a_property_lookup_allocates_nothing() {
                 let exact = index.get(&exact);
                 let unknown = index.range_by(|key| key.name.as_str().cmp("mistral"));
                 std::hint::black_box(served(exact));
+                std::hint::black_box(pools.pool(M1).map(gdl::Pool::properties_version));
                 usize::from(exact.len() == 1 && by_name.len() == 1 && unknown.is_empty())
             })
             .unwrap_or(0);

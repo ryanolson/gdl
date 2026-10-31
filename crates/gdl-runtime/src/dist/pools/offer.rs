@@ -683,6 +683,7 @@ mod tests {
                 leases: Arc::new(super::super::lease::Leases::counted(Some(
                     meters.figures("model_x", "m1", "home"),
                 ))),
+                properties_version: 0,
             })])),
         );
         let crossing = |within: Within| {
@@ -830,6 +831,7 @@ mod tests {
                     revision: 1,
                     changes: 0,
                     leases: Arc::default(),
+                    properties_version: 0,
                 })
             })
             .collect();
@@ -966,6 +968,7 @@ mod tests {
                     leases: Arc::new(Leases::counted(Some(
                         meters.figures("model_x", name, "home"),
                     ))),
+                    properties_version: 0,
                 })
             })
             .collect();
@@ -1116,6 +1119,7 @@ mod tests {
                 leases: Arc::new(Leases::counted(Some(
                     meters.figures("model_x", name, "home"),
                 ))),
+                properties_version: 0,
             })
         })
         .collect();
@@ -1293,6 +1297,7 @@ mod tests {
                     revision: 1,
                     changes: 0,
                     leases: Arc::default(),
+                    properties_version: 0,
                 })
             })
             .collect();
@@ -1412,6 +1417,7 @@ mod tests {
                     revision: 1,
                     changes: 0,
                     leases: Arc::default(),
+                    properties_version: 0,
                 })
             })
             .collect();
@@ -1494,6 +1500,7 @@ mod tests {
                     revision: pool.revision,
                     changes: pool.changes,
                     leases: Arc::clone(&pool.leases),
+                    properties_version: 0,
                 };
                 change.take().expect("one pool of the name")(&mut next);
                 Arc::new(next)
@@ -1837,6 +1844,7 @@ mod tests {
                 changes: 0,
                 // Counted, as a chooser whose listener is on counts.
                 leases: Arc::new(super::super::lease::Leases::counted(Some(figures))),
+                properties_version: 0,
             })])),
         );
         let mut targets = targets(

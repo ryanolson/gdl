@@ -207,6 +207,7 @@ impl Fleet {
                 leases: Arc::new(Leases::counted(Some(
                     meters.figures("model_x", name, "home"),
                 ))),
+                properties_version: 0,
             }));
         }
         let pools = Pools::new(
