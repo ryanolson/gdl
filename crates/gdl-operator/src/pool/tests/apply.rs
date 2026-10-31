@@ -320,3 +320,39 @@ async fn a_held_generation_names_the_hub_image() {
         "{message}"
     );
 }
+
+#[tokio::test]
+#[ignore = "F4: a restarted hub publishes serving while cached status prevents restoring scaledToZero"]
+async fn a_restarted_hub_receives_the_pools_scaled_to_zero_presence() {
+    let fake = running(true).await;
+    fake.state().pool.as_mut().expect("pool").spec.pool.presence = gdl_k8s::Presence::ScaledToZero;
+    fake.reconcile(1_000).await.expect("scale to zero");
+    assert_eq!(fake.state().hub_presence, gdl_k8s::Presence::ScaledToZero);
+    assert_eq!(
+        fake.status().presence,
+        Some(gdl_k8s::Presence::ScaledToZero)
+    );
+    fake.settle();
+
+    // A new PoolReadiness starts its publisher with Serving.
+    fake.state().hub_presence = gdl_k8s::Presence::Serving;
+    fake.state().log.clear();
+    fake.reconcile(2_000)
+        .await
+        .expect("reconcile after hub restart");
+    assert!(
+        fake.state()
+            .objects
+            .values()
+            .filter(|object| object.live.kind == Kind::GdlScaler)
+            .all(|object| object.live.suspended),
+        "the segments remain suspended"
+    );
+    let presence = fake.state().hub_presence;
+    assert_eq!(
+        presence,
+        gdl_k8s::Presence::ScaledToZero,
+        "the restarted hub's directory record must agree with the suspended segments: {:?}",
+        fake.log(),
+    );
+}

@@ -53,6 +53,7 @@ struct State {
     withdraws: bool,
     unreachable: bool,
     refuses_drain: Option<String>,
+    hub_presence: gdl_k8s::Presence,
 }
 
 #[derive(Debug, Default)]
@@ -442,7 +443,9 @@ impl Hubs for Fake {
     }
 
     async fn presence(&self, _: &str, presence: gdl_k8s::Presence) -> Result<(), String> {
-        self.state().log.push(format!("presence {presence:?}"));
+        let mut state = self.state();
+        state.hub_presence = presence;
+        state.log.push(format!("presence {presence:?}"));
         Ok(())
     }
 }
