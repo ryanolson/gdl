@@ -53,12 +53,14 @@ pub(super) async fn list(
     // service per read. The segments are read at once, and each segment's
     // phases one after another, in the order an instance announces them,
     // so that a member's listed phase never goes back from one list to
-    // the next without anything kept between lists. It holds because an
-    // instance withdraws only `ready` while it is a member, and only once
-    // the hub has taken its `retired` (docs/src/concepts/pools.md,
-    // "Listing the instances"): a read of `ready` that misses it is
-    // followed by a read of `retired` that sees it, and the later phases
-    // stay until the instance leaves.
+    // the next while its announcements stand, without anything kept
+    // between lists. It holds because, while they stand, an instance
+    // withdraws only `ready`, and only once the hub has taken its
+    // `retired` (docs/src/concepts/pools.md, "Listing the instances"): a
+    // read of `ready` that misses it is followed by a read of `retired`
+    // that sees it, and the later phases stay until the instance leaves.
+    // An instance whose `retired` went unanswered withdraws it, and is
+    // listed `ready` again, as the hub holds it.
     let reads = segments.iter().map(|segment| async move {
         let mut read = Vec::with_capacity(PHASES.len());
         for (phase, shown) in PHASES {

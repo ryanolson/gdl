@@ -13,6 +13,7 @@ use velo_hub::velo::transports::tcp::TcpTransportBuilder;
 use super::super::instances::list;
 use super::{Served, WAIT, spec};
 
+mod answer;
 mod order;
 
 struct Directory {

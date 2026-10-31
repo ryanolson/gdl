@@ -52,9 +52,11 @@ pub struct PoolInstance {
 
 /// The furthest phase a member has announced to its hub, as a service
 /// ([`gdl_model::SegmentPhase`]). The order below is the order in which
-/// an instance takes them, and the hub reads them in it, so that while
-/// one registration stays a member, the phase listed for it never goes
-/// back from one list to the next.
+/// an instance takes them, and the hub reads them in it, so that for one
+/// registration a listed phase never goes backwards while the instance's
+/// own announcements stand. An instance whose retirement announcement
+/// went unanswered withdraws it, and is listed `ready` again, as the hub
+/// holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstancePhase {
