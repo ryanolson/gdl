@@ -47,6 +47,8 @@ struct Tamper {
     rewrite: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
     /// While set, a request that holds it is not passed on.
     hold: tokio::sync::watch::Sender<Option<Vec<u8>>>,
+    /// Close the downstream connection while retaining the held request.
+    disconnect_held: std::sync::atomic::AtomicBool,
     /// Signalled when a request is held.
     held: tokio::sync::Notify,
     /// Signalled when the hub answers a request released after a hold.
@@ -105,6 +107,15 @@ impl Proxy {
     pub fn hold(&self, pattern: &[u8]) {
         assert!(pattern.len() <= TAIL + 1, "a pattern the relay can find");
         self.tamper.hold.send_replace(Some(pattern.to_vec()));
+    }
+
+    /// Hold a request after its downstream connection fails. Its upstream
+    /// work can still commit after the caller has given up.
+    pub fn hold_disconnected(&self, pattern: &[u8]) {
+        self.tamper
+            .disconnect_held
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.hold(pattern);
     }
 
     /// Answer every request that holds `pattern` as a hub that refuses it
@@ -262,6 +273,9 @@ async fn relay(
                     {
                         awaiting_held = true;
                         held.tamper.held.notify_one();
+                        if held.tamper.disconnect_held.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = to_client.shutdown().await;
+                        }
                         let mut hold = held.tamper.hold.subscribe();
                         let _ = hold.wait_for(Option::is_none).await;
                     }

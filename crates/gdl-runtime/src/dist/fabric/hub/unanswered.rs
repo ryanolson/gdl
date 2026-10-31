@@ -282,3 +282,100 @@ async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
     assert!(sink.all_avoid(me, &["front"]).await.expect("asked"));
     hub.shutdown().await.expect("the hub stopped");
 }
+
+/// A proxy can keep upstream work after its downstream connection fails.
+#[tokio::test]
+#[ignore = "F4: a buffered ready PUT can commit after its confirmed withdrawal and after retired disappears"]
+async fn a_delayed_ready_cannot_undo_a_confirmed_withdrawal() {
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec()))
+        .serve()
+        .await
+        .expect("hub");
+    let control = proxy::Proxy::new(hub.control_addr()).await;
+    let (mut session, node) = session(&hub, control.port).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    session.loaded = Some(
+        session
+            .announce(SegmentPhase::Loaded, deadline)
+            .await
+            .expect("loaded"),
+    );
+    let services = session.client.services();
+    let id = node.instance_id();
+    let ready_name = segment_service("sink", SegmentPhase::Ready);
+    let retired_name = segment_service("sink", SegmentPhase::Retired);
+
+    control.hold_disconnected(b"PUT /v1/services/gdl-ready-");
+    let (ready, ()) = tokio::join!(
+        session.announce_ready(tokio::time::Instant::now() + Duration::from_millis(200)),
+        async {
+            tokio::time::timeout(WAIT, control.holding())
+                .await
+                .expect("ready is buffered upstream");
+        }
+    );
+    assert!(ready.is_err(), "the downstream connection failed");
+
+    control.withhold_answers(b"PUT /v1/services/gdl-retired-");
+    let (retired, ()) = tokio::join!(
+        session.retire(tokio::time::Instant::now() + Duration::from_millis(200)),
+        async {
+            tokio::time::timeout(WAIT, control.withholding())
+                .await
+                .expect("the hub stored retired after confirming the withdrawals");
+        }
+    );
+    assert!(retired.is_err());
+    assert!(
+        services
+            .get_instances(&retired_name)
+            .await
+            .expect("retired")
+            .contains(&id)
+    );
+    assert!(
+        !services
+            .get_instances(&ready_name)
+            .await
+            .expect("ready")
+            .contains(&id)
+    );
+    control.answer();
+    tokio::time::timeout(WAIT, session.client.sync_services())
+        .await
+        .expect("the cancelled retirement was withdrawn in time")
+        .expect("the hub confirmed the withdrawal");
+    assert!(
+        !services
+            .get_instances(&retired_name)
+            .await
+            .expect("retired")
+            .contains(&id)
+    );
+
+    control.release();
+    tokio::time::timeout(WAIT, control.answered_after_hold())
+        .await
+        .expect("the hub applied the buffered ready");
+    session.client.sync_services().await.expect("synchronized");
+    let ready = services
+        .get_instances(&ready_name)
+        .await
+        .expect("ready")
+        .contains(&id);
+    let retired = services
+        .get_instances(&retired_name)
+        .await
+        .expect("retired")
+        .contains(&id);
+    session.leave().await;
+    hub.shutdown().await.expect("the hub stopped");
+    assert!(
+        !ready || retired,
+        "a delayed PUT undid a confirmed withdrawal: ready={ready}, retired={retired}"
+    );
+}
