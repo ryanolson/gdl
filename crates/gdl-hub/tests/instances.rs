@@ -177,3 +177,59 @@ async fn the_hub_lists_its_members_with_their_phase_and_latest_load() {
     }
     hub.shutdown().await.expect("the hub stops");
 }
+
+/// A transport's key can differ from its protocol name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F1: TCP addresses under a custom transport key are omitted"]
+async fn tcp_addresses_under_a_custom_transport_key_are_listed() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use velo_hub::client::HubClient;
+    use velo_hub::velo::Velo;
+    use velo_hub::velo::transports::tcp::TcpTransportBuilder;
+
+    let (hub, _) = hub_of(
+        model(common::POOL, "us-east-1", "model-x-01-hub:1337"),
+        MemoryDirectory::new(),
+        common::timing(),
+    )
+    .await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let listening = listener.local_addr().expect("a bound port");
+    let tcp = TcpTransportBuilder::new()
+        .key("pool-tcp".into())
+        .from_listener(listener)
+        .expect("a listener")
+        .build()
+        .expect("a TCP transport");
+    let node = Velo::builder()
+        .add_transport(Arc::new(tcp))
+        .build()
+        .await
+        .expect("a velo node");
+    let client = HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(hub.public_addr().port())
+        .control_port(hub.control_addr().port())
+        .build()
+        .expect("a hub client");
+    let registration = common::spec().registration("f").expect("segment f");
+    client
+        .register_peer(
+            node.peer_info(),
+            BTreeMap::from([(
+                "gdl".to_string(),
+                serde_json::to_value(registration).expect("a registration"),
+            )]),
+        )
+        .await
+        .expect("the hub admits the instance");
+
+    let listed = list(&hub).await;
+    assert_eq!(listed.len(), 1);
+    let instance = &listed[&node.instance_id()];
+    assert!(same_peer(&instance.peer, &node.peer_info()));
+    assert_eq!(instance.addresses, [listening]);
+    hub.shutdown().await.expect("the hub stops");
+}
