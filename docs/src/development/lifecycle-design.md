@@ -22,11 +22,11 @@ Under a hub, an instance registers before its nodes are ready, and keeps the lea
 
 ## Wait for the hub at start
 
-An instance whose hub cannot be reached, or answers that it is not ready, asks again with a jittered backoff until `hub_wait_ms`. It exits at once on any other answer.
+An instance whose hub cannot be reached, or answers that it is not ready, asks again with a jittered backoff until `hub_wait_ms`. One more answer is waited out: after an attempt whose answer may have been lost (a broken connection, or a proxy's 502, 503, or 504), the hub may hold that attempt's registration. The next attempt carries no credential, so the hub refuses it as unauthorized until the orphan's lease lapses, after the hub's TTL and at most one prune interval (30 s and 10 s by default). A lost answer therefore costs up to about 40 s, within `hub_wait_ms`. The instance exits at once on any other answer, an unauthorized one with no lost answer before it included.
 
 **Why:** Kubernetes starts a pool's hub and segments together, and no pod waits for another. An instance that exited at its first failed request was restarted, logged errors on every first deploy, and could fall into a crash-loop backoff that the deploy's health wait then sat through. Compose hid this, since its segments start after the hub's health check.
 
-**Rejected: an init container that waits for the hub's health.** It needs a second image in every pod, and it would wait on the hub's health, not on the answer to the registration itself. The instance knows which answers can change by waiting; an init container would have to repeat that rule. **Rejected: waiting on every error.** A hub that refuses the registration, a binary built for another graph, would refuse it every time; waiting would only delay the error by `hub_wait_ms`.
+**Rejected: an init container that waits for the hub's health.** It could run the segment's own image, but it would wait on the hub's health, not on the answer to the registration itself. A hub can be healthy and still answer the registration that it is busy, and a lost answer happens after the health check passed. The instance knows which answers can change by waiting; an init container would have to repeat that rule. **Rejected: replaying a lost answer.** A registration key that the hub kept with the registration, and answered again with the same credential, would make a lost answer cost nothing. The registration's authority is velo-hub's, which gdl's admission extension can only refuse, so the key belongs in velo-hub. **Rejected: waiting on every error.** A hub that refuses the registration, a binary built for another graph, would refuse it every time; waiting would only delay the error by `hub_wait_ms`.
 
 ## The readiness order
 

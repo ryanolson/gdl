@@ -172,11 +172,12 @@ async fn a_hub_that_refuses_the_segment_ends_its_start_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F1: a lost registration answer makes the retry fail with Unauthorized"]
 async fn a_registration_committed_before_a_proxy_error_can_finish_starting() {
+    // The hub has no velo, so it does not probe the instance: the orphan
+    // goes when its lease lapses, which a short lease makes quick here.
     let mut hub_settings = hub_config();
-    hub_settings.server.heartbeat_interval = Duration::from_millis(300);
-    hub_settings.server.heartbeat_max_failures = 1;
+    hub_settings.server.ttl = Duration::from_millis(500);
+    hub_settings.server.prune_interval = Duration::from_millis(100);
     let hub = velo_hub::Hub::builder(hub_settings)
         .extension(gdl_hub::GraphAdmission::new(spec()))
         .serve()
@@ -185,7 +186,7 @@ async fn a_registration_committed_before_a_proxy_error_can_finish_starting() {
     let proxy = Proxy::new(hub.control_addr()).await;
     // The hub commits before answering 200; the proxy replaces that answer.
     proxy.rewrite_once(b"200 OK", b"502 XX");
-    let config = settings(hub.public_addr().port(), proxy.port, 2_000);
+    let config = settings(hub.public_addr().port(), proxy.port, 4_000);
     let process = Process::start(&config).await.expect("the process starts");
     let launched = tokio::time::timeout(
         WAIT,

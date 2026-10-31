@@ -75,6 +75,14 @@ impl HubSession {
     /// not answer for a while, and `false` once the hub admitted the
     /// instance. Any other answer, such as the hub refusing the
     /// registration, ends the start at once: asking again cannot change it.
+    ///
+    /// The exception is an attempt whose answer may have been lost after
+    /// the hub recorded it: the next one, with no credential, is refused as
+    /// unauthorized while that orphan holds the instance. Nothing renews the
+    /// orphan's lease, so the hub drops it when the lease lapses, after its
+    /// TTL and at most one prune interval (30 s and 10 s by default; a hub
+    /// with velo also drops it once its probes of this instance fail), and
+    /// then admits a fresh attempt: the start waits for that too.
     #[expect(
         clippy::too_many_arguments,
         reason = "register's, with the wait and its report"
@@ -100,13 +108,29 @@ impl HubSession {
         let deadline = tokio::time::Instant::now() + wait;
         let mut backoff = gdl_watch::Backoff::new(HUB_WAIT, HUB_WAIT_CAP);
         let mut last = None;
+        // Whether an attempt's answer may have been lost after the hub
+        // recorded it, and whether the wait for that orphan was logged.
+        let (mut lost, mut orphaned) = (false, false);
         waiting(true);
         loop {
             let attempt = client.register(node, extensions.clone());
             let error = match tokio::time::timeout_at(deadline, attempt).await {
                 Ok(Ok(_)) => break,
-                Ok(Err(error)) if !not_up(&error) => return Err(failure(error)),
-                Ok(Err(error)) => error.to_string(),
+                Ok(Err(error)) if !not_up(&error, lost) => return Err(failure(error)),
+                Ok(Err(error)) => {
+                    if lost && !orphaned && is_unauthorized(&error) {
+                        orphaned = true;
+                        tracing::warn!(
+                            %error,
+                            hub = %format!("{host}:{control_port}"),
+                            "the hub holds this instance from an attempt whose answer was lost; \
+                             waiting until its lease lapses, after the hub's TTL and prune \
+                             interval (30 s to 40 s by default)"
+                        );
+                    }
+                    lost |= answer_lost(&error);
+                    error.to_string()
+                }
                 // A hub that took the connection and has not answered: the
                 // error before, if there was one, says more.
                 Err(_) => last.take().unwrap_or_else(|| "no answer".to_string()),
@@ -968,13 +992,41 @@ async fn keep_lease(client: HubClient, heartbeat: Duration, report: watch::Sende
 /// asked. An answer that does not decode is not a hub's, nor is 502 from
 /// the hub: it could not reach this instance over velo, which waiting does
 /// not mend.
-fn not_up(error: &ClientError) -> bool {
+///
+/// After `lost`, an attempt whose answer may not have arrived, a refusal
+/// as unauthorized is the hub holding that attempt's registration, which
+/// it drops once that registration's lease lapses: waited for too.
+fn not_up(error: &ClientError, lost: bool) -> bool {
     match error {
         ClientError::Transport(error) => !error.is_decode(),
-        ClientError::Hub { code, .. } => matches!(code, ErrorCode::Unavailable | ErrorCode::Busy),
+        ClientError::Hub { code, .. } => {
+            matches!(code, ErrorCode::Unavailable | ErrorCode::Busy)
+                || (lost && *code == ErrorCode::Unauthorized)
+        }
         ClientError::Unexpected { status, .. } => matches!(status.as_u16(), 502..=504),
         _ => false,
     }
+}
+
+/// Whether the hub may have recorded the attempt that failed so: the
+/// request may have reached it, and its answer did not come back. One that
+/// never connected did not reach it; one the hub answered was answered.
+fn answer_lost(error: &ClientError) -> bool {
+    match error {
+        ClientError::Transport(error) => !error.is_connect(),
+        ClientError::Unexpected { status, .. } => matches!(status.as_u16(), 502..=504),
+        _ => false,
+    }
+}
+
+fn is_unauthorized(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Hub {
+            code: ErrorCode::Unauthorized,
+            ..
+        }
+    )
 }
 
 /// The first wait for a hub that is not up yet at a segment's start, and
@@ -1242,7 +1294,7 @@ mod tests {
     /// starting or busy, or a proxy that finds it gone. A refusal, or a
     /// hub that cannot reach the instance, ends the start.
     mod starting {
-        use super::super::not_up;
+        use super::super::{answer_lost, not_up};
         use velo_hub::client::ClientError;
         use velo_hub::protocol::ErrorCode;
 
@@ -1263,10 +1315,27 @@ mod tests {
 
         #[test]
         fn a_hub_that_is_not_up_is_waited_for() {
-            assert!(not_up(&answered(ErrorCode::Unavailable)));
-            assert!(not_up(&answered(ErrorCode::Busy)));
-            assert!(not_up(&unexpected(ErrorCode::Unavailable)));
-            assert!(not_up(&unexpected(ErrorCode::BadGateway)));
+            for lost in [false, true] {
+                assert!(not_up(&answered(ErrorCode::Unavailable), lost));
+                assert!(not_up(&answered(ErrorCode::Busy), lost));
+                assert!(not_up(&unexpected(ErrorCode::Unavailable), lost));
+                assert!(not_up(&unexpected(ErrorCode::BadGateway), lost));
+            }
+        }
+
+        /// A refusal as unauthorized is waited out only after an answer
+        /// that may have been lost: then it is the hub holding that
+        /// attempt's registration. With none lost, another instance holds
+        /// the instance id, and waiting does not change that.
+        #[test]
+        fn unauthorized_is_waited_out_only_after_a_lost_answer() {
+            assert!(!not_up(&answered(ErrorCode::Unauthorized), false));
+            assert!(not_up(&answered(ErrorCode::Unauthorized), true));
+            assert!(answer_lost(&unexpected(ErrorCode::BadGateway)));
+            assert!(answer_lost(&unexpected(ErrorCode::Unavailable)));
+            assert!(!answer_lost(&answered(ErrorCode::Unavailable)));
+            assert!(!answer_lost(&answered(ErrorCode::Unauthorized)));
+            assert!(!answer_lost(&unexpected(ErrorCode::BadRequest)));
         }
 
         #[test]
@@ -1274,15 +1343,15 @@ mod tests {
             for code in [
                 ErrorCode::BadRequest,
                 ErrorCode::Conflict,
-                ErrorCode::Unauthorized,
                 ErrorCode::NotFound,
                 ErrorCode::BadGateway,
                 ErrorCode::Internal,
             ] {
-                assert!(!not_up(&answered(code)), "{code:?}");
+                assert!(!not_up(&answered(code), true), "{code:?}");
+                assert!(!not_up(&answered(code), false), "{code:?}");
             }
-            assert!(!not_up(&unexpected(ErrorCode::BadRequest)));
-            assert!(!not_up(&ClientError::NotRegistered));
+            assert!(!not_up(&unexpected(ErrorCode::BadRequest), true));
+            assert!(!not_up(&ClientError::NotRegistered, true));
         }
     }
 
