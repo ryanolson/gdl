@@ -1134,6 +1134,49 @@ async fn git_catalog_entries_export_fetchable_dependencies() {
 }
 
 #[tokio::test]
+#[ignore = "F5: the composer replaces the offer's bound revision with its resolved commit"]
+async fn a_draft_retains_the_catalogued_git_revision() {
+    let commit = "0123456789abcdef0123456789abcdef01234567ab";
+    let mut failures = Vec::new();
+    for rev in [commit, &commit[..12]] {
+        let temp = scratch("git-binding");
+        let source = format!("git+https://example.com/packages?rev={rev}#{commit}");
+        let replace = |value: String| {
+            value.replace(
+                "registry+https://github.com/rust-lang/crates.io-index",
+                &source,
+            )
+        };
+        let mut catalog =
+            gdl_extract::Catalog::load(&temp.path().join("catalog")).expect("catalogue");
+        for entry in gdl_extract::Catalog::load(&fixture_catalog())
+            .expect("fixture catalogue")
+            .entries()
+        {
+            catalog
+                .add(
+                    serde_json::from_str(&replace(
+                        serde_json::to_string(entry).expect("fixture entry"),
+                    ))
+                    .expect("Git entry"),
+                )
+                .expect("add Git entry");
+        }
+        let app = router(temp.path(), temp.path().join("catalog"));
+        let draft = draft("regproto::Words", "Engine", json!({"all": ["A", "Engine"]}));
+        let draft = serde_json::from_str(&replace(draft.to_string())).expect("Git draft");
+        let (status, checked) = json_call(&app, "POST", "/api/check", Some(draft)).await;
+        assert_eq!(status, StatusCode::OK, "{checked:#}");
+        if rev == commit {
+            assert_eq!(checked["ok"], true, "full revision control: {checked:#}");
+        } else if checked["ok"] != true {
+            failures.push(format!("revision {rev:?}: {}", checked["problems"]));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
 async fn git_import_rejects_non_http_sources_and_escaping_paths() {
     let temp = scratch("git-refused");
     let dir = temp.path();
