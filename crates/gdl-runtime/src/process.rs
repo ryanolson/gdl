@@ -1107,8 +1107,8 @@ impl Launch {
     }
 
     /// Say that this instance has retired, so that its peers stop routing
-    /// to it: at the hub, `retired`, then `ready` and `loaded`
-    /// withdrawn; in a roster directory, a file in `retired/`. Bounded by
+    /// to it: at the hub, `ready` and `loaded` withdrawn, then `retired`;
+    /// in a roster directory, a file in `retired/`. Bounded by
     /// `deadline`; what does not get through leaves the drain to (B) or its
     /// bound.
     async fn retire(&mut self, deadline: tokio::time::Instant) {

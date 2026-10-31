@@ -72,21 +72,19 @@ A stop does not choose between retiring one instance and a deployment-wide drain
 
 ## The order of a retirement's announcements
 
-A retiring instance X announces `retired` first, then withdraws `ready` and `loaded`. The hub confirms each step before the next. X checks (A) only after all three.
+A retiring instance X withdraws `ready` and `loaded` first, and waits until the hub has confirmed both withdrawals. Only then does it announce `retired`. X checks (A) only after all three.
 
-(A) waits for the members of the sending segments that have announced `loaded` or `retired`. A member that has announced neither when X checks will announce `loaded` later. It reads its roster, and starts following membership, only after that. So its roster and its first watch of `ready` both come after X's withdrawals, and never hold X. It needs no acknowledgement.
+**Why:** velo-hub's client keeps a withdrawal, but not an announcement. A name taken out of the client's set is withdrawn again by every later change the client sends, and nothing puts it back. An announcement whose answer is lost (a request dropped at its timeout, the client's own 60 s timeout, a broken connection) is withdrawn by the next change, whoever sends it. So once the hub has confirmed the withdrawals, it never lists X as `ready` or `loaded` again, whatever becomes of `retired`. A joiner never takes X into its roster, and a pool never counts it as usable.
 
-**Rejected: withdraw, then announce.** Between the two steps, a member that was itself retiring was in neither set, so X did not wait for it. That member could still route to X while it drained.
+A hub that does not confirm the withdrawals within the retirement's bound is not sent `retired`. X prints a line that names the hub, and its drain ends by (B) or at its bound, as under a hub that refuses `retired`.
 
-## An announcement the hub does not answer is kept
+(A) waits for the members of the sending segments that have announced `loaded`, `serving`, or `retired`. `serving` holds a sender M that is retiring itself, between the withdrawal of its `loaded` and its `retired`: M still routes to X while it drains, so X waits for its promise. `serving` is withdrawn only when a member leaves. A member that has announced none of the three when X checks will announce `loaded` later. It reads its roster, and starts following membership, only after that. So its roster and its first watch of `ready` both come after X's withdrawals, and never hold X. It needs no acknowledgement.
 
-X retries `retired` until its drain's bound. An attempt that the hub has not answered is never given up. X waits for it again rather than sending a second one. Past the bound, X keeps the attempt until it leaves the hub. When the hub answers late, the registration lands and stays. The same holds for `ready`, `drained`, and `detach`.
+`crates/gdl-runtime/tests/rosters/unanswered.rs` and `crates/gdl-runtime/src/dist/fabric/hub/unanswered.rs` hold these cases.
 
-The client sends one change at a time, so the leave waits behind the attempt's open request. X queues the leave first, and only then cuts the attempt. The leave then goes next, and takes the announcement off the hub with the rest. If X cut the attempt first, the withdrawal of its dropped registration could go ahead of the leave, and the hub would list X without `retired` until X left.
+**Rejected: announce, then withdraw.** With `retired` first, a `retired` the hub stored but answered late was withdrawn again by the client, and the hub listed X as `ready` and `loaded` and not retired. Peers that were already following were not affected, since they keep a retirement once they have seen it. But a joiner took X into its roster, and a pool counted X as usable again. This order was chosen first because, with the withdrawals first, a retiring sender was in neither `loaded` nor `retired` between its two steps, so X did not wait for it. Counting `serving` in (A) answers that.
 
-**Why:** the hub may have stored `retired` and only answered late. velo-hub's client withdraws a service whose registration is dropped. So an attempt dropped at its timeout withdrew a `retired` that the hub held. The hub then listed X as `ready` and `loaded` and not retired: a joiner took X into its roster, and a pool counted X as usable again. Peers that were already following were not affected, since they keep the retirement once they have seen it. `crates/gdl-runtime/tests/rosters/unanswered.rs` holds the case.
-
-**Rejected: do not drain while the hub lists X as ready, and retry the retirement.** X already retries until its drain's bound, so this either stops at the bound with the same listing, or holds X past its bound.
+**Rejected: keep an announcement the hub has not answered.** Holding its request open, past its timeout, until the hub answered, kept `retired` in most cases. But the open request held the client, which sends one change at a time, so it held back the leave. And a cancelled request, or the client's own timeout, still withdrew it. Each case needed another rule. The order above holds without any of them.
 
 ## The acknowledgement is a promise
 

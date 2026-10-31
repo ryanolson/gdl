@@ -128,11 +128,10 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
                 .iter()
                 .any(|peer| peer.instance_id() == first_id);
             joiner = Some((process, launch, stopped.elapsed().as_millis(), routes));
-            // The engine has drained by now, and its leave waits at the
-            // proxy: an announcement the hub has not answered must not
-            // hold the leave back.
-            // Its drain ended at the bound, so its leave is due well
-            // within the leave's own 5 s limit.
+            // The engine has drained by now. The hub answers the
+            // retirement, late: until it does, the client waits on the
+            // connection that holds the answer. Then its leave comes.
+            control.answer();
             let leaving = tokio::time::timeout(Duration::from_secs(2), control.holding()).await;
             assert!(leaving.is_ok(), "the engine never sent its leave");
             control.release();
@@ -140,10 +139,8 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let exited = stopped.elapsed();
-    // Its leave took it off the hub, `retired` included, and nothing else
-    // did first.
+    // Its leave took it off the hub.
     let gone = listed(&services, first_id).await;
-    control.answer();
     recorder.abort();
 
     let avoided = front_segment.promised_to_avoid(first_id);
@@ -199,7 +196,6 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
 /// A stop interrupts `ready` after the hub stores it. The test spends
 /// the drain's 3 s bound and the leave's 5 s limit with that answer held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F1: cancelling ready detaches its task and blocks leave past the limit"]
 async fn a_stop_during_an_unanswered_ready_still_leaves_the_hub() {
     let placement = two();
     let hub = hub(&placement).await;

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use velo::discovery::{ServiceDiscovery, ServiceEvent, ServiceRegistrationGuard};
+use velo::discovery::{ServiceDiscovery, ServiceEvent};
 use velo::{InstanceId, PeerInfo, Velo};
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 use velo_hub::protocol::ErrorCode;
@@ -32,9 +32,6 @@ pub struct HubSession {
     drained: Option<HubServiceRegistration>,
     detached: Option<HubServiceRegistration>,
     retired: Option<HubServiceRegistration>,
-    /// Announcements the hub did not answer by their deadline, still
-    /// waiting for its answer. See [`HubSession::persist`].
-    unanswered: Vec<(SegmentPhase, Announcing)>,
     lease: tokio::task::JoinHandle<()>,
     lost: watch::Receiver<Option<String>>,
     /// Follows membership into the roster, from just before `loaded`.
@@ -174,7 +171,6 @@ impl HubSession {
             drained: None,
             detached: None,
             retired: None,
-            unanswered: Vec::new(),
             lease,
             lost,
             follower: None,
@@ -315,45 +311,66 @@ impl HubSession {
         Ok(())
     }
 
-    /// Announce that this instance retired, then withdraw `ready` and
-    /// `loaded`, each answered by the hub before the next: a
-    /// roster read afterwards leaves it out, and a peer that follows
-    /// membership afterwards never adds it. Bounded by `deadline`; what the
-    /// hub did not answer is left to the drain's bound, and a `retired` it
-    /// did not answer stays announced ([`HubSession::persist`]).
+    /// Withdraw `ready` and `loaded`, wait until the hub has confirmed
+    /// both withdrawals, then announce that this instance retired: a roster
+    /// read afterwards leaves it out, and a peer that follows membership
+    /// afterwards never adds it. Bounded by `deadline`; what the hub did
+    /// not answer is left to the drain's bound.
+    ///
+    /// The withdrawals go first because velo-hub's client keeps a
+    /// withdrawal but not an announcement. A name taken out of the
+    /// client's set is withdrawn again by every later change, and nothing
+    /// puts it back; an announcement whose answer is lost is withdrawn by
+    /// the next change. So once `retired` is sent, the hub never lists this
+    /// instance `ready` or `loaded` without `retired`, whatever becomes of
+    /// the announcement. A hub that does not confirm the withdrawals is not
+    /// sent `retired` at all. See `docs/src/development/lifecycle-design.md`.
     pub(crate) async fn retire(&mut self, deadline: tokio::time::Instant) -> Result<()> {
-        if self.retired.is_none() {
-            self.retired = Some(self.persist(SegmentPhase::Retired, deadline).await?);
+        if self.retired.is_some() {
+            return Ok(());
         }
-        for mut guard in [self.ready.take(), self.loaded.take()]
-            .into_iter()
-            .flatten()
-        {
+        // Out of the client's set: the changes below send the withdrawals,
+        // and that of an announcement whose answer was lost.
+        drop(self.ready.take());
+        drop(self.loaded.take());
+        loop {
             // A lost lease took the registration these belong to: there is
-            // nothing left to withdraw, and nobody to wait for.
-            let withdrawn = tokio::time::timeout_at(deadline, guard.unregister());
-            tokio::select! {
-                biased;
-                lost = self.maintain() => return lost,
-                withdrawn = withdrawn => withdrawn
-                    .map_err(|_| failure("the hub did not answer in time"))?
-                    .map_err(failure)?,
+            // nothing left to withdraw, and nobody to tell.
+            self.lost()?;
+            let check = (tokio::time::Instant::now() + POLL * 10).min(deadline);
+            match tokio::time::timeout_at(check, self.client.sync_services()).await {
+                Ok(Ok(())) => break,
+                _ if tokio::time::Instant::now() + POLL >= deadline => {
+                    return Err(failure(format!(
+                        "the hub at {} did not confirm that it withdrew `ready` and `loaded` in time, so `retired` was not sent",
+                        self.client.control_url()
+                    )));
+                }
+                _ => tokio::time::sleep(POLL).await,
             }
         }
+        self.retired = Some(self.persist(SegmentPhase::Retired, deadline).await?);
         Ok(())
     }
 
-    /// Whether every member of `senders` that announced `loaded` or
-    /// `retired` avoids `me`: it has promised never to route to it again.
-    /// A member that left is no longer one. A member that announced neither
-    /// reads its roster, and follows membership, only after this instance's
-    /// retirement, so it never routes here.
+    /// Whether every member of `senders` that announced `loaded`,
+    /// `serving`, or `retired` avoids `me`: it has promised never to route
+    /// to it again. A member that left is no longer one. `serving` holds a
+    /// sender that is retiring itself, between the withdrawal of its
+    /// `loaded` and its `retired`. A member that announced none of them
+    /// reads its roster, and follows membership, only after this
+    /// instance's retirement, so it never routes here.
     pub(crate) async fn all_avoid(&self, me: InstanceId, senders: &[&str]) -> Result<bool> {
         let members = self.members().await?;
         let mut routing = HashSet::new();
         for segment in senders {
-            routing.extend(self.instances(segment, SegmentPhase::Loaded).await?);
-            routing.extend(self.instances(segment, SegmentPhase::Retired).await?);
+            for phase in [
+                SegmentPhase::Loaded,
+                SegmentPhase::Serving,
+                SegmentPhase::Retired,
+            ] {
+                routing.extend(self.instances(segment, phase).await?);
+            }
         }
         let avoiding: HashSet<InstanceId> = self
             .client
@@ -431,61 +448,25 @@ impl HubSession {
 
     /// Announce `phase`, retried until `deadline`: an announcement the hub
     /// refused is gone with its registration guard, and peers would wait
-    /// for it until their bound. Each check is bounded, since a hub can
+    /// for it until their bound. Each attempt is bounded, since a hub can
     /// stop answering without closing its connections.
-    ///
-    /// An announcement the hub has not answered is never given up: the hub
-    /// may have taken it, and dropping it would withdraw it. It is waited
-    /// for again rather than sent again, since the client's request for it
-    /// is still open, and a second one would wait behind it. Past
-    /// `deadline` the session keeps it, so that what the hub took stays,
-    /// for a retired instance most of all: a hub that lists it without
-    /// `retired` sends joiners and pools to an instance that is leaving.
     async fn persist(
-        &mut self,
+        &self,
         phase: SegmentPhase,
         deadline: tokio::time::Instant,
     ) -> Result<HubServiceRegistration> {
-        let mut announcing = match self.unanswered.iter().position(|(p, _)| *p == phase) {
-            Some(at) => self.unanswered.swap_remove(at).1,
-            None => self.announcing(phase),
-        };
         loop {
             // A lost lease took the registration this would belong to.
             self.lost()?;
-            let check = (tokio::time::Instant::now() + POLL * 10).min(deadline);
-            let refused = match tokio::time::timeout_at(check, &mut announcing).await {
-                Ok(Ok(Ok(registration))) => return Ok(registration),
-                Ok(Ok(Err(error))) => Some(failure(error)),
-                Ok(Err(error)) => Some(failure(error)),
-                Err(_) => None,
-            };
-            if tokio::time::Instant::now() + POLL >= deadline {
-                return Err(match refused {
-                    Some(error) => error,
-                    None => {
-                        self.unanswered.push((phase, announcing));
-                        failure("the hub did not answer in time")
-                    }
-                });
-            }
-            // An answer, but not the registration: the guard is gone with
-            // it, so the next attempt registers again.
-            if refused.is_some() {
-                tokio::time::sleep(POLL).await;
-                announcing = self.announcing(phase);
+            let attempt = (tokio::time::Instant::now() + POLL * 10).min(deadline);
+            match self.announce(phase, attempt).await {
+                Ok(registration) => return Ok(registration),
+                Err(error) if tokio::time::Instant::now() + POLL >= deadline => {
+                    return Err(error);
+                }
+                Err(_) => tokio::time::sleep(POLL).await,
             }
         }
-    }
-
-    /// One attempt to announce `phase`, run apart from its caller, so that
-    /// a caller that stops waiting does not withdraw what the hub took.
-    fn announcing(&self, phase: SegmentPhase) -> Announcing {
-        let (client, name) = (
-            self.client.clone(),
-            segment_service(&self.registration.segment, phase),
-        );
-        tokio::spawn(async move { client.register_service(&name).await })
     }
 
     /// Announce that this instance, of a draining pool, will send no more
@@ -537,25 +518,8 @@ impl HubSession {
 
     /// Leave the hub at once, rather than when the lease runs out, so that
     /// no peer's drain waits for this instance.
-    ///
-    /// An announcement the hub has not answered holds the client's lock,
-    /// which the leave needs too. So the leave queues for the lock first,
-    /// and only then is the announcement cut: the leave goes next, and
-    /// takes the announcement off the hub with the rest. Cut first, the
-    /// announcement's dropped guard could withdraw it ahead of the leave,
-    /// and the hub would list this instance without `retired` until it
-    /// left.
     pub(crate) async fn leave(&self) {
-        let leave = async {
-            let mut unregister = std::pin::pin!(self.client.unregister());
-            if futures::poll!(unregister.as_mut()).is_pending() {
-                for (_, announcing) in &self.unanswered {
-                    announcing.abort();
-                }
-                let _ = unregister.await;
-            }
-        };
-        let _ = tokio::time::timeout(POLL * 50, leave).await;
+        let _ = tokio::time::timeout(POLL * 50, self.client.unregister()).await;
     }
 
     /// Whether the lease is lost.
@@ -667,18 +631,11 @@ impl HubSession {
 impl Drop for HubSession {
     fn drop(&mut self) {
         self.lease.abort();
-        for (_, announcing) in &self.unanswered {
-            announcing.abort();
-        }
         if let Some(follower) = &self.follower {
             follower.abort();
         }
     }
 }
-
-/// An announcement on its way to the hub: its registration guard, once the
-/// hub has answered.
-type Announcing = tokio::task::JoinHandle<std::result::Result<HubServiceRegistration, ClientError>>;
 
 /// The members of the deployment `registration` belongs to, from the hub.
 /// The questions a wait beside an instance's drain asks its hub, held

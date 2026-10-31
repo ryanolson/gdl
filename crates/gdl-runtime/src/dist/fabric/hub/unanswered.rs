@@ -32,7 +32,6 @@ async fn session(hub: &velo_hub::Hub, control: u16) -> (HubSession, velo::Velo) 
 /// A follower can already be waiting to announce an avoidance promise
 /// when leave queues behind an unanswered retirement.
 #[tokio::test]
-#[ignore = "F2: a sync queued before leave withdraws retired when the kept task is aborted"]
 async fn a_waiting_acknowledgement_keeps_retired_until_leave() {
     let mut config = velo_hub::HubConfig::default();
     config.server.public_port = 0;
@@ -67,7 +66,6 @@ async fn a_waiting_acknowledgement_keeps_retired_until_leave() {
         }
     );
     assert!(retired.is_err());
-    assert_eq!(session.unanswered.len(), 1);
 
     let client = session.client.clone();
     let name = super::avoids(velo::InstanceId::new_v4());
@@ -76,6 +74,10 @@ async fn a_waiting_acknowledgement_keeps_retired_until_leave() {
     control.hold(b"DELETE /v1/instances/");
     let mut leaving = std::pin::pin!(session.leave());
     assert!(futures::poll!(leaving.as_mut()).is_pending());
+    // The hub answers the retirement now, late: until it does, the client
+    // waits on the connection that holds the answer, and nothing it sends
+    // after gets through.
+    control.answer();
 
     let services = client.services();
     let id = node.instance_id();
@@ -112,7 +114,6 @@ async fn a_waiting_acknowledgement_keeps_retired_until_leave() {
 /// The client's 60 s request timeout must not withdraw a retirement.
 /// This test waits for that timeout and spends one more second retrying.
 #[tokio::test]
-#[ignore = "F3: the client's request timeout drops and withdraws an applied retirement"]
 async fn a_client_timeout_cannot_withdraw_an_applied_retirement() {
     use futures::StreamExt;
     use velo::discovery::ServiceEvent;
@@ -210,4 +211,74 @@ async fn a_client_timeout_cannot_withdraw_an_applied_retirement() {
         !(ready || loaded) || retired,
         "the client's timeout withdrew a stored retirement: ready={ready}, loaded={loaded}, retired={retired}"
     );
+}
+
+/// A sender that is retiring itself, between the withdrawal of its
+/// `loaded` and its `retired`, still routes, so a retiree waits for its
+/// promise: it is counted by its `serving`.
+#[tokio::test]
+async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec()))
+        .serve()
+        .await
+        .expect("hub");
+    let port = hub.control_addr().port();
+    let (sink, sink_node) = session(&hub, port).await;
+    let node = crate::dist::bind_node("127.0.0.1:0".parse().expect("address"))
+        .await
+        .expect("node");
+    let mut front = HubSession::register(
+        "127.0.0.1",
+        hub.public_addr().port(),
+        port,
+        &node,
+        spec().registration("front").expect("registration"),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("registered");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    front.loaded = Some(
+        front
+            .announce(SegmentPhase::Loaded, deadline)
+            .await
+            .expect("loaded"),
+    );
+    front.serving = Some(
+        front
+            .announce(SegmentPhase::Serving, deadline)
+            .await
+            .expect("serving"),
+    );
+    let me = sink_node.instance_id();
+    assert!(!sink.all_avoid(me, &["front"]).await.expect("asked"));
+
+    // The front withdraws `loaded`, as a retirement does first, and has
+    // not announced `retired` yet.
+    drop(front.loaded.take());
+    front.client.sync_services().await.expect("withdrawn");
+    let loaded = front
+        .client
+        .services()
+        .get_instances(&segment_service("front", SegmentPhase::Loaded))
+        .await
+        .expect("the hub answers");
+    assert!(!loaded.contains(&node.instance_id()));
+    assert!(
+        !sink.all_avoid(me, &["front"]).await.expect("asked"),
+        "the sink took a sender that still routes to it for one that avoids it"
+    );
+
+    // Its promise ends the wait.
+    let _promise = front
+        .client
+        .register_service(&super::avoids(me))
+        .await
+        .expect("promised");
+    assert!(sink.all_avoid(me, &["front"]).await.expect("asked"));
+    hub.shutdown().await.expect("the hub stopped");
 }

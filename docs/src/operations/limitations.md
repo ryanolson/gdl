@@ -127,8 +127,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Exit overrun:** the exit can pass the bound by up to about eight and a half seconds. velo's shutdown can run up to one second past the bound to finish requests, and up to two and a half more to close its connections. Leaving a hub that does not answer takes up to five. The Compose bundle's 30 s margin covers this. `cargo gdl compose` fixes each segment's `stop_grace_period` from the drain bound in its settings, so a `GDL_RUNTIME__DRAIN_MS` set at run time does not change it. Set the bound in the settings and generate the bundle again. See [Segment lifecycle](../concepts/lifecycle.md) and [Deploy with Docker Compose](../guides/compose-deploy.md).
 
 ### A hub that does not answer the retirement spends the drain's bound
-- **What:** an instance retries its `retired` announcement until its drain's bound. If the hub does not answer it, the waits after it (for its senders or sources, and for its own requests) end at once, and a request still in flight is cut. The serving body still runs during that time.
-- **Not affected:** what the hub lists. An announcement the hub took and did not answer is kept, so the hub lists the instance as retired. See [Segment lifecycle](../concepts/lifecycle.md).
+- **What:** an instance retries the withdrawal of `ready` and `loaded`, and then its `retired` announcement, until its drain's bound. If the hub does not answer them, the waits after them (for its senders or sources, and for its own requests) end at once, and a request still in flight is cut. The serving body still runs during that time.
+- **Not affected:** what the hub lists. Once the hub has confirmed the withdrawals, it never lists the instance as one to route to. See [Segment lifecycle](../concepts/lifecycle.md).
+
+### A hub that does not confirm the withdrawals is not told of the retirement
+- **What:** an instance announces `retired` only once the hub has confirmed that it withdrew `ready` and `loaded`. If the hub does not confirm them within the retirement's bound, the instance prints a line that names the hub, and does not announce `retired`. Peers that already route to it go on until it closes its entries, and then fail over. Its drain ends when the sources that reach it have drained, or at its bound.
+- **Why:** a `retired` whose answer is lost is withdrawn again by the hub client, while a withdrawal stays. Sending `retired` before the withdrawals are confirmed could leave the hub listing the instance as ready and not retired. See [Lifecycle design](../development/lifecycle-design.md).
 
 ### Output velo still holds can be cut when a drain is cut short
 - **What:** an instance that exits before velo hands on its finished streams loses that output. The consumer reads a broken stream.

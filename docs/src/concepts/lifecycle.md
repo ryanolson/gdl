@@ -95,7 +95,7 @@ sequenceDiagram
     participant H as Hub or roster directory
     participant P as Peer P (sends to X's segment)
     X->>X: health: draining, cancel the serving body
-    X->>H: announce retired, then withdraw ready and loaded
+    X->>H: withdraw ready and loaded, then announce retired
     H-->>P: X retired
     P->>P: publish a routing table without X (if X's segment has another instance)
     P->>H: acknowledge: gdl-avoids-X, or avoids/X/P
@@ -110,7 +110,7 @@ sequenceDiagram
 
 The steps, in order:
 
-1. **Retire.** The health phase becomes `draining`, and the serving body's context is cancelled. Meanwhile, the instance announces `retired`, then withdraws `ready` and `loaded`. A roster read after that leaves it out. If the hub does not answer `retired` in time, the instance prints a line and keeps the announcement until it leaves: once the hub takes it, the hub lists the instance as retired.
+1. **Retire.** The health phase becomes `draining`, and the serving body's context is cancelled. Meanwhile, the instance withdraws `ready` and `loaded`, and announces `retired` once the hub has confirmed both. A roster read after the withdrawals leaves it out. If the hub does not confirm them in time, the instance prints a line and does not announce `retired`.
 2. **Peers avoid it.** A peer that sees the retirement stops routing to the instance, but only while the segment has another instance that is not retired. Then the peer acknowledges. The acknowledgement is a promise: the peer never routes to that instance again.
 3. **The body ends.** A frontend drains the requests it holds. A JSON-lines source stops reading lines, and finishes the answer it is writing.
 4. **Drained.** A source instance announces `drained` before it waits further. So source segments that route to each other never wait for each other. An entry instance of a pool is the exception: it announces `drained` only once it holds no request ([An interior instance's stop](pool-routing.md#an-interior-instances-stop)).
@@ -143,4 +143,4 @@ Under a hub, an instance in a pool also stops when its pool drains, once no more
 
 ## Limits
 
-[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a hub that does not answer the retirement spends the drain's bound, the last instance of a segment is not avoided, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.
+[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a hub that does not answer the retirement spends the drain's bound, and a hub that does not confirm the withdrawals is not told of the retirement, the last instance of a segment is not avoided, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.
