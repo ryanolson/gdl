@@ -110,6 +110,11 @@ pub struct Live {
     pub suspended: bool,
     /// For a Deployment, its `spec.replicas`.
     pub replicas: Option<i64>,
+    /// For a Deployment, its pods' image.
+    pub image: Option<String>,
+    /// For a Deployment, its pods' `gdl.dev/config`: a checksum of what
+    /// they read from the pool's ConfigMap.
+    pub config: Option<String>,
     /// Whether it is being deleted.
     pub deleting: bool,
 }
@@ -142,6 +147,8 @@ impl Live {
             replica_owners,
             suspended: !object["spec"]["suspend"].is_null(),
             replicas: object["spec"]["replicas"].as_i64(),
+            image: text(&object["spec"]["template"]["spec"]["containers"][0]["image"]),
+            config: text(&object["spec"]["template"]["metadata"]["annotations"]["gdl.dev/config"]),
             deleting: !metadata["deletionTimestamp"].is_null(),
         })
     }

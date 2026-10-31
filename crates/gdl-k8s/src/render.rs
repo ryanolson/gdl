@@ -116,6 +116,24 @@ pub fn children(
     Ok(objects)
 }
 
+/// The `GdlPool` of `pool`, named `name` in namespace `namespace`, with
+/// the labels its objects carry but `gdl.dev/segment`: the one object of
+/// the pool that `cargo gdl` writes for a cluster the operator runs.
+pub fn pool_object(name: &str, namespace: &str, pool: &Pool) -> Value {
+    let render = Render {
+        name,
+        namespace,
+        pool,
+        scaling: Scaling::Operator,
+    };
+    json!({
+        "apiVersion": "gdl.dev/v1alpha1",
+        "kind": "GdlPool",
+        "metadata": render.meta(name, None),
+        "spec": pool,
+    })
+}
+
 /// The name of pool `pool`'s object of segment `segment`.
 pub fn object_name(pool: &str, segment: &str) -> String {
     format!("{pool}-{segment}")

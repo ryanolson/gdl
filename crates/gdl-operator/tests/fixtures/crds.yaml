@@ -579,8 +579,7 @@
                     "type": "boolean"
                   },
                   "presence": {
-                    "default": "serving",
-                    "description": "Whether the pool serves, or is scaled to 0 and says so in its\nrecord.",
+                    "description": "Whether the pool serves, or is scaled to 0 and says so in its\nrecord. Absent means `serving`, and `cargo gdl` writes it only\nwhen it is not, so that a redeploy leaves a person's change of it\nin place.",
                     "enum": [
                       "serving",
                       "scaledToZero"

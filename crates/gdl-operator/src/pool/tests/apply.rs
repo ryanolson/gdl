@@ -30,6 +30,8 @@ async fn a_new_pool_gets_its_finalizer_before_any_object() {
         );
         assert!(log.contains(&write), "{write}: {log:?}");
     }
+    // An absent presence is serving: the hub is not asked to say it.
+    assert!(log.iter().all(|e| !e.starts_with("presence")), "{log:?}");
     // Once written, it is never written again.
     fake.state().log.clear();
     fake.reconcile(1_000).await.expect("a reconcile");
@@ -66,6 +68,18 @@ async fn a_hub_change_without_allow_pool_restart_is_held() {
         Some(("True".into(), "HubChange".into()))
     );
     assert_eq!(fake.state().events, ["HubChange"]);
+    let message = fake
+        .status()
+        .conditions
+        .iter()
+        .find(|c| c.type_ == "PoolRestartPending")
+        .map(|c| c.message.clone())
+        .expect("the condition");
+    assert!(
+        message.contains("the pool's deployment changes"),
+        "{message}"
+    );
+    assert!(!message.contains("image"), "{message}");
 
     fake.state()
         .pool
@@ -111,6 +125,8 @@ async fn an_object_the_pool_did_not_make_is_never_changed() {
         replica_owners: Vec::new(),
         suspended: false,
         replicas: None,
+        image: None,
+        config: None,
         deleting: false,
     };
     fake.state().objects.insert(
@@ -153,6 +169,8 @@ async fn a_labelled_object_the_pool_did_not_make_is_left_alone() {
         replica_owners: Vec::new(),
         suspended: false,
         replicas: Some(1),
+        image: None,
+        config: None,
         deleting: false,
     };
     fake.state().objects.insert(
@@ -271,4 +289,34 @@ async fn a_pool_scaled_to_zero_says_so_before_its_scalers_hold() {
 
 fn first(log: &[String], prefix: &str) -> Option<usize> {
     log.iter().position(|entry| entry.starts_with(prefix))
+}
+
+/// A new hub image is named as the reason a generation is held, and a
+/// pool's first create is never held.
+#[tokio::test]
+async fn a_held_generation_names_the_hub_image() {
+    let fresh = Fake::with(pool(false));
+    fresh.reconcile(0).await.expect("a reconcile");
+    assert_eq!(fresh.status().held, None, "a first create is not a restart");
+    let fake = running(false).await;
+    {
+        let mut state = fake.state();
+        let pool = state.pool.as_mut().expect("a pool");
+        pool.spec.pool.hub.image = "registry.example/hub@sha256:2".into();
+        pool.metadata.generation = Some(2);
+    }
+    fake.reconcile(1_000).await.expect("a reconcile");
+    let message = fake
+        .status()
+        .conditions
+        .iter()
+        .find(|c| c.type_ == "PoolRestartPending")
+        .map(|c| c.message.clone())
+        .expect("the condition");
+    assert!(
+        message.contains(
+            "its image changes from `registry.example/hub:tag` to `registry.example/hub@sha256:2`"
+        ),
+        "{message}"
+    );
 }

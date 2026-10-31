@@ -130,12 +130,13 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             if running.template.as_deref() != next && !spec.allow_pool_restart {
                 let generation = self.generation();
                 self.status.held = Some(generation);
+                let why = restart(running, object);
                 self.warn(
                     "PoolRestartPending",
                     true,
                     "HubChange",
                     &format!(
-                        "generation {generation} replaces the pool's hub, which drains the pool: nothing of it was applied. Set `allowPoolRestart` to apply it"
+                        "generation {generation} replaces the pool's hub ({why}), and a hub restart drains the pool: nothing of the generation was applied. Set `allowPoolRestart` to apply it (`cargo gdl deploy --allow-pool-restart`)"
                     ),
                 );
                 self.health().await;
@@ -322,6 +323,30 @@ fn kind_of(object: &Value) -> Kind {
         .as_str()
         .and_then(Kind::of)
         .expect("gdl-k8s renders only the kinds a pool owns")
+}
+
+/// What in `next`, the hub's Deployment as rendered, replaces `running`'s
+/// pods: its image, the pool's deployment it reads, or else the rest of
+/// its pod template.
+fn restart(running: &Live, next: &Value) -> String {
+    let template = &next["spec"]["template"];
+    let image = template["spec"]["containers"][0]["image"].as_str();
+    let config = template["metadata"]["annotations"]["gdl.dev/config"].as_str();
+    let mut why = Vec::new();
+    if running.image.as_deref() != image {
+        why.push(format!(
+            "its image changes from `{}` to `{}`",
+            running.image.as_deref().unwrap_or_default(),
+            image.unwrap_or_default()
+        ));
+    }
+    if running.config.as_deref() != config {
+        why.push("the pool's deployment changes".to_string());
+    }
+    if why.is_empty() {
+        why.push("its pod template changes".to_string());
+    }
+    why.join("; ")
 }
 
 /// A hash of a pod template, as hex: what the pool-restart guard compares.

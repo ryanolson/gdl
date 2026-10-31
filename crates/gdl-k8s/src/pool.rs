@@ -51,8 +51,10 @@ pub struct Pool {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pod_monitor: bool,
     /// Whether the pool serves, or is scaled to 0 and says so in its
-    /// record.
-    #[serde(default)]
+    /// record. Absent means `serving`, and `cargo gdl` writes it only
+    /// when it is not, so that a redeploy leaves a person's change of it
+    /// in place.
+    #[serde(default, skip_serializing_if = "Presence::is_serving")]
     pub presence: Presence,
     /// Whether a change that replaces the pool's hub may be applied. A hub
     /// restart drains its pool, so without this the change is held, and
@@ -120,6 +122,13 @@ pub enum Presence {
     Serving,
     /// Its segments are held at 0, and its record says so.
     ScaledToZero,
+}
+
+impl Presence {
+    /// Whether it is [`Presence::Serving`].
+    pub fn is_serving(&self) -> bool {
+        *self == Self::Serving
+    }
 }
 
 /// A pool's hub.
