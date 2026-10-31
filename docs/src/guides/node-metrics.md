@@ -30,7 +30,7 @@ The derive refuses a name that breaks dynamo's conventions:
 - A counter's name ends in `_total`, and no other kind's name does.
 - The unit is the last word, or the word before `total`. It cannot be `counter`, `gauge`, `size`, or `time`. It cannot be `sum`, `count`, or `bucket`, which a histogram's own series use. So `batch_size` and `request_counter_total` are refused, and `worker_last_time_to_first_token_seconds` passes.
 - A name with the word `duration` or `latency` has the unit `seconds` (`_seconds`, or `_seconds_total` for a counter). This is stricter than dynamo, which has `tokenizer_latency_ms`.
-- The runtime's names are reserved, and so are the labels it adds. Both lists are in [Metrics reference](../appendix/metrics.md#reserved-names).
+- The runtime's names are reserved, and so are the labels it adds. A name that starts with `velo_` is refused too: velo's own families use those names. The lists and the rule are in [Metrics reference](../appendix/metrics.md#reserved-names).
 - A label is letters, digits, and `_`, does not start with a digit or `__`, appears once, and is not `le` on a histogram.
 
 ## 3. Take the metrics in `build`

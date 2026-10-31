@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
