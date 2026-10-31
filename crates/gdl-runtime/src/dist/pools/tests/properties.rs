@@ -612,6 +612,56 @@ fn a_lower_version_never_replaces_a_held_list_while_listed() {
     );
 }
 
+/// An incomplete directory snapshot does not withdraw a pool.
+#[test]
+#[ignore = "F2: an incomplete relay snapshot forgets the held property-list version"]
+fn an_incomplete_relay_snapshot_keeps_the_last_listed_version() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let read = || {
+        node.read("model_x", |pools| {
+            let version = pools.pool(M1)?.properties_version();
+            let state = listed(pools.properties(), "qwen-32b").first()?.1.state();
+            Some((version, state))
+        })
+        .flatten()
+    };
+    let now = Instant::now();
+    let linked = listing(
+        PoolCondition::Live,
+        &[("qwen-32b", PropertyState::Ready)],
+        5,
+    );
+    let stored = listing(
+        PoolCondition::Live,
+        &[("qwen-32b", PropertyState::Starting)],
+        3,
+    );
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
+    follows.apply(listed_event(M1, Some(linked.clone())), now);
+    let seen = read().expect("followed before the relay restarts");
+    assert_eq!(seen, (5, PropertyState::Ready));
+
+    // Relay::watch times out its directory wait and sends this marker.
+    let mut incomplete = follows.snapshot();
+    incomplete.apply(FollowEvent::Synced { listed: false }, now);
+    follows.resnapshot(incomplete, now);
+    assert!(!sets(&node, "qwen-32b").0, "the directory is not read yet");
+
+    // The record arrives later. The pool never withdrew or stopped serving.
+    follows.take(listed_event(M1, Some(stored)), now);
+    follows.take(follow(M1, 1, PoolState::Ready), now);
+    let during = read().expect("the relay installed the follow again");
+    follows.take(listed_event(M1, Some(linked)), now);
+    assert_eq!(read(), Some(seen), "the link's list catches up");
+    assert_eq!(
+        during,
+        seen,
+        "an incomplete snapshot reset the still-listed pool: before={seen:?}, during={during:?}, after={:?}",
+        read(),
+    );
+}
+
 /// Looking a property up in the index allocates nothing.
 #[test]
 fn a_property_lookup_allocates_nothing() {
