@@ -178,9 +178,9 @@ async fn the_hub_lists_its_members_with_their_phase_and_latest_load() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A transport's key can differ from its protocol name.
+/// A transport's key can differ from its protocol name: the TCP address
+/// under a key of its own is listed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F1: TCP addresses under a custom transport key are omitted"]
 async fn tcp_addresses_under_a_custom_transport_key_are_listed() {
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -203,8 +203,12 @@ async fn tcp_addresses_under_a_custom_transport_key_are_listed() {
         .expect("a listener")
         .build()
         .expect("a TCP transport");
+    // As the runtime builds its node: without `mux_only`, velo also
+    // advertises a per-stream listener on every interface, which is a TCP
+    // address the list rightly shows.
     let node = Velo::builder()
         .add_transport(Arc::new(tcp))
+        .mux_only()
         .build()
         .await
         .expect("a velo node");

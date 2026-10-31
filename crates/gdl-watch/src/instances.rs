@@ -31,9 +31,10 @@ pub struct PoolInstance {
     /// velo encodes it, as `/v1/ext/gdl/members` and the pool's watch
     /// carry it.
     pub peer: PeerInfo,
-    /// The socket addresses its velo TCP transport advertises, read from
-    /// the peer's worker address: under Kubernetes, its pod's IP, on the
-    /// port velo listens on. Empty when it advertises no TCP address.
+    /// The socket addresses its velo TCP transports advertise, each once,
+    /// read from every entry of the peer's worker address, whatever its
+    /// key: under Kubernetes, its pod's IP, on the port velo listens on.
+    /// An entry that is not a TCP endpoint is skipped; empty when none is.
     #[serde(default)]
     pub addresses: Vec<SocketAddr>,
     /// The furthest phase it has announced.

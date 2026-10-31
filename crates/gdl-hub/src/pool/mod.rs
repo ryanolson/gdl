@@ -175,7 +175,7 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// The hub lists its members on the control listener (`GET instances`, a
 /// [`gdl_watch::Instances`]), for a controller outside the pool: each
 /// one's segment and peer from [`GraphAdmission`], with the addresses
-/// the peer's TCP transport advertises, the furthest phase it
+/// the peer's TCP transports advertise, the furthest phase it
 /// has announced, read from the hub's own services over loopback when the
 /// list is asked for, and, for a usable entry instance, the latest report
 /// that the next summary would count, with its age.

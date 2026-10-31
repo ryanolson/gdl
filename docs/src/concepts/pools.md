@@ -126,7 +126,7 @@ A controller outside the pool, such as one that chooses which instance to remove
 
 - its segment;
 - its velo peer, the instance id and the worker address, encoded as `/v1/ext/gdl/members` and the pool's watch carry it;
-- `addresses`, the socket addresses its velo TCP transport advertises, as `ip:port`. Under Kubernetes the IP is the pod's ([Addresses in a container](hub.md#addresses-in-a-container)), so a controller maps a pod to its instance by it;
+- `addresses`, the socket addresses its velo TCP transports advertise, as `ip:port`, each once. The hub reads every entry of the worker address, whatever its transport key, and skips one that is not a TCP endpoint. Under Kubernetes the IP is the pod's ([Addresses in a container](hub.md#addresses-in-a-container)), so a controller maps a pod to its instance by it;
 - its phase, the furthest one it has announced, in this order: `joining` (registered, not yet `ready`), `ready`, `detached`, `retired`, `drained`;
 - for a usable entry instance, its latest load report: `admitted`, `limit`, `refusals`, and `age_ms`, how long ago the hub took it. It is the report the next summary would count, so it is absent for an interior instance, an entry instance that has not reported yet, one that is not usable, and a report older than three periods.
 

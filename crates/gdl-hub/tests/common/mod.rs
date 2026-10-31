@@ -183,8 +183,11 @@ impl Instance {
             .expect("valid test fixture")
             .build()
             .expect("valid test fixture");
+        // As the runtime builds its node: without `mux_only`, velo also
+        // advertises a per-stream listener on every interface.
         let node = Velo::builder()
             .add_transport(Arc::new(tcp))
+            .mux_only()
             .build()
             .await
             .expect("a velo node");

@@ -83,18 +83,93 @@ pub(super) async fn list(
     Ok(Instances { instances })
 }
 
-/// The socket addresses `peer`'s velo TCP transport advertises: none when
-/// it has no TCP entry, or one velo cannot read.
+/// The socket addresses `peer`'s velo TCP transports advertise, each once,
+/// in the order of their transport keys. Every transport entry is
+/// read, whatever its key, since a TCP transport can be registered under
+/// a key of its own; an entry that is not a TCP endpoint is skipped.
 fn addresses(peer: &PeerInfo) -> Vec<SocketAddr> {
-    let Ok(Some(entry)) = peer.worker_address.get_entry("tcp") else {
-        return Vec::new();
-    };
-    parse_endpoints(&entry)
-        .map(|endpoints| {
-            endpoints
-                .iter()
-                .filter_map(|endpoint| endpoint.socket_addr())
-                .collect()
-        })
-        .unwrap_or_default()
+    let address = &peer.worker_address;
+    let mut keys = address.available_transports().unwrap_or_default();
+    keys.sort();
+    let mut addresses = Vec::new();
+    for key in keys {
+        let Ok(Some(entry)) = address.get_entry(&key) else {
+            continue;
+        };
+        for found in endpoints(&entry) {
+            if !addresses.contains(&found) {
+                addresses.push(found);
+            }
+        }
+    }
+    addresses
+}
+
+/// The TCP endpoints of one transport entry: velo's list of endpoints, or
+/// one `tcp://ip:port` or `ip:port`. A text entry is parsed here, never by
+/// velo, whose fallback resolves a host name and would block the hub on
+/// an entry such as `nats://host:4222`. velo's list is MessagePack, which
+/// is never valid UTF-8.
+fn endpoints(entry: &[u8]) -> Vec<SocketAddr> {
+    match std::str::from_utf8(entry) {
+        Ok(text) => text
+            .strip_prefix("tcp://")
+            .unwrap_or(text)
+            .parse()
+            .into_iter()
+            .collect(),
+        Err(_) => parse_endpoints(entry)
+            .map(|endpoints| {
+                endpoints
+                    .iter()
+                    .filter_map(|endpoint| endpoint.socket_addr())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::addresses;
+    use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
+
+    /// A worker address of `entries`, encoded as velo encodes one: a
+    /// MessagePack map of each key to its bytes, as an array (array16, so
+    /// that a value may be longer than a fixarray's 15).
+    fn address(entries: &[(&str, &[u8])]) -> WorkerAddress {
+        let mut encoded = vec![0x80 | u8::try_from(entries.len()).expect("a few entries")];
+        for (key, value) in entries {
+            encoded.push(0xa0 | u8::try_from(key.len()).expect("a short key"));
+            encoded.extend_from_slice(key.as_bytes());
+            encoded.push(0xdc);
+            let len = u16::try_from(value.len()).expect("a short value");
+            encoded.extend_from_slice(&len.to_be_bytes());
+            for &byte in *value {
+                if byte >= 0x80 {
+                    encoded.push(0xcc);
+                }
+                encoded.push(byte);
+            }
+        }
+        WorkerAddress::from_encoded(encoded)
+    }
+
+    /// Every entry that is a TCP endpoint is listed, whatever its key, and
+    /// each address once; one that is not is skipped, never resolved.
+    #[test]
+    fn every_tcp_entry_is_listed_once_and_others_are_skipped() {
+        let peer = PeerInfo::new(
+            InstanceId::new_v4(),
+            address(&[
+                ("a", b"tcp://127.0.0.1:9000"),
+                ("b", b"nats://host:4222"),
+                ("c", b"\xff\x00"),
+                ("d", b"127.0.0.1:9000"),
+                ("e", b"10.0.0.7:9001"),
+            ]),
+        );
+        let listed: Vec<String> = addresses(&peer).iter().map(ToString::to_string).collect();
+        assert_eq!(listed, ["127.0.0.1:9000", "10.0.0.7:9001"]);
+    }
 }
