@@ -15,6 +15,8 @@ use tokio::time::Instant;
 use super::super::Pools;
 use super::{M1, M2, dropped, follow, follower};
 
+mod hub;
+
 /// What `pool`'s hub lists of it, from its hub of `epoch`.
 fn listing(epoch: u64) -> Listing {
     Listing {
