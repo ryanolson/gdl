@@ -292,6 +292,11 @@
                           "minimum": 0.0,
                           "type": "integer"
                         },
+                        "gone": {
+                          "description": "When its pod was first seen gone while its hub still listed its\ninstance, RFC 3339: the removal ends once the hub no longer lists\nit, or a minute after this.",
+                          "nullable": true,
+                          "type": "string"
+                        },
                         "instance": {
                           "description": "Its instance's velo address, `ip:port`, when the hub listed it.",
                           "nullable": true,

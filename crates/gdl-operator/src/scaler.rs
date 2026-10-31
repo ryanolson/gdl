@@ -27,6 +27,11 @@ pub const VICTIM_COST: i32 = i32::MIN;
 /// 8.5 s (`docs/src/concepts/lifecycle.md`, "The bound").
 pub const EXIT_MARGIN: Duration = Duration::from_secs(10);
 
+/// How long after a victim's pod is gone its hub may still list its
+/// instance before the removal ends anyway: a crashed instance's lease
+/// lapses in about 30 s.
+pub const LEAVE_BOUND: Duration = Duration::from_secs(60);
+
 /// When to look again while a victim is being removed.
 const BUSY: Duration = Duration::from_secs(1);
 
@@ -302,6 +307,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                         phase: RetiringPhase::Unrouting,
                         unrouted: None,
                         scaled: None,
+                        gone: None,
                         admitted: held.admitted,
                         egress: held.egress,
                         anchors: held.anchors,
@@ -369,8 +375,41 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         bound: Option<Duration>,
     ) -> Result<Vec<Retiring>, Stop> {
         let mut kept = Vec::new();
+        let mut listed: Option<Option<Instances>> = None;
         for mut victim in retiring {
             let Some(pod) = pods.iter().find(|p| p.uid == victim.uid) else {
+                // The removal ends with the pod's exit and the instance's
+                // leaving its hub. A hub that does not answer cannot say.
+                let mut reason = String::new();
+                if let Some(address) = victim.instance.clone() {
+                    if listed.is_none() {
+                        listed = Some(self.cx.probe.instances(&self.spec.pool).await.ok());
+                    }
+                    let still = listed
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|list| {
+                            list.instances
+                                .iter()
+                                .any(|i| i.addresses.iter().any(|a| a.to_string() == address))
+                        });
+                    if still {
+                        let since = victim
+                            .gone
+                            .as_deref()
+                            .and_then(millis)
+                            .unwrap_or(self.now_ms);
+                        if self.now_ms - since < millis_of(LEAVE_BOUND) {
+                            victim.gone = Some(rfc3339(since));
+                            kept.push(victim);
+                            continue;
+                        }
+                        reason = format!(
+                            "; its hub still listed it {} s after its pod was gone",
+                            LEAVE_BOUND.as_secs()
+                        );
+                    }
+                }
                 let late = match (bound, victim.scaled.as_deref().and_then(millis)) {
                     (Some(bound), Some(scaled)) => {
                         self.now_ms - scaled > millis_of(bound + EXIT_MARGIN)
@@ -383,7 +422,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     Outcome::Removed
                 };
                 let reason = format!(
-                    "chosen by `{}` with {} admitted requests",
+                    "chosen by `{}` with {} admitted requests{reason}",
                     self.spec.victim(),
                     victim.admitted
                 );

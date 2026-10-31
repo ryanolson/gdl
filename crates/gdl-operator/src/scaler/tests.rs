@@ -653,3 +653,63 @@ async fn a_victim_found_terminating_is_not_scaled_down_twice() {
         (Outcome::Removed, "uid-2")
     );
 }
+
+/// A removal ends when the victim's pod is gone and its hub no longer
+/// lists its instance: an instance that crashed stays listed until its
+/// lease lapses. A hub that still lists it a minute after its pod went
+/// ends the wait, and the reason says so.
+#[tokio::test]
+async fn a_removal_ends_once_the_hub_no_longer_lists_the_instance() {
+    let listing = |addresses: &[&str]| -> Instances {
+        serde_json::from_value(serde_json::json!({"instances": addresses
+            .iter()
+            .map(|a| serde_json::json!({"segment": "front", "addresses": [a], "phase": "ready"}))
+            .collect::<Vec<_>>()}))
+        .expect("a list")
+    };
+    let all = ["10.0.0.1:7000", "10.0.0.2:7000", "10.0.0.3:7000"];
+    for (still, at, ended) in [
+        (false, 5_000, true),
+        (true, 5_000, false),
+        (true, 66_000, true),
+    ] {
+        let fake = Fake::with(&[3, 0, 3]);
+        *fake.instances.lock().expect("instances") = Some(listing(&all));
+        let spec = spec(Some(2));
+        once(&fake, &spec, 0).await;
+        assert_eq!(
+            status(&fake).retiring[0].instance.as_deref(),
+            Some("10.0.0.2:7000")
+        );
+        fake.settle(false);
+        fake.exit();
+        let left: Vec<&str> = all
+            .iter()
+            .copied()
+            .filter(|a| still || *a != "10.0.0.2:7000")
+            .collect();
+        *fake.instances.lock().expect("instances") = Some(listing(&left));
+        once(&fake, &spec, 4_000).await;
+        if still {
+            assert_eq!(
+                status(&fake).retiring.len(),
+                1,
+                "kept while the hub lists it"
+            );
+            assert!(status(&fake).retiring[0].gone.is_some());
+            once(&fake, &spec, at).await;
+        }
+        let status = status(&fake);
+        assert_eq!(status.retiring.is_empty(), ended, "{still} {at}");
+        if ended {
+            let last = status.last.expect("ended");
+            assert_eq!(last.chosen, "uid-2");
+            assert_eq!(
+                last.reason.contains("still listed"),
+                still,
+                "{}",
+                last.reason
+            );
+        }
+    }
+}

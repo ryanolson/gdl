@@ -184,6 +184,11 @@ pub struct Retiring {
     /// delete, and so its drain, starts here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaled: Option<String>,
+    /// When its pod was first seen gone while its hub still listed its
+    /// instance, RFC 3339: the removal ends once the hub no longer lists
+    /// it, or a minute after this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gone: Option<String>,
     /// Its admitted requests, as its `/metrics` last said: when chosen,
     /// then while it drains.
     #[serde(default)]
