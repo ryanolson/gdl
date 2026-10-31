@@ -15,7 +15,8 @@
 #   - a Prometheus without the operator, configured with the scrape job of docs/src/guides/prometheus.yml, finds
 #     every hub and segment of the fleet, each with its pool, class, region and segment, and scrapes each segment.
 #     A hub serves its metrics only from a gdl that has its route: with HUB_METRICS_REV, a commit of the spec's
-#     `[gdl] git` that does, the images are built from it and every hub must be scraped too;
+#     `[gdl] git` that does, the images are built from it and every hub must be scraped too. With LOCAL=1, every
+#     segment and hub shows its pod's CPU limit as `process_cgroup_cpu_quota_cores`;
 #   - a second `deploy`, with one model pool removed from the fleet, drains that pool, which withdraws: its parent's
 #     hub no longer holds its record. Its objects are deleted, and the other pools' Deployments and pods are left
 #     as they were;
@@ -383,6 +384,29 @@ ${expected}
 with each segment up$([[ -n "${HUB_METRICS_REV:-}" ]] && echo ", and each hub")"
 echo "kind-fleet.sh: Prometheus finds every hub and segment with its labels, and scrapes each segment$([[ -n "${HUB_METRICS_REV:-}" ]] && echo " and hub"):"
 echo "${found}"
+
+# With LOCAL=1 every image has the process's cgroup figures: each pod's limit of 1 CPU must show as the quota of its
+# segment and hub. An image from the spec's pinned gdl may predate them.
+if [[ "${LOCAL}" == "1" ]]; then
+  quota() {
+    k get --raw "/api/v1/namespaces/gdl-metrics/services/http:prometheus:9090/proxy/api/v1/query?query=process_cgroup_cpu_quota_cores" \
+      | jq -r '.data.result[] | select(.metric.job == "gdl")
+          | [.metric.in_pool, .metric.in_class, .metric.in_region, .metric.segment, .value[1]] | join(" ")' \
+      | sort
+  }
+  expected_quota="$(sed 's/$/ 1/' <<<"${expected}")"
+  quotas=""
+  for _ in $(seq 1 60); do
+    quotas="$(quota || true)"
+    [[ "${quotas}" == "${expected_quota}" ]] && break
+    sleep 1
+  done
+  [[ "${quotas}" == "${expected_quota}" ]] || fail "process_cgroup_cpu_quota_cores (pool, class, region, segment, cores):
+${quotas}
+expected:
+${expected_quota}"
+  echo "kind-fleet.sh: every segment and hub shows its CPU limit as process_cgroup_cpu_quota_cores 1"
+fi
 
 # What a second deploy must leave alone: the other pools' Deployments (uid and generation) and pods (uid).
 kept() {
