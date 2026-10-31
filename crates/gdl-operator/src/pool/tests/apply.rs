@@ -359,3 +359,62 @@ async fn a_restarted_hub_receives_the_pools_scaled_to_zero_presence() {
         fake.log(),
     );
 }
+
+#[tokio::test]
+#[ignore = "F9: an earlier hub never receives Serving when a scaled-to-zero pool resumes"]
+async fn an_earlier_hub_receives_serving_before_its_scalers_resume() {
+    struct Earlier<'a>(&'a Fake);
+
+    impl Hubs for Earlier<'_> {
+        async fn health(&self, pool: &str) -> Result<Health, String> {
+            let mut health = Hubs::health(self.0, pool).await?;
+            health.presence = None;
+            Ok(health)
+        }
+
+        async fn withdrawn(&self, pool: &str) -> Result<bool, String> {
+            Hubs::withdrawn(self.0, pool).await
+        }
+
+        async fn drain(&self, pool: &str) -> Result<Drain, String> {
+            Hubs::drain(self.0, pool).await
+        }
+
+        async fn presence(&self, pool: &str, presence: gdl_k8s::Presence) -> Result<(), String> {
+            Hubs::presence(self.0, pool, presence).await
+        }
+    }
+
+    let fake = running(true).await;
+    let hubs = Earlier(&fake);
+    let cx = Context {
+        pools: &fake,
+        hubs: &hubs,
+        namespace: "ns",
+    };
+    fake.state().pool.as_mut().expect("pool").spec.pool.presence = gdl_k8s::Presence::ScaledToZero;
+    reconcile(&cx, &fake.pool().expect("pool"), 1_000)
+        .await
+        .expect("scale to zero");
+    assert_eq!(fake.state().hub_presence, gdl_k8s::Presence::ScaledToZero);
+    assert!(
+        fake.state()
+            .objects
+            .values()
+            .filter(|object| object.live.kind == Kind::GdlScaler)
+            .all(|object| object.live.suspended)
+    );
+
+    fake.state().pool.as_mut().expect("pool").spec.pool.presence = gdl_k8s::Presence::Serving;
+    fake.state().log.clear();
+    reconcile(&cx, &fake.pool().expect("pool"), 2_000)
+        .await
+        .expect("resume serving");
+    let presence = fake.state().hub_presence;
+    assert_eq!(
+        presence,
+        gdl_k8s::Presence::Serving,
+        "the scalers resume but the directory still says scaled_to_zero: {:?}",
+        fake.log(),
+    );
+}
