@@ -400,9 +400,14 @@ async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
     );
     let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
     let pools = chooser.pools().expect("a chooser");
-    until(&pools, "both pools", |pools| {
-        followed(pools, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
-            && followed(pools, "f", M2).is_some_and(|m| m.eligible == [f2.id()])
+    // Ready, not only eligible: a pool's hub holds it degraded for a while
+    // after its instances are ready, and a hold that ended during the
+    // test would change a pool the test holds unchanged.
+    until(&pools, "both pools ready", |pools| {
+        followed(pools, "f", M1)
+            .is_some_and(|m| m.eligible == [f1.id()] && m.state == PoolState::Ready)
+            && followed(pools, "f", M2)
+                .is_some_and(|m| m.eligible == [f2.id()] && m.state == PoolState::Ready)
     })
     .await;
     let mut watchers = relay.follows_watchers();
