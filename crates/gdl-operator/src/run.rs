@@ -12,7 +12,10 @@ use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
 use kube::{Api, Client, ResourceExt};
 
-use crate::{Context, GdlScaler, HttpProbe, KubeCluster, Victims};
+use crate::cluster::KubeCluster;
+use crate::probe::HttpProbe;
+use crate::scaler::Context;
+use crate::{GdlScaler, Victims};
 
 /// When to try again after a reconcile that failed.
 const RETRY: Duration = Duration::from_secs(5);
@@ -71,7 +74,9 @@ async fn reconcile(scaler: Arc<GdlScaler>, shared: Arc<Shared>) -> Result<Action
         victims: &shared.victims,
     };
     let now = k8s_openapi::jiff::Timestamp::now().as_millisecond();
-    let requeue = crate::reconcile(&cx, &scaler, now).await.map_err(Failed)?;
+    let requeue = crate::scaler::reconcile(&cx, &scaler, now)
+        .await
+        .map_err(Failed)?;
     Ok(Action::requeue(requeue))
 }
 

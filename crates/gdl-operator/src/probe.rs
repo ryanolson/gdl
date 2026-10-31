@@ -136,7 +136,8 @@ pub fn samples(text: &str) -> impl Iterator<Item = (&str, u64)> {
 }
 
 /// The sum of the samples of `name` in `text`.
-pub fn sum(text: &str, name: &str) -> u64 {
+#[cfg(test)]
+fn sum(text: &str, name: &str) -> u64 {
     samples(text)
         .filter(|(sample, _)| *sample == name)
         .fold(0u64, |sum, (_, value)| sum.saturating_add(value))

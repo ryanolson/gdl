@@ -2,8 +2,7 @@
 //! policy ranks each candidate; the scaler removes the lowest rank, and a
 //! tie goes to the newest pod, the one with the least work behind it. A
 //! policy is registered by name, as pool policies are, so that a fleet can
-//! add its own: the next one planned ranks an instance by how often the
-//! sessions routed to it recur.
+//! add its own.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

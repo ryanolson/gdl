@@ -537,7 +537,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### The operator runs one replica, and scales only Deployments in signal mode
 - **What:** the operator does not elect a leader: its Deployment runs one replica with `Recreate`, so a node that loses touch with the cluster can leave its pod running while another starts. A `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
-- **Workaround:** none yet.
+- **Workaround:** none.
 
 ### A scale-down waits for a rollout, and for every pod to be ready
 - **What:** the operator chooses a victim only while no rollout of the target is in progress and every other pod runs and is ready, since only then does the deletion cost decide the ReplicaSet's choice. A pod that never becomes ready blocks the scale-down (`Blocked: PodNotReady`).

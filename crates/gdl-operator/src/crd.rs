@@ -66,7 +66,7 @@ pub struct GdlScalerSpec {
     #[schemars(range(min = 1))]
     pub min_replicas: Option<i32>,
     /// `zero` holds the target at 0, whatever `replicas` and
-    /// `minReplicas` say. Only a pool's own controller writes it.
+    /// `minReplicas` say, as a pool scaled to 0 or being stopped needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspend: Option<Suspend>,
     /// How many instances drain at once: 1 by default.

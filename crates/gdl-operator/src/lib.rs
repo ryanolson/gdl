@@ -16,16 +16,11 @@ mod run;
 mod scaler;
 mod victim;
 
-pub use cluster::{Cluster, KubeCluster, PodView, Target};
 pub use crd::{
-    DEFAULT_PREFIX, DELETION_COST, GROUP, GdlScaler, GdlScalerSpec, GdlScalerStatus, Last, Outcome,
-    ROUTABLE, Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
-    parse_duration,
+    DELETION_COST, GROUP, GdlScaler, GdlScalerSpec, GdlScalerStatus, Last, Outcome, ROUTABLE,
+    Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
 };
 pub use manifests::{NAME, crds, namespaced, stream};
-pub use probe::{Held, HttpProbe, Instance, InstanceLoad, Instances, Probe, held, sum};
+pub use probe::{Instance, InstanceLoad, Instances};
 pub use run::run;
-pub use scaler::{Context, EXIT_MARGIN, VICTIM_COST, reconcile};
-pub use victim::{
-    Candidate, FEWEST_ADMITTED, FewestAdmitted, NEWEST, Newest, VictimPolicy, Victims,
-};
+pub use victim::{Candidate, FEWEST_ADMITTED, NEWEST, VictimPolicy, Victims};
