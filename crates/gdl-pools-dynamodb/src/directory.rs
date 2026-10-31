@@ -425,9 +425,12 @@ impl PoolDirectory for DynamoDirectory {
             .await?)
     }
 
-    /// One consistent read of the pool's item: a tombstone is answered as
-    /// it is, and a record from a new watch's snapshot, which joins its
-    /// list ([`gdl_pools::last_record`]).
+    /// One consistent read of the pool's item, which holds its record or
+    /// its tombstone, so the answer is one state of the pool, never a mix
+    /// of two reads. A record's list is then read by the key the item
+    /// names: a list item is never replaced, so it is that record's. A list
+    /// that has not arrived, or an item that holds a write but does not
+    /// decode, is an error, never none: the caller reads again.
     async fn last_write(
         &self,
         class: &str,
@@ -448,28 +451,36 @@ impl PoolDirectory for DynamoDirectory {
                     error,
                 )
             })?;
-        let stored = got
-            .item()
-            .and_then(|got| item::decode(class, got))
-            .filter(|stored| stored.pool == pool);
-        match stored {
-            None => Ok(None),
-            Some(item::Stored {
-                version,
-                held: item::StoredHeld::Withdrawn { properties_version },
-                ..
-            }) => Ok(Some(LastWrite::Withdrawn(Withdrawal {
-                class: class.to_owned(),
-                pool: pool.to_owned(),
-                epoch: version.epoch,
-                seq: version.seq,
-                properties_version,
-            }))),
-            Some(_) => {
-                let record = gdl_pools::last_record(self, class, pool).await?;
-                Ok(record.map(|record| LastWrite::Record(Box::new(record))))
+        // An item without a version holds no pool's write, and a write
+        // writes over it.
+        let Some(found) = got.item().filter(|found| item::version(found).is_some()) else {
+            return Ok(None);
+        };
+        let stored = item::decode(class, found)
+            .filter(|stored| stored.pool == pool)
+            .ok_or_else(|| {
+                DirectoryError::Unavailable(format!(
+                    "the item of pool `{pool}` of class `{class}` holds a write that does not decode"
+                ))
+            })?;
+        let list = match &stored.held {
+            item::StoredHeld::Record {
+                list: Some(key), ..
+            } => {
+                let key = *key;
+                let list = watch::read_list(&self.shared, class, pool, key).await?;
+                Some(list.ok_or_else(|| {
+                    DirectoryError::Unavailable(format!(
+                        "the property list of pool `{pool}` of class `{class}` has not arrived"
+                    ))
+                })?)
             }
-        }
+            _ => None,
+        };
+        Ok(Some(match item::Entry::new(class, stored, list).held {
+            item::Held::Record(record) => LastWrite::Record(record),
+            item::Held::Withdrawn(withdrawal) => LastWrite::Withdrawn(withdrawal),
+        }))
     }
 
     /// The watch begins when it is first polled, which must be inside a

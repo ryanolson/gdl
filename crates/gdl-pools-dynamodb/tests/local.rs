@@ -32,25 +32,32 @@ use gdl_pools::{
 use gdl_pools_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
 
 #[tokio::test]
-#[ignore = "F2: last_write drops a retained tombstone that replaces the record between its two reads"]
+/// A withdrawal that lands while the last write is read never makes the
+/// pool read as holding nothing: the read is one consistent read of the
+/// pool's item, so it answers that item, here the record, whose list it then
+/// reads by the key the record names. A hub that numbers past this record
+/// writes conditionally on it, and is refused by the tombstone.
 async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
     use std::sync::{Mutex, mpsc};
 
     use aws_sdk_dynamodb::{
         config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
-        operation::query::QueryInput,
+        operation::get_item::GetItemInput,
     };
     use tokio::sync::oneshot;
 
     #[derive(Debug)]
-    struct PauseQuery {
+    /// Pauses the first request after the read of the pool's item, whatever
+    /// it is: so a withdrawal lands between that read and the next.
+    struct PauseNextRead {
+        records: String,
         began: Mutex<Option<oneshot::Sender<()>>>,
         release: Mutex<mpsc::Receiver<()>>,
     }
 
-    impl Intercept for PauseQuery {
+    impl Intercept for PauseNextRead {
         fn name(&self) -> &'static str {
-            "PauseQuery"
+            "PauseNextRead"
         }
 
         fn read_before_execution(
@@ -58,9 +65,11 @@ async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
             context: &BeforeSerializationInterceptorContextRef<'_>,
             _config: &mut ConfigBag,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            if context.input().downcast_ref::<QueryInput>().is_some()
-                && let Some(began) = self.began.lock().expect("the signal lock").take()
-            {
+            let item_read = context
+                .input()
+                .downcast_ref::<GetItemInput>()
+                .is_some_and(|read| read.table_name() == Some(self.records.as_str()));
+            if !item_read && let Some(began) = self.began.lock().expect("the signal lock").take() {
                 began.send(()).expect("the test waits for the query");
                 self.release
                     .lock()
@@ -82,7 +91,8 @@ async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
     let reader = DynamoDirectory::with_limits(
         Client::from_conf(
             own_pool(&client)
-                .interceptor(PauseQuery {
+                .interceptor(PauseNextRead {
+                    records: tables.records.clone(),
                     began: Mutex::new(Some(began)),
                     release: Mutex::new(released),
                 })
@@ -104,8 +114,8 @@ async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
     });
     tokio::time::timeout(WAIT, paused)
         .await
-        .expect("the query begins in time")
-        .expect("the first GetItem already read the record");
+        .expect("the next read begins in time")
+        .expect("the item read already read the record");
     let withdrawal = Withdrawal {
         class: first.class.clone(),
         pool: first.name.clone(),
@@ -117,15 +127,23 @@ async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
         .withdraw(withdrawal.clone())
         .await
         .expect("the tombstone");
-    release.send(()).expect("release the query");
+    release.send(()).expect("release the next read");
     let last = tokio::task::spawn_blocking(move || reading.join().expect("the reader thread"))
         .await
         .expect("join the reader")
         .expect("the last write is read");
     assert_eq!(
         last,
+        Some(gdl_pools::LastWrite::Record(Box::new(first))),
+        "the pool is never forgotten: the read answers the record it read"
+    );
+    assert_eq!(
+        writer
+            .last_write(MODEL, "model-x-01")
+            .await
+            .expect("the last write is read"),
         Some(gdl_pools::LastWrite::Withdrawn(withdrawal)),
-        "the pool is never forgotten: its record was replaced by its retained tombstone"
+        "a read after the withdrawal answers its tombstone"
     );
 }
 

@@ -617,7 +617,7 @@ async fn scan(shared: &Shared, name: &str, previous: &Entries) -> Result<Found, 
 }
 
 /// The list `key` of `pool`, if this region's lists table holds it.
-async fn read_list(
+pub(crate) async fn read_list(
     shared: &Shared,
     class: &str,
     pool: &str,
