@@ -143,7 +143,7 @@ fn a_redeploy_never_undoes_a_scale() {
 #[test]
 fn a_cluster_that_opts_in_keeps_its_live_count() {
     let mirror = Mirror::new();
-    let before = fleet_text().replace("scaler = true\n", "");
+    let before = fleet_text().replace("operator = true\n", "");
     let files = files(&mirror, &before);
     let log = Log::default();
     let mut kube = Kube::new(&log);
@@ -247,7 +247,7 @@ fn pods(labelled: bool) -> Value {
 #[test]
 fn an_entry_service_selects_on_routable_once_every_pod_has_it() {
     let mirror = Mirror::new();
-    let before = fleet_text().replace("scaler = true\n", "");
+    let before = fleet_text().replace("operator = true\n", "");
     let files = files(&mirror, &before);
     let log = Log::default();
     let mut kube = Kube::new(&log);
@@ -317,7 +317,7 @@ fn a_cluster_that_opts_out_with_scaled_segments_is_refused() {
     for part in [
         "cluster `euw1`",
         "model-x-eu-engine",
-        "scaler = true",
+        "operator = true",
         "GdlScaler",
     ] {
         assert!(error.contains(part), "{part} in {error}");

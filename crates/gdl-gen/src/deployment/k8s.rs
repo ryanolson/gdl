@@ -517,7 +517,7 @@ impl Render<'_> {
             segments,
             &variables(gdl_k8s::hub_address(&pool.name))?,
         )?;
-        let scaling = match cluster.scaler {
+        let scaling = match cluster.operator {
             true => gdl_k8s::Scaling::Operator,
             false => gdl_k8s::Scaling::Fixed,
         };

@@ -7,7 +7,7 @@
 # own. As the cluster's owner, it makes the fleet's namespace, builds the operator's image from this working tree,
 # and applies `gdl-operator manifests`. It writes the api example's spec in two classes, with an engine that paces
 # its chunks so that each response streams for about 2 s, and a fleet of one cluster that asks for the operator
-# (`scaler = true`): a global pool (`front`, with an entry Service) and a model pool (`engine`). `cargo gdl deploy
+# (`operator = true`): a global pool (`front`, with an entry Service) and a model pool (`engine`). `cargo gdl deploy
 # --local` builds every image from this working tree and applies the fleet. It then checks that:
 #   - deploy made a GdlScaler per segment, wrote each one's replicas once at the quorum, under its own manager, and
 #     the entry Service selects on gdl.dev/routable;
@@ -208,7 +208,7 @@ namespace = "${ns}"
 region = "local"
 registry = "${registry}/gdl"
 platform = "linux/${arch}"
-scaler = true
+operator = true
 
 [class.global]
 ready = { front = 1 }

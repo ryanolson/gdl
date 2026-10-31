@@ -146,9 +146,9 @@ pub fn deploy(
             )));
         }
         cluster.find_scalers(kube, how.waits.objects)?;
-        if cluster.scaler && !cluster.scalers {
+        if cluster.operator && !cluster.scalers {
             return Err(Error::new(format!(
-                "cluster `{}`: the fleet asks the gdl operator to scale its segments (`[cluster.{}] scaler`), but the cluster has no `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `scaler` out",
+                "cluster `{}`: the fleet asks the gdl operator to scale its segments (`[cluster.{}] operator`), but the cluster has no `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `operator` out",
                 cluster.name, cluster.name
             )));
         }
@@ -168,7 +168,7 @@ pub fn deploy(
     )?;
     let rendered = Rendered::of(&files, &clusters)?;
     unmoved(kube, &fleet, &clusters, &how.waits)?;
-    for cluster in clusters.0.iter().filter(|cluster| !cluster.scaler) {
+    for cluster in clusters.0.iter().filter(|cluster| !cluster.operator) {
         let pools = &rendered.0[&cluster.name].pools;
         scaled::refuse_opted_out(kube, cluster, pools, &how.waits)?;
     }
@@ -234,7 +234,7 @@ pub fn deploy(
         if pools.trim().is_empty() {
             continue;
         }
-        if cluster.scaler {
+        if cluster.operator {
             applied.extend(scaled::apply(kube, cluster, pools, &how.waits, say)?);
         } else {
             applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
@@ -360,7 +360,7 @@ impl Clusters {
                     ),
                     unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
                     monitors: false,
-                    scaler: settings.scaler,
+                    operator: settings.operator,
                     scalers: false,
                 })
                 .collect(),
@@ -391,8 +391,8 @@ struct Cluster {
     /// whatever the fleet asks now, so that one it no longer asks for goes.
     monitors: bool,
     /// Whether the fleet asks the gdl operator to scale the cluster's
-    /// segments (`[cluster.<name>] scaler`).
-    scaler: bool,
+    /// segments (`[cluster.<name>] operator`).
+    operator: bool,
     /// Whether the cluster has the gdl operator's `GdlScaler` CRD: only
     /// then are the fleet's scalers listed, pruned, and deleted, so that a
     /// cluster that no longer asks for them loses them.

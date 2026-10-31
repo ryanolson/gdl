@@ -14,7 +14,7 @@ platform = "linux/amd64"
 service_account_annotations = { "eks.amazonaws.com/role-arn" = "arn:aws:iam::000000000000:role/gdl-api" }
 secrets = { fingerprint = "api-fingerprint" }
 env = { RUST_LOG = "info" }
-scaler = true
+operator = true
 
 [cluster.euw1]
 context = "kind-euw1"

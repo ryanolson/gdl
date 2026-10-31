@@ -456,7 +456,7 @@ pub(super) fn readme(fleet: &Fleet) -> String {
             "\n```bash\nkubectl --context {context} apply --server-side -f {cluster}/base.yaml\nkubectl --context {context} apply --server-side -R -f {cluster}/pools\n```\n",
             context = settings.context
         ));
-        if settings.scaler {
+        if settings.operator {
             text.push_str(&format!(
                 "\nThe gdl operator scales the segments of cluster `{cluster}`: it needs the `GdlScaler` CRD and the operator in namespace `{namespace}` (`gdl-operator manifests`). Each segment has a `GdlScaler` named after its Deployment, and neither carries `replicas`: write each once, under a manager of its own, and only while no other manager owns it, as `cargo gdl deploy` does. For a new segment, `kubectl --context {context} --namespace {namespace} apply --server-side --field-manager=gdl-scaler` the Deployment's `{{\"spec\": {{\"replicas\": <quorum>}}}}`, and the same under `--field-manager=gdl-bootstrap` for its `GdlScaler`; the quorum is the scaler's `minReplicas`. Its pods carry `gdl.dev/routable`, and its entry Service selects on it: where the Service exists and its pods do not carry the label yet, apply the Service's selector only once the segment's rollout has ended.\n",
                 namespace = settings.namespace,

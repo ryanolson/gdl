@@ -1,5 +1,5 @@
 //! The apply of a cluster's pools where the gdl operator scales the
-//! segments (`[cluster.<name>] scaler`). Two rules hold there.
+//! segments (`[cluster.<name>] operator`). Two rules hold there.
 //!
 //! `gdl` never writes `replicas`. The render leaves it out of each segment
 //! Deployment and each `GdlScaler`, and a one-field apply under a manager
@@ -127,7 +127,7 @@ pub(super) fn refuse_opted_out(
         return Ok(());
     }
     Err(Error::new(format!(
-        "cluster `{}` does not set `scaler = true`, but the gdl operator still owns the `replicas` of {}: an apply of the fleet's count would conflict with it. Keep `[cluster.{}] scaler = true`; or delete the operator's GdlScalers there (`kubectl --context {} --namespace {} delete {} --selector gdl.dev/fleet=<fleet>`) and set each Deployment's count, then deploy again",
+        "cluster `{}` does not set `operator = true`, but the gdl operator still owns the `replicas` of {}: an apply of the fleet's count would conflict with it. Keep `[cluster.{}] operator = true`; or delete the operator's GdlScalers there (`kubectl --context {} --namespace {} delete {} --selector gdl.dev/fleet=<fleet>`) and set each Deployment's count, then deploy again",
         cluster.name,
         scaled
             .iter()

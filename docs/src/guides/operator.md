@@ -49,7 +49,7 @@ The rejected alternative is an election of the operator's own, by a Kubernetes L
 
 ## Let `deploy` make the scalers
 
-Set `scaler = true` on a cluster in the fleet file. `cargo gdl deploy` then gives each segment of that cluster a `GdlScaler` named after its Deployment, writes each one's `replicas` once at the segment's quorum, and labels the pods for their entry Service ([The operator](kubernetes.md#the-operator) in the Kubernetes guide). It refuses a cluster that sets `scaler` and has no `GdlScaler` CRD. A cluster without `scaler` keeps its segments at the quorum, with no scaler.
+Set `operator = true` on a cluster in the fleet file. `cargo gdl deploy` then gives each segment of that cluster a `GdlScaler` named after its Deployment, writes each one's `replicas` once at the segment's quorum, and labels the pods for their entry Service ([The operator](kubernetes.md#the-operator) in the Kubernetes guide). It refuses a cluster that sets `operator` and has no `GdlScaler` CRD. A cluster without `operator` keeps its segments at the quorum, with no scaler.
 
 ```toml
 [cluster.use1]
@@ -58,7 +58,7 @@ namespace = "gdl-api"
 region = "us-east-1"
 registry = "registry.example/gdl"
 platform = "linux/amd64"
-scaler = true
+operator = true
 ```
 
 ## The `GdlScaler` resource
@@ -237,7 +237,7 @@ Set the HPA's `minReplicas` to at least the segment's quorum. The scaler drains 
 
 ## Prove it on kind
 
-`scripts/kind-operator.sh` runs the scale-down on a kind cluster, outside the default suite. It installs the operator as a cluster's owner would, deploys the api example's fleet with `scaler = true` and `cargo gdl deploy --local`, and runs a load of streamed requests from a pod in the cluster, each on a new connection to the frontend's Service. Each response streams for about 2 s: the engine waits `pace_ms` before each word. It then proves, for the engine and for the frontend, each scaled from 3 to 2:
+`scripts/kind-operator.sh` runs the scale-down on a kind cluster, outside the default suite. It installs the operator as a cluster's owner would, deploys the api example's fleet with `operator = true` and `cargo gdl deploy --local`, and runs a load of streamed requests from a pod in the cluster, each on a new connection to the frontend's Service. Each response streams for about 2 s: the engine waits `pace_ms` before each word. It then proves, for the engine and for the frontend, each scaled from 3 to 2:
 
 - the pod the scaler chose is the pod deleted, and the others stay;
 - no request fails, a new connection to the frontend included;
