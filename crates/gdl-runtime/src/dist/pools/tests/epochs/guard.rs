@@ -389,6 +389,9 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         own: None,
     };
     let mut heard = Heard::default();
+    // Steps for which the pool's own watch, a slow socket, delivers
+    // nothing.
+    let mut slow = 0_u32;
     let mut chosen: Option<velo::InstanceId> = None;
     let mut taken: Vec<Taken> = Vec::new();
     let mut trace = Vec::new();
@@ -399,7 +402,12 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
     wire.send(&mut hub, listed);
     for step in 0..steps {
         let now = start + Duration::from_millis(step as u64);
-        let what = match rng.below(20) {
+        // Steps 20 and up weigh the walk toward what loses a drain: a
+        // withdrawal, which unlists a pool a lagging own watch still shows;
+        // a same-epoch follow of a new generation; and a pool read from
+        // its own watch; and a later hub's whole life, drain and withdrawal,
+        // told on the relay's watch while the pool's own watch lags.
+        let what = match rng.below(28) {
             // The pool's next hub writes its record: listed at once, and
             // its follow begun, which may never install.
             0 => {
@@ -506,7 +514,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                 format!("scaled to 0 at {}", hub.epoch)
             }
             // The pool withdraws, by its own hub or, past it, an operator.
-            8 if hub.listing.is_some() && rng.chance(40) => {
+            8 | 20 | 21 if hub.listing.is_some() && rng.chance(40) => {
                 end_follow(&mut hub, &mut wire);
                 hub.listing = None;
                 let listed = hub.listed_event();
@@ -566,7 +574,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
             }
             // An event of a kind the follower does not know: the pool is
             // read from its own watch, whose snapshot the relay takes now.
-            12 if wire.own.is_none() => match read(&pools).1 {
+            12 | 24 | 25 if wire.own.is_none() => match read(&pools).1 {
                 Some((generation, _)) => {
                     follows.unknown(UnknownFollowEvent {
                         kind: "paused".into(),
@@ -601,6 +609,82 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     None => "the own watch is let go".into(),
                 }
             }
+            26 | 27 if wire.own.is_some() && hub.listing.is_some() && !hub.withdrawn => {
+                hub.epoch += 1;
+                end_follow(&mut hub, &mut wire);
+                hub.listing = Some((hub.wire(hub.epoch), PoolCondition::Live, false));
+                let listed = hub.listed_event();
+                wire.send(&mut hub, listed);
+                begin(&mut hub);
+                let mut follow = hub.follow.expect("just begun");
+                follow.installed = true;
+                follow.state = PoolState::Draining;
+                hub.follow = Some(follow);
+                let event = hub.follow_event(&follow, None);
+                wire.send(&mut hub, event);
+                if let Some(listing) = &mut hub.listing {
+                    listing.2 = true;
+                }
+                let listed = hub.listed_event();
+                wire.send(&mut hub, listed);
+                end_follow(&mut hub, &mut wire);
+                hub.listing = None;
+                let listed = hub.listed_event();
+                wire.send(&mut hub, listed);
+                hub.withdrawn = true;
+                let withdrawn = FollowEvent::Withdrawn {
+                    class: "model_x".into(),
+                    pool: M1.into(),
+                    generation: hub.generation,
+                    epoch: hub.wire(hub.epoch),
+                    properties_version: 0,
+                };
+                wire.send(&mut hub, withdrawn);
+                slow = 12;
+                // The relay's watch is quick: it delivers up to the
+                // unlisting, and its withdrawal waits for a later step.
+                while let Some(event) = wire.relay.pop_front() {
+                    let unlisted = matches!(event, FollowEvent::Listed { listing: None, .. });
+                    if wire.own.is_none()
+                        || matches!(
+                            event,
+                            FollowEvent::Listed { .. } | FollowEvent::Withdrawn { .. }
+                        )
+                    {
+                        heard.hear(&event);
+                    }
+                    follows.take(event, now);
+                    if unlisted {
+                        break;
+                    }
+                }
+                format!(
+                    "hub of epoch {} lists, drains, and withdraws, while the own watch lags; the relay delivers to its unlisting",
+                    hub.epoch
+                )
+            }
+            // The link is replaced: a follow of a new generation of the
+            // same hub, installed, as after a link that came back.
+            22 | 23 => match hub.follow {
+                Some(follow) if follow.installed => {
+                    end_follow(&mut hub, &mut wire);
+                    begin(&mut hub);
+                    let mut next = hub.follow.expect("just begun");
+                    next.installed = true;
+                    hub.follow = Some(next);
+                    let event = hub.follow_event(&next, None);
+                    wire.send(&mut hub, event);
+                    if matches!(next.state, PoolState::Ready) {
+                        let exposed = hub.exposed(next.generation);
+                        wire.send(&mut hub, exposed);
+                    }
+                    format!(
+                        "follow {} replaced by follow {} of epoch {}",
+                        follow.generation, next.generation, next.epoch
+                    )
+                }
+                _ => "no link to replace".into(),
+            },
             14..=16 => match wire.relay.pop_front() {
                 Some(event) => {
                     let said = format!("relay delivers {event:?}");
@@ -617,6 +701,10 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                 }
                 None => "the relay is quiet".into(),
             },
+            17 | 18 if slow > 0 => {
+                slow -= 1;
+                "the own watch is slow".into()
+            }
             17 | 18 => match &mut wire.own {
                 Some((asked, events)) => match events.pop_front() {
                     Some(event) => {
