@@ -489,6 +489,75 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "F4: matching different Git references hides incompatible message origins"]
+    fn a_rebound_git_offer_must_preserve_message_origin_checks() {
+        // Comparing both providers requires repeated Git imports and source reads.
+        let repo = GitFixture::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let path = |path: std::path::PathBuf| toml::Value::String(path.display().to_string());
+        std::fs::write(
+            repo.dir.path().join("repo/Cargo.toml"),
+            format!(
+                "[package]\nname = \"review-router\"\nversion = \"0.2.0\"\nedition = \"2024\"\n\n[workspace]\n[dependencies]\ngdl = {{ path = {} }}\nfutures = \"0.3\"\n",
+                path(root.join("crates/gdl"))
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(
+            repo.dir.path().join("repo/src/lib.rs"),
+            r#"
+#[derive(Debug, gdl::Message)]
+pub struct Prompt;
+#[derive(Debug, gdl::Message)]
+pub struct Answer;
+#[derive(gdl::Node)]
+pub struct Model;
+impl gdl::Sink for Model {
+    type Req = Prompt;
+    type Item = Answer;
+    async fn generate(&self, _: gdl::Cx, _: Prompt) -> gdl::Result<gdl::Items<Answer>> {
+        Ok(gdl::items(futures::stream::empty()))
+    }
+}
+impl gdl::Build for Model {
+    type Config = ();
+    type Metrics = ();
+    async fn build(_: (), _: ()) -> gdl::Result<Self> { Ok(Self) }
+}
+"#,
+        )
+        .expect("source");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "--quiet", "-m", "messages and node"]);
+        let full = repo.git(&["rev-parse", "HEAD"]);
+        let short = &full[..12];
+        let offer = repo.offer(short);
+        assert_eq!(offer.messages.len(), 2);
+        assert_eq!(offer.nodes.len(), 1);
+        let text = format!(
+            "[graph]\npath = \"identity.gdl\"\n[messages]\ncrates = [{{ package = \"review-router\", git = {url:?}, rev = {full:?} }}]\n[nodes]\ncrates = [{{ package = \"review-router\", git = {url:?}, rev = {short:?} }}]\n[gdl]\npath = {runtime}\n[segment.main]\nnodes = [\"Front\", \"Model\"]\n",
+            url = repo.url,
+            runtime = path(root.join("crates/gdl-runtime")),
+        );
+        let graph = "name = \"identity\", schema = 1;\nsource Front: Prompt -> stream Answer;\nsink Model: Prompt -> stream Answer;\ntopology: Front => Model;\n";
+        let control = crate::Spec::from_text(&text.replace(&full, short), graph, repo.dir.path())
+            .expect("one Git reference");
+        crate::check(&control, repo.dir.path(), Offers::Read)
+            .expect("a graph whose message and node use one Git source");
+        let spec = crate::Spec::from_text(&text, graph, repo.dir.path()).expect("spec");
+        let error = crate::check(&spec, repo.dir.path(), Offers::Read)
+            .expect_err("different Cargo references give different message origins");
+        assert!(error.to_string().contains("port `Req`"), "{error}");
+        assert!(
+            crate::check(&spec, repo.dir.path(), Offers::Given(&[&offer])).is_err(),
+            "Given accepted a graph that Read rejects:\n{error}"
+        );
+    }
+
     struct GitFixture {
         dir: tempfile::TempDir,
         url: String,
