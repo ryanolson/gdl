@@ -144,16 +144,47 @@ fn an_environment_value_overrides_a_node_table_by_its_name() {
     });
 }
 
+/// A fleet sets a cluster's environment on every segment in it, so one
+/// node's variable reaches the segments that do not host that node. They
+/// must start, and must not read it.
 #[test]
-fn a_misspelled_environment_setting_is_refused() {
+fn a_variable_for_a_node_the_segment_does_not_host_is_ignored() {
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", BASE)?;
         jail.set_env("GDL_NODE__TRUNCATE__MAX", "3");
-        jail.set_env("GDL_NODE__OTHER__MAX", "3");
-        let Err(error) = Config::load(["config.toml"]) else {
-            panic!("a node the segment does not host")
+        jail.set_env("GDL_NODE__LOOKUP__STORE__REGION", "us-east-2");
+        jail.set_env("GDL_NODE__OTHER", "1");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let truncate = config.hosted.node.truncate.expect("the node's table");
+        assert_eq!(truncate["max"].as_integer(), Some(3));
+        assert_eq!(truncate.len(), 1, "{truncate:?}");
+        Ok(())
+    });
+}
+
+/// A hosted node's variables still reach its table whole, misspelled keys
+/// and all. Whether a key it does not know is refused is the node's
+/// settings type's to say; one that denies unknown fields, as the
+/// examples' do, refuses it.
+#[test]
+fn a_variable_for_a_hosted_node_reaches_its_table() {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TruncateConfig {
+        #[expect(dead_code, reason = "read only to be refused")]
+        max: i64,
+    }
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_NODE__TRUNCATE__MAX", "3");
+        jail.set_env("GDL_NODE__TRUNCATE__UNKNOWN", "1");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let truncate = config.hosted.node.truncate.expect("the node's table");
+        assert_eq!(truncate["unknown"].as_integer(), Some(1));
+        let Err(error) = truncate.try_into::<TruncateConfig>() else {
+            panic!("an unknown key of a hosted node")
         };
-        assert!(error.to_string().contains("other"), "{error}");
+        assert!(error.to_string().contains("unknown"), "{error}");
         Ok(())
     });
 }

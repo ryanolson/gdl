@@ -48,6 +48,8 @@ The runtime has no default port for the system listener. The Compose bundle sets
 
 **Why:** the build scripts use the same prefix (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`). A variable meant for them must not stop a segment from starting. The four `DYN_SYSTEM_*` variables are the only exception, so that the dynamo operator's probes find the listener.
 
+A `GDL_NODE__<name>__*` variable is read only by a segment that hosts the node. **Why:** a fleet sets a cluster's `env` on every segment in the cluster, so one node's settings there reach segments that do not host it, which refused them as unknown tables and did not start. **Rejected: a per-segment `env` in the fleet.** It would make the owner know the placement to set a node's value; a file's table for a node the segment does not host is still an error, since a file is written for its segment.
+
 ## The drain sources
 
 A deployment-wide stop needs no signal from velo. When every source that can reach an instance has drained, every request admitted before the stop has been answered and its output read. Nothing the instance still holds is wanted. So condition (B) waits for the sources' `drained` announcements and then the ledger.

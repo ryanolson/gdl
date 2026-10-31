@@ -29,7 +29,9 @@ pub(super) fn environment<H: Hosted>() -> Figment {
 /// overrides an earlier one as within one provider. A key is matched
 /// without regard to case (`canonical`), and only the settings' own keys
 /// are read: the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` are
-/// not settings.
+/// not settings. A `GDL_NODE__<name>__` variable is read only by a segment
+/// that hosts the node: a fleet sets a cluster's environment on every
+/// segment in it, and one node's settings must not stop the others.
 fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
     const PREFIX: &str = "GDL_";
     std::env::vars_os().filter_map(|(name, value)| {
@@ -39,8 +41,10 @@ fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
             .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
             .map(|_| &name[PREFIX.len()..])?;
         let key = canonical::<H>(rest);
-        let first = key.split('.').next().unwrap_or_default();
-        let known = KEYS.contains(&first) || H::KEYS.contains(&first);
+        let mut parts = key.split('.');
+        let first = parts.next().unwrap_or_default();
+        let hosted = first != "node" || parts.next().is_none_or(|name| H::NAMES.contains(&name));
+        let known = (KEYS.contains(&first) || H::KEYS.contains(&first)) && hosted;
         (known && !key.split('.').any(str::is_empty)).then(|| Variable {
             key,
             value: value.to_string_lossy().to_string(),

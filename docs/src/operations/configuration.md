@@ -9,7 +9,8 @@ A segment binary takes its settings from TOML files (`segment config.toml [overr
 - An environment key is matched without regard to case. A node or adapter name is matched to the graph's spelling of it, so `TRUNCATE` finds `[node.Truncate]`.
 - Only variables whose first key is a settings key are read. Any other `GDL_` variable is ignored without a word, so `GDL_PROFILE` and `GDL_IMAGE_PREFIX` do not stop a segment. A misspelled first key (`GDL_RUNTIM__DRAIN_MS`) is ignored the same way.
 - dynamo's `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT`, `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH` set `[system]` too, under the `GDL_SYSTEM__*` variables. No other `DYN_` variable is read.
-- An unknown key in a file, or below a known first key (`GDL_RUNTIME__DRAIN_M`), is an error.
+- A `GDL_NODE__<name>__*` variable is read only by a segment that hosts the node. Other segments ignore it, so a fleet can set one node's settings for a whole cluster in the cluster's `env`, which every segment in the cluster gets. A misspelled node name is therefore ignored too.
+- An unknown key in a file, or below a known first key (`GDL_RUNTIME__DRAIN_M`), is an error. A file's `[node.<name>]` table for a node the segment does not host is an error too. The keys inside a hosted node's table are the node's own: its settings type decides whether a key it does not know is refused (`#[serde(deny_unknown_fields)]`, as the examples' nodes do).
 
 ## Top-level keys
 
