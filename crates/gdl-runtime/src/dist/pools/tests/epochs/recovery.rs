@@ -1,5 +1,72 @@
 use super::*;
 
+#[test]
+#[ignore = "F10: a later listing drops the drain of a follow whose own snapshot is still filling"]
+fn a_lagging_own_snapshot_keeps_its_hubs_drain_past_a_later_listing() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("an own watch");
+    // The snapshot predates the drain. Its marker waits on the own watch.
+    follows.own(
+        asked.key.clone(),
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(followed(M1, 2, 6))),
+        now,
+    );
+    let mut draining = listing(6);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+            listing: Some(draining),
+        },
+        now,
+    );
+    assert_eq!(
+        evidence(&pools, M1),
+        (
+            Some(at(6, PoolCondition::Live).with_draining(true)),
+            Some(5)
+        )
+    );
+    follows.take(listed(M1, Some(7)), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(7, PoolCondition::Live)), Some(5))
+    );
+    follows.own(
+        asked.key,
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(FollowEvent::Synced {
+            listed: true,
+        })),
+        now,
+    );
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(7, PoolCondition::Live)), Some(6))
+    );
+    // The own watch has not delivered the queued drain or end of epoch 6.
+    follows.take(listed(M1, None), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (
+            Some(at(6, PoolCondition::Live).with_draining(true)),
+            Some(6)
+        ),
+        "the epoch-6 drain was heard before its follow was installed"
+    );
+}
+
 /// A relay's snapshot can show a draining follow of one hub beside a
 /// listing of a later hub, as the hub's own test shows. The follow's drain
 /// lasts with it: when the relay unlists the pool while the follow is shown,
