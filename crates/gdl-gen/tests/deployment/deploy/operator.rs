@@ -462,3 +462,58 @@ fn an_opt_out_with_renamed_pools_is_refused_when_the_gdl_pool_list_is_forbidden(
         "the refusal must precede every apply"
     );
 }
+
+#[test]
+#[ignore = "F5: down deletes a replacement GdlPool from another fleet because the delete carries no uid"]
+fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
+    struct Recreated {
+        kube: Kube,
+        replaced: bool,
+    }
+
+    impl gdl_gen::Kube for Recreated {
+        fn run(
+            &mut self,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            if !self.replaced
+                && args[1] == "kind-use1"
+                && args.contains(&"delete".to_string())
+                && args.contains(&"gdlpools.gdl.dev/model-x-us".to_string())
+            {
+                let key = ("GdlPool".to_string(), "model-x-us".to_string());
+                let object = self
+                    .kube
+                    .objects
+                    .get_mut("kind-use1")
+                    .expect("cluster")
+                    .get_mut(&key)
+                    .expect("listed pool");
+                object["metadata"]["uid"] = "replacement-pool".into();
+                object["metadata"]["labels"]["gdl.dev/fleet"] = "another-fleet".into();
+                object["spec"]["fleet"] = "another-fleet".into();
+                self.replaced = true;
+            }
+            gdl_gen::Kube::run(&mut self.kube, args, input)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    let mut raced = Recreated {
+        kube,
+        replaced: false,
+    };
+    let result = gdl_gen::down(&files.fleet, &waits(), &mut raced, &mut |_| {});
+    assert!(raced.replaced, "the pool was recreated after the list");
+    let key = ("GdlPool".to_string(), "model-x-us".to_string());
+    let replacement = raced.kube.objects["kind-use1"].get(&key);
+    assert!(
+        replacement.is_some_and(|object| object["metadata"]["uid"] == "replacement-pool"),
+        "down deleted another fleet's replacement pool; result={result:?}, replacement={replacement:?}",
+    );
+}
