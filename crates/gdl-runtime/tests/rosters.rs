@@ -5,6 +5,8 @@
 //! directory, in this test process.
 
 mod common;
+#[path = "rosters/unanswered.rs"]
+mod unanswered;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -78,15 +80,16 @@ fn settings(hub: &velo_hub::Hub, drain_ms: u64, extra: &str) -> ProcessConfig<No
 }
 
 /// Settings for an instance that reaches `hub`'s control port through a
-/// proxy at `control`, and waits at most `rendezvous_ms` at each step of
-/// its launch.
+/// proxy at `control`, waits at most `rendezvous_ms` at each step of its
+/// launch, and drains for at most `drain_ms`.
 fn settings_through(
     hub: &velo_hub::Hub,
     control: u16,
     rendezvous_ms: u64,
+    drain_ms: u64,
 ) -> ProcessConfig<Nothing> {
     let text = format!(
-        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = {rendezvous_ms}\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = {}\n",
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = {rendezvous_ms}\n[runtime]\ndrain_ms = {drain_ms}\nsetup_timeout_ms = {}\n",
         hub.public_addr().port(),
         GRACE.as_millis(),
     );
@@ -1054,7 +1057,7 @@ async fn a_refused_ready() {
     let control = Proxy::new(hub.control_addr()).await;
     control.refuse(format!("gdl-ready-{}", hex("engine")).as_bytes());
     let (joiner_process, joiner) = launch(
-        &settings_through(&hub, control.port, 2_000),
+        &settings_through(&hub, control.port, 2_000, 20_000),
         "engine",
         &placement,
     )

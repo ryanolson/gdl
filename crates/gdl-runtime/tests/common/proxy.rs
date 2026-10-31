@@ -54,6 +54,11 @@ struct Tamper {
     /// While set, a request that holds it is answered here with the hub's
     /// `unavailable`, and never passed on.
     refuse: std::sync::Mutex<Option<Vec<u8>>>,
+    /// While set, a request that holds it is passed on, and the hub's
+    /// answer to it is held until the pattern is cleared.
+    withhold: tokio::sync::watch::Sender<Option<Vec<u8>>>,
+    /// Signalled when an answer is held.
+    withheld: tokio::sync::Notify,
 }
 
 impl Proxy {
@@ -113,6 +118,25 @@ impl Proxy {
     /// Pass on the requests [`Proxy::refuse`] answered.
     pub fn stop_refusing(&self) {
         *self.tamper.refuse.lock().expect("lock") = None;
+    }
+
+    /// Pass every request that holds `pattern` on at once, and hold the
+    /// hub's answer to it until [`Proxy::answer`]: a hub that has taken
+    /// the request but answers it late. The answer is lost if the client
+    /// gives up first.
+    pub fn withhold_answers(&self, pattern: &[u8]) {
+        assert!(pattern.len() <= TAIL + 1, "a pattern the relay can find");
+        self.tamper.withhold.send_replace(Some(pattern.to_vec()));
+    }
+
+    /// Send the answers [`Proxy::withhold_answers`] held, and hold no more.
+    pub fn answer(&self) {
+        self.tamper.withhold.send_replace(None);
+    }
+
+    /// Resolves once an answer is held.
+    pub async fn withholding(&self) {
+        self.tamper.withheld.notified().await;
     }
 
     /// Pass the held requests on.
@@ -178,6 +202,8 @@ async fn relay(
     // until the bytes after it come.
     let mut held_down: Vec<u8> = Vec::new();
     let mut awaiting_held = false;
+    // Whether the hub's next answer is to a request whose answer is held.
+    let mut withholding = false;
     // Cleared when the client stops sending while a released request
     // awaits the hub's answer: the relay stays, so that the hub still
     // answers it, and a client that only half-closed still gets the answer.
@@ -239,6 +265,12 @@ async fn relay(
                         let mut hold = held.tamper.hold.subscribe();
                         let _ = hold.wait_for(Option::is_none).await;
                     }
+                    let pattern = held.tamper.withhold.borrow().clone();
+                    if let Some(pattern) = pattern
+                        && find(&seen, kept, &pattern).is_some()
+                    {
+                        withholding = true;
+                    }
                     if to_server.write_all(&up[..n]).await.is_err() {
                         return;
                     }
@@ -257,6 +289,13 @@ async fn relay(
                     if awaiting_held {
                         awaiting_held = false;
                         held.tamper.answered.notify_one();
+                    }
+                    // The hub has taken the request, since it answers: only
+                    // the answer is late.
+                    if std::mem::take(&mut withholding) {
+                        held.tamper.withheld.notify_one();
+                        let mut withhold = held.tamper.withhold.subscribe();
+                        let _ = withhold.wait_for(Option::is_none).await;
                     }
                     let mut out = std::mem::take(&mut held_down);
                     out.extend_from_slice(&down[..n]);
