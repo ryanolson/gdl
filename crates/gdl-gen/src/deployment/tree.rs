@@ -754,6 +754,7 @@ fn trim(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deployment::context::Mode;
 
     /// A file and a link of the same bytes, and a file whose content reads
     /// like another's path, give different digests.
@@ -777,5 +778,130 @@ mod tests {
             file,
             digest(&BTreeMap::from([(PathBuf::from("a"), executable)]))
         );
+    }
+
+    /// A Git checkout that Git refuses to list, here for its ownership,
+    /// stops the build with Git's error: nothing falls back to a plain
+    /// copy, which would admit what the checkout ignores.
+    ///
+    /// Git reads the ownership override from the process environment, and
+    /// setting it here would reach the other tests of this binary, so the
+    /// case runs again as a child that has it. The child is cheap because
+    /// the test calls [`build`], where every builder reaches Git, on a
+    /// fixture of one small crate: `images` and `compose` get there only
+    /// after they generate and resolve a whole bundle, which costs seconds.
+    #[test]
+    fn a_git_error_does_not_admit_ignored_credentials() {
+        const WORKER: &str = "GDL_TREE_GIT_WORKER";
+        if std::env::var_os(WORKER).is_none() {
+            let output = std::process::Command::new("timeout")
+                .arg("10")
+                .arg(std::env::current_exe().expect("the test binary"))
+                .args([
+                    "--exact",
+                    "deployment::tree::tests::a_git_error_does_not_admit_ignored_credentials",
+                    "--nocapture",
+                ])
+                .env(WORKER, "1")
+                .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+                .output()
+                .expect("an isolated Git ownership check");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // The child ran the case itself, not none.
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        }
+        let git = |dir: &Path, args: &[&str], owned: bool| {
+            let mut command = std::process::Command::new("git");
+            command
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=gdl", "-c", "user.email=gdl@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args);
+            if owned {
+                command.env_remove("GIT_TEST_ASSUME_DIFFERENT_OWNER");
+            }
+            command.output().expect("git runs")
+        };
+        // Under one directory of the system's temporary directory, so that
+        // the context's root is not `/` and Git finds no repository above.
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-tree-git-")
+            .tempdir()
+            .expect("a directory");
+        let root = temp.path().canonicalize().expect("the path");
+        let node = root.join("node");
+        std::fs::create_dir_all(node.join("src")).expect("a crate");
+        std::fs::write(node.join("src/lib.rs"), "").expect("a library");
+        std::fs::write(
+            node.join("Cargo.toml"),
+            "[package]\nname = \"node\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("a manifest");
+        std::fs::write(node.join(".gitignore"), "/ignored-credentials.txt\n")
+            .expect("an ignore rule");
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"][..],
+            &["commit", "-q", "-m", "node"][..],
+        ] {
+            let output = git(&node, args, true);
+            assert!(output.status.success(), "{output:?}");
+        }
+        let marker = ["ignored", "credential", "marker"].join("-");
+        std::fs::write(node.join("ignored-credentials.txt"), &marker)
+            .expect("an ignored synthetic credential");
+        // The fixture is what the case says it is: Git refuses to list it
+        // for its ownership, and ignores the file it would otherwise skip.
+        let listed = git(
+            &node,
+            &["ls-files", "--others", "--exclude-standard"],
+            false,
+        );
+        assert!(!listed.status.success());
+        assert!(String::from_utf8_lossy(&listed.stderr).contains("dubious ownership"));
+        let ignored = git(
+            &node,
+            &["check-ignore", "--quiet", "ignored-credentials.txt"],
+            true,
+        );
+        assert!(ignored.status.success());
+
+        let files = Files::from([(
+            PathBuf::from("main/Cargo.toml"),
+            "[package]\nname = \"segment\"\nversion = \"1.0.0\"\n\
+             [dependencies]\nnode = { path = \"../../node\" }\n"
+                .to_string(),
+        )]);
+        let context =
+            Context::find(&root.join("bundle"), &files, None, Mode::Image).expect("the context");
+        let tree = root.join("tree");
+        std::fs::create_dir(&tree).expect("a tree");
+        let built = build(&tree, &context, &files, &[]);
+        // Whatever the build returned, nothing it wrote holds the secret.
+        let mut found = Vec::new();
+        let mut pending = vec![tree.clone()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if std::fs::read(&path)
+                    .expect("a file")
+                    .starts_with(marker.as_bytes())
+                {
+                    found.push(path);
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:?} hold an ignored file");
+        let error = built.expect_err("Git's refusal stops the build");
+        assert!(error.to_string().contains("dubious ownership"), "{error}");
     }
 }
