@@ -10,6 +10,17 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+mod api;
+mod apply;
+mod hub;
+mod reconcile;
+mod stop;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use api::KubePools;
+pub(crate) use reconcile::{Context, reconcile};
+
 /// The finalizer by which a pool's stop runs before its objects go.
 pub const FINALIZER: &str = "gdl.dev/stop";
 
@@ -53,6 +64,9 @@ pub struct GdlPoolStatus {
     /// Whether the pool's hub says its drained record is withdrawn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub withdrawn: bool,
+    /// The presence the pool's hub last said it stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<gdl_k8s::Presence>,
     /// The generation held because it would replace the pool's hub: none
     /// of it was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]

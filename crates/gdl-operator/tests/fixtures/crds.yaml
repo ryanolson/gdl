@@ -853,6 +853,15 @@
                     "nullable": true,
                     "type": "string"
                   },
+                  "presence": {
+                    "description": "Whether a pool serves.",
+                    "enum": [
+                      "serving",
+                      "scaledToZero"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "segments": {
                     "additionalProperties": {
                       "description": "One segment of a pool, as its hub counts it.",

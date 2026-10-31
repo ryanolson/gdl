@@ -543,6 +543,22 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the operator is a StatefulSet of one replica, and Kubernetes starts its replacement only once the old pod is confirmed gone. A person who force-deletes the pod (`--force --grace-period=0`), or removes its node by hand while the pod still runs, tells Kubernetes otherwise, and a second operator can start beside the first. The per-object fences keep a stale decision from overwriting a newer one in most cases, but two operators at once can still lose a scale-up, delete the wrong pod, or leave a deletion cost behind, until one of them stops. The ignored tests in `crates/gdl-operator/src/scaler/tests/two.rs` show each. While the operator's node does not answer, no replacement starts, and scaling pauses until the node answers or Kubernetes removes it.
 - **Workaround:** never force-delete the operator's pod, and let Kubernetes remove a lost node. If it happens, once only one operator runs, check each `GdlScaler`'s status, and the deletion cost and `gdl.dev/routable` label of its segment's pods.
 
+### A `GdlPool` deleted with foreground propagation skips its ordered stop
+- **What:** a `GdlPool`'s finalizer stops the pool in order while every object of it still exists: a drain for a pool with a parent, then its segments, then its hub. Under background propagation, the default of `kubectl delete`, garbage collection deletes the pool's objects only after the finalizer is gone. Under foreground propagation (`kubectl delete --cascade=foreground`) it deletes them while the finalizer still runs, in no order, so a top pool's hub can stop before its segments, and an admitted request that needs the hub can fail. Each instance still drains on its own SIGTERM. The operator says so in the pool's `ForegroundDelete` condition and in an event, and still removes its finalizer once no pod of the pool runs.
+- **Workaround:** delete a `GdlPool` with background propagation, as `cargo gdl` does.
+
+### A pool's stop waits on its hub to say it withdrew
+- **What:** a `GdlPool` with a parent is deleted only once its hub says its drained record is withdrawn (`GET /v1/ext/gdl-pool/withdrawn`). When the hub does not say so within the longest stop grace of its segments and 60 s, or refuses the drain, the finalizer stays, with the `Withdrawn` condition and an event, and the pool's objects stay. A pool whose hub's Deployment is gone stops as a top pool does, with `HubGone`: its parent still holds its record.
+- **Workaround:** withdraw the pool on its parent's hub (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on the control port), then remove the finalizer `gdl.dev/stop` by hand.
+
+### A change that restarts a pool's hub waits for `allowPoolRestart`
+- **What:** a hub restart drains its pool ([A segment does not outlive a hub restart](#a-segment-does-not-outlive-a-hub-restart)). So the operator holds a `GdlPool` generation that changes its hub's pod template, such as a new deployment or hub image, and applies nothing of it, not even its segments' changes, until `allowPoolRestart` is set. The pool's `PoolRestartPending` condition and an event name the held generation.
+- **Workaround:** set `allowPoolRestart` on the pool when its restart is wanted.
+
+### The operator changes no object it did not make
+- **What:** a `GdlPool` whose rendered objects exist without the pool's controller reference, such as the plain objects of an earlier deploy, gets the `NotOwned` condition and an event, and nothing of it is applied.
+- **Workaround:** take the pool down, or delete the objects, and apply the `GdlPool` again.
+
 ### A scale-down waits for a rollout, and for every pod to be ready
 - **What:** the operator chooses a victim only while no rollout of the target is in progress and every other pod runs and is ready, since only then does the deletion cost decide the ReplicaSet's choice. A pod that never becomes ready blocks the scale-down (`Blocked: PodNotReady`).
 - **Workaround:** fix or delete the pod that is not ready.

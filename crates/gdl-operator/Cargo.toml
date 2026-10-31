@@ -1,6 +1,6 @@
 [package]
 name = "gdl-operator"
-description = "The gdl Kubernetes operator: GdlScaler scales a pool's segment, choosing the instance to remove by its load and letting it drain before its pod goes"
+description = "The gdl Kubernetes operator: GdlPool owns a pool's objects and stops it in order, and GdlScaler scales a pool's segment, choosing the instance to remove by its load"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

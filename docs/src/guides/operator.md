@@ -87,6 +87,73 @@ Group `gdl.dev`, version `v1alpha1`, namespaced. One scaler per segment of a poo
 
 A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses any other, a `retire` other than `signal`, and a `minReplicas` below 1.
 
+## The `GdlPool` resource
+
+Group `gdl.dev`, version `v1alpha1`, namespaced. One per pool, named after it. Its spec is the pool with every value resolved: what `gdl-k8s` renders the pool's objects from, so that the operator in the cluster renders what `cargo gdl k8s` would. The operator owns each object it renders, by a controller reference: the pool's ConfigMap, its hub's Deployment, Service and claim, each segment's Deployment and entry Service, a `GdlScaler` per segment, and the pool's PodMonitor when it asks for one and the cluster serves them.
+
+| Field | Meaning |
+|---|---|
+| `spec.fleet`, `spec.cluster`, `spec.class`, `spec.region` | Where the pool is, as the fleet names it |
+| `spec.deployment` | The pool's layout as its hub admits it, the `DeploymentSpec` as JSON |
+| `spec.hub` | The hub's image, variables, resources, and, for a parent under `relay`, its state directory |
+| `spec.segments[]` | Each segment's name, image, settings file, quorum, published ports, variables, secrets, and resources |
+| `spec.serviceAccountName`, `spec.nodeSelector`, `spec.tolerations` | Where its pods run |
+| `spec.parent` | `{home: <pool>}` or `{parents: <class>}`; absent for a top pool |
+| `spec.dynamodb` | The tables of the DynamoDB directory; absent under `relay` |
+| `spec.podMonitor` | Whether the pool has a PodMonitor, named after it |
+| `spec.presence` | `serving`, or `scaledToZero` |
+| `spec.allowPoolRestart` | Whether a change that replaces the hub may be applied |
+| `status.phase` | `Pending`, `Ready`, `Degraded`, `Unavailable`, from the hub's health; `Draining`, `Stopping`, `Withdrawn` while it stops |
+| `status.segments`, `status.withdrawn` | Each segment's usable instances and quorum, and the withdrawal, as the hub says them |
+| `status.missing` | The objects the pool renders that do not exist yet |
+| `status.held` | The generation the pool-restart guard holds |
+| `status.stop` | The step of the pool's stop, its start, and the uid of each object it acts on |
+| `status.conditions` | `Applied`, `Healthy`, `Presence`, `PodMonitor`, `NotOwned`, `PoolRestartPending`, `Draining`, `Withdrawn`, `HubGone`, and `ForegroundDelete` |
+
+### How a pool is kept
+
+Each reconcile of a pool that is not being deleted:
+
+1. adds the finalizer `gdl.dev/stop` first, before any object, so that a delete always stops the pool in order;
+2. renders the pool's objects, and refuses the whole generation when one of them exists without the pool's controller reference (`NotOwned`): the operator changes no object it did not make;
+3. holds the whole generation when it changes the hub's pod template and `allowPoolRestart` is not set (`PoolRestartPending`), since a hub restart drains the pool. The hub's Deployment carries `gdl.dev/template`, a hash of its pod template as rendered, which the guard compares. A first create is not a restart, and a change to a segment's settings does not replace the hub: the hub's `gdl.dev/config` covers only the pool's deployment;
+4. stores its status, conditionally on the pool's resourceVersion, and only then writes anything else, so that a reconcile whose read is out of date writes nothing;
+5. applies each object, by forced server-side apply under the manager `gdl`, carrying the uid of the object it read;
+6. writes `replicas` once on each segment's Deployment and `GdlScaler`, at the segment's quorum, under `gdl-scaler` and `gdl-bootstrap`, while no other manager owns it: `gdl` never writes `replicas`, so a redeploy cannot undo a scale;
+7. tells the hub the pool's presence (`POST /v1/ext/gdl-pool/presence`), and once it answers 204, suspends each scaler at 0 for `scaledToZero`, or lets it go for `serving`, under the manager `gdl-pool`;
+8. deletes each object it controls and no longer renders, such as a renamed segment's, by its uid;
+9. reads the hub's health into the status.
+
+### How a pool stops
+
+Garbage collection deletes a pool's objects in no order: a top pool's hub that stopped before its segments would leave an empty instance without its lease while a frontend still holds a request that needs it. So the finalizer stops the pool in order while every object of it still exists, and garbage collection deletes what is left once no process runs.
+
+```mermaid
+sequenceDiagram
+    participant D as kubectl delete (background)
+    participant O as gdl operator
+    participant H as Pool hub
+    participant S as Segment scalers and pods
+    D->>O: GdlPool deletionTimestamp, finalizer gdl.dev/stop
+    alt the pool has a parent and a hub
+        O->>O: status.stop: drain, hub's uid
+        O->>H: POST /drain
+        loop until withdrawn, bounded by the longest grace and 60 s
+            O->>H: GET /withdrawn
+        end
+    end
+    O->>O: status.stop: segments, each scaler's and Deployment's uid
+    O->>S: suspend each scaler at 0
+    S-->>O: no segment pod runs
+    O->>O: status.stop: hub, the hub Deployment's uid
+    O->>H: hub Deployment replicas 0
+    H-->>O: the hub's pod is gone
+    O->>O: status.stop: release
+    O->>D: remove gdl.dev/stop; garbage collection deletes the rest
+```
+
+The step is stored, with the uid of each object it acts on, before it is taken. A restart takes the step stored. An object made again under the same name, with another uid, is written into the step before it is acted on, and every write carries the uid, so a stale step is never taken on another object. A top pool, whose hub refuses a drain, and a pool whose hub's Deployment is gone (`HubGone`) start at the segments. A withdrawal the hub has not said within the bound, or a drain it refuses, keeps the finalizer, with the `Withdrawn` condition and an event: the parent would still hold the pool's record. A pool deleted with foreground propagation is named in `ForegroundDelete` and an event, and still loses the finalizer once no pod of it runs ([Known limitations](../operations/limitations.md)).
+
 ## How a scale-down runs
 
 ```mermaid

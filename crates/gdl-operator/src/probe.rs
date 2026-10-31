@@ -174,6 +174,16 @@ impl HttpProbe {
         })
     }
 
+    /// The HTTP client, with its timeout.
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// The namespace whose pools it reaches.
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     async fn get(&self, url: &str) -> Result<reqwest::Response, String> {
         let response = self
             .client

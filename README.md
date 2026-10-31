@@ -42,7 +42,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-cgroup` | Hub and runtime | A process's own CPU and memory, and its cgroup's CPU use and throttling, quota, and memory, read at each scrape |
 | `gdl-watch` | Hub and runtime | The watches a pool's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a pool's quorum, health, record, follows, and keyed records |
-| `gdl-operator` | Deployments on Kubernetes | The operator: `GdlScaler` scales a pool's segment through `/scale`, and removes the instance it chooses by load once it is out of its entry Service. No velo |
+| `gdl-operator` | Deployments on Kubernetes | The operator: `GdlPool` owns a pool's objects and stops the pool in order through its finalizer, and `GdlScaler` scales a pool's segment through `/scale`, removing the instance it chooses by load once it is out of its entry Service. No velo |
 
 The examples in `examples/` are separate workspaces. See [Run the examples](docs/src/guides/examples.md).
 

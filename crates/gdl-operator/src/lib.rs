@@ -1,5 +1,7 @@
-//! The gdl Kubernetes operator. A `GdlScaler` scales one segment of a
-//! pool: an HPA, or a person, writes its `/scale`, and on a scale-down the
+//! The gdl Kubernetes operator. A `GdlPool` owns one pool's objects,
+//! which the operator renders from it with `gdl-k8s`, and its finalizer
+//! stops the pool in order before garbage collection deletes them. A
+//! `GdlScaler` scales one segment of a pool: an HPA, or a person, writes its `/scale`, and on a scale-down the
 //! operator chooses the instance to remove by its load, takes it out of
 //! its entry Service, and steers the ReplicaSet to delete exactly that pod
 //! with `controller.kubernetes.io/pod-deletion-cost`. The instance retires

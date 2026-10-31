@@ -91,7 +91,8 @@ pub enum Refused {
 }
 
 impl Refused {
-    fn of(what: &str, error: kube::Error) -> Self {
+    /// `error`, from a write to `what`.
+    pub(crate) fn of(what: &str, error: kube::Error) -> Self {
         match &error {
             kube::Error::Api(status) if [404, 409, 422].contains(&status.code) => {
                 Self::Stale(format!("{what}: {error}"))
