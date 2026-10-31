@@ -38,10 +38,11 @@ const WAIT: Duration = Duration::from_secs(10);
 const ADMISSION_LIMIT: usize = 8;
 
 /// One instance each of `front` and `side`, each a process of its own with
-/// a system listener, met in a roster directory, with the process's
-/// registry made for its segment.
+/// a system listener and the further `[system]` settings `system`, met in
+/// a roster directory, with the process's registry made for its segment.
 async fn launched(
     spec: &DeploymentSpec,
+    system: &str,
 ) -> (
     tempfile::TempDir,
     [(Process, Launch, gdl::prometheus::Registry); 2],
@@ -51,7 +52,7 @@ async fn launched(
         .tempdir()
         .expect("roster directory");
     let settings = format!(
-        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nside = 1\n[runtime]\ndrain_ms = 10000\n[system]\nport = 0\n",
+        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nside = 1\n[runtime]\ndrain_ms = 10000\n[system]\nport = 0\n{system}",
         dir.path().display()
     );
     let config: ProcessConfig<Nothing> =
@@ -81,9 +82,7 @@ async fn launched(
 /// scrape of `process`; `None` when it has no such series. Every family
 /// here has one series per instance, or one per `phase`.
 async fn read(process: &Process, name: &str, phase: Option<&str>) -> Option<f64> {
-    let address = process.system_address().expect("a listener");
-    let (code, scrape) = get(address, "/metrics").await;
-    assert_eq!(code, 200, "{scrape}");
+    let scrape = scrape(process).await;
     let name = format!("dynamo_component_{name}{{");
     scrape
         .lines()
@@ -93,6 +92,14 @@ async fn read(process: &Process, name: &str, phase: Option<&str>) -> Option<f64>
             let (_, value) = line.rsplit_once(' ').expect("a value");
             value.parse().expect("a number")
         })
+}
+
+/// What the `/metrics` of `process` answers.
+async fn scrape(process: &Process) -> String {
+    let address = process.system_address().expect("a listener");
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!(code, 200, "{scrape}");
+    scrape
 }
 
 /// Wait until the series of `name` in the scrape of `process` is `value`.
@@ -130,7 +137,7 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
             (front, front_launch, front_registry),
             (side, side_launch, side_registry),
         ],
-    ) = launched(&spec).await;
+    ) = launched(&spec, "").await;
     let events = Events::new();
     let start = |launch: &Launch, name: &str, registry: &gdl::prometheus::Registry| {
         let deployment = Deployment::new(
@@ -204,6 +211,11 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
         Some(ADMISSION_LIMIT as f64)
     );
     assert_eq!(read(&side, "egress_in_use", None).await, Some(1.0));
+    let off = scrape(&side).await;
+    assert!(
+        !off.contains("velo_"),
+        "velo's metrics are off by default: {off}"
+    );
     let anchors = read(&front, "active_anchors", None).await;
     assert!(
         anchors.is_some_and(|anchors| anchors >= 1.0),
@@ -232,6 +244,113 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     );
 
     front.stop();
+    for served in [front_served, side_served] {
+        tokio::time::timeout(WAIT, served)
+            .await
+            .expect("the instance left")
+            .expect("its task")
+            .expect("it served");
+    }
+}
+
+/// With `velo_metrics`, each instance also serves velo's own families:
+/// under velo's names, not the registry's prefix, with the instance's
+/// identity labels, each family once in the scrape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "velo metrics: no `velo_metrics` setting, and velo's families are not served"]
+async fn velos_families_are_served_beside_the_registry_when_asked() {
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C", "D"]);
+    let manifest = reference_manifest(|_| true);
+    let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
+    let (
+        _dir,
+        [
+            (front, front_launch, front_registry),
+            (side, side_launch, side_registry),
+        ],
+    ) = launched(&spec, "velo_metrics = true\n").await;
+    let events = Events::new();
+    let start = |launch: &Launch, name: &str, registry: &gdl::prometheus::Registry| {
+        let deployment = Deployment::new(
+            launch.node(),
+            &manifest,
+            &placement,
+            name,
+            launch.roster(),
+            RuntimeConfig {
+                metrics: Some(registry.clone()),
+                ..RuntimeConfig::default()
+            },
+        )
+        .expect("deployment");
+        let root = reference_graph(&deployment, &events).expect("graph");
+        deployment.start(root).expect("start")
+    };
+    let front_segment = start(&front_launch, "front", &front_registry);
+    let side_segment = start(&side_launch, "side", &side_registry);
+    front.serve_metrics(front_registry).expect("served");
+    side.serve_metrics(side_registry).expect("served");
+    let (answered, answer) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front_launch.serve(
+        front_segment,
+        move |segment, shutdown| async move {
+            let out = segment
+                .call(Cx::new(), prompt("counted", Plan::default()))
+                .await?;
+            let items = collect(out).await;
+            assert!(items.iter().all(Result::is_ok), "{items:?}");
+            let _ = answered.send(());
+            shutdown.cancelled().await;
+            Ok(())
+        },
+    ));
+    let side_served = tokio::spawn(side_launch.serve(side_segment, |_, shutdown| async move {
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    tokio::time::timeout(WAIT, answer)
+        .await
+        .expect("answered in time")
+        .expect("the front's body ran");
+
+    for (process, segment) in [(&front, "front"), (&side, "side")] {
+        let scrape = scrape(process).await;
+        let families: Vec<&str> = scrape
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|line| line.split(' ').next())
+            .collect();
+        let mut once = families.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(once.len(), families.len(), "a family twice: {scrape}");
+        for family in [
+            "velo_streaming_active_anchors",
+            "velo_messenger_handler_requests_total",
+        ] {
+            assert!(
+                families.contains(&family),
+                "{segment} has no {family}: {scrape}"
+            );
+        }
+        assert!(
+            !families.iter().any(|family| family.contains("_velo_")),
+            "velo's families take no prefix: {scrape}"
+        );
+        let worker = format!("worker_id=\"{:032x}\"", process.instance_id().as_u128());
+        let component = format!("dynamo_component=\"{segment}\"");
+        for line in scrape.lines().filter(|line| line.starts_with("velo_")) {
+            assert!(
+                line.contains(&worker) && line.contains(&component),
+                "{segment}: {line}"
+            );
+        }
+    }
+
+    front.stop();
+    side.stop();
     for served in [front_served, side_served] {
         tokio::time::timeout(WAIT, served)
             .await

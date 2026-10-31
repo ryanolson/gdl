@@ -84,3 +84,24 @@ impl Collector for Reserved {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Reserved;
+
+    /// velo's families are served unprefixed beside the registry, under
+    /// names that start with `velo_`: a node metric served under such a
+    /// name is refused, under any prefix, and one that is not registers.
+    #[test]
+    #[ignore = "velo metrics: a name served as velo's is not refused"]
+    fn a_name_served_as_velos_is_refused() {
+        let refused = |prefix: Option<&str>, name: &str| Reserved::new(prefix).refusal(name);
+        let empty = refused(None, "velo_streaming_active_anchors").expect("refused");
+        assert!(empty.contains("velo"), "{empty}");
+        assert!(refused(Some("velo"), "tokens_total").is_some());
+        assert!(refused(Some("velo_x"), "tokens_total").is_some());
+        assert!(refused(Some("dynamo_component"), "velo_frames_total").is_none());
+        assert!(refused(Some("velocity"), "tokens_total").is_none());
+        assert!(refused(None, "tokens_total").is_none());
+    }
+}
