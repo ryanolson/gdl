@@ -464,7 +464,8 @@ pub fn pool_id(class: &str, pool: &str) -> u64 {
 /// What a pool policy sees of one attempt: the request's context and
 /// head, the chooser's region, the pools the request excluded and why
 /// each that declined it did, the pools the chooser damps, the chooser's
-/// clock, and the attempt's turn.
+/// clock, the attempt's turn, and the class's property indexes and
+/// draining pools from the table it chooses from.
 pub struct PoolRequest<'a, H> {
     cx: &'a Cx,
     head: &'a H,
@@ -477,6 +478,7 @@ pub struct PoolRequest<'a, H> {
     turn: u64,
     random: Option<&'a RandomState>,
     properties: &'a PropertyIndexes,
+    draining: &'a [Box<str>],
 }
 
 impl<H> Clone for PoolRequest<'_, H> {
@@ -507,6 +509,7 @@ impl<'a, H> PoolRequest<'a, H> {
             turn: 0,
             random: None,
             properties: &NO_PROPERTIES,
+            draining: &[],
         }
     }
 
@@ -578,6 +581,38 @@ impl<'a, H> PoolRequest<'a, H> {
         self.properties
     }
 
+    /// The request with the names of the class's pools that its hub lists
+    /// as draining, sorted: the runtime gives those of the table the
+    /// policy chooses from, as for [`with_properties`](Self::with_properties).
+    #[inline]
+    pub fn with_draining(mut self, draining: &'a [Box<str>]) -> Self {
+        self.draining = draining;
+        self
+    }
+
+    /// Whether the chooser's hub lists the pool named `name` as draining,
+    /// followed or not ([`ClassPools::is_draining`](crate::ClassPools::is_draining)),
+    /// from the same table as the pools the policy chooses from and its
+    /// [`properties`](Self::properties): a drain and the rows a policy
+    /// reads are always one table's, never a newer drain over older rows.
+    /// A drain that lands after the table was loaded is seen by the next
+    /// attempt. `false` for a request built without them.
+    #[inline]
+    pub fn is_draining(&self, name: &str) -> bool {
+        !self.draining.is_empty() && self.draining_in(name)
+    }
+
+    /// [`is_draining`](Self::is_draining) once some pool drains: a search
+    /// of the names, out of line, so that a policy's pass over its pools
+    /// inlines only the branch.
+    #[cold]
+    #[inline(never)]
+    fn draining_in(&self, name: &str) -> bool {
+        self.draining
+            .binary_search_by(|draining| (**draining).cmp(name))
+            .is_ok()
+    }
+
     /// The same attempt, with `head` read from its bytes.
     fn with_head<'b, G>(&self, head: &'b G) -> PoolRequest<'b, G>
     where
@@ -595,6 +630,7 @@ impl<'a, H> PoolRequest<'a, H> {
             turn: self.turn,
             random: self.random,
             properties: self.properties,
+            draining: self.draining,
         }
     }
 

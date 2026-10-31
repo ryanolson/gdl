@@ -72,6 +72,7 @@ impl PoolPolicy for ByShard {
 - A reason is a `Cow<'static, str>`. A fixed `&'static str` allocates nothing. A reason that you `format!` allocates only when no pool is chosen. The reason reaches the error only on the first attempt. After a decline, the request fails with the last pool's refusal, unless the chooser holds every pool that declined it gone and the policy chooses no other pool: then it fails with `Routing` and the reason.
 - Skip a pool that `request.is_excluded` names: it declined this request, or it declined an offer as gone and its follow has not changed since (`request.damped().is_gone(pool)`).
 - `request.declined(pool)` says why a pool declined this request, and `request.declines()` lists each pool that did, in order, with its `gdl::Decline`. A policy that keeps a session with one pool can tell a pool that is full (`Decline::Full`) from one that no longer has the session's property (`Decline::NotPresent`). Both are empty on the first attempt. A pool whose hand-off never left is excluded but not listed: it said nothing.
+- `request.is_draining(name)` says whether the chooser's hub lists a pool as draining, followed or not: a policy that keeps a session with one pool moves it off a pool that drains, also once that pool's follow is dropped and it is no longer in `pools`. Read it from the request, not from a `FollowedPools` handle. The request holds the same table as `pools` and `request.properties()`, so the drain and the rows are always one table's. A handle loads the table again, which can be newer than the rows the policy chooses from: a newer drain with older rows can move a session to a pool that neither table allows. A drain that lands after the table was loaded is seen by the next attempt. The read takes no lock and allocates nothing.
 - `request` also gives the chooser's region, the clock, the damped pools (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
 - `choose` is not `async`, and it runs once per attempt. It runs once more when every pool that declined the request is gone, to learn whether it chooses another. That choice is dropped and offered nothing. Take no lock in it, and allocate nothing when it chooses a pool.
 - Override `eligible` when a pool can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a pool is eligible while it takes work.
@@ -178,7 +179,7 @@ let request = PoolRequest::new(&cx, &head, "us-east-1", now);
 assert_eq!(ByShard.choose(request, &pools).map(|choice| choice.at()), Ok(1));
 ```
 
-Both versions of `ByShard` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_declines`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
+Both versions of `ByShard` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_declines`, `with_damped` (a `gdl::Damped`), `with_turn`, `with_properties`, and `with_draining` (the draining pools' names, sorted) set the rest. `crates/gdl/tests/policies.rs` has more.
 
 ## 4. Bind it in the spec
 

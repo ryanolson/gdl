@@ -267,7 +267,8 @@ impl Crossing {
             .with_excluded(left.excluded)
             .with_declines(left.declines)
             .with_damped(&damped)
-            .with_properties(&table.properties);
+            .with_properties(&table.properties)
+            .with_draining(&table.draining);
         target.policy.requeue(request, self.encoding, view)
     }
 
@@ -539,7 +540,8 @@ impl Crossing {
             .with_damped(damped)
             .with_turn(turn)
             .with_random(&self.random)
-            .with_properties(&table.properties);
+            .with_properties(&table.properties)
+            .with_draining(&table.draining);
         let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
             Ok(choice) => choice.into_parts(),
             Err(no) => return Ok(Err(no)),
@@ -1615,6 +1617,168 @@ mod tests {
             .expect("chosen")
             .expect("a pool");
         assert_eq!(chosen, ids[1], "the pool the index lists");
+    }
+
+    /// `pool`, with its property-list version at `tag`: a mark that tells
+    /// one test table from another, not a drain's order.
+    fn tagged(name: &str, state: PoolState, eligible: &[InstanceId], tag: u64) -> Arc<PoolTable> {
+        let mut table = Arc::try_unwrap(pool(name, state, eligible)).expect("one table owner");
+        table.properties_version = tag;
+        Arc::new(table)
+    }
+
+    /// Keeps a request with its pin, `m1`, until the chooser's hub lists
+    /// `m1` as draining, then moves it to `m2` if `m2` takes work, as the
+    /// endpoints' set router moves a pin. Before it reads, it stores the
+    /// next of `newer`, if any: a table made while it chooses. It records
+    /// the tag of the rows it chose from and whether `m1` drained, for
+    /// each choice and each re-queue it is asked.
+    struct Pinned {
+        table: Arc<ArcSwap<EntryTable>>,
+        newer: std::sync::Mutex<std::collections::VecDeque<EntryTable>>,
+        seen: std::sync::Mutex<Vec<(u64, bool)>>,
+    }
+
+    impl Pinned {
+        fn new(
+            table: &Arc<ArcSwap<EntryTable>>,
+            newer: impl IntoIterator<Item = EntryTable>,
+        ) -> Self {
+            Self {
+                table: Arc::clone(table),
+                newer: std::sync::Mutex::new(newer.into_iter().collect()),
+                seen: std::sync::Mutex::default(),
+            }
+        }
+
+        /// Store the next newer table, then record what `request` reads
+        /// with the rows `tag` names.
+        fn read(&self, request: &PoolRequest<'_, gdl::Encoded>, tag: u64) -> bool {
+            if let Some(newer) = self.newer.lock().expect("unpoisoned").pop_front() {
+                self.table.store(Arc::new(newer));
+            }
+            let draining = request.is_draining("m1");
+            self.seen.lock().expect("unpoisoned").push((tag, draining));
+            draining
+        }
+
+        fn seen(&self) -> Vec<(u64, bool)> {
+            self.seen.lock().expect("unpoisoned").clone()
+        }
+    }
+
+    impl gdl::PoolPolicy for Pinned {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            request: PoolRequest<'_, gdl::Encoded>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
+            let at = |name: &str| pools.iter().position(|pool| pool.name() == name);
+            if !self.read(&request, pools[0].properties_version()) {
+                return at("m1").map(gdl::PoolChoice::new).ok_or_else(NoPool::new);
+            }
+            at("m2")
+                .filter(|&m2| pools[m2].takes_work())
+                .map(gdl::PoolChoice::new)
+                .ok_or_else(|| NoPool::because("the pin drains, and no other set takes work"))
+        }
+
+        fn requeue(&self, request: PoolRequest<'_, gdl::Encoded>, pool: &gdl::Pool) -> bool {
+            !self.read(&request, pool.properties_version())
+        }
+    }
+
+    /// A pinning policy behind `table`'s crossing, which stores `newer`
+    /// one table per read.
+    fn pinned(tables: impl IntoIterator<Item = EntryTable>) -> (Crossing, Arc<Pinned>) {
+        let mut tables = tables.into_iter();
+        let first = tables.next().expect("a first table");
+        let mut crossing = crossing(Vec::new(), Within::Policy(Policy::RoundRobin));
+        crossing.target.table.store(Arc::new(first));
+        let policy = Arc::new(Pinned::new(&crossing.target.table, tables));
+        crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::clone(&policy)));
+        crossing.target.name = Arc::from("pinned");
+        (crossing, policy)
+    }
+
+    /// A drain that lands while a policy chooses is not seen by that
+    /// choice, whose rows are older, and is seen by the next, with the
+    /// rows of its own table. Read from a newer table than the rows, the
+    /// drain would move the pin to `m2`, which neither table allows: the
+    /// first keeps the pin, and in the second `m2` takes no work.
+    #[test]
+    fn a_drain_after_the_table_was_loaded_waits_for_the_next_choice() {
+        let ids = ids(2);
+        let before = EntryTable::new(Box::new([
+            tagged("m1", PoolState::Ready, &ids[..1], 1),
+            tagged("m2", PoolState::Ready, &ids[1..], 1),
+        ]));
+        let drained = EntryTable::new(Box::new([
+            tagged("m1", PoolState::Draining, &ids[..1], 2),
+            tagged("m2", PoolState::Unavailable, &ids[1..], 2),
+        ]))
+        .with_draining(Box::new(["m1".into()]));
+        let (crossing, policy) = pinned([before, drained]);
+        let cx = Cx::new();
+        let random = RandomState::new();
+        let pick = || crossing.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE);
+        let (_, first, _) = pick().expect("a pick").expect("a pool");
+        assert_eq!(
+            first,
+            super::super::pool_id("model_x", "m1"),
+            "the pin holds"
+        );
+        assert_eq!(
+            pick().expect("a pick").err(),
+            Some(NoPool::because(
+                "the pin drains, and no other set takes work"
+            )),
+            "the next choice sees the drain, with its own table's rows"
+        );
+        assert_eq!(policy.seen(), [(1, false), (2, true)]);
+    }
+
+    /// Whether a pool drains and the rows a policy reads are always one
+    /// table's, through each table the chooser stores, for a choice and
+    /// for a re-queue alike. Each table here drains `m1` when its tag is
+    /// odd, and a new one is stored while each read is under way.
+    #[test]
+    fn draining_and_the_rows_are_read_from_one_table() {
+        const TABLES: u64 = 8;
+        let ids = ids(2);
+        let table = |tag: u64| {
+            let made = EntryTable::new(Box::new([
+                tagged("m1", PoolState::Ready, &ids[..1], tag),
+                tagged("m2", PoolState::Ready, &ids[1..], tag),
+            ]));
+            if tag % 2 == 1 {
+                made.with_draining(Box::new(["m1".into()]))
+            } else {
+                made
+            }
+        };
+        let (crossing, policy) = pinned((0..TABLES).map(table));
+        let cx = Cx::new();
+        let random = RandomState::new();
+        let m1 = super::super::pool_id("model_x", "m1");
+        for tag in 0..TABLES {
+            if tag % 3 == 2 {
+                let requeued = crossing.requeue(&cx, &[], Left::NONE, m1).expect("asked");
+                assert_eq!(requeued, tag % 2 == 0, "tag {tag}");
+            } else {
+                let (_, chosen, _) = crossing
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .expect("a pick")
+                    .expect("a pool");
+                let pin = if tag % 2 == 0 { "m1" } else { "m2" };
+                assert_eq!(chosen, super::super::pool_id("model_x", pin), "tag {tag}");
+            }
+        }
+        let seen = policy.seen();
+        let one_table: Vec<(u64, bool)> = (0..TABLES).map(|tag| (tag, tag % 2 == 1)).collect();
+        assert_eq!(seen, one_table);
     }
 
     #[tokio::test]

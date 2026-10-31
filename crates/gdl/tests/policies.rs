@@ -159,6 +159,61 @@ fn a_policy_sees_what_the_runtime_gives_it() {
     );
 }
 
+/// Moves a request off a pool that its hub lists as draining, as a set
+/// router moves a pin: it reads the drain from its request, which holds
+/// the same table as the pools it chooses from.
+struct Undrained;
+
+impl PoolPolicy for Undrained {
+    type Head = Projected<Hinted>;
+
+    fn choose(
+        &self,
+        request: PoolRequest<'_, Projected<Hinted>>,
+        pools: &[Pool],
+    ) -> Result<PoolChoice, NoPool> {
+        HomeFirst
+            .choose_where(request, pools, |pool| !request.is_draining(pool.name()))
+            .map(PoolChoice::new)
+            .ok_or_else(|| NoPool::because("every pool drains"))
+    }
+}
+
+/// A policy reads which pools drain from its request, by name, for a
+/// followed pool and for one whose follow was dropped alike. A request
+/// built without them lists no pool as draining.
+#[test]
+fn a_policy_reads_which_pools_drain_from_its_request() {
+    let now = Instant::now();
+    let pools = [pool("llama-1", HOME, now), pool("llama-2", AWAY, now)];
+    let cx = Cx::new();
+    let head = hinted("llama");
+    // `llama-0`'s follow was dropped: it is not among the pools.
+    let draining: [Box<str>; 2] = ["llama-0".into(), "llama-1".into()];
+    let request = PoolRequest::new(&cx, &head, HOME, now).with_draining(&draining);
+    assert!(request.is_draining("llama-0"), "a pool no longer followed");
+    assert!(request.is_draining("llama-1"), "a followed pool");
+    assert!(!request.is_draining("llama-2"));
+    assert_eq!(
+        Undrained.choose(request, &pools).map(|c| c.at()),
+        Ok(1),
+        "the home pool drains, so the request goes away"
+    );
+    let undrained = PoolRequest::new(&cx, &head, HOME, now);
+    assert!(!undrained.is_draining("llama-1"));
+    assert_eq!(Undrained.choose(undrained, &pools).map(|c| c.at()), Ok(0));
+    let every: [Box<str>; 2] = ["llama-1".into(), "llama-2".into()];
+    assert_eq!(
+        Undrained
+            .choose(
+                PoolRequest::new(&cx, &head, HOME, now).with_draining(&every),
+                &pools
+            )
+            .map(|c| c.at()),
+        Err(NoPool::because("every pool drains"))
+    );
+}
+
 /// A policy that filters the pools chooses among the ones it keeps as
 /// `home_first` or `round_robin` would, and gets an index into all of
 /// them: the shard's pool elsewhere while its home pool is saturated,
