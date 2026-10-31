@@ -431,7 +431,16 @@ until_true 120 "the engine did not settle at 2 under the HPA" scaled_to model-a 
 say "the HPA scaled the engine down to 2, and the scaler removed the pod it chose"
 
 counts="$(load_counts)"
-[[ "${counts#* }" == "0" ]] || fail "requests failed: $(k logs load | grep '^fail' | head -n 5)"
+# Stop the load, then count: each worker finishes the request it is sending, and the pod prints `done` once all
+# have, so a request that fails as the load stops is counted too. Only external commands, `k`, `load_counts`,
+# `fail` and `say` here: crates/gdl-operator/tests/proof.rs runs this tail against a mock.
 k exec load -- touch /tmp/stop
-say "no request failed: ${counts% *} answered"
+for _ in $(seq 1 240); do
+  k logs load | grep -q '^done$' && break
+  sleep 0.5
+done
+k logs load | grep -q '^done$' || fail "the load's workers did not stop within 120 s"
+stopped="$(load_counts)"
+[[ "${stopped#* }" == "0" ]] || fail "requests failed: $(k logs load | grep '^fail' | head -n 5)"
+say "no request failed: ${stopped% *} answered"
 say "passed"

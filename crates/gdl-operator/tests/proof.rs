@@ -42,7 +42,6 @@ fn the_kind_proof_accepts_successes_and_rejects_reported_failures() {
 }
 
 #[test]
-#[ignore = "F7: the kind proof reports success without collecting the workers' final request outcomes"]
 fn the_kind_proof_rejects_a_request_that_fails_as_the_load_stops() {
     assert!(
         !finish_load(0, 1).status.success(),
