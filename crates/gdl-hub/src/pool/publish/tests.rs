@@ -144,3 +144,61 @@ async fn a_withdrawal_replaced_before_its_reply_is_not_proof() {
         "the hub says withdrawn while the directory holds the later hub's record"
     );
 }
+
+#[tokio::test]
+#[ignore = "F7: correcting clocks and restarting advances the current record but can stay below the lost predecessor's future epoch"]
+async fn a_restart_with_synchronized_clocks_overtakes_a_lost_future_epoch() {
+    let now = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock follows the epoch")
+            .as_millis(),
+    )
+    .expect("the time fits");
+    let predecessor_epoch = now + 3_600_000;
+    let directory = MemoryDirectory::new();
+    let record: PoolRecord = serde_json::from_value(serde_json::json!({
+        "name": "model-a",
+        "class": "model",
+        "region": "us",
+        "home": "global",
+        "contract": 1,
+        "placement": 1,
+        "state": "ready",
+        "epoch": 0,
+        "seq": 0,
+        "hub": "127.0.0.1:1337"
+    }))
+    .expect("a pool record");
+
+    // The predecessor's clock was an hour ahead. Its record was lost,
+    // and both subsequent starts use the same corrected system clock.
+    let (first, held) = Writer::start(&directory, None, &record, WAIT).await;
+    assert!(held.expect("the directory answers").is_none());
+    assert!(first.epoch < predecessor_epoch, "the lost record matters");
+    directory
+        .publish(PoolRecord {
+            epoch: first.epoch,
+            seq: 1,
+            ..record.clone()
+        })
+        .await
+        .expect("the current hub stores its record");
+
+    let (restarted, held) = Writer::start(&directory, None, &record, WAIT).await;
+    assert_eq!(
+        held.expect("the directory answers")
+            .expect("the current record is present")
+            .epoch,
+        first.epoch
+    );
+    assert!(
+        restarted.epoch > first.epoch,
+        "the restart advances its record"
+    );
+    assert!(
+        restarted.epoch > predecessor_epoch,
+        "clock correction and a restart must overtake the lost epoch: restart={}, predecessor={predecessor_epoch}",
+        restarted.epoch
+    );
+}
