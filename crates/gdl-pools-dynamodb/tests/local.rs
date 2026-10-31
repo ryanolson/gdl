@@ -31,6 +31,104 @@ use gdl_pools::{
 };
 use gdl_pools_dynamodb::{DynamoDirectory, DynamoLimits, Tables};
 
+#[tokio::test]
+#[ignore = "F2: last_write drops a retained tombstone that replaces the record between its two reads"]
+async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
+    use std::sync::{Mutex, mpsc};
+
+    use aws_sdk_dynamodb::{
+        config::{ConfigBag, Intercept, interceptors::BeforeSerializationInterceptorContextRef},
+        operation::query::QueryInput,
+    };
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    struct PauseQuery {
+        began: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Intercept for PauseQuery {
+        fn name(&self) -> &'static str {
+            "PauseQuery"
+        }
+
+        fn read_before_execution(
+            &self,
+            context: &BeforeSerializationInterceptorContextRef<'_>,
+            _config: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if context.input().downcast_ref::<QueryInput>().is_some()
+                && let Some(began) = self.began.lock().expect("the signal lock").take()
+            {
+                began.send(()).expect("the test waits for the query");
+                self.release
+                    .lock()
+                    .expect("the release lock")
+                    .recv_timeout(WAIT)
+                    .expect("the test releases the query");
+            }
+            Ok(())
+        }
+    }
+
+    let client = client();
+    let tables = tables(&client).await;
+    let writer = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
+    let first = record("model-x-01", 1, 1, &["qwen-32b"]);
+    writer.publish(first.clone()).await.expect("the record");
+    let (began, paused) = oneshot::channel();
+    let (release, released) = mpsc::channel();
+    let reader = DynamoDirectory::with_limits(
+        Client::from_conf(
+            own_pool(&client)
+                .interceptor(PauseQuery {
+                    began: Mutex::new(Some(began)),
+                    release: Mutex::new(released),
+                })
+                .build(),
+        ),
+        tables,
+        LIMITS,
+    );
+    let reading = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the reader's runtime")
+            .block_on(async {
+                tokio::time::timeout(WAIT, reader.last_write(MODEL, "model-x-01"))
+                    .await
+                    .expect("the read ends in time")
+            })
+    });
+    tokio::time::timeout(WAIT, paused)
+        .await
+        .expect("the query begins in time")
+        .expect("the first GetItem already read the record");
+    let withdrawal = Withdrawal {
+        class: first.class.clone(),
+        pool: first.name.clone(),
+        epoch: first.epoch,
+        seq: first.seq + 1,
+        properties_version: first.properties_version + (1 << 20),
+    };
+    writer
+        .withdraw(withdrawal.clone())
+        .await
+        .expect("the tombstone");
+    release.send(()).expect("release the query");
+    let last = tokio::task::spawn_blocking(move || reading.join().expect("the reader thread"))
+        .await
+        .expect("join the reader")
+        .expect("the last write is read");
+    assert_eq!(
+        last,
+        Some(gdl_pools::LastWrite::Withdrawn(withdrawal)),
+        "the pool is never forgotten: its record was replaced by its retained tombstone"
+    );
+}
+
 // In a directory of its own, so that cargo does not take it for a test
 // target.
 #[path = "local/ensure.rs"]
