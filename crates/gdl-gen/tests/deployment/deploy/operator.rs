@@ -353,3 +353,21 @@ fn down_stops_a_plain_child_before_its_operated_parent() {
     assert!(operated_child < operated_parent, "{calls:?}");
     assert!(child < plain_parent, "{calls:?}");
 }
+
+/// A pool whose `GdlPool` is gone when the wait reads it is named as such
+/// at the wait's end, not taken for an unreadable answer.
+#[test]
+fn a_pool_whose_gdl_pool_is_gone_is_named() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.operator = Operator::Deletes;
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("not ready")
+        .to_string();
+    assert!(
+        error.contains("pool `global-us` in cluster `use1`: its GdlPool does not exist"),
+        "{error}"
+    );
+}

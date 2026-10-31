@@ -112,6 +112,8 @@ enum Operator {
     Holds(&'static str),
     /// Never acts: the operator does not run.
     Absent,
+    /// Deletes each `GdlPool` as soon as it is applied, as a person might.
+    Deletes,
 }
 
 impl Kube {
@@ -249,6 +251,10 @@ impl Kube {
             .unwrap_or(0)
             + 1;
         object["metadata"]["resourceVersion"] = version.to_string().into();
+        if key.0 == "GdlPool" && self.operator == Operator::Deletes {
+            object["metadata"]["uid"] = format!("{context}/GdlPool/{}", key.1).into();
+            return Ok(object);
+        }
         if key.0 == "GdlPool" {
             // A field the apply leaves out that another manager set, as a
             // person's patch of `presence`, stays.

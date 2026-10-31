@@ -218,6 +218,10 @@ pub(super) fn ready(
         None,
         &format!("reading GdlPool `{pool}` in cluster `{}`", cluster.name),
     )?;
+    // `--ignore-not-found` prints nothing for a pool that is gone.
+    if reply.stdout.trim().is_empty() {
+        return Ok(Some("its GdlPool does not exist".into()));
+    }
     let read = Operated::list(&reply.stdout)?;
     let Some(read) = read.first() else {
         return Ok(Some("its GdlPool does not exist".into()));
