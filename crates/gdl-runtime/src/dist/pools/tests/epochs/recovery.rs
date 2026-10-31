@@ -229,7 +229,6 @@ fn a_withheld_follow_behind_a_later_hub_reads_unknown_when_unlisted() {
 /// stale listing, and the pool reads that hub live and not draining though
 /// the follower heard it drain.
 #[test]
-#[ignore = "guard seed 1246, held for the marshal's ruling: an unlisting that forgets a later hub's evidence lets a stale listing of the shown follow's hub hide its drain"]
 fn a_stale_listing_after_an_unlisting_does_not_hide_a_heard_drain() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
