@@ -26,7 +26,7 @@ mod relay;
 
 pub(super) use dynamodb::{LOCAL, PLACEHOLDER, TABLES};
 use objects::{Names, Pod, Port, Segment};
-pub(super) use objects::{image, label_value};
+pub(super) use objects::{ROUTABLE, image, label_value, stream};
 
 /// The objects of `fleet`'s pools, which run `spec`, by path from the
 /// output directory: `<cluster>/base.yaml`, `<cluster>/pools/<pool>.yaml`
@@ -444,11 +444,18 @@ impl Render<'_> {
                 )),
             }
         }
+        let metrics_prefix = table
+            .get("system")
+            .and_then(|system| system.get("metrics_prefix"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string);
         Ok(Some(Segment {
             name: segment.to_string(),
             repository: package,
             config,
             grace,
+            drain_ms: super::drain_bound(&table).as_millis(),
+            metrics_prefix,
             probes,
             ports,
             secrets: self.bundle.secrets(segment).to_vec(),
@@ -526,6 +533,9 @@ impl Render<'_> {
             objects.push(pod.segment(segment, &variables, &checksum)?);
             if !segment.ports.is_empty() {
                 objects.push(pod.entry_service(segment));
+            }
+            if cluster.scaler {
+                objects.push(pod.scaler(segment));
             }
         }
         for object in &objects {

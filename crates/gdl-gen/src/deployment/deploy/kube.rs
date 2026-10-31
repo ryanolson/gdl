@@ -199,7 +199,7 @@ const MANAGER: &str = "--field-manager=gdl";
 /// it: what `deploy` prunes and `down` deletes. A delete names the same
 /// resource the listing did: `podmonitor/<name>` alone could resolve to
 /// another group's kind of that name.
-pub(super) const RESOURCES: [(&str, &str); 7] = [
+pub(super) const RESOURCES: [(&str, &str); 8] = [
     ("Deployment", "deployments.apps"),
     ("Service", "services"),
     ("ConfigMap", "configmaps"),
@@ -207,6 +207,7 @@ pub(super) const RESOURCES: [(&str, &str); 7] = [
     ("ServiceAccount", "serviceaccounts"),
     ("Job", JOBS),
     ("PodMonitor", PODMONITORS),
+    ("GdlScaler", SCALERS),
 ];
 
 /// A Job, as its group qualifies it.
@@ -219,6 +220,13 @@ pub(super) const PODMONITORS: &str = "podmonitors.monitoring.coreos.com";
 
 /// The API group of [`PODMONITORS`].
 pub(super) const MONITORING: &str = "monitoring.coreos.com";
+
+/// The gdl operator's `GdlScaler`, as `kubectl get` takes it: listed only
+/// in a cluster that has its CRD.
+pub(super) const SCALERS: &str = "gdlscalers.gdl.dev";
+
+/// The API group of [`SCALERS`].
+pub(super) const GDL: &str = "gdl.dev";
 
 /// The service port on which a hub serves its public routes, and its
 /// control routes, as the render names them.
@@ -302,23 +310,46 @@ impl At<'_> {
         ])
     }
 
-    /// The resources of the Prometheus operator's group the cluster has,
-    /// one name a line.
-    pub(super) fn monitoring(&self) -> Vec<String> {
-        let group = format!("--api-group={MONITORING}");
+    /// The resources of API group `group` the cluster has, one name a
+    /// line.
+    pub(super) fn resources(&self, group: &str) -> Vec<String> {
+        let group = format!("--api-group={group}");
         self.cluster(&["api-resources", &group, "--output=name"])
     }
 
     /// The namespace's objects of [`RESOURCES`] that `selector` selects,
-    /// PodMonitors only when `monitors`, as a JSON list.
-    pub(super) fn list(&self, selector: &str, monitors: bool) -> Vec<String> {
+    /// PodMonitors only when `monitors` and GdlScalers only when
+    /// `scalers`, as a JSON list.
+    pub(super) fn list(&self, selector: &str, monitors: bool, scalers: bool) -> Vec<String> {
         let kinds: Vec<&str> = RESOURCES
             .iter()
             .map(|(_, resource)| *resource)
             .filter(|resource| monitors || *resource != PODMONITORS)
+            .filter(|resource| scalers || *resource != SCALERS)
             .collect();
         let kinds = kinds.join(",");
         self.namespaced(&["get", &kinds, "--selector", selector, "--output", "json"])
+    }
+
+    /// The namespace's `<resource>/<name>`, as JSON with its field
+    /// managers, or nothing when it does not exist.
+    pub(super) fn object(&self, reference: &str) -> Vec<String> {
+        self.namespaced(&[
+            "get",
+            reference,
+            "--ignore-not-found",
+            "--show-managed-fields",
+            "--output",
+            "json",
+        ])
+    }
+
+    /// Apply the objects on stdin, server-side, under the field manager
+    /// `manager`, never forced: an object whose stdin carries its uid and
+    /// resourceVersion is refused with a conflict if either changed.
+    pub(super) fn apply_as(&self, manager: &str) -> Vec<String> {
+        let manager = format!("--field-manager={manager}");
+        self.namespaced(&["apply", "--server-side", &manager, "-f", "-"])
     }
 
     /// The namespace's pods that `selector` selects, as a JSON list.

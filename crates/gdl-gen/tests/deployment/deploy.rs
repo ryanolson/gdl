@@ -88,6 +88,15 @@ struct Kube {
     /// The API group whose discovery fails: `api-resources` then prints
     /// what it found and exits 1, as kubectl does.
     undiscovered: Option<&'static str>,
+    /// The contexts whose cluster has no `GdlScaler` CRD.
+    without_scalers: Vec<&'static str>,
+    /// Each object's managers of `spec.replicas`, by context, kind and
+    /// name, as server-side apply keeps them.
+    owners: BTreeMap<(String, String, String), std::collections::BTreeSet<String>>,
+    /// How many of the next one-field applies with a resourceVersion
+    /// another writer beats: each bumps the object's resourceVersion just
+    /// before it lands, as a scale between the read and the write would.
+    raced: usize,
 }
 
 impl Kube {
@@ -107,7 +116,107 @@ impl Kube {
             job_log: "",
             without_monitors: Vec::new(),
             undiscovered: None,
+            without_scalers: Vec::new(),
+            owners: BTreeMap::new(),
+            raced: 0,
         }
+    }
+
+    /// Whether `context`'s cluster has the `GdlScaler` CRD.
+    fn scalers(&self, context: &str) -> bool {
+        !self.without_scalers.contains(&context)
+    }
+
+    /// The managers of `spec.replicas` of `context`'s object `key`.
+    fn owners_of(&self, context: &str, key: &(String, String)) -> Vec<String> {
+        self.owners
+            .get(&(context.to_string(), key.0.clone(), key.1.clone()))
+            .map(|owners| owners.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Apply `object` under `manager` as server-side apply does for
+    /// `spec.replicas`: an object that carries only the field merges it;
+    /// one that carries more replaces what was held, and a field it leaves
+    /// out stays only while another manager owns it. A Deployment's that
+    /// no one owns falls back to 1. A resourceVersion or a uid that is not
+    /// the held one refuses the apply.
+    fn server_side(
+        &mut self,
+        context: &str,
+        manager: &str,
+        mut object: Value,
+    ) -> Result<Value, gdl_gen::Reply> {
+        let key = key(&object);
+        let held = self
+            .objects
+            .get(context)
+            .and_then(|objects| objects.get(&key))
+            .cloned();
+        if let Some(version) = object["metadata"]["resourceVersion"].as_str() {
+            if held.is_none() {
+                return Err(gdl_gen::Reply::failed(
+                    "Error from server (NotFound): not found",
+                ));
+            }
+            if self.raced > 0 {
+                self.raced -= 1;
+                let objects = self.objects.get_mut(context).expect("held");
+                let bumped = objects.get_mut(&key).expect("held");
+                let next = bumped["metadata"]["resourceVersion"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    + 1;
+                bumped["metadata"]["resourceVersion"] = next.to_string().into();
+                bumped["spec"]["replicas"] = 5.into();
+                let owners = self
+                    .owners
+                    .entry((context.to_string(), key.0.clone(), key.1.clone()))
+                    .or_default();
+                owners.clear();
+                owners.insert("kubectl".into());
+            }
+            let held = self.objects[context][&key].clone();
+            if held["metadata"]["resourceVersion"].as_str() != Some(version)
+                || held["metadata"]["uid"] != object["metadata"]["uid"]
+            {
+                return Err(gdl_gen::Reply::failed(format!(
+                    "error: Operation cannot be fulfilled on {}s \"{}\": the object has been modified; please apply your changes to the latest version and try again",
+                    key.0.to_ascii_lowercase(),
+                    key.1
+                )));
+            }
+        }
+        let owners_key = (context.to_string(), key.0.clone(), key.1.clone());
+        let owners = self.owners.entry(owners_key).or_default();
+        let only_replicas = object["spec"]
+            .as_object()
+            .is_some_and(|spec| spec.len() == 1 && spec.contains_key("replicas"));
+        if only_replicas {
+            let mut merged = held.clone().expect("a one-field apply of a held object");
+            merged["spec"]["replicas"] = object["spec"]["replicas"].clone();
+            owners.insert(manager.to_string());
+            object = merged;
+        } else if object["spec"].get("replicas").is_some() {
+            owners.insert(manager.to_string());
+        } else {
+            owners.remove(manager);
+            let kept = held.as_ref().map(|held| held["spec"]["replicas"].clone());
+            match (owners.is_empty(), kept) {
+                (false, Some(kept)) if !kept.is_null() => object["spec"]["replicas"] = kept,
+                _ if key.0 == "Deployment" => object["spec"]["replicas"] = 1.into(),
+                _ => {}
+            }
+        }
+        let version = held
+            .as_ref()
+            .and_then(|held| held["metadata"]["resourceVersion"].as_str())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        object["metadata"]["resourceVersion"] = version.to_string().into();
+        Ok(self.holds(context, object))
     }
 
     /// Whether `context`'s cluster has the PodMonitor CRD.
@@ -174,6 +283,12 @@ impl gdl_gen::Kube for Kube {
             .map(|i| rest[i + 1].as_str());
         let reply = match (verb, raw) {
             ("auth", _) => gdl_gen::Reply::ok(format!("{}\n", self.can_i)),
+            ("api-resources", _) if rest.contains(&"--api-group=gdl.dev".to_string()) => {
+                match self.scalers(&context) {
+                    true => gdl_gen::Reply::ok("gdlscalers.gdl.dev\n"),
+                    false => gdl_gen::Reply::ok(""),
+                }
+            }
             ("api-resources", _) => {
                 assert!(rest.contains(&"--api-group=monitoring.coreos.com".to_string()));
                 let found = match self.monitors(&context)
@@ -196,6 +311,11 @@ impl gdl_gen::Kube for Kube {
                 }
             }
             ("apply", _) => {
+                let manager = rest
+                    .iter()
+                    .find_map(|a| a.strip_prefix("--field-manager="))
+                    .expect("a field manager")
+                    .to_string();
                 let mut applied = Vec::new();
                 for document in input.unwrap_or_default().split("---\n") {
                     if document.trim().is_empty() {
@@ -207,7 +327,15 @@ impl gdl_gen::Kube for Kube {
                             "error: resource mapping not found for kind \"PodMonitor\"",
                         ));
                     }
-                    applied.push(self.holds(&context, object));
+                    if object["kind"] == "GdlScaler" && !self.scalers(&context) {
+                        return Ok(gdl_gen::Reply::failed(
+                            "error: resource mapping not found for kind \"GdlScaler\"",
+                        ));
+                    }
+                    match self.server_side(&context, &manager, object) {
+                        Ok(held) => applied.push(held),
+                        Err(refused) => return Ok(refused),
+                    }
                 }
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": applied}).to_string())
             }
@@ -319,6 +447,37 @@ impl gdl_gen::Kube for Kube {
                 gdl_gen::Reply::ok(self.local_pods.to_string())
             }
             ("get", None) if rest[1] == "pods" => gdl_gen::Reply::ok(self.pods.to_string()),
+            ("get", None) if rest[1].contains('/') && !rest[1].starts_with("namespace/") => {
+                assert!(rest.contains(&"--ignore-not-found".to_string()), "{args:?}");
+                let (resource, name) = rest[1].split_once('/').expect("resource/name");
+                let kind = match resource {
+                    "deployments.apps" => "Deployment",
+                    "gdlscalers.gdl.dev" => "GdlScaler",
+                    "services" => "Service",
+                    _ => panic!("an unexpected read: {args:?}"),
+                };
+                let key = (kind.to_string(), name.to_string());
+                let held = self
+                    .objects
+                    .get(&context)
+                    .and_then(|objects| objects.get(&key))
+                    .cloned();
+                match held {
+                    None => gdl_gen::Reply::ok(""),
+                    Some(mut held) => {
+                        let fields: Vec<Value> = self
+                            .owners_of(&context, &key)
+                            .into_iter()
+                            .map(|manager| {
+                                json!({"manager": manager, "fieldsV1": {"f:spec": {"f:replicas": {}}}})
+                            })
+                            .chain([json!({"manager": "gdl", "fieldsV1": {"f:metadata": {}}})])
+                            .collect();
+                        held["metadata"]["managedFields"] = fields.into();
+                        gdl_gen::Reply::ok(held.to_string())
+                    }
+                }
+            }
             ("get", None) if rest[1] == "jobs.batch" => {
                 gdl_gen::Reply::ok(json!({"kind": "Job", "status": self.job}).to_string())
             }
@@ -329,6 +488,12 @@ impl gdl_gen::Kube for Kube {
                 if monitors && !self.monitors(&context) {
                     return Ok(gdl_gen::Reply::failed(
                         "error: the server doesn't have a resource type \"podmonitors\"",
+                    ));
+                }
+                let scalers = rest[1].contains("gdlscalers.gdl.dev");
+                if scalers && !self.scalers(&context) {
+                    return Ok(gdl_gen::Reply::failed(
+                        "error: the server doesn't have a resource type \"gdlscalers\"",
                     ));
                 }
                 let selector = rest
@@ -343,6 +508,7 @@ impl gdl_gen::Kube for Kube {
                     .flat_map(|objects| objects.values())
                     .filter(|object| object["kind"] != "Namespace")
                     .filter(|object| monitors || object["kind"] != "PodMonitor")
+                    .filter(|object| scalers || object["kind"] != "GdlScaler")
                     .filter(|object| {
                         selector.split(',').filter(|s| !s.is_empty()).all(|pair| {
                             let labels = &object["metadata"]["labels"];
@@ -474,6 +640,12 @@ fn steps(log: &Log) -> Vec<String> {
                     "can-i"
                 } else if args.contains(&"api-resources".to_string()) {
                     "crds"
+                } else if args.iter().any(|a| {
+                    a == "--field-manager=gdl-scaler" || a == "--field-manager=gdl-bootstrap"
+                }) {
+                    "bootstrap"
+                } else if args.contains(&"--show-managed-fields".to_string()) {
+                    "read"
                 } else if args.contains(&"apply".to_string())
                     && input.contains("\"ServiceAccount\"")
                 {
@@ -581,7 +753,7 @@ fn left(kind: &str, name: &str, pool: &str, segment: &str, home: Option<&str>) -
 }
 
 /// `deploy` checks each cluster's context and asks whether it has the
-/// PodMonitor CRD, builds and pushes, renders, lists each cluster's
+/// PodMonitor and `GdlScaler` CRDs, builds and pushes, renders, lists each cluster's
 /// pools to refuse a move, applies each cluster's base and waits for its
 /// namespace, applies its pools, prunes, and waits for health, in that
 /// order.
@@ -617,7 +789,20 @@ fn a_deploy_runs_its_steps_in_order() {
             "kind-use1:base",
             "kind-use1:wait-namespace",
             "kind-euw1:pools",
+            // use1's segments are scaled by the operator: what exists is
+            // bootstrapped before the apply, the entry Service's pods are
+            // read, and what the apply made is bootstrapped after it.
+            "kind-use1:read",
+            "kind-use1:list",
             "kind-use1:pools",
+            "kind-use1:read",
+            "kind-use1:bootstrap",
+            "kind-use1:read",
+            "kind-use1:bootstrap",
+            "kind-use1:read",
+            "kind-use1:bootstrap",
+            "kind-use1:read",
+            "kind-use1:bootstrap",
             "kind-euw1:list",
             "kind-use1:list",
             "kind-euw1:health",
@@ -917,9 +1102,14 @@ fn a_health_timeout_names_the_pods_and_their_events() {
         !error.contains("global-us-xyz"),
         "a ready pod is not named: {error}"
     );
+    // The listing of an unhealthy pool's pods, not the operator's check of
+    // an entry Service's pods, which names no cluster.
     let pods = commands(&log)
         .into_iter()
-        .find(|args| args.contains(&"pods".to_string()))
+        .find(|args| {
+            args.contains(&"pods".to_string())
+                && args.iter().any(|a| a.contains("gdl.dev/cluster="))
+        })
         .expect("pods were listed");
     assert!(
         pods.contains(&"gdl.dev/fleet=api,gdl.dev/cluster=euw1,gdl.dev/pool=global-eu".to_string()),
@@ -1114,6 +1304,9 @@ mod moved;
 
 #[path = "deploy/monitors.rs"]
 mod monitors;
+
+#[path = "deploy/scalers.rs"]
+mod scalers;
 
 #[path = "deploy/namespace.rs"]
 mod namespace;

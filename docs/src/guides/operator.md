@@ -35,6 +35,20 @@ It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It 
 
 The operator runs as one replica, which its Deployment's `Recreate` strategy stops before it starts another, so two operators never act on one scaler. It does not elect a leader.
 
+## Let `deploy` make the scalers
+
+Set `scaler = true` on a cluster in the fleet file. `cargo gdl deploy` then gives each segment of that cluster a `GdlScaler` named after its Deployment, writes each one's `replicas` once at the segment's quorum, and labels the pods for their entry Service ([The operator](kubernetes.md#the-operator) in the Kubernetes guide). It refuses a cluster that sets `scaler` and has no `GdlScaler` CRD. A cluster without `scaler` keeps its segments at the quorum, with no scaler.
+
+```toml
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+scaler = true
+```
+
 ## The `GdlScaler` resource
 
 Group `gdl.dev`, version `v1alpha1`, namespaced. One scaler per segment of a pool.
@@ -139,3 +153,4 @@ spec:
 ```
 
 Set the HPA's `minReplicas` to at least the segment's quorum. The scaler drains `maxConcurrentDrains` at a time, so a larger step down drains in waves, and the HPA's stabilization window (300 s by default) keeps it from flapping. A drain cannot be undone: a scale-up while a victim drains starts a new pod.
+

@@ -240,17 +240,22 @@ fn every_object_is_labelled_and_selects_its_own_pods() {
         );
         // A selector names its pods by fleet, pool, and segment only: a
         // Deployment's selector cannot change, and a class's name can.
+        // Where the operator scales the segments, an entry Service also
+        // selects only the pods that take connections.
         let selector = match kind.as_str() {
             "Deployment" => &object["spec"]["selector"]["matchLabels"],
             "Service" => &object["spec"]["selector"],
             _ => continue,
         };
         let keys: Vec<&String> = selector.as_object().expect("a selector").keys().collect();
-        assert_eq!(
-            keys,
-            ["gdl.dev/fleet", "gdl.dev/pool", "gdl.dev/segment"],
-            "{kind} {name}"
-        );
+        let scaled = labels["gdl.dev/cluster"] == "use1";
+        let entry = kind == "Service" && labels["gdl.dev/segment"] != "hub";
+        let mut expected = vec!["gdl.dev/fleet", "gdl.dev/pool", "gdl.dev/segment"];
+        if scaled && entry {
+            expected.insert(2, "gdl.dev/routable");
+            assert_eq!(selector["gdl.dev/routable"], "true", "{kind} {name}");
+        }
+        assert_eq!(keys, expected, "{kind} {name}");
         if kind == "Deployment" {
             let template = &object["spec"]["template"]["metadata"]["labels"];
             for (key, value) in selector.as_object().expect("a selector") {
@@ -414,7 +419,16 @@ fn a_pools_pods_are_sized_and_probed_as_its_settings_say() {
         ("model-x-eu-engine", 1, 120),
     ] {
         let object = deployment(name);
-        assert_eq!(object["spec"]["replicas"], replicas, "{name}");
+        // Where the operator scales the segments (use1), the Deployment
+        // leaves `replicas` to the scaler, whose minimum is the quorum.
+        match objects.get(&("GdlScaler".to_string(), name.to_string())) {
+            Some(scaler) => {
+                assert!(object["spec"].get("replicas").is_none(), "{name}");
+                assert_eq!(scaler["spec"]["minReplicas"], replicas, "{name}");
+                assert!(scaler["spec"].get("replicas").is_none(), "{name}");
+            }
+            None => assert_eq!(object["spec"]["replicas"], replicas, "{name}"),
+        }
         let pod = &object["spec"]["template"]["spec"];
         assert_eq!(pod["terminationGracePeriodSeconds"], grace, "{name}");
         let container = container(object);

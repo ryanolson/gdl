@@ -267,7 +267,6 @@
     "namespace": "gdl-api"
   },
   "spec": {
-    "replicas": 2,
     "selector": {
       "matchLabels": {
         "gdl.dev/fleet": "api",
@@ -289,6 +288,7 @@
           "gdl.dev/fleet": "api",
           "gdl.dev/pool": "global-us",
           "gdl.dev/region": "us-east-1",
+          "gdl.dev/routable": "true",
           "gdl.dev/segment": "front"
         }
       },
@@ -450,8 +450,38 @@
     "selector": {
       "gdl.dev/fleet": "api",
       "gdl.dev/pool": "global-us",
+      "gdl.dev/routable": "true",
       "gdl.dev/segment": "front"
     },
     "type": "ClusterIP"
+  }
+}
+---
+{
+  "apiVersion": "gdl.dev/v1alpha1",
+  "kind": "GdlScaler",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "global",
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1",
+      "gdl.dev/segment": "front"
+    },
+    "name": "global-us-front",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "drainBound": "600000ms",
+    "minReplicas": 2,
+    "pool": "global-us",
+    "segment": "front",
+    "service": "global-us-front",
+    "targetRef": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "global-us-front"
+    }
   }
 }

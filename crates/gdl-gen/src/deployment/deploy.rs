@@ -23,8 +23,9 @@ use crate::{Error, Files, Sources, Spec};
 
 mod kube;
 mod live;
+mod scaled;
 
-use kube::{At, CONTROL, JOBS, MONITORING, PODMONITORS, PUBLIC, bounded};
+use kube::{At, CONTROL, GDL, JOBS, MONITORING, PODMONITORS, PUBLIC, SCALERS, bounded};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
 
@@ -144,6 +145,13 @@ pub fn deploy(
                 cluster.name
             )));
         }
+        cluster.find_scalers(kube, how.waits.objects)?;
+        if cluster.scaler && !cluster.scalers {
+            return Err(Error::new(format!(
+                "cluster `{}`: the fleet asks the gdl operator to scale its segments (`[cluster.{}] scaler`), but the cluster has no `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `scaler` out",
+                cluster.name, cluster.name
+            )));
+        }
     }
     say("check: the spec, the fleet, and each cluster's context");
 
@@ -222,7 +230,11 @@ pub fn deploy(
         if pools.trim().is_empty() {
             continue;
         }
-        applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
+        if cluster.scaler {
+            applied.extend(scaled::apply(kube, cluster, pools, &how.waits, say)?);
+        } else {
+            applied.extend(apply(kube, cluster, pools, how.waits.objects)?);
+        }
     }
     say("apply: each cluster's pools");
 
@@ -286,6 +298,7 @@ pub fn down(
     let mut clusters = Clusters::of(&fleet)?;
     for cluster in &mut clusters.0 {
         cluster.find_monitors(kube, waits.objects)?;
+        cluster.find_scalers(kube, waits.objects)?;
     }
     let mut deleted = BTreeMap::new();
     for cluster in &clusters.0 {
@@ -343,6 +356,8 @@ impl Clusters {
                     ),
                     unowned: format!("{FLEET_LABEL}={},!{CLUSTER_LABEL}", label_value(fleet_name)),
                     monitors: false,
+                    scaler: settings.scaler,
+                    scalers: false,
                 })
                 .collect(),
         ))
@@ -371,6 +386,13 @@ struct Cluster {
     /// only then are the fleet's PodMonitors listed, pruned, and deleted,
     /// whatever the fleet asks now, so that one it no longer asks for goes.
     monitors: bool,
+    /// Whether the fleet asks the gdl operator to scale the cluster's
+    /// segments (`[cluster.<name>] scaler`).
+    scaler: bool,
+    /// Whether the cluster has the gdl operator's `GdlScaler` CRD: only
+    /// then are the fleet's scalers listed, pruned, and deleted, so that a
+    /// cluster that no longer asks for them loses them.
+    scalers: bool,
 }
 
 impl Cluster {
@@ -401,30 +423,48 @@ impl Cluster {
     }
 
     /// Ask the cluster, once, whether it has the PodMonitor CRD.
+    fn find_monitors(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
+        self.monitors = self.discover(kube, MONITORING, PODMONITORS, budget)?;
+        Ok(())
+    }
+
+    /// Ask the cluster, once, whether it has the gdl operator's
+    /// `GdlScaler` CRD.
+    fn find_scalers(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
+        self.scalers = self.discover(kube, GDL, SCALERS, budget)?;
+        Ok(())
+    }
+
+    /// Whether the cluster serves `resource` of API group `group`.
     /// `kubectl api-resources` discovers every API group before it filters
     /// by one, and exits 1 when another group's discovery fails, as a
     /// stale metrics server's does, after printing what it found: what it
-    /// printed answers unless the failed groups include the operator's.
-    /// When they do, nothing it printed answers, a PodMonitor listed from
-    /// another of the group's versions included: the run stops.
-    fn find_monitors(&mut self, kube: &mut dyn Kube, budget: Duration) -> Result<(), Error> {
-        let args = bounded(self.at().monitoring(), budget);
+    /// printed answers unless the failed groups include `group`. When they
+    /// do, nothing it printed answers, a resource listed from another of
+    /// the group's versions included: the run stops.
+    fn discover(
+        &self,
+        kube: &mut dyn Kube,
+        group: &str,
+        resource: &str,
+        budget: Duration,
+    ) -> Result<bool, Error> {
+        let args = bounded(self.at().resources(group), budget);
         let reply = kube.run(&args, None)?;
-        let found = reply.stdout.lines().any(|line| line.trim() == PODMONITORS);
+        let found = reply.stdout.lines().any(|line| line.trim() == resource);
         let others_only = reply
             .stderr
             .contains("unable to retrieve the complete list of server APIs")
-            && !reply.stderr.contains(MONITORING);
+            && !reply.stderr.contains(group);
         if !reply.success && !others_only {
             return Err(Error::new(format!(
-                "cluster `{}`: asking whether it has `{PODMONITORS}`: `kubectl {}` failed: {}",
+                "cluster `{}`: asking whether it has `{resource}`: `kubectl {}` failed: {}",
                 self.name,
                 args.join(" "),
                 reply.stderr.trim()
             )));
         }
-        self.monitors = found;
-        Ok(())
+        Ok(found)
     }
 
     /// Create the cluster's namespace where none exists, or add the
@@ -490,7 +530,7 @@ impl Cluster {
     fn live(&self, kube: &mut dyn Kube, budget: Duration) -> Result<Vec<Live>, Error> {
         let reply = run(
             kube,
-            self.at().list(&self.unowned, self.monitors),
+            self.at().list(&self.unowned, self.monitors, self.scalers),
             budget,
             None,
             "listing the fleet's objects that name no cluster",
@@ -512,7 +552,7 @@ impl Cluster {
         }
         let reply = run(
             kube,
-            self.at().list(&self.selector, self.monitors),
+            self.at().list(&self.selector, self.monitors, self.scalers),
             budget,
             None,
             "listing the fleet's objects",

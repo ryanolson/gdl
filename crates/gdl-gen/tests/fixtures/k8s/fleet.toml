@@ -1,6 +1,7 @@
 # The api example's fleet over two clusters: in each, a global pool and
 # its child. Under the relay directory a child's hub reaches its parent's
-# hub by a Service name, which resolves only in its own cluster.
+# hub by a Service name, which resolves only in its own cluster. The gdl
+# operator scales use1's segments, and not euw1's.
 [fleet]
 name = "api"
 
@@ -13,6 +14,7 @@ platform = "linux/amd64"
 service_account_annotations = { "eks.amazonaws.com/role-arn" = "arn:aws:iam::000000000000:role/gdl-api" }
 secrets = { fingerprint = "api-fingerprint" }
 env = { RUST_LOG = "info" }
+scaler = true
 
 [cluster.euw1]
 context = "kind-euw1"

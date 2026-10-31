@@ -16,6 +16,8 @@ kubectl --context kind-use1 apply --server-side -f use1/base.yaml
 kubectl --context kind-use1 apply --server-side -R -f use1/pools
 ```
 
+The gdl operator scales the segments of cluster `use1`: it needs the `GdlScaler` CRD and the operator in namespace `gdl-api` (`gdl-operator manifests`). Each segment has a `GdlScaler` named after its Deployment, and neither carries `replicas`: write each once, under a manager of its own, and only while no other manager owns it, as `cargo gdl deploy` does. For a new segment, `kubectl --context kind-use1 --namespace gdl-api apply --server-side --field-manager=gdl-scaler` the Deployment's `{"spec": {"replicas": <quorum>}}`, and the same under `--field-manager=gdl-bootstrap` for its `GdlScaler`; the quorum is the scaler's `minReplicas`. Its pods carry `gdl.dev/routable`, and its entry Service selects on it: where the Service exists and its pods do not carry the label yet, apply the Service's selector only once the segment's rollout has ended.
+
 Before its pods start, namespace `gdl-api` of cluster `use1` must hold: Secret `api-fingerprint`, with key `fingerprint`. The objects name each Secret and hold no value.
 
 Each image must be in its cluster's registry before its pods start: `cargo gdl images --push` builds and pushes them. A pool's hub's Service is named for the pool, and its segments' objects `<pool>-<segment>`.

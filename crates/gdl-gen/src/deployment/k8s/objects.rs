@@ -54,6 +54,10 @@ const HUB_METRICS: &str = "/v1/ext/gdl-pool/metrics";
 /// Where a segment serves its metrics, on its system port.
 const SEGMENT_METRICS: &str = "/metrics";
 
+/// The label a segment's pods carry under the operator, `true` while they
+/// take connections, which their entry Service selects on.
+pub(in crate::deployment) const ROUTABLE: &str = "gdl.dev/routable";
+
 /// The names of the container ports a hub and a segment serve their
 /// metrics on, which a PodMonitor scrapes by name.
 const PUBLIC: &str = "public";
@@ -69,6 +73,10 @@ pub(super) struct Segment {
     /// How long its pod is let stop, in seconds: its drain bound and a
     /// margin.
     pub(super) grace: u64,
+    /// Its drain bound, in milliseconds.
+    pub(super) drain_ms: u128,
+    /// Its `[system] metrics_prefix`, when its settings set one.
+    pub(super) metrics_prefix: Option<String>,
     pub(super) probes: Probes,
     /// The container ports it publishes.
     pub(super) ports: Vec<Port>,
@@ -316,7 +324,7 @@ impl Pod<'_> {
             port: HUB_PUBLIC_PORT,
             path: HUB_METRICS,
         };
-        Ok(self.deployment(&self.pool.name, "hub", 1, true, checksum, scrape, pod))
+        Ok(self.deployment(&self.pool.name, "hub", Some(1), true, checksum, scrape, pod))
     }
 
     /// The Service of the pool's hub, named for the pool: where its
@@ -397,26 +405,70 @@ impl Pod<'_> {
             port: segment.probes.port,
             path: SEGMENT_METRICS,
         };
-        Ok(self.deployment(
+        // Under the operator, the scaler owns `replicas`, and its pods say
+        // that they take connections, which their entry Service selects
+        // on.
+        let replicas = (!self.cluster.scaler).then(|| self.pool.quorum(&segment.name));
+        let mut deployment = self.deployment(
             &object_name(&self.pool.name, &segment.name),
             &segment.name,
-            self.pool.quorum(&segment.name),
+            replicas,
             false,
             checksum,
             scrape,
             pod,
-        ))
+        );
+        if self.cluster.scaler {
+            deployment["spec"]["template"]["metadata"]["labels"][ROUTABLE] = "true".into();
+        }
+        Ok(deployment)
+    }
+
+    /// The `GdlScaler` of the pool's `segment`, named after its
+    /// Deployment, without `replicas`, which only its bootstrap and then
+    /// its HPA or a person write: the segment's quorum as its minimum, its
+    /// drain bound, its entry Service when it publishes ports, and its
+    /// metrics' prefix.
+    pub(super) fn scaler(&self, segment: &Segment) -> Value {
+        let name = object_name(&self.pool.name, &segment.name);
+        let mut spec = json!({
+            "pool": self.pool.name,
+            "segment": segment.name,
+            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
+            "minReplicas": self.pool.quorum(&segment.name).max(1),
+            "drainBound": format!("{}ms", segment.drain_ms),
+        });
+        if !segment.ports.is_empty() {
+            spec["service"] = name.clone().into();
+        }
+        if let Some(prefix) = &segment.metrics_prefix {
+            spec["metricsPrefix"] = prefix.clone().into();
+        }
+        json!({
+            "apiVersion": "gdl.dev/v1alpha1",
+            "kind": "GdlScaler",
+            "metadata": self.metadata(&name, &segment.name),
+            "spec": spec,
+        })
     }
 
     /// The ClusterIP Service of the ports the pool's `segment` publishes.
+    /// Under the operator it selects only the pods that take connections
+    /// (`gdl.dev/routable: "true"`), so that a pod the operator removes
+    /// leaves its endpoints before it goes. `deploy` leaves that label out
+    /// of a live Service's selector until every ready pod carries it.
     pub(super) fn entry_service(&self, segment: &Segment) -> Value {
+        let mut selector = self.selector(&segment.name);
+        if self.cluster.scaler {
+            selector[ROUTABLE] = "true".into();
+        }
         json!({
             "apiVersion": "v1",
             "kind": "Service",
             "metadata": self.metadata(&object_name(&self.pool.name, &segment.name), &segment.name),
             "spec": {
                 "type": "ClusterIP",
-                "selector": self.selector(&segment.name),
+                "selector": selector,
                 "ports": segment.ports.iter().map(Port::service).collect::<Vec<_>>(),
             },
         })
@@ -425,13 +477,14 @@ impl Pod<'_> {
     /// A Deployment of `replicas` pods of `segment` with `pod` as their
     /// spec, which `checksum`, the pool's ConfigMap's, replaces when the
     /// settings change: a ConfigMap's change alone restarts no pod. Each pod
-    /// says where it serves its metrics (`scrape`).
+    /// says where it serves its metrics (`scrape`). Without `replicas`, the
+    /// Deployment leaves the field to the one manager that owns it.
     #[allow(clippy::too_many_arguments)]
     fn deployment(
         &self,
         name: &str,
         segment: &str,
-        replicas: u32,
+        replicas: Option<u32>,
         recreate: bool,
         checksum: &str,
         scrape: Scrape,
@@ -444,13 +497,15 @@ impl Pod<'_> {
         annotations.insert("prometheus.io/port".into(), scrape.port.to_string().into());
         annotations.insert("prometheus.io/path".into(), scrape.path.into());
         let mut spec = json!({
-            "replicas": replicas,
             "selector": {"matchLabels": self.selector(segment)},
             "template": {
                 "metadata": {"labels": labels, "annotations": annotations},
                 "spec": pod,
             },
         });
+        if let Some(replicas) = replicas {
+            spec["replicas"] = replicas.into();
+        }
         if recreate {
             spec["strategy"] = json!({"type": "Recreate"});
         }
@@ -728,7 +783,7 @@ pub(super) fn base(fleet: &str, name: &str, cluster: &Cluster) -> Vec<Value> {
 
 /// `objects` as a YAML stream: each a JSON document, which YAML reads,
 /// with the characters YAML refuses escaped.
-pub(super) fn stream(objects: &[Value]) -> serde_json::Result<String> {
+pub(in crate::deployment) fn stream(objects: &[Value]) -> serde_json::Result<String> {
     let mut text = String::new();
     for object in objects {
         text.push_str("---\n");
@@ -920,6 +975,13 @@ pub(super) fn readme(fleet: &Fleet) -> String {
             "\n```bash\nkubectl --context {context} apply --server-side -f {cluster}/base.yaml\nkubectl --context {context} apply --server-side -R -f {cluster}/pools\n```\n",
             context = settings.context
         ));
+        if settings.scaler {
+            text.push_str(&format!(
+                "\nThe gdl operator scales the segments of cluster `{cluster}`: it needs the `GdlScaler` CRD and the operator in namespace `{namespace}` (`gdl-operator manifests`). Each segment has a `GdlScaler` named after its Deployment, and neither carries `replicas`: write each once, under a manager of its own, and only while no other manager owns it, as `cargo gdl deploy` does. For a new segment, `kubectl --context {context} --namespace {namespace} apply --server-side --field-manager=gdl-scaler` the Deployment's `{{\"spec\": {{\"replicas\": <quorum>}}}}`, and the same under `--field-manager=gdl-bootstrap` for its `GdlScaler`; the quorum is the scaler's `minReplicas`. Its pods carry `gdl.dev/routable`, and its entry Service selects on it: where the Service exists and its pods do not carry the label yet, apply the Service's selector only once the segment's rollout has ended.\n",
+                namespace = settings.namespace,
+                context = settings.context
+            ));
+        }
         if !settings.secrets.is_empty() {
             let secrets: Vec<String> = settings
                 .secrets

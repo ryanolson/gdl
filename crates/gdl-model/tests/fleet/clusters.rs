@@ -23,6 +23,7 @@ service_account_annotations = { "eks.amazonaws.com/role-arn" = "arn:aws:iam::0:r
 secrets = { sequence-key = "llm-sequence-key" }
 env = { SET_RECORDS_TABLE = "llm-pins-use1" }
 pins_local = true
+scaler = true
 
 [cluster.usw2]
 context = "kind-usw2"
@@ -124,6 +125,7 @@ fn a_fleets_clusters_are_read_whole() {
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             resources: None,
+            scaler: true,
         }
     );
     // Every key but the three that place it is optional.
@@ -143,6 +145,7 @@ fn a_fleets_clusters_are_read_whole() {
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             resources: None,
+            scaler: false,
         }
     );
     let names: Vec<&str> = fleet.clusters().map(|(name, _)| name).collect();

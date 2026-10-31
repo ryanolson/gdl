@@ -55,6 +55,12 @@ pub struct Cluster {
     /// Every pod's CPU and memory requests and limits, or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ClusterResources>,
+    /// Whether the gdl operator scales the cluster's segments: each gets a
+    /// `GdlScaler`, which owns its Deployment's `replicas`, and its pods
+    /// leave their entry Service before they go. The cluster must have the
+    /// operator's CRD.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scaler: bool,
 }
 
 impl Cluster {

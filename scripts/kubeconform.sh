@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Validate the Kubernetes objects that `cargo gdl k8s` writes with kubeconform, against the schemas of a pinned
-# Kubernetes version, and a PodMonitor against the Prometheus operator's CRD schema at a pinned commit, in strict
-# mode, offline. Outside the default suite: the objects' contents are pinned by
+# Kubernetes version, a PodMonitor against the Prometheus operator's CRD schema at a pinned commit, and a GdlScaler
+# against the gdl operator's pinned CRD, in strict mode, offline. Outside the default suite: the objects' contents are pinned by
 # `crates/gdl-gen/tests/deployment/k8s.rs`, and this checks that the Kubernetes API accepts each one.
 #
 #   bash scripts/kubeconform.sh [dir ...]
@@ -59,6 +59,16 @@ if [[ ! -x "${kubeconform}" ]]; then
 fi
 "${kubeconform}" -v
 
+# The gdl operator's GdlScaler: its schema is the CRD the operator pins (crates/gdl-operator/tests/fixtures/crds.yaml),
+# read from the working tree, so it never drifts from the objects it checks.
+command -v jq >/dev/null || { echo "kubeconform.sh: jq is not on the PATH" >&2; exit 1; }
+gdl_schemas="$(mktemp -d)"
+trap 'rm -rf "${gdl_schemas}"' EXIT
+mkdir -p "${gdl_schemas}/gdl.dev"
+sed '/^---$/d' "${root}/crates/gdl-operator/tests/fixtures/crds.yaml" \
+  | jq 'select(.spec.names.kind == "GdlScaler") | .spec.versions[0].schema.openAPIV3Schema' \
+  >"${gdl_schemas}/gdl.dev/gdlscaler_v1alpha1.json"
+
 if [[ $# -eq 0 ]]; then
   set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out"
 fi
@@ -67,4 +77,5 @@ fi
 "${kubeconform}" -strict -summary -kubernetes-version "${KUBERNETES_VERSION}" \
   -schema-location "${tools}/schemas/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json" \
   -schema-location "${crds}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+  -schema-location "${gdl_schemas}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
   "$@"
