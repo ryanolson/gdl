@@ -1540,6 +1540,8 @@ mod drains;
 mod load;
 mod pool;
 mod records;
+#[cfg(test)]
+mod unanswered;
 
 pub(crate) use chooser::ChooserHub;
 pub(crate) use pool::{Parent, PoolDrain};

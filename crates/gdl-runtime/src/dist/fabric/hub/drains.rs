@@ -17,7 +17,7 @@ use crate::dist::pools::{Damping, Follows, Pools};
 
 const DRAIN: Duration = Duration::from_millis(300);
 
-fn spec() -> DeploymentSpec {
+pub(super) fn spec() -> DeploymentSpec {
     let node = |name: &str, role| NodeInfo {
         name: name.into(),
         role,
