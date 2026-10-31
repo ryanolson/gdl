@@ -154,3 +154,18 @@ spec:
 
 Set the HPA's `minReplicas` to at least the segment's quorum. The scaler drains `maxConcurrentDrains` at a time, so a larger step down drains in waves, and the HPA's stabilization window (300 s by default) keeps it from flapping. A drain cannot be undone: a scale-up while a victim drains starts a new pod.
 
+## Prove it on kind
+
+`scripts/kind-operator.sh` runs the scale-down on a kind cluster, outside the default suite. It installs the operator as a cluster's owner would, deploys the api example's fleet with `scaler = true` and `cargo gdl deploy --local`, and runs a load of streamed requests from a pod in the cluster, each on a new connection to the frontend's Service. Each response streams for about 2 s: the engine waits `pace_ms` before each word. It then proves, for the engine and for the frontend, each scaled from 3 to 2:
+
+- the pod the scaler chose is the pod deleted, and the others stay;
+- no request fails, a new connection to the frontend included;
+- no offer reaches the engine's victim after its acknowledgement: its `requests_total` does not rise once its `instance_avoided` reads 1;
+- the frontend's victim leaves its Service's EndpointSlices before its pod is deleted;
+- the removal ends inside the drain bound and the runtime's exit margin.
+
+Last, an HPA on the engine's `GdlScaler` scales it to 3 and back to 2 through `/scale`. kind runs no metrics server, so the HPA moves the scaler by its `minReplicas` and `maxReplicas`, which it applies before it reads any metric.
+
+```bash
+INSTALL_TOOLS=1 bash scripts/kind-operator.sh
+```

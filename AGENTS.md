@@ -37,6 +37,7 @@ bash scripts/build-book.sh                         # the book, with its link and
 bash scripts/dynamodb-local.sh                     # gdl-pools-dynamodb, and gdl-hub with its dynamodb feature, against DynamoDB Local in Docker, outside the default suite (TIMEOUT=<limit>)
 bash scripts/kubeconform.sh                        # the pinned Kubernetes objects against Kubernetes 1.35 schemas, offline (INSTALL_TOOLS=1 fetches kubeconform and the schemas)
 bash scripts/kind-fleet.sh                         # cargo gdl deploy and down on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
+bash scripts/kind-operator.sh                      # the operator's scale-down under load on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
 ```
 
 - Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. nextest prints each test's time and the run's (`Summary`).

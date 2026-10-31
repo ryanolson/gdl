@@ -17,6 +17,7 @@ node --test crates/gdl-web/tests/editor.cjs         # the composer's page, outsi
 bash scripts/kubeconform.sh                          # the pinned Kubernetes objects, outside cargo
 bash scripts/images-local.sh                         # a fleet's images, pushed to a local registry (Docker, network)
 bash scripts/kind-fleet.sh                           # deploy and down on a kind cluster (Docker, network, kubectl, kind)
+bash scripts/kind-operator.sh                        # the operator's scale-down under load on a kind cluster (Docker, network, kubectl, kind)
 ```
 
 The suite runs under [cargo-nextest](https://nexte.st), which runs each test in its own process. Its settings are in `.config/nextest.toml`. `crates/gdl-runtime/tests/allocs.rs` has its own `main`, so that no other thread changes its allocation count. It answers nextest's `--list` with one test, `allocations`. A test that counts the allocations of a velo call warms the sender first. velo's table of response slots allocates once for each of its shards, and the shard count grows with the host's cores (`warm` in `crates/gdl-runtime/src/dist/offers/failover.rs`).
