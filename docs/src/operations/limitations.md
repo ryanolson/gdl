@@ -316,6 +316,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** read `process_cgroup_cpu_usage_seconds_total`, the cgroup's CPU use to the microsecond, which is the precise figure under cgroup v2. Off cgroup v2, read the process's rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
 - **Lifts:** a prometheus release whose collector counts fractions of a second.
 
+### An instance's drain gauges can read 0 while it still holds work
+- **What:** a draining instance can read 0 for `admission_admitted`, `egress_in_use`, and `active_anchors` while it holds a request. A request that a source calls in its own segment passes through neither admission nor egress. `inflight_requests` at the source's endpoint counts it, but falls when the graph's stream ends, before a source that collects the response has answered its caller.
+- **Workaround:** take the drain as complete only when the process exits. Read the gauges as its progress ([Reading a drain](observability.md#reading-a-drain)).
+- **Lifts:** the runtime announcing that an instance has drained, from inside the process.
+
 ### velo's own metrics cost every request, so they are off by default
 - **What:** with `[system] velo_metrics = true`, each request through two segments costs about 5% more instructions ([velo's own metrics](feature-costs.md#velos-own-metrics)). So the setting is off by default, and a segment serves none of velo's families unless it is set.
 - **Why:** velo records these metrics as frames are sent and handler calls run, not when they are scraped.

@@ -136,18 +136,25 @@ dynamo's `request_duration_seconds` spans the whole handler, its stream included
 
 ## Reading a drain
 
-To remove an instance without cutting a request, stop it, then delete it once it holds nothing. `/metrics` shows both on one scrape. Each series is read from what the instance already counts, so a request does no work for them:
+A stopped instance drains: it takes no new work and finishes what it holds ([Segment lifecycle](../concepts/lifecycle.md)). The drain is complete only when the instance's own drain completes: when its process exits. `/metrics` shows the drain's progress, not its end. Each series is read from what the instance already counts, so a request does no work for them:
 
-| Series | Drained when |
+| Series | What it shows |
 |---|---|
 | `instance_phase{phase="draining"}` | 1: the instance was stopped and takes no new work. Draining is final |
-| `admission_admitted` | 0: no root request is held, and every stream the instance sent has been handed on by velo |
-| `egress_in_use` | 0: the instance produces no stream, and velo holds none of its output |
-| `active_anchors` | 0: no stream is still to arrive here |
+| `admission_admitted` | Root requests that entered through a crossing and are still held, each until velo has handed on every stream the instance sent for it |
+| `egress_in_use` | Streams the instance produces, each until velo holds none of its output |
+| `active_anchors` | Streams still to arrive here |
+| `inflight_requests` at the source's endpoint | Requests the instance's source called and has not finished: local work that admission does not see |
+
+These can all read 0 while the instance still holds work, so 0 is not a signal to delete it:
+
+- **A source's own requests** do not pass through admission or egress. A request that a source calls in its own segment, with every node local, opens no anchor either. Only `inflight_requests` at the source's endpoint counts it.
+- **`inflight_requests` falls when the graph's stream ends,** not when the source has answered its caller. A source that collects the whole response before it answers, as the HTTP example's collected answer does, still writes the answer after the gauge reads 0.
+- **A body may hold work that gdl does not see,** such as a connection that has not yet called the graph.
 
 `admission_limit` is the instance's admission limit, so `admission_admitted` over it is the instance's load.
 
-`inflight_requests` is not the drain's signal. A visit leaves it when its response ends here, while the request keeps its admission share and its egress permit until velo's `StreamSender::retired()` resolves: until the consumer has read the stream's last output or left. The instance's own drain waits for the ledger, not the gauge ([Segment lifecycle](../concepts/lifecycle.md)).
+`inflight_requests` falls before the ledger does for a request that crosses: a visit leaves it when its response ends here, while the request keeps its admission share and its egress permit until velo's `StreamSender::retired()` resolves, until the consumer has read the stream's last output or left. The instance's own drain waits for the ledger.
 
 The four counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` is always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
 

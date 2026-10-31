@@ -1,10 +1,13 @@
 //! What one segment instance holds, read when its registry is scraped: the
 //! roots its admission ledger holds and the ledger's limit, the egress
 //! permits its streams hold, and the anchors its velo node keeps open. An
-//! operator that drains the instance before it deletes it reads these to
-//! see it empty. `inflight_requests` cannot say so: a request leaves that
-//! gauge when its response ends, while its root and its permit stay until
-//! velo has handed the response on. Each is read from counts the instance
+//! operator that drains the instance reads these to see the drain's
+//! progress; only the process's exit completes it. A request that a source
+//! calls in its own segment passes through neither admission nor egress,
+//! so these do not count it (docs/src/operations/observability.md).
+//! `inflight_requests` falls before them for a request that crosses: it
+//! leaves that gauge when its response ends, while its root and its permit
+//! stay until velo has handed the response on. Each is read from counts the instance
 //! keeps anyway, so a request does nothing for them.
 
 use std::sync::Weak;

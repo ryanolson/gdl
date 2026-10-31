@@ -41,7 +41,7 @@ A series appears at zero once the registry is served, as the segment starts to s
 
 ## An instance's phase and what it holds
 
-These have no `dynamo_endpoint`, and each is read at each scrape from what the instance already counts. [Reading a drain](../operations/observability.md#reading-a-drain) says how an operator reads them.
+These have no `dynamo_endpoint`, and each is read at each scrape from what the instance already counts. [Reading a drain](../operations/observability.md#reading-a-drain) says how to read them: they show a drain's progress, and only the process's exit completes it.
 
 | Name | Type | Extra labels | Meaning |
 |---|---|---|---|

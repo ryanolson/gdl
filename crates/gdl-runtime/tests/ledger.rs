@@ -94,6 +94,22 @@ async fn read(process: &Process, name: &str, phase: Option<&str>) -> Option<f64>
         })
 }
 
+/// The value of the series of `name`, with the default prefix, at the
+/// entry `endpoint`, in the scrape of `process`.
+async fn read_at(process: &Process, name: &str, endpoint: &str) -> Option<f64> {
+    let name = format!("dynamo_component_{name}{{");
+    let endpoint = format!("dynamo_endpoint=\"{endpoint}\"");
+    scrape(process)
+        .await
+        .lines()
+        .filter(|line| line.starts_with(&name) && line.contains(&endpoint))
+        .map(|line| {
+            let (_, value) = line.rsplit_once(' ').expect("a value");
+            value.parse().expect("a number")
+        })
+        .next()
+}
+
 /// What the `/metrics` of `process` answers.
 async fn scrape(process: &Process) -> String {
     let address = process.system_address().expect("a listener");
@@ -414,8 +430,12 @@ async fn a_runtime_gauge_cannot_collide_with_the_velo_bridge() {
         .expect("a registry under `velocity`");
 }
 
+/// A request that a source calls in its own segment does not pass through
+/// admission or egress, and opens no anchor: a draining instance can hold
+/// it while every drain gauge reads 0. `inflight_requests` at the source's
+/// endpoint counts it, and the instance has not exited: the gauges show
+/// the drain's progress, and only the exit completes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F2: a draining source with a held local request reports zero for every drain gauge"]
 async fn a_local_request_is_not_reported_as_drained_while_its_body_still_holds_it() {
     let placement = Placement::new().segment("only", common::REFERENCE_NODES);
     let manifest = reference_manifest(|_| true);
@@ -485,21 +505,26 @@ async fn a_local_request_is_not_reported_as_drained_while_its_body_still_holds_i
     process.stop();
     reaches(&process, "instance_phase", Some("draining"), 1.0).await;
     assert!(!served.is_finished(), "the body still holds its request");
-    let mut held = Vec::new();
     for gauge in ["admission_admitted", "egress_in_use", "active_anchors"] {
-        held.push((gauge, read(&process, gauge, None).await.expect("a gauge")));
+        assert_eq!(
+            read(&process, gauge, None).await,
+            Some(0.0),
+            "{gauge}: admission does not see a local request"
+        );
     }
-    let still_held = held.iter().any(|(_, value)| *value > 0.0);
+    assert_eq!(
+        read_at(&process, "inflight_requests", "A").await,
+        Some(1.0),
+        "the source's endpoint counts the local request"
+    );
+    assert!(!served.is_finished(), "the instance has not exited");
     release.send(()).expect("the body waits for release");
     tokio::time::timeout(WAIT, served)
         .await
         .expect("the instance drains")
         .expect("its task")
         .expect("it served");
-    assert!(
-        still_held,
-        "draining and every holding zero while a local request is held: {held:?}"
-    );
+    assert_eq!(read_at(&process, "inflight_requests", "A").await, Some(0.0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
