@@ -491,6 +491,59 @@ fn a_pools_property_version_is_its_listings() {
     assert_eq!(read(), Some(7), "from a snapshot's follow");
 }
 
+/// A relay restart must not replace a link's newer list with its stored list.
+#[test]
+#[ignore = "F1: a relay resnapshot and reinstalled follow expose a lower property-list version"]
+fn a_relay_restart_keeps_the_version_learned_before_its_record() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let read = || {
+        node.read("model_x", |pools| {
+            let version = pools.pool(M1)?.properties_version();
+            let state = listed(pools.properties(), "qwen-32b").first()?.1.state();
+            Some((version, state))
+        })
+        .flatten()
+    };
+    let now = Instant::now();
+    let stored = listing(
+        PoolCondition::Live,
+        &[("qwen-32b", PropertyState::Starting)],
+        3,
+    );
+    let linked = listing(
+        PoolCondition::Live,
+        &[("qwen-32b", PropertyState::Ready)],
+        5,
+    );
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
+    follows.apply(listed_event(M1, Some(linked.clone())), now);
+    let seen = read().expect("followed before the relay restarts");
+    assert_eq!(seen, (5, PropertyState::Ready));
+
+    // The restarted relay reads the stored list before its follow opens.
+    // Its snapshot still lists the pool, with no follow installed yet.
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(listed_event(M1, Some(stored)), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(read(), None, "the new follow is not installed yet");
+    assert_eq!(sets(&node, "qwen-32b").1.len(), 1, "the pool stays listed");
+
+    // Relay::install sends Follow with no listing, then Listed with the
+    // link's list. Each event publishes a table of its own in the runtime.
+    follows.take(follow(M1, 1, PoolState::Ready), now);
+    let during = read().expect("the restarted relay installed its follow");
+    follows.take(listed_event(M1, Some(linked)), now);
+    assert_eq!(read(), Some(seen), "the next listing catches up");
+    assert_eq!(
+        during,
+        seen,
+        "the still-listed pool went backwards when the relay reinstalled its follow: before={seen:?}, during={during:?}, after={:?}",
+        read(),
+    );
+}
+
 /// Looking a property up in the index allocates nothing.
 #[test]
 fn a_property_lookup_allocates_nothing() {
