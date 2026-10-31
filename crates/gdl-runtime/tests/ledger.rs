@@ -238,6 +238,7 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     reaches(&side, "egress_in_use", None, 0.0).await;
     reaches(&front, "admission_admitted", None, 0.0).await;
     reaches(&front, "active_anchors", None, 0.0).await;
+    reaches(&side, "active_anchors", None, 0.0).await;
     assert_eq!(
         read(&side, "instance_phase", Some("draining")).await,
         Some(1.0)
