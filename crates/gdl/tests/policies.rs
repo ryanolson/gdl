@@ -733,6 +733,9 @@ fn a_gone_mark_is_of_one_hubs_follow() {
     assert!(gone.is_gone(&pool(5)));
     assert!(!gone.is_gone(&pool(6)), "a later hub's follow");
     let later = Damped::EMPTY.with_gone(&pool(6));
-    assert!(later.holds_gone_since(&pool(5)), "the earlier hub's is older");
+    assert!(
+        later.holds_gone_since(&pool(5)),
+        "the earlier hub's is older"
+    );
     assert!(!gone.holds_gone_since(&pool(6)));
 }

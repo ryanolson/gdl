@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use super::super::Pools;
 use super::{M1, M2, dropped, follow, follower};
 
+mod guard;
 mod hub;
 
 /// What `pool`'s hub lists of it, from its hub of `epoch`.
@@ -746,5 +747,49 @@ fn a_rewatch_never_reuses_an_earlier_hubs_acceptance_epoch() {
     assert!(
         failures.is_empty(),
         "a new acceptance must use its recovered row's hub epoch (own, generation, row epoch, accepted_at): {failures:?}"
+    );
+}
+
+/// A pool read from its own watch keeps the row that watch shows until the
+/// watch says it was dropped; the relay's watch, which is not ordered with
+/// it, can unlist the pool first, as it does for a withdrawal. The row must
+/// not then be read with no evidence: a policy would read a follow of a hub
+/// with no word of that hub.
+#[test]
+#[ignore = "guard class 3, held for the marshal's ruling: the relay's unlisting forgets a pool's evidence while its own watch still shows its row"]
+fn a_row_on_a_pools_own_watch_keeps_its_evidence_when_the_relay_unlists_it() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    let entry = super::peer();
+    follows.take(followed(M1, 1, 5), now);
+    follows.take(super::exposed(M1, 1, &entry), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a watch of its own");
+    for event in [
+        followed(M1, 1, 5),
+        super::exposed(M1, 1, &entry),
+        FollowEvent::Synced { listed: true },
+    ] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    // The relay's watch says the pool dropped and unlisted it; the own
+    // watch has yet to say so.
+    follows.take(dropped(M1, 1), now);
+    follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1).1, Some(5), "the own watch's row");
+    assert_eq!(
+        evidence(&pools, M1).0.map(|evidence| evidence.epoch()),
+        Some(5),
+        "a row read with no evidence of its hub"
     );
 }
