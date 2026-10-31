@@ -40,12 +40,13 @@ async fn listed(services: &velo_hub::client::HubServices, id: InstanceId) -> Lis
 }
 
 /// One of two engines retires, and the hub stores its `retired` but
-/// answers each time only after the engine has stopped waiting. From the
-/// moment the hub holds `retired`, it must not list the engine as one to
-/// route to again while it drains, and a front that joins meanwhile must
-/// not take it into its roster.
+/// answers only after the engine has stopped waiting. From the moment the
+/// hub holds `retired`, it must not list the engine as one to route to
+/// again while it drains, and a front that joins meanwhile must not take
+/// it into its roster. The engine still leaves within its bound. The test
+/// runs about 8 s: the drain's bound, 3 s, and the leave, which it holds
+/// for its 5 s limit so that the listing after the drain can be read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "unanswered retirement: each attempt that times out drops its guard, which withdraws the `retired` the hub took, so the hub lists the engine ready and not retired, and a joiner routes to it"]
 async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
     let placement = two();
     let hub = hub(&placement).await;
@@ -135,18 +136,14 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
     control.answer();
     recorder.abort();
 
-    let avoided = front_segment
-        .promised_to_avoid(first_id)
-        .map(|at| at.saturating_duration_since(stopped).as_millis());
+    let avoided = front_segment.promised_to_avoid(first_id);
     let after = first_segment.served().forwards - forwards;
     let (joiner_process, joiner_launch, joined, joiner_routes) =
         joiner.expect("a front joined during the drain");
-    eprintln!(
-        "first retired taken at {taken:?}; engine left at {exited:?}\n\
-         hub's `retired` watch: {:#?}\n\
-         hub's listing of the engine (ms after its stop): {samples:#?}\n\
-         the front promised to avoid it at {avoided:?} ms; forwards after the stop: {after}\n\
-         a front that joined at {joined} ms routes to it: {joiner_routes}",
+    let report = format!(
+        "the hub took the first `retired` {taken:?} after the stop; the engine left after \
+         {exited:?}\nthe hub's `retired` watch: {:#?}\nthe hub's listing of the engine, ms \
+         after its stop: {samples:#?}",
         seen.lock().expect("lock"),
     );
 
@@ -158,16 +155,24 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
     left(front_served).await;
     left(second_served).await;
 
-    let usable: Vec<_> = samples
-        .iter()
-        .filter(|(_, listed)| listed.usable())
-        .collect();
     assert!(
-        usable.is_empty(),
-        "the hub listed the retiring engine as one to route to: {usable:?}"
+        samples.iter().all(|(_, listed)| !listed.usable()),
+        "the hub listed the retiring engine as one to route to\n{report}"
     );
     assert!(
         !joiner_routes,
-        "a front that joined while the engine drained routes to it"
+        "a front that joined {joined} ms after the stop routes to the retiring engine\n{report}"
+    );
+    // The front that served already avoids it, and sends it nothing more.
+    assert!(
+        avoided.is_some(),
+        "the front never promised to avoid it\n{report}"
+    );
+    assert_eq!(after, 0, "the front sent it work after its stop\n{report}");
+    // Still bounded: the drain, and the leave's 5 s limit, which the test
+    // held; then slack for a loaded host.
+    assert!(
+        exited < DRAIN + Duration::from_secs(5 + 3),
+        "the engine took {exited:?} to leave\n{report}"
     );
 }

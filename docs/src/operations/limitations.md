@@ -126,6 +126,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Stop while starting:** a SIGINT or SIGTERM while the nodes load or the instances meet ends the launch with "stopped while starting" and exit code 1. A stop that arrives at the barrier, after the instance said it serves, drains first.
 - **Exit overrun:** the exit can pass the bound by up to about eight and a half seconds. velo's shutdown can run up to one second past the bound to finish requests, and up to two and a half more to close its connections. Leaving a hub that does not answer takes up to five. The Compose bundle's 30 s margin covers this. `cargo gdl compose` fixes each segment's `stop_grace_period` from the drain bound in its settings, so a `GDL_RUNTIME__DRAIN_MS` set at run time does not change it. Set the bound in the settings and generate the bundle again. See [Segment lifecycle](../concepts/lifecycle.md) and [Deploy with Docker Compose](../guides/compose-deploy.md).
 
+### A hub that does not answer the retirement spends the drain's bound
+- **What:** an instance retries its `retired` announcement until its drain's bound. If the hub does not answer it, the waits after it (for its senders or sources, and for its own requests) end at once, and a request still in flight is cut. The serving body still runs during that time.
+- **Not affected:** what the hub lists. An announcement the hub took and did not answer is kept, so the hub lists the instance as retired. See [Segment lifecycle](../concepts/lifecycle.md).
+
 ### Output velo still holds can be cut when a drain is cut short
 - **What:** an instance that exits before velo hands on its finished streams loses that output. The consumer reads a broken stream.
 - **When:** the drain ends on its bound or on a second stop. A drain that waits for its ledger does not cut output: each stream holds its request's admission share and egress permit until velo reports it retired (`StreamSender::retired()`), so an empty ledger means the output has left the node.

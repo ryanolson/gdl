@@ -294,4 +294,23 @@ mod tests {
         set.apply(Watched::Ready, ServiceEvent::Added(a));
         assert_eq!(set.usable, 0, "retired before it was ready");
     }
+
+    /// An instance whose `retired` stays, while its `ready` does too (its
+    /// hub did not answer the withdrawal), is never counted again: not on a
+    /// repeated `ready`, nor when the watches start again from scratch.
+    #[test]
+    fn a_retiree_still_ready_is_not_counted_again() {
+        let (a, b) = (InstanceId::new_v4(), InstanceId::new_v4());
+        let mut set = Usable::default();
+        set.apply(Watched::Retired, ServiceEvent::Initial(Vec::new()));
+        set.apply(Watched::Ready, ServiceEvent::Initial(vec![a, b]));
+        assert_eq!(set.usable, 2);
+        set.apply(Watched::Retired, ServiceEvent::Added(a));
+        assert_eq!(set.usable, 1, "a retired");
+        set.apply(Watched::Ready, ServiceEvent::Added(a));
+        assert_eq!(set.usable, 1, "a's `ready` repeated");
+        set.apply(Watched::Retired, ServiceEvent::Initial(vec![a]));
+        set.apply(Watched::Ready, ServiceEvent::Initial(vec![a, b]));
+        assert_eq!(set.usable, 1, "a, watched again");
+    }
 }

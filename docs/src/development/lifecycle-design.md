@@ -78,6 +78,14 @@ A retiring instance X announces `retired` first, then withdraws `ready` and `loa
 
 **Rejected: withdraw, then announce.** Between the two steps, a member that was itself retiring was in neither set, so X did not wait for it. That member could still route to X while it drained.
 
+## An announcement the hub does not answer is kept
+
+X retries `retired` until its drain's bound. An attempt that the hub has not answered is never given up. X waits for it again rather than sending a second one. Past the bound, X keeps the attempt until it leaves the hub. When the hub answers late, the registration lands and stays. The same holds for `ready`, `drained`, and `detach`.
+
+**Why:** the hub may have stored `retired` and only answered late. velo-hub's client withdraws a service whose registration is dropped. So an attempt dropped at its timeout withdrew a `retired` that the hub held. The hub then listed X as `ready` and `loaded` and not retired: a joiner took X into its roster, and a pool counted X as usable again. Peers that were already following were not affected, since they keep the retirement once they have seen it. `crates/gdl-runtime/tests/rosters/unanswered.rs` holds the case.
+
+**Rejected: do not drain while the hub lists X as ready, and retry the retirement.** X already retries until its drain's bound, so this either stops at the bound with the same listing, or holds X past its bound.
+
 ## The acknowledgement is a promise
 
 A peer marks a retired instance acknowledged, and publishes a routing table without it, before it sends the acknowledgement. The mark stays even if the send fails.

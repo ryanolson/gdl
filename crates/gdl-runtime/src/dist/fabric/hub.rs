@@ -32,6 +32,9 @@ pub struct HubSession {
     drained: Option<HubServiceRegistration>,
     detached: Option<HubServiceRegistration>,
     retired: Option<HubServiceRegistration>,
+    /// Announcements the hub did not answer by their deadline, still
+    /// waiting for its answer. See [`HubSession::persist`].
+    unanswered: Vec<(SegmentPhase, Announcing)>,
     lease: tokio::task::JoinHandle<()>,
     lost: watch::Receiver<Option<String>>,
     /// Follows membership into the roster, from just before `loaded`.
@@ -171,6 +174,7 @@ impl HubSession {
             drained: None,
             detached: None,
             retired: None,
+            unanswered: Vec::new(),
             lease,
             lost,
             follower: None,
@@ -315,7 +319,8 @@ impl HubSession {
     /// `loaded`, each answered by the hub before the next: a
     /// roster read afterwards leaves it out, and a peer that follows
     /// membership afterwards never adds it. Bounded by `deadline`; what the
-    /// hub did not answer is left to the drain's bound.
+    /// hub did not answer is left to the drain's bound, and a `retired` it
+    /// did not answer stays announced ([`HubSession::persist`]).
     pub(crate) async fn retire(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.retired.is_none() {
             self.retired = Some(self.persist(SegmentPhase::Retired, deadline).await?);
@@ -426,25 +431,61 @@ impl HubSession {
 
     /// Announce `phase`, retried until `deadline`: an announcement the hub
     /// refused is gone with its registration guard, and peers would wait
-    /// for it until their bound. Each attempt is bounded, since a hub can
+    /// for it until their bound. Each check is bounded, since a hub can
     /// stop answering without closing its connections.
+    ///
+    /// An announcement the hub has not answered is never given up: the hub
+    /// may have taken it, and dropping it would withdraw it. It is waited
+    /// for again rather than sent again, since the client's request for it
+    /// is still open, and a second one would wait behind it. Past
+    /// `deadline` the session keeps it, so that what the hub took stays,
+    /// for a retired instance most of all: a hub that lists it without
+    /// `retired` sends joiners and pools to an instance that is leaving.
     async fn persist(
-        &self,
+        &mut self,
         phase: SegmentPhase,
         deadline: tokio::time::Instant,
     ) -> Result<HubServiceRegistration> {
+        let mut announcing = match self.unanswered.iter().position(|(p, _)| *p == phase) {
+            Some(at) => self.unanswered.swap_remove(at).1,
+            None => self.announcing(phase),
+        };
         loop {
             // A lost lease took the registration this would belong to.
             self.lost()?;
-            let attempt = (tokio::time::Instant::now() + POLL * 10).min(deadline);
-            match self.announce(phase, attempt).await {
-                Ok(registration) => return Ok(registration),
-                Err(error) if tokio::time::Instant::now() + POLL >= deadline => {
-                    return Err(error);
-                }
-                Err(_) => tokio::time::sleep(POLL).await,
+            let check = (tokio::time::Instant::now() + POLL * 10).min(deadline);
+            let refused = match tokio::time::timeout_at(check, &mut announcing).await {
+                Ok(Ok(Ok(registration))) => return Ok(registration),
+                Ok(Ok(Err(error))) => Some(failure(error)),
+                Ok(Err(error)) => Some(failure(error)),
+                Err(_) => None,
+            };
+            if tokio::time::Instant::now() + POLL >= deadline {
+                return Err(match refused {
+                    Some(error) => error,
+                    None => {
+                        self.unanswered.push((phase, announcing));
+                        failure("the hub did not answer in time")
+                    }
+                });
+            }
+            // An answer, but not the registration: the guard is gone with
+            // it, so the next attempt registers again.
+            if refused.is_some() {
+                tokio::time::sleep(POLL).await;
+                announcing = self.announcing(phase);
             }
         }
+    }
+
+    /// One attempt to announce `phase`, run apart from its caller, so that
+    /// a caller that stops waiting does not withdraw what the hub took.
+    fn announcing(&self, phase: SegmentPhase) -> Announcing {
+        let (client, name) = (
+            self.client.clone(),
+            segment_service(&self.registration.segment, phase),
+        );
+        tokio::spawn(async move { client.register_service(&name).await })
     }
 
     /// Announce that this instance, of a draining pool, will send no more
@@ -609,11 +650,18 @@ impl HubSession {
 impl Drop for HubSession {
     fn drop(&mut self) {
         self.lease.abort();
+        for (_, announcing) in &self.unanswered {
+            announcing.abort();
+        }
         if let Some(follower) = &self.follower {
             follower.abort();
         }
     }
 }
+
+/// An announcement on its way to the hub: its registration guard, once the
+/// hub has answered.
+type Announcing = tokio::task::JoinHandle<std::result::Result<HubServiceRegistration, ClientError>>;
 
 /// The members of the deployment `registration` belongs to, from the hub.
 /// The questions a wait beside an instance's drain asks its hub, held
