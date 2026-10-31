@@ -52,7 +52,7 @@ mod timing;
 mod tests;
 
 pub use feed::PoolWatch;
-pub use health::{PoolHealth, RequiredHealth, SegmentHealth};
+pub use health::{PoolHealth, RequiredHealth, SegmentHealth, Waiting};
 pub use timing::{PoolTiming, RefusedWatches};
 
 /// Whether a pool can take work, judged and published by the pool's own

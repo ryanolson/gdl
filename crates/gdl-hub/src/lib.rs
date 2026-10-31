@@ -60,7 +60,7 @@ pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
 pub use pool::{
     PoolError, PoolHealth, PoolReadiness, PoolTiming, PoolWatch, RefusedWatches, RequiredHealth,
-    SegmentHealth,
+    SegmentHealth, Waiting,
 };
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};

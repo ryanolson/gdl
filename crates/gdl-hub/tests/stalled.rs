@@ -62,7 +62,6 @@ impl PoolDirectory for Unreadable {
 /// publisher waiting. Quorum alone must not report that hub as healthy.
 /// The pool watch takes its five-second startup bound before refusing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F7: health answers 200 while the first write is refused and its rereads fail indefinitely"]
 async fn health_exposes_a_publisher_stuck_reading_its_last_write() {
     let inner = MemoryDirectory::new();
     let last = Withdrawal {

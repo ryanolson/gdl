@@ -118,6 +118,7 @@ impl<D: PoolDirectory> Publisher<D> {
         writer
             .publish(directory, (feed, stored), &self.record, &written)
             .await;
+        self.settled(&writer);
         let mut cadence = self.cadence.clone();
         let mut heartbeat = beat(self.heartbeat);
         let ended = self.drain.ended();
@@ -149,6 +150,7 @@ impl<D: PoolDirectory> Publisher<D> {
             writer
                 .publish(directory, (feed, stored), &self.record, &written)
                 .await;
+            self.settled(&writer);
         }
         if state != PoolState::Draining {
             let last = Written {
@@ -174,6 +176,15 @@ impl<D: PoolDirectory> Publisher<D> {
 }
 
 impl<D: PoolDirectory> Publisher<D> {
+    /// Once `writer` has stored a write, the hub waits for the directory no
+    /// longer: its health says so until then.
+    fn settled(&self, writer: &Writer) {
+        if writer.stored {
+            self.health
+                .send_if_modified(|health| health.waiting.take().is_some());
+        }
+    }
+
     /// Whether the directory holds no record of the pool, read as the
     /// pool's last record is read when the hub starts: from its parent's
     /// hub under the `relay` backend, else from the directory. A read that

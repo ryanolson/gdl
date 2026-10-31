@@ -39,6 +39,22 @@ pub struct PoolHealth {
     /// reader of an earlier hub reads it as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub withdrawn: bool,
+    /// What the hub waits for before it can serve its pool: `directory`
+    /// until it has read the pool's last write and stored its own first
+    /// write, which is when its watch begins. The endpoint answers 503
+    /// meanwhile. Absent from the body once it waits for nothing, and from
+    /// a hub of an earlier build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+}
+
+/// What a pool's hub waits for, in [`PoolHealth::waiting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Waiting {
+    /// The pool directory: the hub has not yet read the pool's last write,
+    /// or stored its first write, as when the directory fails its reads.
+    Directory,
 }
 
 impl PoolHealth {
@@ -58,6 +74,7 @@ impl PoolHealth {
                 .collect(),
             missing: requires.keys().cloned().collect(),
             withdrawn: false,
+            waiting: Some(Waiting::Directory),
         }
     }
 
@@ -81,11 +98,13 @@ impl PoolHealth {
         true
     }
 
-    /// Whether the endpoint answers 200: the pool is `ready`, and each
-    /// required class has as many ready, followed pools as it requires.
+    /// Whether the endpoint answers 200: the pool is `ready`, its hub waits
+    /// for nothing, and each required class has as many ready, followed
+    /// pools as it requires.
     pub fn healthy(&self) -> bool {
         // The counts, not `missing`, which a body of an earlier hub lacks.
         self.state == PoolState::Ready
+            && self.waiting.is_none()
             && self
                 .requires
                 .values()
