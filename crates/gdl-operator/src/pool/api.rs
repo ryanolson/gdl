@@ -2,7 +2,11 @@
 //! [`KubePools`] is the real one, and the tests give a fake. Each read
 //! returns only what the controller decides on.
 
+use std::collections::BTreeSet;
+
+use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{
     ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
     Preconditions, PropagationPolicy,
@@ -120,6 +124,8 @@ pub struct Live {
     /// Whether [`MANAGER`] owns fields of it by an update, as a create
     /// leaves them: they are moved to its apply before the next one.
     pub created: bool,
+    /// For a Deployment, its selector's labels, `key=value,...`.
+    pub selector: Option<String>,
 }
 
 impl Live {
@@ -145,7 +151,18 @@ impl Live {
             .into_iter()
             .flatten()
             .any(|entry| entry["manager"] == MANAGER && entry["operation"] == "Update");
+        let selector = object["spec"]["selector"]["matchLabels"]
+            .as_object()
+            .map(|labels| {
+                labels
+                    .iter()
+                    .map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or_default()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|_| kind == Kind::Deployment);
         Some(Self {
+            selector,
             created,
             kind,
             name: text(&metadata["name"])?,
@@ -241,8 +258,9 @@ pub trait Pools {
         uid: &str,
     ) -> impl Future<Output = Result<(), Refused>> + Send;
 
-    /// The pods `selector` selects.
-    fn pods(&self, selector: &str) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
+    /// The pods of `deployment`: those its ReplicaSets control, each
+    /// ReplicaSet one that `deployment` controls, by uid.
+    fn pods(&self, deployment: &Live) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
 
     /// Whether the cluster serves PodMonitors, as asked once when the
     /// operator started.
@@ -256,6 +274,7 @@ pub struct KubePools {
     namespace: String,
     pools: Api<GdlPool>,
     pods: Api<Pod>,
+    sets: Api<ReplicaSet>,
     recorder: Recorder,
     monitors: bool,
 }
@@ -271,6 +290,7 @@ impl KubePools {
         Self {
             pools: Api::namespaced(client.clone(), namespace),
             pods: Api::namespaced(client.clone(), namespace),
+            sets: Api::namespaced(client.clone(), namespace),
             recorder: Recorder::new(client.clone(), reporter),
             namespace: namespace.to_string(),
             monitors,
@@ -522,13 +542,40 @@ impl Pools for KubePools {
         }
     }
 
-    async fn pods(&self, selector: &str) -> Result<Vec<PodView>, String> {
+    async fn pods(&self, deployment: &Live) -> Result<Vec<PodView>, String> {
+        let Some(selector) = &deployment.selector else {
+            return Ok(Vec::new());
+        };
+        let listed = ListParams::default().labels(selector);
+        let controller = |metadata: &ObjectMeta| {
+            metadata
+                .owner_references
+                .iter()
+                .flatten()
+                .find(|owner| owner.controller == Some(true))
+                .map(|owner| owner.uid.clone())
+        };
+        let sets: BTreeSet<String> = self
+            .sets
+            .list(&listed)
+            .await
+            .map_err(|e| format!("ReplicaSets of `{}`: {e}", deployment.name))?
+            .items
+            .iter()
+            .filter(|set| controller(&set.metadata).as_deref() == Some(deployment.uid.as_str()))
+            .filter_map(|set| set.metadata.uid.clone())
+            .collect();
         let pods = self
             .pods
-            .list(&ListParams::default().labels(selector))
+            .list(&listed)
             .await
-            .map_err(|e| format!("pods `{selector}`: {e}"))?;
-        Ok(pods.items.iter().filter_map(PodView::of).collect())
+            .map_err(|e| format!("pods of `{}`: {e}", deployment.name))?;
+        Ok(pods
+            .items
+            .iter()
+            .filter(|pod| controller(&pod.metadata).is_some_and(|uid| sets.contains(&uid)))
+            .filter_map(PodView::of)
+            .collect())
     }
 
     fn monitors(&self) -> bool {
@@ -539,24 +586,3 @@ impl Pools for KubePools {
 #[cfg(test)]
 #[path = "api/tests.rs"]
 mod tests;
-
-/// The labels by which a pool's pods are listed: pool `pool`'s, of fleet
-/// `fleet` in its cluster `cluster`, and, for `hub`, its hub's alone or
-/// its segments' alone. The cluster keeps apart another cluster's pool of
-/// the same name, where two clusters' contexts reach one namespace.
-pub fn pod_selector(fleet: &str, cluster: &str, pool: &str, hub: Option<bool>) -> String {
-    let mut selector: Vec<String> = [
-        ("gdl.dev/fleet", fleet),
-        ("gdl.dev/cluster", cluster),
-        ("gdl.dev/pool", pool),
-    ]
-    .into_iter()
-    .map(|(key, value)| format!("{key}={}", gdl_k8s::label_value(value)))
-    .collect();
-    match hub {
-        Some(true) => selector.push("gdl.dev/segment=hub".into()),
-        Some(false) => selector.push("gdl.dev/segment!=hub".into()),
-        None => {}
-    }
-    selector.join(",")
-}

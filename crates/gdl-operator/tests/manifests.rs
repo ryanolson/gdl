@@ -140,6 +140,7 @@ fn the_role_grants_only_what_the_operator_uses() {
             ("/configmaps", write),
             ("/persistentvolumeclaims", write),
             ("/pods", "get,list,watch,patch"),
+            ("apps/replicasets", "get,list,watch"),
             ("discovery.k8s.io/endpointslices", "get,list,watch"),
             ("monitoring.coreos.com/podmonitors", write),
             ("events.k8s.io/events", "create,patch"),

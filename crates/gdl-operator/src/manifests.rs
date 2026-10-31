@@ -64,6 +64,7 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("apps", &["deployments"], &write),
             rule("", &["services", "configmaps", "persistentvolumeclaims"], &write),
             rule("", &["pods"], &["get", "list", "watch", "patch"]),
+            rule("apps", &["replicasets"], &read),
             rule("discovery.k8s.io", &["endpointslices"], &read),
             rule("monitoring.coreos.com", &["podmonitors"], &write),
             rule("events.k8s.io", &["events"], &["create", "patch"]),

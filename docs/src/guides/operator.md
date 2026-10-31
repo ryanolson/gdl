@@ -33,6 +33,7 @@ The Role grants only what the operator uses, in its namespace:
 | `apps` `deployments` | get, list, watch, create, update, patch, delete | A pool's Deployments, and each one's `replicas` |
 | core `services`, `configmaps`, `persistentvolumeclaims` | get, list, watch, create, update, patch, delete | A pool's other objects |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
+| `apps` `replicasets` | get, list, watch | Find a pool's pods by what its Deployments own, at its stop |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
 | `monitoring.coreos.com` `podmonitors` | get, list, watch, create, update, patch, delete | A pool's PodMonitor, where the cluster runs the Prometheus operator |
 | `events.k8s.io` `events` | create, patch | Say what it held, refused, or could not prove |

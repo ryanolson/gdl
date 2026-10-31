@@ -176,7 +176,7 @@ impl crate::pool::hub::Hubs for Hubs {
 }
 
 #[tokio::test]
-#[ignore = "F2: deleting a held fleet rename searches the new labels and stops the hub before existing segment pods"]
+#[ignore = "needs an isolated kind cluster: set GDL_REVIEW_KUBECONFIG"]
 async fn a_held_fleet_rename_keeps_the_hub_until_its_segment_pods_stop() {
     let client = client().await;
     let space = namespace(&client, "gdl-review-p1-labels-").await;
@@ -257,8 +257,13 @@ async fn a_held_fleet_rename_keeps_the_hub_until_its_segment_pods_stop() {
         held.status.as_ref().expect("status").held,
         held.metadata.generation
     );
+    let engine = api
+        .get(Kind::Deployment, "p-engine")
+        .await
+        .expect("read")
+        .expect("the engine");
     assert!(
-        !api.pods(&pod_selector("api", "use1", "p", Some(false)))
+        !api.pods(&engine)
             .await
             .expect("original segment pods")
             .is_empty()

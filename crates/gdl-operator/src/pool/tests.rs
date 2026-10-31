@@ -379,17 +379,16 @@ impl Pools for Fake {
         Ok(())
     }
 
-    async fn pods(&self, selector: &str) -> Result<Vec<PodView>, String> {
+    async fn pods(&self, deployment: &Live) -> Result<Vec<PodView>, String> {
         let state = self.state();
-        let wanted = |segment: &str| {
-            if selector.contains("gdl.dev/segment=hub") {
-                segment == "hub"
-            } else if selector.contains("gdl.dev/segment!=hub") {
-                segment != "hub"
-            } else {
-                true
-            }
-        };
+        // A Deployment's pods are its segment's, while the Deployment is
+        // the one of its name: the hub's for `p`.
+        let segment = deployment.name.strip_prefix("p-").unwrap_or("hub");
+        let current = state
+            .objects
+            .get(&(Kind::Deployment, deployment.name.clone()))
+            .is_some_and(|held| held.live.uid == deployment.uid);
+        let wanted = |s: &str| current && s == segment;
         let mut pods = Vec::new();
         for (segment, count) in state.pods.iter().filter(|(s, _)| wanted(s)) {
             for n in 0..*count {

@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::api::{Kind, Live, Pools, pod_selector};
+use super::api::{Kind, Live, Pools};
 use super::apply::POOL_MANAGER;
 use super::hub::{Drain, Hubs};
 use super::reconcile::{BLOCKED, BUSY, Run, Stop, millis};
@@ -108,13 +108,7 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     StopStep::Release
                 }
                 StopStep::Release => {
-                    let selector = pod_selector(
-                        &self.pool.spec.pool.fleet,
-                        &self.pool.spec.pool.cluster,
-                        &self.name,
-                        None,
-                    );
-                    if !self.cx.pools.pods(&selector).await?.is_empty() {
+                    if self.running(&owned, |_| true).await? {
                         // A pod of the pool runs again: the stop starts its
                         // segments over.
                         StopStep::Segments
@@ -282,13 +276,9 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 _ => {}
             }
         }
-        let selector = pod_selector(
-            &self.pool.spec.pool.fleet,
-            &self.pool.spec.pool.cluster,
-            &self.name,
-            Some(false),
-        );
-        Ok(!self.cx.pools.pods(&selector).await?.is_empty())
+        let pool = self.name.clone();
+        self.running(owned, |deployment| deployment.name != pool)
+            .await
     }
 
     /// The hub step: scale the hub's Deployment to 0. Whether its pod still
@@ -310,13 +300,24 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 )
                 .await?;
         }
-        let selector = pod_selector(
-            &self.pool.spec.pool.fleet,
-            &self.pool.spec.pool.cluster,
-            &self.name,
-            Some(true),
-        );
-        Ok(!self.cx.pools.pods(&selector).await?.is_empty())
+        let pool = self.name.clone();
+        self.running(owned, |deployment| deployment.name == pool)
+            .await
+    }
+}
+
+impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
+    /// Whether a pod runs of a Deployment among `owned` that `which`
+    /// picks: a pod its ReplicaSets control, by uid. The labels of the
+    /// pool's current spec are never read, since a held generation has not
+    /// changed the objects' own.
+    async fn running(&self, owned: &[Live], which: impl Fn(&Live) -> bool) -> Result<bool, Stop> {
+        for deployment in owned.iter().filter(|o| o.kind == Kind::Deployment) {
+            if which(deployment) && !self.cx.pools.pods(deployment).await?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
