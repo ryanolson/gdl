@@ -221,3 +221,47 @@ fn a_withheld_follow_behind_a_later_hub_reads_unknown_when_unlisted() {
     follows.take(listed(M1, None), now);
     assert_eq!(evidence(&pools, M1), (None, Some(5)));
 }
+
+/// Found by the guard (seed 1246): a pool's own watch runs ahead of the
+/// relay's watch, which then delivers an earlier unlisting and the hub's
+/// stale listing of the shown follow's hub, made before that hub drained.
+/// Once the unlisting forgets the later hub's evidence, nothing drops the
+/// stale listing, and the pool reads that hub live and not draining though
+/// the follower heard it drain.
+#[test]
+#[ignore = "guard seed 1246, held for the marshal's ruling: an unlisting that forgets a later hub's evidence lets a stale listing of the shown follow's hub hide its drain"]
+fn a_stale_listing_after_an_unlisting_does_not_hide_a_heard_drain() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("an own watch");
+    let mut snapshot = follow_at(M1, 1, 5, PoolState::Draining);
+    if let FollowEvent::Follow { listing: of, .. } = &mut snapshot {
+        *of = Some(listing(6));
+    }
+    for event in [snapshot, FollowEvent::Synced { listed: true }] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    // The relay lags: an earlier unlisting, then hub 5's listing from
+    // before it drained.
+    follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1), (None, Some(5)), "unknown");
+    follows.take(listed(M1, Some(5)), now);
+    let (after, row) = evidence(&pools, M1);
+    assert_eq!(row, Some(5));
+    assert!(
+        after.is_none_or(|after| after.is_draining()),
+        "hub 5 was heard to drain: {after:?}"
+    );
+}
