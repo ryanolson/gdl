@@ -175,10 +175,10 @@ impl PoolWatcher {
 
     /// The last write the parent pool's hub at `hub`, `host:port`, holds
     /// for the pool `pool` of `class` ([`crate::HELD_ROUTE`]): its record,
-    /// or the tombstone of its withdrawal, or `None` when it holds neither,
-    /// as a parent of an earlier build says of a tombstone too. A parent
-    /// that cannot be reached, or answers anything else, is
-    /// [`DirectoryError::Unavailable`].
+    /// or the tombstone of its withdrawal, or `None` when it answers a bare
+    /// 404, as a parent of an earlier build does for a tombstone too. A
+    /// parent that cannot be reached, or answers anything else, a body that
+    /// does not parse among it, is [`DirectoryError::Unavailable`].
     pub async fn held(
         &self,
         hub: &str,
@@ -199,11 +199,18 @@ impl PoolWatcher {
             .await
             .map_err(|e| unavailable(&e))?;
         match response.status() {
-            // A tombstone is in the body; a parent of an earlier build
-            // sends none, which reads as no write held.
+            // A tombstone is in the body. Only a bare 404, as a parent of an
+            // earlier build sends, says that no write is held: a body that
+            // does not parse is unknown, never nothing, since a hub that
+            // read it as nothing would number below the tombstone.
             reqwest::StatusCode::NOT_FOUND => {
                 let body = response.bytes().await.map_err(|e| unavailable(&e))?;
-                Ok(serde_json::from_slice(&body).ok().map(LastWrite::Withdrawn))
+                if body.iter().all(u8::is_ascii_whitespace) {
+                    return Ok(None);
+                }
+                serde_json::from_slice(&body)
+                    .map(|withdrawal| Some(LastWrite::Withdrawn(withdrawal)))
+                    .map_err(|e| unavailable(&e))
             }
             status if status.is_success() => {
                 let body = response.bytes().await.map_err(|e| unavailable(&e))?;

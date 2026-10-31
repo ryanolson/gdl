@@ -30,7 +30,6 @@ use velo_hub::Hub;
 use velo_hub::axum::{Json, Router, routing::post};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F3: a malformed nonempty 404 tombstone is silently read as no retained write"]
 async fn a_malformed_withdrawal_response_is_an_error() {
     use velo_hub::axum::{extract::Path, http::StatusCode, routing::get};
 
