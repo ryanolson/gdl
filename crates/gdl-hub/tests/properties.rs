@@ -1045,3 +1045,23 @@ async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
         "the drain was answered={answered} before the revocation was stored"
     );
 }
+
+/// The pool's health says the presence its last stored record says, so
+/// that whoever scales the pool can see a hub that restarted serving and
+/// tell it again; a hub of an earlier build leaves it out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pool_health_says_the_stored_presence() {
+    let directory = MemoryDirectory::new();
+    let (hub, _pool) = hub_of(pool(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    records.next().await;
+    let presence = |body: String| {
+        serde_json::from_str::<serde_json::Value>(&body).expect("JSON")["presence"].clone()
+    };
+    let (_, body) = common::get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert_eq!(presence(body), "serving");
+    assert_eq!(set_presence(&hub, Presence::ScaledToZero).await, 204);
+    let (_, body) = common::get(&hub, "/v1/ext/gdl-pool/health").await;
+    assert_eq!(presence(body), "scaled_to_zero");
+    hub.shutdown().await.expect("the hub stops");
+}

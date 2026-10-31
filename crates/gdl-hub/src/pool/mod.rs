@@ -1093,13 +1093,25 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 "/health",
                 get(move || {
                     let health = self.health.borrow().clone();
+                    // The presence of the record last stored, once there
+                    // is one: a hub that restarted says `serving` until it
+                    // is told otherwise, which whoever scales the pool
+                    // reads here.
+                    let presence = self.stored.borrow().as_ref().map(|stored| stored.presence);
                     async move {
                         let status = if health.healthy() {
                             StatusCode::OK
                         } else {
                             StatusCode::SERVICE_UNAVAILABLE
                         };
-                        (status, Json(health))
+                        let mut body = serde_json::to_value(&health).unwrap_or_default();
+                        if let (Some(presence), Some(fields)) = (presence, body.as_object_mut()) {
+                            fields.insert(
+                                "presence".into(),
+                                serde_json::to_value(presence).unwrap_or_default(),
+                            );
+                        }
+                        (status, Json(body))
                     }
                 }),
             )

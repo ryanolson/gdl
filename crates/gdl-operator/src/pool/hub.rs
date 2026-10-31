@@ -27,6 +27,23 @@ pub struct Health {
     /// Whether its drained record is withdrawn.
     #[serde(default)]
     pub withdrawn: bool,
+    /// The presence its last stored record says: `serving` or
+    /// `scaled_to_zero`. Absent before its first record, and from a hub of
+    /// an earlier build.
+    #[serde(default)]
+    pub presence: Option<String>,
+}
+
+impl Health {
+    /// The presence its last stored record says, when it says one this
+    /// operator knows.
+    pub fn presence(&self) -> Option<gdl_k8s::Presence> {
+        match self.presence.as_deref()? {
+            "serving" => Some(gdl_k8s::Presence::Serving),
+            "scaled_to_zero" => Some(gdl_k8s::Presence::ScaledToZero),
+            _ => None,
+        }
+    }
 }
 
 /// One segment's count, as the hub's health says it.
@@ -166,6 +183,26 @@ pub fn presence_body(presence: gdl_k8s::Presence) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The presence the hub's health says reads as the hub's own type
+    /// encodes it.
+    #[test]
+    fn the_health_presence_is_the_hubs() {
+        for (theirs, ours) in [
+            (gdl_pools::Presence::Serving, gdl_k8s::Presence::Serving),
+            (
+                gdl_pools::Presence::ScaledToZero,
+                gdl_k8s::Presence::ScaledToZero,
+            ),
+        ] {
+            let body = serde_json::json!({"state": "ready", "presence": theirs});
+            let health: Health = serde_json::from_value(body).expect("a health body");
+            assert_eq!(health.presence(), Some(ours));
+        }
+        let earlier: Health = serde_json::from_value(serde_json::json!({"state": "ready"}))
+            .expect("a health body of an earlier hub");
+        assert_eq!(earlier.presence(), None);
+    }
 
     /// What the operator posts reads as the hub's own request, for each
     /// presence.

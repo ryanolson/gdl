@@ -263,6 +263,7 @@ async fn the_pool_health_endpoint_answers_ready_only_once_the_pool_is() {
         body,
         serde_json::json!({
             "state": "unavailable",
+            "presence": "serving",
             "segments": {
                 "d": { "usable": 0, "quorum": 2 },
                 "f": { "usable": 0, "quorum": 1 },

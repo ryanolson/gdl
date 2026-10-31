@@ -326,7 +326,6 @@ async fn a_held_generation_names_the_hub_image() {
 }
 
 #[tokio::test]
-#[ignore = "F4: a restarted hub publishes serving while cached status prevents restoring scaledToZero"]
 async fn a_restarted_hub_receives_the_pools_scaled_to_zero_presence() {
     let fake = running(true).await;
     fake.state().pool.as_mut().expect("pool").spec.pool.presence = gdl_k8s::Presence::ScaledToZero;

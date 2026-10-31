@@ -424,6 +424,13 @@ impl Hubs for Fake {
             state: if state.drained { "draining" } else { "ready" }.into(),
             segments: BTreeMap::new(),
             withdrawn: state.drained && state.withdraws,
+            presence: Some(
+                match state.hub_presence {
+                    gdl_k8s::Presence::Serving => "serving",
+                    gdl_k8s::Presence::ScaledToZero => "scaled_to_zero",
+                }
+                .into(),
+            ),
         })
     }
 

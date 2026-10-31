@@ -221,8 +221,14 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
     /// go. Whether it must be looked at again.
     async fn presence(&mut self, applied: &[Live]) -> Result<bool, Stop> {
         let asked = self.pool.spec.pool.presence;
-        let said = self.status.presence.unwrap_or_default();
-        if said != asked {
+        // What the hub's last stored record says, not what this status
+        // last said: a hub that restarted says `serving` again. A hub that
+        // has stored no record yet, or does not answer, starts serving.
+        let reported = match self.cx.hubs.health(&self.name).await {
+            Ok(health) => health.presence(),
+            Err(_) => None,
+        };
+        if reported.unwrap_or_default() != asked {
             match self.cx.hubs.presence(&self.name, asked).await {
                 Ok(()) => self.status.presence = Some(asked),
                 Err(error) => {
