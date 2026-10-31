@@ -873,6 +873,31 @@ impl Runtime {
             .ok_or_else(|| Error::new(ErrorKind::Transport, "the segment has shut down"))
     }
 
+    /// Refuse the segment when a selector it sends through needs a property
+    /// kind that the class of a crossing it routes does not supply
+    /// ([`gdl::Selector::NEEDS`]), as `cargo gdl check` holds a bound one: a
+    /// selector registered in code is checked only here. Only the crossings
+    /// this segment sends are its own.
+    pub(crate) fn check_selector_needs(&self, manifest: &gdl_model::Manifest) -> Result<()> {
+        let consumers: Vec<gdl_model::PropertyConsumer> = self
+            .selectors
+            .iter()
+            .flat_map(|(name, selector)| {
+                gdl_model::selector_consumers(&self.layout, name, selector.needs())
+            })
+            .filter(|consumer| consumer.segment.as_deref() == Some(self.segment.as_str()))
+            .collect();
+        if consumers.is_empty() {
+            return Ok(());
+        }
+        let unmet = gdl_model::property_supply(manifest, &self.layout, &consumers);
+        if unmet.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::Placement, unmet.join("\n")))
+        }
+    }
+
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
     /// `Runtime::new` resolved, reading the head in `encoding`, its edge's;

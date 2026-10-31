@@ -280,6 +280,17 @@ impl FollowedPools {
         self.source.set(source).is_ok()
     }
 
+    /// A handle on the same pools whose kinds register only `needs`, for
+    /// `reader`: a selector, held to its `NEEDS` as a pool policy is
+    /// ([`PropertyKinds::limited`]).
+    #[doc(hidden)]
+    pub fn limited(&self, needs: &'static [&'static str], reader: impl Into<Arc<str>>) -> Self {
+        Self {
+            source: Arc::clone(&self.source),
+            kinds: self.kinds.limited(needs, reader),
+        }
+    }
+
     /// Run `build` with this handle as the one [`FollowedPools::current`]
     /// gives.
     #[doc(hidden)]

@@ -344,8 +344,12 @@ impl Builder {
             .map_err(|e| format!("building selector {name}: registering its metrics: {e}"))?;
         let table = self.tables.get(name).cloned().unwrap_or_default();
         let providers = Figment::from(Serialized::defaults(table));
+        // Held to its `NEEDS`, as a pool policy is, not to its segment's
+        // nodes' needs: what `cargo gdl check` holds its crossings' class
+        // to is what it reads.
         let built = self
             .followed
+            .limited(S::NEEDS, format!("selector `{name}`"))
             .scope(self.records.scope(self.properties.scope(build_node::<S>(
                 &providers,
                 &GraphConfig::new(),

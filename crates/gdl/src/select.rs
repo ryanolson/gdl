@@ -68,6 +68,15 @@ pub trait Selector: Send + Sync + 'static {
     /// segment starts, or [`Encoded`], the head's bytes on any edge.
     type Head: Head;
 
+    /// The property kinds the selector reads from the pools its segment
+    /// follows ([`crate::FollowedPools`]), by name: what `cargo gdl check`
+    /// reads of the selector's source, to check that each pool of the class
+    /// of each crossing it routes supplies them. Written as a list of
+    /// string literals, `&["model"]`, which the source reader reads without
+    /// compiling the crate. A kind the selector registers while it is built
+    /// must be among them. By default, none.
+    const NEEDS: &'static [&'static str] = &[];
+
     /// Choose one of `instances` for `request`.
     fn select<'a>(
         &'a self,
@@ -480,6 +489,9 @@ pub trait Erased: Send + Sync + 'static {
     /// Whether it reads the head's fields by name, which a positional
     /// encoding cannot give.
     fn by_name(&self) -> bool;
+
+    /// The property kinds it reads: its [`Selector::NEEDS`].
+    fn needs(&self) -> &'static [&'static str];
 }
 
 /// A typed selector behind [`Erased`].
@@ -513,6 +525,10 @@ impl<S: Selector> Erased for Typed<S> {
 
     fn by_name(&self) -> bool {
         <S::Head as sealed::Sealed>::by_name()
+    }
+
+    fn needs(&self) -> &'static [&'static str] {
+        S::NEEDS
     }
 }
 

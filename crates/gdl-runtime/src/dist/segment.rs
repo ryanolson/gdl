@@ -57,6 +57,7 @@ impl Deployment {
             config.reservation_renew_interval,
         );
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config, meters)?;
+        rt.check_selector_needs(manifest)?;
         Ok(Self { rt: Arc::new(rt) })
     }
 

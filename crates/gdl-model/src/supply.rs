@@ -1,8 +1,9 @@
-use crate::{Layout, Manifest};
+use crate::{Layout, Manifest, RequestRouter};
 
 /// A reader of a property kind that the graph does not draw: an entry
 /// adapter, which runs in the segment that hosts the source, or a pool
-/// policy, which runs wherever its class is chosen. Graph nodes say what
+/// policy, which runs wherever its class is chosen, or a selector, which
+/// runs in the segment that sends the crossings it routes. Graph nodes say what
 /// they need in the graph ([`crate::PropertyNeed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyConsumer {
@@ -17,6 +18,40 @@ pub struct PropertyConsumer {
     /// read them; `None` for a pool policy, which runs only where its
     /// class is chosen.
     pub segment: Option<String>,
+}
+
+/// The readers that selector `name`, which needs the kinds `needs`, is in
+/// `layout`: for each crossing it routes, and each kind, one that reads the
+/// kind from the class of the segment the crossing enters, and runs in the
+/// segment that sends it. Each reader once. A placement without classes
+/// has no class to read from: each kind is read from class `""` then, which
+/// [`property_supply`] refuses, since no segment follows pools.
+pub fn selector_consumers(layout: &Layout, name: &str, needs: &[&str]) -> Vec<PropertyConsumer> {
+    let mut consumers: Vec<PropertyConsumer> = Vec::new();
+    for (hop, plan) in layout.hops().iter().enumerate() {
+        for pair in plan.forward_runs.windows(2) {
+            let routed = matches!(
+                layout.request_router(hop, pair[1].start),
+                RequestRouter::Selector(router) if router == name
+            );
+            if !routed {
+                continue;
+            }
+            let class = layout.class_of(&pair[1].segment).unwrap_or_default();
+            for kind in needs {
+                let consumer = PropertyConsumer {
+                    consumer: format!("selector `{name}`"),
+                    kind: (*kind).to_string(),
+                    class: class.to_string(),
+                    segment: Some(pair[0].segment.clone()),
+                };
+                if !consumers.contains(&consumer) {
+                    consumers.push(consumer);
+                }
+            }
+        }
+    }
+    consumers
 }
 
 /// What is wrong with how `layout` supplies the property kinds its graph's
@@ -82,6 +117,11 @@ fn unsupplied(manifest: &Manifest, layout: &Layout, consumer: &PropertyConsumer)
         segment,
     } = consumer;
     let needs = format!("{consumer} needs property `{kind}` from class `{class}`");
+    if class.is_empty() {
+        return Some(format!(
+            "{consumer} needs property `{kind}`, but the placement has no classes, so its segment follows no pools"
+        ));
+    }
     let Some(property) = manifest.property(kind) else {
         return Some(format!(
             "{consumer} needs property kind `{kind}`, which the graph does not declare"

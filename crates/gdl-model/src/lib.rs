@@ -58,7 +58,7 @@ pub use problem::{Origin, Problem, Problems, read_toml};
 pub use properties::{
     EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind, read_each,
 };
-pub use supply::{PropertyConsumer, property_supply};
+pub use supply::{PropertyConsumer, property_supply, selector_consumers};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

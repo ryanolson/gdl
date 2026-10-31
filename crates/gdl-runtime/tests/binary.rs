@@ -318,6 +318,70 @@ impl<const SETS: u8> gdl_runtime::SegmentBinary for Providing<SETS> {
     }
 }
 
+/// A selector that, in its build, reads property kind `shard` of the
+/// pools its segment follows. It names `shard` in its `NEEDS` when `NEEDS`
+/// is true.
+struct ReadsShard<const NEEDS: bool>;
+
+impl<const NEEDS: bool> gdl::Build for ReadsShard<NEEDS> {
+    type Config = toml::Table;
+    type Metrics = ();
+    async fn build(_config: toml::Table, (): ()) -> gdl::Result<Self> {
+        gdl::FollowedPools::current().register(&gdl::PropertyKind::<Shard>::new("shard"))?;
+        Ok(Self)
+    }
+}
+
+impl<const NEEDS: bool> gdl::Selector for ReadsShard<NEEDS> {
+    type Head = gdl::Encoded;
+    const NEEDS: &'static [&'static str] = if NEEDS { &["shard"] } else { &[] };
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, gdl::Encoded>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+
+/// [`Providing`] that also builds [`ReadsShard`] as selector `reads`.
+struct ReadingSelector<const NEEDS: bool>;
+
+impl<const NEEDS: bool> gdl_runtime::SegmentBinary for ReadingSelector<NEEDS> {
+    const PACKAGE: &'static str = "shards-only";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = Settings;
+    type Hosts = Serve<0>;
+
+    async fn build(settings: Settings, builder: &Builder) -> Result<Serve<0>, Failure> {
+        let serve = Providing::<0>::build(settings, builder).await?;
+        builder.selector::<ReadsShard<NEEDS>>("reads").await?;
+        Ok(serve)
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        Providing::<0>::deployment()
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        shards::property_types()
+    }
+
+    const ENTRY_NEEDS: &'static [&'static str] = &[];
+
+    fn start(
+        serve: Serve<0>,
+        node: gdl_runtime::velo::Velo,
+        roster: &Roster,
+        runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        Providing::<0>::start(serve, node, roster, runtime)
+    }
+}
+
 /// Tables with no class in them.
 struct NoPools;
 
@@ -548,6 +612,27 @@ async fn a_segment_binary_runs_its_lifecycle() {
     a_selector_table_nothing_registers_is_refused().await;
     a_registered_selector_is_built_with_its_settings_and_metrics().await;
     a_provider_sets_only_its_declared_kind_and_type().await;
+    a_selector_reads_only_the_kinds_its_needs_name().await;
+}
+
+/// A selector reads the kinds its `NEEDS` names, as a pool policy does,
+/// though no node of its segment needs them: what `cargo gdl check` holds
+/// its crossing's class to is what it reads. A kind its `NEEDS` does not
+/// name fails its build, naming the selector and the kind.
+async fn a_selector_reads_only_the_kinds_its_needs_name() {
+    let (_dir, file) = settings("");
+    run::<ReadingSelector<true>>(std::slice::from_ref(&file))
+        .await
+        .expect("a kind its NEEDS names");
+    let error = run::<ReadingSelector<false>>(&[file])
+        .await
+        .expect_err("a kind its NEEDS does not name");
+    assert!(
+        error.contains(
+            "selector `reads` reads property kind `shard`, which its `NEEDS` does not name"
+        ),
+        "{error}"
+    );
 }
 
 /// The graph declares `shard` with keys of type `Shard`, and `Serve`
