@@ -147,11 +147,11 @@ async fn a_withdrawal_replaced_before_its_reply_is_not_proof() {
 
 /// A hub whose record was lost, after a hub whose clock ran an hour ahead,
 /// numbers its epoch from its own clock. Restarting it moves past the
-/// record it holds, but not past the lost hub's epoch, until its clock
-/// does: a drain that hub left can then hold, whatever the clocks now
-/// say (operations/limitations.md).
+/// record it holds, by one millisecond, but not past the lost hub's epoch:
+/// a drain that hub left can then hold, whatever the clocks now say
+/// (operations/limitations.md).
 #[tokio::test]
-async fn a_restart_stays_below_a_lost_epoch_until_the_clock_passes_it() {
+async fn a_restart_stays_below_a_lost_epoch() {
     let now = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -204,5 +204,60 @@ async fn a_restart_stays_below_a_lost_epoch_until_the_clock_passes_it() {
         restarted.epoch < predecessor_epoch,
         "a restart passes the lost epoch only once its clock does: restart={}, predecessor={predecessor_epoch}",
         restarted.epoch
+    );
+}
+
+/// Each restart that reads the record of the hub before it takes at least
+/// the epoch after that record's, even while its clock is behind. So
+/// restarts pass a lost epoch one millisecond each, before the clock does
+/// when they come faster than one a millisecond (operations/limitations.md).
+#[tokio::test]
+async fn restarts_pass_a_lost_epoch_before_the_clock_does() {
+    let directory = MemoryDirectory::new();
+    let record: PoolRecord = serde_json::from_value(serde_json::json!({
+        "name": "model-a",
+        "class": "model",
+        "region": "us",
+        "home": "global",
+        "contract": 1,
+        "placement": 1,
+        "state": "ready",
+        "epoch": 0,
+        "seq": 0,
+        "hub": "127.0.0.1:1337"
+    }))
+    .expect("a pool record");
+    let (mut current, held) = Writer::start(&directory, None, &record, WAIT).await;
+    assert!(held.expect("the directory answers").is_none());
+    // The lost hub's clock was 10 s ahead. 10,001 restarts take well under
+    // a second, so the clock stays behind it.
+    let lost_epoch = current.epoch + 10_000;
+    for _ in 0..=10_000 {
+        directory
+            .publish(PoolRecord {
+                epoch: current.epoch,
+                seq: 1,
+                ..record.clone()
+            })
+            .await
+            .expect("the current hub stores its record");
+        let (next, held) = Writer::start(&directory, None, &record, WAIT).await;
+        let held = held.expect("the directory answers").expect("a record");
+        assert_eq!(held.epoch, current.epoch);
+        assert!(next.epoch > current.epoch, "each restart moves on");
+        current = next;
+    }
+    let clock = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock follows the epoch")
+            .as_millis(),
+    )
+    .expect("the time fits");
+    assert!(clock < lost_epoch, "the clock has not caught up");
+    assert!(
+        current.epoch > lost_epoch,
+        "the restarts passed the lost epoch: lost={lost_epoch}, restarted={}",
+        current.epoch
     );
 }
