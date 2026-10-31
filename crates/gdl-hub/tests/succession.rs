@@ -327,3 +327,66 @@ async fn a_successor_with_a_failed_reread_stays_past_the_retained_tombstone() {
     };
     assert_past(&last, &successor_over(&directory, through, &last).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F4: a predecessor crossing a block after the startup read can outrun the successor's first list"]
+async fn a_successor_stays_past_a_predecessor_that_writes_during_its_start() {
+    #[derive(Clone)]
+    struct Racing {
+        inner: MemoryDirectory,
+        latest: PoolRecord,
+        raced: Arc<AtomicBool>,
+    }
+
+    impl PoolDirectory for Racing {
+        type Watch = MemoryWatch;
+
+        async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+            if !self.raced.swap(true, Ordering::SeqCst) {
+                self.inner.publish(self.latest.clone()).await?;
+            }
+            self.inner.publish(record).await
+        }
+
+        async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+            self.inner.withdraw(withdrawal).await
+        }
+
+        async fn last_write(
+            &self,
+            class: &str,
+            pool: &str,
+        ) -> Result<Option<LastWrite>, DirectoryError> {
+            self.inner.last_write(class, pool).await
+        }
+
+        fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+            self.inner.watch(class, from)
+        }
+    }
+
+    let epoch = millis_now() + 600_000;
+    let last = predecessor(epoch, floor(epoch + 1) - 1);
+    let latest = PoolRecord {
+        seq: last.seq + 1,
+        properties_version: last.properties_version + 2,
+        ..last.clone()
+    };
+    let directory = MemoryDirectory::new();
+    seed(&directory, &last, Left::Listed).await;
+    let through = Racing {
+        inner: directory.clone(),
+        latest: latest.clone(),
+        raced: Arc::default(),
+    };
+    let mut records = Records::new(&directory);
+    let (hub, _pool) = hub_of(settings(), through, timing()).await;
+    let next = loop {
+        let record = records.next().await;
+        if record.epoch > epoch {
+            break record;
+        }
+    };
+    hub.shutdown().await.expect("the hub stops");
+    assert_past(&latest, &next);
+}
