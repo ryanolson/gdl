@@ -580,6 +580,9 @@ impl<H> ProcessConfig<H> {
                         *public_port,
                         &self.runtime,
                     )?;
+                    if let Some(drain) = &pool_drain {
+                        process.health.avoided_by(drain.avoided());
+                    }
                 }
                 // The membership leaves to the chooser what its tables hold.
                 let pools = chooser.as_ref().map(|(pools, _)| pools.clone());
@@ -1505,6 +1508,10 @@ impl Process {
         registry.register(Box::new(uptime)).map_err(metrics_error)?;
         let phases = system::Phases::new(&self.health).map_err(metrics_error)?;
         registry.register(Box::new(phases)).map_err(metrics_error)?;
+        let avoided = system::Avoided::new(&self.health).map_err(metrics_error)?;
+        registry
+            .register(Box::new(avoided))
+            .map_err(metrics_error)?;
         let reserved = self.reserved();
         if !reserved.is_empty() {
             registry

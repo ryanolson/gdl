@@ -44,7 +44,7 @@ Still to measure: the scaling at higher core counts, where a shared counter woul
 
 ## velo's own metrics
 
-`[system] velo_metrics` gives each node a `VeloMetrics`, which velo updates per frame and per handler call ([velo's own metrics](observability.md#velos-own-metrics)). It costs every request, so it is off by default. The drain gauges (`admission_admitted`, `egress_in_use`, `active_anchors`, `instance_phase`) are read at the scrape and cost a request nothing.
+`[system] velo_metrics` gives each node a `VeloMetrics`, which velo updates per frame and per handler call ([velo's own metrics](observability.md#velos-own-metrics)). It costs every request, so it is off by default. The drain gauges (`admission_admitted`, `egress_in_use`, `active_anchors`, `instance_phase`, `instance_avoided`) are read at the scrape and cost a request nothing.
 
 Measured on spark-a26e (aarch64, 20 cores, shared, load average 8 to 12), rustc 1.93.1, bench profile B, valgrind 3.22 callgrind, as [Callgrind Ir](benchmarking.md#callgrind-ir) does. Instructions per request are the count at 400 requests minus the count at 200, divided by 200. Seven rounds, eight runs at once. Base is `4d0fa5e1`, the commit before the drain gauges. Change is the commit that added `velo_metrics`. The `-velo` setups are the `-metrics` setups with a `VeloMetrics` on every node.
 

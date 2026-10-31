@@ -58,6 +58,7 @@ The registry holds:
 
 - `uptime_seconds`, read at each scrape;
 - `instance_phase`, the phase the probes report, one series for each phase, read at each scrape;
+- `instance_avoided`, whether a retired entry instance's hub has said that the pools that follow its pool avoid it, read at each scrape;
 - what the instance holds now: the roots in its admission ledger, its admission limit, its egress permits in use, and its open anchors, read at each scrape ([Reading a drain](#reading-a-drain));
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
 - the runtime's figures for each segment a request passes through;
@@ -141,6 +142,7 @@ A stopped instance drains: it takes no new work and finishes what it holds ([Seg
 | Series | What it shows |
 |---|---|
 | `instance_phase{phase="draining"}` | 1: the instance was stopped and takes no new work. Draining is final |
+| `instance_avoided` | 1: for a retired entry instance of a pool, its hub has said that the pools that follow its pool avoid it, so no chooser of theirs offers it work from here on. An offer that reaches it after this reads 1 broke that promise |
 | `admission_admitted` | Root requests that entered through a crossing and are still held, each until velo has handed on every stream the instance sent for it |
 | `egress_in_use` | Streams the instance produces, each until velo holds none of its output |
 | `active_anchors` | Streams still to arrive here |
@@ -156,7 +158,7 @@ These can all read 0 while the instance still holds work, so 0 is not a signal t
 
 `inflight_requests` falls before the ledger does for a request that crosses: a visit leaves it when its response ends here, while the request keeps its admission share and its egress permit until velo's `StreamSender::retired()` resolves, until the consumer has read the stream's last output or left. The instance's own drain waits for the ledger.
 
-The four counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` is always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
+The four counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` and `instance_avoided` are always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
 
 ## Reading a chooser's pool choices
 

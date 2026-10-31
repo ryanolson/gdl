@@ -83,7 +83,7 @@ impl MetricKind {
 /// which it reserves. A node's own metrics may not take these names: they
 /// would collide in the registry or in the scrape, or, for the reserved
 /// one, a dashboard would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 52] = [
+pub const RUNTIME_METRICS: [&str; 53] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -101,6 +101,7 @@ pub const RUNTIME_METRICS: [&str; 52] = [
     "end_to_end_duration_seconds",
     "uptime_seconds",
     "instance_phase",
+    "instance_avoided",
     "admission_admitted",
     "admission_limit",
     "egress_in_use",

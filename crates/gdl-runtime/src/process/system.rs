@@ -246,6 +246,58 @@ impl Collector for Phases {
     }
 }
 
+/// The family that says whether the instance is avoided, and its help.
+pub(crate) const AVOIDED: &str = "instance_avoided";
+const AVOIDED_HELP: &str = "1 once this retired entry instance's hub has said that no chooser of another pool will offer it work again: every pool that followed its pool avoids it, or none follows its draining pool. 0 before, and for any other instance.";
+
+/// `instance_avoided`: one series, read from the process's health at each
+/// scrape, so that an operator that retired the instance can tell an offer
+/// that reached it after its acknowledgement from one before. It holds the
+/// health weakly, as [`Phases`] does.
+pub(crate) struct Avoided {
+    health: Weak<Health>,
+    desc: Desc,
+}
+
+impl Avoided {
+    pub(crate) fn new(health: &Arc<Health>) -> prometheus::Result<Self> {
+        Ok(Self {
+            health: Arc::downgrade(health),
+            desc: Desc::new(
+                AVOIDED.into(),
+                AVOIDED_HELP.into(),
+                Vec::new(),
+                Default::default(),
+            )?,
+        })
+    }
+}
+
+impl Collector for Avoided {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let Some(health) = self.health.upgrade() else {
+            return Vec::new();
+        };
+        let mut gauge = proto::Gauge::default();
+        gauge.set_value(f64::from(u8::from(health.avoided())));
+        let mut metric = proto::Metric::default();
+        metric.set_gauge(gauge);
+        let mut family = MetricFamily::default();
+        family.set_name(AVOIDED.into());
+        family.set_help(AVOIDED_HELP.into());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(vec![metric]);
+        vec![family]
+    }
+}
+
+/// Reads whether the instance is avoided ([`Avoided`]).
+type AvoidedBy = Box<dyn Fn() -> bool + Send + Sync>;
+
 /// What the listener reports, shared between the process and its
 /// listener: the phase, and the process's metrics once they exist.
 pub(crate) struct Health {
@@ -262,6 +314,9 @@ pub(crate) struct Health {
     /// them out of `registry`'s prefix: a hub serves the same names, and
     /// dashboards know them unprefixed.
     own: OnceLock<prometheus::Registry>,
+    /// Whether the instance is avoided, once its pool's drain watch is
+    /// read; false until then, and for an instance outside a pool.
+    avoided: OnceLock<AvoidedBy>,
     /// How long a scrape may take before it is answered with 503.
     scrape_limit: Duration,
     /// `SCRAPES` permits: the scrapes whose gathers run.
@@ -276,9 +331,22 @@ impl Health {
             started: Instant::now(),
             registry: OnceLock::new(),
             own: OnceLock::new(),
+            avoided: OnceLock::new(),
             scrape_limit: SCRAPE_LIMIT,
             scrapes: Arc::new(tokio::sync::Semaphore::new(SCRAPES)),
         }
+    }
+
+    /// Read whether the instance is avoided with `read`, from now on;
+    /// `false` if it is read already.
+    #[cfg(feature = "hub")]
+    pub(crate) fn avoided_by(&self, read: impl Fn() -> bool + Send + Sync + 'static) -> bool {
+        self.avoided.set(Box::new(read)).is_ok()
+    }
+
+    /// Whether the instance is avoided ([`Avoided`]).
+    pub(crate) fn avoided(&self) -> bool {
+        self.avoided.get().is_some_and(|read| read())
     }
 
     /// Seconds since the process started.

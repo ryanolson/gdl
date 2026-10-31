@@ -252,6 +252,20 @@ impl PoolDrain {
         }))
     }
 
+    /// Reads, when asked, whether the instance's hub has said that no
+    /// chooser of another pool will offer it work again: as a retired
+    /// entry instance, that every pool that followed its pool avoids it,
+    /// or that none follows its draining pool. Unlike [`Parent::avoids`],
+    /// a bound that passed is not an answer. Read at a scrape, from what
+    /// the watch has learned, so a request does nothing for it.
+    pub(crate) fn avoided(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let learned = self.learned.clone();
+        move || {
+            let learned = *learned.borrow();
+            learned.acknowledged || learned.unfollowed
+        }
+    }
+
     /// The instance retired now, if it had not already.
     pub(crate) fn retire(&mut self) {
         self.retired.get_or_insert_with(Instant::now);

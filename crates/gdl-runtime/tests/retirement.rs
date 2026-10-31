@@ -261,6 +261,47 @@ async fn an_acknowledged_retiree_waits_out_the_setup_timeout_and_leaves() {
     assert!(took < BOUND, "took {took:?} to leave");
 }
 
+/// The value of the process's `instance_avoided` in `registry`: `None`
+/// when the registry has no such series.
+fn avoided_gauge(registry: &prometheus::Registry) -> Option<f64> {
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name().ends_with("instance_avoided"))
+        .and_then(|family| family.get_metric().first().map(|m| m.get_gauge().value()))
+}
+
+/// A retiree's `instance_avoided` gauge, which an operator reads from
+/// outside, says 0 until its hub has said that the pools that follow its
+/// pool avoid it, and 1 from then: an offer that reaches it later breaks
+/// the chooser's promise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retirees_avoided_gauge_turns_1_once_its_parent_acknowledges_it() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let mut m1 = model(&spec, &directory, pool(M1, "m1-hub:1337", 2), &quiet).await;
+    following(&tables(&first), M1, 2).await;
+    let mut watch = m1.readiness.watch().await.expect("the pool's watch");
+    let retiree = m1.entries.remove(0);
+    let registry = retiree
+        .process
+        .registry(&spec, "f")
+        .expect("the retiree's registry");
+    assert_eq!(avoided_gauge(&registry), Some(0.0), "before it retires");
+    let id = retiree.node.instance_id();
+    let (_, ended) = stop(retiree);
+    acknowledged(&mut watch, id).await;
+    let deadline = Instant::now() + WAIT;
+    while avoided_gauge(&registry) != Some(1.0) {
+        assert!(Instant::now() < deadline, "the gauge never turned 1");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ended.await.expect("the retiree's task");
+}
+
 /// With one chooser's view of the model pool held back, so that it has
 /// not applied the retirement, the global's hub waits for it, and so does
 /// the retiree, which takes the hand-offs that chooser still sends it and
