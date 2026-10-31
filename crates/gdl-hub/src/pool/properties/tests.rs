@@ -780,3 +780,38 @@ fn a_declared_property_recreated_at_startup_takes_the_new_version() {
         "a recreated property takes the version of its fresh state"
     );
 }
+
+/// A hub sends each new list over its follow links at once, and writes
+/// its record after: a hub that stops between the two, or while the
+/// directory refuses writes, sent a version its record never held. Its
+/// successor reads the older record. If nothing in that record changes on
+/// restore, it must still count past every version its predecessor sent,
+/// or a follower that took the newer list keeps it, since it takes only a
+/// higher version, and a fresh follower reads a lower version than an
+/// older one did.
+#[test]
+#[ignore = "restore keeps the held version when nothing changes, below one the predecessor sent over its link"]
+fn a_restart_counts_past_a_version_sent_but_not_stored() {
+    let mut before = Properties::new(Vec::new());
+    before.restore(None, floor(1_000));
+    before.update([Offer::Listed(&lists(&[says("m", SaysStarting)]))]);
+    let stored = before.list();
+    before.update([Offer::Listed(&lists(&[says("m", SaysReady)]))]);
+    let sent = before.list();
+    assert!(sent.version > stored.version);
+
+    let mut after = Properties::new(Vec::new());
+    after.restore(
+        Some((&stored.entries, stored.version, &stored.revoked)),
+        floor(1_001),
+    );
+    assert_eq!(after.list().entries, stored.entries, "nothing changed");
+    assert!(
+        after.list().version > sent.version,
+        "the restarted hub lists {:?} at version {}, below the version {} its predecessor sent for {:?}",
+        after.list().entries,
+        after.list().version,
+        sent.version,
+        sent.entries,
+    );
+}
