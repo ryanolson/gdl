@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "operator/after.rs"]
+mod after;
+
 fn fakes(log: &Log) -> (Docker, Kube) {
     (
         Docker {
