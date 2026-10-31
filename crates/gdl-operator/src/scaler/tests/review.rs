@@ -151,7 +151,6 @@ async fn a_committed_removal_keeps_the_victim_out_of_its_service() {
 }
 
 #[test]
-#[ignore = "F6: the fake ReplicaSet ranks deletion cost before readiness, unlike Kubernetes"]
 fn the_fake_replicaset_deletes_an_unready_pod_before_a_cheaper_ready_pod() {
     let fake = Fake::with(&[9, 0]);
     {

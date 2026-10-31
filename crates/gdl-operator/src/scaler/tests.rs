@@ -66,9 +66,10 @@ impl Fake {
         self.state.lock().expect("state")
     }
 
-    /// The ReplicaSet's step: delete pods down to the count, the lowest
-    /// cost first and then the newest, or the oldest when `misrank`; and
-    /// make pods up to it.
+    /// The ReplicaSet's step: delete pods down to the count in
+    /// Kubernetes' order, a pod that is not ready first, then the lowest
+    /// cost, then the newest (`ActivePodsWithRanks`), or the oldest when
+    /// `misrank`; and make pods up to it.
     fn settle(&self, misrank: bool) {
         let mut state = self.state();
         loop {
@@ -84,7 +85,7 @@ impl Fake {
                         .iter()
                         .min_by_key(|&&i| {
                             let pod = &state.pods[i];
-                            (pod.cost.unwrap_or(0), -pod.view.created_ms)
+                            (pod.view.ready, pod.cost.unwrap_or(0), -pod.view.created_ms)
                         })
                         .expect("a pod")
                 };
