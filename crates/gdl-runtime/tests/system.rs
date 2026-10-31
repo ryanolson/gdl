@@ -493,3 +493,66 @@ async fn the_process_figures_are_served_unprefixed() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+async fn scrape_node_cpu(prefix: &str) -> String {
+    #[derive(gdl::Metrics)]
+    struct NodeMetrics {
+        /// CPU seconds used by this node's work.
+        cpu_seconds_total: gdl::prometheus::IntCounter,
+    }
+
+    let dir = roster();
+    let config = config(
+        dir.path(),
+        &format!("host = \"127.0.0.1\"\nport = 0\nmetrics_prefix = {prefix:?}\n"),
+    );
+    let process = Process::start(&config).await.expect("process");
+    let address = process.system_address().expect("a listener");
+    let registry = process.registry(&deployment(), "only").expect("a registry");
+    let node = <NodeMetrics as gdl::Metrics>::register(&registry, "Echo").expect("node metrics");
+    node.cpu_seconds_total.inc();
+    process.serve_metrics(registry).expect("served");
+    let (code, text) = get(address, "/metrics").await;
+    assert_eq!(code, 200, "{text}");
+    text
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_node_cpu_metric_has_distinct_families_with_default_or_empty_prefix() {
+    for prefix in ["dynamo_component", ""] {
+        let text = scrape_node_cpu(prefix).await;
+        let own = "# TYPE process_cpu_seconds_total counter";
+        assert_eq!(
+            text.lines().filter(|line| *line == own).count(),
+            1,
+            "{text}"
+        );
+        let name = if prefix.is_empty() {
+            "cpu_seconds_total".to_string()
+        } else {
+            format!("{prefix}_cpu_seconds_total")
+        };
+        let node = format!("# TYPE {name} counter");
+        assert_eq!(
+            text.lines().filter(|line| *line == node).count(),
+            1,
+            "{text}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "F1: a process metrics prefix lets node metrics duplicate an unprefixed process family"]
+async fn a_node_cpu_metric_cannot_duplicate_the_process_family_after_prefixing() {
+    let text = scrape_node_cpu("process").await;
+    assert_eq!(
+        text.lines()
+            .filter(|line| *line == "# TYPE process_cpu_seconds_total counter")
+            .count(),
+        1,
+        "a family must occur once per scrape:\n{text}"
+    );
+}
