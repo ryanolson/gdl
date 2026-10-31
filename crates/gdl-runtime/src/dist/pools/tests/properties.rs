@@ -74,6 +74,7 @@ fn listing(
             revoked: Vec::new(),
         },
         missing_age_ms: None,
+        draining: false,
     }
 }
 
@@ -836,6 +837,7 @@ fn a_property_lookup_allocates_nothing() {
                 let unknown = index.range_by(|key| key.name.as_str().cmp("mistral"));
                 std::hint::black_box(served(exact));
                 std::hint::black_box(pools.pool(M1).map(gdl::Pool::properties_version));
+                std::hint::black_box(pools.is_draining(M1));
                 usize::from(exact.len() == 1 && by_name.len() == 1 && unknown.is_empty())
             })
             .unwrap_or(0);
@@ -844,4 +846,101 @@ fn a_property_lookup_allocates_nothing() {
     counting(false);
     assert_eq!(found, 100);
     assert_eq!(allocations, 0, "a lookup allocated");
+}
+
+/// Whether a node reads `M1` draining, and the version of its list, in one
+/// read: the version 0 while the pool is not followed.
+fn drains(node: &FollowedPools) -> (bool, u64) {
+    node.read("model_x", |pools| {
+        (
+            pools.is_draining(M1),
+            pools.pool(M1).map_or(0, gdl::Pool::properties_version),
+        )
+    })
+    .expect("the class has a table")
+}
+
+/// `M1`'s listing with its list at `version`, draining or not.
+fn draining_at(version: u64, draining: bool) -> Listing {
+    Listing {
+        draining,
+        ..listing(
+            PoolCondition::Live,
+            &[("qwen-32b", PropertyState::Ready)],
+            version,
+        )
+    }
+}
+
+/// A pool's drain holds by the property list's rules. A listing that says
+/// it drains is taken at once, also with the list held, since a drain does
+/// not change the list. One that does not is taken only with a newer list:
+/// an older or the same list does not clear it, nor does a lapse or a
+/// dropped follow, after which a node still reads it draining though it no
+/// longer reads a `Pool`. A newer list clears it, as a hub of the pool
+/// started again sends, and a draining listing with an older list after it
+/// does not set it again.
+#[test]
+fn a_pools_drain_is_cleared_only_by_a_newer_list() {
+    let (mut follows, node, now) = holding_five();
+    assert_eq!(drains(&node), (false, 5), "ready");
+    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
+    assert_eq!(drains(&node), (true, 5), "the same list, draining");
+
+    for (version, what) in [(5, "the same list"), (3, "an older list")] {
+        follows.apply(listed_event(M1, Some(draining_at(version, false))), now);
+        assert_eq!(drains(&node), (true, 5), "{what}, not draining");
+    }
+    let lapsed = Listing {
+        draining: false,
+        ..missing(&[("qwen-32b", PropertyState::Ready)], 3, Some(1_000))
+    };
+    follows.apply(listed_event(M1, Some(lapsed)), now);
+    assert_eq!(drains(&node), (true, 5), "a lapse");
+    follows.apply(dropped(M1, 1), now);
+    assert_eq!(drains(&node), (true, 0), "the follow dropped: listed still");
+    follows.apply(follow(M1, 2, PoolState::Ready), now);
+    follows.apply(listed_event(M1, Some(draining_at(3, false))), now);
+    assert_eq!(drains(&node), (true, 5), "followed again, an older list");
+
+    follows.apply(listed_event(M1, Some(draining_at(6, false))), now);
+    assert_eq!(drains(&node), (false, 6), "a newer list, not draining");
+    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
+    assert_eq!(drains(&node), (false, 6), "an older list, draining");
+}
+
+/// A pool's drain is held through a relay restart, whose snapshot lists
+/// the pool from its record, with an older list and before its link says
+/// it drains, and through a snapshot that is not whole and does not name
+/// it. A withdrawal forgets it, and so does a whole snapshot that does not
+/// name the pool: listed again, the pool starts afresh.
+#[test]
+fn a_pools_drain_is_held_while_listed_and_forgotten_with_its_listing() {
+    let (mut follows, node, now) = holding_five();
+    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
+    assert_eq!(drains(&node), (true, 5));
+
+    let mut restarted = follows.snapshot();
+    restarted.apply(listed_event(M1, Some(draining_at(3, false))), now);
+    restarted.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(restarted, now);
+    assert_eq!(drains(&node), (true, 0), "a relay restart");
+    follows.take(follow(M1, 1, PoolState::Draining), now);
+    assert_eq!(drains(&node), (true, 5), "its follow installed again");
+
+    let mut incomplete = follows.snapshot();
+    incomplete.apply(FollowEvent::Synced { listed: false }, now);
+    follows.resnapshot(incomplete, now);
+    assert_eq!(drains(&node), (true, 0), "an incomplete snapshot");
+
+    follows.apply(listed_event(M1, None), now);
+    assert_eq!(drains(&node), (false, 0), "withdrawn");
+    follows.apply(listed_event(M1, Some(draining_at(3, false))), now);
+    assert!(!drains(&node).0, "listed afresh");
+
+    follows.apply(listed_event(M1, Some(draining_at(3, true))), now);
+    let mut whole = follows.snapshot();
+    whole.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(whole, now);
+    assert_eq!(drains(&node), (false, 0), "a whole snapshot without it");
 }

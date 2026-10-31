@@ -12,6 +12,11 @@
 //! snapshot that says the hub's listings are whole and does not name the
 //! pool. A snapshot that is not whole says nothing of a pool it does not
 //! name, which keeps its listing.
+//!
+//! Whether the pool drains is held by the same rules, with the list: a
+//! drain does not change the list, so a listing of the same list that
+//! does not say it drains is from before the drain, and only a newer list,
+//! which only a later hub of the pool sends, clears it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -72,6 +77,16 @@ impl Listings {
             .map_or(0, |(listing, _)| listing.properties.version)
     }
 
+    /// The names of `class`'s pools whose listing says they drain, in
+    /// order.
+    pub(super) fn draining<'a>(&'a self, class: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.held
+            .range((class.to_string(), String::new())..)
+            .take_while(move |((of, _), _)| of == class)
+            .filter(|(_, (listing, _))| listing.draining)
+            .map(|((_, pool), _)| pool.as_str())
+    }
+
     /// Each listed pool, in key order, with its listing and silence.
     pub(super) fn iter(&self) -> impl Iterator<Item = (&Key, &(Listing, Option<Instant>))> {
         self.held.iter()
@@ -79,11 +94,17 @@ impl Listings {
 }
 
 /// Keep `held`'s property list in place of `listing`'s when it has a
-/// higher version; take every other field of `listing`.
+/// higher version, and whether the pool drains with it; keep a drain with
+/// the same version too, since a drain does not change the list and
+/// cannot be cancelled. Take every other field of `listing`.
 fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
-    if let Some((held, _)) = held
-        && held.properties.version > listing.properties.version
-    {
+    let Some((held, _)) = held else {
+        return;
+    };
+    if held.properties.version > listing.properties.version {
         listing.properties.clone_from(&held.properties);
+        listing.draining = held.draining;
+    } else if held.properties.version == listing.properties.version {
+        listing.draining |= held.draining;
     }
 }

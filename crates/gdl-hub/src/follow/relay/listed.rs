@@ -7,7 +7,9 @@
 //!
 //! A pool's properties come from its record and from its follow link,
 //! whichever has the higher version, since the two race, and the version
-//! never goes down, also across a restart of the pool's hub.
+//! never goes down, also across a restart of the pool's hub. Whether the
+//! pool drains comes from either, with the list: a drain does not change
+//! the list, so only a newer list clears it.
 //!
 //! A missing pool's listing says how long it has been silent, as an age at
 //! the moment it is sent. The listings hold the instant on the hub's
@@ -16,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use gdl_pools::{PoolCondition, PoolRecord, Presence};
+use gdl_pools::{PoolCondition, PoolRecord, PoolState, Presence};
 use gdl_watch::{Listing, PropertyList};
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +57,9 @@ struct Listed {
     dirty: bool,
     /// Whether `properties` is a list taken from the record or the link.
     taken: bool,
+    /// Whether the record or the link said the pool drains, with
+    /// `properties` or a list of the same version.
+    draining: bool,
 }
 
 impl Listed {
@@ -72,6 +77,7 @@ impl Listed {
             condition,
             properties: self.properties.clone(),
             missing_age_ms: None,
+            draining: self.draining,
         }
     }
 
@@ -95,6 +101,20 @@ impl Listed {
             u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
         });
         listing
+    }
+
+    /// Take whether the pool drains, said with a list of `version`, before
+    /// the list is taken: with a newer list, or the first, it is taken as
+    /// said; with the list held, a drain is added, since a drain does not
+    /// change the list and cannot be cancelled; with an older list it says
+    /// nothing, as a hub before the one that listed the newer list.
+    fn take_draining(&mut self, draining: bool, version: u64) {
+        let next = if !self.taken || version > self.properties.version {
+            draining
+        } else {
+            self.draining || (draining && version == self.properties.version)
+        };
+        Listed::set(&mut self.draining, next, &mut self.dirty);
     }
 
     /// Take `properties` if they are newer than the list held, or the first
@@ -169,6 +189,7 @@ impl Listings {
                 sent: None,
                 dirty: true,
                 taken: false,
+                draining: false,
             });
         if listed.region != record.region {
             listed.region.clone_from(&record.region);
@@ -176,6 +197,10 @@ impl Listings {
         }
         Listed::set(&mut listed.presence, record.presence, &mut listed.dirty);
         Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
+        listed.take_draining(
+            record.state == PoolState::Draining,
+            record.properties_version,
+        );
         if !listed.taken || record.properties_version > listed.properties.version {
             // Logged where the properties are taken, so a record read again
             // unchanged does not repeat it, and a listing the relay sends
@@ -216,12 +241,20 @@ impl Listings {
         }
     }
 
-    /// The pool's follow link sent `properties`.
-    pub(super) fn link_properties(&mut self, class: &str, pool: &str, properties: &PropertyList) {
-        if let Some(listed) = self.get_mut(class, pool)
-            && listed.take_properties(properties)
-            && !properties.dropped.is_empty()
-        {
+    /// The pool's follow link sent `properties`, and its state says
+    /// whether the pool drains.
+    pub(super) fn link_properties(
+        &mut self,
+        class: &str,
+        pool: &str,
+        properties: &PropertyList,
+        draining: bool,
+    ) {
+        let Some(listed) = self.get_mut(class, pool) else {
+            return;
+        };
+        listed.take_draining(draining, properties.version);
+        if listed.take_properties(properties) && !properties.dropped.is_empty() {
             // The directory path logs a record's drops where it takes them
             // ([`Listings::record`]); a list the link takes first leaves the
             // record of that version untaken, so its kinds are logged here.

@@ -1069,13 +1069,13 @@ impl Shared {
         let Shared {
             follows, listings, ..
         } = self;
-        if let Some(properties) = follows
+        if let Some(installed) = follows
             .get(class)
             .and_then(|pools| pools.get(pool))
             .and_then(|follow| follow.installed.as_ref())
-            .and_then(Installed::properties)
+            && let Some(properties) = installed.properties()
         {
-            listings.link_properties(class, pool, properties);
+            listings.link_properties(class, pool, properties, installed.draining());
         }
         if let Some(listing) = self
             .listings

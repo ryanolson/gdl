@@ -305,4 +305,11 @@ pub struct Listing {
     /// of an earlier build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_age_ms: Option<u64>,
+    /// Whether the pool drains: its record or its follow link said so.
+    /// A drain does not change the property list, and cannot be
+    /// cancelled, so the hub clears it only with a newer list than the
+    /// one it held when the pool drained, which only a later hub of the
+    /// pool sends. Absent when false, and from a hub of an earlier build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
 }

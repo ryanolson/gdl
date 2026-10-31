@@ -91,6 +91,7 @@ impl FollowedPools {
             withdrawn,
             std::iter::empty::<(String, String)>(),
             std::iter::empty::<(String, PropertyIndexes)>(),
+            std::iter::empty::<(String, String)>(),
         )
     }
 
@@ -134,16 +135,25 @@ impl FollowedPools {
         M: Into<String>,
         K: Into<String>,
     {
-        Self::fixed_tables(None, pools, withdrawn, gone, properties)
+        Self::fixed_tables(
+            None,
+            pools,
+            withdrawn,
+            gone,
+            properties,
+            std::iter::empty::<(String, String)>(),
+        )
     }
 
-    /// The handle bound to fixed tables, for a chooser in `region`, if any.
-    fn fixed_tables<C, N, G, M, K>(
-        region: Option<Arc<str>>,
+    /// [`FollowedPools::fixed_with_properties`], with the pools named by
+    /// class and name in `draining` listed as draining
+    /// ([`ClassPools::is_draining`]), followed or not.
+    pub fn fixed_with_draining<C, N, G, M, K, D, E>(
         pools: impl IntoIterator<Item = Pool>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
         gone: impl IntoIterator<Item = (G, M)>,
         properties: impl IntoIterator<Item = (K, PropertyIndexes)>,
+        draining: impl IntoIterator<Item = (D, E)>,
     ) -> Self
     where
         C: Into<String>,
@@ -151,8 +161,31 @@ impl FollowedPools {
         G: Into<String>,
         M: Into<String>,
         K: Into<String>,
+        D: Into<String>,
+        E: Into<String>,
     {
-        let mut classes: BTreeMap<String, (Vec<Pool>, Vec<Box<str>>)> = BTreeMap::new();
+        Self::fixed_tables(None, pools, withdrawn, gone, properties, draining)
+    }
+
+    /// The handle bound to fixed tables, for a chooser in `region`, if any.
+    fn fixed_tables<C, N, G, M, K, D, E>(
+        region: Option<Arc<str>>,
+        pools: impl IntoIterator<Item = Pool>,
+        withdrawn: impl IntoIterator<Item = (C, N)>,
+        gone: impl IntoIterator<Item = (G, M)>,
+        properties: impl IntoIterator<Item = (K, PropertyIndexes)>,
+        draining: impl IntoIterator<Item = (D, E)>,
+    ) -> Self
+    where
+        C: Into<String>,
+        N: Into<String>,
+        G: Into<String>,
+        M: Into<String>,
+        K: Into<String>,
+        D: Into<String>,
+        E: Into<String>,
+    {
+        let mut classes: BTreeMap<String, Gathered> = BTreeMap::new();
         for pool in pools {
             classes
                 .entry(pool.class().to_string())
@@ -168,6 +201,14 @@ impl FollowedPools {
                 .1
                 .push(name.into_boxed_str());
         }
+        for (class, name) in draining {
+            let name: String = name.into();
+            classes
+                .entry(class.into())
+                .or_default()
+                .2
+                .push(name.into_boxed_str());
+        }
         let gone: Vec<(String, String)> = gone
             .into_iter()
             .map(|(class, name)| (class.into(), name.into()))
@@ -181,16 +222,25 @@ impl FollowedPools {
         }
         let tables = classes
             .into_iter()
-            .map(|(class, (mut pools, mut withdrawn))| {
+            .map(|(class, (mut pools, mut withdrawn, mut draining))| {
                 pools.sort_by(|a, b| a.name().cmp(b.name()));
                 withdrawn.sort();
                 withdrawn.dedup();
+                draining.sort();
+                draining.dedup();
                 let damped = pools
                     .iter()
                     .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
                     .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
                 let index = properties.remove(&class).unwrap_or_default();
-                (class, (pools.into(), withdrawn.into(), damped, index))
+                let table = FixedTable {
+                    pools: pools.into(),
+                    withdrawn: withdrawn.into(),
+                    draining: draining.into(),
+                    damped,
+                    properties: index,
+                };
+                (class, table)
             })
             .collect();
         let handle = Self::new();
@@ -376,6 +426,7 @@ pub trait PoolSource: Send + Sync + 'static {
 pub struct ClassPools<'a> {
     pools: &'a [Pool],
     withdrawn: &'a [Box<str>],
+    draining: &'a [Box<str>],
     damped: &'a Damped,
     properties: &'a PropertyIndexes,
 }
@@ -391,9 +442,17 @@ impl<'a> ClassPools<'a> {
         Self {
             pools,
             withdrawn,
+            draining: &[],
             damped: &NONE_GONE,
             properties: &NO_PROPERTIES,
         }
+    }
+
+    /// The view with the pools whose listing says they drain, `draining`,
+    /// sorted: from the same table as its pools.
+    #[doc(hidden)]
+    pub fn with_draining(self, draining: &'a [Box<str>]) -> Self {
+        Self { draining, ..self }
     }
 
     /// The view with the pools `damped` holds gone: the chooser's damping
@@ -476,6 +535,32 @@ impl<'a> ClassPools<'a> {
         self.withdrawn.iter().map(|name| &**name)
     }
 
+    /// Whether the chooser's hub lists the pool named `name` as draining:
+    /// its record or its follow link said so, followed or not. It tells a
+    /// draining pool whose follow was dropped, which reads `live` in the
+    /// property index while its record stays, from a pool whose hub has
+    /// not yet reported, such as one that just restarted. A followed pool
+    /// that drains also reads [`PoolState::Draining`](crate::PoolState::Draining) in
+    /// [`ClassPools::pool`], but only until its follow is dropped: this
+    /// holds while the pool is listed, which is why it is read here and
+    /// not from a [`Pool`].
+    ///
+    /// It holds through the same rules as the property list
+    /// ([`Pool::properties_version`]). A drain does not change the list
+    /// and cannot be cancelled, so it is cleared only by a listing whose
+    /// list is newer than the one held when the pool drained, which only a
+    /// later hub of the pool, started again, sends. A listing with an
+    /// older list changes nothing. It is forgotten with the listing: when
+    /// the pool withdraws its record ([`ClassPools::is_withdrawn`]), or
+    /// when a whole snapshot of the hub's listings no longer names it.
+    /// A pool this chooser never saw, and one listed by a hub of an
+    /// earlier build, is not draining.
+    pub fn is_draining(&self, name: &str) -> bool {
+        self.draining
+            .binary_search_by(|draining| (**draining).cmp(name))
+            .is_ok()
+    }
+
     /// Whether the chooser holds the followed pool named `name` gone: the
     /// pool declined its offer as gone, as a draining pool or a segment
     /// that declines by its own policy does, and the relay has changed
@@ -489,9 +574,22 @@ impl<'a> ClassPools<'a> {
     }
 }
 
-/// Fixed tables: per class, its pools by name, its withdrawn pools, its
-/// gone pools, and its property indexes.
-type Tables = BTreeMap<String, (Box<[Pool]>, Box<[Box<str>]>, Damped, PropertyIndexes)>;
+/// Fixed tables, by class.
+type Tables = BTreeMap<String, FixedTable>;
+
+/// One class's pools, and its withdrawn and its draining pools' names, as
+/// a test gives them, before they are sorted.
+type Gathered = (Vec<Pool>, Vec<Box<str>>, Vec<Box<str>>);
+
+/// One class's fixed table: its pools by name, its withdrawn and its
+/// draining pools, its gone pools, and its property indexes.
+struct FixedTable {
+    pools: Box<[Pool]>,
+    withdrawn: Box<[Box<str>]>,
+    draining: Box<[Box<str>]>,
+    damped: Damped,
+    properties: PropertyIndexes,
+}
 
 struct Fixed {
     tables: Tables,
@@ -500,11 +598,12 @@ struct Fixed {
 
 impl PoolSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>)) {
-        if let Some((pools, withdrawn, damped, properties)) = self.tables.get(class) {
+        if let Some(table) = self.tables.get(class) {
             read(
-                ClassPools::new(pools, withdrawn)
-                    .with_damped(damped)
-                    .with_properties(properties),
+                ClassPools::new(&table.pools, &table.withdrawn)
+                    .with_draining(&table.draining)
+                    .with_damped(&table.damped)
+                    .with_properties(&table.properties),
             );
         }
     }
@@ -673,6 +772,30 @@ mod tests {
             Some(false),
             "fixed tables hold no pool gone"
         );
+        assert_eq!(
+            followed.read("model_x", |pools| pools.is_draining("m2")),
+            Some(false),
+            "a followed pool's state is not its listing"
+        );
+    }
+
+    /// Fixed tables list the pools named in `draining` as draining, by
+    /// class, followed or not, and no other.
+    #[test]
+    fn fixed_tables_read_each_classs_draining_pools() {
+        let followed = FollowedPools::fixed_with_draining(
+            [Pool::new("model_x", "m1", "r", PoolState::Ready)],
+            std::iter::empty::<(String, String)>(),
+            std::iter::empty::<(String, String)>(),
+            std::iter::empty::<(String, PropertyIndexes)>(),
+            [("model_x", "m2"), ("model_x", "m1"), ("model_y", "y1")],
+        );
+        let read = |class: &str, pool: &str| followed.read(class, |pools| pools.is_draining(pool));
+        assert_eq!(read("model_x", "m1"), Some(true), "followed");
+        assert_eq!(read("model_x", "m2"), Some(true), "not followed");
+        assert_eq!(read("model_x", "m3"), Some(false));
+        assert_eq!(read("model_y", "y1"), Some(true));
+        assert_eq!(read("model_y", "m1"), Some(false), "another class's");
     }
 
     /// Fixed tables give each class the property indexes they were given,

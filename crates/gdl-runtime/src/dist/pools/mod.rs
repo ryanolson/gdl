@@ -341,6 +341,7 @@ impl gdl::__runtime::PoolSource for Pools {
         let damped = self.shared.damping.view();
         read(
             gdl::ClassPools::new(&table.views, &table.withdrawn)
+                .with_draining(&table.draining)
                 .with_damped(&damped)
                 .with_properties(&table.properties),
         );
@@ -436,6 +437,9 @@ pub(crate) struct EntryTable {
     /// so that a node reads both from one snapshot. A withdrawn pool may
     /// still be in `pools` until its follow is dropped.
     pub(crate) withdrawn: Box<[Box<str>]>,
+    /// The pools of the class whose listing says they drain, by name,
+    /// sorted, followed or not: kept beside the pools for the same reason.
+    pub(crate) draining: Box<[Box<str>]>,
     /// The class's property indexes, shared by the tables of each of its
     /// entry segments, and made again only when what they list, or the
     /// kinds they decode, change.
@@ -450,6 +454,7 @@ impl EntryTable {
             pools,
             views,
             withdrawn: Box::default(),
+            draining: Box::default(),
             properties: Arc::default(),
         }
     }
@@ -457,6 +462,12 @@ impl EntryTable {
     /// The table with the class's `withdrawn` pools, sorted.
     pub(crate) fn with_withdrawn(mut self, withdrawn: Box<[Box<str>]>) -> Self {
         self.withdrawn = withdrawn;
+        self
+    }
+
+    /// The table with the class's `draining` pools, sorted.
+    pub(crate) fn with_draining(mut self, draining: Box<[Box<str>]>) -> Self {
+        self.draining = draining;
         self
     }
 

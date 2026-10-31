@@ -35,13 +35,14 @@ async fn next(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> FollowEv
     }
 }
 
-/// The events the watch has now. The hub applies an acknowledgement and
-/// sends what it changes before it answers, so once one is answered, what
-/// it closed is here.
+/// The events the watch has now, as [`next`] reads them: a listing, such
+/// as the one that says a pool drains, is not what these tests watch. The
+/// hub applies an acknowledgement and sends what it changes before it
+/// answers, so once one is answered, what it closed is here.
 fn pending(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> Vec<FollowEvent> {
     let mut events = Vec::new();
     while let Some(Some(event)) = watch.next().now_or_never() {
-        events.push(event);
+        events.extend(common::plain_follow(event));
     }
     events
 }

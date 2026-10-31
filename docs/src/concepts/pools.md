@@ -186,7 +186,7 @@ A hub that restarts ends every watch, so the epoch does not change within one. T
 
 ### The drain request
 
-`POST /v1/ext/gdl-pool/drain` on the control listener starts the pool's drain. The pool is `draining` on its health endpoint (503), its record, and its watch by the time the hub answers. The answer is 202 with the health body. It waits up to 5 s for the directory to store the draining record. A second drain is answered the same way. A pool whose class no hop enters, such as a global pool, is refused with 409. [Draining a pool](pool-routing.md#draining-a-pool) describes what the instances do.
+`POST /v1/ext/gdl-pool/drain` on the control listener starts the pool's drain. The pool is `draining` on its health endpoint (503), its record, and its watch by the time the hub answers. The answer is 202 with the health body. It waits up to 5 s for the directory to store the draining record. A second drain is answered the same way. A pool whose class no hop enters, such as a global pool, is refused with 409. [Draining a pool](pool-routing.md#draining-a-pool) describes what the instances do. A parent's hub lists the pool as draining from its watch or its record, and a node reads that with `ClassPools::is_draining`, also after the parent has dropped its follow and until the pool withdraws its record ([What a node reads](pool-routing.md#what-a-node-reads)). A drain does not change the pool's property list.
 
 ### A pool whose hub is gone
 

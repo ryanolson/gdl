@@ -239,7 +239,7 @@ fn a_later_directory_drop_is_logged_when_the_link_wins_the_race() {
             assert!(logged.contains(CLASS) && logged.contains(POOL), "{logged}");
 
             if link_first {
-                listings.link_properties(CLASS, POOL, &linked);
+                listings.link_properties(CLASS, POOL, &linked, false);
             }
             for _ in 0..3 {
                 listings.record(&later, None);
@@ -266,4 +266,98 @@ fn a_later_directory_drop_is_logged_when_the_link_wins_the_race() {
             );
         });
     }
+}
+
+/// The record of the pool, written `seq`th, with its list at `version`, in
+/// `state`.
+fn stated(seq: u64, version: u64, state: PoolState) -> PoolRecord {
+    PoolRecord {
+        state,
+        properties_version: version,
+        ..record(seq, Presence::Serving)
+    }
+}
+
+/// A link's list at `version`.
+fn linked(version: u64) -> gdl_watch::PropertyList {
+    gdl_watch::PropertyList {
+        version,
+        ..gdl_watch::PropertyList::default()
+    }
+}
+
+/// Whether the listing says the pool drains.
+fn draining(listings: &Listings) -> bool {
+    listings
+        .listing(CLASS, POOL, Instant::now())
+        .expect("listed")
+        .draining
+}
+
+/// A record that says the pool drains lists it draining at once, and the
+/// change is sent. A drain does not change the list, so a record of the
+/// same list read late, from before the drain, and one of an older list
+/// do not clear it. Only a newer list does, as a hub of the pool started
+/// again sends, and a draining record of the hub before it, read late
+/// with its older list, does not set it again.
+#[test]
+fn a_record_lists_the_pool_draining_until_a_newer_list() {
+    let now = Instant::now();
+    let mut listings = Listings::default();
+    listings.record(&stated(1, 5, PoolState::Ready), None);
+    assert!(!draining(&listings), "ready");
+    assert!(listings.changed(CLASS, POOL, now).is_some(), "first shown");
+
+    listings.record(&stated(2, 5, PoolState::Draining), None);
+    assert!(draining(&listings), "the record says it drains");
+    let sent = listings.changed(CLASS, POOL, now).expect("a change");
+    assert!(sent.draining, "sent draining");
+
+    listings.record(&stated(1, 5, PoolState::Ready), None);
+    listings.record(&stated(1, 4, PoolState::Ready), None);
+    assert!(draining(&listings), "a record of the same or an older list");
+    assert_eq!(listings.changed(CLASS, POOL, now), None, "nothing to send");
+
+    let started = PoolRecord {
+        epoch: 2,
+        ..stated(1, 6, PoolState::Ready)
+    };
+    listings.record(&started, None);
+    assert!(!draining(&listings), "a newer list, not draining");
+    listings.record(&stated(3, 5, PoolState::Draining), None);
+    assert!(
+        !draining(&listings),
+        "the hub before, with its older list, read late"
+    );
+}
+
+/// A follow link whose state says the pool drains lists it draining, with
+/// its list, before the record does; a record of the same list from
+/// before the drain does not clear it. Once a hub of the pool started
+/// again lists a newer list, the link of the hub before, with its older
+/// list, does not set it again.
+#[test]
+fn a_link_lists_the_pool_draining_until_a_newer_list() {
+    let mut listings = Listings::default();
+    listings.record(&stated(1, 5, PoolState::Ready), None);
+    listings.link_properties(CLASS, POOL, &linked(5), false);
+    assert!(!draining(&listings), "ready");
+
+    listings.link_properties(CLASS, POOL, &linked(5), true);
+    assert!(draining(&listings), "the link says it drains");
+    listings.record(&stated(1, 5, PoolState::Ready), None);
+    assert!(draining(&listings), "a record from before the drain");
+
+    let started = PoolRecord {
+        epoch: 2,
+        ..stated(1, 7, PoolState::Ready)
+    };
+    listings.record(&started, None);
+    listings.link_properties(CLASS, POOL, &linked(5), true);
+    assert!(
+        !draining(&listings),
+        "the link of the hub before, with its older list"
+    );
+    listings.link_properties(CLASS, POOL, &linked(7), false);
+    assert!(!draining(&listings), "the new hub's link");
 }

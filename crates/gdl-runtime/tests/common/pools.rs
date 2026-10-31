@@ -252,11 +252,17 @@ async fn unresolved_pool_hub_of(
 /// is a name, which a test resolves to the address the hub serves at once
 /// it serves, since a hub's port is assigned only then. A publish waits
 /// until its hub's name is resolved, then stores the record with the
-/// address in its place.
+/// address in its place. A test can hold withdrawals back, to read a
+/// drained pool while its record still says it is `draining`, and
+/// publishes, so that only a pool's follow link says what changed.
 #[derive(Clone)]
 pub struct Resolving {
     inner: MemoryDirectory,
     names: Arc<watch::Sender<HashMap<String, String>>>,
+    /// Whether a withdrawal waits.
+    withdrawals: Arc<watch::Sender<bool>>,
+    /// Whether a publish waits.
+    publishes: Arc<watch::Sender<bool>>,
 }
 
 impl Resolving {
@@ -264,7 +270,21 @@ impl Resolving {
         Self {
             inner: MemoryDirectory::new(),
             names: Arc::new(watch::Sender::new(HashMap::new())),
+            withdrawals: Arc::new(watch::Sender::new(false)),
+            publishes: Arc::new(watch::Sender::new(false)),
         }
+    }
+
+    /// Hold every withdrawal until `held` is false again: one under way
+    /// waits, unanswered, and the record stays.
+    pub fn hold_withdrawals(&self, held: bool) {
+        self.withdrawals.send_replace(held);
+    }
+
+    /// Hold every publish until `held` is false again: one under way
+    /// waits, unanswered, and the record stays as it was.
+    pub fn hold_publishes(&self, held: bool) {
+        self.publishes.send_replace(held);
     }
 
     /// The hub named `name` serves at `address`, `host:port`.
@@ -279,6 +299,8 @@ impl PoolDirectory for Resolving {
     type Watch = MemoryWatch;
 
     async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
+        let mut held = self.publishes.subscribe();
+        held.wait_for(|held| !held).await.expect("the hold lives");
         let mut names = self.names.subscribe();
         let address = names
             .wait_for(|names| names.contains_key(&record.hub))
@@ -290,6 +312,8 @@ impl PoolDirectory for Resolving {
     }
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
+        let mut held = self.withdrawals.subscribe();
+        held.wait_for(|held| !held).await.expect("the hold lives");
         self.inner.withdraw(withdrawal).await
     }
 

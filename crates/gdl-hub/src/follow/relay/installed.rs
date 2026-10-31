@@ -79,6 +79,11 @@ impl Installed {
         self.properties.as_ref()
     }
 
+    /// Whether the pool's link last said it drains, withheld or not.
+    pub(super) fn draining(&self) -> bool {
+        self.state == PoolState::Draining
+    }
+
     /// The state the relay shows: the one the pool last sent, or
     /// `unavailable` while the pool is withheld.
     fn shown(&self) -> PoolState {

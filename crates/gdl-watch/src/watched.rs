@@ -436,7 +436,39 @@ mod tests {
             condition: gdl_pools::PoolCondition::Missing,
             properties: crate::PropertyList::default(),
             missing_age_ms: Some(4000),
+            draining: false,
         };
+        // Draining is sent only when true, so an earlier reader, which
+        // ignores it, reads a draining listing as before, and a listing
+        // from an earlier hub reads as not draining.
+        let draining = crate::Listing {
+            draining: true,
+            ..listing.clone()
+        };
+        let sent = serde_json::to_value(&draining).expect("json");
+        assert_eq!(sent["draining"], true);
+        assert!(
+            serde_json::to_value(&listing)
+                .expect("json")
+                .get("draining")
+                .is_none(),
+            "absent when false"
+        );
+        assert!(
+            !serde_json::from_value::<crate::Listing>(serde_json::json!({
+                "region": "r",
+                "condition": "live",
+            }))
+            .expect("an earlier hub's listing")
+            .draining
+        );
+        assert_eq!(
+            serde_json::from_value::<EarlierListing>(sent).expect("an earlier reader reads it"),
+            EarlierListing {
+                region: "r".into(),
+                condition: gdl_pools::PoolCondition::Missing,
+            }
+        );
         // A listing's age is a field a reader of an earlier build ignores.
         #[derive(serde::Deserialize, Debug, PartialEq)]
         struct EarlierListing {

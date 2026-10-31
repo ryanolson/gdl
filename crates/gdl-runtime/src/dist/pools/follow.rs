@@ -660,11 +660,18 @@ impl<R: Registry> Follows<R> {
             .filter(|(of, _)| *of == class)
             .map(|(_, pool)| Box::from(pool.as_str()))
             .collect();
+        let draining = self
+            .followed
+            .listings
+            .draining(&class)
+            .map(Box::from)
+            .collect();
         let properties = self.index(&class);
         self.pools.store(
             segment,
             EntryTable::new(pools)
                 .with_withdrawn(withdrawn)
+                .with_draining(draining)
                 .with_properties(properties),
         );
     }

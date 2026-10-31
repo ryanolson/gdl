@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::boundary::{
-    Model, ModelPool, RUNTIME, Running, ask, model_configured, model_of, model_proxied, placement,
-    run_graph, spec_of,
+    Model, ModelPool, RUNTIME, Running, ask, model_configured, model_of, model_proxied,
+    model_summarized, placement, run_graph, spec_of,
 };
 use common::pools::{
     REGION, Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until,
@@ -1552,6 +1552,291 @@ async fn a_node_reads_a_drained_pool_as_withdrawn_and_a_stopped_one_as_not() {
     assert_eq!(read(&node, M2), (None, false), "a stop is not a withdrawal");
     assert_eq!(read(&node, M1), (None, true));
     for hub in [hub, m1_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// The property kind the tests of a draining pool's listing report and read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+struct Shard {
+    name: String,
+}
+
+const SHARD: gdl::PropertyKind<Shard> = gdl::PropertyKind::new("test");
+
+/// What a node in the global pool reads of `pool` in one read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Listed {
+    /// Its state, if the chooser follows it.
+    state: Option<PoolState>,
+    withdrawn: bool,
+    draining: bool,
+    /// The row of the shard `a` in the index: the shard's state, the
+    /// pool's condition, and whether the chooser offers the pool work.
+    row: Option<(gdl::PropertyState, gdl::PoolCondition, bool)>,
+}
+
+fn listed(followed: &FollowedPools, pool: &str) -> Listed {
+    followed
+        .read("model_x", |pools| Listed {
+            state: pools.pool(pool).map(gdl::Pool::state),
+            withdrawn: pools.is_withdrawn(pool),
+            draining: pools.is_draining(pool),
+            row: pools.properties().get(&SHARD).and_then(|index| {
+                index
+                    .get(&Shard { name: "a".into() })
+                    .iter()
+                    .find(|(_, listing)| listing.pool() == pool)
+                    .map(|(_, listing)| {
+                        (listing.state(), listing.condition(), listing.is_offered())
+                    })
+            }),
+        })
+        .expect("the chooser sends to model_x")
+}
+
+/// The pool `M1`, whose entry instance lists the shard `a` `ready`.
+async fn sharded(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    events: &Arc<Events>,
+) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
+    let properties = gdl::InstanceProperties::new();
+    properties
+        .set(
+            &SHARD,
+            [(Shard { name: "a".into() }, gdl::EntryState::Ready)],
+        )
+        .expect("a list");
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        properties: properties.clone(),
+        ..runtime
+    };
+    model_summarized(
+        spec,
+        directory,
+        ready(M1, "m1-hub:1337"),
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, events),
+    )
+    .await
+}
+
+/// The global pool's hub, a chooser in it whose node registered the
+/// shard's kind, and the node's handle.
+async fn sharded_chooser(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+) -> (
+    Hub,
+    FollowedPools,
+    Running<impl Next<Prompt, Chunk> + Register + use<>>,
+) {
+    let (hub, _global): (Hub, Arc<PoolReadiness<Resolving>>) =
+        pool_hub_of(spec, global_hub(), directory).await;
+    let node = FollowedPools::new();
+    node.scope(async { FollowedPools::current().register(&SHARD) })
+        .await
+        .expect("registered");
+    let chooser = reading_chooser(spec, &hub, &node).await;
+    (hub, node, chooser)
+}
+
+/// What a node reads of `M1` followed `ready`, with the shard.
+const FOLLOWED: Listed = Listed {
+    state: Some(PoolState::Ready),
+    withdrawn: false,
+    draining: false,
+    row: Some((gdl::PropertyState::Ready, gdl::PoolCondition::Live, true)),
+};
+
+/// Drain `m1` with its withdrawal held, and wait until its instances have
+/// left and the chooser has dropped its follow: its record stays, and says
+/// it drains. The record stored when the drain was answered, the record
+/// that stays, and the pool's hub.
+async fn drained<H>(
+    directory: &Resolving,
+    pools: &Pools,
+    m1: ModelPool<H>,
+) -> (PoolRecord, PoolRecord, Hub) {
+    directory.hold_withdrawals(true);
+    m1.readiness.drain().await.expect("the pool drains");
+    let answered = record(directory, M1).await.expect("listed");
+    let ModelPool {
+        hub, entries, sink, ..
+    } = m1;
+    for entry in entries {
+        entry.ended(PAST_BOUND).await.expect("the entry drained");
+    }
+    sink.ended(WAIT)
+        .await
+        .expect("the interior instance drained");
+    until(pools, "the chooser dropped the drained pool", |pools| {
+        followed(pools, "f", M1).is_none()
+    })
+    .await;
+    let held = record(directory, M1)
+        .await
+        .expect("the withdrawal is held: the record stays");
+    assert_eq!(held.state, gdl_pools::PoolState::Draining, "the record");
+    (answered, held, hub)
+}
+
+/// A pool that drains reads draining at once, and still once the chooser
+/// has dropped its follow and before its hub withdraws its record. In that
+/// window the pool is no longer followed, and the index lists its shard
+/// with its condition `live`, not offered, as it would a pool whose hub
+/// has not reported since it started: only `is_draining` tells the two
+/// apart. A drain does not change the pool's list: the record stored when
+/// the drain is answered, while its instances still serve, has the list
+/// of the one before. Once the record is
+/// withdrawn, the pool reads withdrawn and no longer draining. The test
+/// holds the withdrawal back to read the window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drained_pool_reads_draining_until_its_record_is_withdrawn() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, node, chooser) = sharded_chooser(&spec, &directory).await;
+    let m1 = sharded(&spec, &directory, &quiet).await;
+    let pools = tables(&chooser);
+    until(&pools, "the node reads the pool and its shard", |_| {
+        listed(&node, M1) == FOLLOWED
+    })
+    .await;
+    ask(&chooser.segment).await.expect("answered");
+    let before = record(&directory, M1).await.expect("listed");
+
+    let (answered, _, m1_hub) = drained(&directory, &pools, m1).await;
+    assert_eq!(
+        (answered.state, answered.properties_version),
+        (gdl_pools::PoolState::Draining, before.properties_version),
+        "a drain does not change the list"
+    );
+    let read = listed(&node, M1);
+    assert_eq!(
+        (read.state, read.withdrawn, read.draining),
+        (None, false, true),
+        "the follow dropped, the record draining"
+    );
+    assert!(
+        read.row.is_some_and(
+            |(_, condition, offered)| condition == gdl::PoolCondition::Live && !offered
+        ),
+        "listed live and not offered: {read:?}"
+    );
+
+    directory.hold_withdrawals(false);
+    until(&pools, "the node reads the pool withdrawn", |_| {
+        listed(&node, M1)
+            == Listed {
+                state: None,
+                withdrawn: true,
+                draining: false,
+                row: None,
+            }
+    })
+    .await;
+    for hub in [hub, m1_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// A pool whose hub stops while its record still says it drains reads
+/// draining from the record alone, to a hub that starts then and never
+/// had a link to it. Started again with the same properties, it reads no
+/// longer draining: the new hub's record does not say it, and its list is
+/// newer, since a hub numbers its list past every version its predecessor
+/// sent. That is the only way out of a drain, which cannot be cancelled.
+/// The test holds the first hub's withdrawal back, so its record stays
+/// until the new hub writes its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pool_started_again_after_a_drain_reads_not_draining() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, node, chooser) = sharded_chooser(&spec, &directory).await;
+    let m1 = sharded(&spec, &directory, &quiet).await;
+    let pools = tables(&chooser);
+    until(&pools, "the node reads the pool and its shard", |_| {
+        listed(&node, M1) == FOLLOWED
+    })
+    .await;
+    ask(&chooser.segment).await.expect("answered");
+    let (_, held, m1_hub) = drained(&directory, &pools, m1).await;
+    assert!(listed(&node, M1).draining, "draining");
+
+    m1_hub.shutdown().await.expect("valid test fixture");
+    let (late_hub, late, late_chooser) = sharded_chooser(&spec, &directory).await;
+    until(
+        &tables(&late_chooser),
+        "a hub that starts reads the record draining",
+        |_| listed(&late, M1).draining,
+    )
+    .await;
+    assert_eq!(listed(&late, M1).state, None, "no link to the stopped hub");
+    drop(late_chooser);
+    late_hub.shutdown().await.expect("valid test fixture");
+
+    let again = sharded(&spec, &directory, &quiet).await;
+    until(&pools, "the node reads the pool started again", |_| {
+        listed(&node, M1) == FOLLOWED
+    })
+    .await;
+    let started = record(&directory, M1).await.expect("listed");
+    assert!(
+        started.epoch > held.epoch && started.properties_version > held.properties_version,
+        "the new hub numbers past the one before: {:?} after {:?}",
+        (started.epoch, started.properties_version),
+        (held.epoch, held.properties_version),
+    );
+    directory.hold_withdrawals(false);
+    for hub in [hub, again.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// A pool's follow link says it drains before its record does: with the
+/// pool's publishes held, so that its record still says `ready`, a node
+/// reads the pool draining from the link alone. The pool's drain is
+/// answered only once its record is stored, so it runs beside the test.
+/// No request holds the follow, so the chooser may already have dropped
+/// it: whether it still follows the pool is not what this test reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pool_reads_draining_from_its_link_before_its_record() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, node, chooser) = sharded_chooser(&spec, &directory).await;
+    let m1 = sharded(&spec, &directory, &quiet).await;
+    let pools = tables(&chooser);
+    until(&pools, "the node reads the pool and its shard", |_| {
+        listed(&node, M1) == FOLLOWED
+    })
+    .await;
+
+    directory.hold_publishes(true);
+    let readiness = Arc::clone(&m1.readiness);
+    let drain = tokio::spawn(async move { readiness.drain().await });
+    until(&pools, "the node reads the pool draining", |_| {
+        listed(&node, M1).draining
+    })
+    .await;
+    let stored = record(&directory, M1).await.expect("listed");
+    assert_eq!(
+        stored.state,
+        gdl_pools::PoolState::Ready,
+        "the record does not say it yet"
+    );
+
+    directory.hold_publishes(false);
+    tokio::time::timeout(WAIT, drain)
+        .await
+        .expect("the drain is answered in time")
+        .expect("the drain ran")
+        .expect("the pool drains");
+    for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
