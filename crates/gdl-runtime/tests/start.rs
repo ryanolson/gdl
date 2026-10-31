@@ -147,6 +147,12 @@ async fn a_segment_whose_hub_never_starts_ends_at_its_deadline() {
     let error = error.to_string();
     assert!(error.contains(&format!("127.0.0.1:{control}")), "{error}");
     assert!(error.contains("hub request failed"), "{error}");
+    let address = process.system_address().expect("a system listener");
+    let (_, body) = get(address, "/health").await;
+    assert!(
+        !body.contains("waiting"),
+        "a start past its deadline: {body}"
+    );
 }
 
 /// A hub that refuses the segment, here because it serves another graph,
@@ -228,7 +234,6 @@ async fn an_unanswered_first_registration_reports_what_the_start_waits_for() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F4: a refused start leaves health waiting for the hub"]
 async fn a_refused_start_stops_reporting_a_hub_wait() {
     let mut other = spec();
     other.graph.name = "other".into();
@@ -256,4 +261,32 @@ async fn a_refused_start_stops_reporting_a_hub_wait() {
         !body.contains("\"waiting\":\"hub\""),
         "a start that already returned a permanent refusal is no longer waiting: {body}"
     );
+}
+
+/// A stop while the start waits for its hub ends the start, and the wait
+/// with it: the probe no longer says the process waits for the hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_while_waiting_for_the_hub_ends_the_wait() {
+    let (public, control) = free_ports();
+    let config = settings(public, control, 20_000);
+    let process = Process::start(&config).await.expect("the process starts");
+    let deployment = spec();
+    let launch = config.launch(&process, "a", SEGMENTS, &deployment, async { Ok(()) });
+    let stop = async {
+        waiting(&process).await;
+        process.stop();
+    };
+    let (launched, ()) = tokio::time::timeout(WAIT, async { tokio::join!(launch, stop) })
+        .await
+        .expect("the stop ended the start within the wait");
+    let Err(error) = launched else {
+        panic!("launched with no hub")
+    };
+    assert!(
+        error.to_string().contains("stopped while starting"),
+        "{error}"
+    );
+    let address = process.system_address().expect("a system listener");
+    let (_, body) = get(address, "/health").await;
+    assert!(!body.contains("waiting"), "a stopped start: {body}");
 }

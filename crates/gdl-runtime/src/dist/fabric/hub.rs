@@ -72,8 +72,9 @@ impl HubSession {
     /// ready, is asked again after a wait that doubles from 100 ms up to
     /// 2 s, with jitter, until `wait` has passed. `waiting` is told `true`
     /// as the first attempt begins, since a hub that took the connection may
-    /// not answer for a while, and `false` once the hub admitted the
-    /// instance. Any other answer, such as the hub refusing the
+    /// not answer for a while, and `false` however the wait ends: admitted,
+    /// refused, past `wait`, or dropped with a cancelled start. Any other
+    /// answer, such as the hub refusing the
     /// registration, ends the start at once: asking again cannot change it.
     ///
     /// The exception is an attempt whose answer may have been lost after
@@ -112,6 +113,9 @@ impl HubSession {
         // recorded it, and whether the wait for that orphan was logged.
         let (mut lost, mut orphaned) = (false, false);
         waiting(true);
+        // Cleared on every exit, a dropped future's included: a process
+        // that outlives a failed start must not report a wait that ended.
+        let _waiting = Ended(&waiting);
         loop {
             let attempt = client.register(node, extensions.clone());
             let error = match tokio::time::timeout_at(deadline, attempt).await {
@@ -150,7 +154,6 @@ impl HubSession {
             last = Some(error);
             tokio::time::sleep(pause).await;
         }
-        waiting(false);
         Ok(Self::kept(client, registration, heartbeat))
     }
 
@@ -982,6 +985,15 @@ async fn keep_lease(client: HubClient, heartbeat: Duration, report: watch::Sende
                 tracing::warn!(%error, "hub heartbeat failed; retrying");
             }
         }
+    }
+}
+
+/// Tells a start's wait report `false` when dropped, however the wait ended.
+struct Ended<'a, F: Fn(bool)>(&'a F);
+
+impl<F: Fn(bool)> Drop for Ended<'_, F> {
+    fn drop(&mut self) {
+        (self.0)(false);
     }
 }
 

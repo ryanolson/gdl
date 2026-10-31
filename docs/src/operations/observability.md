@@ -38,7 +38,7 @@ Both bodies are dynamo's JSON with gdl's phase added:
 {"status":"ready","uptime":12.345,"phase":"ready"}
 ```
 
-From the start's first request to its hub until the hub admits the instance, the body adds `"waiting":"hub"`:
+From the start's first request to its hub until that wait ends (the hub admits or refuses the instance, `hub_wait_ms` runs out, or a stop ends the start), the body adds `"waiting":"hub"`:
 
 ```json
 {"status":"notready","uptime":3.210,"phase":"starting","waiting":"hub"}
