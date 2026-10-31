@@ -129,3 +129,6 @@ fn retry(scaler: Arc<GdlScaler>, error: &Failed, _: Arc<Shared>) -> Action {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct Failed(String);
+
+#[cfg(test)]
+mod tests;
