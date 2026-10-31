@@ -130,6 +130,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** an instance retries the withdrawal of `ready` and `loaded`, and then its `retired` announcement, until its drain's bound. If the hub does not answer them, the waits after them (for its senders or sources, and for its own requests) end at once, and a request still in flight is cut. The serving body still runs during that time.
 - **Not affected:** what the hub lists. Once the hub has confirmed the withdrawals, it never lists the instance as one to route to. See [Segment lifecycle](../concepts/lifecycle.md).
 
+### A proxy that replays requests to the hub can list a retiring instance as ready
+- **What:** a retiring instance withdraws `ready` and `loaded`, and announces `retired` once the hub has confirmed the withdrawals. An L7 proxy between the instance and its hub that holds an earlier `ready` and delivers it after the confirmed withdrawal, for example on a retry after its own connection failed, makes the hub list the instance as ready again. If `retired` is gone by then, joiners and pools route to an instance that is leaving.
+- **Not affected:** the deployments gdl renders. Docker Compose reaches the hub directly, and a Kubernetes Service forwards connections (L4), not requests.
+- **Workaround:** do not put a retrying L7 proxy between segments and their hub. See [Lifecycle design](../development/lifecycle-design.md).
+
 ### A hub that does not confirm the withdrawals is not told of the retirement
 - **What:** an instance announces `retired` only once the hub has confirmed that it withdrew `ready` and `loaded`. If the hub does not confirm them within the retirement's bound, the instance prints a line that names the hub, and does not announce `retired`. Peers that already route to it go on until it closes its entries, and then fail over. Its drain ends when the sources that reach it have drained, or at its bound.
 - **Why:** a `retired` whose answer is lost is withdrawn again by the hub client, while a withdrawal stays. Sending `retired` before the withdrawals are confirmed could leave the hub listing the instance as ready and not retired. See [Lifecycle design](../development/lifecycle-design.md).

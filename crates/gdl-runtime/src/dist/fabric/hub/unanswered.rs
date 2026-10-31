@@ -285,7 +285,7 @@ async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
 
 /// A proxy can keep upstream work after its downstream connection fails.
 #[tokio::test]
-#[ignore = "F4: a buffered ready PUT can commit after its confirmed withdrawal and after retired disappears"]
+#[ignore = "a known limitation: an L7 proxy that replays a ready PUT after its confirmed withdrawal can list a retiring instance ready"]
 async fn a_delayed_ready_cannot_undo_a_confirmed_withdrawal() {
     let mut config = velo_hub::HubConfig::default();
     config.server.public_port = 0;
