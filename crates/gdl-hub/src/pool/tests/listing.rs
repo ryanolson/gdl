@@ -13,6 +13,8 @@ use velo_hub::velo::transports::tcp::TcpTransportBuilder;
 use super::super::instances::list;
 use super::{Served, WAIT, spec};
 
+mod order;
+
 struct Directory {
     services: HubServices,
     entered: Arc<Semaphore>,
@@ -185,14 +187,6 @@ async fn retaining_ready_across_the_reads_shows_the_retirement() {
     assert_eq!(
         retirement_between_reads(false).await,
         InstancePhase::Retired
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retirement_between_reads_does_not_regress_a_member_that_stays() {
-    assert!(
-        retirement_between_reads(true).await >= InstancePhase::Ready,
-        "a continuously registered member regressed from ready to joining"
     );
 }
 

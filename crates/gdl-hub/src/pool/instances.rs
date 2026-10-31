@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use futures::future::try_join_all;
 use gdl_model::{SegmentPhase, segment_service};
 use gdl_watch::{InstancePhase, Instances, PoolInstance};
-use velo_hub::client::HubServices;
 use velo_hub::store::Incarnation;
 use velo_hub::velo::discovery::ServiceDiscovery;
 use velo_hub::velo::transports::utils::parse_endpoints;
@@ -42,7 +41,7 @@ const PHASES: [(SegmentPhase, InstancePhase); 4] = [
 /// reason, when the directory does not answer within 5 s.
 pub(super) async fn list(
     admission: &GraphAdmission,
-    services: &HubServices,
+    services: &impl ServiceDiscovery,
     feed: &Feed,
 ) -> Result<Instances, String> {
     let members = admission.members();
