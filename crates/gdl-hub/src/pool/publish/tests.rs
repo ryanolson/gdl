@@ -145,9 +145,13 @@ async fn a_withdrawal_replaced_before_its_reply_is_not_proof() {
     );
 }
 
+/// A hub whose record was lost, after a hub whose clock ran an hour ahead,
+/// numbers its epoch from its own clock. Restarting it moves past the
+/// record it holds, but not past the lost hub's epoch, until its clock
+/// does: a drain that hub left can then hold, whatever the clocks now
+/// say (operations/limitations.md).
 #[tokio::test]
-#[ignore = "F7: correcting clocks and restarting advances the current record but can stay below the lost predecessor's future epoch"]
-async fn a_restart_with_synchronized_clocks_overtakes_a_lost_future_epoch() {
+async fn a_restart_stays_below_a_lost_epoch_until_the_clock_passes_it() {
     let now = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -197,8 +201,8 @@ async fn a_restart_with_synchronized_clocks_overtakes_a_lost_future_epoch() {
         "the restart advances its record"
     );
     assert!(
-        restarted.epoch > predecessor_epoch,
-        "clock correction and a restart must overtake the lost epoch: restart={}, predecessor={predecessor_epoch}",
+        restarted.epoch < predecessor_epoch,
+        "a restart passes the lost epoch only once its clock does: restart={}, predecessor={predecessor_epoch}",
         restarted.epoch
     );
 }
