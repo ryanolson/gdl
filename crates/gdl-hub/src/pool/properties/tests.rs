@@ -622,6 +622,41 @@ fn a_write_read_again_is_adopted_with_its_revocations() {
     );
 }
 
+#[test]
+#[ignore = "F9: set differences erase local revoke intent after a matching reread or a local lift/revoke"]
+fn a_local_revoke_survives_refused_first_writes() {
+    let property = key("mine");
+    let mut repeated = Properties::new(Vec::new());
+    repeated.restore(None, 100);
+    assert!(repeated.revoke(property.clone()));
+
+    repeated.adopt(Some((&[], 200, std::slice::from_ref(&property))), 300);
+    assert_eq!(
+        repeated.list().revoked.as_slice(),
+        std::slice::from_ref(&property)
+    );
+    repeated.adopt(Some((&[entry("mine", Ready, 400)], 400, &[])), 500);
+
+    let mut toggled = Properties::new(Vec::new());
+    toggled.restore(Some((&[], 50, std::slice::from_ref(&property))), 100);
+    assert!(toggled.lift(&property));
+    assert!(toggled.revoke(property.clone()));
+    toggled.adopt(Some((&[entry("mine", Ready, 200)], 200, &[])), 300);
+
+    assert_eq!(
+        [
+            repeated.list().revoked.contains(&property),
+            toggled.list().revoked.contains(&property),
+        ],
+        [true, true],
+        "a local revoke must survive repeated rereads and a local lift/revoke before a reread"
+    );
+    assert_eq!(
+        [state(&repeated, "mine"), state(&toggled, "mine")],
+        [None, None]
+    );
+}
+
 /// A pool declares that it serves each property on its own: one property that
 /// goes away, by a drain or by silence, changes no other property's state.
 #[test]
