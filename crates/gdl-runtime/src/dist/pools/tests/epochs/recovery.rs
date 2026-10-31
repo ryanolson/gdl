@@ -264,3 +264,61 @@ fn a_stale_listing_after_an_unlisting_does_not_hide_a_heard_drain() {
         "hub 5 was heard to drain: {after:?}"
     );
 }
+
+/// A snapshot taken before a drain must not clear it when its marker
+/// arrives after an unlisting that fenced the same hub.
+#[test]
+#[ignore = "F11: a stale snapshot at the fence clears a drain heard before the unlisting"]
+fn a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("an own watch");
+    follows.own(
+        asked.key.clone(),
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(followed(M1, 2, 6))),
+        now,
+    );
+    let mut draining = listing(6);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+            listing: Some(draining),
+        },
+        now,
+    );
+    assert_eq!(
+        evidence(&pools, M1),
+        (
+            Some(at(6, PoolCondition::Live).with_draining(true)),
+            Some(5)
+        ),
+        "the relay heard hub 6 drain while the own snapshot filled"
+    );
+    follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1), (None, Some(5)), "unknown");
+    follows.own(
+        asked.key,
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(FollowEvent::Synced {
+            listed: true,
+        })),
+        now,
+    );
+    let (after, row) = evidence(&pools, M1);
+    assert_eq!(row, Some(6), "the delayed snapshot installed");
+    assert!(
+        after.is_none_or(|after| after.epoch() != 6 || after.is_draining()),
+        "hub 6 was heard to drain and never withdrew: {after:?}"
+    );
+}
