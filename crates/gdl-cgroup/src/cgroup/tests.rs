@@ -227,19 +227,16 @@ fn registers_once() {
 #[test]
 fn every_name_is_reserved_from_nodes() {
     let cgroup = CgroupCollector::at(None);
-    let mut names: Vec<String> = cgroup
-        .desc()
-        .into_iter()
-        .map(|desc| desc.fq_name.clone())
-        .collect();
+    let names = cgroup.desc().into_iter().map(|desc| desc.fq_name.clone());
     #[cfg(target_os = "linux")]
-    names.extend(
+    let names = names.chain(
         prometheus::process_collector::ProcessCollector::for_self()
             .desc()
             .into_iter()
-            .map(|desc| desc.fq_name.clone()),
+            .map(|desc| desc.fq_name.clone())
+            .collect::<Vec<_>>(),
     );
-    for name in &names {
+    for name in names {
         assert!(
             gdl_model::RUNTIME_METRICS.contains(&name.as_str()),
             "{name} is not reserved"
