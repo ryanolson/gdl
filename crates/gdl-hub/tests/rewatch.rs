@@ -32,6 +32,9 @@ struct Scripted {
     scripts: Arc<Mutex<VecDeque<Script>>>,
     /// How many watches of `model_x` have begun.
     watches: Arc<watch::Sender<usize>>,
+    /// If given, the watch of `model_x` that is the nth to begin yields
+    /// nothing until it reads n or more.
+    gate: Option<watch::Receiver<usize>>,
 }
 
 impl PoolDirectory for Scripted {
@@ -49,7 +52,11 @@ impl PoolDirectory for Scripted {
         if class != "model_x" {
             return self.inner.watch(class, from).boxed();
         }
-        self.watches.send_modify(|watches| *watches += 1);
+        let mut nth = 0;
+        self.watches.send_modify(|watches| {
+            *watches += 1;
+            nth = *watches;
+        });
         let script = self
             .scripts
             .lock()
@@ -58,19 +65,31 @@ impl PoolDirectory for Scripted {
             .unwrap_or_default();
         let ends = script.last().is_some_and(Result::is_err);
         let events = futures::stream::iter(script);
-        if ends {
+        let events = if ends {
             events.boxed()
         } else {
             events.chain(futures::stream::pending()).boxed()
-        }
+        };
+        let Some(mut gate) = self.gate.clone() else {
+            return events;
+        };
+        let held = async move {
+            let _ = gate.wait_for(|allowed| *allowed >= nth).await;
+        };
+        futures::stream::once(held)
+            .filter_map(|()| std::future::ready(None))
+            .chain(events)
+            .boxed()
     }
 }
 
 /// A watch that names a child of the global and then fails, before its
 /// snapshot is complete, then a watch whose complete snapshot is empty:
-/// the pool was withdrawn meanwhile. The global follows the pool from the first
-/// watch; its link fails, since no hub serves the pool, and once the
-/// second snapshot is in, the global does not follow it again.
+/// the pool was withdrawn meanwhile. The global follows the pool from the
+/// second watch; its link fails, since no hub serves the pool, and once the
+/// third snapshot is in, the global does not follow it again. The first
+/// watch is a complete empty snapshot that then fails, so that the relay's
+/// listings are whole and a watch of it subscribes at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     let spec = spec();
@@ -97,12 +116,25 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
         lease: Duration::from_secs(30),
         load: None,
     };
+    // Each watch after the first waits for the test: the second until the
+    // relay is subscribed, since a watch of it sees only what comes after,
+    // and the third until the test has seen the pool followed, since the
+    // follower drops it as soon as that snapshot is in, 20 ms after the
+    // second watch ends.
+    let (allow, gate) = watch::channel(1usize);
     let directory = Scripted {
         inner: MemoryDirectory::new(),
         scripts: Arc::new(Mutex::new(VecDeque::from([
             vec![
+                Ok(PoolEvent::Synced {
+                    token: ResumeToken::new("model_x", 1),
+                    snapshot: true,
+                }),
+                Err(DirectoryError::Unavailable("the first watch broke".into())),
+            ],
+            vec![
                 Ok(PoolEvent::Current(pool.clone())),
-                Err(DirectoryError::Unavailable("the watch broke".into())),
+                Err(DirectoryError::Unavailable("the second watch broke".into())),
             ],
             vec![Ok(PoolEvent::Synced {
                 token: ResumeToken::new("model_x", 1),
@@ -110,6 +142,7 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
             })],
         ]))),
         watches: Arc::new(watch::Sender::new(0)),
+        gate: Some(gate),
     };
     let mut watches = directory.watches.subscribe();
     let (hub, global) = hub_of(
@@ -122,13 +155,16 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     )
     .await;
     let mut relay = global.follows();
+    subscribed(&mut relay).await;
+    allow.send_replace(2);
     let key = ("model_x".to_string(), pool.name.clone());
     let mut following = global.following();
     tokio::time::timeout(WAIT, following.wait_for(|pools| pools.contains_key(&key)))
         .await
-        .expect("the global follows the pool the first watch named")
+        .expect("the global follows the pool the second watch named")
         .expect("the extension lives");
-    tokio::time::timeout(WAIT, watches.wait_for(|watches| *watches >= 2))
+    allow.send_replace(3);
+    tokio::time::timeout(WAIT, watches.wait_for(|watches| *watches >= 3))
         .await
         .expect("the follower watches again")
         .expect("the directory lives");
@@ -146,77 +182,14 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     );
     // A snapshot that does not hold the pool is no withdrawal: the
     // directory may have lost the record for any reason, an expiry
-    // included, and silence is never a decommission.
+    // included, and silence is never a decommission. The relay was
+    // subscribed before anything happened, so what this drains is
+    // everything the follower relayed, not only what came after the drain.
     let withdrawn: Vec<FollowEvent> = std::iter::from_fn(|| relay.next().now_or_never().flatten())
         .filter(|event| matches!(event, FollowEvent::Withdrawn { .. }))
         .collect();
     assert!(withdrawn.is_empty(), "{withdrawn:?}");
     hub.shutdown().await.expect("the hub stops");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F1: a relay first polled after a withdrawal misses it and passes the negative assertion"]
-async fn a_late_relay_drain_detects_a_confirmed_withdrawal() {
-    let directory = MemoryDirectory::new();
-    let pool = record();
-    let spec = spec();
-    let global = Arc::new(
-        gdl_hub::PoolReadiness::new(&spec, global_default(), directory.clone(), timing())
-            .expect("a pool extension"),
-    );
-    // No directory task runs yet, so this watch must take the deferred path.
-    let mut relay = global.follows();
-    let hub = velo_hub::Hub::builder(common::config())
-        .extension(gdl_hub::GraphAdmission::new(spec))
-        .extension(Arc::clone(&global))
-        .serve()
-        .await
-        .expect("the hub serves");
-    let mut witness = global.follows();
-    tokio::time::timeout(WAIT, async {
-        while !matches!(
-            witness.next().await.expect("the witness lives"),
-            FollowEvent::Synced { .. }
-        ) {}
-    })
-    .await
-    .expect("the witness is subscribed");
-    let key = ("model_x".to_string(), pool.name.clone());
-    let mut following = global.following();
-    directory.publish(pool.clone()).await.expect("stored");
-    tokio::time::timeout(WAIT, following.wait_for(|pools| pools.contains_key(&key)))
-        .await
-        .expect("the global follows the pool")
-        .expect("the extension lives");
-    directory
-        .withdraw(Withdrawal {
-            class: pool.class.clone(),
-            pool: pool.name.clone(),
-            epoch: pool.epoch,
-            seq: pool.seq + 1,
-        })
-        .await
-        .expect("withdrawn");
-    let relayed = tokio::time::timeout(WAIT, async {
-        loop {
-            let event = witness.next().await.expect("the witness lives");
-            if matches!(event, FollowEvent::Withdrawn { .. }) {
-                return event;
-            }
-        }
-    })
-    .await
-    .expect("the witness confirms the relay emitted a withdrawal");
-    // Use the interrupted-snapshot test's exact late drain after a confirmed event.
-    let withdrawn: Vec<FollowEvent> = std::iter::from_fn(|| relay.next().now_or_never().flatten())
-        .filter(|event| matches!(event, FollowEvent::Withdrawn { .. }))
-        .collect();
-    hub.shutdown().await.expect("the hub stops");
-    assert_eq!(
-        withdrawn,
-        vec![relayed],
-        "F1: the negative assertion accepts a relay that already emitted a withdrawal"
-    );
 }
 
 /// A withdrawal the directory's watch shows is relayed, naming the
@@ -227,17 +200,7 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
     let pool = record();
     let (hub, global) = hub_of(global_default(), directory.clone(), timing()).await;
     let mut relay = global.follows();
-    // A watch begun before the directory's first snapshot is in takes its
-    // own only once that is, and sees no change from before: read to its
-    // marker, so that the withdrawal below comes after it.
-    tokio::time::timeout(WAIT, async {
-        while !matches!(
-            relay.next().await.expect("the relay lives"),
-            FollowEvent::Synced { .. }
-        ) {}
-    })
-    .await
-    .expect("the relay's snapshot is whole");
+    subscribed(&mut relay).await;
     let key = ("model_x".to_string(), pool.name.clone());
     let mut following = global.following();
     directory.publish(pool.clone()).await.expect("stored");
@@ -276,6 +239,21 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
     );
     assert!(withdrawn.2 >= 1, "{withdrawn:?}");
     hub.shutdown().await.expect("the hub stops");
+}
+
+/// Read `relay` to the marker that ends its snapshot. A watch begun before
+/// the directory's first snapshot is in takes its own, and subscribes to
+/// changes, only on its first poll, and sees none from before; a test that
+/// looks for a relayed event, or for the absence of one, subscribes first.
+async fn subscribed(relay: &mut (impl futures::Stream<Item = FollowEvent> + Unpin)) {
+    tokio::time::timeout(WAIT, async {
+        while !matches!(
+            relay.next().await.expect("the relay lives"),
+            FollowEvent::Synced { .. }
+        ) {}
+    })
+    .await
+    .expect("the relay's snapshot is whole");
 }
 
 /// A ready child of the global whose hub nobody serves.
@@ -404,6 +382,7 @@ async fn a_directory_whose_watches_fail_is_watched_a_bounded_number_of_times() {
         inner: MemoryDirectory::new(),
         scripts: Arc::new(Mutex::new(std::iter::repeat_n(failing, 1000).collect())),
         watches: Arc::new(watch::Sender::new(0)),
+        gate: None,
     };
     let mut watches = directory.watches.subscribe();
     let (hub, _global) = hub_of(global_default(), directory, timing()).await;
