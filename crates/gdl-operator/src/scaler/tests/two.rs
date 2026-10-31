@@ -166,23 +166,34 @@ async fn a_stale_pod_write_is_refused_by_the_pods_version() {
     assert!(fake.pod("pod-2").routable);
 }
 
-struct PausedScale<'a> {
+struct PausedWrite<'a> {
     fake: &'a Fake,
+    write: &'static str,
     arrived: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
 
-impl<'a> PausedScale<'a> {
-    fn new(fake: &'a Fake) -> Self {
+impl<'a> PausedWrite<'a> {
+    fn new(fake: &'a Fake, write: &'static str) -> Self {
         Self {
             fake,
+            write,
             arrived: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
         }
     }
+
+    async fn before(&self, write: &str) {
+        if self.write == write {
+            self.arrived.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), self.resume.notified())
+                .await
+                .expect("the other operator releases the write");
+        }
+    }
 }
 
-impl Cluster for PausedScale<'_> {
+impl Cluster for PausedWrite<'_> {
     async fn target(&self, name: &str) -> Result<Option<Target>, String> {
         self.fake.target(name).await
     }
@@ -196,10 +207,7 @@ impl Cluster for PausedScale<'_> {
     }
 
     async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
-        self.arrived.notify_one();
-        tokio::time::timeout(Duration::from_secs(3), self.resume.notified())
-            .await
-            .expect("the other operator releases the count write");
+        self.before("scale").await;
         self.fake.scale(name, replicas, fence).await
     }
 
@@ -209,6 +217,9 @@ impl Cluster for PausedScale<'_> {
         version: &str,
         routable: bool,
     ) -> Result<String, Refused> {
+        if routable {
+            self.before("restore").await;
+        }
         self.fake.routable(pod, version, routable).await
     }
 
@@ -233,7 +244,7 @@ impl Cluster for PausedScale<'_> {
 
 async fn count_across_cancellation(desired: i32) -> Fake {
     let fake = Fake::with(&[9, 0, 9]);
-    let paused = PausedScale::new(&fake);
+    let paused = PausedWrite::new(&fake, "scale");
     let victims = Victims::default();
     let cx = Context {
         cluster: &paused,
@@ -283,5 +294,120 @@ async fn a_count_write_after_cancellation_preserves_the_newer_scale() {
         state.replicas, 3,
         "a cancelled removal must not lower the newer desired count: {:?}",
         state.events
+    );
+}
+
+async fn cancel_across_sweep(sweep: bool) -> Fake {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut down = spec(Some(2));
+    down.service = Some(SERVICE.into());
+    down.routing_grace = Some("0s".into());
+    once(&fake, &down, 0).await;
+    fake.unlist();
+    once(&fake, &down, 1_000).await;
+    let victims = Victims::default();
+
+    // Stop after the cost write, as a restart before the count write can.
+    {
+        let paused = PausedWrite::new(&fake, "scale");
+        let cx = Context {
+            cluster: &paused,
+            probe: &fake,
+            victims: &victims,
+        };
+        let read = snapshot(&fake, &down);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                result = reconcile(&cx, &read, 2_000) => panic!("the count write did not pause: {result:?}"),
+                () = paused.arrived.notified() => {},
+            }
+        })
+        .await
+        .expect("the cost write completes");
+    }
+    assert_eq!(fake.state().replicas, 3);
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Committing);
+    assert_eq!(fake.pod("pod-2").cost, Some(VICTIM_COST));
+
+    let mut up = down;
+    up.replicas = Some(3);
+    fake.state().scaler_version += 1;
+    let paused = PausedWrite::new(&fake, "restore");
+    let cx = Context {
+        cluster: &paused,
+        probe: &fake,
+        victims: &victims,
+    };
+    let read = snapshot(&fake, &up);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (result, ()) = tokio::join!(reconcile(&cx, &read, 3_000), async {
+            paused.arrived.notified().await;
+            assert!(status(&fake).retiring.is_empty());
+            assert!(!fake.pod("pod-2").routable);
+            if sweep {
+                once(&fake, &up, 3_001).await;
+                assert!(fake.pod("pod-2").routable);
+            }
+            paused.resume.notify_one();
+        });
+        result.expect("the restoring operator reconciles");
+    })
+    .await
+    .expect("the restore interleaving completes");
+    assert!(status(&fake).retiring.is_empty());
+    assert!(fake.pod("pod-2").routable);
+    fake
+}
+
+async fn next_removal(fake: &Fake) -> (String, String) {
+    let mut down = spec(Some(2));
+    down.service = Some(SERVICE.into());
+    down.routing_grace = Some("0s".into());
+    {
+        let mut state = fake.state();
+        state.scaler_version += 1;
+        state.pods[0].load = 0;
+        state.pods[1].load = 99;
+        state.pods[2].load = 99;
+    }
+    once(fake, &down, 4_000).await;
+    fake.unlist();
+    once(fake, &down, 5_000).await;
+    once(fake, &down, 6_000).await;
+    let chosen = status(fake).retiring[0].uid.clone();
+    assert_eq!(chosen, "uid-1");
+    assert_eq!(fake.state().replicas, 2);
+    fake.settle(false);
+    let deleted = fake
+        .state()
+        .pods
+        .iter()
+        .find(|p| p.view.terminating)
+        .expect("the ReplicaSet deletes a pod")
+        .view
+        .uid
+        .clone();
+    (chosen, deleted)
+}
+
+#[tokio::test]
+async fn cancellation_without_a_concurrent_sweep_clears_the_cost() {
+    let fake = cancel_across_sweep(false).await;
+    assert_eq!(fake.pod("pod-2").cost, None);
+    let (chosen, deleted) = next_removal(&fake).await;
+    assert_eq!(deleted, chosen);
+}
+
+#[tokio::test]
+#[ignore = "F2: a concurrent sweep interrupts cost restoration after the victim leaves status"]
+async fn a_sweep_during_cancellation_preserves_the_next_victim() {
+    let fake = cancel_across_sweep(true).await;
+    let retained_cost = fake.pod("pod-2").cost;
+    let (chosen, deleted) = next_removal(&fake).await;
+    assert_eq!(
+        deleted,
+        chosen,
+        "the cancelled victim retains cost {retained_cost:?}: {:?}",
+        fake.state().events
     );
 }
