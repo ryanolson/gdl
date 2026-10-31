@@ -187,3 +187,76 @@ async fn retirement_between_reads_does_not_regress_a_member_that_stays() {
         "a continuously registered member regressed from ready to joining"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F5: the membership recheck accepts a replacement registration with the same id"]
+async fn a_reused_id_does_not_preserve_the_departed_registration() {
+    let served = Served::new().await;
+    let (node, client) = member(&served).await;
+    let retired = client
+        .register_service(&segment_service("a", SegmentPhase::Retired))
+        .await
+        .expect("the hub takes retirement");
+    let admission = Arc::clone(served.pool.admission.get().expect("admission attached"));
+    let services = client.services();
+    let before = list(&admission, &services, &served.pool.feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(before.instances.len(), 1);
+    assert_eq!(before.instances[0].segment, "a");
+    assert_eq!(before.instances[0].phase, InstancePhase::Retired);
+
+    let held = [
+        SegmentPhase::Ready,
+        SegmentPhase::Detached,
+        SegmentPhase::Retired,
+        SegmentPhase::Drained,
+    ]
+    .map(|phase| segment_service("a", phase))
+    .into();
+    let directory = Directory::new(services.clone(), held).await;
+    let listing = tokio::spawn({
+        let admission = Arc::clone(&admission);
+        let feed = Arc::clone(&served.pool.feed);
+        let services = directory.services.clone();
+        async move { list(&admission, &services, &feed).await }
+    });
+    directory.entered().await;
+    client.unregister().await.expect("the instance leaves");
+    assert!(admission.member(node.instance_id()).is_none());
+    drop(retired);
+    client
+        .register_peer(
+            node.peer_info(),
+            BTreeMap::from([(
+                "gdl".to_string(),
+                serde_json::to_value(spec().registration("f").expect("segment f"))
+                    .expect("a registration"),
+            )]),
+        )
+        .await
+        .expect("the hub admits the same id for another segment");
+    assert_eq!(
+        admission.member(node.instance_id()).expect("a member").0,
+        "f"
+    );
+    directory.gate.add_permits(4);
+    let during = tokio::time::timeout(WAIT, listing)
+        .await
+        .expect("the listing finishes")
+        .expect("the listing task runs")
+        .expect("the directory answers");
+    let after = list(&admission, &services, &served.pool.feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(after.instances.len(), 1);
+    assert_eq!(after.instances[0].segment, "f");
+    assert_eq!(after.instances[0].phase, InstancePhase::Joining);
+    directory.stop().await;
+    served.stop().await;
+    assert!(
+        during.instances.is_empty(),
+        "the departed registration survives under the replacement's id: {:?}",
+        during.instances
+    );
+}
