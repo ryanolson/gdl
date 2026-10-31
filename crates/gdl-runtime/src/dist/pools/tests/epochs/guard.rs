@@ -416,7 +416,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         // later hub's record read before the follower ends the earlier
         // hub's follow, which may drain after, so that a snapshot shows the
         // two together and only the follow says the drain.
-        let what = match rng.below(36) {
+        let what = match rng.below(38) {
             // The pool's next hub writes its record: listed at once, and
             // its follow begun, which may never install.
             0 => {
@@ -891,6 +891,112 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                         format!(
                             "the relay lags: withdrawn, hub {} followed and draining behind hub {}, read from its own watch; the relay delivers to its stale listing",
                             follow.epoch, hub.epoch
+                        )
+                    }
+                    None => "no row to read again".into(),
+                }
+            }
+            // The pool's own watch takes its snapshot of a later hub while
+            // that hub is ready, and holds back its marker; the hub drains
+            // and the pool withdraws; the relay delivers up to its
+            // unlisting, which forgets the drain beside the earlier hub's
+            // row; then the marker comes, at the fence's hub.
+            36 | 37 if wire.own.is_none() && hub.listing.is_some() && !hub.withdrawn => {
+                match read(&pools).1 {
+                    Some((generation, _)) => {
+                        end_follow(&mut hub, &mut wire);
+                        hub.epoch += 1;
+                        hub.listing = Some((hub.wire(hub.epoch), PoolCondition::Live, false));
+                        let listed = hub.listed_event();
+                        wire.send(&mut hub, listed);
+                        begin(&mut hub);
+                        let mut follow = hub.follow.expect("just begun");
+                        follow.installed = true;
+                        follow.state = PoolState::Ready;
+                        hub.follow = Some(follow);
+                        let event = hub.follow_event(&follow, None);
+                        wire.send(&mut hub, event);
+                        let exposed = hub.exposed(follow.generation);
+                        wire.send(&mut hub, exposed);
+                        follows.unknown(UnknownFollowEvent {
+                            kind: "paused".into(),
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation,
+                        });
+                        let Some(asked) = follows.asked().pop() else {
+                            trace.push("no own watch asked".into());
+                            continue;
+                        };
+                        heard.filling = Some(Vec::new());
+                        let mut snapshot = hub.own_snapshot();
+                        let marker = snapshot.pop().expect("a marker");
+                        for event in snapshot {
+                            heard.hear_own(&event);
+                            follows.own(
+                                asked.key.clone(),
+                                asked.watch,
+                                Ok(Watched::Event(event)),
+                                now,
+                            );
+                        }
+                        let (key, watch) = (asked.key.clone(), asked.watch);
+                        wire.own = Some((asked, VecDeque::new()));
+                        follow.state = PoolState::Draining;
+                        hub.follow = Some(follow);
+                        hub.said.entry(hub.wire(follow.epoch)).or_default().drained = true;
+                        wire.send(
+                            &mut hub,
+                            FollowEvent::State {
+                                class: "model_x".into(),
+                                pool: M1.into(),
+                                generation: follow.generation,
+                                state: PoolState::Draining,
+                            },
+                        );
+                        if let Some(listing) = &mut hub.listing {
+                            listing.2 = true;
+                        }
+                        let listed = hub.listed_event();
+                        wire.send(&mut hub, listed);
+                        end_follow(&mut hub, &mut wire);
+                        hub.listing = None;
+                        let unlisted = hub.listed_event();
+                        wire.send(&mut hub, unlisted);
+                        hub.withdrawn = true;
+                        let withdrawn = FollowEvent::Withdrawn {
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation: hub.generation,
+                            epoch: hub.wire(hub.epoch),
+                            properties_version: 0,
+                        };
+                        wire.send(&mut hub, withdrawn);
+                        while let Some(event) = wire.relay.pop_front() {
+                            let unlisting_now =
+                                matches!(event, FollowEvent::Listed { listing: None, .. });
+                            if matches!(
+                                event,
+                                FollowEvent::Listed { .. } | FollowEvent::Withdrawn { .. }
+                            ) {
+                                heard.hear(&event);
+                            }
+                            let unlisting = unlisting_beside(&pools, &event);
+                            unknown |= unlisting.is_some_and(|(another, _)| another);
+                            follows.take(event, now);
+                            if let Err(broke) = kept_at_unlisting(&pools, unlisting) {
+                                trace.push("an unlisting is delivered".into());
+                                return Err((trace, broke));
+                            }
+                            if unlisting_now {
+                                break;
+                            }
+                        }
+                        heard.hear_own(&marker);
+                        follows.own(key, watch, Ok(Watched::Event(marker)), now);
+                        format!(
+                            "own snapshot of hub {} taken ready, marker held; the hub drains and withdraws; the relay delivers to its unlisting; then the marker",
+                            hub.epoch
                         )
                     }
                     None => "no row to read again".into(),
