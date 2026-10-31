@@ -569,6 +569,12 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Workaround:** keep the hosts' clocks in sync. Drop a stored version when its pool withdraws.
 - **Test:** `a_restart_without_a_record_does_not_reuse_a_properties_version` in `crates/gdl-hub/src/pool/properties/tests.rs`.
 
+### A pool's drain can hold or hide after a lost record and a clock behind
+- **What:** a chooser orders a pool's drain by the epoch of the pool's hub: a later epoch clears it, and an earlier one changes nothing ([What the chooser builds](../concepts/pool-routing.md#what-the-chooser-builds)). If the directory loses the pool's record and its withdrawal, and the next hub of the pool starts on a host whose clock is behind the last one's, the new hub takes a lower epoch. Then the chooser keeps the last hub's drain state for the new hub: a ready pool can read draining, or a draining one not draining. This lasts until a hub of the pool starts at a later epoch, or the pool withdraws and the chooser forgets its listing.
+- **Why:** with no record, the new hub counts its epoch from its clock ([A hub with no record numbers its properties by its clock](#a-hub-with-no-record-numbers-its-properties-by-its-clock)). Ordering the drain by the list's version instead fails the other way: a hub's version can repeat the last hub's, and a late listing from the last hub would then set or clear the new hub's drain.
+- **Workaround:** keep the hosts' clocks in sync. Once they are, restart the pool's hub: it takes a later epoch, which clears or sets the drain as the new hub says.
+- **Test:** `a_successor_after_directory_loss_can_change_its_drain_at_a_lower_epoch` in `crates/gdl-runtime/src/dist/pools/tests/properties/recovery.rs`, ignored.
+
 ### A drain not stored while its instance stops can be lost
 - **What:** an instance that stops waits while it drains, before it retires, until its hub has stored each drain it reported: for at most two summary periods, and never past its drain bound. If the hub's writes take longer than that, and the hub restarts before it stores the drain, the restarted hub reads the record from before the drain: the property is `unavailable`, not `drained`, until the pool withdraws. An instance that loses its lease does not wait.
 - **Impact:** it fails safe. The property stays listed, and nothing is removed.

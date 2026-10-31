@@ -33,7 +33,7 @@ fn a_ready_successor_from_a_relay_without_epochs_clears_a_drain() {
 }
 
 #[test]
-#[ignore = "F4: a lower successor epoch freezes the predecessor's drain even after its list is overtaken"]
+#[ignore = "a known limit: a hub whose clock is behind, after the directory lost the record and its withdrawal, starts at a lower epoch, and the drain of the hub before it holds until a later epoch (operations/limitations.md)"]
 fn a_successor_after_directory_loss_can_change_its_drain_at_a_lower_epoch() {
     let version = 1_001 * (1 << 20);
     let mut observed = Vec::new();
