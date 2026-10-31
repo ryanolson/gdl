@@ -8,6 +8,7 @@ gdl runs its crossings, streams, and discovery on [velo](https://github.com/ai-d
 - **One module.** `crates/gdl-runtime/src/dist/fabric.rs` is the only module that calls velo: it builds the node, mints and attaches anchors, registers handlers, and shuts down. A velo upgrade stays there, and in the hub client under `fabric/hub`. Other modules name only velo's id and address types. There is no transport trait, because the runtime has no second messaging implementation.
 - **`gdl` never links velo.** A node crate builds without the transport (`crates/gdl/tests/dependencies.rs`). Generated code and node implementations never call velo.
 - **The node.** `build_node` binds one TCP listener and calls `mux_only()`, so every stream rides the messenger mux on that one listener. gdl talks only to gdl. The per-stream listener that velo keeps for older peers would be a second port per segment, and a path where the retirement signal means less.
+- **velo's metrics.** Under `[system] velo_metrics`, `build_node` gives the builder a `VeloMetrics` registered in a registry of its own, which the process serves beside its registry ([velo's own metrics](../operations/observability.md#velos-own-metrics)). It is a builder option, so the registry exists before the node, while the identity labels name the node's instance. velo records per frame and per handler call, so it is off by default ([velo's own metrics](../operations/feature-costs.md#velos-own-metrics)).
 
 ## What the runtime relies on
 

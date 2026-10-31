@@ -865,6 +865,25 @@ pub async fn tight_velo_node() -> velo::Velo {
         .expect("velo node")
 }
 
+/// A velo node as a segment binds one under `[system] velo_metrics`:
+/// [`velo_node`], recording velo's own metrics in `registry`.
+pub async fn metered_velo_node(registry: &prometheus::Registry) -> velo::Velo {
+    let metrics = Arc::new(velo::VeloMetrics::register(registry).expect("metrics"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let transport = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .expect("listener")
+        .build()
+        .expect("transport");
+    velo::Velo::builder()
+        .add_transport(Arc::new(transport))
+        .mux_only()
+        .metrics(metrics)
+        .build()
+        .await
+        .expect("velo node")
+}
+
 /// A tight velo node (see [`tight_velo_node`]) that counts how often its
 /// producers waited for credit, read through [`backpressured`].
 pub async fn metered_tight_velo_node() -> (velo::Velo, prometheus::Registry) {

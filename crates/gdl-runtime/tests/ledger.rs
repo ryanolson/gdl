@@ -257,7 +257,6 @@ async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
 /// under velo's names, not the registry's prefix, with the instance's
 /// identity labels, each family once in the scrape.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "velo metrics: no `velo_metrics` setting, and velo's families are not served"]
 async fn velos_families_are_served_beside_the_registry_when_asked() {
     let placement = Placement::new()
         .segment("front", ["A", "B", "F", "E", "G"])
@@ -328,7 +327,7 @@ async fn velos_families_are_served_beside_the_registry_when_asked() {
         assert_eq!(once.len(), families.len(), "a family twice: {scrape}");
         for family in [
             "velo_streaming_active_anchors",
-            "velo_messenger_handler_requests_total",
+            "velo_transport_frames_total",
         ] {
             assert!(
                 families.contains(&family),

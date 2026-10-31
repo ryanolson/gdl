@@ -41,7 +41,7 @@ pub use fleet::{
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
-    RUNTIME_METRICS, WORKER_LABEL,
+    RUNTIME_METRICS, VELO_METRICS, WORKER_LABEL,
 };
 pub use placement::{
     ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,

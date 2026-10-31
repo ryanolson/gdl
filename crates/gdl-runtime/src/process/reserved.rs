@@ -9,6 +9,12 @@
 //! segment binary's build asks first, to name the prefix and the figure,
 //! and the collector itself, which the registry holds so that it refuses
 //! every other registration of such a name.
+//!
+//! velo's own families, under `[system] velo_metrics`, are served
+//! unprefixed beside the registry too, under names that start with
+//! `velo_`. velo names them, so [`Reserved::refusal`] refuses every name
+//! served with that start, setting on or off. The collector cannot: a
+//! registry refuses exact names only.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -64,11 +70,21 @@ impl Reserved {
 
     /// Why a metric named `name` cannot register, if it cannot.
     pub(crate) fn refusal(&self, name: &str) -> Option<String> {
-        let family = self.names.get(name)?;
         let under = match &self.prefix {
             Some(prefix) => format!("under `metrics_prefix` {prefix:?}"),
             None => "with no `metrics_prefix`".to_string(),
         };
+        let served = match &self.prefix {
+            Some(prefix) => format!("{prefix}_{name}"),
+            None => name.to_string(),
+        };
+        if served.starts_with(gdl_model::VELO_METRICS) {
+            return Some(format!(
+                "its metric `{name}` is served as `{served}` {under}, and velo's own metrics are served under names that start with `{}`: name the metric otherwise, or choose another prefix",
+                gdl_model::VELO_METRICS
+            ));
+        }
+        let family = self.names.get(name)?;
         Some(format!(
             "its metric `{name}` is served as `{family}` {under}, the name of one of the process's own figures: name the metric otherwise, or choose another prefix"
         ))
@@ -93,7 +109,6 @@ mod tests {
     /// names that start with `velo_`: a node metric served under such a
     /// name is refused, under any prefix, and one that is not registers.
     #[test]
-    #[ignore = "velo metrics: a name served as velo's is not refused"]
     fn a_name_served_as_velos_is_refused() {
         let refused = |prefix: Option<&str>, name: &str| Reserved::new(prefix).refusal(name);
         let empty = refused(None, "velo_streaming_active_anchors").expect("refused");

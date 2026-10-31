@@ -1,4 +1,4 @@
-use gdl_model::{MetricField, MetricKind, RUNTIME_LABELS, RUNTIME_METRICS};
+use gdl_model::{MetricField, MetricKind, RUNTIME_LABELS, RUNTIME_METRICS, VELO_METRICS};
 use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 
@@ -132,6 +132,11 @@ fn name_problem(name: &str, kind: MetricKind) -> Option<String> {
     }
     if RUNTIME_METRICS.contains(&name) {
         return Some("the runtime records or reserves a metric of this name".into());
+    }
+    if name.starts_with(VELO_METRICS) {
+        return Some(format!(
+            "velo's metrics are served under names that start with `{VELO_METRICS}`"
+        ));
     }
     let counter = kind == MetricKind::Counter;
     let total = words.last() == Some(&"total");
@@ -431,6 +436,10 @@ mod tests {
             (
                 quote::quote!(/** x */ #[gdl(buckets = [1.0])] request_duration_seconds: Histogram),
                 "the runtime records",
+            ),
+            (
+                quote::quote!(/** x */ velo_frames_total: IntCounter),
+                "velo's metrics",
             ),
         ] {
             let message = refused(field.clone());

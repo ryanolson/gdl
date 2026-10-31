@@ -11,7 +11,8 @@
 //!
 //! The setups are `remote`'s: `local`, `one` (one segment), `two`, and
 //! `three`, and the last three again with the runtime's metrics recorded
-//! (`one-metrics`, ...). `two-random` is `two` with the engine's crossing
+//! (`one-metrics`, ...), and again with velo's own metrics recorded too, as
+//! `[system] velo_metrics` does (`one-velo`, ...). `two-random` is `two` with the engine's crossing
 //! routed by `random` rather than `round_robin`; `two-least_loaded` and
 //! `two-affinity` route it through those selectors. Only the setup named
 //! is built. `requests sizes 0` prints the size of the front's call future
@@ -37,7 +38,7 @@ mod common;
 #[path = "remote/setup.rs"]
 mod setup;
 
-use common::{Events, deploy, local_graph, prompt, velo_node};
+use common::{Events, deploy, local_graph, metered_velo_node, prompt, velo_node};
 use gdl::Cx;
 use gdl_runtime::{RequestRouter, RuntimeConfig};
 use setup::*;
@@ -46,14 +47,20 @@ use setup::*;
 #[inline(always)]
 fn produced() {}
 
+/// Whether the setup's velo nodes record velo's own metrics.
+static VELO_METRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `setup` builds its velo nodes as a segment does.
 async fn node() -> velo::Velo {
-    velo_node().await
+    match VELO_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+        true => metered_velo_node(&gdl::prometheus::Registry::new()).await,
+        false => velo_node().await,
+    }
 }
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics | -velo] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -90,9 +97,13 @@ fn main() {
             std::process::exit(0);
         }
         let events = Events::quiet();
-        let (shape, metrics) = match which.strip_suffix("-metrics") {
-            Some(shape) => (shape, true),
-            None => (which.as_str(), false),
+        let (shape, metrics) = match (which.strip_suffix("-metrics"), which.strip_suffix("-velo")) {
+            (Some(shape), _) => (shape, true),
+            (_, Some(shape)) => {
+                VELO_METRICS.store(true, std::sync::atomic::Ordering::Relaxed);
+                (shape, true)
+            }
+            _ => (which.as_str(), false),
         };
         let caller: Caller = match shape {
             "local" if !metrics => {

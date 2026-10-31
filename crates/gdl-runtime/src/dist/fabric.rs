@@ -39,17 +39,20 @@ use gdl::{Error, ErrorKind, Result};
 /// streams alike. Port zero picks a free port; the node's address carries
 /// the bound one.
 pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
-    build_node(listen, None).await
+    build_node(listen, None, None).await
 }
 
 /// [`bind_node`], resolving a peer it has not registered through
 /// `discovery` when a message is addressed to that peer's worker (an attach
 /// to an anchor it minted, a ticket open, a stream batch, a reservation
 /// renewal): a peer may mint an anchor that this node is asked to attach to
-/// before this node has heard of the peer.
+/// before this node has heard of the peer. With `metrics`, velo records
+/// its own metrics there: per frame and per handler call, so not free on
+/// the request path (docs/src/operations/feature-costs.md).
 pub(crate) async fn build_node(
     listen: std::net::SocketAddr,
     discovery: Option<Arc<dyn velo::PeerDiscovery>>,
+    metrics: Option<&prometheus::Registry>,
 ) -> Result<Velo> {
     let transport = |e: &dyn std::fmt::Display| Error::new(ErrorKind::Transport, e.to_string());
     let listener = std::net::TcpListener::bind(listen).map_err(|e| transport(&e))?;
@@ -65,6 +68,12 @@ pub(crate) async fn build_node(
     let builder = Velo::builder().add_transport(Arc::new(tcp)).mux_only();
     let builder = match discovery {
         Some(discovery) => builder.discovery(discovery),
+        None => builder,
+    };
+    let builder = match metrics {
+        Some(registry) => builder.metrics(Arc::new(
+            velo::VeloMetrics::register(registry).map_err(|e| transport(&e))?,
+        )),
         None => builder,
     };
     builder.build().await.map_err(|e| transport(&e))

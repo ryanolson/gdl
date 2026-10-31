@@ -76,7 +76,7 @@ The chapters that explain these settings: [Requests, attempts, and deadlines](..
 
 ## `[system]`
 
-The system listener answers the live and health probes and serves `/metrics`. It is off unless `port` is set. Its keys are `port` (default -1: off; 0 is an ephemeral port), `host` (`0.0.0.0`), `live_path` (`/live`), `health_path` (`/health`), and `metrics_prefix` (`dynamo_component`; empty for none). [Health and metrics](observability.md) describes the probe contract.
+The system listener answers the live and health probes and serves `/metrics`. It is off unless `port` is set. Its keys are `port` (default -1: off; 0 is an ephemeral port), `host` (`0.0.0.0`), `live_path` (`/live`), `health_path` (`/health`), `metrics_prefix` (`dynamo_component`; empty for none), and `velo_metrics` (`false`). [Health and metrics](observability.md) describes the probe contract.
 
 ## `[pool]`
 

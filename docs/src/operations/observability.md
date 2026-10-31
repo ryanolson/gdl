@@ -13,6 +13,7 @@ The `[system]` table of a segment's settings configures the listener. It is off 
 | `live_path` | `/live` | The live probe's path. |
 | `health_path` | `/health` | The health probe's path. |
 | `metrics_prefix` | `dynamo_component` | The prefix of every metric name. Empty for none. |
+| `velo_metrics` | `false` | Also serve velo's own metrics ([velo's own metrics](#velos-own-metrics)). |
 
 dynamo's variables `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT`, `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH` set the same keys. No other `DYN_` variable is read. The settings files come first, then the `DYN_SYSTEM_*` variables, then the `GDL_SYSTEM__*` variables, and a later source wins. [Segment settings](configuration.md) describes the files and the `GDL_` variables.
 
@@ -61,7 +62,7 @@ The registry holds:
 - the runtime's figures for each segment a request passes through;
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
-Beside the registry, `/metrics` serves the process's own figures ([The process's own figures](#the-processs-own-figures)), with the same identity labels but never the prefix.
+Beside the registry, `/metrics` serves the process's own figures ([The process's own figures](#the-processs-own-figures)), and under `velo_metrics` velo's ([velo's own metrics](#velos-own-metrics)), with the same identity labels but never the prefix.
 
 The listener gathers the registry on a blocking thread, so a node's `ScrapeGaugeVec` closure does not run on a runtime worker. A scrape answered with 503 for its time still runs until its closures return. Up to 4 scrapes run at once, enough for an HA pair of Prometheus servers and a person. Each runs the closures on vectors of its own, so their values do not mix. A scrape that takes longer than 5 s is answered with 503 and the reason. A scrape that finds 4 running is answered with 503 at once ("a scrape is in progress"). Waiting, it would hold one of the listener's 64 connections, and enough waiting scrapes would keep the probes from being answered. A closure that panics is answered with 500.
 
@@ -89,6 +90,14 @@ rate(process_cgroup_cpu_usage_seconds_total[1m]) + rate(process_cgroup_cpu_throt
 The cgroup is the container's, so in a pod of one container its use is the process's. CPU per request is the use's rate over the rate of the requests the segment served. The first term alone flattens at `process_cgroup_cpu_quota_cores`. A window in which `process_cgroup_cpu_throttled_periods_total` rises is capped: the process waited for its quota, and its latency includes the wait. `process_cgroup_memory_peak_bytes` is the most the cgroup has held since it started, so a step of a load test reads its peak against a fresh process, or as the rise over the step.
 
 `process_cpu_seconds_total` counts whole seconds: prometheus's collector rounds the kernel's ticks down. Where the cgroup's figures exist, read `process_cgroup_cpu_usage_seconds_total` instead. Otherwise read the process's as a rate over a minute or more.
+
+## velo's own metrics
+
+With `[system] velo_metrics = true`, a segment also serves the metrics of its velo node: its transport, messenger, streams, and mux, under velo's own names (`velo_streaming_active_anchors`, `velo_transport_active_connections`, `velo_streaming_mux_staged_records`). Each family's help text in the scrape says what it counts. They carry the segment's identity labels and never its prefix, as the process's own figures do, so dashboards built for velo read them as they are. The setting needs the listener: without it, velo records nothing.
+
+They are off by default because velo records them per frame and per handler call: each request pays for them ([velo's own metrics](feature-costs.md#velos-own-metrics) has the numbers). [Reading a drain](#reading-a-drain) needs none of them.
+
+No family appears twice in one scrape. A node metric whose served name starts with `velo_` is refused when the segment binary builds, with the setting on or off ([Reserved names](../appendix/metrics.md#reserved-names)).
 
 ## Reading the runtime's figures
 

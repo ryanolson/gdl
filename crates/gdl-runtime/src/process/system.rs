@@ -39,6 +39,12 @@ pub(crate) struct SystemSettings {
     /// they are; empty for none.
     #[serde(default = "default_metrics_prefix")]
     metrics_prefix: String,
+    /// Serve velo's own metrics (`velo_*`) beside the registry, as the
+    /// process's own figures are. Off by default: velo records them per
+    /// frame and per handler call, which costs every request
+    /// (docs/src/operations/feature-costs.md).
+    #[serde(default)]
+    velo_metrics: bool,
 }
 
 impl Default for SystemSettings {
@@ -49,6 +55,7 @@ impl Default for SystemSettings {
             live_path: default_live_path(),
             health_path: default_health_path(),
             metrics_prefix: default_metrics_prefix(),
+            velo_metrics: false,
         }
     }
 }
@@ -125,11 +132,33 @@ impl SystemSettings {
         (!self.metrics_prefix.is_empty()).then(|| self.metrics_prefix.clone())
     }
 
+    /// Whether velo's own metrics are asked for.
+    pub(crate) fn velo_metrics(&self) -> bool {
+        self.velo_metrics
+    }
+
     /// The address to bind, if a listener is asked for.
     fn address(&self) -> Option<SocketAddr> {
         u16::try_from(self.port)
             .ok()
             .map(|port| SocketAddr::new(self.host, port))
+    }
+}
+
+/// Another registry's families, gathered as the registry this is in
+/// gathers, which adds its labels and its prefix: velo's, which must exist
+/// before the node is built, while the labels name the node's instance.
+/// It has no descriptors, as it cannot know the families before they are
+/// gathered, so the registry it is in holds no other such collector.
+pub(crate) struct Gathered(pub(crate) prometheus::Registry);
+
+impl Collector for Gathered {
+    fn desc(&self) -> Vec<&Desc> {
+        Vec::new()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        self.0.gather()
     }
 }
 

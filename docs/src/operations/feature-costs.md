@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -41,6 +41,30 @@ One in-flight gauge for requests and responses, instead of two, was measured on 
 - **A stream wrapper per node** to see a response's end cost an allocation per sink, operator, and backward node. The reading now rides the boundary every such stream already passes.
 
 Still to measure: the scaling at higher core counts, where a shared counter would contend more and a shard per thread costs more memory (64 shards at most, 256 bytes each per node).
+
+## velo's own metrics
+
+`[system] velo_metrics` gives each node a `VeloMetrics`, which velo updates per frame and per handler call ([velo's own metrics](observability.md#velos-own-metrics)). It costs every request, so it is off by default. The drain gauges (`admission_admitted`, `egress_in_use`, `active_anchors`, `instance_phase`) are read at the scrape and cost a request nothing.
+
+Measured on spark-a26e (aarch64, 20 cores, shared, load average 8 to 12), rustc 1.93.1, bench profile B, valgrind 3.22 callgrind, as [Callgrind Ir](benchmarking.md#callgrind-ir) does. Instructions per request are the count at 400 requests minus the count at 200, divided by 200. Seven rounds, eight runs at once. Base is `4d0fa5e1`, the commit before the drain gauges. Change is the commit that added `velo_metrics`. The `-velo` setups are the `-metrics` setups with a `VeloMetrics` on every node.
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench requests --no-run   # copy the binary aside, once per commit
+valgrind --tool=callgrind --callgrind-out-file=/dev/null requests-<base|change> <two|three>[-metrics|-velo] <200|400>
+```
+
+| Setup | Base | Change | Change, `-velo` |
+|---|---|---|---|
+| two segments | 249,427 (247,838 to 255,290) | 247,877 (243,625 to 250,654) | |
+| two segments, metrics | 251,856 (250,602 to 253,537) | 251,754 (251,121 to 253,231) | 265,555 (261,815 to 266,033) |
+| three segments | 454,858 (448,223 to 461,442) | 457,412 (450,194 to 461,217) | |
+| three segments, metrics | 460,426 (442,016 to 474,887) | 464,685 (454,577 to 472,360) | 479,511 (462,801 to 492,845) |
+
+Each cell is the median of the seven rounds, with the lowest and the highest.
+
+- **The drain gauges cost nothing.** Base and change are within each other's range in every row.
+- **velo's metrics cost about 13,800 instructions per request through two segments (+5.5%),** beyond both ranges. Through three segments they cost about 14,800 (+3.2%), inside the wide spread of that row.
+- **Allocations do not settle it here.** DHAT's count per request, 400 requests minus 200, moved from 204 to 275 between rounds of one build, more than any difference between builds.
 
 ## Live rosters
 

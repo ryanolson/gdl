@@ -316,6 +316,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** read `process_cgroup_cpu_usage_seconds_total`, the cgroup's CPU use to the microsecond, which is the precise figure under cgroup v2. Off cgroup v2, read the process's rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
 - **Lifts:** a prometheus release whose collector counts fractions of a second.
 
+### velo's own metrics cost every request, so they are off by default
+- **What:** with `[system] velo_metrics = true`, each request through two segments costs about 5% more instructions ([velo's own metrics](feature-costs.md#velos-own-metrics)). So the setting is off by default, and a segment serves none of velo's families unless it is set.
+- **Why:** velo records these metrics as frames are sent and handler calls run, not when they are scraped.
+- **Workaround:** leave it off in production, and turn it on to diagnose a transport or a stream. An instance's drain needs none of velo's families ([Reading a drain](observability.md#reading-a-drain)).
+- **Lifts:** velo metrics that cost a request nothing measurable.
+
 ### Some processes do not serve their own figures
 - **What:** a hub that is not a pool's hub has no metrics route, so it serves no `process_*` figures. A program that embeds a segment and serves a registry it made itself, not one from `Process::registry`, serves none either.
 - **Workaround:** an embedding program calls `gdl_cgroup::register` on a registry of its own and serves it. See [The process's own figures](observability.md#the-processs-own-figures).

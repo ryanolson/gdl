@@ -138,6 +138,12 @@ pub const RUNTIME_METRICS: [&str; 52] = [
     "request_duration_seconds",
 ];
 
+/// The start of the name of every family of velo's own, which a segment
+/// serves unprefixed beside its registry under `[system] velo_metrics`. A
+/// node's metric may not be served under a name that starts with it, so
+/// that no family appears twice in one scrape, with the setting on or off.
+pub const VELO_METRICS: &str = "velo_";
+
 /// The deployment a series comes from: the graph's name and the first eight
 /// hex digits of the placement hash.
 pub const NAMESPACE_LABEL: &str = "dynamo_namespace";

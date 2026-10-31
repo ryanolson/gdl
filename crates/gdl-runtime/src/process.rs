@@ -27,8 +27,7 @@ use serde::de::DeserializeOwned;
 use velo::Velo;
 
 use crate::dist::{
-    Roster, RuntimeConfig, Segment, SegmentLoad, announce, announced, bind_node, follow_directory,
-    shut_down,
+    Roster, RuntimeConfig, Segment, SegmentLoad, announce, announced, follow_directory, shut_down,
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
@@ -655,8 +654,9 @@ impl<H> ProcessConfig<H> {
     /// Bind this instance's velo node. Under a hub, a container binds and
     /// advertises the address its hostname resolves to; any other address
     /// is bound and advertised as given. Nothing is announced: peers learn
-    /// the address only when the instance launches.
-    async fn bind(&self) -> Result<Velo> {
+    /// the address only when the instance launches. With `metrics`, velo
+    /// records its own metrics there.
+    async fn bind(&self, metrics: Option<&prometheus::Registry>) -> Result<Velo> {
         match self.discovery()? {
             #[cfg(feature = "hub")]
             Discovery::Hub(hub) => {
@@ -665,10 +665,11 @@ impl<H> ProcessConfig<H> {
                     &hub.host,
                     hub.public_port,
                     hub.control_port,
+                    metrics,
                 )
                 .await
             }
-            _ => bind_node(self.listen).await,
+            _ => crate::dist::build_node(self.listen, None, metrics).await,
         }
     }
 
@@ -1336,6 +1337,9 @@ pub struct Process {
     node: Arc<std::sync::Mutex<Option<Velo>>>,
     instance: velo::InstanceId,
     metrics_prefix: Option<String>,
+    /// Where velo records its own metrics, under `[system] velo_metrics`
+    /// with a listener to serve them.
+    velo_metrics: Option<prometheus::Registry>,
     /// Whether [`registry`](Self::registry) made the registry.
     registry_made: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1363,6 +1367,10 @@ impl Process {
         if let Some(address) = system {
             eprintln!("system listener at {address}");
         }
+        // Made before the node, which takes it as it is built; served
+        // only where a listener can serve it.
+        let velo_metrics =
+            (config.system.velo_metrics() && system.is_some()).then(prometheus::Registry::new);
         // Under a stop, as the rest of the start is: a container's bind
         // resolves its hostname, which may wait on DNS.
         let node = tokio::select! {
@@ -1370,7 +1378,7 @@ impl Process {
             () = stopped(&stops, 1) => {
                 return Err(Error::new(ErrorKind::Cancelled, "stopped while starting"));
             }
-            node = config.bind() => node?,
+            node = config.bind(velo_metrics.as_ref()) => node?,
         };
         Ok(Self {
             stops,
@@ -1380,6 +1388,7 @@ impl Process {
             instance: node.instance_id(),
             node: Arc::new(std::sync::Mutex::new(Some(node))),
             metrics_prefix: config.system.metrics_prefix(),
+            velo_metrics,
             registry_made: Arc::default(),
         })
     }
@@ -1405,11 +1414,13 @@ impl Process {
     /// identity labels: `dynamo_namespace` (the graph's name and the first
     /// eight hex digits of the placement hash), `dynamo_component` (the
     /// segment), and `worker_id` (the instance id). It holds
-    /// `uptime_seconds` from the start. `/metrics` serves it only once it
-    /// is given to [`serve_metrics`](Self::serve_metrics), and with it the
-    /// process's own figures (`process_*`, `process_cgroup_*`), under the
-    /// same labels but never the prefix. It refuses a metric whose prefixed
-    /// name is one of those figures'.
+    /// `uptime_seconds` and `instance_phase` from the start. `/metrics`
+    /// serves it only once it is given to
+    /// [`serve_metrics`](Self::serve_metrics), and with it the process's
+    /// own figures (`process_*`, `process_cgroup_*`) and, under
+    /// `[system] velo_metrics`, velo's (`velo_*`), under the same labels but
+    /// never the prefix. It refuses a metric whose prefixed name is one of
+    /// those figures', or starts with `velo_`.
     pub fn registry(
         &self,
         deployment: &gdl_model::DeploymentSpec,
@@ -1464,6 +1475,10 @@ impl Process {
                 .map_err(metrics_error)?;
         }
         gdl_cgroup::register(&own).map_err(metrics_error)?;
+        if let Some(velo) = &self.velo_metrics {
+            own.register(Box::new(system::Gathered(velo.clone())))
+                .map_err(metrics_error)?;
+        }
         self.health.own_metrics(own);
         Ok(registry)
     }

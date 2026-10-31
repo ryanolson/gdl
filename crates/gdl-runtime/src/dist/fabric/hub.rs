@@ -1085,6 +1085,7 @@ pub(crate) async fn bind_under_hub(
     host: &str,
     public_port: u16,
     control_port: u16,
+    metrics: Option<&prometheus::Registry>,
 ) -> Result<Velo> {
     let client = HubClient::builder()
         .host(host)
@@ -1097,7 +1098,7 @@ pub(crate) async fn bind_under_hub(
     } else {
         listen
     };
-    super::build_node(address, Some(Arc::new(client.discovery()))).await
+    super::build_node(address, Some(Arc::new(client.discovery())), metrics).await
 }
 
 /// This container's routable address: the one its `HOSTNAME`, `host`,
@@ -1402,7 +1403,7 @@ mod tests {
         let owner = fabric(owner);
         let bound = |under_hub: bool| async move {
             match under_hub {
-                true => bind_under_hub(local, "127.0.0.1", public, control).await,
+                true => bind_under_hub(local, "127.0.0.1", public, control, None).await,
                 false => bind_node(local).await,
             }
             .expect("node")

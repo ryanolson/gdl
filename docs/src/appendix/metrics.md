@@ -1,6 +1,6 @@
 # Metrics reference
 
-This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds`, `instance_phase`, and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`), and what an instance holds in `crates/gdl-runtime/src/dist/held.rs`. The process's own figures are in `crates/gdl-cgroup`. [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
+This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds`, `instance_phase`, and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`), and what an instance holds in `crates/gdl-runtime/src/dist/held.rs`. The process's own figures are in `crates/gdl-cgroup`, and velo's in velo's `lib/velo/src/observability.rs`. [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
 
 ## Names and labels
 
@@ -182,6 +182,10 @@ Every segment serves these beside its registry, and every pool's hub on its metr
 - The `process_cgroup_*` figures need cgroup v2, mounted at `/sys/fs/cgroup`. The process's cgroup is the path on the `0::` line of `/proc/self/cgroup`. Under cgroup v1 none is served. `cpu.stat` always has the usage keys; the period and throttling keys are present only where the cgroup's CPU controller is on.
 - The cgroup is the container's, so in a pod of one container its figures are the process's.
 
+## velo's own families
+
+Under `[system] velo_metrics = true`, a segment serves its velo node's families beside the registry ([velo's own metrics](../operations/observability.md#velos-own-metrics)). velo names and defines them, in `lib/velo/src/observability.rs` at the pinned commit ([Velo](../development/velo.md)), each with its help text. Their names start with `velo_`. Each carries the segment's identity labels and never the prefix. A family with labels appears once it has a series: `velo_transport_frames_total` after the first frame.
+
 ## Buckets
 
 All six histograms, the runtime's five and `pool_offer_round_trip_seconds`, use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
@@ -209,5 +213,7 @@ A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node ga
 ## Reserved names
 
 `gdl_model::RUNTIME_METRICS` holds 52 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, `instance_phase` and the 4 families of what an instance holds, the 12 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+
+`gdl_model::VELO_METRICS` is `velo_`, the start of every name of [velo's own families](#velos-own-families). A node's metric that starts with it is refused when it is read, and a segment binary's build refuses a node's metric whose served name starts with it: `velo_frames_total` with no prefix, or any name under `metrics_prefix = "velo"`. The rule holds with `velo_metrics` off, so turning it on cannot break a build. velo names its families, so the rule is the start of the name, not a list.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.
