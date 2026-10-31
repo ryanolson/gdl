@@ -154,6 +154,71 @@ async fn a_pool_only_an_interrupted_snapshot_named_is_not_kept() {
     hub.shutdown().await.expect("the hub stops");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F1: a relay first polled after a withdrawal misses it and passes the negative assertion"]
+async fn a_late_relay_drain_detects_a_confirmed_withdrawal() {
+    let directory = MemoryDirectory::new();
+    let pool = record();
+    let spec = spec();
+    let global = Arc::new(
+        gdl_hub::PoolReadiness::new(&spec, global_default(), directory.clone(), timing())
+            .expect("a pool extension"),
+    );
+    // No directory task runs yet, so this watch must take the deferred path.
+    let mut relay = global.follows();
+    let hub = velo_hub::Hub::builder(common::config())
+        .extension(gdl_hub::GraphAdmission::new(spec))
+        .extension(Arc::clone(&global))
+        .serve()
+        .await
+        .expect("the hub serves");
+    let mut witness = global.follows();
+    tokio::time::timeout(WAIT, async {
+        while !matches!(
+            witness.next().await.expect("the witness lives"),
+            FollowEvent::Synced { .. }
+        ) {}
+    })
+    .await
+    .expect("the witness is subscribed");
+    let key = ("model_x".to_string(), pool.name.clone());
+    let mut following = global.following();
+    directory.publish(pool.clone()).await.expect("stored");
+    tokio::time::timeout(WAIT, following.wait_for(|pools| pools.contains_key(&key)))
+        .await
+        .expect("the global follows the pool")
+        .expect("the extension lives");
+    directory
+        .withdraw(Withdrawal {
+            class: pool.class.clone(),
+            pool: pool.name.clone(),
+            epoch: pool.epoch,
+            seq: pool.seq + 1,
+        })
+        .await
+        .expect("withdrawn");
+    let relayed = tokio::time::timeout(WAIT, async {
+        loop {
+            let event = witness.next().await.expect("the witness lives");
+            if matches!(event, FollowEvent::Withdrawn { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("the witness confirms the relay emitted a withdrawal");
+    // Use the interrupted-snapshot test's exact late drain after a confirmed event.
+    let withdrawn: Vec<FollowEvent> = std::iter::from_fn(|| relay.next().now_or_never().flatten())
+        .filter(|event| matches!(event, FollowEvent::Withdrawn { .. }))
+        .collect();
+    hub.shutdown().await.expect("the hub stops");
+    assert_eq!(
+        withdrawn,
+        vec![relayed],
+        "F1: the negative assertion accepts a relay that already emitted a withdrawal"
+    );
+}
+
 /// A withdrawal the directory's watch shows is relayed, naming the
 /// pool's latest follow: the control for the test above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
