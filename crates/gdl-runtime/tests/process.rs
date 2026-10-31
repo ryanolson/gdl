@@ -190,6 +190,53 @@ fn a_variable_for_a_hosted_node_reaches_its_table() {
 }
 
 #[test]
+#[ignore = "F3: a foreign pipeline name matching an adapter reaches the node table"]
+fn a_foreign_pipeline_node_matching_a_hosted_adapter_is_ignored() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ServiceHosts {
+        #[serde(default)]
+        node: Nodes,
+        #[serde(default)]
+        adapter: BTreeMap<String, toml::Table>,
+    }
+    impl Hosted for ServiceHosts {
+        const KEYS: &'static [&'static str] = &["node", "adapter"];
+        // Generated service settings share this list between both tables.
+        const NAMES: &'static [&'static str] = &["Truncate", "Http_chat_f0"];
+    }
+    let graph = gdl_syntax::Graph::parse(
+        "name = \"adapter_names\", schema = 1;\n\
+         source Http: u32 -> stream u32;\n\
+         forward Truncate: u32 -> u32;\n\
+         sink Http_chat_F0: u32 -> stream u32;\n\
+         topology: Http => Truncate => Http_chat_F0;"
+            .parse()
+            .expect("graph tokens"),
+    )
+    .expect("a valid pipeline name differing from the adapter's spelling");
+    assert!(graph.nodes.iter().any(|node| node.ident == "Http_chat_F0"));
+    assert!(graph.nodes.iter().all(|node| node.ident != "Http_chat_f0"));
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_NODE__TRUNCATE__MAX", "3");
+        jail.set_env("GDL_ADAPTER__HTTP_CHAT_F0__MAX", "5");
+        jail.set_env("GDL_NODE__HTTP_CHAT_F0__MAX", "7");
+        let config =
+            ProcessConfig::<ServiceHosts>::load(["config.toml"]).map_err(|e| e.to_string())?;
+        assert_eq!(
+            config.hosted.node.truncate.expect("hosted node")["max"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            config.hosted.adapter["Http_chat_f0"]["max"].as_integer(),
+            Some(5)
+        );
+        Ok(())
+    });
+}
+
+#[test]
 fn a_missing_file_is_an_error() {
     let Err(error) = Config::load(["/nonexistent/gdl-config.toml"]) else {
         panic!("no such file")
