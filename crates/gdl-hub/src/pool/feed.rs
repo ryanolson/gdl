@@ -153,10 +153,10 @@ impl Feed {
             }
         };
         // Before the last record is read the table only keeps it: the list
-        // is sent once the record is read.
+        // is sent once the record is read. After, it goes to the record and
+        // over every live link at once, as a change an instance reports does.
         if changed && shared.properties.restored() {
-            self.properties
-                .send_replace(Arc::new(shared.properties.list()));
+            self.properties_changed(&shared);
         }
         shared.properties.list().version
     }

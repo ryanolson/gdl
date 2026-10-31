@@ -233,21 +233,18 @@ async fn one_list_has_one_version_on_every_path() {
     revoke(&model_hub).await;
     let lists = [
         record.until("revoked", revoked).await,
+        link.until("revoked", revoked).await,
         relay.until("revoked", revoked).await,
     ];
-    assert_eq!(lists[0], lists[1], "revoked: the record and the relay");
-    // A live link does not carry a revocation
-    // (`a_revocation_goes_over_a_live_link`); a new link's snapshot does.
-    let mut renewed = Path::new("a new link", self::link(&model_hub).await);
-    let snapshot = renewed.until("revoked", revoked).await;
-    assert_eq!(lists[0], snapshot, "revoked: the record and a new link");
+    assert_eq!(lists[0], lists[1], "revoked: the record and the link");
+    assert_eq!(lists[0], lists[2], "revoked: the record and the relay");
     versions.push(lists[0].version);
 
     assert!(
         versions.windows(2).all(|pair| pair[0] < pair[1]),
         "each change raises the version: {versions:?}"
     );
-    one_numbering(&[&record, &link, &relay, &renewed]);
+    one_numbering(&[&record, &link, &relay]);
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -275,14 +272,90 @@ async fn revoke(hub: &velo_hub::Hub) {
     assert_eq!(status.as_u16(), 204);
 }
 
+/// A directory that answers each write as stored but stores nothing once
+/// `frozen`: what a follower learns of the pool from then comes over its
+/// link alone.
+#[derive(Clone)]
+struct Frozen {
+    inner: Resolving,
+    frozen: Arc<AtomicBool>,
+}
+
+impl PoolDirectory for Frozen {
+    type Watch = <Resolving as PoolDirectory>::Watch;
+
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        if self.frozen.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> Self::Watch {
+        self.inner.watch(class, from)
+    }
+}
+
 /// An operator's revocation changes the pool's list, so it goes over each
-/// follow link at once, as a change an instance reports does: a parent
-/// must not have to wait for the record to learn it. It does not: the
-/// hub hands the revoked list to its record writer alone, and a live link
-/// carries it only with the next change, or a new link's snapshot.
+/// live follow link at once, as a change an instance reports does: the
+/// parent, and every chooser that watches its relay, learns it while the
+/// directory still holds the list from before, at the version the hub
+/// gave it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "a revocation goes to the record alone: the hub sends no `properties` event on its live links"]
 async fn a_revocation_goes_over_a_live_link() {
+    let resolving = Resolving::new();
+    let directory = Frozen {
+        inner: resolving.clone(),
+        frozen: Arc::new(AtomicBool::new(false)),
+    };
+    let settings = model(POOL, "us-east-1", "model-x-01-hub:1337");
+    let name = settings.hub.clone().expect("named");
+    let mut record = Path::new("record", records(&resolving).map(|(_, list)| list).boxed());
+    let (model_hub, _model) = hub_of(settings, directory.clone(), timing()).await;
+    resolving.resolve(&name, &model_hub);
+    let (instances, _) = meet_the_quorum(&model_hub).await;
+    instances[0]
+        .report(says(EntryState::Ready))
+        .await
+        .expect("taken");
+    let mut link = Path::new("link", link(&model_hub).await);
+    let (global_hub, global) = serve_pool(global_default(), &resolving, timing()).await;
+    let mut relay = Path::new("relay", relayed(global.follows()));
+    let ready = |list: &PropertyList| states(list) == [(MODEL, PropertyState::Ready)];
+    let stored = record.until("ready", ready).await;
+    link.until("ready", ready).await;
+    relay.until("ready", ready).await;
+    followed(&global).await;
+
+    directory.frozen.store(true, Ordering::SeqCst);
+    revoke(&model_hub).await;
+    let sent = link.until("revoked", revoked).await;
+    let relayed = relay.until("revoked, over the link", revoked).await;
+    assert_eq!(relayed, sent, "the relay lists the link's list");
+    assert!(sent.version > stored.version);
+    let held = records(&resolving)
+        .next()
+        .await
+        .expect("the directory holds the record")
+        .1;
+    assert_eq!(
+        held, stored,
+        "the directory still holds the list from before"
+    );
+    global_hub.shutdown().await.expect("the hub stops");
+    model_hub.shutdown().await.expect("the hub stops");
+}
+
+/// A revocation and the report after it reach a follow link in the order
+/// the hub made them, each at a higher version: the hub sends both under
+/// the lock that orders the link's events. The revoked property stays
+/// revoked in the later list, though the instance says it is ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_and_the_report_after_it_keep_their_order() {
     let directory = Resolving::new();
     let (model_hub, _model) = serve_pool(
         model(POOL, "us-east-1", "model-x-01-hub:1337"),
@@ -291,20 +364,41 @@ async fn a_revocation_goes_over_a_live_link() {
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    instances[0]
-        .report(says(EntryState::Ready))
-        .await
-        .expect("taken");
-    let mut record = Path::new("record", records(&directory).map(|(_, list)| list).boxed());
+    let entry: &Instance = &instances[0];
+    entry.report(says(EntryState::Ready)).await.expect("taken");
     let mut link = Path::new("link", link(&model_hub).await);
     let ready = |list: &PropertyList| states(list) == [(MODEL, PropertyState::Ready)];
-    record.until("ready", ready).await;
-    link.until("ready", ready).await;
+    let before = link.until("ready", ready).await;
 
     revoke(&model_hub).await;
-    let stored = record.until("revoked", revoked).await;
-    let sent = link.until("revoked", revoked).await;
-    assert_eq!(stored, sent);
+    let both = LoadReport {
+        properties: gdl_model::PropertyLists::from([(
+            "test".to_string(),
+            vec![
+                gdl_model::PropertyEntry::new(key(MODEL), EntryState::Ready),
+                gdl_model::PropertyEntry::new(key("llama-70b"), EntryState::Ready),
+            ],
+        )]),
+        ..says(EntryState::Ready)
+    };
+    entry.report(both).await.expect("taken");
+    let later = |list: &PropertyList| {
+        states(list) == [("llama-70b", PropertyState::Ready)] && list.revoked == [key(MODEL)]
+    };
+    let after = link.until("the later report", later).await;
+
+    let seen: Vec<&PropertyList> = link
+        .seen
+        .iter()
+        .skip_while(|list| list.version <= before.version)
+        .collect();
+    let first = seen.first().expect("a list after the ready one");
+    assert!(revoked(first), "the revocation comes first: {seen:?}");
+    assert!(
+        first.version < after.version,
+        "the report after it has a higher version: {seen:?}"
+    );
+    one_numbering(&[&link]);
     model_hub.shutdown().await.expect("the hub stops");
 }
 
