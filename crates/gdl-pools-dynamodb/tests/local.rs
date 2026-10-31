@@ -167,6 +167,46 @@ const LIMITS: DynamoLimits = DynamoLimits {
     first_sync: Duration::from_secs(5),
 };
 
+/// An earlier build leaves no list-version attribute. A present attribute
+/// that does not decode cannot establish that numbering floor.
+#[tokio::test]
+#[ignore = "F6: a present tombstone list version that does not decode reads as zero"]
+async fn a_tombstone_with_an_undecodable_list_version_is_an_error() {
+    let client = client();
+    let tables = tables(&client).await;
+    let directory = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
+    let withdrawal = Withdrawal {
+        class: MODEL.into(),
+        pool: "model-x-01".into(),
+        epoch: 42,
+        seq: 2,
+        properties_version: (44 << 20) + 100,
+    };
+    directory
+        .withdraw(withdrawal.clone())
+        .await
+        .expect("the tombstone");
+    assert_eq!(
+        directory.last_write(MODEL, &withdrawal.pool).await,
+        Ok(Some(gdl_pools::LastWrite::Withdrawn(withdrawal.clone())))
+    );
+    client
+        .update_item()
+        .table_name(&tables.records)
+        .key("class", AttributeValue::S(MODEL.into()))
+        .key("pool", AttributeValue::S(withdrawal.pool.clone()))
+        .update_expression("SET properties_version = :broken")
+        .expression_attribute_values(":broken", AttributeValue::S("broken".into()))
+        .send()
+        .await
+        .expect("the malformed attribute is stored");
+    let read = directory.last_write(MODEL, &withdrawal.pool).await;
+    assert!(
+        matches!(read, Err(DirectoryError::Unavailable(_))),
+        "an undecodable version must hold sending, never lower the retained floor to zero: {read:?}"
+    );
+}
+
 /// A client of the DynamoDB Local at `GDL_DYNAMODB_LOCAL`, with dummy
 /// credentials, which DynamoDB Local takes and never checks.
 fn client() -> Client {
