@@ -275,7 +275,6 @@ async fn a_hubs_own_withdrawal_keeps_its_list_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F1: a failed reread after NotNewer loses the retained tombstone's list version"]
 async fn a_successor_with_a_failed_reread_stays_past_the_retained_tombstone() {
     use std::sync::atomic::AtomicUsize;
 

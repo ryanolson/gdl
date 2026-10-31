@@ -384,11 +384,16 @@ impl Writer {
                     // equal epoch is a predecessor's that started in the
                     // same millisecond: catching up its sequence alone would
                     // publish a lower version than it did.
-                    let last = match last_write(directory, self.parent.as_ref(), record).await {
-                        Ok(last) => last,
-                        Err(error) => {
-                            tracing::warn!(%error, "the pool's last write was not read again");
-                            None
+                    // A read that fails is unknown, never nothing: the hub
+                    // reads again, and stores and sends nothing meanwhile,
+                    // as before its first read.
+                    let last = loop {
+                        match last_write(directory, self.parent.as_ref(), record).await {
+                            Ok(last) => break last,
+                            Err(error) => {
+                                tracing::warn!(%error, "the pool's last write was not read again");
+                                tokio::time::sleep(REREAD).await;
+                            }
                         }
                     };
                     let epoch = last
