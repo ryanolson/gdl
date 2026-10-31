@@ -273,3 +273,57 @@ async fn a_hubs_own_withdrawal_keeps_its_list_version() {
     };
     assert_past(&last, &successor(&directory, &last).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F1: a failed reread after NotNewer loses the retained tombstone's list version"]
+async fn a_successor_with_a_failed_reread_stays_past_the_retained_tombstone() {
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Clone)]
+    struct FailingReread {
+        inner: MemoryDirectory,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl PoolDirectory for FailingReread {
+        type Watch = MemoryWatch;
+
+        async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+            self.inner.publish(record).await
+        }
+
+        async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+            self.inner.withdraw(withdrawal).await
+        }
+
+        async fn last_write(
+            &self,
+            class: &str,
+            pool: &str,
+        ) -> Result<Option<LastWrite>, DirectoryError> {
+            match self.reads.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(None),
+                1 => Err(DirectoryError::Unavailable("the reread failed".into())),
+                _ => self.inner.last_write(class, pool).await,
+            }
+        }
+
+        fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+            self.inner.watch(class, from)
+        }
+    }
+
+    let epoch = millis_now() + 600_000;
+    let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
+    let directory = MemoryDirectory::new();
+    seed(&directory, &last, Left::Withdrawn).await;
+    assert!(matches!(
+        directory.last("model_x", POOL),
+        Some(LastWrite::Withdrawn(_))
+    ));
+    let through = FailingReread {
+        inner: directory.clone(),
+        reads: Arc::default(),
+    };
+    assert_past(&last, &successor_over(&directory, through, &last).await);
+}
