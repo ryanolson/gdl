@@ -248,7 +248,21 @@ A property loaded again while it drains starts afresh, as it does after `drained
 
 **Rejected: a record written before the last one is read.** A read that failed would look like a pool with no record, and the write would drop the properties no instance has reported yet.
 
-The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A restarted hub raises the version it read to that floor, even when nothing in the list changes. A hub that reads no record, as from a relay parent that restarted, starts at the floor. Either way it publishes versions above any its predecessor sent, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version, and a version only grows. With no record, the floor is the host's clock ([Limitations](../operations/limitations.md#a-hub-with-no-record-numbers-its-properties-by-its-clock)).
+## A hub numbers past the pool's last write
+
+A hub that starts reads the pool's last write before its first write (`PoolDirectory::last_write`): its record, or the tombstone of its withdrawal. A tombstone keeps the list version the pool had when it withdrew (`Withdrawal::properties_version`). The hub's epoch is the later of its clock and one past the last write's epoch, so the clock decides only when the directory holds nothing for the pool.
+
+The list's versions fall in blocks of 2^20. A hub counts from the block after the last write's list version, and from at least its epoch in the high bits (epoch × 2^20). A hub sends no list over its follow links in a block past that of the last version its stored records carry: it holds the list back until a record in that block is stored, once each 2^20 changes. So every version a hub sent is below the block after the last one the directory holds, and its successor numbers past all of them, however many changes it made. A restarted hub raises the version it read to that floor, even when nothing in the list changes. So a reader that holds a version holds the list of that version, and a version only grows. When the directory forgot the pool, the floor is the host's clock ([Limitations](../operations/limitations.md#a-hub-whose-directory-forgot-its-pool-numbers-it-by-its-clock)).
+
+A hub that is refused as not newer before its first stored write, as when its read raced the tombstone, reads the last write again and numbers past it. Under `relay`, the parent's hub answers a tombstone as a `404` with the withdrawal as its body, so a child of an earlier build reads no write, as it did. A tombstone of an earlier build, with no list version, reads as version 0: the hub counts from its epoch's floor, as before.
+
+**Rejected: a counter in the directory**, such as a DynamoDB conditional add. It is kept exactly as long as the tombstone is, so it is lost with it, and it costs a write each start.
+
+**Rejected: the registration incarnation.** It orders one instance's registrations within one hub's membership store. A successor hub starts a new store, so it cannot order two hubs.
+
+**Rejected: readers report the highest epoch they hold.** A hub would have to change its epoch while it runs, which a drain that lasts for its hub's process forbids, and a reader forgets a withdrawn pool, so none may remember it.
+
+**Not built: a floor the hub keeps on its own volume.** It would survive a directory that forgot the pool when the successor runs on the same volume, and would cover a pool under `relay` that reports to no parent. It covers no successor on another volume, and no pool under DynamoDB, whose hubs keep no state directory.
 
 **Rejected: keep the version read when the restore changes nothing.** A hub sends each new list over its follow links at once, and its record holds the list only after the write. A hub that stops in between, or while the directory refuses its writes, sent a version above its record's. A successor that kept the record's version went back below what a follower already read, and the parent, which takes only a higher version, kept the dead hub's list until the next change (`a_restart_counts_past_a_version_its_predecessor_sent_but_did_not_store` in `crates/gdl-hub/tests/numbering.rs`).
 

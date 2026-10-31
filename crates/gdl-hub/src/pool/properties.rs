@@ -317,11 +317,36 @@ impl Properties {
 }
 
 /// The least version of the list that a hub whose writes have `epoch`
-/// counts from: the epoch, a time in milliseconds, in the high bits, so
-/// that its versions are above any its predecessor published, unless that
-/// one made more than 2^20 changes for each millisecond it ran.
+/// counts from: the epoch, a time in milliseconds, in the high bits. With
+/// no write of the pool to read, it is all a hub has to count past its
+/// predecessor ([`floor_after`]).
 pub(super) fn floor(epoch: u64) -> u64 {
-    epoch.saturating_mul(1 << 20)
+    epoch.saturating_mul(1 << BLOCK_BITS)
+}
+
+/// The versions of a list fall in blocks of 2^20. A hub sends no list over
+/// its links in a block above that of the last version its stored records
+/// carry ([`super::feed::Feed::stored`]): so every version a hub sent is
+/// below the block after the last one the directory holds for it.
+const BLOCK_BITS: u32 = 20;
+
+/// The block of `version`.
+pub(super) fn block(version: u64) -> u64 {
+    version >> BLOCK_BITS
+}
+
+/// The least version of the list that a hub whose writes have `epoch`
+/// counts from, when the pool's last write, a record or a withdrawal's
+/// tombstone, carried the list version `last`: past the block of `last`,
+/// so past every version the hub before sent over its links, however many
+/// changes it made, and never below the epoch's floor.
+pub(super) fn floor_after(epoch: u64, last: Option<u64>) -> u64 {
+    let past = last.map_or(0, |last| {
+        block(last)
+            .saturating_add(1)
+            .saturating_mul(1 << BLOCK_BITS)
+    });
+    floor(epoch).max(past)
 }
 
 /// What one usable entry instance says of its properties.

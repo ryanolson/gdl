@@ -358,6 +358,7 @@ async fn two_processes_see_each_others_writes_and_refuse_each_others_tokens() {
         pool: "model-x-01".into(),
         epoch: 1,
         seq: 2,
+        properties_version: 0,
     })
     .await
     .expect("m1 withdrawn by a");
@@ -494,6 +495,7 @@ async fn a_superseded_list_expires_and_the_named_one_stays() {
             pool: "model-x-01".into(),
             epoch: 1,
             seq: 4,
+            properties_version: 0,
         })
         .await
         .expect("withdrawn");
@@ -543,6 +545,7 @@ async fn a_cached_list_is_kept_when_published_after_another_handles_withdrawal()
             pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("a withdrawal through another handle in the same region");
@@ -644,6 +647,7 @@ async fn a_delayed_withdrawal_does_not_expire_a_republished_list() {
                             pool: "model-x-01".into(),
                             epoch: 1,
                             seq: 2,
+                            properties_version: 0,
                         })
                         .await
                 })
@@ -785,6 +789,7 @@ async fn a_withdrawal_between_a_list_and_its_record_does_not_expire_the_list() {
             pool: latest.name.clone(),
             epoch: 1,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("the withdrawal completes before the newer record is stored");
@@ -873,6 +878,7 @@ async fn a_pool_scaled_to_zero_after_a_withdrawal_keeps_its_list() {
             pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("the same-region withdrawal");
@@ -1142,6 +1148,7 @@ async fn a_lost_record_response_leaves_its_list_unexpired() {
             pool: first.name.clone(),
             epoch: first.epoch,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("the same-region withdrawal");
@@ -1351,6 +1358,7 @@ async fn overlapping_publishes_of_a_pool_leave_its_list_unexpired() {
             pool: first.name.clone(),
             epoch: 1,
             seq: 3,
+            properties_version: 0,
         })
         .await
         .expect("the withdrawal between the second list and record");
@@ -1452,6 +1460,7 @@ async fn a_list_expires_only_past_its_properties_version() {
             pool: "model-x-01".into(),
             epoch: 9,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("withdrawn");

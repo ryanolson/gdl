@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord,
-    ResumeToken, Version, Withdrawal,
+    DirectoryError, LastWrite, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory,
+    PoolRecord, ResumeToken, Version, Withdrawal,
     dir::file::{self, Files, Held},
 };
 
@@ -149,6 +149,13 @@ impl RelayDirectory {
         self.records.record(class, pool)
     }
 
+    /// The last write the directory took for `pool` of `class`, its record
+    /// or the tombstone of its withdrawal: a restarted child numbers past
+    /// it.
+    pub fn last(&self, class: &str, pool: &str) -> Option<LastWrite> {
+        self.records.last(class, pool)
+    }
+
     /// Whether the latest write the directory took for `pool` of `class`
     /// is a record, expired or not, rather than a withdrawal.
     pub fn holds_record(&self, class: &str, pool: &str) -> bool {
@@ -201,6 +208,14 @@ impl PoolDirectory for RelayDirectory {
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
         self.write(Write::Withdrawal(withdrawal)).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        Ok(self.last(class, pool))
     }
 
     /// A resume token is a place in this directory's watches: a directory

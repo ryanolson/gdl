@@ -80,7 +80,9 @@ async fn a_ready_successor_is_not_listed_draining_after_the_epochs_version_budge
         successor.epoch > predecessor.epoch,
         "the successor owns the record"
     );
-    assert_eq!(successor.properties_version, predecessor.properties_version);
+    // It counts from the block of versions after the predecessor's, so its
+    // version is above, not equal.
+    assert!(successor.properties_version > predecessor.properties_version);
     loop {
         match next(&mut watch).await {
             FollowEvent::Follow {
@@ -338,6 +340,7 @@ async fn a_new_hub_lists_a_silent_pool_with_its_properties() {
             pool: silent.name.clone(),
             epoch: 1,
             seq: 2,
+            properties_version: 0,
         })
         .await
         .expect("withdrawn");

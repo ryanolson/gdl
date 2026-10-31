@@ -193,6 +193,7 @@ async fn a_restart_stays_below_a_lost_epoch() {
     assert_eq!(
         held.expect("the directory answers")
             .expect("the current record is present")
+            .version()
             .epoch,
         first.epoch
     );
@@ -243,7 +244,7 @@ async fn restarts_pass_a_lost_epoch_before_the_clock_does() {
             .expect("the current hub stores its record");
         let (next, held) = Writer::start(&directory, None, &record, WAIT).await;
         let held = held.expect("the directory answers").expect("a record");
-        assert_eq!(held.epoch, current.epoch);
+        assert_eq!(held.version().epoch, current.epoch);
         assert!(next.epoch > current.epoch, "each restart moves on");
         current = next;
     }

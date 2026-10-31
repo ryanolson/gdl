@@ -57,7 +57,7 @@ fn read_back(published: &PoolRecord) -> PoolRecord {
             Some(decode_list(*key, item).expect("the list's own body"))
         }
         StoredHeld::Record { list: None, .. } => None,
-        StoredHeld::Withdrawn => panic!("a record, not a tombstone"),
+        StoredHeld::Withdrawn { .. } => panic!("a record, not a tombstone"),
     };
     match Entry::new("model_x", stored, list).held {
         Held::Record(record) => *record,
@@ -142,11 +142,43 @@ fn a_withdrawal_is_a_tombstone_at_its_version() {
         pool: "model-x-02".into(),
         epoch: 4,
         seq: 2,
+        properties_version: (1 << 21) + 5,
     };
     let stored = decode("model_x", &withdrawal(&w, 1)).expect("a pool's item");
     assert_eq!(stored.version, Version { epoch: 4, seq: 2 });
-    assert_eq!(stored.held, StoredHeld::Withdrawn);
+    assert_eq!(
+        stored.held,
+        StoredHeld::Withdrawn {
+            properties_version: (1 << 21) + 5
+        }
+    );
     assert_eq!(Entry::new("model_x", stored, None).held, Held::Withdrawn(w));
+}
+
+/// A tombstone an earlier build wrote keeps no list version: it is still a
+/// tombstone at its version, and its list version reads as 0, so a later
+/// hub numbers from its own floor, as it did.
+#[test]
+fn a_tombstone_of_an_earlier_build_reads_as_list_version_zero() {
+    let w = Withdrawal {
+        class: "model_x".into(),
+        pool: "model-x-02".into(),
+        epoch: 4,
+        seq: 2,
+        properties_version: 9,
+    };
+    let mut earlier = withdrawal(&w, 1);
+    earlier
+        .remove("properties_version")
+        .expect("the attribute this build writes");
+    let stored = decode("model_x", &earlier).expect("a pool's item");
+    assert_eq!(stored.version, Version { epoch: 4, seq: 2 });
+    assert_eq!(
+        stored.held,
+        StoredHeld::Withdrawn {
+            properties_version: 0
+        }
+    );
 }
 
 /// A list past DynamoDB's item limit fails every write the same way, so
@@ -240,7 +272,7 @@ fn a_list_drops_a_malformed_property_and_keeps_the_rest() {
             },
             ..stored
         },
-        StoredHeld::Withdrawn => panic!("a record, not a tombstone"),
+        StoredHeld::Withdrawn { .. } => panic!("a record, not a tombstone"),
     };
     let list = decode_list(key, &item).expect("the list reads");
     assert_eq!(list.dropped, ["test"]);

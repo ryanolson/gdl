@@ -23,10 +23,13 @@ pub const REPORT_ROUTE: &str = "/report";
 /// The route of what a parent pool's hub holds for one child, under the
 /// extension's, on its public listener: `GET` answers `200 OK` with the
 /// [`gdl_pools::PoolRecord`] it holds for the pool `pool` of `class`,
-/// expired or not, or `404 Not Found` when it holds none. A child's hub
-/// that restarts reads its pool's last record here before its first
-/// report, so that its properties keep their history. Like the report, it
-/// trusts the private network.
+/// expired or not, or `404 Not Found` when it holds none. When it holds the
+/// tombstone of the pool's withdrawal, the `404` carries the
+/// [`gdl_pools::Withdrawal`] as its body, which a child of an earlier build
+/// does not read. A child's hub that restarts reads its pool's last write
+/// here before its first report, so that its properties keep their history
+/// and it numbers past a withdrawn hub. Like the report, it trusts the
+/// private network.
 pub const HELD_ROUTE: &str = "/report/{class}/{pool}";
 
 /// [`HELD_ROUTE`]'s path for the pool `pool` of `class`.

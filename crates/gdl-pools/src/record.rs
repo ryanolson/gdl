@@ -356,6 +356,12 @@ pub struct Withdrawal {
     pub epoch: u64,
     /// The writer's sequence number, as in [`PoolRecord::seq`].
     pub seq: u64,
+    /// The version of the pool's property list when it withdrew, as in
+    /// [`PoolRecord::properties_version`]: the tombstone keeps it, so that a
+    /// later hub of the pool numbers its list past it. 0 from a writer of
+    /// an earlier build, which kept none.
+    #[serde(default)]
+    pub properties_version: u64,
 }
 
 impl Withdrawal {

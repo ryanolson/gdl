@@ -499,7 +499,11 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
         .held(&address(&parent.hub), "model_x", "model-x-01")
         .await
         .expect("the restarted parent answers");
-    assert_eq!(read, Some(record), "the child's last record, whole");
+    assert_eq!(
+        read,
+        Some(gdl_pools::LastWrite::Record(Box::new(record))),
+        "the child's last record, whole"
+    );
     parent.hub.shutdown().await.expect("the parent stops");
 }
 
@@ -530,6 +534,7 @@ async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
                 pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 2,
+                properties_version: 0,
             }),
         )
         .await
@@ -866,6 +871,7 @@ async fn the_parent_refuses_what_it_cannot_verify() {
                 pool: "model-x-02".into(),
                 epoch: u64::MAX,
                 seq: u64::MAX,
+                properties_version: 0,
             }),
         )
         .await
@@ -886,6 +892,7 @@ async fn the_parent_refuses_what_it_cannot_verify() {
                 pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 3,
+                properties_version: 0,
             }),
         )
         .await
@@ -1036,6 +1043,7 @@ async fn a_withdrawal_after_a_visible_publish_removes_the_record() {
                 pool: "model-x-01".into(),
                 epoch: 5,
                 seq: 2,
+                properties_version: 0,
             }),
         )
         .await;
@@ -1188,6 +1196,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
         .held(&at, "model_x", "model-x-01")
         .await
         .expect("the parent answers")
+        .and_then(gdl_pools::LastWrite::into_record)
         .expect("it holds the child's record");
     assert_eq!(read, before["model-x-01"]);
     drop(watch);
@@ -1381,4 +1390,125 @@ async fn a_parent_lists_its_childrens_properties_and_no_other_pools() {
         .map(|entry| entry.property.key()["name"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(properties, ["qwen-32b"]);
+}
+
+/// A child that withdrew and starts again, behind a predecessor whose clock
+/// ran ahead and which made more than 2^20 list changes in its epoch: its
+/// parent keeps the tombstone with the list version and answers it, so the
+/// successor numbers past both its epoch and its list version. The parent
+/// answers the tombstone as a `404`, with the withdrawal as the body, so a
+/// child of an earlier build reads no record, as it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_child_numbers_past_the_withdrawal_its_parent_keeps() {
+    let spec = spec();
+    let parent = relay_pool(&spec, global(), quiet_timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
+    let at = address(&parent.hub);
+    let epoch = common::millis_now() + 600_000;
+    let version = (epoch << 20) + (1 << 20) + 1024;
+    let last = PoolRecord {
+        properties_version: version,
+        ..child_record(
+            "model-x-01",
+            &nowhere(),
+            (epoch, 1),
+            Duration::from_secs(30),
+        )
+    };
+    watcher
+        .report(&at, &Report::Record(last))
+        .await
+        .expect("the predecessor's record");
+    let withdrawal = Withdrawal {
+        class: "model_x".into(),
+        pool: "model-x-01".into(),
+        epoch,
+        seq: 2,
+        properties_version: version,
+    };
+    watcher
+        .report(&at, &Report::Withdrawal(withdrawal.clone()))
+        .await
+        .expect("its withdrawal");
+    assert_eq!(
+        watcher.held(&at, "model_x", "model-x-01").await,
+        Ok(Some(gdl_pools::LastWrite::Withdrawn(withdrawal))),
+    );
+    let url = format!(
+        "http://{at}/v1/ext/{}{}",
+        gdl_watch::EXTENSION,
+        gdl_watch::held_path("model_x", "model-x-01")
+    );
+    let answer = reqwest::get(&url).await.expect("the parent answers");
+    assert_eq!(answer.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let child = relay_pool(&spec, model("model-x-01", &at), quiet_timing()).await;
+    let after = holds(&parent.directory, "model_x", "the successor", |records| {
+        records.contains_key("model-x-01")
+    })
+    .await;
+    let next = &after["model-x-01"];
+    assert!(next.epoch > epoch, "{} -> {}", epoch, next.epoch);
+    assert!(
+        next.properties_version >= version,
+        "{version} -> {}",
+        next.properties_version
+    );
+    child.hub.shutdown().await.expect("the child's hub stops");
+    parent.hub.shutdown().await.expect("the parent's hub stops");
+}
+
+/// A parent of an earlier build answers a withdrawn child's read with a
+/// bare `404`: the child reads no write, and starts as it did before the
+/// tombstone kept a list version, numbering from its own clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_of_a_parent_of_an_earlier_build_starts_as_before() {
+    let (arrivals, mut arrived) = watch::channel(Vec::<PoolRecord>::new());
+    let arrivals = Arc::new(Mutex::new(arrivals));
+    let app = Router::new()
+        .route(
+            &format!("/v1/ext/{}{}", gdl_watch::EXTENSION, gdl_watch::HELD_ROUTE),
+            velo_hub::axum::routing::get(|| async { velo_hub::axum::http::StatusCode::NOT_FOUND }),
+        )
+        .route(
+            &format!(
+                "/v1/ext/{}{}",
+                gdl_watch::EXTENSION,
+                gdl_watch::REPORT_ROUTE
+            ),
+            post(move |Json(report): Json<Report>| {
+                if let Report::Record(record) = report {
+                    arrivals
+                        .lock()
+                        .expect("the arrivals")
+                        .send_modify(|arrived| arrived.push(record));
+                }
+                async {
+                    Json(ReportReply {
+                        interval_ms: 10_000,
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("an address").to_string();
+    tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
+    let watcher = PoolWatcher::new().expect("a client");
+    assert_eq!(
+        watcher.held(&address, "model_x", "model-x-01").await,
+        Ok(None)
+    );
+
+    let started = common::millis_now();
+    let child = relay_pool(&spec(), model("model-x-01", &address), quiet_timing()).await;
+    let first = tokio::time::timeout(WAIT, arrived.wait_for(|arrived| !arrived.is_empty()))
+        .await
+        .expect("a report in time")
+        .expect("the parent runs")[0]
+        .clone();
+    assert!(first.epoch >= started, "{first:?}");
+    assert!(first.properties_version >= first.epoch << 20, "{first:?}");
+    child.hub.shutdown().await.expect("the child's hub stops");
 }

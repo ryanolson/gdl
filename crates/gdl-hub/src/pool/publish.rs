@@ -3,13 +3,15 @@
 //! summary as it is when it is written, and withdrawn once the pool's
 //! drain has ended. Under the `relay` backend the heartbeat is the cadence
 //! the parent last answered with. Before its first write, the hub reads
-//! the pool's last record, whose properties keep their history.
+//! the pool's last write: its record, whose properties keep their history,
+//! or the tombstone of its withdrawal. The hub numbers past either.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gdl_pools::{
-    DirectoryError, LoadSummary, PoolDirectory, PoolRecord, PoolState, Presence, Withdrawal,
+    DirectoryError, LastWrite, LoadSummary, PoolDirectory, PoolRecord, PoolState, Presence,
+    Withdrawal,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -85,26 +87,32 @@ impl<D: PoolDirectory> Publisher<D> {
         // history of the pool's properties, so the hub writes none until it
         // has read it. Under the `relay` backend, a write could not land
         // while the parent cannot be read either.
-        let (mut writer, held) = loop {
-            let parent = self.parent.as_ref();
+        let (mut writer, last) = loop {
+            let parent = self.parent.clone();
             match Writer::start(directory, parent, &self.record, self.heartbeat).await {
-                (writer, Ok(held)) => break (writer, held),
+                (writer, Ok(last)) => break (writer, last),
                 (_, Err(error)) => {
-                    tracing::warn!(%error, "the pool's last record was not read");
+                    tracing::warn!(%error, "the pool's last write was not read");
                     tokio::time::sleep(REREAD).await;
                 }
             }
         };
         let stored = &self.stored;
         let feed = &*self.feed;
-        let held = held.as_ref().map(|held| {
+        // The list counts past the last write's version, a withdrawal's
+        // too, and keeps the history of the last record's entries.
+        let floor = super::properties::floor_after(
+            writer.epoch,
+            last.as_ref().map(LastWrite::properties_version),
+        );
+        let held = last.as_ref().and_then(LastWrite::record).map(|held| {
             (
                 &held.properties[..],
                 held.properties_version,
                 &held.revoked[..],
             )
         });
-        feed.restore(held, super::properties::floor(writer.epoch));
+        feed.restore(held, floor);
         let mut written = sources.take();
         let mut state = written.state;
         writer
@@ -151,7 +159,10 @@ impl<D: PoolDirectory> Publisher<D> {
                 .publish(directory, (feed, stored), &self.record, &last)
                 .await;
         }
-        let stored = writer.withdraw(directory, &self.record).await;
+        // The tombstone keeps the list's version, which no list this hub
+        // sent is above, so that a later hub of the pool numbers past it.
+        let version = sources.properties.borrow().version;
+        let stored = writer.withdraw(directory, &self.record, version).await;
         feed.close();
         // The withdrawal's success alone is no proof: a later hub of the
         // pool may have published since it was stored, and before its
@@ -171,7 +182,10 @@ impl<D: PoolDirectory> Publisher<D> {
         loop {
             let read = async {
                 match &self.parent {
-                    Some(parent) => parent.held(&self.record.class, &self.record.name).await,
+                    Some(parent) => parent
+                        .held(&self.record.class, &self.record.name)
+                        .await
+                        .map(|last| last.and_then(LastWrite::into_record)),
                     None => {
                         gdl_pools::last_record(directory, &self.record.class, &self.record.name)
                             .await
@@ -265,6 +279,9 @@ async fn answered(cadence: &mut Option<watch::Receiver<Option<Duration>>>) -> Du
 struct Writer {
     epoch: u64,
     seq: u64,
+    /// Under the `relay` backend, where the pool's last write is read: its
+    /// parent's hub.
+    parent: Option<HubDirectory>,
     /// The longest a write may take: one that takes longer is overtaken by
     /// the next, rather than holding up the heartbeat.
     bound: Duration,
@@ -274,18 +291,19 @@ struct Writer {
 }
 
 impl Writer {
-    /// The writer of a hub that starts now, with the record the directory
-    /// holds for the pool, if it read one in time: its epoch is the time
-    /// in milliseconds, raised past the held record's, so that a restart
-    /// orders after its predecessor even when the predecessor's clock ran
-    /// ahead. Under the `relay` backend, the record is read from the
-    /// parent. A read that fails or does not end in time is an error.
+    /// The writer of a hub that starts now, with the pool's last write the
+    /// directory holds, its record or a withdrawal's tombstone, if it read
+    /// one in time: its epoch is the time in milliseconds, raised past the
+    /// last write's, so that a restart orders after its predecessor
+    /// whatever the clocks say. Under the `relay` backend, the write is
+    /// read from the parent. A read that fails or does not end in time is
+    /// an error.
     async fn start(
         directory: &impl PoolDirectory,
-        parent: Option<&HubDirectory>,
+        parent: Option<HubDirectory>,
         record: &PoolRecord,
         bound: Duration,
-    ) -> (Self, Result<Option<PoolRecord>, DirectoryError>) {
+    ) -> (Self, Result<Option<LastWrite>, DirectoryError>) {
         let now = u64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -293,31 +311,20 @@ impl Writer {
                 .as_millis(),
         )
         .unwrap_or(u64::MAX);
-        let read = async {
-            match parent {
-                Some(parent) => parent.held(&record.class, &record.name).await,
-                None => gdl_pools::last_record(directory, &record.class, &record.name).await,
-            }
-        };
-        let held = tokio::time::timeout(SNAPSHOT, read)
-            .await
-            .unwrap_or_else(|_| {
-                Err(DirectoryError::Unavailable(format!(
-                    "the pool's last record was not read within {SNAPSHOT:?}"
-                )))
-            });
-        let epoch = held
+        let last = last_write(directory, parent.as_ref(), record).await;
+        let epoch = last
             .as_ref()
             .ok()
             .and_then(Option::as_ref)
-            .map(|held| held.epoch);
+            .map(|last| last.version().epoch);
         let writer = Self {
-            epoch: epoch.map_or(now, |held| now.max(held.saturating_add(1))),
+            epoch: epoch.map_or(now, |last| now.max(last.saturating_add(1))),
             seq: 0,
+            parent,
             bound,
             stored: false,
         };
-        (writer, held)
+        (writer, last)
     }
 
     async fn publish(
@@ -334,7 +341,7 @@ impl Writer {
             load,
             ref properties,
         } = *written;
-        let record = PoolRecord {
+        let write = PoolRecord {
             state,
             load,
             presence: presence.presence,
@@ -345,12 +352,15 @@ impl Writer {
             seq: self.seq,
             ..record.clone()
         };
-        let Ok(written) = tokio::time::timeout(self.bound, directory.publish(record)).await else {
+        let Ok(written) = tokio::time::timeout(self.bound, directory.publish(write)).await else {
             tracing::warn!(bound = ?self.bound, "the pool's record was not published in time");
             return;
         };
         match written {
             Ok(()) => {
+                // A list in the block of the stored version may go over the
+                // links, before a watch opens on the settled epoch.
+                feed.stored(properties.version);
                 // The watch carries the record's epoch, which is settled
                 // once a write is stored under it.
                 feed.settle(self.epoch);
@@ -369,15 +379,27 @@ impl Writer {
                 } else if held.epoch >= self.epoch && !self.stored {
                     // Nothing has been stored under this epoch, so no reader
                     // knows it: it can still move past the one held. The
-                    // properties' versions follow it, so they stay above the
-                    // ones published under the epoch held. An equal epoch
-                    // is a predecessor's that started in the same
-                    // millisecond, whose properties' versions count from the
-                    // same floor: catching up its sequence alone would
+                    // properties' versions follow the write held, read
+                    // again, so they stay above the ones it published. An
+                    // equal epoch is a predecessor's that started in the
+                    // same millisecond: catching up its sequence alone would
                     // publish a lower version than it did.
-                    self.epoch = held.epoch.saturating_add(1);
+                    let last = match last_write(directory, self.parent.as_ref(), record).await {
+                        Ok(last) => last,
+                        Err(error) => {
+                            tracing::warn!(%error, "the pool's last write was not read again");
+                            None
+                        }
+                    };
+                    let epoch = last
+                        .as_ref()
+                        .map_or(held.epoch, |last| held.epoch.max(last.version().epoch));
+                    self.epoch = epoch.saturating_add(1);
                     self.seq = 0;
-                    feed.raise_floor(super::properties::floor(self.epoch));
+                    feed.raise_floor(super::properties::floor_after(
+                        self.epoch,
+                        last.as_ref().map(LastWrite::properties_version),
+                    ));
                 } else {
                     tracing::error!(
                         %held,
@@ -390,12 +412,39 @@ impl Writer {
     }
 }
 
+/// The pool's last write: read from its parent's hub under the `relay`
+/// backend, else from `directory`, bounded.
+async fn last_write(
+    directory: &impl PoolDirectory,
+    parent: Option<&HubDirectory>,
+    record: &PoolRecord,
+) -> Result<Option<LastWrite>, DirectoryError> {
+    let read = async {
+        match parent {
+            Some(parent) => parent.held(&record.class, &record.name).await,
+            None => directory.last_write(&record.class, &record.name).await,
+        }
+    };
+    tokio::time::timeout(SNAPSHOT, read)
+        .await
+        .unwrap_or_else(|_| {
+            Err(DirectoryError::Unavailable(format!(
+                "the pool's last write was not read within {SNAPSHOT:?}"
+            )))
+        })
+}
+
 impl Writer {
     /// Withdraw the record, after every write before it, retried once a
     /// heartbeat until the directory takes it: whether this hub's
     /// withdrawal is stored. A later hub of the pool holds its record
     /// otherwise, which is that hub's to withdraw.
-    async fn withdraw(&mut self, directory: &impl PoolDirectory, record: &PoolRecord) -> bool {
+    async fn withdraw(
+        &mut self,
+        directory: &impl PoolDirectory,
+        record: &PoolRecord,
+        properties_version: u64,
+    ) -> bool {
         loop {
             self.seq += 1;
             let withdrawal = Withdrawal {
@@ -403,6 +452,7 @@ impl Writer {
                 pool: record.name.clone(),
                 epoch: self.epoch,
                 seq: self.seq,
+                properties_version,
             };
             match tokio::time::timeout(self.bound, directory.withdraw(withdrawal)).await {
                 Ok(Ok(())) => return true,

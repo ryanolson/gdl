@@ -47,6 +47,7 @@ impl PoolCommand {
                 pool: last.name.clone(),
                 epoch,
                 seq,
+                properties_version: last.properties_version,
             }),
             Self::ScaleToZero => CommandWrite::Record(Box::new(PoolRecord {
                 presence: Presence::ScaledToZero,

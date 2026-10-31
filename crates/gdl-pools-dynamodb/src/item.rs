@@ -48,6 +48,10 @@ pub(crate) const EXPIRES_AT: &str = dynamodb_tables::TTL_ATTRIBUTE;
 
 const RECORD: &str = "record";
 const WITHDRAWN: &str = "withdrawn";
+/// A tombstone's attribute that keeps the pool's last list version, so that
+/// a later hub numbers past it. A reader of an earlier build passes over
+/// it; a tombstone an earlier build wrote has none, and reads as 0.
+const PROPERTIES_VERSION: &str = "properties_version";
 
 /// DynamoDB's limit on one item, in bytes: the names and values of its
 /// attributes.
@@ -217,7 +221,19 @@ pub(crate) fn withdrawal(withdrawal: &Withdrawal, order: u64) -> Item {
         order,
     );
     item.insert(KIND.into(), AttributeValue::S(WITHDRAWN.into()));
+    item.insert(
+        PROPERTIES_VERSION.into(),
+        number(withdrawal.properties_version),
+    );
     item
+}
+
+/// The records table's key of `pool` of `class`.
+pub(crate) fn record_key(class: &str, pool: &str) -> Item {
+    Item::from([
+        (CLASS.into(), AttributeValue::S(class.into())),
+        (POOL.into(), AttributeValue::S(pool.into())),
+    ])
 }
 
 /// The lists table's key of `key`'s list of `pool` of `class`.
@@ -244,7 +260,9 @@ pub(crate) enum StoredHeld {
         record: Box<PoolRecord>,
         list: Option<ListKey>,
     },
-    Withdrawn,
+    Withdrawn {
+        properties_version: u64,
+    },
 }
 
 /// The pool's write `item` holds, if it is one of `class`: a record a
@@ -259,7 +277,11 @@ pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
     let version = version(item)?;
     let order = count(item, ORDER)?;
     let held = match text(item, KIND)? {
-        WITHDRAWN => StoredHeld::Withdrawn,
+        // A tombstone without the list version, as an earlier build wrote
+        // it, still refuses late writes: it reads as 0.
+        WITHDRAWN => StoredHeld::Withdrawn {
+            properties_version: count(item, PROPERTIES_VERSION).unwrap_or(0),
+        },
         RECORD => {
             let record: PoolRecord = serde_json::from_str(text(item, BODY)?).ok()?;
             let belongs = record.name == pool
@@ -355,12 +377,13 @@ impl Entry {
     /// record that names one.
     pub(crate) fn new(class: &str, stored: Stored, list: Option<List>) -> Self {
         let (held, key) = match stored.held {
-            StoredHeld::Withdrawn => (
+            StoredHeld::Withdrawn { properties_version } => (
                 Held::Withdrawn(Withdrawal {
                     class: class.to_owned(),
                     pool: stored.pool,
                     epoch: stored.version.epoch,
                     seq: stored.version.seq,
+                    properties_version,
                 }),
                 None,
             ),

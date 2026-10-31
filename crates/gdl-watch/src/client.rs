@@ -17,7 +17,7 @@ use super::{
     RELEASE_ROUTE, REPORT_ROUTE, RelayWatcher, Report, ReportRefusal, ReportReply, UnknownEvent,
     UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
-use gdl_pools::{DirectoryError, PoolRecord};
+use gdl_pools::{DirectoryError, LastWrite};
 use serde::Serialize;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
@@ -173,16 +173,18 @@ impl PoolWatcher {
         }
     }
 
-    /// The record the parent pool's hub at `hub`, `host:port`, holds for
-    /// the pool `pool` of `class` ([`crate::HELD_ROUTE`]): `None` when it
-    /// holds none. A parent that cannot be reached, or answers anything
-    /// else, is [`DirectoryError::Unavailable`].
+    /// The last write the parent pool's hub at `hub`, `host:port`, holds
+    /// for the pool `pool` of `class` ([`crate::HELD_ROUTE`]): its record,
+    /// or the tombstone of its withdrawal, or `None` when it holds neither,
+    /// as a parent of an earlier build says of a tombstone too. A parent
+    /// that cannot be reached, or answers anything else, is
+    /// [`DirectoryError::Unavailable`].
     pub async fn held(
         &self,
         hub: &str,
         class: &str,
         pool: &str,
-    ) -> Result<Option<PoolRecord>, DirectoryError> {
+    ) -> Result<Option<LastWrite>, DirectoryError> {
         gdl_model::check_hub_address(hub).map_err(DirectoryError::Unavailable)?;
         let url = format!(
             "http://{hub}/v1/ext/{EXTENSION}{}",
@@ -197,11 +199,16 @@ impl PoolWatcher {
             .await
             .map_err(|e| unavailable(&e))?;
         match response.status() {
-            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            // A tombstone is in the body; a parent of an earlier build
+            // sends none, which reads as no write held.
+            reqwest::StatusCode::NOT_FOUND => {
+                let body = response.bytes().await.map_err(|e| unavailable(&e))?;
+                Ok(serde_json::from_slice(&body).ok().map(LastWrite::Withdrawn))
+            }
             status if status.is_success() => {
                 let body = response.bytes().await.map_err(|e| unavailable(&e))?;
                 serde_json::from_slice(&body)
-                    .map(Some)
+                    .map(|record| Some(LastWrite::Record(Box::new(record))))
                     .map_err(|e| unavailable(&e))
             }
             status => Err(unavailable(&status)),

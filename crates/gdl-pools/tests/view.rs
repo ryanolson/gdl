@@ -43,6 +43,7 @@ fn withdrawn(name: &str, epoch: u64, seq: u64) -> PoolEvent {
             pool: name.into(),
             epoch,
             seq,
+            properties_version: 0,
         },
         token: ResumeToken::new("model_x", seq),
     }

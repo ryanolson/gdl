@@ -115,6 +115,7 @@ fn withdrawal(pool: &str, seq: u64) -> Withdrawal {
         pool: pool.into(),
         epoch: 7,
         seq,
+        properties_version: 0,
     }
 }
 

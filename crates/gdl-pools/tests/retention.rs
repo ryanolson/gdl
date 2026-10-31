@@ -8,8 +8,8 @@ use std::{
 
 use futures::{FutureExt, StreamExt};
 use gdl_pools::{
-    DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory, PoolEvent,
-    PoolRecord, PoolState, ResumeToken, Withdrawal,
+    DirectoryError, LastWrite, MemoryDirectory, MemoryLimits, MemoryWatch, PoolDirectory,
+    PoolEvent, PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{self, Backend},
 };
 
@@ -54,6 +54,14 @@ impl PoolDirectory for Stored {
         }
         saved.insert(key, Saved::Withdrawn(withdrawal));
         Ok(())
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        self.live.last_write(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
@@ -159,6 +167,7 @@ async fn a_store_that_loses_the_withdrawal_version_on_restart_fails() {
         pool: "m2".into(),
         epoch: 1,
         seq: 5,
+        properties_version: 0,
     };
     directory
         .withdraw(withdrawal)

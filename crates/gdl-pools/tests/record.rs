@@ -162,6 +162,7 @@ fn a_well_formed_record_passes() {
         pool: "model-x-01-us-east-1".into(),
         epoch: 1,
         seq: 2,
+        properties_version: 0,
     }
     .check()
     .expect("a well-formed withdrawal");
@@ -266,6 +267,7 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
             pool: pool.into(),
             epoch: 1,
             seq: 1,
+            properties_version: 0,
         };
         assert!(
             matches!(withdrawal.check(), Err(DirectoryError::Malformed(_))),
@@ -519,4 +521,27 @@ fn a_record_drops_a_malformed_property_and_keeps_the_rest() {
     );
     let text = serde_json::to_string(&revoked).expect("json");
     assert!(!text.contains("dropped"), "not on the wire: {text}");
+}
+
+/// A withdrawal keeps the pool's last list version through JSON, and one
+/// from a writer of an earlier build, without it, reads as 0: today's
+/// floor, never a refusal.
+#[test]
+fn a_withdrawal_keeps_its_list_version_and_reads_without_it() {
+    let withdrawal = Withdrawal {
+        class: "model_x".into(),
+        pool: "model-x-01".into(),
+        epoch: 4,
+        seq: 2,
+        properties_version: (1 << 21) + 5,
+    };
+    let json = serde_json::to_value(&withdrawal).expect("json");
+    assert_eq!(json["properties_version"], (1 << 21) + 5);
+    let back: Withdrawal = serde_json::from_value(json).expect("a withdrawal");
+    assert_eq!(back, withdrawal);
+    let earlier: Withdrawal = serde_json::from_value(json!({
+        "class": "model_x", "pool": "model-x-01", "epoch": 4, "seq": 2
+    }))
+    .expect("an earlier build's withdrawal");
+    assert_eq!(earlier.properties_version, 0);
 }

@@ -10,7 +10,7 @@ use aws_sdk_dynamodb::{
     operation::put_item::PutItemError,
     types::{AttributeValue, ReturnValue, ReturnValuesOnConditionCheckFailure},
 };
-use gdl_pools::{DirectoryError, PoolDirectory, PoolRecord, Version, Withdrawal};
+use gdl_pools::{DirectoryError, LastWrite, PoolDirectory, PoolRecord, Version, Withdrawal};
 
 use crate::{
     item::{self, Item, ListKey},
@@ -423,6 +423,53 @@ impl PoolDirectory for DynamoDirectory {
                 None,
             )
             .await?)
+    }
+
+    /// One consistent read of the pool's item: a tombstone is answered as
+    /// it is, and a record from a new watch's snapshot, which joins its
+    /// list ([`gdl_pools::last_record`]).
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        let got = self
+            .shared
+            .client
+            .get_item()
+            .table_name(&self.shared.tables.records)
+            .set_key(Some(item::record_key(class, pool)))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(|error| {
+                unavailable(
+                    &format!("reading the item of pool `{pool}` of class `{class}`"),
+                    error,
+                )
+            })?;
+        let stored = got
+            .item()
+            .and_then(|got| item::decode(class, got))
+            .filter(|stored| stored.pool == pool);
+        match stored {
+            None => Ok(None),
+            Some(item::Stored {
+                version,
+                held: item::StoredHeld::Withdrawn { properties_version },
+                ..
+            }) => Ok(Some(LastWrite::Withdrawn(Withdrawal {
+                class: class.to_owned(),
+                pool: pool.to_owned(),
+                epoch: version.epoch,
+                seq: version.seq,
+                properties_version,
+            }))),
+            Some(_) => {
+                let record = gdl_pools::last_record(self, class, pool).await?;
+                Ok(record.map(|record| LastWrite::Record(Box::new(record))))
+            }
+        }
     }
 
     /// The watch begins when it is first polled, which must be inside a

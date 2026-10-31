@@ -18,8 +18,8 @@ use std::{
 
 use futures::StreamExt;
 use gdl_pools::{
-    DirDirectory, DirLimits, DirectoryError, PoolDirectory, PoolEvent, PoolRecord, PoolState,
-    ResumeToken, Version, Withdrawal,
+    DirDirectory, DirLimits, DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord,
+    PoolState, ResumeToken, Version, Withdrawal,
     conformance::{self, Backend},
 };
 use tempfile::TempDir;
@@ -116,6 +116,7 @@ fn withdrawal(pool: &str, epoch: u64, seq: u64) -> Withdrawal {
         pool: pool.into(),
         epoch,
         seq,
+        properties_version: 0,
     }
 }
 
@@ -681,4 +682,38 @@ async fn a_record_keeps_its_presence_and_properties_in_its_file() {
     writer.publish(published.clone()).await.expect("a record");
     let mut watch = watch(&reader, None);
     assert_eq!(event(&mut watch).await, PoolEvent::Current(published));
+}
+
+/// A tombstone file an earlier build wrote keeps no list version: it is
+/// still the pool's last write, and still refuses a late write, and its list
+/// version reads as 0, so a later hub numbers from its own floor, as before.
+#[tokio::test]
+async fn a_tombstone_of_an_earlier_build_is_read_with_list_version_zero() {
+    let temp = temp();
+    let class = temp.path().join("model_x");
+    std::fs::create_dir_all(&class).expect("the class directory");
+    std::fs::write(
+        class.join("m1.json"),
+        r#"{"order":1,"withdrawn":{"pool":"m1","epoch":4,"seq":2}}"#,
+    )
+    .expect("the earlier build's tombstone");
+    let directory = DirDirectory::new(temp.path());
+    let last = directory
+        .last_write("model_x", "m1")
+        .await
+        .expect("the file is read");
+    assert_eq!(
+        last,
+        Some(LastWrite::Withdrawn(Withdrawal {
+            class: "model_x".into(),
+            pool: "m1".into(),
+            epoch: 4,
+            seq: 2,
+            properties_version: 0,
+        }))
+    );
+    assert!(matches!(
+        directory.publish(record("m1", 4, 2)).await,
+        Err(DirectoryError::NotNewer { .. })
+    ));
 }

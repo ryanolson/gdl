@@ -486,6 +486,14 @@ impl PoolDirectory for Gated {
         self.inner.withdraw(withdrawal).await
     }
 
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<gdl_pools::LastWrite>, DirectoryError> {
+        self.inner.last_write(class, pool).await
+    }
+
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
         self.inner.watch(class, from)
     }
@@ -535,6 +543,14 @@ impl PoolDirectory for Resolving {
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<gdl_pools::LastWrite>, DirectoryError> {
+        self.inner.last_write(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
@@ -629,6 +645,14 @@ impl<D: PoolDirectory> PoolDirectory for Named<D> {
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<gdl_pools::LastWrite>, DirectoryError> {
+        self.inner.last_write(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> D::Watch {

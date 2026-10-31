@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gdl_pools::{
-    DirectoryError, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord, RelayDirectory,
-    Withdrawal,
+    DirectoryError, LastWrite, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord,
+    RelayDirectory, Withdrawal,
 };
 use gdl_watch::{PoolWatcher, Report, ReportReply};
 use tokio::sync::watch;
@@ -99,16 +99,18 @@ impl HubDirectory {
         &self.children
     }
 
-    /// The record the parent's hub holds for the pool `pool` of `class`,
-    /// for a restarted hub to keep its pool's history: `None` for a pool
-    /// that reports nowhere, or when the parent holds none, as a parent of
-    /// a build that does not answer the route says too. A parent that
-    /// cannot be reached is an error, never a pool with no record.
+    /// The last write the parent's hub holds for the pool `pool` of
+    /// `class`, its record or the tombstone of its withdrawal, for a
+    /// restarted hub to keep its pool's history and number past it: `None`
+    /// for a pool that reports nowhere, or when the parent holds neither,
+    /// as a parent of a build that does not answer the route says too. A
+    /// parent that cannot be reached is an error, never a pool with no
+    /// record.
     pub(crate) async fn held(
         &self,
         class: &str,
         pool: &str,
-    ) -> Result<Option<PoolRecord>, DirectoryError> {
+    ) -> Result<Option<LastWrite>, DirectoryError> {
         let Some(parent) = &self.parent else {
             return Ok(None);
         };
@@ -194,6 +196,12 @@ impl Reports {
     /// The record held for the child `pool` of `class`, expired or not.
     pub(crate) fn held(&self, class: &str, pool: &str) -> Option<PoolRecord> {
         self.children.record(class, pool)
+    }
+
+    /// The last write held for the child `pool` of `class`: its record,
+    /// expired or not, or the tombstone of its withdrawal.
+    pub(crate) fn last(&self, class: &str, pool: &str) -> Option<LastWrite> {
+        self.children.last(class, pool)
     }
 
     /// Verify `report`, write it, and answer with the interval at which

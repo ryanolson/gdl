@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use futures::{FutureExt, Stream, StreamExt, stream};
 use gdl_pools::{
-    DirectoryError, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
+    DirectoryError, LastWrite, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
     ResumeToken, Withdrawal,
     conformance::{self, Backend, Rule},
 };
@@ -32,6 +32,14 @@ impl PoolDirectory for Folding {
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.0.withdraw(withdrawal).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        self.0.last_write(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Events {

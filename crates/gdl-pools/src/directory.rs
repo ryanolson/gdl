@@ -78,6 +78,28 @@ pub trait PoolDirectory: Send + Sync + 'static {
         withdrawal: Withdrawal,
     ) -> impl Future<Output = Result<(), DirectoryError>> + Send;
 
+    /// The last write the directory took for the pool `pool` of `class`:
+    /// its record, expired or not, or the tombstone of its withdrawal, or
+    /// `None` when it holds neither. A hub that starts reads it, so that
+    /// it numbers past every write before it, a withdrawn one too.
+    ///
+    /// The default reads the record from a new watch's snapshot
+    /// ([`crate::last_record`]), which holds no tombstone: a backend that
+    /// keeps tombstones answers with them.
+    fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> impl Future<Output = Result<Option<LastWrite>, DirectoryError>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            let record = crate::last_record(self, class, pool).await?;
+            Ok(record.map(|record| LastWrite::Record(Box::new(record))))
+        }
+    }
+
     /// Watch the records of `class`, and only those.
     ///
     /// From `None`: each current record ([`PoolEvent::Current`]), then
@@ -92,6 +114,50 @@ pub trait PoolDirectory: Send + Sync + 'static {
     ///
     /// An error ends the watch.
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Self::Watch;
+}
+
+/// The last write a directory took for one pool
+/// ([`PoolDirectory::last_write`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastWrite {
+    /// The pool's record.
+    Record(Box<PoolRecord>),
+    /// The tombstone of the pool's withdrawal.
+    Withdrawn(Withdrawal),
+}
+
+impl LastWrite {
+    /// The write's place in its writer's order of writes.
+    pub fn version(&self) -> Version {
+        match self {
+            Self::Record(record) => record.version(),
+            Self::Withdrawn(withdrawal) => withdrawal.version(),
+        }
+    }
+
+    /// The version of the pool's property list the write carries.
+    pub fn properties_version(&self) -> u64 {
+        match self {
+            Self::Record(record) => record.properties_version,
+            Self::Withdrawn(withdrawal) => withdrawal.properties_version,
+        }
+    }
+
+    /// The record, if the write is one.
+    pub fn record(&self) -> Option<&PoolRecord> {
+        match self {
+            Self::Record(record) => Some(record),
+            Self::Withdrawn(_) => None,
+        }
+    }
+
+    /// The record, if the write is one.
+    pub fn into_record(self) -> Option<PoolRecord> {
+        match self {
+            Self::Record(record) => Some(*record),
+            Self::Withdrawn(_) => None,
+        }
+    }
 }
 
 /// What a watch of one class yields.

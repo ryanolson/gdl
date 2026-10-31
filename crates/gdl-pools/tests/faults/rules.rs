@@ -6,8 +6,8 @@ use std::{
 
 use futures::StreamExt;
 use gdl_pools::{
-    DirectoryError, LoadSummary, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent,
-    PoolRecord, PoolState, ResumeToken, Withdrawal,
+    DirectoryError, LastWrite, LoadSummary, MemoryDirectory, MemoryLimits, PoolDirectory,
+    PoolEvent, PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{Backend, Rule},
 };
 use tokio::time::Instant;
@@ -90,6 +90,14 @@ impl PoolDirectory for Faulty {
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        self.inner.last_write(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Events {

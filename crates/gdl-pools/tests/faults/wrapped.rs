@@ -5,7 +5,7 @@ use std::{
 
 use futures::StreamExt;
 use gdl_pools::{
-    DirectoryError, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
+    DirectoryError, LastWrite, MemoryDirectory, MemoryLimits, PoolDirectory, PoolEvent, PoolRecord,
     ResumeToken, Withdrawal, conformance::Backend,
 };
 
@@ -57,6 +57,19 @@ where
             self.refused.lock().expect("lock").remove(&key);
         }
         result
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        let key = (class.to_owned(), pool.to_owned());
+        let stored = self.refused.lock().expect("lock").get(&key).cloned();
+        Ok(match (self.inner.last(class, pool), stored) {
+            (Some(LastWrite::Record(_)), Some(stored)) => Some(LastWrite::Record(Box::new(stored))),
+            (last, _) => last,
+        })
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Events {

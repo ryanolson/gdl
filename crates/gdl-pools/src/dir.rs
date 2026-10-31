@@ -15,7 +15,9 @@ use tokio::{
     task::AbortHandle,
 };
 
-use crate::{DirectoryError, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Withdrawal};
+use crate::{
+    DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Withdrawal,
+};
 
 pub(crate) mod file;
 mod watch;
@@ -191,6 +193,23 @@ impl PoolDirectory for DirDirectory {
         withdrawal.check()?;
         let (class, pool) = (withdrawal.class.clone(), withdrawal.pool.clone());
         self.write(class, pool, Held::tombstone(withdrawal)).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        // Before any path is made of its names.
+        if gdl_model::check_class_name(class).is_err() || gdl_model::check_pool_name(pool).is_err()
+        {
+            return Ok(None);
+        }
+        let dir = self.shared.root.join(class);
+        let (class, pool) = (class.to_owned(), pool.to_owned());
+        tokio::task::spawn_blocking(move || file::read(&dir, &class, &pool))
+            .await
+            .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
     }
 
     /// The watch begins when it is first polled, which must be inside a

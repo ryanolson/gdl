@@ -659,6 +659,7 @@ const VARIANTS: [Variant; 6] = [
                         pool: first.name.clone(),
                         epoch: 2,
                         seq: 2,
+                        properties_version: 0,
                     })],
                 ),
             ]

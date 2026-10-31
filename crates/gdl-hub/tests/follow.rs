@@ -811,6 +811,7 @@ async fn a_withdrawn_record_does_not_end_a_live_follow() {
             pool: POOL.into(),
             epoch: record.epoch,
             seq: record.seq + 1,
+            properties_version: 0,
         })
         .await
         .expect("withdrawn");

@@ -18,8 +18,8 @@ use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, time::Duration};
 use futures::{FutureExt, Stream, StreamExt};
 
 use crate::{
-    DirectoryError, LoadSummary, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken,
-    Version, Withdrawal,
+    DirectoryError, LastWrite, LoadSummary, PoolDirectory, PoolEvent, PoolRecord, PoolState,
+    ResumeToken, Version, Withdrawal,
 };
 
 /// The smallest [`Backend::buffer`] the suite takes.
@@ -143,6 +143,7 @@ pub async fn run<B: Backend>(backend: &B) {
     case!(a_watch_resumes_after_a_token, Some(Rule::Changes));
     case!(a_lagging_watcher_is_cut_off, Some(Rule::Changes));
     case!(a_dropped_watch_is_released);
+    case!(the_last_write_of_a_pool_is_read);
     case!(a_record_stays_until_withdrawn, Some(Rule::Kept));
     case!(
         a_watch_sees_every_record_of_its_class,
@@ -226,6 +227,7 @@ fn withdrawal(class: &str, pool: &str, epoch: u64, seq: u64) -> Withdrawal {
         pool: pool.into(),
         epoch,
         seq,
+        properties_version: 0,
     }
 }
 
@@ -739,7 +741,11 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
     publish(&writer, record(MODEL, "m2", 1, 1))
         .await
         .expect("a record");
-    withdraw(&writer, withdrawal(MODEL, "m2", 1, 2))
+    let gone = Withdrawal {
+        properties_version: 1 << 21,
+        ..withdrawal(MODEL, "m2", 1, 2)
+    };
+    withdraw(&writer, gone.clone())
         .await
         .expect("its withdrawal");
 
@@ -783,6 +789,54 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
             "after a restart, a write of m2 at its withdrawal's version was taken",
         ),
         Err(error) => panic!("after a restart, a write of m2: {error}"),
+    }
+    // With the list version a later hub of the pool numbers past.
+    let last = within("the last write", restarted.last_write(MODEL, "m2"))
+        .await
+        .expect("the last write is read");
+    if last != Some(LastWrite::Withdrawn(gone)) {
+        broke(
+            Rule::Kept,
+            format_args!("after a restart, m2's last write reads {last:?}, not its withdrawal"),
+        );
+    }
+}
+
+/// A hub that starts reads its pool's last write, through any handle: the
+/// record whole, or the tombstone of its withdrawal with the list version
+/// it keeps, so that the hub numbers past both. A pool the directory never
+/// held has none.
+async fn the_last_write_of_a_pool_is_read<B: Backend>(backend: &B) {
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
+    let m1 = record(MODEL, "m1", 3, 1);
+    publish(&writer, m1.clone()).await.expect("a record");
+    publish(&writer, record(MODEL, "m2", 4, 1))
+        .await
+        .expect("a record");
+    let gone = Withdrawal {
+        properties_version: (1 << 21) + 5,
+        ..withdrawal(MODEL, "m2", 4, 2)
+    };
+    withdraw(&writer, gone.clone())
+        .await
+        .expect("its withdrawal");
+    for (directory, through) in [(&writer, "the writer"), (&reader, "another handle")] {
+        let last = |pool| async move {
+            within("the last write", directory.last_write(MODEL, pool))
+                .await
+                .unwrap_or_else(|error| panic!("{pool}'s last write through {through}: {error}"))
+        };
+        assert_eq!(
+            last("m1").await,
+            Some(LastWrite::Record(Box::new(m1.clone()))),
+            "m1's last write through {through}"
+        );
+        assert_eq!(
+            last("m2").await,
+            Some(LastWrite::Withdrawn(gone.clone())),
+            "m2's last write through {through}"
+        );
+        assert_eq!(last("m3").await, None, "m3's last write through {through}");
     }
 }
 

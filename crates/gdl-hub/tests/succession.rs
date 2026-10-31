@@ -1,16 +1,22 @@
 //! A pool's successor hub numbers past its predecessor: a later epoch, and a
 //! property-list version that is not below the predecessor's last, so that a
 //! reader that compares versions or epochs across the two hubs never sees one
-//! go back. The version may stay the same: it names one list, and a successor
-//! whose list did not change lists it at the version it read. Each case starts a real hub over a directory that holds what a
+//! go back. Each case starts a real hub over a directory that holds what a
 //! predecessor left: its record, the tombstone of its withdrawal, or nothing.
-//! The predecessor is seeded rather than run, since its state is what matters
-//! and a hub would need more than 2^20 list changes to reach some of it.
+//! Most cases seed the predecessor rather than run it, since its state is
+//! what matters and a hub would need more than 2^20 list changes to reach
+//! some of it.
 
 mod common;
 
 use common::{POOL, Records, hub_of, millis_now, settings, timing};
-use gdl_pools::{MemoryDirectory, PoolDirectory, PoolRecord, Withdrawal};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use gdl_pools::{
+    DirectoryError, LastWrite, MemoryDirectory, MemoryWatch, PoolDirectory, PoolRecord,
+    ResumeToken, Withdrawal,
+};
 
 /// The least list version a hub of `epoch` counts from, as the hub computes
 /// it: the epoch in the high bits.
@@ -37,19 +43,37 @@ fn predecessor(epoch: u64, version: u64) -> PoolRecord {
     .expect("a pool record")
 }
 
-/// Seed `directory` with the predecessor's record, withdrawn when
-/// `withdrawn`.
-async fn seed(directory: &MemoryDirectory, last: &PoolRecord, withdrawn: bool) {
+/// How the predecessor left its pool.
+#[derive(Clone, Copy)]
+enum Left {
+    /// Its record stays.
+    Listed,
+    /// It withdrew, and its tombstone keeps its list version.
+    Withdrawn,
+    /// It withdrew, as a hub of an earlier build does: its tombstone keeps
+    /// no list version.
+    WithdrawnByAnEarlierBuild,
+}
+
+/// Seed `directory` with the predecessor's record, and its withdrawal as
+/// it `left`.
+async fn seed(directory: &MemoryDirectory, last: &PoolRecord, left: Left) {
     directory
         .publish(last.clone())
         .await
         .expect("the predecessor's record");
-    if withdrawn {
+    let properties_version = match left {
+        Left::Listed => return,
+        Left::Withdrawn => last.properties_version,
+        Left::WithdrawnByAnEarlierBuild => 0,
+    };
+    {
         let withdrawal = Withdrawal {
             class: last.class.clone(),
             pool: last.name.clone(),
             epoch: last.epoch,
             seq: last.seq + 1,
+            properties_version,
         };
         directory
             .withdraw(withdrawal)
@@ -61,8 +85,18 @@ async fn seed(directory: &MemoryDirectory, last: &PoolRecord, withdrawn: bool) {
 /// The first record a hub of the pool writes, started over `directory`
 /// after `last`: a watch's snapshot holds `last` while it is kept.
 async fn successor(directory: &MemoryDirectory, last: &PoolRecord) -> PoolRecord {
+    successor_over(directory, directory.clone(), last).await
+}
+
+/// [`successor`], with the hub writing through `through`, a directory over
+/// `directory`.
+async fn successor_over<D: PoolDirectory>(
+    directory: &MemoryDirectory,
+    through: D,
+    last: &PoolRecord,
+) -> PoolRecord {
     let mut records = Records::new(directory);
-    let (hub, _pool) = hub_of(settings(), directory.clone(), timing()).await;
+    let (hub, _pool) = hub_of(settings(), through, timing()).await;
     let first = loop {
         let record = records.next().await;
         if record.version() != last.version() {
@@ -98,21 +132,19 @@ async fn a_successor_behind_a_kept_record_keeps_a_version_past_many_list_changes
     let epoch = millis_now() + 600_000;
     let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
     let directory = MemoryDirectory::new();
-    seed(&directory, &last, false).await;
+    seed(&directory, &last, Left::Listed).await;
     assert_past(&last, &successor(&directory, &last).await);
 }
 
-/// The same predecessor, withdrawn: the tombstone keeps the epoch but not
-/// the list version, so the successor moves one epoch past the tombstone
-/// and counts from that epoch's floor, which is below the predecessor's
-/// last version.
+/// The same predecessor, withdrawn: the tombstone keeps the list version
+/// with the epoch, and the successor reads it, so it counts past it rather
+/// than from the next epoch's floor, which is below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "a withdrawal's tombstone keeps no list version, so a successor counts from the next epoch's floor, below a predecessor that made more than 2^20 list changes"]
 async fn a_successor_behind_a_kept_withdrawal_keeps_a_version_past_many_list_changes() {
     let epoch = millis_now() + 600_000;
     let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
     let directory = MemoryDirectory::new();
-    seed(&directory, &last, true).await;
+    seed(&directory, &last, Left::Withdrawn).await;
     assert_past(&last, &successor(&directory, &last).await);
 }
 
@@ -125,7 +157,7 @@ async fn a_successor_behind_a_kept_withdrawal_numbers_past_a_clock_ahead() {
     let epoch = millis_now() + 60_000;
     let last = predecessor(epoch, floor(epoch) + 1);
     let directory = MemoryDirectory::new();
-    seed(&directory, &last, true).await;
+    seed(&directory, &last, Left::Withdrawn).await;
     assert_past(&last, &successor(&directory, &last).await);
 }
 
@@ -135,10 +167,110 @@ async fn a_successor_behind_a_kept_withdrawal_numbers_past_a_clock_ahead() {
 /// clock, which is behind. No state kept in the directory can order this
 /// successor; only a clock, or state kept outside the directory, can.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "a directory that forgot the pool holds nothing to number past, so a successor whose clock is behind its predecessor's numbers lower (operations/limitations.md)"]
+#[ignore = "cannot pass: a directory that forgot the pool holds nothing to number past, which no order kept in the directory can fix, so a successor whose clock is behind numbers lower (operations/limitations.md)"]
 async fn a_successor_after_the_directory_forgot_the_pool_numbers_past_it() {
     let epoch = millis_now() + 60_000;
     let last = predecessor(epoch, floor(epoch) + 1);
     let forgotten = MemoryDirectory::new();
     assert_past(&last, &successor(&forgotten, &last).await);
+}
+
+/// A predecessor of an earlier build, withdrawn: its tombstone keeps no list
+/// version, so the successor numbers as it did before the tombstone kept
+/// one, never worse: one epoch past the tombstone, from that epoch's floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_successor_behind_a_withdrawal_of_an_earlier_build_numbers_as_before() {
+    let epoch = millis_now() + 600_000;
+    let last = predecessor(epoch, floor(epoch) + 1);
+    let directory = MemoryDirectory::new();
+    seed(&directory, &last, Left::WithdrawnByAnEarlierBuild).await;
+    let next = successor(&directory, &last).await;
+    assert_past(&last, &next);
+    assert_eq!(next.epoch, epoch + 1, "one past the tombstone");
+    assert_eq!(
+        next.properties_version,
+        floor(epoch + 1),
+        "from the epoch's floor"
+    );
+}
+
+/// A directory whose first read of a pool's last write finds nothing, as a
+/// read that raced the tombstone's write: the hub learns of the tombstone
+/// only when its first write is refused as not newer.
+#[derive(Clone)]
+struct Stale {
+    inner: MemoryDirectory,
+    read: Arc<AtomicBool>,
+}
+
+impl PoolDirectory for Stale {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        if self.read.swap(true, Ordering::SeqCst) {
+            self.inner.last_write(class, pool).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+        self.inner.watch(class, from)
+    }
+}
+
+/// A successor whose first read missed the tombstone is refused as not
+/// newer, reads the pool's last write again, and numbers past its list
+/// version as well as its epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_successor_refused_by_a_withdrawal_it_did_not_read_numbers_past_it() {
+    let epoch = millis_now() + 600_000;
+    let last = predecessor(epoch, floor(epoch) + (1 << 20) + 1024);
+    let directory = MemoryDirectory::new();
+    seed(&directory, &last, Left::Withdrawn).await;
+    let stale = Stale {
+        inner: directory.clone(),
+        read: Arc::default(),
+    };
+    assert_past(&last, &successor_over(&directory, stale, &last).await);
+}
+
+/// A hub that drains and withdraws leaves a tombstone with its list's last
+/// version, and the hub after it numbers past it, though nothing in the
+/// list changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hubs_own_withdrawal_keeps_its_list_version() {
+    let directory = MemoryDirectory::new();
+    let mut records = Records::new(&directory);
+    let (hub, pool) = hub_of(settings(), directory.clone(), timing()).await;
+    let first = records.next().await;
+    pool.drain().await.expect("a drain");
+    let mut health = pool.health();
+    tokio::time::timeout(common::WAIT, health.wait_for(|health| health.withdrawn))
+        .await
+        .expect("withdrawn in time")
+        .expect("the hub runs");
+    hub.shutdown().await.expect("the hub stops");
+    let Some(LastWrite::Withdrawn(withdrawal)) = directory.last("model_x", POOL) else {
+        panic!("the pool's tombstone");
+    };
+    assert_eq!(withdrawal.epoch, first.epoch);
+    assert!(withdrawal.properties_version >= first.properties_version);
+    let last = PoolRecord {
+        properties_version: withdrawal.properties_version,
+        ..first
+    };
+    assert_past(&last, &successor(&directory, &last).await);
 }

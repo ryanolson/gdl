@@ -40,7 +40,7 @@ fn a_listing_with_no_epoch_leaves_a_known_drain_as_it_is() {
 }
 
 #[test]
-#[ignore = "a known limit: a hub whose clock is behind, after the directory lost the record and its withdrawal, starts at a lower epoch, and the drain of the hub before it holds until a later epoch (operations/limitations.md)"]
+#[ignore = "cannot pass: after a directory that forgot the pool, which no order kept in the directory can fix, a hub whose clock is behind starts at a lower epoch, and the drain of the hub before it holds until a later epoch (operations/limitations.md)"]
 fn a_successor_after_directory_loss_can_change_its_drain_at_a_lower_epoch() {
     let version = 1_001 * (1 << 20);
     let mut observed = Vec::new();

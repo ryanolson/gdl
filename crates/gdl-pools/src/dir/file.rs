@@ -16,7 +16,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DirectoryError, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal};
+use crate::{DirectoryError, LastWrite, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal};
 
 /// What a scan found in a class's directory, by pool.
 pub(crate) type Files = HashMap<String, Seen>;
@@ -59,6 +59,9 @@ pub(crate) struct Tombstone {
     pool: String,
     epoch: u64,
     seq: u64,
+    // Absent from a file an earlier build wrote, which kept none.
+    #[serde(default)]
+    properties_version: u64,
 }
 
 impl Entry {
@@ -74,12 +77,15 @@ impl Entry {
     pub(crate) fn withdrawal(&self, class: &str) -> Option<Withdrawal> {
         match &self.held {
             Held::Record(_) => None,
-            Held::Withdrawn(tombstone) => Some(Withdrawal {
-                class: class.to_owned(),
-                pool: tombstone.pool.clone(),
-                epoch: tombstone.epoch,
-                seq: tombstone.seq,
-            }),
+            Held::Withdrawn(tombstone) => Some(tombstone.withdrawal(class)),
+        }
+    }
+
+    /// The write this entry holds for a pool of `class`.
+    pub(crate) fn last(&self, class: &str) -> LastWrite {
+        match &self.held {
+            Held::Record(record) => LastWrite::Record(record.clone()),
+            Held::Withdrawn(tombstone) => LastWrite::Withdrawn(tombstone.withdrawal(class)),
         }
     }
 
@@ -112,12 +118,7 @@ impl Entry {
                 token,
             },
             Held::Withdrawn(tombstone) => PoolEvent::Withdrawn {
-                withdrawal: Withdrawal {
-                    class: class.to_owned(),
-                    pool: tombstone.pool.clone(),
-                    epoch: tombstone.epoch,
-                    seq: tombstone.seq,
-                },
+                withdrawal: tombstone.withdrawal(class),
                 token,
             },
         }
@@ -135,7 +136,20 @@ impl Held {
             pool: withdrawal.pool,
             epoch: withdrawal.epoch,
             seq: withdrawal.seq,
+            properties_version: withdrawal.properties_version,
         })
+    }
+}
+
+impl Tombstone {
+    fn withdrawal(&self, class: &str) -> Withdrawal {
+        Withdrawal {
+            class: class.to_owned(),
+            pool: self.pool.clone(),
+            epoch: self.epoch,
+            seq: self.seq,
+            properties_version: self.properties_version,
+        }
     }
 }
 
@@ -286,6 +300,24 @@ pub(crate) fn write(dir: &Path, class: &str, pool: &str, held: Held) -> Result<(
         let _ = std::fs::remove_file(&partial);
         unavailable("writing", error)
     })
+}
+
+/// The last write `class/pool.json` in the class directory `dir` holds:
+/// None when there is no such file, or it holds anything else.
+pub(crate) fn read(
+    dir: &Path,
+    class: &str,
+    pool: &str,
+) -> Result<Option<LastWrite>, DirectoryError> {
+    let path = dir.join(format!("{pool}.json"));
+    match load(&path, class, pool) {
+        Ok(entry) => Ok(entry.map(|entry| entry.last(class))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DirectoryError::Unavailable(format!(
+            "reading {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 /// The entry `path` holds for `class/pool`; None when it holds anything

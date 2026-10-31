@@ -566,3 +566,65 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
         PropertyState::Drained
     );
 }
+
+/// The list versions a watch's events carry, a snapshot's and changes'.
+fn listed(events: &[PoolWatchEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PoolWatchEvent::Pool {
+                properties: Some(list),
+                ..
+            }
+            | PoolWatchEvent::Properties { properties: list } => Some(list.version),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A list in a block of versions past that of the last stored record goes
+/// over no link, in a change or in a new watch's snapshot, until a record
+/// in its block is stored: so a hub that reads the pool's last write, and
+/// counts from the block after it, numbers past every version a link
+/// carried. A later change in a stored block goes at once.
+#[test]
+fn a_list_in_a_later_block_waits_for_a_stored_record_in_it() {
+    let block = 1_u64 << 20;
+    let feed = Feed::new(
+        "pool".into(),
+        "class".into(),
+        vec![("f".into(), true)],
+        Duration::from_secs(1),
+        16,
+        Duration::from_secs(30),
+        Vec::new(),
+    );
+    // The last version of block 2, stored, as the hub's first write does.
+    feed.restore(None, 3 * block - 1);
+    feed.stored(3 * block - 1);
+    feed.settle(1);
+    let mut early = watch_now(&feed);
+    assert_eq!(listed(&pending(&mut early)), [3 * block - 1]);
+
+    let key =
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" })).expect("a key");
+    assert_eq!(feed.revoke(key.clone(), true), 3 * block, "block 3");
+    assert_eq!(
+        feed.properties().borrow().version,
+        3 * block,
+        "for the record"
+    );
+    assert_eq!(listed(&pending(&mut early)), [0; 0], "not over the link");
+    let mut late = watch_now(&feed);
+    assert_eq!(
+        listed(&pending(&mut late)),
+        [3 * block - 1],
+        "a new watch's snapshot carries the list the links have"
+    );
+
+    feed.stored(3 * block);
+    assert_eq!(listed(&pending(&mut early)), [3 * block]);
+    assert_eq!(listed(&pending(&mut late)), [3 * block]);
+    assert!(feed.revoke(key, false) > 3 * block);
+    assert_eq!(listed(&pending(&mut early)), [3 * block + 1], "at once");
+}

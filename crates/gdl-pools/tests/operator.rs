@@ -129,6 +129,18 @@ fn a_command_writes_at_an_epoch_past_the_last_record() {
         (withdrawal.class.as_str(), withdrawal.pool.as_str()),
         (CLASS, POOL)
     );
+    // The tombstone keeps the record's list version, which a later hub of
+    // the pool numbers past.
+    let CommandWrite::Withdrawal(kept) = PoolCommand::Withdraw.write(
+        &PoolRecord {
+            properties_version: (1 << 21) + 5,
+            ..behind
+        },
+        now,
+    ) else {
+        panic!("a withdrawal");
+    };
+    assert_eq!(kept.properties_version, (1 << 21) + 5);
 }
 
 /// Withdrawn by the operator, the pool's properties leave every reader's

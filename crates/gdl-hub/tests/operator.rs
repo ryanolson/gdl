@@ -304,8 +304,10 @@ async fn gone_relay_child() -> (RelayPool, PoolRecord) {
     let child = relay_pool(child(Some(&at)), timing()).await;
     let reported = tokio::time::timeout(WAIT, async {
         loop {
-            if let Ok(Some(record)) = watcher.held(&at, "model_x", CHILD).await {
-                return record;
+            if let Ok(Some(gdl_pools::LastWrite::Record(record))) =
+                watcher.held(&at, "model_x", CHILD).await
+            {
+                return *record;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -317,6 +319,7 @@ async fn gone_relay_child() -> (RelayPool, PoolRecord) {
         .held(&at, "model_x", CHILD)
         .await
         .expect("the parent answers")
+        .and_then(gdl_pools::LastWrite::into_record)
         .expect("the parent holds the child's record");
     assert!(last.version() >= reported.version());
     (parent, last)
@@ -332,7 +335,14 @@ async fn under_relay_a_parent_withdraws_a_gone_child() {
     let watcher = PoolWatcher::new().expect("a client");
 
     assert_eq!(command(&parent.hub, &withdraw(CHILD)).await, 204);
-    assert_eq!(watcher.held(&at, "model_x", CHILD).await, Ok(None));
+    // No record, only the tombstone, which keeps the record's list version.
+    match watcher.held(&at, "model_x", CHILD).await {
+        Ok(Some(gdl_pools::LastWrite::Withdrawn(withdrawal))) => {
+            assert!(withdrawal.version() > last.version());
+            assert_eq!(withdrawal.properties_version, last.properties_version);
+        }
+        other => panic!("the child's tombstone: {other:?}"),
+    }
     let late = Report::Record(PoolRecord {
         seq: last.seq + 100,
         ..last
@@ -341,7 +351,13 @@ async fn under_relay_a_parent_withdraws_a_gone_child() {
         watcher.report(&at, &late).await.is_err(),
         "a late report of the old epoch is refused"
     );
-    assert_eq!(watcher.held(&at, "model_x", CHILD).await, Ok(None));
+    assert!(
+        matches!(
+            watcher.held(&at, "model_x", CHILD).await,
+            Ok(Some(gdl_pools::LastWrite::Withdrawn(_)))
+        ),
+        "still withdrawn"
+    );
     parent.hub.shutdown().await.expect("the parent's hub stops");
 }
 

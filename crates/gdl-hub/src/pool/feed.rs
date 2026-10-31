@@ -100,6 +100,8 @@ impl Feed {
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
                 properties: Properties::new(declared),
+                stored_block: None,
+                linked: PropertyList::default(),
                 followers: Followers::new(lease),
                 retiring: Retiring::default(),
                 events: broadcast::channel(buffer).0,
@@ -123,7 +125,7 @@ impl Feed {
     pub(super) fn raise_floor(&self, floor: u64) {
         let mut shared = self.lock();
         if shared.properties.raise_floor(floor) {
-            self.properties_changed(&shared);
+            self.properties_changed(&mut shared);
         }
     }
 
@@ -135,7 +137,7 @@ impl Feed {
         let mut shared = self.lock();
         shared.properties.restore(held, floor);
         shared.update_properties();
-        self.properties_changed(&shared);
+        self.properties_changed(&mut shared);
     }
 
     /// Revoke the property `key`, or lift its revocation when `revoked` is
@@ -156,7 +158,7 @@ impl Feed {
         // is sent once the record is read. After, it goes to the record and
         // over every live link at once, as a change an instance reports does.
         if changed && shared.properties.restored() {
-            self.properties_changed(&shared);
+            self.properties_changed(&mut shared);
         }
         shared.properties.list().version
     }
@@ -167,13 +169,25 @@ impl Feed {
 
     /// The pool's property entries changed: for the record, and for each
     /// pool that follows this one, under the lock that orders the watch's
-    /// events.
-    fn properties_changed(&self, shared: &Shared) {
+    /// events, once a stored record reaches the list's block.
+    fn properties_changed(&self, shared: &mut Shared) {
         let list = shared.properties.list();
-        shared.send(PoolWatchEvent::Properties {
-            properties: list.clone(),
-        });
+        shared.link(&list);
         self.properties.send_replace(Arc::new(list));
+    }
+
+    /// A record carrying the list version `version` is stored: the links
+    /// are sent the list, if it was held back until a record reached its
+    /// block.
+    pub(super) fn stored(&self, version: u64) {
+        let mut shared = self.lock();
+        let block = super::properties::block(version);
+        if shared.stored_block.is_some_and(|stored| stored >= block) {
+            return;
+        }
+        shared.stored_block = Some(block);
+        let list = shared.properties.list();
+        shared.link(&list);
     }
 
     /// A watch of the pool: its snapshot, then each change. It begins once
@@ -441,7 +455,7 @@ impl Feed {
                 let changed = entry.said != said;
                 entry.said = said;
                 if changed && shared.update_properties() {
-                    self.properties_changed(&shared);
+                    self.properties_changed(&mut shared);
                 }
                 if !draining.is_empty() {
                     // Its admission replaces the last report's, so it counts
@@ -503,7 +517,7 @@ impl Feed {
         // An instance that is no longer usable no longer serves its
         // properties: seen here, once a period, as its report is dropped.
         if shared.update_properties() {
-            self.properties_changed(&shared);
+            self.properties_changed(&mut shared);
         }
         // The summary's period paces the followers' leases too, so a watch
         // is marked lost up to a period after its lease; that is never a
@@ -579,6 +593,13 @@ struct Shared {
     /// The pool's property entries, made of what its usable entry instances
     /// say.
     properties: Properties,
+    /// The block of the highest list version a stored record carries
+    /// ([`super::properties::block`]): a list in a later block goes over no
+    /// link until a record in its block is stored, so that a hub that reads
+    /// the pool's last write numbers past every version a link carried.
+    stored_block: Option<u64>,
+    /// The list the links were last sent, which a watch's snapshot carries.
+    linked: PropertyList,
     events: broadcast::Sender<PoolWatchEvent>,
     #[cfg(test)]
     work: crate::fanout::Work,
@@ -691,6 +712,21 @@ impl Shared {
         self.segments
             .iter()
             .position(|(name, entry)| *entry && name == segment)
+    }
+
+    /// Send `list` over the links, unless they have it, or its block is
+    /// past the last stored record's.
+    fn link(&mut self, list: &PropertyList) {
+        let block = super::properties::block(list.version);
+        if list.version == self.linked.version
+            || self.stored_block.is_none_or(|stored| block > stored)
+        {
+            return;
+        }
+        self.send(PoolWatchEvent::Properties {
+            properties: list.clone(),
+        });
+        self.linked = list.clone();
     }
 
     /// Subscribe a watch to the changes.
@@ -854,7 +890,7 @@ impl Shared {
             epoch,
             state: self.state,
             load: self.loads.summary(),
-            properties: Some(self.properties.list()),
+            properties: Some(self.linked.clone()),
         });
         if self.followers.unfollowed() {
             events.push(unfollowed());

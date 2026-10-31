@@ -319,6 +319,14 @@ impl PoolDirectory for Resolving {
         self.inner.withdraw(withdrawal).await
     }
 
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<gdl_pools::LastWrite>, DirectoryError> {
+        self.inner.last_write(class, pool).await
+    }
+
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
         self.inner.watch(class, from)
     }

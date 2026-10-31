@@ -12,7 +12,8 @@ use futures::Stream;
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::{
-    DirectoryError, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Version, Withdrawal,
+    DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Version,
+    Withdrawal,
 };
 
 /// An in-process pool directory, shared by every hub in one process
@@ -79,8 +80,12 @@ enum Held {
     // Boxed: a record is many times the size of a tombstone.
     Record(Box<PoolRecord>),
     // The tombstone a withdrawal leaves, so that a late publish cannot
-    // bring the record back.
-    Withdrawn(Version),
+    // bring the record back, with the list version a later hub numbers
+    // past.
+    Withdrawn {
+        version: Version,
+        properties_version: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -117,7 +122,26 @@ impl MemoryDirectory {
     pub fn record(&self, class: &str, pool: &str) -> Option<PoolRecord> {
         match self.shared.lock().classes.get(class)?.pools.get(pool)? {
             Held::Record(record) => Some(PoolRecord::clone(record)),
-            Held::Withdrawn(_) => None,
+            Held::Withdrawn { .. } => None,
+        }
+    }
+
+    /// The last write the directory took for `pool` of `class`, its record
+    /// or the tombstone of its withdrawal: [`PoolDirectory::last_write`],
+    /// which never waits.
+    pub fn last(&self, class: &str, pool: &str) -> Option<LastWrite> {
+        match self.shared.lock().classes.get(class)?.pools.get(pool)? {
+            Held::Record(record) => Some(LastWrite::Record(record.clone())),
+            Held::Withdrawn {
+                version,
+                properties_version,
+            } => Some(LastWrite::Withdrawn(Withdrawal {
+                class: class.to_owned(),
+                pool: pool.to_owned(),
+                epoch: version.epoch,
+                seq: version.seq,
+                properties_version: *properties_version,
+            })),
         }
     }
 
@@ -147,7 +171,10 @@ impl MemoryDirectory {
     pub(crate) fn remove(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
         let (class, pool) = (withdrawal.class.clone(), withdrawal.pool.clone());
-        let held = Held::Withdrawn(withdrawal.version());
+        let held = Held::Withdrawn {
+            version: withdrawal.version(),
+            properties_version: withdrawal.properties_version,
+        };
         self.write(&class, &pool, held, |token| PoolEvent::Withdrawn {
             withdrawal,
             token,
@@ -209,6 +236,14 @@ impl PoolDirectory for MemoryDirectory {
         self.remove(withdrawal)
     }
 
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        Ok(self.last(class, pool))
+    }
+
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
         let mut state = self.shared.lock();
         let id = state.next_watcher;
@@ -223,7 +258,7 @@ impl PoolDirectory for MemoryDirectory {
                     .values()
                     .filter_map(|held| match held {
                         Held::Record(record) => Some(&**record),
-                        Held::Withdrawn(_) => None,
+                        Held::Withdrawn { .. } => None,
                     })
                     .collect();
                 records.sort_by(|a, b| a.name.cmp(&b.name));
@@ -316,7 +351,7 @@ impl Held {
     fn version(&self) -> Version {
         match self {
             Held::Record(record) => record.version(),
-            Held::Withdrawn(version) => *version,
+            Held::Withdrawn { version, .. } => *version,
         }
     }
 }

@@ -214,6 +214,7 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
             pool: pool.name.clone(),
             epoch: pool.epoch,
             seq: pool.seq + 1,
+            properties_version: 0,
         })
         .await
         .expect("withdrawn");

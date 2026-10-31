@@ -2,7 +2,8 @@ use std::{sync::mpsc, thread, time::Duration};
 
 use futures::stream;
 use gdl_pools::{
-    DirectoryError, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken, Withdrawal,
+    DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord, PoolState, ResumeToken,
+    Withdrawal,
     conformance::{self, Backend, Rule},
 };
 
@@ -26,6 +27,11 @@ impl PoolDirectory for Endless {
 
     async fn withdraw(&self, _: Withdrawal) -> Result<(), DirectoryError> {
         Ok(())
+    }
+
+    /// Never answers, as its snapshot never ends.
+    async fn last_write(&self, _: &str, _: &str) -> Result<Option<LastWrite>, DirectoryError> {
+        std::future::pending().await
     }
 
     fn watch(&self, class: &str, _: Option<ResumeToken>) -> Events {
@@ -87,13 +93,14 @@ impl Backend for Endless {
     }
 }
 
-const CASES: [&str; 9] = [
+const CASES: [&str; 10] = [
     "malformed_writes_are_refused",
     "writes_are_ordered_by_epoch_and_seq",
     "a_watch_sees_its_class_snapshot_then_changes",
     "a_watch_resumes_after_a_token",
     "a_lagging_watcher_is_cut_off",
     "a_dropped_watch_is_released",
+    "the_last_write_of_a_pool_is_read",
     "a_record_stays_until_withdrawn",
     "a_watch_sees_every_record_of_its_class",
     "a_record_arrives_whole",

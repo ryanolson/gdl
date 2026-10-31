@@ -987,8 +987,16 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                     gdl_watch::HELD_ROUTE,
                     get(
                         move |Path((class, pool)): Path<(String, String)>| async move {
-                            match holding.held(&class, &pool) {
-                                Some(record) => Json(record).into_response(),
+                            match holding.last(&class, &pool) {
+                                Some(gdl_pools::LastWrite::Record(record)) => {
+                                    Json(record).into_response()
+                                }
+                                // A child of an earlier build reads no
+                                // record, as it did; a later one reads the
+                                // tombstone, to number past it.
+                                Some(gdl_pools::LastWrite::Withdrawn(withdrawal)) => {
+                                    (StatusCode::NOT_FOUND, Json(withdrawal)).into_response()
+                                }
                                 None => StatusCode::NOT_FOUND.into_response(),
                             }
                         },

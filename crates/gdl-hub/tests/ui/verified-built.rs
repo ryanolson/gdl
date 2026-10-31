@@ -8,6 +8,7 @@ fn main() {
         pool: "model-x-01".into(),
         epoch: 1,
         seq: 1,
+        properties_version: 0,
     });
     let _ = gdl_hub::VerifiedReport(report);
 }

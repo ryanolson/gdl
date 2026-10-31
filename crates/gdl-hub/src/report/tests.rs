@@ -60,6 +60,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 pool: record.name.clone(),
                 epoch: 1,
                 seq: 2,
+                properties_version: 0,
             };
             let reports = std::sync::Arc::new(Reports::new(
                 children.clone(),
