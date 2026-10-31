@@ -100,10 +100,10 @@ impl Default for Waits {
 ///    another cluster than one that holds any of its Deployments, before
 ///    anything is applied;
 /// 4. apply each cluster's base objects, and wait until its namespace is
-///    active. The Namespace is applied only where none exists; an existing
-///    one only gets the fleet's labels, with `kubectl label`, since an
-///    apply would take over the fields its owner set and drop those the
-///    render does not list. The DynamoDB directory's cluster goes first,
+///    active. The Namespace is never applied, since an apply would take
+///    over the fields its owner set and drop those the render does not
+///    list: it is created where none exists, and an existing one only gets
+///    the fleet's labels, with `kubectl label`. The DynamoDB directory's cluster goes first,
 ///    whose base holds the directory's DynamoDB Local, which is waited for
 ///    until it is ready.
 ///    Its pod's IP then replaces the placeholder in the other clusters'
@@ -175,20 +175,8 @@ pub fn deploy(
     let mut local = None;
     for cluster in order {
         let objects = &rendered.0[&cluster.name];
-        let base = match cluster.namespace_exists(kube, how.waits.objects)? {
-            true => {
-                run(
-                    kube,
-                    cluster.at().label(&objects.labels),
-                    how.waits.objects,
-                    None,
-                    "adding the fleet's labels to the namespace",
-                )?;
-                objects.base.clone()
-            }
-            false => format!("{}{}", objects.namespace, objects.base),
-        };
-        applied.extend(apply(kube, cluster, &base, how.waits.objects)?);
+        cluster.prepare_namespace(kube, objects, how.waits.objects)?;
+        applied.extend(apply(kube, cluster, &objects.base, how.waits.objects)?);
         run(
             kube,
             cluster.at().namespace_active(how.waits.objects.as_secs()),
@@ -439,9 +427,46 @@ impl Cluster {
         Ok(())
     }
 
+    /// Create the cluster's namespace where none exists, or add the
+    /// fleet's labels to the one that does. The Namespace is never
+    /// applied: a server-side apply of a namespace that its owner made
+    /// with a client-side apply takes over the fields that apply set, and
+    /// drops those the render does not list. A create fails on a
+    /// namespace that another made after the question, which is then
+    /// labelled as one that existed. Any other failure stops the deploy.
+    fn prepare_namespace(
+        &self,
+        kube: &mut dyn Kube,
+        objects: &Objects,
+        budget: Duration,
+    ) -> Result<(), Error> {
+        if !self.namespace_exists(kube, budget)? {
+            let args = bounded(self.at().create(), budget);
+            let reply = kube.run(&args, Some(objects.namespace.as_bytes()))?;
+            if reply.success {
+                return Ok(());
+            }
+            if !reply.stderr.contains("(AlreadyExists)") {
+                return Err(Error::new(format!(
+                    "cluster `{}`: creating the namespace: `kubectl {}` failed: {}",
+                    self.name,
+                    args.join(" "),
+                    reply.stderr.trim()
+                )));
+            }
+        }
+        run(
+            kube,
+            self.at().label(&objects.labels),
+            budget,
+            None,
+            "adding the fleet's labels to the namespace",
+        )?;
+        Ok(())
+    }
+
     /// Whether the cluster's namespace exists. A question that fails
-    /// stops the deploy: taken for a namespace to make, it would apply
-    /// over another owner's.
+    /// stops the deploy.
     fn namespace_exists(&self, kube: &mut dyn Kube, budget: Duration) -> Result<bool, Error> {
         let reply = run(
             kube,
@@ -503,7 +528,7 @@ struct Rendered(BTreeMap<String, Objects>);
 
 #[derive(Default)]
 struct Objects {
-    /// The Namespace, applied only where none exists.
+    /// The Namespace, created only where none exists.
     namespace: String,
     /// The Namespace's labels, which an existing namespace gets instead.
     labels: Vec<(String, String)>,

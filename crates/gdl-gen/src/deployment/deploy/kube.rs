@@ -268,6 +268,12 @@ impl At<'_> {
         ])
     }
 
+    /// Create the objects on stdin. Unlike an apply, it fails on one that
+    /// exists, and so never takes over an object that another made.
+    pub(super) fn create(&self) -> Vec<String> {
+        self.cluster(&["create", MANAGER, "-f", "-"])
+    }
+
     /// Print `namespace/<name>` when the namespace exists, and nothing
     /// when it does not.
     pub(super) fn namespace(&self) -> Vec<String> {

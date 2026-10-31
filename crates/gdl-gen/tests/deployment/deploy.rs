@@ -250,6 +250,29 @@ impl gdl_gen::Kube for Kube {
                     false => gdl_gen::Reply::ok(""),
                 }
             }
+            ("create", None) => {
+                // Creates each object, and refuses one that exists.
+                let mut created = Vec::new();
+                for document in input.unwrap_or_default().split("---\n") {
+                    if document.trim().is_empty() {
+                        continue;
+                    }
+                    let object: Value = serde_json::from_str(document).expect("JSON");
+                    let (kind, name) = key(&object);
+                    if self
+                        .objects
+                        .get(&context)
+                        .is_some_and(|objects| objects.contains_key(&(kind.clone(), name.clone())))
+                    {
+                        return Ok(gdl_gen::Reply::failed(format!(
+                            "Error from server (AlreadyExists): error when creating \"STDIN\": {}s \"{name}\" already exists",
+                            kind.to_ascii_lowercase()
+                        )));
+                    }
+                    created.push(self.holds(&context, object));
+                }
+                gdl_gen::Reply::ok(format!("{} created\n", created.len()))
+            }
             ("create", Some(path)) => {
                 assert!(path.ends_with("/proxy/v1/ext/gdl-pool/drain"), "{path}");
                 gdl_gen::Reply::ok("{\"state\":\"draining\"}")
@@ -475,6 +498,8 @@ fn steps(log: &Log) -> Vec<String> {
                     "unlabel"
                 } else if args.iter().any(|a| a.starts_with("namespace/")) {
                     "namespace"
+                } else if args.contains(&"create".to_string()) && input.contains("\"Namespace\"") {
+                    "create-namespace"
                 } else if args.contains(&"get".to_string()) {
                     "list"
                 } else {
@@ -584,9 +609,11 @@ fn a_deploy_runs_its_steps_in_order() {
             "kind-euw1:list",
             "kind-use1:list",
             "kind-euw1:namespace",
+            "kind-euw1:create-namespace",
             "kind-euw1:base",
             "kind-euw1:wait-namespace",
             "kind-use1:namespace",
+            "kind-use1:create-namespace",
             "kind-use1:base",
             "kind-use1:wait-namespace",
             "kind-euw1:pools",

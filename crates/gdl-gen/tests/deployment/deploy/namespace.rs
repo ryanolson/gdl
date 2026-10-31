@@ -1,6 +1,7 @@
-//! `deploy` takes no namespace over. It applies the Namespace only where
-//! none exists. Where one does, it only adds the fleet's labels, with
-//! `kubectl label`, and `down` only removes them. A server-side apply of
+//! `deploy` takes no namespace over, and never applies a Namespace. It
+//! creates the namespace only where none exists. Where one does, or where
+//! another makes it before the create, it only adds the fleet's labels,
+//! with `kubectl label`, and `down` only removes them. A server-side apply of
 //! a namespace that another owner made with a client-side apply takes
 //! over the fields that owner set, and removes those that gdl's object
 //! does not list: the owner's labels and its last-applied annotation.
@@ -38,6 +39,21 @@ fn namespace_applies(log: &Log, context: &str) -> usize {
             Call::Kube { args, input } => {
                 args[1] == context
                     && args.contains(&"apply".to_string())
+                    && input.contains("\"Namespace\"")
+            }
+            Call::Docker => false,
+        })
+        .count()
+}
+
+/// How many creates in `context` carried a Namespace.
+fn namespace_creates(log: &Log, context: &str) -> usize {
+    log.borrow()
+        .iter()
+        .filter(|call| match call {
+            Call::Kube { args, input } => {
+                args[1] == context
+                    && args.contains(&"create".to_string())
                     && input.contains("\"Namespace\"")
             }
             Call::Docker => false,
@@ -84,6 +100,7 @@ fn an_existing_namespace_is_only_labelled() {
     deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
     for (context, cluster) in [("kind-euw1", "euw1"), ("kind-use1", "use1")] {
         assert_eq!(namespace_applies(&log, context), 0, "{context}");
+        assert_eq!(namespace_creates(&log, context), 0, "{context}");
         assert_eq!(
             labels(&log, context),
             [vec![
@@ -149,10 +166,10 @@ fn an_existing_namespace_is_only_labelled() {
     );
 }
 
-/// A deploy where the namespace does not exist applies it with the base,
+/// A deploy where the namespace does not exist creates it, applies none,
 /// and labels nothing. The next deploy finds it, and only labels it.
 #[test]
-fn a_missing_namespace_is_applied() {
+fn a_missing_namespace_is_created() {
     let mirror = Mirror::new();
     let files = files(&mirror, &fleet_text());
     let log = Log::default();
@@ -163,7 +180,8 @@ fn a_missing_namespace_is_applied() {
     let mut kube = Kube::new(&log);
     deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
     for (context, cluster) in [("kind-euw1", "euw1"), ("kind-use1", "use1")] {
-        assert_eq!(namespace_applies(&log, context), 1, "{context}");
+        assert_eq!(namespace_creates(&log, context), 1, "{context}");
+        assert_eq!(namespace_applies(&log, context), 0, "{context}");
         assert!(labels(&log, context).is_empty(), "{context}");
         assert_eq!(
             namespace(&kube, context)["metadata"]["labels"],
@@ -175,6 +193,7 @@ fn a_missing_namespace_is_applied() {
     log.borrow_mut().clear();
     deploy(&mirror, &files, &mut docker, &mut kube).expect("a second deploy");
     for context in ["kind-euw1", "kind-use1"] {
+        assert_eq!(namespace_creates(&log, context), 0, "{context}");
         assert_eq!(namespace_applies(&log, context), 0, "{context}");
         assert_eq!(labels(&log, context).len(), 1, "{context}");
     }
@@ -229,8 +248,10 @@ fn an_unanswered_namespace_question_applies_nothing() {
     );
 }
 
+/// A namespace that another makes after deploy asks, and before it
+/// creates its own, is not applied: the create fails as AlreadyExists,
+/// and the namespace is labelled as one that existed.
 #[test]
-#[ignore = "F1: a namespace created after the lookup is server-side applied"]
 fn a_namespace_created_after_the_lookup_is_not_applied() {
     struct CreatedAfterLookup {
         inner: Kube,
@@ -306,5 +327,70 @@ fn a_namespace_created_after_the_lookup_is_not_applied() {
     assert_eq!(
         namespace(&kube.inner, "kind-euw1")["metadata"]["annotations"],
         owned()["metadata"]["annotations"]
+    );
+    result.expect("deploy");
+    // The create was refused, and the namespace labelled instead.
+    assert_eq!(namespace_creates(&log, "kind-euw1"), 1);
+    assert_eq!(labels(&log, "kind-euw1").len(), 1);
+    assert_eq!(
+        namespace(&kube.inner, "kind-euw1")["metadata"]["labels"],
+        json!({"example.com/setup": "gr-aws", "gdl.dev/cluster": "euw1", "gdl.dev/fleet": "api"})
+    );
+}
+
+/// A create that fails for any other reason than an existing namespace
+/// stops the deploy before anything is labelled or applied.
+#[test]
+fn a_failed_namespace_create_stops_the_deploy() {
+    struct Refused(Kube);
+    impl gdl_gen::Kube for Refused {
+        fn run(
+            &mut self,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<gdl_gen::Reply, gdl_gen::Error> {
+            if args.contains(&"create".to_string())
+                && args.contains(&"-f".to_string())
+                && !args.contains(&"--raw".to_string())
+            {
+                return Ok(gdl_gen::Reply::failed(
+                    "Error from server (Forbidden): namespaces is forbidden: User cannot create resource \"namespaces\"",
+                ));
+            }
+            self.0.run(args, input)
+        }
+    }
+
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let mut docker = Docker {
+        log: Rc::clone(&log),
+        fail: false,
+    };
+    let mut kube = Refused(Kube::new(&log));
+    let how = gdl_gen::Deploy {
+        spec: files.spec.clone(),
+        fleet: files.fleet.clone(),
+        target: mirror.target(),
+        out: None,
+        waits: waits(),
+        sources: gdl_gen::Sources::Fetched,
+    };
+    let error = gdl_gen::deploy(&how, &mut docker, &mut kube, &mut |_| {})
+        .expect_err("a refused create")
+        .to_string();
+    assert!(
+        error.contains("cluster `euw1`: creating the namespace") && error.contains("is forbidden"),
+        "{error}"
+    );
+    // The refused create never reached the log: its command line is in the error.
+    assert!(error.contains("create --field-manager=gdl -f -"), "{error}");
+    assert!(
+        commands(&log).iter().all(
+            |args| !args.contains(&"apply".to_string()) && !args.contains(&"label".to_string())
+        ),
+        "{:?}",
+        commands(&log)
     );
 }
