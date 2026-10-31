@@ -361,7 +361,6 @@ async fn a_restarted_hub_receives_the_pools_scaled_to_zero_presence() {
 }
 
 #[tokio::test]
-#[ignore = "F9: an earlier hub never receives Serving when a scaled-to-zero pool resumes"]
 async fn an_earlier_hub_receives_serving_before_its_scalers_resume() {
     struct Earlier<'a>(&'a Fake);
 

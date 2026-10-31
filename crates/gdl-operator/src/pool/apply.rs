@@ -223,12 +223,13 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         let asked = self.pool.spec.pool.presence;
         // What the hub's last stored record says, not what this status
         // last said: a hub that restarted says `serving` again. A hub that
-        // has stored no record yet, or does not answer, starts serving.
+        // says none, as one of an earlier build, one with no record yet, or
+        // one that does not answer, is told.
         let reported = match self.cx.hubs.health(&self.name).await {
             Ok(health) => health.presence(),
             Err(_) => None,
         };
-        if reported.unwrap_or_default() != asked {
+        if reported != Some(asked) {
             match self.cx.hubs.presence(&self.name, asked).await {
                 Ok(()) => self.status.presence = Some(asked),
                 Err(error) => {
