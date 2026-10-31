@@ -420,3 +420,45 @@ fn an_operated_cluster_needs_its_gdl_pool_rights() {
         .to_string();
     assert!(error.contains("Forbidden"), "{error}");
 }
+
+#[test]
+#[ignore = "F3: a forbidden GdlPool list hides live operated pools during a change to a plain cluster"]
+fn an_opt_out_with_renamed_pools_is_refused_when_the_gdl_pool_list_is_forbidden() {
+    let mirror = Mirror::new();
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    let operated = files(&mirror, &fleet_text());
+    deploy(&mirror, &operated, &mut docker, &mut kube).expect("operated deploy");
+    for (kind, name, pool) in [
+        ("Deployment", "global-us", "global-us"),
+        ("Deployment", "model-x-us-engine", "model-x-us"),
+    ] {
+        kube.holds("kind-use1", made(kind, name, pool));
+    }
+    let next = plain_fleet()
+        .replace("global-us", "global-next")
+        .replace("model-x-us", "model-x-next");
+    let plain = files(&mirror, &next);
+    log.borrow_mut().clear();
+    deploy(&mirror, &plain, &mut docker, &mut kube)
+        .expect_err("kind change is refused with list rights");
+    assert!(
+        commands(&log)
+            .iter()
+            .all(|args| !args.contains(&"apply".to_string()))
+    );
+    kube.forbidden_pools = vec!["kind-use1"];
+    log.borrow_mut().clear();
+
+    let result = deploy(&mirror, &plain, &mut docker, &mut kube);
+    assert!(
+        result.is_err(),
+        "the kind change must be refused while the operator still owns global-us and model-x-us; deploy returned {result:?}"
+    );
+    assert!(
+        commands(&log)
+            .iter()
+            .all(|args| !args.contains(&"apply".to_string())),
+        "the refusal must precede every apply"
+    );
+}
