@@ -539,6 +539,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
 - **Workaround:** none.
 
+### At most one operator acts only while nobody force-deletes its pod
+- **What:** the operator is a StatefulSet of one replica, and Kubernetes starts its replacement only once the old pod is confirmed gone. A person who force-deletes the pod (`--force --grace-period=0`), or removes its node by hand while the pod still runs, tells Kubernetes otherwise, and a second operator can start beside the first. The per-object fences still keep the two from both committing a victim, both lowering the count, undoing a newer scale, or undoing each other's write to a pod. While the operator's node does not answer, no replacement starts, and scaling pauses until the node answers or Kubernetes removes it.
+- **Workaround:** never force-delete the operator's pod. Let Kubernetes remove a lost node.
+
 ### A scale-down waits for a rollout, and for every pod to be ready
 - **What:** the operator chooses a victim only while no rollout of the target is in progress and every other pod runs and is ready, since only then does the deletion cost decide the ReplicaSet's choice. A pod that never becomes ready blocks the scale-down (`Blocked: PodNotReady`).
 - **Workaround:** fix or delete the pod that is not ready.

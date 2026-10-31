@@ -82,7 +82,13 @@ fn the_role_grants_only_what_the_scaler_uses() {
         .collect();
     assert_eq!(
         kinds,
-        ["ServiceAccount", "Role", "RoleBinding", "Deployment"]
+        [
+            "ServiceAccount",
+            "Role",
+            "RoleBinding",
+            "Service",
+            "StatefulSet"
+        ]
     );
     for object in &objects {
         assert_eq!(object["metadata"]["namespace"], "gdl-api");
@@ -103,7 +109,13 @@ fn the_role_grants_only_what_the_scaler_uses() {
     for (resource, verbs) in &granted {
         assert!(!verbs.contains(&"delete"), "{resource} may be deleted");
         assert!(!verbs.contains(&"*"), "{resource} has every verb");
-        for refused in ["secrets", "serviceaccounts", "services/proxy", "namespaces"] {
+        for refused in [
+            "secrets",
+            "serviceaccounts",
+            "services/proxy",
+            "namespaces",
+            "leases",
+        ] {
             assert_ne!(resource, refused);
         }
     }
@@ -118,35 +130,30 @@ fn the_role_grants_only_what_the_scaler_uses() {
             "gdlscalers/status",
             "deployments",
             "pods",
-            "endpointslices",
-            "leases"
+            "endpointslices"
         ]
     );
-    let container = &objects[3]["spec"]["template"]["spec"]["containers"][0];
+}
+
+/// The operator is a StatefulSet of one replica: Kubernetes starts its
+/// replacement only once the old pod is confirmed gone, so two never run
+/// at once. Its headless Service is the StatefulSet's governing Service.
+#[test]
+fn the_operator_runs_as_one_stateful_replica() {
+    let objects = gdl_operator::namespaced("gdl-api", "registry/gdl-operator:tag");
+    let service = &objects[3];
+    let set = &objects[4];
+    assert_eq!(service["spec"]["clusterIP"], "None");
+    assert_eq!(set["spec"]["serviceName"], service["metadata"]["name"]);
+    assert_eq!(set["spec"]["replicas"], 1);
+    assert_eq!(
+        service["spec"]["selector"],
+        set["spec"]["selector"]["matchLabels"]
+    );
+    let container = &set["spec"]["template"]["spec"]["containers"][0];
     assert_eq!(container["image"], "registry/gdl-operator:tag");
     assert_eq!(
         container["args"],
         serde_json::json!(["run", "--namespace", "gdl-api"])
-    );
-    // One operator acts at a time by its Lease, which names it by its pod.
-    assert_eq!(objects[3]["spec"]["replicas"], 1);
-    let identity = container["env"]
-        .as_array()
-        .expect("env")
-        .iter()
-        .find(|var| var["name"] == "POD_NAME")
-        .expect("the pod's name");
-    assert_eq!(
-        identity["valueFrom"]["fieldRef"]["fieldPath"],
-        "metadata.name"
-    );
-    let leases = rules
-        .iter()
-        .find(|rule| rule["resources"][0] == "leases")
-        .expect("a rule for leases");
-    assert_eq!(leases["apiGroups"][0], "coordination.k8s.io");
-    assert_eq!(
-        leases["verbs"],
-        serde_json::json!(["get", "create", "patch"])
     );
 }

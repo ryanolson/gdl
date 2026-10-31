@@ -12,9 +12,13 @@
 //! each step can be taken again; and a reconcile that finds a step half
 //! done finishes or undoes it from what the status says. Every write
 //! carries the read it was decided on: the status the scaler's
-//! resourceVersion, the target its uid and resourceVersion, a pod its uid.
-//! A write refused as stale ends the reconcile, and the next one reads
-//! again and decides again. See `docs/src/guides/operator.md`.
+//! resourceVersion, the target its uid and resourceVersion, a pod its uid
+//! and resourceVersion. Each reconcile stores its status, conditionally,
+//! before its first pod write, so one whose read of the scaler predates
+//! another's stored step writes no pod. A write refused as stale ends the
+//! reconcile, and the next one reads again and decides again. So even two
+//! operators at once cannot both act on one scaler. See
+//! `docs/src/guides/operator.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -92,6 +96,8 @@ pub async fn reconcile<C: Cluster, P: Probe>(
         version: scaler.metadata.resource_version.clone(),
         written: old.clone(),
         restored: BTreeSet::new(),
+        confirmed: false,
+        versions: BTreeMap::new(),
     };
     let requeue = match run.step(old.retiring.clone()).await {
         Ok(requeue) => requeue,
@@ -105,7 +111,7 @@ pub async fn reconcile<C: Cluster, P: Probe>(
         }
         Err(Stop::Failed(error)) => return Err(error),
     };
-    match run.write().await {
+    match run.write(false).await {
         Ok(()) => Ok(requeue),
         Err(Stop::Stale(why)) => {
             tracing::debug!(scaler = %run.name, %why, "the status was stale; reading again");
@@ -157,6 +163,11 @@ struct Run<'a, 'c, C, P> {
     written: GdlScalerStatus,
     /// The pods this reconcile put back in their Service, by uid.
     restored: BTreeSet<String>,
+    /// Whether a status write in this reconcile has landed: its read of
+    /// the scaler was current then. Every pod write needs one before it.
+    confirmed: bool,
+    /// Each pod's resourceVersion after this reconcile wrote it, by uid.
+    versions: BTreeMap<String, String>,
 }
 
 impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
@@ -196,19 +207,29 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
 
         // A victim of a Deployment since made again under the same name is
         // abandoned: what the scaler changed on its pod is put back.
+        // What is put back is stored first, as every step is.
+        let mut undo = Vec::new();
         let mut current = Vec::new();
         for victim in retiring {
             if victim.deployment == fence.uid {
                 current.push(victim);
                 continue;
             }
-            if let Some(pod) = alive(&pods, &victim.uid) {
-                self.put_back(pod, true).await?;
-            }
+            undo.push(victim.uid.clone());
             let reason = "its Deployment was made again under the same name".to_string();
             self.finish(victim, Outcome::Abandoned, String::new(), reason);
         }
-        let mut kept = self.follow(current, &pods, replicas, bound).await?;
+        let mut kept = self
+            .follow(current, &pods, replicas, bound, &mut undo)
+            .await?;
+        if !undo.is_empty() {
+            self.ahead(&kept).await?;
+            for uid in undo {
+                if let Some(pod) = alive(&pods, &uid) {
+                    self.put_back(pod, true).await?;
+                }
+            }
+        }
         self.sweep(&pods, &kept).await?;
 
         let suspended = spec.suspend.is_some();
@@ -294,7 +315,8 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             let mut commit = kept[at].phase == RetiringPhase::Committing;
             if kept[at].phase == RetiringPhase::Unrouting {
                 if pod.routable != Some(false) {
-                    self.cx.cluster.routable(pod, false).await?;
+                    self.ahead(&kept).await?;
+                    self.label(pod, false).await?;
                 }
                 let service = spec.service.as_deref().unwrap_or_default();
                 let listed = self.cx.cluster.endpoints(service).await?;
@@ -458,10 +480,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 policy = spec.victim(),
                 "chose a victim"
             );
-            self.persist(kept).await?;
+            self.ahead(kept).await?;
             let at = kept.len() - 1;
             match kept[at].phase {
-                RetiringPhase::Unrouting => self.cx.cluster.routable(pod, false).await?,
+                RetiringPhase::Unrouting => self.label(pod, false).await?,
                 _ => replicas = self.commit(kept, at, pod, replicas, fence).await?,
             }
         }
@@ -481,12 +503,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         fence: &mut Fence,
     ) -> Result<i32, Stop> {
         let target = replicas - 1;
-        if kept[at].phase != RetiringPhase::Committing || kept[at].target != target {
-            kept[at].phase = RetiringPhase::Committing;
-            kept[at].target = target;
-            self.persist(kept).await?;
-        }
-        self.cx.cluster.cost(pod, Some(VICTIM_COST)).await?;
+        kept[at].phase = RetiringPhase::Committing;
+        kept[at].target = target;
+        self.ahead(kept).await?;
+        self.price(pod, Some(VICTIM_COST)).await?;
         fence.resource_version = self
             .cx
             .cluster
@@ -505,12 +525,14 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         pods: &[PodView],
     ) -> Result<(), Stop> {
         let victim = kept.remove(at);
-        if let Some(pod) = alive(pods, &victim.uid) {
-            let cost = victim.phase == RetiringPhase::Committing;
-            self.put_back(pod, cost).await?;
-        }
+        let uid = victim.uid.clone();
+        let cost = victim.phase == RetiringPhase::Committing;
         let reason = "the scale-down was undone before it was committed".to_string();
         self.finish(victim, Outcome::Cancelled, String::new(), reason);
+        self.ahead(kept).await?;
+        if let Some(pod) = alive(pods, &uid) {
+            self.put_back(pod, cost).await?;
+        }
         Ok(())
     }
 
@@ -522,7 +544,8 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     /// Service until its pod is gone, except one the ReplicaSet passed
     /// over: its pod is alive, the count is at or below its target, and no
     /// more pods live than the count, so the ReplicaSet has nothing left to
-    /// delete. In signal mode it never retired, and it gets its cost and
+    /// delete. In signal mode it never retired, and its uid goes in `undo`,
+    /// to get its cost and
     /// its label back.
     async fn follow(
         &mut self,
@@ -530,6 +553,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         pods: &[PodView],
         replicas: i32,
         bound: Option<Duration>,
+        undo: &mut Vec<String>,
     ) -> Result<Vec<Retiring>, Stop> {
         let mut kept = Vec::new();
         let mut listed: Option<Option<Instances>> = None;
@@ -612,7 +636,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 kept.push(victim);
                 continue;
             }
-            self.put_back(pod, true).await?;
+            undo.push(pod.uid.clone());
             let other = pods.iter().find(|p| {
                 p.terminating && p.uid != victim.uid && !kept.iter().any(|v| v.uid == p.uid)
             });
@@ -634,43 +658,76 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     /// Give back their Service to the live pods that are out of it and
     /// that no victim names: a victim is stored before its label changes,
     /// so such a pod is one whose removal was undone or lost.
-    async fn sweep(&self, pods: &[PodView], kept: &[Retiring]) -> Result<(), Stop> {
+    async fn sweep(&mut self, pods: &[PodView], kept: &[Retiring]) -> Result<(), Stop> {
         for pod in pods {
             if !pod.terminating
                 && pod.routable == Some(false)
                 && !kept.iter().any(|v| v.uid == pod.uid)
                 && !self.restored.contains(&pod.uid)
             {
-                self.cx.cluster.routable(pod, true).await?;
+                self.ahead(kept).await?;
+                self.label(pod, true).await?;
             }
         }
         Ok(())
     }
 
     /// Put `pod`, which never retired, back in its entry Service, and
-    /// clear its cost when `cost`.
+    /// clear its cost when `cost`. The status that says so is stored.
     async fn put_back(&mut self, pod: &PodView, cost: bool) -> Result<(), Stop> {
         if self.spec.service.is_some() || pod.routable == Some(false) {
-            self.cx.cluster.routable(pod, true).await?;
+            self.label(pod, true).await?;
             self.restored.insert(pod.uid.clone());
         }
         if cost {
-            self.cx.cluster.cost(pod, None).await?;
+            self.price(pod, None).await?;
         }
         Ok(())
     }
 
-    /// Store the status with `kept` as its victims, conditional on the
-    /// scaler's resourceVersion: the intent of the step that follows.
-    async fn persist(&mut self, kept: &[Retiring]) -> Result<(), Stop> {
-        self.status.retiring = kept.to_vec();
-        self.write().await
+    /// Set `pod`'s routable label, at the version this reconcile last saw.
+    async fn label(&mut self, pod: &PodView, routable: bool) -> Result<(), Stop> {
+        let version = self.version_of(pod);
+        let written = self.cx.cluster.routable(pod, &version, routable).await?;
+        self.versions.insert(pod.uid.clone(), written);
+        Ok(())
     }
 
-    /// Store the status if it changed since it was last stored.
-    async fn write(&mut self) -> Result<(), Stop> {
+    /// Set `pod`'s deletion cost, at the version this reconcile last saw.
+    async fn price(&mut self, pod: &PodView, cost: Option<i32>) -> Result<(), Stop> {
+        let version = self.version_of(pod);
+        let written = self.cx.cluster.cost(pod, &version, cost).await?;
+        self.versions.insert(pod.uid.clone(), written);
+        Ok(())
+    }
+
+    /// `pod`'s resourceVersion: as this reconcile wrote it, or as read. A
+    /// pod write needs a status write of this reconcile before it, which
+    /// shows that the read it was decided on was current: another operator
+    /// stores each step before it writes a pod, so one whose step came
+    /// after this reconcile's read moved the scaler's version.
+    fn version_of(&self, pod: &PodView) -> String {
+        debug_assert!(self.confirmed, "a pod write needs a status write before it");
+        self.versions
+            .get(&pod.uid)
+            .cloned()
+            .unwrap_or_else(|| pod.resource_version.clone())
+    }
+
+    /// Store the status with `kept` as its victims, conditional on the
+    /// scaler's resourceVersion, before the step that follows it: written
+    /// if it changed, and in any case once in each reconcile.
+    async fn ahead(&mut self, kept: &[Retiring]) -> Result<(), Stop> {
+        self.status.retiring = kept.to_vec();
+        self.write(!self.confirmed).await
+    }
+
+    /// Store the status if it changed since it was last stored, or when
+    /// `always`, conditional on the scaler's resourceVersion. A write that
+    /// changes nothing still fails on a stale version.
+    async fn write(&mut self, always: bool) -> Result<(), Stop> {
         self.status.conditions = self.conditions.clone();
-        if self.status == self.written {
+        if self.status == self.written && !always {
             return Ok(());
         }
         let version = self
@@ -678,9 +735,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             .cluster
             .status(&self.name, &self.status, self.version.as_deref())
             .await?;
-        // An answer without a version leaves the next write unconditional.
-        self.version = version;
+        // An answer without a version leaves the next write conditional on
+        // the last one.
+        if version.is_some() {
+            self.version = version;
+        }
         self.written = self.status.clone();
+        self.confirmed = true;
         Ok(())
     }
 

@@ -159,26 +159,3 @@ async fn a_recreated_deployment_keeps_its_new_replica_count() {
         "the removal belongs to deployment-a"
     );
 }
-
-/// Once this operator's hold has lapsed by its own clock, a write is
-/// refused before any request leaves: another operator may hold the lease.
-#[tokio::test]
-async fn a_write_after_the_lease_lapsed_sends_nothing() {
-    let service = service_fn(|request: Request<Body>| async move {
-        panic!("a request was sent: {} {}", request.method(), request.uri());
-        #[allow(unreachable_code)]
-        Ok::<Response<Body>, Infallible>(Response::new(Body::empty()))
-    });
-    let cluster = KubeCluster::new(Client::new(service, "test"), "test")
-        .leased(Arc::new(crate::lease::Clock::default()));
-    let fence = Fence {
-        uid: "deployment-a".into(),
-        resource_version: "10".into(),
-    };
-    let refused = cluster.scale("global-front", 2, &fence).await;
-    assert!(matches!(refused, Err(Refused::Failed(_))), "{refused:?}");
-    let status = cluster
-        .status("global-front", &crate::GdlScalerStatus::default(), None)
-        .await;
-    assert!(matches!(status, Err(Refused::Failed(_))), "{status:?}");
-}

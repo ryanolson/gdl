@@ -26,9 +26,11 @@ pub fn crds() -> Vec<Value> {
 }
 
 /// The operator's objects in `namespace`, its image `image`: the
-/// ServiceAccount, the Role, the RoleBinding, and the Deployment of one
-/// replica. Two operators never act together: each acts only while it
-/// holds the Lease `gdl-operator`, which names it by its pod.
+/// ServiceAccount, the Role, the RoleBinding, and a StatefulSet of one
+/// replica with its headless Service. A StatefulSet starts the replacement
+/// of its pod only once the old one is confirmed gone, so two operators
+/// never run at once, unless a person force-deletes the pod or removes its
+/// node while the pod still runs.
 pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
     let meta = || json!({"name": NAME, "namespace": namespace, "labels": {SETUP: NAME}});
     let rule = |group: &str, resources: &[&str], verbs: &[&str]| json!({"apiGroups": [group], "resources": resources, "verbs": verbs});
@@ -43,7 +45,6 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("apps", &["deployments"], &["get", "list", "watch", "patch"]),
             rule("", &["pods"], &["get", "list", "watch", "patch"]),
             rule("discovery.k8s.io", &["endpointslices"], &read),
-            rule("coordination.k8s.io", &["leases"], &["get", "create", "patch"]),
         ],
     });
     let binding = json!({
@@ -54,12 +55,19 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
         "subjects": [{"kind": "ServiceAccount", "name": NAME, "namespace": namespace}],
     });
     let labels = json!({"app.kubernetes.io/name": NAME});
-    let deployment = json!({
+    let service = json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": meta(),
+        "spec": {"clusterIP": "None", "selector": labels},
+    });
+    let set = json!({
         "apiVersion": "apps/v1",
-        "kind": "Deployment",
+        "kind": "StatefulSet",
         "metadata": meta(),
         "spec": {
             "replicas": 1,
+            "serviceName": NAME,
             "selector": {"matchLabels": labels},
             "template": {
                 "metadata": {"labels": labels},
@@ -70,10 +78,7 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
                         "name": "operator",
                         "image": image,
                         "args": ["run", "--namespace", namespace],
-                        "env": [
-                            {"name": "RUST_LOG", "value": "info"},
-                            {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-                        ],
+                        "env": [{"name": "RUST_LOG", "value": "info"}],
                     }],
                 },
             },
@@ -83,7 +88,8 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
         json!({"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta()}),
         role,
         binding,
-        deployment,
+        service,
+        set,
     ]
 }
 

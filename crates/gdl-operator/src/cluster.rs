@@ -108,6 +108,8 @@ pub struct PodView {
     pub name: String,
     /// Its uid.
     pub uid: String,
+    /// Its resourceVersion when read: a write to it carries this.
+    pub resource_version: String,
     /// Its IP, once it has one.
     pub ip: Option<String>,
     /// When it was created, in milliseconds since the Unix epoch.
@@ -143,6 +145,7 @@ impl PodView {
         Some(Self {
             name: pod.metadata.name.clone()?,
             uid: pod.metadata.uid.clone()?,
+            resource_version: pod.metadata.resource_version.clone().unwrap_or_default(),
             ip: status.pod_ip.filter(|ip| !ip.is_empty()),
             created_ms: pod
                 .metadata
@@ -187,19 +190,23 @@ pub trait Cluster {
         fence: &Fence,
     ) -> impl Future<Output = Result<String, Refused>> + Send;
 
-    /// Set `pod`'s [`ROUTABLE`] label, only on the pod of its uid.
+    /// Set `pod`'s [`ROUTABLE`] label, only on the pod of its uid and
+    /// only if it is still at `version`: its resourceVersion after.
     fn routable(
         &self,
         pod: &PodView,
+        version: &str,
         routable: bool,
-    ) -> impl Future<Output = Result<(), Refused>> + Send;
+    ) -> impl Future<Output = Result<String, Refused>> + Send;
 
-    /// Set `pod`'s deletion cost, or remove it, only on the pod of its uid.
+    /// Set `pod`'s deletion cost, or remove it, as
+    /// [`routable`](Cluster::routable) writes.
     fn cost(
         &self,
         pod: &PodView,
+        version: &str,
         cost: Option<i32>,
-    ) -> impl Future<Output = Result<(), Refused>> + Send;
+    ) -> impl Future<Output = Result<String, Refused>> + Send;
 
     /// Write the status of the scaler `name`, only if it is still at
     /// `version` when one is given: its resourceVersion after, when the
@@ -219,8 +226,6 @@ pub struct KubeCluster {
     pods: Api<Pod>,
     slices: Api<EndpointSlice>,
     scalers: Api<GdlScaler>,
-    /// The lease every write needs to be held, by this operator's clock.
-    lease: Option<std::sync::Arc<crate::lease::Clock>>,
 }
 
 impl KubeCluster {
@@ -231,48 +236,31 @@ impl KubeCluster {
             pods: Api::namespaced(client.clone(), namespace),
             slices: Api::namespaced(client.clone(), namespace),
             scalers: Api::namespaced(client, namespace),
-            lease: None,
         }
     }
 
-    /// The same, writing only while `clock` says this operator holds the
-    /// lease.
-    pub fn leased(self, clock: std::sync::Arc<crate::lease::Clock>) -> Self {
-        Self {
-            lease: Some(clock),
-            ..self
-        }
-    }
-
-    /// Refuse a write once the lease has lapsed by this operator's clock:
-    /// another operator may hold it now.
-    fn holds(&self) -> Result<(), Refused> {
-        match &self.lease {
-            Some(clock) if !clock.current() => Err(Refused::Failed(
-                "this operator's lease has lapsed: it stops acting".into(),
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// Merge `metadata` into `pod`'s, carrying its uid, so that a pod of
-    /// the same name made since is refused rather than changed.
+    /// Merge `metadata` into `pod`'s, carrying its uid and `version`, so
+    /// that a pod of the same name made since, or the pod changed since it
+    /// was read, refuses it rather than being changed: another writer's
+    /// label or cost is never undone by a stale one.
     async fn patch_pod(
         &self,
         pod: &PodView,
+        version: &str,
         mut metadata: serde_json::Value,
-    ) -> Result<(), Refused> {
-        self.holds()?;
+    ) -> Result<String, Refused> {
         metadata["uid"] = pod.uid.clone().into();
-        self.pods
+        metadata["resourceVersion"] = version.into();
+        let written = self
+            .pods
             .patch(
                 &pod.name,
                 &PatchParams::default(),
                 &Patch::Merge(json!({"metadata": metadata})),
             )
             .await
-            .map(drop)
-            .map_err(|e| Refused::of(&format!("pod `{}`", pod.name), e))
+            .map_err(|e| Refused::of(&format!("pod `{}`", pod.name), e))?;
+        Ok(written.metadata.resource_version.unwrap_or_default())
     }
 }
 
@@ -316,7 +304,6 @@ impl Cluster for KubeCluster {
     }
 
     async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
-        self.holds()?;
         // A forced apply of the one field: the scaler is its designated
         // owner, so force is its normal mode and it meets no field
         // conflict, and it changes no other field. Its uid and
@@ -344,15 +331,25 @@ impl Cluster for KubeCluster {
         Ok(written.metadata.resource_version.unwrap_or_default())
     }
 
-    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), Refused> {
-        self.patch_pod(pod, json!({"labels": {ROUTABLE: routable.to_string()}}))
-            .await
+    async fn routable(
+        &self,
+        pod: &PodView,
+        version: &str,
+        routable: bool,
+    ) -> Result<String, Refused> {
+        let labels = json!({"labels": {ROUTABLE: routable.to_string()}});
+        self.patch_pod(pod, version, labels).await
     }
 
-    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), Refused> {
+    async fn cost(
+        &self,
+        pod: &PodView,
+        version: &str,
+        cost: Option<i32>,
+    ) -> Result<String, Refused> {
         let value = cost.map(|cost| cost.to_string());
-        self.patch_pod(pod, json!({"annotations": {DELETION_COST: value}}))
-            .await
+        let annotations = json!({"annotations": {DELETION_COST: value}});
+        self.patch_pod(pod, version, annotations).await
     }
 
     async fn status(
@@ -361,7 +358,6 @@ impl Cluster for KubeCluster {
         status: &GdlScalerStatus,
         version: Option<&str>,
     ) -> Result<Option<String>, Refused> {
-        self.holds()?;
         // A merge patch replaces a list whole, and removes a field set to
         // null: the encoding leaves out an empty list and an absent
         // field, which the patch would then keep as they were, so each is

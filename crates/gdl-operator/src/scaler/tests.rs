@@ -14,6 +14,9 @@ const SERVICE: &str = "global-front";
 #[path = "tests/review.rs"]
 mod review;
 
+#[path = "tests/two.rs"]
+mod two;
+
 #[derive(Debug, Clone)]
 struct FakePod {
     view: PodView,
@@ -50,6 +53,9 @@ struct Fake {
     instances: Mutex<Option<Instances>>,
     /// Pods whose `/metrics` does not answer, by IP.
     silent: Mutex<BTreeSet<String>>,
+    /// Held by each read of the pods, so that two reconciles both read
+    /// before either writes.
+    barrier: Option<tokio::sync::Barrier>,
 }
 
 impl Fake {
@@ -162,6 +168,7 @@ impl State {
             view: PodView {
                 name: format!("pod-{n}"),
                 uid: format!("uid-{n}"),
+                resource_version: "1".into(),
                 ip: Some(format!("10.0.0.{n}")),
                 created_ms: i64::from(n) * 1_000,
                 ready: true,
@@ -173,6 +180,34 @@ impl State {
             routable: true,
             load: 0,
         }
+    }
+}
+
+impl Fake {
+    /// Apply `change` to `pod` if it is still at `version`, logging
+    /// `write`: its version after.
+    fn write_pod(
+        &self,
+        pod: &PodView,
+        version: &str,
+        write: String,
+        change: impl FnOnce(&mut FakePod),
+    ) -> Result<String, Refused> {
+        let mut state = self.state();
+        let fake = state
+            .pods
+            .iter_mut()
+            .find(|p| p.view.uid == pod.uid)
+            .ok_or(Refused::Stale("no pod".into()))?;
+        if fake.view.resource_version != version {
+            return Err(Refused::Stale(format!("{} changed", pod.name)));
+        }
+        change(fake);
+        let next = fake.view.resource_version.parse::<u64>().unwrap_or(0) + 1;
+        fake.view.resource_version = next.to_string();
+        state.writes.push(write.clone());
+        state.events.push(write);
+        Ok(next.to_string())
     }
 }
 
@@ -192,7 +227,7 @@ impl Cluster for Fake {
     }
 
     async fn pods(&self, _: &str) -> Result<Vec<PodView>, String> {
-        Ok(self
+        let pods = self
             .state()
             .pods
             .iter()
@@ -200,7 +235,11 @@ impl Cluster for Fake {
                 routable: Some(p.routable),
                 ..p.view.clone()
             })
-            .collect())
+            .collect();
+        if let Some(barrier) = &self.barrier {
+            barrier.wait().await;
+        }
+        Ok(pods)
     }
 
     async fn endpoints(&self, service: &str) -> Result<BTreeSet<String>, String> {
@@ -220,32 +259,36 @@ impl Cluster for Fake {
         Ok(state.version.to_string())
     }
 
-    async fn routable(&self, pod: &PodView, routable: bool) -> Result<(), Refused> {
-        let mut state = self.state();
-        let fake = state
-            .pods
-            .iter_mut()
-            .find(|p| p.view.uid == pod.uid)
-            .ok_or(Refused::Stale("no pod".into()))?;
-        fake.routable = routable;
-        let write = format!("{} routable {routable}", pod.name);
-        state.writes.push(write.clone());
-        state.events.push(write);
-        Ok(())
+    async fn routable(
+        &self,
+        pod: &PodView,
+        version: &str,
+        routable: bool,
+    ) -> Result<String, Refused> {
+        self.write_pod(
+            pod,
+            version,
+            format!("{} routable {routable}", pod.name),
+            |fake| {
+                fake.routable = routable;
+            },
+        )
     }
 
-    async fn cost(&self, pod: &PodView, cost: Option<i32>) -> Result<(), Refused> {
-        let mut state = self.state();
-        let fake = state
-            .pods
-            .iter_mut()
-            .find(|p| p.view.uid == pod.uid)
-            .ok_or(Refused::Stale("no pod".into()))?;
-        fake.cost = cost;
-        let write = format!("{} cost {cost:?}", pod.name);
-        state.writes.push(write.clone());
-        state.events.push(write);
-        Ok(())
+    async fn cost(
+        &self,
+        pod: &PodView,
+        version: &str,
+        cost: Option<i32>,
+    ) -> Result<String, Refused> {
+        self.write_pod(
+            pod,
+            version,
+            format!("{} cost {cost:?}", pod.name),
+            |fake| {
+                fake.cost = cost;
+            },
+        )
     }
 
     async fn status(
@@ -258,7 +301,11 @@ impl Cluster for Fake {
         if version.is_some_and(|v| v != state.scaler_version.to_string()) {
             return Err(Refused::Stale("the scaler changed".into()));
         }
-        state.scaler_version += 1;
+        // A write that changes nothing leaves the version as it was, as
+        // the API server does.
+        if state.status.as_ref() != Some(status) {
+            state.scaler_version += 1;
+        }
         state.status = Some(status.clone());
         let victims: Vec<String> = status
             .retiring

@@ -8,7 +8,7 @@ The operator is a Rust binary, `gdl-operator`, that runs in the fleet's namespac
 
 ## Install it
 
-The operator needs one cluster-scoped object, the `GdlScaler` CRD (`gdlscalers.gdl.dev`), and four objects in the fleet's namespace: its ServiceAccount, a Role, a RoleBinding, and its Deployment. A cluster's owner applies them, since a deployer cannot grant rights it does not hold. `gdl-operator manifests` prints all five, each labelled `gdl.dev/setup=gdl-operator`:
+The operator needs one cluster-scoped object, the `GdlScaler` CRD (`gdlscalers.gdl.dev`), and five objects in the fleet's namespace: its ServiceAccount, a Role, a RoleBinding, a StatefulSet of one replica, and the StatefulSet's headless Service. A cluster's owner applies them, since a deployer cannot grant rights it does not hold. `gdl-operator manifests` prints all six, each labelled `gdl.dev/setup=gdl-operator`:
 
 ```bash
 gdl-operator manifests --namespace gdl-api --image registry.example/gdl/gdl-operator:<tag> \
@@ -30,11 +30,16 @@ The Role grants only what the scaler uses, in its namespace:
 | `apps` `deployments` | get, list, watch, patch | Read the target, and write its `replicas` |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
-| `coordination.k8s.io` `leases` | get, create, patch | Hold the Lease `gdl-operator`, so that one operator acts at a time |
 
 It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
-The operator acts only while it holds the Lease `gdl-operator` in its namespace, which names it by its pod (`POD_NAME`, from the downward API). Each operator judges time by its own clock alone, never by another node's. The holder renews every 5 s, and counts each hold from the moment it sent a renewal that then succeeded: it stops acting 10 s after that, the 15 s lease less a third, unless a later renewal succeeds. Every write checks that first. An operator that waits takes a held lease only once the lease record has gone unchanged for 15 s since it first saw it so. So a holder whose renewals hang, or a node that loses touch, stops acting at least 5 s before another can take the lease. This rests on the nodes' clocks running at about the same rate, as they do on EKS and kind; the third is the margin for their difference and a request's time on the wire. An operator that loses the lease exits, and a clean stop frees it at once. The lease keeps two operators from deciding at once; the write fences below keep a decision made just before the lease went from landing.
+The operator runs as a StatefulSet of one replica. A StatefulSet never runs two pods of one identity: it starts the replacement of its pod only once the old one is confirmed gone. So at most one operator acts at a time, through a rollout, a restart, or a node failure. While the operator's node does not answer, its pod is not confirmed gone, and no replacement starts: scaling pauses, the safe way, until the node answers again or Kubernetes removes it. Scaling pauses, and nothing else does: the segments serve on, and a pod that leaves meanwhile drains on its own SIGTERM.
+
+**Never force-delete the operator's pod** (`kubectl delete --force --grace-period=0`), and never remove its node by hand while the pod may still run. Either tells Kubernetes the pod is gone when it may not be, and a second operator can then start beside the first ([Known limitations](../operations/limitations.md)).
+
+### Why a StatefulSet
+
+The rejected alternative is an election of the operator's own, by a Kubernetes Lease. Three review passes each found a new way for it to let two operators act at once: a renewal that hung left the old holder acting after another took the lapsed lease; a delayed first read let a successor take over inside the holder's hold; and a write that passed the holder's check could land after the handoff. Kubernetes already keeps one pod of a StatefulSet's identity, and the operator needs nothing more.
 
 ## Let `deploy` make the scalers
 
@@ -115,7 +120,7 @@ The scaler keeps its target at `max(spec.replicas, spec.minReplicas)`. A scale-u
 
 Each victim is in `status.retiring` from its choice until its pod is gone, with what its `/metrics` last said it holds. The status is all the scaler remembers, so an operator that restarts carries on. It is written ahead: the scaler stores each phase before the step it names, so a step that a lost write or a restart leaves half done is finished or undone from what the status says, never guessed. A victim whose pod is terminating, or whose count is at or below its target, is committed, whatever its phase says. One that is not committed and whose pod went ends as `lost`, with nothing else changed. A live pod out of its Service that no victim names gets its Service back. Only one victim at a time is not yet committed; committed victims drain together, up to `maxConcurrentDrains`.
 
-Every write carries the read it was decided on. A status write carries the scaler's resourceVersion, a write of the count the Deployment's uid and resourceVersion, and a write to a pod the pod's uid. The API server refuses a write whose read is out of date, and the reconcile stops; the next one reads again and decides again. So a reconcile that waited on a scrape cannot undo a newer scale, and a Deployment made again under the same name is not changed by a decision about the old one. A victim of the old one is abandoned: its pod gets its Service and its cost back, and `status.last` says `abandoned`. Each reconcile reads the scaler from the API, not from its watch's cache.
+Every write carries the read it was decided on. A status write carries the scaler's resourceVersion, a write of the count the Deployment's uid and resourceVersion, and a write to a pod the pod's uid and resourceVersion. The API server refuses a write whose read is out of date, a write that changes nothing included, and the reconcile stops; the next one reads again and decides again. A step that puts a pod back is stored before it is taken, as every step is, and each reconcile stores its status, conditionally, before its first write to a pod: a reconcile whose read of the scaler predates another's stored step writes no pod. So even two operators at once on one scaler, which only a force-delete makes possible, cannot both commit a victim, both lower the count, undo a newer scale, or undo each other's label or cost on a pod. So a reconcile that waited on a scrape cannot undo a newer scale, and a Deployment made again under the same name is not changed by a decision about the old one. A victim of the old one is abandoned: its pod gets its Service and its cost back, and `status.last` says `abandoned`. Each reconcile reads the scaler from the API, not from its watch's cache.
 
 ### Victim policies
 

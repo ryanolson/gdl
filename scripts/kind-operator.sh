@@ -56,7 +56,7 @@ fail() {
   if [[ -n "${context:-}" ]]; then
     {
       echo "--- the operator's log"
-      kubectl --context "${context}" --namespace "${ns}" logs deployment/gdl-operator --tail=80 || true
+      kubectl --context "${context}" --namespace "${ns}" logs statefulset/gdl-operator --tail=80 || true
       echo "--- the scalers"
       kubectl --context "${context}" --namespace "${ns}" get gdlscalers --output json | jq '.items[] | {name: .metadata.name, spec, status}' || true
       echo "--- the pods"
@@ -172,7 +172,7 @@ timeout 300 docker push --quiet "${image}" >/dev/null
 "${operator}" manifests --namespace "${ns}" --image "${image}" \
   | timeout 60 kubectl --context "${context}" apply --server-side -f - >/dev/null
 timeout 120 kubectl --context "${context}" wait --for=condition=Established crd/gdlscalers.gdl.dev --timeout=90s >/dev/null
-k rollout status deployment/gdl-operator --timeout=240s >/dev/null || fail "the operator did not start"
+k rollout status statefulset/gdl-operator --timeout=240s >/dev/null || fail "the operator did not start"
 say "the operator runs"
 
 # The api example in two classes, every image from this working tree. The frontend listens on every interface, and

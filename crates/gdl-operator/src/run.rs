@@ -1,10 +1,9 @@
 //! The operator's controller: every `GdlScaler` in one namespace,
 //! reconciled when it or its target Deployment changes, and again when a
-//! reconcile asks, while this operator holds the Lease `gdl-operator`
-//! by its own clock (`crate::lease`). Every write checks the hold first,
-//! and carries the read it was decided on: the lease keeps two operators
-//! from deciding at once, and the fences keep a decision made on a stale
-//! read from landing.
+//! reconcile asks. The operator runs as a StatefulSet of one replica,
+//! which Kubernetes never runs twice at once; every write also carries the
+//! read it was decided on, so that even two operators at once could not
+//! both act on one scaler (`crate::scaler`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +16,6 @@ use kube::runtime::watcher;
 use kube::{Api, Client, ResourceExt};
 
 use crate::cluster::KubeCluster;
-use crate::lease::{Clock, Elector};
 use crate::probe::HttpProbe;
 use crate::scaler::Context;
 use crate::{GdlScaler, Victims};
@@ -25,12 +23,7 @@ use crate::{GdlScaler, Victims};
 /// When to try again after a reconcile that failed.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// How long the lease holds without a renewal.
-const LEASE: Duration = Duration::from_secs(15);
-
 struct Shared {
-    /// Whether this operator holds the lease, by its own clock.
-    lease: Arc<Clock>,
     scalers: Api<GdlScaler>,
     cluster: KubeCluster,
     probe: HttpProbe,
@@ -42,24 +35,16 @@ struct Shared {
 /// target, so a change to a Deployment wakes the scaler of its name.
 pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     let client = Client::try_default().await?;
-    // The pod's name, from the downward API: two pods never share one.
-    let identity = std::env::var("POD_NAME").map_err(|_| anyhow::anyhow!("POD_NAME is not set"))?;
-    let elector = Elector::new(client.clone(), namespace, crate::NAME, &identity, LEASE);
-    tracing::info!(%identity, "waiting for the lease");
-    elector.acquire().await?;
-    tracing::info!(%identity, "holds the lease");
-    let lease = elector.clock();
     let scalers: Api<GdlScaler> = Api::namespaced(client.clone(), namespace);
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let shared = Arc::new(Shared {
-        lease: Arc::clone(&lease),
         scalers: scalers.clone(),
-        cluster: KubeCluster::new(client, namespace).leased(lease),
+        cluster: KubeCluster::new(client, namespace),
         probe: HttpProbe::new(namespace).map_err(anyhow::Error::msg)?,
         victims,
     });
     let space = namespace.to_string();
-    let controller = Controller::new(scalers, watcher::Config::default())
+    Controller::new(scalers, watcher::Config::default())
         .watches(deployments, watcher::Config::default(), move |deployment| {
             Some(ObjectRef::new(&deployment.name_any()).within(&space))
         })
@@ -69,20 +54,12 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
             if let Err(error) = result {
                 tracing::warn!(%error, "reconcile");
             }
-        });
-    let outcome = tokio::select! {
-        () = controller => Ok(()),
-        () = elector.hold() => Err(anyhow::anyhow!("lost the lease")),
-    };
-    // A clean stop frees the lease for the next operator at once.
-    elector.release().await;
-    outcome
+        })
+        .await;
+    Ok(())
 }
 
 async fn reconcile(scaler: Arc<GdlScaler>, shared: Arc<Shared>) -> Result<Action, Failed> {
-    if !shared.lease.current() {
-        return Ok(Action::requeue(RETRY));
-    }
     // The watch's copy can predate the status the last reconcile wrote,
     // whose own write to the target woke this one: the status is all the
     // scaler remembers, so it is read again.
@@ -115,6 +92,3 @@ fn retry(scaler: Arc<GdlScaler>, error: &Failed, _: Arc<Shared>) -> Action {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct Failed(String);
-
-#[cfg(test)]
-mod tests;
