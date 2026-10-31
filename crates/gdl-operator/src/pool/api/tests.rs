@@ -106,7 +106,12 @@ async fn an_apply_is_forced_under_gdl_and_a_bootstrap_is_not() {
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": {"name": "p", "namespace": "ns"}, "data": {},
     });
-    pools.apply(&object, Some("u2")).await.expect("an apply");
+    let read = Live::of(
+        Kind::ConfigMap,
+        &json!({"metadata": {"name": "p", "uid": "u2"}}),
+    )
+    .expect("a view");
+    pools.apply(&object, Some(&read)).await.expect("an apply");
     pools
         .write(
             Kind::GdlScaler,

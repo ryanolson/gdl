@@ -14,11 +14,13 @@ publish.workspace = true
 [dependencies]
 anyhow = "1"
 futures = { workspace = true }
+# The JSON patch that moves a create's fields to the operator's apply.
+json-patch = "4"
 gdl-k8s = { path = "../gdl-k8s" }
 gdl-model = { path = "../gdl-model" }
 # The Kubernetes 1.35 API: the version kind's node runs in the proof.
 k8s-openapi = { version = "0.28", features = ["v1_35", "schemars"] }
-kube = { version = "4.2", default-features = false, features = ["client", "derive", "ring", "runtime", "rustls-tls"] }
+kube = { version = "4.2", default-features = false, features = ["client", "derive", "jsonpatch", "ring", "runtime", "rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 schemars = "1"
 serde = { workspace = true }

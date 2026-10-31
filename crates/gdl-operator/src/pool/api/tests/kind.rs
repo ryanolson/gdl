@@ -36,7 +36,7 @@ async fn namespace(client: &Client, prefix: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "F1: an absent child created by another writer before apply is forcibly adopted"]
+#[ignore = "needs an isolated kind cluster: set GDL_REVIEW_KUBECONFIG"]
 async fn a_child_created_after_the_ownership_read_is_not_adopted() {
     let client = client().await;
     let space = namespace(&client, "gdl-review-p1-adoption-").await;
@@ -93,6 +93,62 @@ async fn a_child_created_after_the_ownership_read_is_not_adopted() {
         after.metadata,
     );
     assert_eq!(after.data, foreign.data, "the foreign data must survive");
+}
+
+/// A child the pool creates is owned by the pool's apply, not by the
+/// create: a later apply under the same manager meets no conflict, and a
+/// field it leaves out goes.
+#[tokio::test]
+#[ignore = "needs an isolated kind cluster: set GDL_REVIEW_KUBECONFIG"]
+async fn a_created_child_is_the_pools_apply_from_its_start() {
+    let client = client().await;
+    let space = namespace(&client, "gdl-review-p1-create-").await;
+    let pools = KubePools::new(client.clone(), &space, false);
+    let first = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "p", "namespace": space},
+        "data": {"kept": "1", "dropped": "2"},
+    });
+    let made = pools.apply(&first, None).await.expect("a create");
+    assert!(!made.created, "the create's fields are the apply's");
+    let maps = Api::<ConfigMap>::namespaced(client, &space);
+    let managers: Vec<(String, String)> = maps
+        .get("p")
+        .await
+        .expect("the map")
+        .metadata
+        .managed_fields
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.manager.unwrap_or_default(),
+                entry.operation.unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(managers, [("gdl".to_string(), "Apply".to_string())]);
+    let second = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "p", "namespace": space},
+        "data": {"kept": "3"},
+    });
+    // Unforced, so that a conflict would show.
+    let mut unforced = second.clone();
+    unforced["metadata"]["uid"] = made.uid.clone().into();
+    Api::<DynamicObject>::namespaced_with(
+        maps.clone().into_client(),
+        &space,
+        &Kind::ConfigMap.resource(),
+    )
+    .patch("p", &PatchParams::apply(MANAGER), &Patch::Apply(unforced))
+    .await
+    .expect("a later apply under the same manager meets no conflict");
+    let data = maps.get("p").await.expect("the map").data.expect("data");
+    assert_eq!(
+        data.into_iter().collect::<Vec<_>>(),
+        [("kept".to_string(), "3".to_string())]
+    );
 }
 
 struct Hubs;

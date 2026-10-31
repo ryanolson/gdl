@@ -151,8 +151,7 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
 
         let mut applied = Vec::new();
         for (object, found) in objects.iter().zip(&live) {
-            let uid = found.as_ref().map(|found| found.uid.as_str());
-            applied.push(self.cx.pools.apply(object, uid).await?);
+            applied.push(self.cx.pools.apply(object, found.as_ref()).await?);
         }
         let mut busy = false;
         for (object, written) in objects.iter().zip(&applied) {

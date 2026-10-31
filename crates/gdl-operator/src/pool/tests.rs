@@ -264,7 +264,8 @@ impl Pools for Fake {
             .map(|o| o.live.clone()))
     }
 
-    async fn apply(&self, object: &Value, uid: Option<&str>) -> Result<Live, Refused> {
+    async fn apply(&self, object: &Value, live: Option<&Live>) -> Result<Live, Refused> {
+        let uid = live.map(|live| live.uid.as_str());
         let mut state = self.state();
         state.check()?;
         let kind = Kind::of(object["kind"].as_str().unwrap_or_default()).expect("a kind");

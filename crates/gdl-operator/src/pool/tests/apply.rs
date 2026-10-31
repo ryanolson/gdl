@@ -128,6 +128,7 @@ async fn an_object_the_pool_did_not_make_is_never_changed() {
         image: None,
         config: None,
         deleting: false,
+        created: false,
     };
     fake.state().objects.insert(
         (Kind::ConfigMap, "p".into()),
@@ -172,6 +173,7 @@ async fn a_labelled_object_the_pool_did_not_make_is_left_alone() {
         image: None,
         config: None,
         deleting: false,
+        created: false,
     };
     fake.state().objects.insert(
         (Kind::Deployment, "p-old".into()),

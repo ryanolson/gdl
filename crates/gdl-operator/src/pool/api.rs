@@ -4,8 +4,8 @@
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{
-    ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, Preconditions,
-    PropagationPolicy,
+    ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
+    Preconditions, PropagationPolicy,
 };
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Api, Client, Resource, ResourceExt};
@@ -117,6 +117,9 @@ pub struct Live {
     pub config: Option<String>,
     /// Whether it is being deleted.
     pub deleting: bool,
+    /// Whether [`MANAGER`] owns fields of it by an update, as a create
+    /// leaves them: they are moved to its apply before the next one.
+    pub created: bool,
 }
 
 impl Live {
@@ -137,7 +140,13 @@ impl Live {
             .filter(|entry| entry["fieldsV1"]["f:spec"].get("f:replicas").is_some())
             .filter_map(|entry| text(&entry["manager"]))
             .collect();
+        let created = metadata["managedFields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|entry| entry["manager"] == MANAGER && entry["operation"] == "Update");
         Some(Self {
+            created,
             kind,
             name: text(&metadata["name"])?,
             uid: text(&metadata["uid"])?,
@@ -195,12 +204,16 @@ pub trait Pools {
         name: &str,
     ) -> impl Future<Output = Result<Option<Live>, String>> + Send;
 
-    /// Apply `object` as its one owner, by forced server-side apply under
-    /// [`MANAGER`], only to the object of uid `uid` when one is given.
+    /// Write `object` as its one owner, under [`MANAGER`]. With `live`, the
+    /// object as read, by forced server-side apply, only to the object of
+    /// its uid. Without, by a create, which an object of the name made
+    /// since the read refuses (409): a child is never adopted. Either way
+    /// the fields end owned by an apply of [`MANAGER`], so that a later
+    /// apply removes a field the render no longer writes.
     fn apply(
         &self,
         object: &Value,
-        uid: Option<&str>,
+        live: Option<&Live>,
     ) -> impl Future<Output = Result<Live, Refused>> + Send;
 
     /// Apply `spec` to the object `name` of kind `kind` under the field
@@ -279,6 +292,59 @@ impl KubePools {
 fn live(kind: Kind, object: &DynamicObject) -> Result<Live, String> {
     let value = serde_json::to_value(object).map_err(|e| e.to_string())?;
     Live::of(kind, &value).ok_or_else(|| format!("a {} without a name or a uid", kind.name()))
+}
+
+impl KubePools {
+    /// Move the fields [`MANAGER`] owns of the object `name` of uid `uid`
+    /// by an update, as its create left them, to its apply, as `kubectl`
+    /// moves a client-side apply's: a JSON patch of `managedFields`, only
+    /// at the resourceVersion read. A write between refuses it, and it
+    /// reads again, a few times: another controller may write the object
+    /// at once, as a Deployment's writes its status.
+    async fn own(&self, kind: Kind, name: &str, uid: &str) -> Result<DynamicObject, Refused> {
+        let api = self.api(kind);
+        let what = |e| Refused::of(&format!("{} `{name}`", kind.name()), e);
+        let mut last = Refused::Stale(format!("{} `{name}` kept changing", kind.name()));
+        for _ in 0..5 {
+            let object = api.get(name).await.map_err(what)?;
+            if object.metadata.uid.as_deref() != Some(uid) {
+                return Err(Refused::Stale(format!(
+                    "{} `{name}` was made again",
+                    kind.name()
+                )));
+            }
+            let mut fields = object.metadata.managed_fields.clone().unwrap_or_default();
+            let mut moved = false;
+            for entry in &mut fields {
+                if entry.manager.as_deref() == Some(MANAGER)
+                    && entry.operation.as_deref() == Some("Update")
+                {
+                    entry.operation = Some("Apply".into());
+                    entry.time = None;
+                    moved = true;
+                }
+            }
+            if !moved {
+                return Ok(object);
+            }
+            let version = object.metadata.resource_version.clone().unwrap_or_default();
+            let patch: json_patch::Patch = serde_json::from_value(json!([
+                {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+                {"op": "replace", "path": "/metadata/managedFields", "value": fields},
+            ]))
+            .map_err(|e| Refused::Failed(e.to_string()))?;
+            match api
+                .patch(name, &PatchParams::default(), &Patch::<()>::Json(patch))
+                .await
+                .map_err(what)
+            {
+                Ok(owned) => return Ok(owned),
+                Err(Refused::Stale(why)) => last = Refused::Stale(why),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last)
+    }
 }
 
 impl Pools for KubePools {
@@ -374,16 +440,30 @@ impl Pools for KubePools {
         object.as_ref().map(|object| live(kind, object)).transpose()
     }
 
-    async fn apply(&self, object: &Value, uid: Option<&str>) -> Result<Live, Refused> {
+    async fn apply(&self, object: &Value, live: Option<&Live>) -> Result<Live, Refused> {
         let kind = object["kind"]
             .as_str()
             .and_then(Kind::of)
             .ok_or_else(|| Refused::Failed(format!("an object of kind {}", object["kind"])))?;
         let name = object["metadata"]["name"].as_str().unwrap_or_default();
-        let mut object = object.clone();
-        if let Some(uid) = uid {
-            object["metadata"]["uid"] = uid.into();
+        let what = |e| Refused::of(&format!("{} `{name}`", kind.name()), e);
+        let Some(live) = live else {
+            let made: DynamicObject = serde_json::from_value(object.clone())
+                .map_err(|e| Refused::Failed(e.to_string()))?;
+            let params = PostParams {
+                field_manager: Some(MANAGER.into()),
+                ..PostParams::default()
+            };
+            let made = self.api(kind).create(&params, &made).await.map_err(what)?;
+            let uid = made.metadata.uid.clone().unwrap_or_default();
+            let owned = self.own(kind, name, &uid).await?;
+            return self::live(kind, &owned).map_err(Refused::Failed);
+        };
+        if live.created {
+            self.own(kind, name, &live.uid).await?;
         }
+        let mut object = object.clone();
+        object["metadata"]["uid"] = live.uid.clone().into();
         let written = self
             .api(kind)
             .patch(
@@ -392,8 +472,8 @@ impl Pools for KubePools {
                 &Patch::Apply(object),
             )
             .await
-            .map_err(|e| Refused::of(&format!("{} `{name}`", kind.name()), e))?;
-        live(kind, &written).map_err(Refused::Failed)
+            .map_err(what)?;
+        self::live(kind, &written).map_err(Refused::Failed)
     }
 
     async fn write(
