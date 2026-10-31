@@ -137,9 +137,9 @@ impl Operated {
 }
 
 /// The `GdlPool`s of `cluster` that carry its fleet's and its labels: none
-/// where the cluster has no `GdlPool` CRD, which is then not asked, and none
-/// where it does not ask for the operator and the deployer may not list
-/// them.
+/// where the cluster has no `GdlPool` CRD, which is then not asked. Where
+/// it has the kind, a list the deployer may not make is refused, naming
+/// the right: it would hide pools the operator runs.
 pub(super) fn pools(
     kube: &mut dyn Kube,
     cluster: &Cluster,
@@ -150,11 +150,13 @@ pub(super) fn pools(
     }
     let args = bounded(cluster.at().pools(&cluster.selector), budget);
     let reply = kube.run(&args, None)?;
-    // A deployer of a cluster the operator does not run may have no right on
-    // GdlPools, and then made none: there is nothing of the operator's to
-    // find. Where the operator runs the pools, the deployer needs the list.
-    if !reply.success && !cluster.operator && reply.stderr.contains("(Forbidden)") {
-        return Ok(Vec::new());
+    // A list the deployer may not make proves nothing: the operator may
+    // still run pools there, which a plain deploy would not stop in order.
+    if reply.stderr.contains("(Forbidden)") {
+        return Err(Error::new(format!(
+            "cluster `{}` has the gdl operator's GdlPool kind, and context `{}` may not list `gdlpools.gdl.dev` in namespace `{}`, so whether the operator runs pools of the fleet there is not known: grant the deployer `list` on `gdlpools.gdl.dev`, or remove the gdl CRDs from a cluster the operator does not run",
+            cluster.name, cluster.context, cluster.namespace
+        )));
     }
     if !reply.success {
         return Err(Error::new(format!(

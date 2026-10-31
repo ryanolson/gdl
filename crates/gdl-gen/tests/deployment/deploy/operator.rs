@@ -373,10 +373,11 @@ fn a_pool_whose_gdl_pool_is_gone_is_named() {
     );
 }
 
-/// A cluster without the operator needs nothing of it. Where it has no gdl
-/// CRDs, `deploy` and `down` make no GdlPool call at all; where it has them
-/// and the deployer may not list GdlPools, the 403 is no failure there: a
-/// deployer without that right made none.
+/// A cluster without the operator and without the gdl CRDs needs no right
+/// on GdlPools: `deploy` and `down` make no GdlPool call there. Where the
+/// kind exists and the deployer may not list it, both refuse before
+/// anything changes, naming the right: the list is what shows that the
+/// operator runs no pool of the fleet there.
 #[test]
 fn a_plain_cluster_needs_no_gdl_pool_rights() {
     let mirror = Mirror::new();
@@ -397,14 +398,18 @@ fn a_plain_cluster_needs_no_gdl_pool_rights() {
     let log = Log::default();
     let (mut docker, mut kube) = fakes(&log);
     kube.forbidden_pools = vec!["kind-use1", "kind-euw1"];
-    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
-    down(&files, &mut kube).expect("down");
-    assert!(
-        commands(&log)
-            .iter()
-            .any(|args| args.contains(&"gdlpools.gdl.dev".to_string())),
-        "the list was asked"
-    );
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("refused")
+        .to_string();
+    assert!(error.contains("may not list `gdlpools.gdl.dev`"), "{error}");
+    let has = |args: &[String], word: &str| args.iter().any(|a| a == word);
+    let changed = commands(&log).iter().any(|args| {
+        ["apply", "delete", "label"].iter().any(|w| has(args, w))
+            || (has(args, "create") && !has(args, "can-i"))
+    });
+    assert!(!changed, "refused before anything changed");
+    let error = down(&files, &mut kube).expect_err("refused").to_string();
+    assert!(error.contains("may not list `gdlpools.gdl.dev`"), "{error}");
 }
 
 /// A cluster the operator runs needs to list its GdlPools: a 403 there
@@ -419,11 +424,10 @@ fn an_operated_cluster_needs_its_gdl_pool_rights() {
     let error = deploy(&mirror, &files, &mut docker, &mut kube)
         .expect_err("refused")
         .to_string();
-    assert!(error.contains("Forbidden"), "{error}");
+    assert!(error.contains("may not list `gdlpools.gdl.dev`"), "{error}");
 }
 
 #[test]
-#[ignore = "F3: a forbidden GdlPool list hides live operated pools during a change to a plain cluster"]
 fn an_opt_out_with_renamed_pools_is_refused_when_the_gdl_pool_list_is_forbidden() {
     let mirror = Mirror::new();
     let log = Log::default();
