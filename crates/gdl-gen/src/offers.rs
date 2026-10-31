@@ -434,6 +434,33 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "F2: a hex-named Git ref can match an offer from another commit"]
+    fn a_hex_named_ref_must_not_select_a_different_commit() {
+        let repo = GitFixture::new();
+        let rev = &repo.first[..12];
+        repo.git(&["tag", rev, &repo.second]);
+        let by_ref = repo.offer(rev);
+        assert_eq!(by_ref.version, "0.2.0");
+        assert_eq!(
+            by_ref.source,
+            format!("git+{}?rev={rev}#{}", repo.url, repo.second)
+        );
+        let other = repo.offer(&repo.first);
+        assert_eq!(other.version, "0.1.0");
+        let found = offers(
+            &[repo.listed(rev)],
+            repo.dir.path(),
+            Offers::Given(&[&other]),
+        );
+        assert!(
+            found.is_err(),
+            "rev {rev} resolves to {}, but the catalogue substitutes {:?}",
+            by_ref.source,
+            found.as_ref().map(|offers| &offers[0].source)
+        );
+    }
+
     struct GitFixture {
         dir: tempfile::TempDir,
         url: String,
