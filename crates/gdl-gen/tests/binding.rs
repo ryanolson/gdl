@@ -308,7 +308,6 @@ impl gdl::Selector for ByText {
 }
 
 #[test]
-#[ignore = "F4: catalogue matching expects the abbreviated revision to equal the full commit hash"]
 fn catalogue_accepts_a_selector_at_an_abbreviated_revision() {
     let router = router(
         r#"
