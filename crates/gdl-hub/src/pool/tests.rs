@@ -482,3 +482,150 @@ async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
         "the list attaches load to an instance it reports as retired"
     );
 }
+
+/// Departure during the directory reads must not move a phase backwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F3: departure during directory reads moves retired back to joining"]
+async fn a_departure_during_directory_reads_does_not_move_the_phase_backwards() {
+    use std::collections::BTreeMap;
+
+    use gdl_model::{SegmentPhase, segment_service};
+    use gdl_watch::InstancePhase;
+    use tokio::sync::Semaphore;
+    use velo_hub::axum::{Json, Router, extract::Path, routing::get};
+    use velo_hub::client::HubClient;
+    use velo_hub::velo::Velo;
+    use velo_hub::velo::discovery::ServiceDiscovery;
+    use velo_hub::velo::transports::tcp::TcpTransportBuilder;
+
+    let served = Served::new().await;
+    let tcp = TcpTransportBuilder::new()
+        .bind_addr("127.0.0.1:0".parse().expect("an address"))
+        .build()
+        .expect("a TCP transport");
+    let node = Velo::builder()
+        .add_transport(Arc::new(tcp))
+        .build()
+        .await
+        .expect("a velo node");
+    let client = HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(served.hub.public_addr().port())
+        .control_port(served.hub.control_addr().port())
+        .build()
+        .expect("a hub client");
+    client
+        .register(
+            &node,
+            BTreeMap::from([(
+                "gdl".to_string(),
+                serde_json::to_value(spec().registration("a").expect("segment a"))
+                    .expect("a registration"),
+            )]),
+        )
+        .await
+        .expect("the hub admits the instance");
+    let mut guards = Vec::new();
+    for phase in [SegmentPhase::Ready, SegmentPhase::Retired] {
+        guards.push(
+            client
+                .register_service(&segment_service("a", phase))
+                .await
+                .expect("the hub takes the phase"),
+        );
+    }
+    let admission = Arc::clone(served.pool.admission.get().expect("admission attached"));
+    let services = client.services();
+    let before = super::instances::list(&admission, &services, &served.pool.feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(before.instances.len(), 1);
+    assert_eq!(before.instances[0].phase, InstancePhase::Retired);
+
+    let entered = Arc::new(Semaphore::new(0));
+    let gate = Arc::new(Semaphore::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a proxy port");
+    let proxy_address = listener.local_addr().expect("a bound proxy port");
+    let router = Router::new().route(
+        "/v1/services/{name}",
+        get({
+            let entered = Arc::clone(&entered);
+            let gate = Arc::clone(&gate);
+            let services = services.clone();
+            move |Path(name): Path<String>| {
+                let entered = Arc::clone(&entered);
+                let gate = Arc::clone(&gate);
+                let services = services.clone();
+                async move {
+                    entered.add_permits(1);
+                    gate.acquire().await.expect("the gate opens").forget();
+                    let ids = services
+                        .get_instances(&name)
+                        .await
+                        .expect("the hub answers");
+                    Json(velo_hub::protocol::ServiceInstancesResponse { instances: ids })
+                }
+            }
+        }),
+    );
+    let proxy = tokio::spawn(async move {
+        velo_hub::axum::serve(listener, router)
+            .await
+            .expect("the proxy serves");
+    });
+    let proxy_services = HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(proxy_address.port())
+        .build()
+        .expect("a proxy client")
+        .services();
+    let listing = tokio::spawn({
+        let admission = Arc::clone(&admission);
+        let feed = Arc::clone(&served.pool.feed);
+        async move { super::instances::list(&admission, &proxy_services, &feed).await }
+    });
+    tokio::time::timeout(WAIT, entered.acquire_many(4))
+        .await
+        .expect("all four phase reads begin")
+        .expect("the signal stays open")
+        .forget();
+    client.unregister().await.expect("the instance leaves");
+    tokio::time::timeout(WAIT, async {
+        while admission.member(node.instance_id()).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admission observes departure");
+    assert!(
+        services
+            .get_instances(&segment_service("a", SegmentPhase::Retired))
+            .await
+            .expect("the directory answers")
+            .is_empty()
+    );
+    gate.add_permits(4);
+    let during = tokio::time::timeout(WAIT, listing)
+        .await
+        .expect("the listing finishes")
+        .expect("the listing task runs")
+        .expect("the directory answers");
+    let after = super::instances::list(&admission, &services, &served.pool.feed)
+        .await
+        .expect("the directory answers");
+    assert!(after.instances.is_empty());
+    proxy.abort();
+    let _ = proxy.await;
+    drop(guards);
+    served.stop().await;
+    assert!(
+        during.instances.iter().all(|instance| {
+            instance.peer.instance_id != node.instance_id()
+                || instance.phase >= before.instances[0].phase
+        }),
+        "a retired member returns with a lower phase: {:?}",
+        during.instances
+    );
+}
