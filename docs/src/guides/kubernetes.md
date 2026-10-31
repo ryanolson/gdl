@@ -350,7 +350,7 @@ DYNAMODB=1 GDL_REV=<commit> bash scripts/kind-fleet.sh
 
 - `deploy` applies one `GdlPool` per pool, each `Ready`, and the operator owns every object of every pool by a controller reference;
 - a second `deploy`, with one model pool removed, deletes that pool's `GdlPool` alone, in the background: its finalizer drains the pool, the global pool's hub then answers 404 for its record, and garbage collection deletes its objects. The other pools' Deployments and pods keep their uids and generations, and no request is refused or cut;
-- a change of the global pool's hub, patched into its `GdlPool` without `allowPoolRestart`, is held, with `PoolRestartPending` naming the held generation, and does not reach the hub's Deployment;
+- a change of the global pool's hub, patched into its `GdlPool` without `allowPoolRestart`, is held, with `PoolRestartPending` naming the held generation and a warning event on the pool, and does not reach the hub's Deployment;
 - `down`, under the load, deletes the model pool's `GdlPool` before the global pool's, and a sampler of the running pods shows each pool's segment gone before its hub, and the model pool gone before the global pool's frontend. No admitted request is cut; requests that arrive once no pool can admit them are refused;
 - no object with the fleet's label is left, and the namespace remains as its owner made it.
 

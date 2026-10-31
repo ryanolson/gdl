@@ -1524,6 +1524,7 @@ dependencies = [
  "futures",
  "gdl-k8s",
  "gdl-model",
+ "gdl-pools",
  "gdl-watch",
  "http 1.5.0",
  "k8s-openapi",

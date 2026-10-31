@@ -46,7 +46,7 @@
 #     it withdraws (its parent's hub no longer holds its record), and garbage collection deletes its objects; the
 #     other pools' Deployments and pods are left as they were, and no request is refused or cut;
 #   - a change of the global pool's hub, patched into its GdlPool without allowPoolRestart, is held, with
-#     PoolRestartPending in its status, and does not reach the hub's Deployment;
+#     PoolRestartPending in its status and a warning event on the pool, and does not reach the hub's Deployment;
 #   - `down`, under the load, stops model-a before global, each segment before its hub, and cuts no admitted request;
 #     no object with the fleet's label is left.
 #
@@ -475,6 +475,16 @@ $(operated_kept)"
     || fail "the GdlPool does not name the held generation"
   [[ "$(k --namespace gdl-api get deployment global --output jsonpath='{.metadata.generation}')" == "${hub_generation}" ]] \
     || fail "the held change reached the hub's Deployment"
+  # And it says so in an event on the pool, as a person reading `kubectl describe` sees it.
+  event=""
+  for _ in $(seq 1 30); do
+    event="$(k --namespace gdl-api get events.events.k8s.io --output json | jq -r '.items[]
+      | select(.regarding.kind == "GdlPool" and .regarding.name == "global" and .reason == "HubChange")
+      | "\(.type): \(.note)"' | head -n 1)"
+    [[ -n "${event}" ]] && break
+    sleep 1
+  done
+  [[ "${event}" == Warning:* ]] || fail "no HubChange event on GdlPool global: ${event}"
   echo "kind-fleet.sh: a hub change without allowPoolRestart is held: ${held}"
 
   # down, under the load: model-a's GdlPool first, then global's, each in the background, each stopped by its

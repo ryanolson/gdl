@@ -35,6 +35,7 @@ tower = { version = "0.5", features = ["util"] }
 # into the operator's mirror. A dev-dependency only, so velo is never in
 # the operator's binary.
 gdl-watch = { path = "../gdl-watch" }
+gdl-pools = { path = "../gdl-pools" }
 tokio = { workspace = true, features = ["test-util"] }
 velo = { workspace = true }
 

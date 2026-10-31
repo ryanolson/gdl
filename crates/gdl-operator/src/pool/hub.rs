@@ -136,14 +136,10 @@ impl Hubs for HttpProbe {
 
     async fn presence(&self, pool: &str, presence: gdl_k8s::Presence) -> Result<(), String> {
         let url = self.hub(pool, gdl_model::HUB_CONTROL_PORT, "/presence");
-        let presence = match presence {
-            gdl_k8s::Presence::Serving => "serving",
-            gdl_k8s::Presence::ScaledToZero => "scaled_to_zero",
-        };
         let response = self
             .client()
             .post(&url)
-            .json(&serde_json::json!({"presence": presence}))
+            .json(&presence_body(presence))
             .send()
             .await
             .map_err(|e| format!("POST {url}: {e}"))?;
@@ -153,5 +149,41 @@ impl Hubs for HttpProbe {
             return Err(format!("POST {url}: {status}: {}", body.trim()));
         }
         Ok(())
+    }
+}
+
+/// The body of a hub's `POST presence`: a mirror of the hub's own
+/// `SetPresence`, which a test holds to it, so the operator links no
+/// velo.
+pub fn presence_body(presence: gdl_k8s::Presence) -> serde_json::Value {
+    let presence = match presence {
+        gdl_k8s::Presence::Serving => "serving",
+        gdl_k8s::Presence::ScaledToZero => "scaled_to_zero",
+    };
+    serde_json::json!({"presence": presence})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the operator posts reads as the hub's own request, for each
+    /// presence.
+    #[test]
+    fn the_presence_body_is_the_hubs() {
+        for (ours, theirs) in [
+            (gdl_k8s::Presence::Serving, gdl_pools::Presence::Serving),
+            (
+                gdl_k8s::Presence::ScaledToZero,
+                gdl_pools::Presence::ScaledToZero,
+            ),
+        ] {
+            let expected = serde_json::to_value(gdl_watch::SetPresence { presence: theirs })
+                .expect("the hub's body");
+            assert_eq!(presence_body(ours), expected);
+            let read: gdl_watch::SetPresence =
+                serde_json::from_value(presence_body(ours)).expect("the hub reads it");
+            assert_eq!(read.presence, theirs);
+        }
     }
 }
