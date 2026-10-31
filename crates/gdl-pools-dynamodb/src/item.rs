@@ -278,9 +278,14 @@ pub(crate) fn decode(class: &str, item: &Item) -> Option<Stored> {
     let order = count(item, ORDER)?;
     let held = match text(item, KIND)? {
         // A tombstone without the list version, as an earlier build wrote
-        // it, still refuses late writes: it reads as 0.
+        // it, still refuses late writes: it reads as 0. One whose version
+        // is there but does not decode is not a tombstone this build can
+        // number past: it does not decode.
         WITHDRAWN => StoredHeld::Withdrawn {
-            properties_version: count(item, PROPERTIES_VERSION).unwrap_or(0),
+            properties_version: match item.get(PROPERTIES_VERSION) {
+                None => 0,
+                Some(_) => count(item, PROPERTIES_VERSION)?,
+            },
         },
         RECORD => {
             let record: PoolRecord = serde_json::from_str(text(item, BODY)?).ok()?;
@@ -325,6 +330,12 @@ pub(crate) fn decode_list(key: ListKey, item: &Item) -> Option<List> {
         return None;
     }
     serde_json::from_str(body).ok()
+}
+
+/// Whether a records-table item says it holds a pool's write: it has an
+/// epoch, which [`version`] may still fail to decode.
+pub(crate) fn has_version(item: &Item) -> bool {
+    item.contains_key(EPOCH)
 }
 
 /// The version of the pool's write a records-table item holds, if it

@@ -509,9 +509,10 @@ impl PoolDirectory for DynamoDirectory {
                     error,
                 )
             })?;
-        // An item without a version holds no pool's write, and a write
-        // writes over it.
-        let Some(found) = got.item().filter(|found| item::version(found).is_some()) else {
+        // An item without an epoch holds no pool's write, and a write
+        // writes over it. One with an epoch that does not decode is not
+        // read below as none.
+        let Some(found) = got.item().filter(|found| item::has_version(found)) else {
             return Ok(None);
         };
         let stored = item::decode(class, found)

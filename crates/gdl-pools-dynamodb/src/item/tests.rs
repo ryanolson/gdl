@@ -155,6 +155,26 @@ fn a_withdrawal_is_a_tombstone_at_its_version() {
     assert_eq!(Entry::new("model_x", stored, None).held, Held::Withdrawn(w));
 }
 
+/// A tombstone whose list version is there but does not decode is no
+/// tombstone this build can number past: it does not decode, so a read of
+/// the pool's last write fails rather than read it as 0.
+#[test]
+fn a_tombstone_with_an_undecodable_list_version_does_not_decode() {
+    let w = Withdrawal {
+        class: "model_x".into(),
+        pool: "model-x-02".into(),
+        epoch: 4,
+        seq: 2,
+        properties_version: 9,
+    };
+    let mut broken = withdrawal(&w, 1);
+    broken.insert(
+        "properties_version".into(),
+        AttributeValue::S("broken".into()),
+    );
+    assert_eq!(decode("model_x", &broken), None);
+}
+
 /// A tombstone an earlier build wrote keeps no list version: it is still a
 /// tombstone at its version, and its list version reads as 0, so a later
 /// hub numbers from its own floor, as it did.

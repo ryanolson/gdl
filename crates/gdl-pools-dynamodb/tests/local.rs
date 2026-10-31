@@ -147,6 +147,32 @@ async fn last_write_keeps_a_withdrawal_that_overtakes_its_record_read() {
     );
 }
 
+/// An item that says it holds a pool's write, by its epoch, but whose
+/// epoch does not decode is an unknown read, never a pool with no write.
+#[tokio::test]
+async fn an_item_whose_epoch_does_not_decode_is_an_error() {
+    let client = client();
+    let tables = tables(&client).await;
+    let directory = DynamoDirectory::with_limits(client.clone(), tables.clone(), LIMITS);
+    let first = record("model-x-03", 1, 1, &["qwen-32b"]);
+    directory.publish(first).await.expect("the record");
+    client
+        .update_item()
+        .table_name(&tables.records)
+        .key("class", AttributeValue::S(MODEL.into()))
+        .key("pool", AttributeValue::S("model-x-03".into()))
+        .update_expression("SET epoch = :broken")
+        .expression_attribute_values(":broken", AttributeValue::S("broken".into()))
+        .send()
+        .await
+        .expect("the malformed epoch is stored");
+    let read = directory.last_write(MODEL, "model-x-03").await;
+    assert!(
+        matches!(read, Err(DirectoryError::Unavailable(_))),
+        "an undecodable epoch must not read as no write: {read:?}"
+    );
+}
+
 // In a directory of its own, so that cargo does not take it for a test
 // target.
 #[path = "local/ensure.rs"]
@@ -170,7 +196,6 @@ const LIMITS: DynamoLimits = DynamoLimits {
 /// An earlier build leaves no list-version attribute. A present attribute
 /// that does not decode cannot establish that numbering floor.
 #[tokio::test]
-#[ignore = "F6: a present tombstone list version that does not decode reads as zero"]
 async fn a_tombstone_with_an_undecodable_list_version_is_an_error() {
     let client = client();
     let tables = tables(&client).await;
