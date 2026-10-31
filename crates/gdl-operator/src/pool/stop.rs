@@ -102,6 +102,15 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     StopStep::Hub
                 }
                 StopStep::Hub => {
+                    // The step's precondition holds on every resume: a
+                    // segment made again since, and its pods, are stopped
+                    // first, and written into the segments step before
+                    // they are touched.
+                    let pool = self.name.clone();
+                    if self.running(&owned, |d| d.name != pool).await? {
+                        self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
+                        continue;
+                    }
                     if self.hub(&owned).await? {
                         return Ok(BUSY);
                     }

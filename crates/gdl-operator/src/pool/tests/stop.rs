@@ -284,7 +284,6 @@ async fn a_refused_drain_keeps_the_finalizer() {
 }
 
 #[tokio::test]
-#[ignore = "F7: resuming the hub step scales the hub down after recreated segment children start pods"]
 async fn a_resumed_hub_step_stops_recreated_segments_before_scaling_the_hub() {
     let fake = running(false).await;
     fake.delete(false);
