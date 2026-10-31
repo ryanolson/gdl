@@ -198,7 +198,6 @@ async fn a_registration_committed_before_a_proxy_error_can_finish_starting() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F2: an unanswered first registration never reports waiting for the hub"]
 async fn an_unanswered_first_registration_reports_what_the_start_waits_for() {
     let hub = hub_on(0, 0, spec()).await;
     let proxy = Proxy::new(hub.control_addr()).await;

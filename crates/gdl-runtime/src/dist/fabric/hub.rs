@@ -71,7 +71,8 @@ impl HubSession {
     /// be up yet: a hub that cannot be reached, or that answers it is not
     /// ready, is asked again after a wait that doubles from 100 ms up to
     /// 2 s, with jitter, until `wait` has passed. `waiting` is told `true`
-    /// once an attempt failed so, and `false` once the hub admitted the
+    /// as the first attempt begins, since a hub that took the connection may
+    /// not answer for a while, and `false` once the hub admitted the
     /// instance. Any other answer, such as the hub refusing the
     /// registration, ends the start at once: asking again cannot change it.
     #[expect(
@@ -99,6 +100,7 @@ impl HubSession {
         let deadline = tokio::time::Instant::now() + wait;
         let mut backoff = gdl_watch::Backoff::new(HUB_WAIT, HUB_WAIT_CAP);
         let mut last = None;
+        waiting(true);
         loop {
             let attempt = client.register(node, extensions.clone());
             let error = match tokio::time::timeout_at(deadline, attempt).await {
@@ -120,7 +122,6 @@ impl HubSession {
             }
             if last.is_none() {
                 tracing::warn!(%error, hub = %format!("{host}:{control_port}"), "the hub is not up yet; waiting for it");
-                waiting(true);
             }
             last = Some(error);
             tokio::time::sleep(pause).await;
