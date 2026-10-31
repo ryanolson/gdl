@@ -300,14 +300,26 @@ impl gdl::Operator for AnthropicAdapter {
         ))
     }
 }
-/// Shared pipeline sink.
-#[derive(gdl::Node)]
-pub struct Echo;
+/// Shared pipeline sink: one chunk per input word. With `pace_ms` in its
+/// settings (`[node.Engine] pace_ms = "50"`), it waits that long before
+/// each chunk, so that a response streams for a while, as a model's does.
+#[derive(gdl::Node, Default)]
+pub struct Echo {
+    pace: Option<std::time::Duration>,
+}
 impl Build for Echo {
     type Config = std::collections::BTreeMap<String, String>;
     type Metrics = ();
-    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
-        Ok(Self)
+    async fn build(config: Self::Config, (): ()) -> gdl::Result<Self> {
+        let pace = match config.get("pace_ms") {
+            None => None,
+            Some(ms) => Some(std::time::Duration::from_millis(ms.parse().map_err(|_| {
+                gdl::Error::node(format!(
+                    "Echo: pace_ms `{ms}` is not a whole number of milliseconds"
+                ))
+            })?)),
+        };
+        Ok(Self { pace })
     }
 }
 impl gdl::Sink for Echo {
@@ -319,7 +331,14 @@ impl gdl::Sink for Echo {
             .split_whitespace()
             .map(|s| Ok(Chunk { text: s.into() }))
             .collect();
-        Ok(gdl::items(futures::stream::iter(chunks)))
+        let chunks = futures::stream::iter(chunks);
+        Ok(match self.pace {
+            None => gdl::items(chunks),
+            Some(pace) => gdl::items(chunks.then(move |chunk| async move {
+                tokio::time::sleep(pace).await;
+                chunk
+            })),
+        })
     }
 }
 

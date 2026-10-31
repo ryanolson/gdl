@@ -38,7 +38,7 @@ async fn enabled_endpoints_use_distinct_adapters_and_disabled_endpoints_are_abse
         .await
         .unwrap();
         let address = frontend.local_addr().unwrap();
-        let pipeline = gdl::Source::new(gdl::Hop::new((), gdl::SinkStage::new(Arc::new(Echo)), ()));
+        let pipeline = gdl::Source::new(gdl::Hop::new((), gdl::SinkStage::new(Arc::new(Echo::default())), ()));
         let clients = ApiClients {
             chat: Some(if all {
                 adapt(ChatAdapter, pipeline.clone())
