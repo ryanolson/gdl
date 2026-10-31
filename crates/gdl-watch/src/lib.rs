@@ -12,7 +12,9 @@
 //! directory backend, the report a child pool's hub sends its parent's
 //! hub of its record ([`Report`]). And what an instance asks of its own
 //! pool hub's keyed record table, and the hub's answer ([`KeyedAsk`],
-//! [`KeyedReply`]).
+//! [`KeyedReply`]). And the list of a pool hub's members, with each one's
+//! phase and latest load, for a controller outside the pool
+//! ([`Instances`]).
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own pool's watch, for the pool's drain, and sends the report, so the wire types, the routes, and the client
@@ -39,6 +41,7 @@ mod backoff;
 mod client;
 mod command;
 mod follows;
+mod instances;
 mod keyed;
 mod limits;
 mod report;
@@ -51,6 +54,7 @@ pub use command::{
     child_scale_to_zero_path, child_withdraw_path,
 };
 pub use follows::{FollowEvent, Listing};
+pub use instances::{INSTANCES_ROUTE, InstanceLoad, InstancePhase, Instances, PoolInstance};
 pub use keyed::{
     Expected, KEYED_EXTENSION, KEYED_ROUTE, KeyedAnswer, KeyedAsk, KeyedOp, KeyedRecord,
     KeyedReply, keyed_path,

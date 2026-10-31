@@ -108,6 +108,15 @@ impl GraphAdmission {
         let (_, member) = members.get(&id)?;
         Some((member.registration.segment.clone(), member.peer.clone()))
     }
+
+    /// Every member, with its segment and peer, as `/members` shows them.
+    pub(crate) fn members(&self) -> Vec<(String, PeerInfo)> {
+        let members = self.members.lock().expect("membership lock");
+        members
+            .values()
+            .map(|(_, member)| (member.registration.segment.clone(), member.peer.clone()))
+            .collect()
+    }
 }
 
 impl Extension for GraphAdmission {

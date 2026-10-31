@@ -35,11 +35,11 @@ The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, an
 
 ### Admission
 
-Each instance registers with a `SegmentRegistration`: its segment's name, the contract hash, and the placement hash compiled into its binary. `GraphAdmission` refuses a registration that does not match the deployment it serves. A binary built for another graph or placement never enters membership. The hub lists its members, with each one's segment and velo peer address, at `GET /v1/ext/gdl/members` on its public listener.
+Each instance registers with a `SegmentRegistration`: its segment's name, the contract hash, and the placement hash compiled into its binary. `GraphAdmission` refuses a registration that does not match the deployment it serves. A binary built for another graph or placement never enters membership. The hub lists its members, with each one's segment and velo peer address, at `GET /v1/ext/gdl/members` on its public listener. A pool's hub also lists them with their phase and load ([Listing the instances](pools.md#listing-the-instances)).
 
 ### Service names
 
-An instance announces each phase as a hub service: `gdl-<phase>-<segment in hex>`, for `loaded`, `serving`, `ready`, `drained`, and `retired`. A peer acknowledges a retirement with `gdl-avoids-<instance id>`, the id as 32 hex digits, and withdraws it once the retired instance has left.
+An instance announces each phase as a hub service: `gdl-<phase>-<segment in hex>`, for `loaded`, `serving`, `ready`, `drained`, `retired`, and `detach` (an instance of a draining pool that sends no more work into it). A peer acknowledges a retirement with `gdl-avoids-<instance id>`, the id as 32 hex digits, and withdraws it once the retired instance has left.
 
 The segment's name is hex because a service name has a narrow alphabet. velo-hub allows 128 characters, and a phase has at most seven letters, so a segment name is at most 58 characters ([Segment settings](../operations/configuration.md)).
 

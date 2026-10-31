@@ -120,6 +120,18 @@ Once a period, the hub sums the latest report of each usable entry instance into
 
 There is no summary while no report counts, and none for a class that no hop enters.
 
+### Listing the instances
+
+A controller outside the pool, such as one that chooses which instance to remove, reads the hub's list of its members: `GET /v1/ext/gdl-pool/instances` on the control listener (`gdl_watch::Instances`). For each member it gives:
+
+- its segment;
+- its velo peer, the instance id and the worker address, encoded as `/v1/ext/gdl/members` and the pool's watch carry it;
+- `addresses`, the socket addresses its velo TCP transport advertises, as `ip:port`. Under Kubernetes the IP is the pod's ([Addresses in a container](hub.md#addresses-in-a-container)), so a controller maps a pod to its instance by it;
+- its phase, the furthest one it has announced, in this order: `joining` (registered, not yet `ready`), `ready`, `detached`, `retired`, `drained`;
+- for a usable entry instance, its latest load report: `admitted`, `limit`, `refusals`, and `age_ms`, how long ago the hub took it. It is the report the next summary would count, so it is absent for an interior instance, an entry instance that has not reported yet, one that is not usable, and a report older than three periods.
+
+The hub makes the list when it is asked, from its members, its own service directory, and the reports it holds. Nothing is kept for it, and no request pays for it. The hub reads each phase's service on its own, so a list can catch an instance between two announcements.
+
 ### Presence
 
 `presence` says whether the pool is expected to answer. `serving` is the default: the hub sends a heartbeat, and a reader that sees none for the lease holds the pool missing. `scaled_to_zero` says that the pool was scaled to 0 on purpose: it sends no heartbeat, and its record never lapses. So a reader tells a pool scaled to 0 from a pool that is expected but silent. The relay directory and `PoolView` apply the lease only to a `serving` record (`PoolRecord::leased`). A pool scaled to 0 takes no work: a parent's hub does not follow it, and ends a follow of it, which closes once its choosers let go, as for a newer epoch.

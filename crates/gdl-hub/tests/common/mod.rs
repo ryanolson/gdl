@@ -153,6 +153,8 @@ pub struct Instance {
     segment: &'static str,
     phases: HashMap<SegmentPhase, HubServiceRegistration>,
     node: Velo,
+    /// The address its velo node listens on.
+    listening: std::net::SocketAddr,
 }
 
 impl Instance {
@@ -175,6 +177,7 @@ impl Instance {
         segment: &'static str,
     ) -> Result<Self, ClientError> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let listening = listener.local_addr().expect("a bound port");
         let tcp = velo_hub::velo::transports::tcp::TcpTransportBuilder::new()
             .from_listener(listener)
             .expect("valid test fixture")
@@ -201,11 +204,22 @@ impl Instance {
             segment,
             phases: HashMap::new(),
             node,
+            listening,
         })
     }
 
     pub fn id(&self) -> InstanceId {
         self.node.instance_id()
+    }
+
+    /// The address its velo node listens on, and advertises.
+    pub fn listening(&self) -> std::net::SocketAddr {
+        self.listening
+    }
+
+    /// The velo peer it registered with.
+    pub fn peer(&self) -> velo_hub::velo::PeerInfo {
+        self.node.peer_info()
     }
 
     pub async fn announce(&mut self, phase: SegmentPhase) {
@@ -678,4 +692,20 @@ pub fn plain_pool(event: gdl_watch::PoolWatchEvent) -> Option<gdl_watch::PoolWat
         }),
         event => Some(event),
     }
+}
+
+/// `GET` on the hub's control listener, under the pool's extension: the
+/// status and the body.
+pub async fn control_get(hub: &Hub, path: &str) -> (u16, String) {
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/{}{path}",
+        hub.control_addr().port(),
+        gdl_watch::EXTENSION
+    );
+    let response = tokio::time::timeout(WAIT, reqwest::get(&url))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    let status = response.status().as_u16();
+    (status, response.text().await.expect("a body"))
 }

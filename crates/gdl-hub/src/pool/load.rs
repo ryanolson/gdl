@@ -79,6 +79,20 @@ impl Reports {
         self.reports.insert(instance, report);
     }
 
+    /// The latest report `instance` made in its registration `epoch`, and
+    /// how long before `now` it was taken, while a summary at `now` would
+    /// still count it: no older than three periods.
+    pub(super) fn latest(
+        &self,
+        instance: &InstanceId,
+        epoch: RegistrationEpoch,
+        now: Instant,
+    ) -> Option<(&LoadReport, Duration)> {
+        let report = self.reports.get(instance)?;
+        let age = now.saturating_duration_since(report.at);
+        (report.epoch == epoch && age <= self.kept).then_some((&report.load, age))
+    }
+
     /// The summary last made.
     pub(super) fn summary(&self) -> Option<LoadSummary> {
         self.summary
@@ -233,6 +247,33 @@ mod tests {
             "a dropped report is not kept"
         );
         assert_eq!(reports.summary().map(|summary| summary.admitted), Some(2));
+    }
+
+    /// The latest report is shown only for the registration it was made in,
+    /// and only while a summary would count it: no older than three
+    /// periods.
+    #[test]
+    fn the_latest_report_is_of_its_registration_and_fresh() {
+        let period = Duration::from_secs(1);
+        let a = InstanceId::new_v4();
+        let start = Instant::now();
+        let mut reports = Reports::new(period);
+        assert!(reports.latest(&a, *EPOCH, start).is_none(), "no report yet");
+        reports.put(a, *EPOCH, report(3, 8, 1), start);
+        let latest = |at| {
+            reports
+                .latest(&a, *EPOCH, at)
+                .map(|(load, age)| (load.admitted, load.limit, load.refusals, age))
+        };
+        assert_eq!(latest(start + period), Some((3, 8, 1, period)));
+        assert_eq!(latest(start + period * 3), Some((3, 8, 1, period * 3)));
+        assert_eq!(latest(start + period * 3 + Duration::from_millis(1)), None);
+        assert!(
+            reports
+                .latest(&a, RegistrationEpoch::new(), start)
+                .is_none(),
+            "a later registration was shown an earlier one's report"
+        );
     }
 
     /// The instance and the hub keep their periods on their own clocks, so

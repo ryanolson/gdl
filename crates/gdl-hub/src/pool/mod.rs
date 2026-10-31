@@ -39,6 +39,7 @@ mod drain;
 mod feed;
 mod followers;
 mod health;
+mod instances;
 mod judge;
 mod load;
 mod meter;
@@ -171,6 +172,14 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// property entries, each with a state that keeps its history, and writes the
 /// record on each change of them.
 ///
+/// The hub lists its members on the control listener (`GET instances`, a
+/// [`gdl_watch::Instances`]), for a controller outside the pool: each
+/// one's segment and peer from [`GraphAdmission`], with the addresses
+/// the peer's TCP transport advertises, the furthest phase it
+/// has announced, read from the hub's own services over loopback when the
+/// list is asked for, and, for a usable entry instance, the latest report
+/// that the next summary would count, with its age.
+///
 /// The record says whether the pool serves or is scaled to 0 on purpose
 /// (`POST presence` on the control listener, a
 /// [`gdl_watch::SetPresence`], or [`PoolReadiness::set_presence`] in
@@ -244,6 +253,9 @@ pub struct PoolReadiness<D: PoolDirectory> {
     places: timing::RoutePlaces,
     /// The hub's admission, whose members say who an entry instance is.
     admission: OnceLock<Arc<GraphAdmission>>,
+    /// The hub's own service directory, over loopback, once the hub has
+    /// started: the instance list reads the members' phases from it.
+    services: OnceLock<velo_hub::client::HubServices>,
     /// The classes the pool's class sends to, whose pools it follows.
     sends: Vec<String>,
     /// The load summary's period, when the class has an entry segment to
@@ -413,6 +425,7 @@ impl<D: PoolDirectory> PoolReadiness<D> {
             feed: Arc::new(feed),
             places: timing::RoutePlaces::new(&timing.watch_caps),
             admission: OnceLock::new(),
+            services: OnceLock::new(),
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(pool.summary),
             relay,
@@ -826,6 +839,14 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
         let (counts, updates) = tokio::sync::mpsc::channel(count::BUFFER);
         let segments = self.quorums.iter().map(|(name, _)| name.clone()).collect();
         let feed = Arc::clone(&self.feed);
+        match count::client(ctx.public_addr(), ctx.control_addr().port()) {
+            Ok(client) => {
+                let _ = self.services.set(client.services());
+            }
+            Err(error) => {
+                tracing::error!(%error, "the hub cannot read its own services; it lists no instances");
+            }
+        }
         let counting = tokio::spawn(count::run(
             count::loopback(ctx.public_addr()),
             ctx.control_addr().port(),
@@ -1095,6 +1116,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
     }
 
     fn control_routes(self: Arc<Self>) -> Router {
+        let listing = Arc::clone(&self);
         let draining = Arc::clone(&self);
         let scaling = Arc::clone(&self);
         let revoking = Arc::clone(&self);
@@ -1105,6 +1127,23 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
         let declared = Arc::clone(&self.relay);
         let avoiding = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::INSTANCES_ROUTE,
+                get(move || async move {
+                    let (Some(admission), Some(services)) =
+                        (listing.admission.get(), listing.services.get())
+                    else {
+                        return Err(HubError::new(
+                            ErrorCode::Unavailable,
+                            "the hub has not started",
+                        ));
+                    };
+                    instances::list(admission, services, &listing.feed)
+                        .await
+                        .map(Json)
+                        .map_err(|error| HubError::new(ErrorCode::Unavailable, error))
+                }),
+            )
             .route(
                 gdl_watch::AVOIDS_ROUTE,
                 post(

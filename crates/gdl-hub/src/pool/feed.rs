@@ -46,7 +46,7 @@ use futures::Stream;
 use futures::stream::BoxStream;
 use gdl_model::{EntryState, PropertyKey, PropertyLists};
 use gdl_pools::{LoadSummary, PoolState};
-use gdl_watch::LoadReport;
+use gdl_watch::{InstanceLoad, LoadReport};
 use tokio::sync::{broadcast, watch};
 use velo_hub::Lease;
 use velo_hub::protocol::RegistrationEpoch;
@@ -515,6 +515,29 @@ impl Feed {
     /// The load summary last made, as the watch last sent it.
     pub(super) fn summary(&self) -> Option<LoadSummary> {
         self.lock().loads.summary()
+    }
+
+    /// The latest load report of each usable entry instance, with its age
+    /// at `now`: each one a summary at `now` would count, so that the list
+    /// never shows a report of a retired instance or of an earlier
+    /// registration.
+    pub(super) fn loads(&self, now: Instant) -> HashMap<InstanceId, InstanceLoad> {
+        let shared = self.lock();
+        shared
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.usable())
+            .filter_map(|(id, entry)| {
+                let (report, age) = shared.loads.latest(id, entry.epoch, now)?;
+                let load = InstanceLoad {
+                    admitted: report.admitted,
+                    limit: report.limit,
+                    refusals: report.refusals,
+                    age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+                };
+                Some((*id, load))
+            })
+            .collect()
     }
 
     /// The counting saw `event` on the `watched` service of the class's

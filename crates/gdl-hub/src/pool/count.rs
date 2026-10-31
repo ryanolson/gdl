@@ -1,5 +1,7 @@
 //! The counting of a pool's usable instances, from its hub's own service
-//! watches over loopback: the extension's only use of velo-hub's client.
+//! watches over loopback. The extension's client of its own hub is built
+//! here, for the counting and for the instance list
+//! ([`super::instances`]), which reads the same services once when asked.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -49,6 +51,20 @@ pub(super) fn loopback(public: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, public.port())
 }
 
+/// A client of the hub whose public listener is at `public`, reached from
+/// its own process, and whose control listener is on `control_port`.
+pub(super) fn client(
+    public: SocketAddr,
+    control_port: u16,
+) -> Result<HubClient, velo_hub::client::ClientError> {
+    let public = loopback(public);
+    HubClient::builder()
+        .host(public.ip().to_string())
+        .public_port(public.port())
+        .control_port(control_port)
+        .build()
+}
+
 /// Count the usable instances of each of `segments` at the hub at
 /// `public`, sending each change to the judgment, until `cancel`. Each
 /// event is shown to `observe` before it is counted, with its segment's
@@ -61,12 +77,7 @@ pub(super) async fn run(
     observe: impl Fn(usize, Watched, &ServiceEvent) + Send,
     cancel: CancellationToken,
 ) {
-    let client = match HubClient::builder()
-        .host(public.ip().to_string())
-        .public_port(public.port())
-        .control_port(control_port)
-        .build()
-    {
+    let client = match client(public, control_port) {
         Ok(client) => client,
         Err(error) => {
             tracing::error!(%error, "the pool cannot watch its hub; it stays unavailable");
