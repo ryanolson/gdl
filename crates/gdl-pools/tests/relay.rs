@@ -469,7 +469,6 @@ async fn an_unknown_kept_write_is_replaced_only_by_a_write_that_reads_nothing() 
 }
 
 #[tokio::test]
-#[ignore = "F10: repairing a kept file never clears the relay's unknown state without another write or parent restart"]
 async fn a_repaired_relay_file_can_be_read_without_restarting_the_parent() {
     let temp = temp();
     let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");

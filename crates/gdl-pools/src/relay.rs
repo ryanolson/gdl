@@ -51,8 +51,9 @@ struct Store {
     writes: Mutex<()>,
     /// The pools, by class and name, whose kept file did not decode when
     /// the directory opened: what they last wrote is unknown, so a read of
-    /// it is an error, never none. A write that does not depend on what
-    /// was read replaces the file, and the pool is known again.
+    /// it is an error, never none. A read decodes the file again, and a
+    /// write that does not depend on what was read replaces it: either
+    /// way, the pool is known again.
     unknown: Mutex<BTreeSet<(String, String)>>,
 }
 
@@ -84,8 +85,9 @@ impl RelayDirectory {
     /// that does not hold its pool's record or tombstone is passed over by
     /// its watches, as the `dir` backend passes it over, but its pool's
     /// last write is unknown ([`RelayDirectory::unknown`]): a read of it is
-    /// an error, and a write numbered past a read is refused, until a write
-    /// that depends on no read, or a withdrawal, replaces the file.
+    /// an error, and a write numbered past a read is refused, until the
+    /// file decodes again, which each read checks, or a write that depends
+    /// on no read, or a withdrawal, replaces it.
     pub fn open(root: impl Into<PathBuf>, limits: MemoryLimits) -> Result<Self, DirectoryError> {
         let root = root.into();
         let unavailable = |what: &str, path: &Path, error: std::io::Error| {
@@ -165,24 +167,39 @@ impl RelayDirectory {
 
     /// The last write the directory took for `pool` of `class`, its record
     /// or the tombstone of its withdrawal: a restarted child numbers past
-    /// it.
+    /// it. For a pool whose kept file did not decode, the file is decoded
+    /// again on each read: once it is repaired, the read takes the write it
+    /// holds, and the pool is known again.
     ///
     /// # Errors
     ///
-    /// [`DirectoryError::Unavailable`] for a pool whose kept file did not
-    /// decode when the directory opened, until a write replaces it.
+    /// [`DirectoryError::Unavailable`] while the kept file of the pool does
+    /// not decode.
     pub fn last(&self, class: &str, pool: &str) -> Result<Option<LastWrite>, DirectoryError> {
-        if self.unknown(class, pool) {
-            return Err(DirectoryError::Unavailable(format!(
-                "the kept file of pool `{pool}` of class `{class}` does not decode"
-            )));
+        let Some(store) = self.store.as_ref().filter(|_| self.unknown(class, pool)) else {
+            return Ok(self.records.last(class, pool));
+        };
+        // In the order a write takes them, so that a write and this read
+        // never both take the file.
+        let _writes = store.writes.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut unknown = store.unknown.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = (class.to_owned(), pool.to_owned());
+        if !unknown.contains(&key) {
+            return Ok(self.records.last(class, pool));
         }
-        Ok(self.records.last(class, pool))
+        let read = file::read(&store.root.join(class), class, pool)?;
+        match &read {
+            Some(LastWrite::Record(record)) => self.records.put(PoolRecord::clone(record))?,
+            Some(LastWrite::Withdrawn(withdrawal)) => self.records.remove(withdrawal.clone())?,
+            None => {}
+        }
+        unknown.remove(&key);
+        Ok(read)
     }
 
     /// Whether the kept file of `pool` of `class` did not decode when the
-    /// directory opened, and no write has replaced it since: what the pool
-    /// last wrote is unknown.
+    /// directory opened, or last read, and no write has replaced it since:
+    /// what the pool last wrote is unknown.
     pub fn unknown(&self, class: &str, pool: &str) -> bool {
         self.store.as_ref().is_some_and(|store| {
             store
