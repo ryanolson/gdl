@@ -24,6 +24,9 @@ mod stop;
 #[path = "tests/apply.rs"]
 mod apply;
 
+#[path = "tests/recheck.rs"]
+mod recheck;
+
 const UID: &str = "pool-uid";
 
 #[derive(Debug, Clone)]
