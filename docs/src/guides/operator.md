@@ -112,7 +112,7 @@ The scaler keeps its target at `max(spec.replicas, spec.minReplicas)`. A scale-u
 4. **Delete exactly that pod.** The scaler sets the victim's `controller.kubernetes.io/pod-deletion-cost` to `-2147483648`, the lowest, and then writes the target's `replicas` one lower. The ReplicaSet deletes the pod, which retires and drains on its SIGTERM ([Stopping](../concepts/lifecycle.md#stopping)), bounded by the pod's grace: the drain bound and 30 s.
 5. **Record it.** Once the pod is gone, `status.last` holds the pod chosen, the pod deleted, the time from the choice, and the outcome: `removed`, or `overran` when the pod went more than `drainBound` and 10 s after the scale-down. The 10 s are the runtime's margin past its bound ([The bound](../concepts/lifecycle.md#the-bound)).
 
-Each victim is in `status.retiring` from its choice until its pod is gone, with what its `/metrics` last said it holds. The status is all the scaler remembers, so an operator that restarts carries on.
+Each victim is in `status.retiring` from its choice until its pod is gone, with what its `/metrics` last said it holds. The status is all the scaler remembers, so an operator that restarts carries on. Each reconcile reads the scaler from the API, not from its watch's cache: the scaler's own write to its target wakes the next reconcile, and the cache can still hold the status from before the last write. A victim whose pod is terminating counts as being deleted, whatever the status says.
 
 ### Victim policies
 

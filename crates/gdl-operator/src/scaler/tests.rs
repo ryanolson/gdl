@@ -620,3 +620,36 @@ async fn an_unchanged_status_is_not_written_again() {
         .collect();
     assert_eq!(counts["Scaling"], "False");
 }
+
+/// A frontend's victim whose scale-down was written but whose status was
+/// not (a status write that failed) is found terminating while its status
+/// still says `unrouting`: the scaler takes it as being deleted, and does
+/// not lower the count again.
+#[tokio::test]
+async fn a_victim_found_terminating_is_not_scaled_down_twice() {
+    let fake = Fake::with(&[3, 0, 3]);
+    let mut spec = spec(Some(2));
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    let unrouted = status(&fake);
+    assert_eq!(unrouted.retiring[0].phase, RetiringPhase::Unrouting);
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    // The status write of that reconcile is lost.
+    fake.state().status = Some(unrouted);
+    fake.settle(false);
+    fake.take_writes();
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.state().replicas, 2, "{:?}", fake.take_writes());
+    assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Deleting);
+    fake.exit();
+    once(&fake, &spec, 4_000).await;
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(
+        (last.outcome, last.chosen.as_str()),
+        (Outcome::Removed, "uid-2")
+    );
+}

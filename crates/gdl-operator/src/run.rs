@@ -18,6 +18,7 @@ use crate::{Context, GdlScaler, HttpProbe, KubeCluster, Victims};
 const RETRY: Duration = Duration::from_secs(5);
 
 struct Shared {
+    scalers: Api<GdlScaler>,
     cluster: KubeCluster,
     probe: HttpProbe,
     victims: Victims,
@@ -31,6 +32,7 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     let scalers: Api<GdlScaler> = Api::namespaced(client.clone(), namespace);
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let shared = Arc::new(Shared {
+        scalers: scalers.clone(),
         cluster: KubeCluster::new(client, namespace),
         probe: HttpProbe::new(namespace).map_err(anyhow::Error::msg)?,
         victims,
@@ -52,6 +54,17 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
 }
 
 async fn reconcile(scaler: Arc<GdlScaler>, shared: Arc<Shared>) -> Result<Action, Failed> {
+    // The watch's copy can predate the status the last reconcile wrote,
+    // whose own write to the target woke this one: the status is all the
+    // scaler remembers, so it is read again.
+    let Some(scaler) = shared
+        .scalers
+        .get_opt(&scaler.name_any())
+        .await
+        .map_err(|e| Failed(e.to_string()))?
+    else {
+        return Ok(Action::await_change());
+    };
     let cx = Context {
         cluster: &shared.cluster,
         probe: &shared.probe,

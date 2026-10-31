@@ -392,6 +392,14 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 continue;
             };
             if pod.terminating {
+                // Being deleted, whatever the status says: a status read
+                // before the write that scaled it down still says
+                // `unrouting`, and a victim taken for one would be scaled
+                // down again, or taken back.
+                if victim.phase == RetiringPhase::Unrouting {
+                    victim.phase = RetiringPhase::Deleting;
+                    victim.scaled.get_or_insert_with(|| rfc3339(self.now_ms));
+                }
                 if let Some(held) = self.held(&[pod]).await.remove(&pod.uid) {
                     victim.admitted = held.admitted;
                     victim.egress = held.egress;
