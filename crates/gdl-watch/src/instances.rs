@@ -18,7 +18,8 @@ pub const INSTANCES_ROUTE: &str = "/instances";
 /// The body of [`INSTANCES_ROUTE`]'s answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instances {
-    /// Every member of the hub, in no order.
+    /// Every member of the hub, in no order. The list is a snapshot: an
+    /// instance that leaves while it is made is left out.
     pub instances: Vec<PoolInstance>,
 }
 

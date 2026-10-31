@@ -7,7 +7,7 @@
 //! costs the hub nothing between requests, and nothing on a request's
 //! path.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -66,9 +66,18 @@ pub(super) async fn list(
             *phase = (*phase).max(shown);
         }
     }
+    // A member that left during the reads has lost its services, and
+    // would read as `joining`, a phase before the one it had: it is left
+    // out, as a list made a moment later would leave it out.
+    let staying: HashSet<InstanceId> = admission
+        .members()
+        .into_iter()
+        .map(|(_, peer)| peer.instance_id)
+        .collect();
     let mut loads = feed.loads(Instant::now());
     let instances = members
         .into_iter()
+        .filter(|(_, peer)| staying.contains(&peer.instance_id))
         .map(|(segment, peer)| {
             let phase = phases
                 .get(&peer.instance_id)

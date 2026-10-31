@@ -484,7 +484,6 @@ async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
 
 /// Departure during the directory reads must not move a phase backwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F3: departure during directory reads moves retired back to joining"]
 async fn a_departure_during_directory_reads_does_not_move_the_phase_backwards() {
     use std::collections::BTreeMap;
 
