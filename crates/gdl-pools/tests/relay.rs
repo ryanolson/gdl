@@ -319,6 +319,43 @@ fn a_state_directory_that_cannot_be_read_is_refused() {
     );
 }
 
+/// Reopening a parent's store must not turn an undecodable retained
+/// tombstone into a bare 404 for its restarted child.
+#[tokio::test]
+#[ignore = "F8: reopening a relay store skips an undecodable tombstone and last_write answers none"]
+async fn an_undecodable_relay_tombstone_is_an_unknown_read() {
+    let temp = temp();
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    let last = Withdrawal {
+        properties_version: (9 << 20) + 100,
+        ..withdrawal("m1", 2)
+    };
+    directory
+        .withdraw(last.clone())
+        .await
+        .expect("the tombstone");
+    assert_eq!(
+        directory.last_write("model_x", "m1").await,
+        Ok(Some(gdl_pools::LastWrite::Withdrawn(last)))
+    );
+    drop(directory);
+    let path = temp.path().join("model_x/m1.json");
+    let mut encoded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the retained file"))
+            .expect("the file is JSON");
+    encoded["withdrawn"]["properties_version"] = serde_json::json!("broken");
+    std::fs::write(&path, serde_json::to_vec(&encoded).expect("JSON"))
+        .expect("the undecodable tombstone stays in place");
+    let read = match RelayDirectory::open(temp.path(), MemoryLimits::default()) {
+        Ok(again) => again.last_write("model_x", "m1").await,
+        Err(error) => Err(error),
+    };
+    assert!(
+        matches!(read, Err(DirectoryError::Unavailable(_))),
+        "an unreadable retained write must hold the child, never read as none: {read:?}"
+    );
+}
+
 /// A child scaled to 0 on purpose sends no heartbeat, and its record stays
 /// in a new watch's snapshot past its lease, as a missing child's does:
 /// the reader tells them apart by their presence.
