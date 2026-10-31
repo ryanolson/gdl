@@ -55,6 +55,8 @@ From the start's first request to its hub until that wait ends (the hub admits o
 The registry holds:
 
 - `uptime_seconds`, read at each scrape;
+- `instance_phase`, the phase the probes report, one series for each phase, read at each scrape;
+- what the instance holds now: the roots in its admission ledger, its admission limit, its egress permits in use, and its open anchors, read at each scrape ([Reading a drain](#reading-a-drain));
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
 - the runtime's figures for each segment a request passes through;
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
@@ -121,6 +123,23 @@ sequenceDiagram
 Known gaps in these rules are in [Known limitations](limitations.md): a deadline can count in two segments when their clocks pass together, an operator's recovered error inside one segment counts nowhere, a streamed request's input error counts where it enters a response, and after a cancel the source can hold a request in flight until its caller reads.
 
 dynamo's `request_duration_seconds` spans the whole handler, its stream included. gdl splits that span into the request path and the response path. So gdl does not emit the name, and reserves it. `error_type` holds gdl's error kinds, not the names of dynamo's handler steps (`generate`, `deserialization`). A dashboard keyed on dynamo's values needs an adapter. [Metrics design](../development/metrics-design.md) records why the figures take this shape. [Runtime feature costs](feature-costs.md) holds what recording costs.
+
+## Reading a drain
+
+To remove an instance without cutting a request, stop it, then delete it once it holds nothing. `/metrics` shows both on one scrape. Each series is read from what the instance already counts, so a request does no work for them:
+
+| Series | Drained when |
+|---|---|
+| `instance_phase{phase="draining"}` | 1: the instance was stopped and takes no new work. Draining is final |
+| `admission_admitted` | 0: no root request is held, and every stream the instance sent has been handed on by velo |
+| `egress_in_use` | 0: the instance produces no stream, and velo holds none of its output |
+| `active_anchors` | 0: no stream is still to arrive here |
+
+`admission_limit` is the instance's admission limit, so `admission_admitted` over it is the instance's load.
+
+`inflight_requests` is not the drain's signal. A visit leaves it when its response ends here, while the request keeps its admission share and its egress permit until velo's `StreamSender::retired()` resolves: until the consumer has read the stream's last output or left. The instance's own drain waits for the ledger, not the gauge ([Segment lifecycle](../concepts/lifecycle.md)).
+
+The four counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` is always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
 
 ## Reading a chooser's pool choices
 

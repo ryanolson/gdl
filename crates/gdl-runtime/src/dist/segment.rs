@@ -6,6 +6,7 @@ use velo::Velo;
 
 use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
+use super::held::Held;
 use super::hop::{DHop, Register};
 use super::offers::{Refusal, refusal};
 use super::roster::Roster;
@@ -58,7 +59,11 @@ impl Deployment {
         );
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config, meters)?;
         rt.check_selector_needs(manifest)?;
-        Ok(Self { rt: Arc::new(rt) })
+        let rt = Arc::new(rt);
+        if let Some(registry) = &rt.config.metrics {
+            Held::register(registry, Arc::downgrade(&rt))?;
+        }
+        Ok(Self { rt })
     }
 
     /// Fail unless this deployment was made for the contract whose manifest

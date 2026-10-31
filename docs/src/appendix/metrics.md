@@ -1,6 +1,6 @@
 # Metrics reference
 
-This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). The process's own figures are in `crates/gdl-cgroup`. [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
+This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's pool families are in `crates/gdl-runtime/src/dist/pools/meter.rs`, and its gauges of the pools it follows in `crates/gdl-runtime/src/dist/pools/meter/gauges.rs`. `uptime_seconds`, `instance_phase`, and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`), and what an instance holds in `crates/gdl-runtime/src/dist/held.rs`. The process's own figures are in `crates/gdl-cgroup`. [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
 
 ## Names and labels
 
@@ -38,6 +38,20 @@ Every family in [The runtime's families](#the-runtimes-families) also has `dynam
 | `uptime_seconds` | gauge | no `dynamo_endpoint` | one per process | Seconds since the segment process started. |
 
 A series appears at zero once the registry is served, as the segment starts to serve. Before that, `/metrics` has no metrics ([`/metrics`](../operations/observability.md#metrics)). The runtime records the families only when `RuntimeConfig::metrics` holds a registry. A segment binary sets it only when its system listener is on.
+
+## An instance's phase and what it holds
+
+These have no `dynamo_endpoint`, and each is read at each scrape from what the instance already counts. [Reading a drain](../operations/observability.md#reading-a-drain) says how an operator reads them.
+
+| Name | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `instance_phase` | gauge | `phase` | 1 for the process's phase, 0 for each other phase: `starting`, `ready`, `draining`. The phase the probes report. |
+| `admission_admitted` | gauge | | Root requests the instance's admission ledger holds. A request holds its root until its last stream here is retired by velo, after its response has ended. |
+| `admission_limit` | gauge | | The most root requests the ledger holds at once: `[runtime] admission_limit`. |
+| `egress_in_use` | gauge | | Egress permits the instance holds: one for each stream it produces, until velo has handed the stream's output on. |
+| `active_anchors` | gauge | | Anchors the instance's velo node holds open: streams still to arrive here. |
+
+`instance_phase` is in every segment's registry. The other four are there only while the runtime records its figures (`RuntimeConfig::metrics`). Once the segment's runtime is gone, they have no series.
 
 ## Entries
 
@@ -194,6 +208,6 @@ A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node ga
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 47 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the 12 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 52 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, `instance_phase` and the 4 families of what an instance holds, the 12 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.

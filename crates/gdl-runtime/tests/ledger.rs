@@ -118,7 +118,6 @@ async fn reaches(process: &Process, name: &str, phase: Option<&str>, value: f64)
 /// output on, the ledger and the permits are empty, and the phase stays
 /// draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the drain gauges: /metrics has no phase, ledger, egress, or anchor series"]
 async fn the_scrape_shows_what_an_instance_holds_until_velo_retires_it() {
     let placement = Placement::new()
         .segment("front", ["A", "B", "F", "E", "G"])

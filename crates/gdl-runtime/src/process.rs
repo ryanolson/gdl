@@ -1455,6 +1455,8 @@ impl Process {
             ));
         }
         registry.register(Box::new(uptime)).map_err(metrics_error)?;
+        let phases = system::Phases::new(&self.health).map_err(metrics_error)?;
+        registry.register(Box::new(phases)).map_err(metrics_error)?;
         let reserved = self.reserved();
         if !reserved.is_empty() {
             registry

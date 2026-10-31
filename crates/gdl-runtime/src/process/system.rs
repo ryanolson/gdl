@@ -6,9 +6,11 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use prometheus::core::{Collector, Desc};
+use prometheus::proto::{self, MetricFamily, MetricType};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -144,12 +146,74 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
+    /// Every phase, in the order a process passes through them.
+    const ALL: [Self; 3] = [Self::Starting, Self::Ready, Self::Draining];
+
     fn name(self) -> &'static str {
         match self {
             Self::Starting => "starting",
             Self::Ready => "ready",
             Self::Draining => "draining",
         }
+    }
+}
+
+/// The family of the process's phase, and its help.
+pub(crate) const PHASE: &str = "instance_phase";
+const PHASE_HELP: &str = "1 for the segment process's phase, 0 for the others: starting, ready, draining. Draining is final.";
+
+/// `instance_phase`: one series for each phase, read from the process's
+/// health at each scrape, so that an operator that retired the instance
+/// sees it drain on the same scrape as what it still holds. It holds the
+/// health weakly: the health holds the registry it is in.
+pub(crate) struct Phases {
+    health: Weak<Health>,
+    desc: Desc,
+}
+
+impl Phases {
+    pub(crate) fn new(health: &Arc<Health>) -> prometheus::Result<Self> {
+        Ok(Self {
+            health: Arc::downgrade(health),
+            desc: Desc::new(
+                PHASE.into(),
+                PHASE_HELP.into(),
+                vec!["phase".into()],
+                Default::default(),
+            )?,
+        })
+    }
+}
+
+impl Collector for Phases {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let Some(health) = self.health.upgrade() else {
+            return Vec::new();
+        };
+        let now = health.phase();
+        let series = Phase::ALL
+            .into_iter()
+            .map(|phase| {
+                let mut label = proto::LabelPair::default();
+                label.set_name("phase".into());
+                label.set_value(phase.name().into());
+                let mut gauge = proto::Gauge::default();
+                gauge.set_value(f64::from(u8::from(phase == now)));
+                let mut metric = proto::Metric::from_label(vec![label]);
+                metric.set_gauge(gauge);
+                metric
+            })
+            .collect();
+        let mut family = MetricFamily::default();
+        family.set_name(PHASE.into());
+        family.set_help(PHASE_HELP.into());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(series);
+        vec![family]
     }
 }
 
