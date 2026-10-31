@@ -523,7 +523,6 @@ fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
 }
 
 #[test]
-#[ignore = "F6: deploy accepts the previous Ready phase after the new generation is observed but before it is applied"]
 fn a_write_ahead_status_does_not_finish_the_deploy_before_the_apply() {
     let mirror = Mirror::new();
     let files = files(&mirror, &fleet_text());

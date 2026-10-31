@@ -271,8 +271,9 @@ pub(super) fn delete(
     Ok(())
 }
 
-/// Wait until `pool` of `cluster` is ready: the operator has acted on its
-/// generation, and its hub says it is healthy. A generation the operator
+/// Wait until `pool` of `cluster` is ready: the operator has applied its
+/// generation (`Applied`, of that generation), and its hub says it is
+/// healthy. A generation the operator
 /// holds or refuses stops the wait at once, with its reason.
 pub(super) fn ready(
     kube: &mut dyn Kube,
@@ -316,6 +317,14 @@ pub(super) fn ready(
     let acted = read.status["observedGeneration"].as_i64() == Some(read.generation);
     if !acted {
         return Ok(Some(read.stopping_or_pending()));
+    }
+    // The operator stores the generation it acts on before it applies it:
+    // only `Applied` for this generation says the apply has landed.
+    if read.on("Applied").is_none() {
+        return Ok(Some(format!(
+            "the operator has not applied its generation {} yet",
+            read.generation
+        )));
     }
     match read.status["phase"].as_str() {
         Some("Ready") => Ok(None),

@@ -168,7 +168,7 @@ impl Kube {
                        "conditions": [condition("PoolRestartPending", true, message)]})
             }
             _ => json!({"observedGeneration": generation, "phase": "Ready",
-                        "conditions": [condition("PoolRestartPending", false, "")]}),
+                        "conditions": [condition("Applied", true, ""), condition("PoolRestartPending", false, "")]}),
         };
     }
 
