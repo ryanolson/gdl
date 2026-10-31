@@ -1,11 +1,11 @@
 # Workspace crates
 
-The root workspace has thirteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
+The root workspace has fourteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
 
 | Crate | Depends on | Contents |
 |---|---|---|
 | `gdl` | `gdl-model`, `gdl-pools`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, pool policies, the followed pools' view (`FollowedPools`) and its typed property index (`PropertyKind`, `PropertyIndex`), what a node says of its instance's properties (`InstanceProperties`), the pool hub's record tables (`PoolRecords`), metrics, the derives, and local composition |
-| `gdl-runtime` | `gdl`, `gdl-model`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
+| `gdl-runtime` | `gdl`, `gdl-model`, `gdl-cgroup`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
 | `gdl-model` | nothing in the workspace | The manifest with its property declarations, placement, layout, validator, the property supply check, diagrams, the fleet file, a pool's settings, a property's key and its canonical comparison (`PropertyKey`, `PropertyEntry`), and the names of a segment's hub services. It builds for wasm |
 | `gdl-syntax` | `gdl-model` | The graph parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract. It builds for wasm |
 | `gdl-message` | `gdl-model` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue |
@@ -16,7 +16,8 @@ The root workspace has thirteen crates. Each example is its own workspace, outsi
 | `gdl-pools` | `gdl-model` | The pool plane's shared types: the pool record, the `PoolDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, an operator's commands for a pool whose hub is gone (`PoolCommand`), and the conformance suite that holds a backend to the trait's four rules (the `conformance` feature). It never links velo, so `gdl` takes `PoolState` and `LoadSummary` from it |
 | `gdl-pools-dynamodb` | `gdl-pools`, `gdl-model`, the AWS SDK's DynamoDB client | The `dynamodb` pool directory backend, in DynamoDB global tables. By default the only crate that links the AWS SDK: only `gdl-hub`'s `dynamodb` feature, off by default, depends on it. Its tests against DynamoDB Local, and the hub's, run outside the default suite (`scripts/dynamodb-local.sh`) |
 | `gdl-watch` | `gdl-pools`, `gdl-model`, velo's peer types | The watches a pool's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
-| `gdl-hub` | `gdl-pools`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a pool's hub the `gdl-pool` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. With its `dynamodb` feature, off by default, the binary also takes the `dynamodb` backend, through `gdl-pools-dynamodb`, and runs its tables step (`gdl-hub --tables`). See [Discovery](../concepts/hub.md) and [Classes and pools](../concepts/pools.md) |
+| `gdl-cgroup` | prometheus alone | What a gdl process serves about itself: prometheus's process collector, and its cgroup v2's CPU throttling, CPU quota, and memory, read from its own cgroup's files when `/metrics` is scraped. Every segment and every hub registers both, so the runtime and the hub share this crate rather than the hub depending on the runtime. See [Health and metrics](../operations/observability.md) |
+| `gdl-hub` | `gdl-pools`, `gdl-watch`, `gdl-cgroup`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a pool's hub the `gdl-pool` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. With its `dynamodb` feature, off by default, the binary also takes the `dynamodb` backend, through `gdl-pools-dynamodb`, and runs its tables step (`gdl-hub --tables`). See [Discovery](../concepts/hub.md) and [Classes and pools](../concepts/pools.md) |
 
 ## The `gdl` and `gdl-runtime` split
 

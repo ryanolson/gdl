@@ -1,0 +1,21 @@
+[package]
+name = "gdl-cgroup"
+description = "A process's own CPU and memory figures, and its cgroup v2's CPU throttling, quota, and memory, read when the registry is scraped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Every segment and every hub serve these figures, so both depend on this
+# crate rather than the hub on the runtime. It takes prometheus alone.
+[dependencies]
+# `process`: prometheus's collector of the process's CPU seconds, memory,
+# threads, and file descriptors, read from /proc on Linux.
+prometheus = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
