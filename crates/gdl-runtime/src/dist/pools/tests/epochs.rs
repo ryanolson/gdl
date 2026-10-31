@@ -666,3 +666,86 @@ fn a_rewatch_stamps_each_pools_epoch() {
         "later"
     );
 }
+
+/// A relay restart can reuse a generation for a different pool hub. Its
+/// leases must date new acceptances by that hub, on either recovery path.
+#[test]
+#[ignore = "F4: a recovered epoch-6 row reuses epoch-5 leases when the generation matches"]
+fn a_rewatch_never_reuses_an_earlier_hubs_acceptance_epoch() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Accepted(Arc<AtomicU64>);
+
+    impl gdl::ChoiceLease for Accepted {
+        fn accepted(&mut self) {
+            panic!("the runtime must supply the acceptance epoch");
+        }
+
+        fn accepted_at(&mut self, epoch: u64) {
+            self.0.store(epoch, Ordering::Relaxed);
+        }
+    }
+
+    let mut failures = Vec::new();
+    for own in [false, true] {
+        for (generation, epoch) in [(1, 5), (2, 6), (1, 6)] {
+            let (mut follows, pools, _, _) = follower();
+            let now = Instant::now();
+            let entry = super::peer();
+            follows.take(followed(M1, 1, 5), now);
+            follows.take(super::exposed(M1, 1, &entry), now);
+            let events = [
+                followed(M1, generation, epoch),
+                super::exposed(M1, generation, &entry),
+                FollowEvent::Synced { listed: true },
+            ];
+            if own {
+                follows.unknown(gdl_watch::UnknownFollowEvent {
+                    kind: "paused".into(),
+                    class: "model_x".into(),
+                    pool: M1.into(),
+                    generation: 1,
+                });
+                let asked = follows.asked().pop().expect("a recovery watch");
+                for event in events {
+                    follows.own(
+                        asked.key.clone(),
+                        asked.watch,
+                        Ok(gdl_watch::Watched::Event(event)),
+                        now,
+                    );
+                }
+            } else {
+                let mut snapshot = follows.snapshot();
+                for event in events {
+                    snapshot.apply(event, now);
+                }
+                follows.resnapshot(snapshot, now);
+            }
+            assert_eq!(evidence(&pools, M1).1, Some(epoch), "the recovered row");
+            let table = pools.table("f").expect("a table");
+            let row = table
+                .pools
+                .iter()
+                .find(|row| row.pool == M1)
+                .expect("a row");
+            assert_eq!(&*row.eligible, &[entry.instance_id()], "a routable entry");
+            let accepted = Arc::new(AtomicU64::new(0));
+            let (_, choice) = gdl::PoolChoice::new(0)
+                .with_lease(Accepted(Arc::clone(&accepted)))
+                .into_parts();
+            let mut lease = super::super::lease::PoolLease::take(&row.leases)
+                .expect("the recovered follow is offered")
+                .with_choice(choice);
+            lease.accepted();
+            let reported = accepted.load(Ordering::Relaxed);
+            if reported != epoch {
+                failures.push((own, generation, epoch, reported));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a new acceptance must use its recovered row's hub epoch (own, generation, row epoch, accepted_at): {failures:?}"
+    );
+}
