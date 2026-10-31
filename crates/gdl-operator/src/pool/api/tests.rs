@@ -159,3 +159,57 @@ async fn an_apply_is_forced_under_gdl_and_a_bootstrap_is_not() {
         json!({"name": "p-engine", "uid": "u3"})
     );
 }
+
+#[tokio::test]
+#[ignore = "F10: terminal segment pods keep the pool stop waiting forever"]
+async fn a_pool_stop_does_not_wait_for_terminal_pods() {
+    for phase in ["Running", "Pending", "Failed", "Succeeded"] {
+        let service = service_fn(move |request: Request<Body>| async move {
+            let (kind, items) = if request.uri().path().ends_with("/replicasets") {
+                (
+                    "ReplicaSetList",
+                    vec![json!({
+                        "metadata": {"name": "p-engine-rs", "uid": "rs-uid", "labels": {"app": "engine"},
+                            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "p-engine", "uid": "deployment-uid", "controller": true}]},
+                    })],
+                )
+            } else {
+                assert!(request.uri().path().ends_with("/pods"));
+                (
+                    "PodList",
+                    vec![json!({
+                        "metadata": {"name": "engine", "uid": "pod-uid", "labels": {"app": "engine"},
+                            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "p-engine-rs", "uid": "rs-uid", "controller": true}]},
+                        "status": {"phase": phase},
+                    })],
+                )
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(200)
+                    .body(Body::from(
+                        json!({"apiVersion": "v1", "kind": kind, "items": items})
+                            .to_string()
+                            .into_bytes(),
+                    ))
+                    .expect("response"),
+            )
+        });
+        let pools = KubePools::new(Client::new(service, "ns"), "ns", false);
+        let deployment = Live::of(
+            Kind::Deployment,
+            &json!({
+                "metadata": {"name": "p-engine", "uid": "deployment-uid"},
+                "spec": {"replicas": 0, "selector": {"matchLabels": {"app": "engine"}}},
+            }),
+        )
+        .expect("deployment");
+        let pods = pools.pods(&deployment).await.expect("owned pods");
+        let terminal = matches!(phase, "Failed" | "Succeeded");
+        assert_eq!(
+            pods.is_empty(),
+            terminal,
+            "phase {phase}: the stop uses an empty list as proof that no pod still runs: {pods:?}"
+        );
+    }
+}
