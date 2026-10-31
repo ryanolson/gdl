@@ -23,9 +23,9 @@ pub(super) struct Properties {
     entries: BTreeMap<PropertyKey, Tracked>,
     /// The list's version: raised on every change, never lowered.
     version: u64,
-    /// The least version the next change takes: the epoch of the hub's
-    /// writes, so that a hub that could not read its last record still
-    /// counts above every version a hub before it published.
+    /// The least version the next change takes: past the pool's last
+    /// write and the epoch of the hub's writes ([`floor_after`]), so that
+    /// the hub counts above every version a hub before it published.
     floor: u64,
     /// The properties the pool's settings declare, which every instance that
     /// reports no list of its own serves.
@@ -73,8 +73,9 @@ impl Properties {
         // The list counts from at least the floor, so that its version is
         // above any that a hub before this one sent: that hub sends each
         // list over its links before its record holds it, so one that
-        // stopped in between sent a version above the record's. A held
-        // version above the floor, as after the clock stepped back, is kept.
+        // stopped in between sent a version above the record's, though
+        // never in a block past it. A held version above the floor is kept:
+        // with the floor past the last write ([`floor_after`]), none is.
         let (entries, version, revoked) = held.unwrap_or((&[], floor, &[]));
         self.version = version.max(floor);
         self.floor = floor;

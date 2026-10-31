@@ -17,8 +17,10 @@
 //! ordered by the epoch of the pool's hub that said it, not by the list's
 //! version: a drain lasts for the life of its hub's process, so a listing
 //! of a later epoch clears it, one of the same epoch can only set it, and
-//! one of an earlier epoch says nothing. A later hub can list the same
-//! version as the hub before it, when that hub ran ahead of its clock.
+//! one of an earlier epoch says nothing. A drain does not change the list's
+//! version, and after a directory that forgot the pool, a later hub can
+//! list a version the hub before it listed, when that hub ran ahead of its
+//! clock.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
