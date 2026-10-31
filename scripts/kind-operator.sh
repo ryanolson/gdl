@@ -6,11 +6,11 @@
 # It starts a `registry:2` on a free loopback port and a kind cluster that pulls from it, each with a name of its
 # own. As the cluster's owner, it makes the fleet's namespace, builds the operator's image from this working tree,
 # and applies `gdl-operator manifests`. It writes the api example's spec in two classes, with an engine that paces
-# its chunks so that each response streams for about 2 s, and a fleet of one cluster that asks for the operator
+# its chunks so that each response streams for about 2 s, and a fleet of one cluster that the operator runs
 # (`operator = true`): a global pool (`front`, with an entry Service) and a model pool (`engine`). `cargo gdl deploy
-# --local` builds every image from this working tree and applies the fleet. It then checks that:
-#   - deploy made a GdlScaler per segment, wrote each one's replicas once at the quorum, under its own manager, and
-#     the entry Service selects on gdl.dev/routable;
+# --local` builds every image from this working tree and applies a GdlPool for each pool. It then checks that:
+#   - the operator made a GdlScaler per segment, wrote each one's replicas once at the quorum, under its own manager,
+#     and the entry Service selects on gdl.dev/routable;
 #   - scaled to 3 engines, under a load of streamed requests from a pod in the cluster, each on a new connection to
 #     the entry Service's ClusterIP, and then to 2: the pod the scaler chose (status.retiring) is the pod deleted,
 #     and the others stay; the victim's `requests_total` does not rise once its `instance_avoided` reads 1, so no
@@ -171,7 +171,9 @@ timeout "${TIMEOUT}" docker build --quiet -f crates/gdl-operator/Dockerfile -t "
 timeout 300 docker push --quiet "${image}" >/dev/null
 "${operator}" manifests --namespace "${ns}" --image "${image}" \
   | timeout 60 kubectl --context "${context}" apply --server-side -f - >/dev/null
-timeout 120 kubectl --context "${context}" wait --for=condition=Established crd/gdlscalers.gdl.dev --timeout=90s >/dev/null
+for crd in gdlpools gdlscalers; do
+  timeout 120 kubectl --context "${context}" wait --for=condition=Established "crd/${crd}.gdl.dev" --timeout=90s >/dev/null
+done
 k rollout status statefulset/gdl-operator --timeout=240s >/dev/null || fail "the operator did not start"
 say "the operator runs"
 
@@ -231,8 +233,8 @@ timeout "${TIMEOUT}" "${gdl[@]}" deploy --spec "${scratch}/gdl.toml" --fleet "${
   || { grep -v '^#\|^ ' "${scratch}/deploy.err" | tail -n 40 >&2; fail "cargo gdl deploy failed"; }
 grep '^cargo gdl: ' "${scratch}/deploy.err" || true
 
-# deploy's scalers: one per segment, each written once at the quorum under its own manager, and the Deployment's
-# replicas under gdl-scaler; gdl owns neither.
+# The operator's scalers: one per segment, each written once at the quorum under its own manager, and the
+# Deployment's replicas under gdl-scaler; gdl owns neither.
 for scaler in global-front model-a-engine; do
   owners="$(k get gdlscaler "${scaler}" --show-managed-fields --output json \
     | jq -c '[.spec.replicas, ([.metadata.managedFields[] | select(.fieldsV1["f:spec"]["f:replicas"]) | .manager])]')"
@@ -243,7 +245,7 @@ for scaler in global-front model-a-engine; do
 done
 [[ "$(k get service global-front --output jsonpath='{.spec.selector.gdl\.dev/routable}')" == "true" ]] \
   || fail "the entry Service does not select on gdl.dev/routable"
-say "deploy made each GdlScaler, wrote its replicas once, and the entry Service selects on gdl.dev/routable"
+say "the operator made each GdlScaler, wrote its replicas once, and the entry Service selects on gdl.dev/routable"
 
 # The pods of `segment`, each as `name uid`, of those not being deleted.
 live_pods() {

@@ -37,9 +37,23 @@
 # withdrawn, and takes the fleet down. kind runs one cluster, so the case covers only
 # the hubs of the Local's own cluster, which reach it at its Service, not the pod-IP address of other clusters.
 #
+# With OPERATOR=1 (and LOCAL=1) it runs the same pools in the cluster the gdl operator runs (`operator = true`)
+# instead, as the cluster's owner installs it from this working tree (`gdl-operator manifests`), under a load of
+# streamed requests from a pod in the cluster, each on a new connection to the global pool's entry Service, and each
+# streaming for about 2 s. A request is admitted once it gets its 200. It checks that:
+#   - deploy applies one GdlPool per pool, each ready, and every object of a pool is the operator's;
+#   - a second deploy, with model-b removed, deletes its GdlPool alone, in the background: its finalizer drains it,
+#     it withdraws (its parent's hub no longer holds its record), and garbage collection deletes its objects; the
+#     other pools' Deployments and pods are left as they were, and no request is refused or cut;
+#   - a change of the global pool's hub, patched into its GdlPool without allowPoolRestart, is held, with
+#     PoolRestartPending in its status, and does not reach the hub's Deployment;
+#   - `down`, under the load, stops model-a before global, each segment before its hub, and cuts no admitted request;
+#     no object with the fleet's label is left.
+#
 #   INSTALL_TOOLS=1 bash scripts/kind-fleet.sh      # first downloads the pinned kind into TOOLS_DIR
 #   bash scripts/kind-fleet.sh
 #   LOCAL=1 DYNAMODB=1 bash scripts/kind-fleet.sh   # every image from this working tree, both cases
+#   LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh   # the pools in a cluster the gdl operator runs
 #
 # LOCAL=1 builds every image from this working tree, with `cargo gdl deploy --local`: the spec is
 # examples/api/gdl.toml, which names gdl and the api crates by path, so no gdl is fetched, and a change that is not
@@ -59,9 +73,19 @@ NODE_IMAGE="kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64
 REGISTRY_IMAGE="registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 # Prometheus 3.7.3, by the digest of its multi-architecture index.
 PROMETHEUS_IMAGE="prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038"
+# curl 8.11.1, by the digest of its multi-architecture index: the operator case's load client.
+CURL_IMAGE="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 TIMEOUT="${TIMEOUT:-1800}"
 DYNAMODB="${DYNAMODB:-0}"
 LOCAL="${LOCAL:-0}"
+OPERATOR="${OPERATOR:-0}"
+# The operator case's request: its words, and the engine's pace between them, so each streams for about 2 s.
+WORDS=20
+PACE_MS=100
+if [[ "${OPERATOR}" == "1" && "${LOCAL}" != "1" ]]; then
+  echo "kind-fleet.sh: OPERATOR=1 needs LOCAL=1: the operator runs pools of the hub this working tree builds" >&2
+  exit 1
+fi
 if [[ "${DYNAMODB}" == "1" && "${LOCAL}" != "1" && -z "${GDL_REV:-}" ]]; then
   echo "kind-fleet.sh: DYNAMODB=1 needs LOCAL=1, or GDL_REV, a commit of the spec's [gdl] git with the hub's dynamodb feature" >&2
   exit 1
@@ -279,6 +303,212 @@ run() {
     || { grep -v '^#\|^ ' "${scratch}/${step}.err" | tail -n 40 >&2; fail "cargo gdl ${step} failed"; }
   grep '^cargo gdl: ' "${scratch}/${step}.err" || true
 }
+
+if [[ "${OPERATOR}" == "1" ]]; then
+  # The cluster's owner installs the gdl operator, from this working tree, in the fleet's namespace.
+  cargo build -p gdl-operator --bin gdl-operator
+  image="${registry}/gdl/gdl-operator:kind-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+  echo "kind-fleet.sh: building the operator's image ${image}"
+  timeout "${TIMEOUT}" docker build --quiet -f crates/gdl-operator/Dockerfile -t "${image}" . >/dev/null \
+    || fail "the operator's image did not build"
+  timeout 300 docker push --quiet "${image}" >/dev/null
+  "${target}/debug/gdl-operator" manifests --namespace gdl-api --image "${image}" \
+    | k apply --server-side -f - >/dev/null
+  # The owner places the operator on the fleet's node group too, which is tainted.
+  k --namespace gdl-api patch statefulset gdl-operator --type=merge -p '{"spec": {"template": {"spec": {
+    "nodeSelector": {"gdl.dev/node-group": "gdl-api"},
+    "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "gdl-api", "effect": "NoSchedule"}]}}}}' \
+    >/dev/null
+  for crd in gdlpools gdlscalers; do
+    k wait --for=condition=Established "crd/${crd}.gdl.dev" --timeout=50s >/dev/null || fail "CRD ${crd} not established"
+  done
+  timeout 300 kubectl --context "${context}" --namespace gdl-api rollout status statefulset/gdl-operator \
+    --timeout=240s >/dev/null || fail "the operator did not start"
+  echo "kind-fleet.sh: the operator runs"
+
+  # The fleet with the operator in its one cluster, and an engine that paces its words: each response streams for
+  # about 2 s, so that requests are in flight while a pool stops.
+  for file in fleet smaller; do
+    sed 's/^platform = \(.*\)$/platform = \1\noperator = true/' "${scratch}/${file}.toml" >"${scratch}/operated-${file}.toml"
+    grep -q '^operator = true$' "${scratch}/operated-${file}.toml" || fail "the fleet does not opt in"
+  done
+  cp "${scratch}/gdl.toml" "${scratch}/operated.gdl.toml"
+  cat >>"${scratch}/operated.gdl.toml" <<EOF
+[deployment.segment.engine.config.node.Engine]
+pace_ms = "${PACE_MS}"
+EOF
+  run deploy --spec "${scratch}/operated.gdl.toml" --fleet "${scratch}/operated-fleet.toml" --target-dir "${target}"
+  [[ "$(owner)" == "${owned}" ]] || fail "deploy changed the owner's label or annotations: $(owner)"
+  pools="$(k --namespace gdl-api get gdlpools --output json \
+    | jq -r '.items[] | "\(.metadata.name) \(.status.phase)"' | sort)"
+  [[ "${pools}" == $'global Ready\nmodel-a Ready\nmodel-b Ready' ]] || fail "the GdlPools are not ready: ${pools}"
+  # Every object of a pool is the operator's, by its GdlPool's controller reference.
+  unowned="$(k --namespace gdl-api get deployments,services,configmaps,gdlscalers --selector gdl.dev/fleet=api \
+    --output json | jq -r '.items[] | select(.metadata.labels["gdl.dev/pool"] != null)
+      | select([.metadata.ownerReferences[]? | select(.kind == "GdlPool" and .controller)] | length != 1)
+      | "\(.kind)/\(.metadata.name)"')"
+  [[ -z "${unowned}" ]] || fail "objects of the pools that no GdlPool controls: ${unowned}"
+  hub global /v1/ext/gdl-pool/health >/dev/null || fail "the global pool's health does not answer 200"
+  echo "kind-fleet.sh: deploy applied a GdlPool per pool, and the operator made and owns every pool's objects"
+
+  # The load: workers in a pod, each sending one streamed chat request after another, each on a new connection to
+  # the global pool's entry Service. A request is admitted once it gets its 200: before that the frontend answers
+  # 502, or the connection is refused. One line per request: `ok`, `refused <curl exit> <status>` for one never
+  # admitted, or `cut <curl exit> <status> <words> <body>` for one admitted and not answered whole.
+  prompt="$(seq -s ' ' 1 "${WORDS}" | sed 's/[0-9]*/w&/g')"
+  cat >"${scratch}/load.sh" <<EOF
+worker() {
+  while [ ! -f /tmp/stop ]; do
+    out="\$(curl -sS -m 60 -w '\n%{http_code}' -X POST -H 'content-type: application/json' \\
+      -d '{"messages":["${prompt}"]}' http://global-front:8080/v1/chat/completions 2>/dev/null)"
+    code=\$?
+    status="\$(printf '%s\n' "\${out}" | tail -n 1)"
+    words="\$(printf '%s\n' "\${out}" | grep -c '"delta"')"
+    errors="\$(printf '%s\n' "\${out}" | grep -c '"error"')"
+    if [ "\${status}" != 200 ]; then
+      echo "refused \$(date +%s) \${code} \${status}"
+      sleep 0.2
+    elif [ "\${code}" -eq 0 ] && [ "\${words}" -eq ${WORDS} ] && [ "\${errors}" -eq 0 ]; then
+      echo "ok \$(date +%s)"
+    else
+      echo "cut \$(date +%s) \${code} \${status} \${words} \$(printf '%s' "\${out}" | tr '\n' ' ' | head -c 200)"
+    fi
+  done
+}
+for w in 1 2 3 4 5 6; do worker & done
+wait
+echo done
+EOF
+  k --namespace gdl-api create configmap load --from-file=load.sh="${scratch}/load.sh" >/dev/null
+  k apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: load, namespace: gdl-api}
+spec:
+  restartPolicy: Never
+  nodeSelector: {gdl.dev/node-group: gdl-api}
+  tolerations: [{key: dedicated, operator: Equal, value: gdl-api, effect: NoSchedule}]
+  containers:
+  - name: load
+    image: ${CURL_IMAGE}
+    command: [sh, /load/load.sh]
+    volumeMounts: [{name: load, mountPath: /load}]
+  volumes: [{name: load, configMap: {name: load}}]
+EOF
+  # The load's counts so far: `<ok> <refused> <cut>`.
+  load_counts() {
+    k --namespace gdl-api logs load \
+      | awk '$1 == "ok" {ok++} $1 == "refused" {no++} $1 == "cut" {cut++} END {print ok + 0, no + 0, cut + 0}'
+  }
+  for _ in $(seq 1 180); do
+    [[ "$(load_counts | cut -d' ' -f1)" -gt 0 ]] && break
+    sleep 1
+  done
+  [[ "$(load_counts | cut -d' ' -f1)" -gt 0 ]] || fail "the load did not start: $(k --namespace gdl-api logs load | tail -n 5)"
+  echo "kind-fleet.sh: the load runs: $(load_counts)"
+
+  # A pool removed from the fleet: deploy deletes its GdlPool alone, in the background, and the finalizer drains it
+  # and waits for its record's withdrawal, then stops its engine and its hub, before garbage collection.
+  operated_kept() {
+    k --namespace gdl-api get deployments,pods --selector 'gdl.dev/pool in (global,model-a)' \
+      --output jsonpath='{range .items[*]}{.kind}/{.metadata.name} {.metadata.uid} {.metadata.generation}{"\n"}{end}' \
+      | grep -v '^Pod/load ' | sort
+  }
+  before="$(operated_kept)"
+  counts_before="$(load_counts)"
+  run deploy --spec "${scratch}/operated.gdl.toml" --fleet "${scratch}/operated-smaller.toml" --target-dir "${target}"
+  grep -q 'stop: pool(s) model-b in cluster `kind` stopped and deleted' "${scratch}/deploy.err" \
+    || fail "the second deploy did not delete model-b's GdlPool"
+  k --namespace gdl-api get gdlpool model-b >/dev/null 2>&1 && fail "model-b's GdlPool is left"
+  if hub global /v1/ext/gdl-pool/report/model/model-b >/dev/null 2>"${scratch}/held.err"; then
+    fail "the global pool's hub still holds model-b: it did not withdraw"
+  fi
+  grep -q '(NotFound)' "${scratch}/held.err" || fail "reading model-b's record failed: $(cat "${scratch}/held.err")"
+  for _ in $(seq 1 60); do
+    left="$(k --namespace gdl-api get deployments,services,configmaps,gdlscalers,pods --selector gdl.dev/pool=model-b \
+      --output name)"
+    [[ -z "${left}" ]] && break
+    sleep 1
+  done
+  [[ -z "${left}" ]] || fail "garbage collection left model-b's objects: ${left}"
+  [[ "$(operated_kept)" == "${before}" ]] || fail "the second deploy changed the other pools:
+before:
+${before}
+after:
+$(operated_kept)"
+  counts_after="$(load_counts)"
+  read -r ok_before refused_before cut_before <<<"${counts_before}"
+  read -r ok_after refused_after cut_after <<<"${counts_after}"
+  ((cut_after == 0)) || fail "admitted requests were cut: $(k --namespace gdl-api logs load | grep '^cut' | head -n 5)"
+  ((refused_after == refused_before)) \
+    || fail "requests were refused while model-b stopped: $(k --namespace gdl-api logs load | grep '^refused' | head -n 5)"
+  ((ok_after > ok_before)) || fail "no request was answered while model-b stopped"
+  echo "kind-fleet.sh: model-b's finalizer drained it, it withdrew, and it was deleted; no request was refused or cut (${counts_before} -> ${counts_after}); global and model-a are as they were"
+
+  # A change that replaces the global pool's hub, which would drain the pool, is held without allowPoolRestart.
+  hub_generation="$(k --namespace gdl-api get deployment global --output jsonpath='{.metadata.generation}')"
+  k --namespace gdl-api patch gdlpool global --type=json \
+    -p '[{"op": "add", "path": "/spec/hub/env/-", "value": {"name": "GDL_KIND_PROBE", "value": "1"}}]' >/dev/null
+  pool_generation="$(k --namespace gdl-api get gdlpool global --output jsonpath='{.metadata.generation}')"
+  held=""
+  for _ in $(seq 1 60); do
+    held="$(k --namespace gdl-api get gdlpool global --output json | jq -r --argjson g "${pool_generation}" \
+      '.status.conditions[]? | select(.type == "PoolRestartPending" and .status == "True" and .observedGeneration == $g)
+        | .message')"
+    [[ -n "${held}" ]] && break
+    sleep 1
+  done
+  [[ -n "${held}" ]] || fail "the hub change was not held: $(k --namespace gdl-api get gdlpool global --output json | jq -c .status)"
+  [[ "$(k --namespace gdl-api get gdlpool global --output jsonpath='{.status.held}')" == "${pool_generation}" ]] \
+    || fail "the GdlPool does not name the held generation"
+  [[ "$(k --namespace gdl-api get deployment global --output jsonpath='{.metadata.generation}')" == "${hub_generation}" ]] \
+    || fail "the held change reached the hub's Deployment"
+  echo "kind-fleet.sh: a hub change without allowPoolRestart is held: ${held}"
+
+  # down, under the load: model-a's GdlPool first, then global's, each in the background, each stopped by its
+  # finalizer: the engine before the hub, and the child pool before its parent. A sampler records which pods run.
+  (
+    while :; do
+      k --namespace gdl-api get pods --selector gdl.dev/fleet=api --output json 2>/dev/null \
+        | jq -r --arg t "$(date +%s%3N)" '.items[] | select(.metadata.deletionTimestamp == null)
+            | "\($t) \(.metadata.labels["gdl.dev/pool"]) \(.metadata.labels["gdl.dev/segment"])"' || true
+      sleep 0.5
+    done
+  ) >"${scratch}/pods.samples" &
+  sampler=$!
+  counts_before="$(load_counts)"
+  run down --spec "${scratch}/operated.gdl.toml" --fleet "${scratch}/operated-smaller.toml" --target-dir "${target}"
+  kill "${sampler}" 2>/dev/null || true
+  wait "${sampler}" 2>/dev/null || true
+  stops="$(grep -o 'stop: pool(s) [a-z-]* in cluster' "${scratch}/down.err" | cut -d' ' -f3 | tr '\n' ' ')"
+  [[ "${stops}" == "model-a global " ]] || fail "down did not stop model-a before global: ${stops}"
+  k --namespace gdl-api get gdlpools --output name | grep -q . && fail "GdlPools are left after down"
+  # The last time each pool's segment and hub were seen running.
+  last() {
+    awk -v pool="$1" -v segment="$2" '$2 == pool && $3 == segment {t = $1} END {print t + 0}' "${scratch}/pods.samples"
+  }
+  (($(last model-a engine) <= $(last model-a hub))) || fail "model-a's hub stopped before its engine"
+  (($(last global front) <= $(last global hub))) || fail "global's hub stopped before its frontend"
+  (($(last model-a hub) <= $(last global front))) || fail "global stopped before model-a"
+  k --namespace gdl-api exec load -- touch /tmp/stop
+  for _ in $(seq 1 120); do
+    k --namespace gdl-api logs load | grep -q '^done$' && break
+    sleep 1
+  done
+  k --namespace gdl-api logs load | grep -q '^done$' || fail "the load's workers did not stop within 120 s"
+  read -r ok_after refused_after cut_after <<<"$(load_counts)"
+  ((cut_after == 0)) || fail "admitted requests were cut: $(k --namespace gdl-api logs load | grep '^cut' | head -n 5)"
+  echo "kind-fleet.sh: down stopped model-a, then global, each engine before its hub, and cut no admitted request ($(load_counts): answered, refused once no pool could admit them, cut)"
+  k --namespace gdl-api delete pod load --wait=false >/dev/null
+  k --namespace gdl-api delete configmap load >/dev/null
+  labelled="$(k get serviceaccounts,configmaps,persistentvolumeclaims,services,deployments,replicasets,gdlscalers \
+    --all-namespaces --selector gdl.dev/fleet=api --output name)"
+  [[ -z "${labelled}" ]] || fail "objects with the fleet's label are left: ${labelled}"
+  [[ "$(owner)" == "${owned}" ]] || fail "down changed the owner's label or annotations: $(owner)"
+  echo "kind-fleet.sh: no object with the fleet's label is left, and the namespace stays as its owner made it"
+  echo "kind-fleet.sh: passed"
+  exit 0
+fi
 
 run deploy --spec "${scratch}/gdl.toml" --fleet "${scratch}/fleet.toml" --target-dir "${target}"
 [[ "$(owner)" == "${owned}" ]] || fail "deploy changed the owner's label or annotations: $(owner)"
