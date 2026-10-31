@@ -165,3 +165,123 @@ async fn a_stale_pod_write_is_refused_by_the_pods_version() {
     assert_eq!(writes, ["pod-2 routable true"], "{events:?}");
     assert!(fake.pod("pod-2").routable);
 }
+
+struct PausedScale<'a> {
+    fake: &'a Fake,
+    arrived: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl<'a> PausedScale<'a> {
+    fn new(fake: &'a Fake) -> Self {
+        Self {
+            fake,
+            arrived: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl Cluster for PausedScale<'_> {
+    async fn target(&self, name: &str) -> Result<Option<Target>, String> {
+        self.fake.target(name).await
+    }
+
+    async fn pods(&self, selector: &str) -> Result<Vec<PodView>, String> {
+        self.fake.pods(selector).await
+    }
+
+    async fn endpoints(&self, service: &str) -> Result<BTreeSet<String>, String> {
+        self.fake.endpoints(service).await
+    }
+
+    async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
+        self.arrived.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), self.resume.notified())
+            .await
+            .expect("the other operator releases the count write");
+        self.fake.scale(name, replicas, fence).await
+    }
+
+    async fn routable(
+        &self,
+        pod: &PodView,
+        version: &str,
+        routable: bool,
+    ) -> Result<String, Refused> {
+        self.fake.routable(pod, version, routable).await
+    }
+
+    async fn cost(
+        &self,
+        pod: &PodView,
+        version: &str,
+        cost: Option<i32>,
+    ) -> Result<String, Refused> {
+        self.fake.cost(pod, version, cost).await
+    }
+
+    async fn status(
+        &self,
+        name: &str,
+        status: &GdlScalerStatus,
+        version: Option<&str>,
+    ) -> Result<Option<String>, Refused> {
+        self.fake.status(name, status, version).await
+    }
+}
+
+async fn count_across_cancellation(desired: i32) -> Fake {
+    let fake = Fake::with(&[9, 0, 9]);
+    let paused = PausedScale::new(&fake);
+    let victims = Victims::default();
+    let cx = Context {
+        cluster: &paused,
+        probe: &fake,
+        victims: &victims,
+    };
+    let read = snapshot(&fake, &spec(Some(2)));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (result, ()) = tokio::join!(reconcile(&cx, &read, 0), async {
+            paused.arrived.notified().await;
+            assert_eq!(fake.state().replicas, 3);
+            assert_eq!(status(&fake).retiring[0].phase, RetiringPhase::Committing);
+            assert_eq!(fake.pod("pod-2").cost, Some(VICTIM_COST));
+            let deployment_version = fake.state().version;
+            // The HPA changes the scaler after the cost write, before the count write.
+            fake.state().scaler_version += 1;
+            once(&fake, &spec(Some(desired)), 1_000).await;
+            assert!(status(&fake).retiring.is_empty());
+            assert_eq!(fake.pod("pod-2").cost, None);
+            assert_eq!(fake.state().replicas, desired);
+            if desired == 3 {
+                assert_eq!(fake.state().version, deployment_version);
+            } else {
+                assert_ne!(fake.state().version, deployment_version);
+            }
+            paused.resume.notify_one();
+        });
+        result.expect("the paused operator reconciles");
+    })
+    .await
+    .expect("the interleaving completes");
+    fake
+}
+
+#[tokio::test]
+async fn a_count_write_is_refused_when_the_other_operator_changes_the_deployment() {
+    let fake = count_across_cancellation(4).await;
+    assert_eq!(fake.state().replicas, 4);
+}
+
+#[tokio::test]
+#[ignore = "F1: a count write lands after the other operator cancels its victim for a newer scale"]
+async fn a_count_write_after_cancellation_preserves_the_newer_scale() {
+    let fake = count_across_cancellation(3).await;
+    let state = fake.state();
+    assert_eq!(
+        state.replicas, 3,
+        "a cancelled removal must not lower the newer desired count: {:?}",
+        state.events
+    );
+}
