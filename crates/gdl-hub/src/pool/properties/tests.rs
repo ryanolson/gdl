@@ -584,21 +584,42 @@ fn a_restored_drain_keeps_an_empty_report_after_its_reporter_leaves() {
     );
 }
 
-/// A writer that moves to a later epoch raises the floor: the list's
-/// version rises to it at once, and later changes count from it. A floor
-/// below the version changes nothing.
+/// A hub refused because another write landed after its first read takes
+/// that write again whole: its entries and its revocations, with the
+/// version past the floor and past every version the table had. A
+/// revocation or a lift the operator made here since the first read is
+/// kept over it.
 #[test]
-fn a_raised_floor_raises_the_version() {
-    let mut properties = fresh();
-    let ready = [says("m", SaysReady)];
-    properties.update([Offer::Listed(&lists(&ready))]);
-    assert_eq!(properties.list().version, 101);
-    assert!(!properties.raise_floor(50));
-    assert!(properties.raise_floor(500));
-    assert_eq!(properties.list().version, 500);
-    let draining = [says("m", SaysDraining)];
-    properties.update([Offer::Listed(&lists(&draining))]);
-    assert_eq!(properties.list().version, 501);
+fn a_write_read_again_is_adopted_with_its_revocations() {
+    let mut properties = Properties::new(Vec::new());
+    let first = [entry("a", Ready, 7)];
+    properties.restore(Some((&first, 7, &[key("lifted")])), 100);
+    assert!(properties.revoke(key("mine")));
+    assert!(properties.lift(&key("lifted")));
+    let before = properties.list().version;
+
+    let again = [entry("a", Ready, 9), entry("b", Drained, 9)];
+    let revoked = [key("theirs"), key("lifted")];
+    properties.adopt(Some((&again, 9, &revoked)), 50);
+    let list = properties.list();
+    assert!(list.version > before, "{} -> {}", before, list.version);
+    assert_eq!(
+        list.revoked,
+        [key("mine"), key("theirs")],
+        "the write's revocation, and the operator's since the read, but not one it lifted"
+    );
+    assert_eq!(
+        states(&properties),
+        [("a".to_string(), Unavailable), ("b".to_string(), Drained)],
+        "the entries of the write read again"
+    );
+    properties.adopt(None, list.version + 1_000);
+    assert!(properties.list().version >= list.version + 1_000);
+    assert_eq!(
+        properties.list().revoked,
+        [key("mine")],
+        "a withdrawal holds none"
+    );
 }
 
 /// A pool declares that it serves each property on its own: one property that

@@ -422,7 +422,6 @@ async fn a_successor_stays_past_a_predecessor_that_writes_during_its_start() {
 /// first read. After its conditional write is refused, the successor must
 /// keep the history of the record it reads again, as it does at startup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F5: the reread raises the list version but drops the newer record's revocations"]
 async fn a_successor_keeps_a_revocation_stored_after_its_first_read() {
     #[derive(Clone)]
     struct RacingRevocation {

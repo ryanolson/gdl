@@ -38,6 +38,10 @@ pub(super) struct Properties {
     /// The properties revoked before the last record was read: their history
     /// in it is dropped, even if the revocation was lifted since.
     discarded: BTreeSet<PropertyKey>,
+    /// The revocations the last record read held: those revoked or lifted
+    /// since are the operator's, kept over a record read again
+    /// ([`Properties::adopt`]).
+    read_revoked: BTreeSet<PropertyKey>,
     /// Whether the last record has been read: nothing is computed before.
     restored: bool,
     /// Whether an instance has reported in its current registration since
@@ -57,6 +61,7 @@ impl Properties {
             revoked: BTreeSet::new(),
             lifted: BTreeSet::new(),
             discarded: BTreeSet::new(),
+            read_revoked: BTreeSet::new(),
             restored: false,
             heard: false,
         }
@@ -83,6 +88,7 @@ impl Properties {
         // A revocation or a lift taken before the record was read is
         // applied over the record's own.
         let read: BTreeSet<PropertyKey> = revoked.iter().cloned().collect();
+        self.read_revoked.clone_from(&read);
         self.revoked.extend(read.iter().cloned());
         for key in std::mem::take(&mut self.lifted) {
             self.revoked.remove(&key);
@@ -127,6 +133,33 @@ impl Properties {
                 }
             }
         }
+    }
+
+    /// Take the pool's last write again, `held`, after a write of this hub
+    /// was refused because another landed after its first read: its
+    /// entries and revocations replace those read before, as at
+    /// [`Properties::restore`], and the version rises past both `floor` and
+    /// every version this table has had. A revocation or a lift an operator
+    /// made here since the first read is applied over it, as one made
+    /// before a read is. So no revocation the other write stored is lost.
+    pub(super) fn adopt(&mut self, held: Option<Held<'_>>, floor: u64) {
+        let revoked: BTreeSet<PropertyKey> = self
+            .revoked
+            .difference(&self.read_revoked)
+            .cloned()
+            .collect();
+        let lifted = self
+            .read_revoked
+            .difference(&self.revoked)
+            .cloned()
+            .collect();
+        let floor = floor.max(self.version.saturating_add(1));
+        self.entries.clear();
+        self.discarded.clone_from(&revoked);
+        self.revoked = revoked;
+        self.lifted = lifted;
+        self.restored = false;
+        self.restore(held, floor);
     }
 
     /// Compute each entry's state from what each usable entry instance
@@ -276,16 +309,6 @@ impl Properties {
             version: self.version,
             revoked: self.revoked.iter().cloned().collect(),
         }
-    }
-
-    /// Count later versions from at least `floor`, the floor of an epoch
-    /// the writer moved to; the list's version rises to it now if it is
-    /// below. Whether the version changed.
-    pub(super) fn raise_floor(&mut self, floor: u64) -> bool {
-        self.floor = self.floor.max(floor);
-        let raised = self.version < self.floor;
-        self.version = self.version.max(self.floor);
-        raised
     }
 
     /// The least version of the list whose record says what the table

@@ -120,15 +120,6 @@ impl Feed {
         self.properties.subscribe()
     }
 
-    /// The writer moved to a later epoch, whose versions count from
-    /// `floor`: the list's version rises to it if it is below.
-    pub(super) fn raise_floor(&self, floor: u64) {
-        let mut shared = self.lock();
-        if shared.properties.raise_floor(floor) {
-            self.properties_changed(&mut shared);
-        }
-    }
-
     /// Take the property entries of the pool's last record, `held` with their
     /// version and the revoked properties, or none, with the version raised
     /// to at least `floor`: from then on, what the instances say of
@@ -136,6 +127,16 @@ impl Feed {
     pub(super) fn restore(&self, held: Option<super::properties::Held<'_>>, floor: u64) {
         let mut shared = self.lock();
         shared.properties.restore(held, floor);
+        shared.update_properties();
+        self.properties_changed(&mut shared);
+    }
+
+    /// Take the pool's last write again, `held`, after this hub's write was
+    /// refused because another landed after its first read, with the
+    /// version raised past `floor` ([`super::properties::Properties::adopt`]).
+    pub(super) fn adopt(&self, held: Option<super::properties::Held<'_>>, floor: u64) {
+        let mut shared = self.lock();
+        shared.properties.adopt(held, floor);
         shared.update_properties();
         self.properties_changed(&mut shared);
     }

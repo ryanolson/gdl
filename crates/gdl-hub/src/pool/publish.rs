@@ -423,10 +423,20 @@ impl Writer {
                     self.epoch = self.epoch.max(epoch.saturating_add(1));
                     self.seq = 0;
                     self.read = last.as_ref().map(LastWrite::version);
-                    feed.raise_floor(super::properties::floor_after(
+                    // The hub takes the write it read again whole, its
+                    // revocations with its entries, not only its numbers.
+                    let floor = super::properties::floor_after(
                         self.epoch,
                         last.as_ref().map(LastWrite::properties_version),
-                    ));
+                    );
+                    let held = last.as_ref().and_then(LastWrite::record).map(|held| {
+                        (
+                            &held.properties[..],
+                            held.properties_version,
+                            &held.revoked[..],
+                        )
+                    });
+                    feed.adopt(held, floor);
                 } else {
                     tracing::error!(
                         %held,
