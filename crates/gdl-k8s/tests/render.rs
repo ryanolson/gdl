@@ -114,3 +114,23 @@ fn the_operator_scales_what_a_fixed_pool_counts() {
     assert_eq!(front["spec"]["replicas"], 2);
     assert!(fixed.iter().all(|o| o["kind"] != "GdlScaler"));
 }
+
+/// A pool's PodMonitor is named after it, which the API server keeps its
+/// own in a namespace, and selects only its pods.
+#[test]
+fn a_pool_monitor_selects_the_pools_pods() {
+    let monitor = gdl_k8s::pool_monitor("p", "ns", &pool());
+    assert_eq!(monitor["metadata"]["name"], "p");
+    assert_eq!(
+        monitor["spec"]["selector"]["matchLabels"],
+        serde_json::json!({"gdl.dev/fleet": "api", "gdl.dev/cluster": "use1", "gdl.dev/pool": "p"})
+    );
+    let objects = children("p", "ns", &pool(), Scaling::Operator).expect("objects");
+    let hub = template(&objects, "p");
+    for (key, value) in monitor["spec"]["selector"]["matchLabels"]
+        .as_object()
+        .expect("labels")
+    {
+        assert_eq!(&hub["metadata"]["labels"][key], value, "{key}");
+    }
+}

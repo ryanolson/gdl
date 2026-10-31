@@ -5,11 +5,13 @@
 //! objects. It never links velo. See `docs/src/guides/kubernetes.md`.
 
 mod labels;
+mod monitor;
 mod pool;
 mod render;
 mod settings;
 
 pub use labels::{LABEL_LIMIT, LABEL_PREFIX, checksum, fnv, label_value};
+pub use monitor::{pod_monitor, pool_monitor};
 pub use pool::{
     Dynamodb, Env, Hub, Parent, Pool, Port, Presence, Protocol, Resources, Secret, Segment,
     Toleration,

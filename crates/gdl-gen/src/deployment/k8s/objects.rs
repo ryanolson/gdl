@@ -9,10 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use gdl_k8s::{
-    Env, HUB_METRICS, LABEL_LIMIT, LABEL_PREFIX, PUBLIC, Pool, Port, Protocol, SEGMENT_METRICS,
-    SYSTEM, Settings, fnv, label_value,
-};
+use gdl_k8s::{Env, LABEL_LIMIT, LABEL_PREFIX, Pool, Port, Protocol, Settings, fnv, label_value};
 use gdl_model::{Cluster, Fleet, PoolSettings, Resources};
 use serde_json::{Map, Value, json};
 
@@ -189,67 +186,15 @@ impl Pod<'_> {
     }
 }
 
-/// The labels a PodMonitor copies from each pod onto every series it
-/// scrapes there, each as the target label it becomes: the same as the
-/// chapter's scrape job without the operator gives. Not `pool`, `class`
-/// or `region`: a chooser labels its own series with the pool it offered
-/// to, its class and its region, and a target label of the same name would
-/// move those aside.
-const MONITORED: [(&str, &str); 6] = [
-    ("gdl.dev/fleet", "fleet"),
-    ("gdl.dev/cluster", "cluster"),
-    ("gdl.dev/pool", "in_pool"),
-    ("gdl.dev/class", "in_class"),
-    ("gdl.dev/region", "in_region"),
-    ("gdl.dev/segment", "segment"),
-];
-
 /// The PodMonitor of `fleet`'s pods in `cluster`, which the fleet names
-/// `name`, for a cluster that runs the Prometheus operator: each segment's
-/// system port at `/metrics` and each hub's public port at its pool's
-/// route, the two named ports no other pod of the fleet has. Each copied
-/// label is read from the pod's label, then from the annotation that holds
-/// its whole value when the label holds a shortened one ([`label_value`]).
+/// `name`, for a cluster that runs the Prometheus operator
+/// ([`gdl_k8s::pod_monitor`]).
 pub(super) fn pod_monitor(fleet: &str, name: &str, cluster: &Cluster) -> Value {
-    let labels = json!({
-        "gdl.dev/fleet": label_value(fleet),
-        "gdl.dev/cluster": label_value(name),
-    });
-    let relabelings: Vec<Value> = MONITORED
-        .iter()
-        .flat_map(|(label, target)| {
-            let meta = prometheus_name(label);
-            [
-                json!({
-                    "sourceLabels": [format!("__meta_kubernetes_pod_label_{meta}")],
-                    "targetLabel": target,
-                }),
-                json!({
-                    "sourceLabels": [format!("__meta_kubernetes_pod_annotation_{meta}")],
-                    "regex": "(.+)",
-                    "targetLabel": target,
-                }),
-            ]
-        })
-        .collect();
-    let endpoint =
-        |port: &str, path: &str| json!({"port": port, "path": path, "relabelings": relabelings});
-    json!({
-        "apiVersion": "monitoring.coreos.com/v1",
-        "kind": "PodMonitor",
-        "metadata": {
-            "name": pod_monitor_name(fleet, name),
-            "namespace": cluster.namespace,
-            "labels": labels,
-        },
-        "spec": {
-            "selector": {"matchLabels": labels},
-            "podMetricsEndpoints": [
-                endpoint(SYSTEM, SEGMENT_METRICS),
-                endpoint(PUBLIC, HUB_METRICS),
-            ],
-        },
-    })
+    gdl_k8s::pod_monitor(
+        &pod_monitor_name(fleet, name),
+        &cluster.namespace,
+        &[("gdl.dev/fleet", fleet), ("gdl.dev/cluster", name)],
+    )
 }
 
 /// The name of `fleet`'s PodMonitor in cluster `cluster`: one of its own
@@ -268,14 +213,6 @@ pub(super) fn pod_monitor_name(fleet: &str, cluster: &str) -> String {
         .collect();
     let hash = format!("{:016x}", fnv(&format!("{}:{fleet}{cluster}", fleet.len())));
     format!("{}-{}", start.trim_end_matches('-'), &hash[..10])
-}
-
-/// A Kubernetes label's key as Prometheus' discovery names it: each
-/// character that a label name cannot hold becomes `_`.
-fn prometheus_name(key: &str) -> String {
-    key.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
 }
 
 /// The image `repository` at `tag` in `registry`, and at `digest` when it
