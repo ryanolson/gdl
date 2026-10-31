@@ -28,7 +28,9 @@ struct Nodes {
 
 impl Hosted for Hosts {
     const KEYS: &'static [&'static str] = &["node"];
-    const NAMES: &'static [&'static str] = &["Truncate"];
+    const NODES: &'static [&'static str] = &["Truncate"];
+    const ADAPTERS: &'static [&'static str] = &[];
+    const GRAPH_NODES: &'static [&'static str] = &["Truncate"];
 }
 
 /// A deployment of one segment, `front`, holding a source and a sink.
@@ -190,7 +192,6 @@ fn a_variable_for_a_hosted_node_reaches_its_table() {
 }
 
 #[test]
-#[ignore = "F3: a foreign pipeline name matching an adapter reaches the node table"]
 fn a_foreign_pipeline_node_matching_a_hosted_adapter_is_ignored() {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -202,8 +203,9 @@ fn a_foreign_pipeline_node_matching_a_hosted_adapter_is_ignored() {
     }
     impl Hosted for ServiceHosts {
         const KEYS: &'static [&'static str] = &["node", "adapter"];
-        // Generated service settings share this list between both tables.
-        const NAMES: &'static [&'static str] = &["Truncate", "Http_chat_f0"];
+        const NODES: &'static [&'static str] = &["Truncate"];
+        const ADAPTERS: &'static [&'static str] = &["Http_chat_f0"];
+        const GRAPH_NODES: &'static [&'static str] = &["Http", "Truncate", "Http_chat_F0"];
     }
     let graph = gdl_syntax::Graph::parse(
         "name = \"adapter_names\", schema = 1;\n\
@@ -231,6 +233,89 @@ fn a_foreign_pipeline_node_matching_a_hosted_adapter_is_ignored() {
         assert_eq!(
             config.hosted.adapter["Http_chat_f0"]["max"].as_integer(),
             Some(5)
+        );
+        Ok(())
+    });
+}
+
+/// Two pipeline nodes whose names differ only in case, `Ab` hosted here
+/// and `AB` elsewhere, fold to one variable name: `GDL_NODE__AB__X` could
+/// mean either. The segment refuses it, naming both, rather than guess.
+#[test]
+fn a_variable_that_could_name_a_hosted_or_a_foreign_node_is_refused() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FoldHosts {
+        #[serde(default)]
+        #[expect(dead_code, reason = "read only to be refused")]
+        node: FoldNodes,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FoldNodes {
+        #[serde(rename = "Ab", default)]
+        _ab: Option<toml::Table>,
+    }
+    impl Hosted for FoldHosts {
+        const KEYS: &'static [&'static str] = &["node"];
+        const NODES: &'static [&'static str] = &["Ab"];
+        const ADAPTERS: &'static [&'static str] = &[];
+        const GRAPH_NODES: &'static [&'static str] = &["Ab", "AB"];
+    }
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_NODE__AB__MAX", "3");
+        let Err(error) = ProcessConfig::<FoldHosts>::load(["config.toml"]) else {
+            panic!("a variable that two nodes' names fold to")
+        };
+        let error = error.to_string();
+        assert!(error.contains("GDL_NODE__AB__MAX"), "{error}");
+        assert!(error.contains("`Ab`") && error.contains("`AB`"), "{error}");
+        Ok(())
+    });
+}
+
+/// A segment that hosts a node and an adapter whose names fold alike keeps
+/// them apart: `GDL_ADAPTER__` reaches the adapter's table, as the adapter
+/// spells its name, and `GDL_NODE__` the node's.
+#[test]
+fn an_adapter_variable_keeps_the_adapters_spelling() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ServiceHosts {
+        #[serde(default)]
+        node: ServiceNodes,
+        #[serde(default)]
+        adapter: BTreeMap<String, toml::Table>,
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ServiceNodes {
+        #[serde(rename = "Http_chat_F0", default)]
+        sink: Option<toml::Table>,
+    }
+    impl Hosted for ServiceHosts {
+        const KEYS: &'static [&'static str] = &["node", "adapter"];
+        const NODES: &'static [&'static str] = &["Http_chat_F0"];
+        const ADAPTERS: &'static [&'static str] = &["Http_chat_f0"];
+        const GRAPH_NODES: &'static [&'static str] = &["Http", "Http_chat_F0"];
+    }
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_ADAPTER__HTTP_CHAT_F0__MAX", "5");
+        jail.set_env("GDL_NODE__HTTP_CHAT_F0__MAX", "7");
+        let config =
+            ProcessConfig::<ServiceHosts>::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let adapter = config.hosted.adapter.get("Http_chat_f0");
+        assert_eq!(
+            adapter.and_then(|table| table["max"].as_integer()),
+            Some(5),
+            "{:?}",
+            config.hosted.adapter
+        );
+        assert_eq!(
+            config.hosted.node.sink.expect("the node's table")["max"].as_integer(),
+            Some(7)
         );
         Ok(())
     });

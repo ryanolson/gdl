@@ -120,8 +120,16 @@ struct Settings {
 pub trait Hosted: DeserializeOwned {
     /// The top-level keys the type takes, such as `node` or `frontend`.
     const KEYS: &'static [&'static str];
-    /// The node and adapter names, as the graph spells them.
-    const NAMES: &'static [&'static str];
+    /// The pipeline nodes it hosts, as the graph spells them: its tables
+    /// under `node`.
+    const NODES: &'static [&'static str];
+    /// The entry adapters it serves, as their bindings spell them: its
+    /// tables under `adapter`.
+    const ADAPTERS: &'static [&'static str];
+    /// Every node the placement places, hosted here or not: a
+    /// `GDL_NODE__<name>__` variable whose name could be a hosted node's or
+    /// another's is refused, not guessed.
+    const GRAPH_NODES: &'static [&'static str];
 }
 
 /// `Settings`' keys. Together with [`Hosted::KEYS`], these are the only
@@ -196,7 +204,7 @@ impl<H: Hosted> ProcessConfig<H> {
         }
         let figment = figment
             .merge(Self::dynamo_env())
-            .merge(origins::environment::<H>());
+            .merge(origins::environment::<H>()?);
         Self::from_figment(figment)
     }
 
@@ -1548,24 +1556,23 @@ impl Signals {
 }
 
 /// An environment variable's key as a settings path: `__` separates nested
-/// keys, and each key is lowercased except a node or adapter name, which is
-/// the name's own spelling. `[node.Truncate]` is therefore reachable as
-/// `GDL_NODE__TRUNCATE__MAX`, though figment would otherwise lowercase the
-/// name and the table would not match.
+/// keys, and each key is lowercased except a hosted node's or adapter's
+/// name, which is the name's own spelling, matched among the nodes under
+/// `node` and among the adapters under `adapter`. `[node.Truncate]` is
+/// therefore reachable as `GDL_NODE__TRUNCATE__MAX`, though figment would
+/// otherwise lowercase the name and the table would not match.
 fn canonical<H: Hosted>(key: &str) -> String {
-    let mut path = Vec::new();
+    let mut path: Vec<String> = Vec::new();
     for (index, part) in key.split("__").enumerate() {
-        let named = index == 1
-            && path
-                .first()
-                .is_some_and(|first| first == "node" || first == "adapter");
-        let part = match named {
-            true => H::NAMES
-                .iter()
-                .find(|name| name.eq_ignore_ascii_case(part))
-                .map_or_else(|| part.to_ascii_lowercase(), ToString::to_string),
-            false => part.to_ascii_lowercase(),
+        let names = match (index, path.first().map(String::as_str)) {
+            (1, Some("node")) => H::NODES,
+            (1, Some("adapter")) => H::ADAPTERS,
+            _ => &[],
         };
+        let part = names
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(part))
+            .map_or_else(|| part.to_ascii_lowercase(), ToString::to_string);
         path.push(part);
     }
     path.join(".")

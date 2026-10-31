@@ -347,17 +347,27 @@ fn settings_types(segment: &Segment, krate: &TokenStream) -> TokenStream {
             quote!(#[serde(default)] pool_policy: std::collections::BTreeMap<String, toml::Table>,),
         );
     }
-    let names: Vec<String> = segment
+    let nodes: Vec<String> = segment
         .nodes
         .iter()
         .map(|node| node.name.to_string())
-        .chain(
-            service
-                .iter()
-                .flat_map(|s| &s.adapters)
-                .map(|adapter| adapter.name.value()),
-        )
         .collect();
+    let adapters: Vec<String> = service
+        .iter()
+        .flat_map(|s| &s.adapters)
+        .map(|adapter| adapter.name.value())
+        .collect();
+    // Every placed node, so that the runtime can refuse a variable whose
+    // name folds to a hosted node's and another's. A placement that does
+    // not parse lists none here; the binary refuses it as it starts.
+    let graph_nodes: Vec<String> = gdl_model::Placement::from_toml(&segment.placement.value())
+        .map(|placement| {
+            placement
+                .segments()
+                .flat_map(|(_, nodes)| nodes.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
     let node_fields = segment.nodes.iter().map(|node| {
         let name = node.name.to_string();
         let binding = &node.binding;
@@ -371,7 +381,9 @@ fn settings_types(segment: &Segment, krate: &TokenStream) -> TokenStream {
         pub struct Settings { #(#fields)* }
         impl #krate::Hosted for Settings {
             const KEYS: &'static [&'static str] = &[#(#keys),*];
-            const NAMES: &'static [&'static str] = &[#(#names),*];
+            const NODES: &'static [&'static str] = &[#(#nodes),*];
+            const ADAPTERS: &'static [&'static str] = &[#(#adapters),*];
+            const GRAPH_NODES: &'static [&'static str] = &[#(#graph_nodes),*];
         }
         #[derive(Default, serde::Deserialize)]
         #[serde(deny_unknown_fields)]

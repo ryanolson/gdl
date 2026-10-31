@@ -230,7 +230,9 @@ struct NodeSettings {
 
 impl gdl_runtime::Hosted for Settings {
     const KEYS: &'static [&'static str] = &["node"];
-    const NAMES: &'static [&'static str] = &["Add"];
+    const NODES: &'static [&'static str] = &["Add"];
+    const ADAPTERS: &'static [&'static str] = &[];
+    const GRAPH_NODES: &'static [&'static str] = &["Add"];
 }
 
 fn deployment() -> gdl::Result<DeploymentSpec> {

@@ -412,7 +412,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** a generated build stage that installs `make` and sets the page size for jemalloc.
 
 ### A misspelled first key or node name in a `GDL_` variable is ignored
-- **What:** only variables whose first key is a settings key are read. `GDL_RUNTIM__DRAIN_MS` is dropped without a word, while `GDL_RUNTIME__DRAIN_M` is refused. A segment reads `GDL_NODE__<name>__*` only for the nodes it hosts, so `GDL_NODE__TRUNCATTE__MAX` is dropped the same way, by every segment.
+- **What:** only variables whose first key is a settings key are read. `GDL_RUNTIM__DRAIN_MS` is dropped without a word, while `GDL_RUNTIME__DRAIN_M` is refused. A segment reads `GDL_NODE__<name>__*` only for the nodes it hosts, so `GDL_NODE__TRUNCATTE__MAX` is dropped the same way, by every segment. Two pipeline nodes whose names differ only in case, such as `Ab` and `AB`, cannot be set from the environment: the segment that hosts one refuses the variable at start. Set them in a settings file, or rename one.
 - **Why:** the build scripts' own variables (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`) must not stop a segment. A fleet's cluster `env` reaches every segment in the cluster, and one node's settings there must not stop the segments that do not host it.
 - **Workaround:** check the settings the segment reports at start. See [Configuration](configuration.md).
 

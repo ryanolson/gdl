@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider, Source};
+use gdl::{Error, ErrorKind};
 use gdl_model::{Origin, PoolSettings, Problems, pool_variable};
 
 use super::{Hosted, KEYS, canonical};
@@ -20,8 +21,10 @@ use super::{Hosted, KEYS, canonical};
 /// supersedes (`GDL_POOL__READY=[]` before `GDL_POOL__READY__FRONT=1`)
 /// replaces nothing of a file's beside the later one's key, as within one
 /// provider. figment keeps a layer's own provenance when it is merged.
-pub(super) fn environment<H: Hosted>() -> Figment {
-    variables::<H>().fold(Figment::new(), Figment::merge)
+pub(super) fn environment<H: Hosted>() -> gdl::Result<Figment> {
+    variables::<H>().try_fold(Figment::new(), |figment, variable| {
+        Ok(figment.merge(variable?))
+    })
 }
 
 /// The `GDL_` variables a segment of `H` reads, one provider to a
@@ -31,8 +34,10 @@ pub(super) fn environment<H: Hosted>() -> Figment {
 /// are read: the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` are
 /// not settings. A `GDL_NODE__<name>__` variable is read only by a segment
 /// that hosts the node: a fleet sets a cluster's environment on every
-/// segment in it, and one node's settings must not stop the others.
-fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
+/// segment in it, and one node's settings must not stop the others. One
+/// whose name could be a hosted node's or another node's, which differ only
+/// in case, is refused: its name cannot say which it is for.
+fn variables<H: Hosted>() -> impl Iterator<Item = gdl::Result<Variable>> {
     const PREFIX: &str = "GDL_";
     std::env::vars_os().filter_map(|(name, value)| {
         let name = name.to_string_lossy().trim().to_string();
@@ -43,13 +48,35 @@ fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
         let key = canonical::<H>(rest);
         let mut parts = key.split('.');
         let first = parts.next().unwrap_or_default();
-        let hosted = first != "node" || parts.next().is_none_or(|name| H::NAMES.contains(&name));
-        let known = (KEYS.contains(&first) || H::KEYS.contains(&first)) && hosted;
-        (known && !key.split('.').any(str::is_empty)).then(|| Variable {
+        let known = KEYS.contains(&first) || H::KEYS.contains(&first);
+        if !known || key.split('.').any(str::is_empty) {
+            return None;
+        }
+        if first == "node"
+            && let Some(node) = parts.next()
+        {
+            let hosted = H::NODES.contains(&node);
+            let other = H::GRAPH_NODES
+                .iter()
+                .find(|other| other.eq_ignore_ascii_case(node) && !H::NODES.contains(other));
+            match (hosted, other) {
+                (true, Some(other)) => {
+                    return Some(Err(Error::new(
+                        ErrorKind::Placement,
+                        format!(
+                            "`{name}` could set node `{node}`, which this segment hosts, or node `{other}`, which it does not: a variable's name does not tell them apart. Rename one of the two nodes, or set the value in a settings file"
+                        ),
+                    )));
+                }
+                (false, _) => return None,
+                (true, None) => {}
+            }
+        }
+        Some(Ok(Variable {
             key,
             value: value.to_string_lossy().to_string(),
             name,
-        })
+        }))
     })
 }
 

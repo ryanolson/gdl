@@ -23,7 +23,9 @@ struct Nothing {}
 
 impl Hosted for Nothing {
     const KEYS: &'static [&'static str] = &[];
-    const NAMES: &'static [&'static str] = &[];
+    const NODES: &'static [&'static str] = &[];
+    const ADAPTERS: &'static [&'static str] = &[];
+    const GRAPH_NODES: &'static [&'static str] = &[];
 }
 
 /// The longest any case waits for something it expects.
