@@ -121,3 +121,31 @@ async fn concurrent_operators_preserve_a_newer_scale() {
         "the paused operator must not undo the scale that the other operator applied"
     );
 }
+
+#[tokio::test]
+#[ignore = "F5: a restart after scaling restores routing before the ReplicaSet deletes the victim"]
+async fn a_committed_removal_keeps_the_victim_out_of_its_service() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut wanted = spec(Some(2));
+    wanted.service = Some(SERVICE.into());
+    wanted.routing_grace = Some("0s".into());
+    once(&fake, &wanted, 0).await;
+    fake.unlist();
+    once(&fake, &wanted, 1_000).await;
+    let persisted = status(&fake);
+    assert_eq!(persisted.retiring[0].phase, RetiringPhase::Unrouting);
+    assert!(persisted.retiring[0].unrouted.is_some());
+    once(&fake, &wanted, 2_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    assert_eq!(fake.pod("pod-2").cost, Some(VICTIM_COST));
+    // The operator restarts before storing Deleting; the ReplicaSet still lags.
+    fake.state().status = Some(persisted);
+    once(&fake, &wanted, 3_000).await;
+    assert!(!fake.pod("pod-2").view.terminating);
+    fake.settle(false);
+    assert!(fake.pod("pod-2").view.terminating);
+    assert!(
+        !fake.pod("pod-2").routable,
+        "the committed victim is deleted after the restarted operator put it back in its Service"
+    );
+}
