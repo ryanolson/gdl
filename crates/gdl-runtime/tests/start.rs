@@ -170,3 +170,29 @@ async fn a_hub_that_refuses_the_segment_ends_its_start_at_once() {
     assert!(error.to_string().contains("400"), "{error}");
     hub.shutdown().await.expect("valid test fixture");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F1: a lost registration answer makes the retry fail with Unauthorized"]
+async fn a_registration_committed_before_a_proxy_error_can_finish_starting() {
+    let mut hub_settings = hub_config();
+    hub_settings.server.heartbeat_interval = Duration::from_millis(300);
+    hub_settings.server.heartbeat_max_failures = 1;
+    let hub = velo_hub::Hub::builder(hub_settings)
+        .extension(gdl_hub::GraphAdmission::new(spec()))
+        .serve()
+        .await
+        .expect("the hub serves");
+    let proxy = Proxy::new(hub.control_addr()).await;
+    // The hub commits before answering 200; the proxy replaces that answer.
+    proxy.rewrite_once(b"200 OK", b"502 XX");
+    let config = settings(hub.public_addr().port(), proxy.port, 2_000);
+    let process = Process::start(&config).await.expect("the process starts");
+    let launched = tokio::time::timeout(
+        WAIT,
+        config.launch(&process, "a", SEGMENTS, &spec(), async { Ok(()) }),
+    )
+    .await
+    .expect("the launch ended within the wait");
+    hub.shutdown().await.expect("valid test fixture");
+    launched.expect("a proxy error after a committed registration must be recoverable");
+}
