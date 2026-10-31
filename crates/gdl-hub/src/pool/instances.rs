@@ -26,7 +26,9 @@ use crate::GraphAdmission;
 /// read of one list.
 const READ: Duration = Duration::from_secs(5);
 
-/// The services read for each segment, each with the phase it shows.
+/// The services read for each segment, each with the phase it shows, in
+/// the order an instance announces them, which is the order they are
+/// read in.
 const PHASES: [(SegmentPhase, InstancePhase); 4] = [
     (SegmentPhase::Ready, InstancePhase::Ready),
     (SegmentPhase::Detached, InstancePhase::Detached),
@@ -47,20 +49,32 @@ pub(super) async fn list(
         .iter()
         .map(|(segment, _)| segment.as_str())
         .collect();
-    // One read per segment and phase, all at once: velo-hub keeps its
-    // service directory to itself, and serves one service per read.
-    let reads = segments.iter().flat_map(|segment| {
-        PHASES.iter().map(move |&(phase, shown)| {
-            let name = segment_service(segment, phase);
-            async move { services.get_instances(&name).await.map(|ids| (shown, ids)) }
-        })
+    // velo-hub keeps its service directory to itself, and serves one
+    // service per read. The segments are read at once, and each segment's
+    // phases one after another, in the order an instance announces them,
+    // so that a member's listed phase never goes back from one list to
+    // the next without anything kept between lists. It holds because an
+    // instance withdraws only `ready` while it is a member, and only once
+    // the hub has taken its `retired` (docs/src/concepts/pools.md,
+    // "Listing the instances"): a read of `ready` that misses it is
+    // followed by a read of `retired` that sees it, and the later phases
+    // stay until the instance leaves.
+    let reads = segments.iter().map(|segment| async move {
+        let mut read = Vec::with_capacity(PHASES.len());
+        for (phase, shown) in PHASES {
+            let ids = services
+                .get_instances(&segment_service(segment, phase))
+                .await?;
+            read.push((shown, ids));
+        }
+        anyhow::Ok(read)
     });
     let read = tokio::time::timeout(READ, try_join_all(reads))
         .await
         .map_err(|_| "the hub's service directory did not answer in time".to_string())?
         .map_err(|error| format!("the hub's service directory did not answer: {error:#}"))?;
     let mut phases: HashMap<InstanceId, InstancePhase> = HashMap::new();
-    for (shown, ids) in read {
+    for (shown, ids) in read.into_iter().flatten() {
         for id in ids {
             let phase = phases.entry(id).or_insert(shown);
             *phase = (*phase).max(shown);

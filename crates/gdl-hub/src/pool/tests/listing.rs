@@ -78,10 +78,13 @@ impl Directory {
         }
     }
 
-    async fn entered(&self) {
-        tokio::time::timeout(WAIT, self.entered.acquire_many(4))
+    /// Wait until `reads` reads have reached their gates or finished. A
+    /// segment's phases are read one after another, so a held read holds
+    /// the ones after it.
+    async fn entered(&self, reads: u32) {
+        tokio::time::timeout(WAIT, self.entered.acquire_many(reads))
             .await
-            .expect("the four reads reach their gates or finish")
+            .expect("the reads reach their gates or finish")
             .expect("the signal stays open")
             .forget();
     }
@@ -139,7 +142,8 @@ async fn retirement_between_reads(withdraw_ready: bool) -> InstancePhase {
     assert_eq!(before.instances.len(), 1);
     assert_eq!(before.instances[0].phase, InstancePhase::Ready);
 
-    // Later-phase reads finish before retirement; the ready read runs after it.
+    // The ready read, the first of the segment's, is held until the
+    // instance has retired; the reads after it run only once it answers.
     let directory = Directory::new(services.clone(), vec![ready_name]).await;
     let listing = tokio::spawn({
         let admission = Arc::clone(&admission);
@@ -147,7 +151,7 @@ async fn retirement_between_reads(withdraw_ready: bool) -> InstancePhase {
         let services = directory.services.clone();
         async move { list(&admission, &services, &feed).await }
     });
-    directory.entered().await;
+    directory.entered(1).await;
     let retired = client
         .register_service(&segment_service("a", SegmentPhase::Retired))
         .await
@@ -174,13 +178,17 @@ async fn retirement_between_reads(withdraw_ready: bool) -> InstancePhase {
     during.instances[0].phase
 }
 
+/// The control: with `ready` kept, the reads after the held one see the
+/// retirement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retaining_ready_across_the_reads_preserves_the_phase() {
-    assert_eq!(retirement_between_reads(false).await, InstancePhase::Ready);
+async fn retaining_ready_across_the_reads_shows_the_retirement() {
+    assert_eq!(
+        retirement_between_reads(false).await,
+        InstancePhase::Retired
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F4: phase reads can miss retirement and withdrawal while membership stays"]
 async fn retirement_between_reads_does_not_regress_a_member_that_stays() {
     assert!(
         retirement_between_reads(true).await >= InstancePhase::Ready,
@@ -221,7 +229,7 @@ async fn a_reused_id_does_not_preserve_the_departed_registration() {
         let services = directory.services.clone();
         async move { list(&admission, &services, &feed).await }
     });
-    directory.entered().await;
+    directory.entered(1).await;
     client.unregister().await.expect("the instance leaves");
     assert!(admission.member(node.instance_id()).is_none());
     drop(retired);

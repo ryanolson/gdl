@@ -586,9 +586,11 @@ async fn a_departure_during_directory_reads_does_not_move_the_phase_backwards() 
         let feed = Arc::clone(&served.pool.feed);
         async move { super::instances::list(&admission, &proxy_services, &feed).await }
     });
-    tokio::time::timeout(WAIT, entered.acquire_many(4))
+    // A segment's phases are read one after another: the first read is
+    // held, and the others wait for it.
+    tokio::time::timeout(WAIT, entered.acquire_many(1))
         .await
-        .expect("all four phase reads begin")
+        .expect("the first phase read begins")
         .expect("the signal stays open")
         .forget();
     client.unregister().await.expect("the instance leaves");
