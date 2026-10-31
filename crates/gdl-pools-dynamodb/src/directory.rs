@@ -451,8 +451,10 @@ impl DynamoDirectory {
 impl PoolDirectory for DynamoDirectory {
     type Watch = DynamoWatch;
 
+    // Boxed: a write holds several SDK calls' futures, too large to move
+    // on a caller's stack, and it runs once a heartbeat, not per request.
     async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
-        self.publish_with(record, None).await
+        Box::pin(self.publish_with(record, None)).await
     }
 
     async fn publish_after(
@@ -460,7 +462,7 @@ impl PoolDirectory for DynamoDirectory {
         record: PoolRecord,
         last: Option<Version>,
     ) -> Result<(), DirectoryError> {
-        self.publish_with(record, Some(last)).await
+        Box::pin(self.publish_with(record, Some(last))).await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
