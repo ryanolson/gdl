@@ -28,6 +28,91 @@ use gdl_pools::{
 use gdl_watch::{FollowEvent, Listing, LoadReport};
 use tokio::sync::watch;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F1: a ready successor can retain the draining predecessor's property version"]
+async fn a_ready_successor_is_not_listed_draining_after_the_epochs_version_budget() {
+    let directory = Resolving::new();
+    let epoch = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock")
+            .as_millis(),
+    )
+    .expect("milliseconds fit")
+        + 60_000;
+    // This is the list after 2^20 changes in an epoch ahead of this host's clock.
+    let predecessor = PoolRecord {
+        state: PoolState::Draining,
+        epoch,
+        properties_version: (epoch + 1) * (1 << 20),
+        ..record(POOL, GLOBAL, &[], Duration::from_secs(30))
+    };
+    directory
+        .inner
+        .publish(predecessor.clone())
+        .await
+        .expect("the draining predecessor's record");
+    let (global_hub, global) = serve_pool(global_default(), &directory, timing()).await;
+    let mut watch = global.follows();
+    let (events, _) = snapshot(&mut watch).await;
+    let before = listings(&events)
+        .into_iter()
+        .find(|(pool, _)| pool == POOL)
+        .and_then(|(_, listing)| listing)
+        .expect("the predecessor is listed");
+    assert!(before.draining, "the drain is observed before the restart");
+    assert_eq!(before.properties.version, predecessor.properties_version);
+
+    let mut records = common::Records::new(&directory.inner);
+    let (model_hub, _model) = serve_pool(
+        model(POOL, "us-east-1", "model-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (_instances, _) = meet_the_quorum(&model_hub).await;
+    records.until(PoolState::Ready).await;
+    let successor = directory
+        .inner
+        .record("model_x", POOL)
+        .expect("the successor's record");
+    assert_eq!(successor.state, PoolState::Ready);
+    assert!(
+        successor.epoch > predecessor.epoch,
+        "the successor owns the record"
+    );
+    assert_eq!(successor.properties_version, predecessor.properties_version);
+    loop {
+        match next(&mut watch).await {
+            FollowEvent::Follow {
+                pool,
+                state: PoolState::Ready,
+                ..
+            }
+            | FollowEvent::State {
+                pool,
+                state: PoolState::Ready,
+                ..
+            } if pool == POOL => break,
+            _ => {}
+        }
+    }
+    let (events, _) = snapshot(&mut global.follows()).await;
+    let after = listings(&events)
+        .into_iter()
+        .find(|(pool, _)| pool == POOL)
+        .and_then(|(_, listing)| listing)
+        .expect("the ready successor is listed");
+    for hub in [model_hub, global_hub] {
+        hub.shutdown().await.expect("the hub stops");
+    }
+    assert!(
+        !after.draining,
+        "ready successor at epoch {} stays draining at version {} after epoch {}",
+        successor.epoch, after.properties.version, predecessor.epoch,
+    );
+}
+
 /// A record of the model pool `pool`, of [`spec`]'s deployment unless
 /// `placement` is given, a child of `home`, listing `properties`.
 fn record(
