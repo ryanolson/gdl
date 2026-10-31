@@ -359,7 +359,6 @@ fn settings() -> PoolSettings {
 
 /// A directory read can overtake the feed's retirement watch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F2: a retired instance keeps its load until the feed observes retirement"]
 async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
     use std::collections::BTreeMap;
     use std::time::Instant;

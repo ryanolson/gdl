@@ -69,15 +69,24 @@ pub(super) async fn list(
     let mut loads = feed.loads(Instant::now());
     let instances = members
         .into_iter()
-        .map(|(segment, peer)| PoolInstance {
-            phase: phases
+        .map(|(segment, peer)| {
+            let phase = phases
                 .get(&peer.instance_id)
                 .copied()
-                .unwrap_or(InstancePhase::Joining),
-            load: loads.remove(&peer.instance_id),
-            addresses: addresses(&peer),
-            segment,
-            peer,
+                .unwrap_or(InstancePhase::Joining);
+            // The feed learns of a retirement from its own watch, which can
+            // lag the directory read above: a load is shown only with the
+            // phase this list read, so a retired instance never shows one.
+            let load = loads
+                .remove(&peer.instance_id)
+                .filter(|_| phase == InstancePhase::Ready);
+            PoolInstance {
+                phase,
+                load,
+                addresses: addresses(&peer),
+                segment,
+                peer,
+            }
         })
         .collect();
     Ok(Instances { instances })

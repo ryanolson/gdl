@@ -41,8 +41,9 @@ pub struct PoolInstance {
     pub phase: InstancePhase,
     /// The latest load report of an entry instance that is usable: ready,
     /// not retired, and reporting in its current registration within three
-    /// summary periods. `None` for an interior instance, and for an entry
-    /// instance that has not reported, or is not usable.
+    /// summary periods. Shown only when [`PoolInstance::phase`] is
+    /// `ready`. `None` for an interior instance, and for an entry instance
+    /// that has not reported, or is not usable.
     #[serde(default)]
     pub load: Option<InstanceLoad>,
 }
