@@ -805,7 +805,6 @@ fn a_row_on_a_pools_own_watch_keeps_its_evidence_when_the_relay_unlists_it() {
 }
 
 #[test]
-#[ignore = "F7: unlisting a withheld follow forgets the drain it reported at the same epoch"]
 fn a_withheld_follow_keeps_its_reported_drain_when_unlisted() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
@@ -848,5 +847,54 @@ fn a_withheld_follow_keeps_its_reported_drain_when_unlisted() {
     assert!(
         after.is_draining(),
         "unlisting must retain the drain this follow reported: {after:?}"
+    );
+}
+
+/// A drain that only a listing said of the hub a follow links to is the
+/// follow's too: when a later hub's listing has replaced that evidence and
+/// the relay then unlists the pool, the follow a pool's own watch still
+/// shows says its word again with the drain. Found by the guard (seed 593).
+#[test]
+fn a_shown_follow_keeps_a_drain_its_hubs_listing_said() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(follow_at(M1, 1, 5, PoolState::Unavailable), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a watch of its own");
+    for event in [
+        follow_at(M1, 1, 5, PoolState::Unavailable),
+        FollowEvent::Synced { listed: true },
+    ] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    let mut draining = listing(5);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 1,
+            listing: Some(draining),
+        },
+        now,
+    );
+    follows.take(listed(M1, Some(6)), now);
+    follows.take(listed(M1, None), now);
+    let (after, row) = evidence(&pools, M1);
+    assert_eq!(row, Some(5), "the own watch still holds its follow");
+    assert_eq!(
+        after,
+        Some(at(5, PoolCondition::Live).with_draining(true)),
+        "the drain its hub's listing said"
     );
 }

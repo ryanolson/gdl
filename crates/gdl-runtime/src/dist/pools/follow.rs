@@ -903,8 +903,14 @@ impl Followed {
                     return None;
                 }
                 self.generations.insert(key.clone(), generation);
-                // The follow is word of the hub it links to, first-hand.
-                self.witness(&key, epoch, state);
+                // The follow is word of the hub it links to, first-hand, and
+                // keeps a drain already said of that hub.
+                let drained = state == PoolState::Draining
+                    || self
+                        .evidence
+                        .get(&key)
+                        .is_some_and(|held| held.epoch() == epoch && held.is_draining());
+                self.witness(&key, epoch, drained);
                 // Counted by the pool's name, so that every generation of
                 // it counts into one series.
                 let figures = self
@@ -927,6 +933,9 @@ impl Followed {
                         figures,
                     ),
                 );
+                if let Some(follow) = self.follows.get_mut(&key) {
+                    follow.drained |= drained;
+                }
                 let Some(mut older) = older else {
                     return Some((key, Change::Table));
                 };
@@ -944,8 +953,8 @@ impl Followed {
                 let key = (class, pool);
                 let follow = self.current(&key, generation)?;
                 follow.set_state(state);
-                let epoch = follow.epoch;
-                self.witness(&key, epoch, state);
+                let (epoch, drained) = (follow.epoch, follow.drained);
+                self.witness(&key, epoch, drained);
                 Some((key, Change::Table))
             }
             FollowEvent::Load {
@@ -1121,6 +1130,14 @@ impl Followed {
                     .and_then(|age| now.checked_sub(Duration::from_millis(age)));
                 let evidence = gdl::PoolEvidence::new(listing.epoch, listing.condition)
                     .with_draining(listing.draining);
+                // A drain of the hub a follow links to is the follow's to
+                // keep, whichever watch said it.
+                if listing.draining
+                    && let Some(follow) = self.follows.get_mut(&key)
+                    && follow.epoch == listing.epoch
+                {
+                    follow.drained = true;
+                }
                 self.evidence.take(&key, evidence, silent);
                 self.listings.take(key, listing);
             }
@@ -1129,26 +1146,25 @@ impl Followed {
                 self.evidence.unlist(&key);
                 // A follow still shown, as one a pool's own watch has yet
                 // to drop, keeps its own word: its row is never read with
-                // no word of its hub.
+                // no word of its hub, and a drain of that hub lasts.
                 if let Some(follow) = self.follows.get(&key) {
-                    let (epoch, state) = (follow.epoch, follow.state);
-                    self.witness(&key, epoch, state);
+                    let (epoch, drained) = (follow.epoch, follow.drained);
+                    self.witness(&key, epoch, drained);
                 }
             }
         }
         self.listings_changed += 1;
     }
 
-    /// Take what a follow of `key`'s pool's hub of `epoch`, in `state`,
-    /// says of the pool: that it drains, if its state says so. A follow
-    /// says nothing of the pool's condition, which is the hub's listing's:
-    /// of the same hub it keeps the condition held, and of a later hub the
-    /// pool is live, its link up and its record new.
-    fn witness(&mut self, key: &Key, epoch: u64, state: PoolState) {
+    /// Take what a follow of `key`'s pool's hub of `epoch` says of the
+    /// pool: that it drains, if it ever said so. A follow says nothing of
+    /// the pool's condition, which is the hub's listing's: of the same hub
+    /// it keeps the condition held, and of a later hub the pool is live,
+    /// its link up and its record new.
+    fn witness(&mut self, key: &Key, epoch: u64, drained: bool) {
         let held = self.evidence.get(key).filter(|held| held.epoch() == epoch);
         let condition = held.map_or(gdl::PoolCondition::Live, |held| held.condition());
-        let said =
-            gdl::PoolEvidence::new(epoch, condition).with_draining(state == PoolState::Draining);
+        let said = gdl::PoolEvidence::new(epoch, condition).with_draining(drained);
         let silent = self.evidence.silent(key);
         if self.evidence.take(key, said, silent) {
             self.listings_changed += 1;
@@ -1285,6 +1301,10 @@ struct Follow {
     /// The epoch of the pool's hub the follow links to: every event of the
     /// follow is word of that hub.
     epoch: u64,
+    /// Whether the follow ever said its pool drains: a drain lasts for its
+    /// hub's life, also when the relay later withholds the pool as
+    /// unavailable, so what the follow says again keeps it.
+    drained: bool,
     region: String,
     state: PoolState,
     /// The pool's load summary, as it arrived.
@@ -1331,6 +1351,7 @@ impl Follow {
         Self {
             generation,
             epoch,
+            drained: state == PoolState::Draining,
             region,
             state,
             load,
@@ -1364,6 +1385,7 @@ impl Follow {
         if state != self.state {
             self.changes += 1;
         }
+        self.drained |= state == PoolState::Draining;
         self.state = state;
         if !self.exposes() {
             self.hidden.extend(self.exposed.drain());
@@ -1417,6 +1439,7 @@ impl Follow {
     /// them, the instances it held that this view neither exposes nor
     /// retires.
     fn carry(&mut self, held: &Follow) {
+        self.drained |= held.drained;
         self.turns.clone_from(&held.turns);
         self.leases = Arc::clone(&held.leases);
         self.changes = held.changes + 1;
