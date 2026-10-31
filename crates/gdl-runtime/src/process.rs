@@ -1109,14 +1109,18 @@ impl Launch {
     /// Say that this instance has retired, so that its peers stop routing
     /// to it: at the hub, `ready` and `loaded` withdrawn, then `retired`;
     /// in a roster directory, a file in `retired/`. Bounded by
-    /// `deadline`; what does not get through leaves the drain to (B) or its
-    /// bound.
+    /// `deadline`, and by [`retirement_bound`] from now, so that a hub that
+    /// does not answer leaves the drain the rest of its bound; what does
+    /// not get through leaves the drain to (B) or its bound.
     async fn retire(&mut self, deadline: tokio::time::Instant) {
         self.pool_retires();
         let retired = match &mut self.peers {
             Peers::Files(dir) => announce(dir, "retired", self.segment, &self.node),
             #[cfg(feature = "hub")]
-            Peers::Hub(session) => session.retire(deadline).await,
+            Peers::Hub(session) => {
+                let bound = tokio::time::Instant::now() + retirement_bound(self.drain);
+                session.retire(deadline.min(bound)).await
+            }
         };
         if let Err(error) = retired {
             eprintln!(
@@ -1315,6 +1319,18 @@ impl Launch {
 
 /// How often a draining instance looks again.
 const DRAIN_POLL: Duration = Duration::from_millis(50);
+
+/// How long a retirement may wait for its hub, out of a drain bound of
+/// `drain`: a quarter of it, and at most [`RETIREMENT_CAP`]. The drain
+/// keeps the rest, to wait for its senders and its own requests.
+#[cfg(feature = "hub")]
+fn retirement_bound(drain: Duration) -> Duration {
+    (drain / 4).min(RETIREMENT_CAP)
+}
+
+/// The most a retirement waits for its hub, whatever the drain's bound.
+#[cfg(feature = "hub")]
+const RETIREMENT_CAP: Duration = Duration::from_secs(5);
 
 /// A segment process before and beyond its graph: the signals that stop it,
 /// the system listener that reports on it, its velo node, and its metrics.
@@ -1648,4 +1664,27 @@ fn metrics_error(error: prometheus::Error) -> Error {
         ErrorKind::Placement,
         format!("the metrics registry: {error}"),
     )
+}
+
+#[cfg(all(test, feature = "hub"))]
+mod tests {
+    use super::retirement_bound;
+    use std::time::Duration;
+
+    /// A quarter of the drain's bound, and at most 5 s.
+    #[test]
+    fn a_retirement_waits_a_quarter_of_the_bound_and_at_most_five_seconds() {
+        assert_eq!(
+            retirement_bound(Duration::from_secs(4)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retirement_bound(Duration::from_secs(20)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            retirement_bound(Duration::from_secs(600)),
+            Duration::from_secs(5)
+        );
+    }
 }

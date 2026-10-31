@@ -86,6 +86,12 @@ A hub that does not confirm the withdrawals within the retirement's bound is not
 
 **Rejected: keep an announcement the hub has not answered.** Holding its request open, past its timeout, until the hub answered, kept `retired` in most cases. But the open request held the client, which sends one change at a time, so it held back the leave. And a cancelled request, or the client's own timeout, still withdrew it. Each case needed another rule. The order above holds without any of them.
 
+## The retirement has a bound of its own
+
+X waits for its hub to confirm the withdrawals and take `retired` for at most a quarter of its drain's bound, and at most 5 s. The drain keeps the rest. A hub that does not answer then costs X a part of its bound, and X still waits for its senders and its own requests, and closes once they are done. `crates/gdl-runtime/tests/rosters/unanswered.rs` holds the case.
+
+**Rejected: retry until the drain's bound.** When the hub did not answer, the retirement used the whole bound. The drain then started with nothing left, so X always stopped at its bound, whatever it held. The serving body and the requests X held still ran meanwhile, so nothing was cut that the bound would not cut anyway, but X never stopped sooner.
+
 ## The acknowledgement is a promise
 
 A peer marks a retired instance acknowledged, and publishes a routing table without it, before it sends the acknowledgement. The mark stays even if the send fails.
