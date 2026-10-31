@@ -70,6 +70,11 @@ fn made(kind: &str, name: &str, pool: &str) -> Value {
     })
 }
 
+/// The raw path of `GdlPool` `name`'s delete.
+fn pool_path(name: &str) -> String {
+    format!("/apis/gdl.dev/v1alpha1/namespaces/gdl-api/gdlpools/{name}")
+}
+
 /// Every delete command in `context`, whole.
 fn delete_commands(log: &Log, context: &str) -> Vec<Vec<String>> {
     commands(log)
@@ -216,8 +221,7 @@ fn deploy_and_down_delete_gdl_pools_alone_and_leave_the_operators_objects() {
     deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
     let deleted = delete_commands(&log, "kind-use1");
     assert_eq!(deleted.len(), 1, "{deleted:?}");
-    assert!(deleted[0].contains(&"gdlpools.gdl.dev/model-x-old".to_string()));
-    assert!(deleted[0].contains(&"--cascade=background".to_string()));
+    assert!(deleted[0].contains(&pool_path("model-x-old")));
     for name in ["model-x-old-engine", "model-x-us-engine"] {
         assert!(
             kube.objects["kind-use1"].contains_key(&("Deployment".to_string(), name.to_string()))
@@ -234,20 +238,17 @@ fn deploy_and_down_delete_gdl_pools_alone_and_leave_the_operators_objects() {
         assert!(
             objects
                 .iter()
-                .all(|o| o.starts_with("gdlpools.gdl.dev/") || o.starts_with("serviceaccounts/")),
+                .all(|o| o.starts_with("/apis/gdl.dev/") || o.starts_with("serviceaccounts/")),
             "{args:?}"
         );
     }
     let pools: Vec<String> = delete_commands(&log, "kind-use1")
         .into_iter()
         .flatten()
-        .filter(|a| a.starts_with("gdlpools.gdl.dev/"))
+        .filter(|a| a.contains("/gdlpools/"))
         .collect();
     // The child before its parent.
-    assert_eq!(
-        pools,
-        ["gdlpools.gdl.dev/model-x-us", "gdlpools.gdl.dev/global-us"]
-    );
+    assert_eq!(pools, [pool_path("model-x-us"), pool_path("global-us")]);
 }
 
 /// A cluster that drops `operator` while the operator still runs pools of
@@ -346,8 +347,8 @@ fn down_stops_a_plain_child_before_its_operated_parent() {
             .unwrap_or_else(|| panic!("no delete of {object} in {context}: {calls:?}"))
     };
     let child = at("kind-euw1", "deployments.apps/model-x-shared-engine");
-    let operated_child = at("kind-use1", "gdlpools.gdl.dev/model-x-us");
-    let operated_parent = at("kind-use1", "gdlpools.gdl.dev/global-us");
+    let operated_child = at("kind-use1", &pool_path("model-x-us"));
+    let operated_parent = at("kind-use1", &pool_path("global-us"));
     let plain_parent = at("kind-euw1", "deployments.apps/global-eu-front");
     assert!(child < operated_parent, "{calls:?}");
     assert!(operated_child < operated_parent, "{calls:?}");
@@ -464,7 +465,6 @@ fn an_opt_out_with_renamed_pools_is_refused_when_the_gdl_pool_list_is_forbidden(
 }
 
 #[test]
-#[ignore = "F5: down deletes a replacement GdlPool from another fleet because the delete carries no uid"]
 fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
     struct Recreated {
         kube: Kube,
@@ -480,7 +480,7 @@ fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
             if !self.replaced
                 && args[1] == "kind-use1"
                 && args.contains(&"delete".to_string())
-                && args.contains(&"gdlpools.gdl.dev/model-x-us".to_string())
+                && args.contains(&pool_path("model-x-us"))
             {
                 let key = ("GdlPool".to_string(), "model-x-us".to_string());
                 let object = self

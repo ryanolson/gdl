@@ -231,7 +231,7 @@ pub(super) const GDL: &str = "gdl.dev";
 /// The gdl operator's `GdlPool`, as `kubectl get` takes it: listed only in
 /// a cluster that has its CRD, and never with [`RESOURCES`], since a
 /// `GdlPool` is deleted only with background propagation
-/// ([`At::delete_pools`]).
+/// ([`At::delete_pool`]).
 pub(super) const POOLS: &str = "gdlpools.gdl.dev";
 
 /// The service port on which a hub serves its public routes, and its
@@ -425,22 +425,18 @@ impl At<'_> {
         self.namespaced(&["get", POOLS, "--selector", selector, "--output", "json"])
     }
 
-    /// Delete the `GdlPool`s `names`, and wait, at most `seconds`, until
-    /// they are gone. With background propagation, Kubernetes' default:
-    /// a pool's finalizer stops it in order while its objects still
-    /// exist, and garbage collection deletes them only after. Foreground
-    /// propagation would delete them while the pool still stops.
-    pub(super) fn delete_pools(&self, names: &[String], seconds: u64) -> Vec<String> {
-        let timeout = format!("--timeout={seconds}s");
-        let mut args = self.namespaced(&[
-            "delete",
-            "--cascade=background",
-            "--wait=true",
-            "--ignore-not-found",
-            &timeout,
-        ]);
-        args.extend(names.iter().map(|name| format!("{POOLS}/{name}")));
-        args
+    /// Delete `GdlPool` `name` with the `DeleteOptions` on stdin, which
+    /// carry its propagation and the uid it must have: `kubectl delete`
+    /// takes no precondition, and a raw DELETE does. Background
+    /// propagation, Kubernetes' default, lets a pool's finalizer stop it
+    /// while its objects still exist; foreground would delete them while
+    /// it still stops.
+    pub(super) fn delete_pool(&self, name: &str) -> Vec<String> {
+        let path = format!(
+            "/apis/gdl.dev/v1alpha1/namespaces/{}/gdlpools/{name}",
+            self.namespace
+        );
+        self.cluster(&["delete", "--raw", &path, "-f", "-"])
     }
 
     /// Remove the labels `keys` from the namespace.

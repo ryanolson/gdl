@@ -613,27 +613,36 @@ impl gdl_gen::Kube for Kube {
                     .collect();
                 gdl_gen::Reply::ok(json!({"kind": "List", "items": items}).to_string())
             }
-            ("delete", _) => {
-                // A GdlPool's finalizer holds its delete until its stop
-                // ends, which only background propagation lets run in
-                // order: a GdlPool is deleted alone, and so.
-                let pools = rest
-                    .iter()
-                    .filter(|a| a.starts_with("gdlpools.gdl.dev/"))
-                    .count();
-                if pools > 0 {
-                    assert!(
-                        rest.contains(&"--cascade=background".to_string()),
-                        "{args:?}"
-                    );
-                    assert_eq!(
-                        pools,
-                        rest.iter()
-                            .filter(|a| !a.starts_with("--") && *a != "delete")
-                            .count(),
-                        "{args:?}"
-                    );
+            ("delete", Some(path)) => {
+                // A GdlPool is deleted alone, with background propagation,
+                // and only if it is still the object of the uid read.
+                let (_, name) = path.rsplit_once("/gdlpools/").expect("a GdlPool's path");
+                let options: Value =
+                    serde_json::from_str(&input.unwrap_or_default()).expect("DeleteOptions");
+                assert_eq!(options["propagationPolicy"], "Background", "{options}");
+                let key = ("GdlPool".to_string(), name.to_string());
+                let objects = self.objects.entry(context.clone()).or_default();
+                match objects.get(&key) {
+                    None => gdl_gen::Reply::failed(format!(
+                        "Error from server (NotFound): gdlpools.gdl.dev \"{name}\" not found"
+                    )),
+                    Some(held) if held["metadata"]["uid"] != options["preconditions"]["uid"] => {
+                        gdl_gen::Reply::failed(format!(
+                            "Error from server (Conflict): Operation cannot be fulfilled on GdlPool \"{name}\": the UID in the precondition ({}) does not match the UID in record ({}). The object might have been deleted and then recreated",
+                            options["preconditions"]["uid"], held["metadata"]["uid"]
+                        ))
+                    }
+                    Some(_) => {
+                        objects.remove(&key);
+                        gdl_gen::Reply::ok("")
+                    }
                 }
+            }
+            ("delete", _) => {
+                assert!(
+                    !rest.iter().any(|a| a.starts_with("gdlpools")),
+                    "a GdlPool is deleted only by its uid: {args:?}"
+                );
                 for reference in rest
                     .iter()
                     .filter(|a| !a.starts_with("--") && *a != "delete")

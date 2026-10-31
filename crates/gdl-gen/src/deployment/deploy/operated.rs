@@ -168,9 +168,11 @@ pub(super) fn pools(
         .map_err(|e| Error::new(format!("cluster `{}`: {e}", cluster.name)))
 }
 
-/// Delete `pools` of `cluster`, with background propagation, and wait until
-/// each is gone: its finalizer has stopped it. A wait that runs out names
-/// the step of the pool's stop and why it waits.
+/// Delete `pools` of `cluster`, each with background propagation and only
+/// the object of the uid listed, and wait until each is gone: its
+/// finalizer has stopped it. A pool made again under its name since the
+/// list, another object, is left in place and said. A wait that runs out
+/// names the step of each pool's stop and why it waits.
 pub(super) fn delete(
     kube: &mut dyn Kube,
     cluster: &Cluster,
@@ -181,36 +183,90 @@ pub(super) fn delete(
     if pools.is_empty() {
         return Ok(());
     }
-    let names: Vec<String> = pools.iter().map(|pool| pool.name.clone()).collect();
-    let bound = pools
+    let mut deleted = Vec::new();
+    for pool in pools {
+        let args = bounded(cluster.at().delete_pool(&pool.name), waits.objects);
+        let body = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "propagationPolicy": "Background",
+            "preconditions": {"uid": pool.uid},
+        });
+        let reply = kube.run(&args, Some(body.to_string().as_bytes()))?;
+        if reply.success || reply.stderr.contains("(NotFound)") {
+            deleted.push(*pool);
+        } else if reply.stderr.contains("does not match the UID in record") {
+            say(&format!(
+                "stop: pool `{}` in cluster `{}` was made again since it was listed: the new one is left in place",
+                pool.name, cluster.name
+            ));
+        } else {
+            return Err(Error::new(format!(
+                "cluster `{}`: deleting GdlPool `{}`: `kubectl {}` failed: {}",
+                cluster.name,
+                pool.name,
+                args.join(" "),
+                reply.stderr.trim()
+            )));
+        }
+    }
+    let bound = deleted
         .iter()
         .map(|pool| pool.stop_bound())
         .max()
         .unwrap_or_default()
         + waits.objects;
-    let args = bounded(cluster.at().delete_pools(&names, bound.as_secs()), bound);
-    let reply = kube.run(&args, None)?;
-    if reply.success {
-        say(&format!(
-            "stop: pool(s) {} in cluster `{}` stopped and deleted",
-            names.join(", "),
-            cluster.name
-        ));
-        return Ok(());
-    }
-    let mut message = format!(
-        "cluster `{}`: deleting GdlPool(s) {}: `kubectl {}` failed: {}",
-        cluster.name,
-        names.join(", "),
-        args.join(" "),
-        reply.stderr.trim()
-    );
-    for pool in self::pools(kube, cluster, waits.objects)? {
-        if names.contains(&pool.name) {
-            message.push_str(&format!("\n- pool `{}`: {}", pool.name, pool.stopping()));
+    let deadline = Instant::now() + bound;
+    let mut waiting = deleted;
+    loop {
+        let mut still = Vec::new();
+        for pool in waiting {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let reply = run(
+                kube,
+                cluster.at().object(&format!("{POOLS}/{}", pool.name)),
+                left.max(Duration::from_secs(1)),
+                None,
+                &format!(
+                    "reading GdlPool `{}` in cluster `{}`",
+                    pool.name, cluster.name
+                ),
+            )?;
+            // Gone, or another object of its name: this one is gone.
+            let read = match reply.stdout.trim().is_empty() {
+                true => Vec::new(),
+                false => Operated::list(&reply.stdout)?,
+            };
+            if read.iter().any(|read| read.uid == pool.uid) {
+                still.push(pool);
+            }
         }
+        waiting = still;
+        if waiting.is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let mut message = format!(
+                "cluster `{}`: GdlPool(s) not gone within {} s:",
+                cluster.name,
+                bound.as_secs()
+            );
+            for pool in self::pools(kube, cluster, waits.objects)? {
+                if waiting.iter().any(|w| w.uid == pool.uid) {
+                    message.push_str(&format!("\n- pool `{}`: {}", pool.name, pool.stopping()));
+                }
+            }
+            return Err(Error::new(message));
+        }
+        std::thread::sleep(waits.interval);
     }
-    Err(Error::new(message))
+    let names: Vec<&str> = pools.iter().map(|pool| pool.name.as_str()).collect();
+    say(&format!(
+        "stop: pool(s) {} in cluster `{}` stopped and deleted",
+        names.join(", "),
+        cluster.name
+    ));
+    Ok(())
 }
 
 /// Wait until `pool` of `cluster` is ready: the operator has acted on its
