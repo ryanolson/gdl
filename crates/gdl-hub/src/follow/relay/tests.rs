@@ -689,3 +689,36 @@ fn a_lost_link_makes_only_its_own_hub_missing() {
     );
     assert_eq!(listing(&lapsed), (5, gdl_pools::PoolCondition::Missing));
 }
+
+/// Replacing a follow before its snapshot arrives says nothing about the
+/// successor hub. The directory lists it before ending the pending link.
+#[test]
+#[ignore = "F5: an uninstalled epoch-5 link is reported missing at the successor listing's epoch 6"]
+fn an_uninstalled_follow_cannot_mark_a_successor_hub_missing() {
+    let mut failures = Vec::new();
+    for epoch in [5, 6] {
+        let relay = held();
+        relay.record(&record_of(5, PoolState::Ready), None);
+        let (generation, _) = relay.begin("model_x", "m");
+        relay.record(&record_of(epoch, PoolState::Ready), None);
+        relay.end("model_x", "m", generation);
+        let listing = relay
+            .lock()
+            .listings
+            .listing("model_x", "m", std::time::Instant::now())
+            .expect("the pool stays listed");
+        assert_eq!(listing.epoch, epoch);
+        let expected = if epoch == 5 {
+            gdl_pools::PoolCondition::Missing
+        } else {
+            gdl_pools::PoolCondition::Live
+        };
+        if listing.condition != expected {
+            failures.push((epoch, listing.condition, expected));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a failed pending epoch-5 link must not become epoch-6 missing evidence (epoch, actual, expected): {failures:?}"
+    );
+}
