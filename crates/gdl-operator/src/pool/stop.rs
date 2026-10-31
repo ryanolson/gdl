@@ -107,30 +107,40 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     // The step's precondition holds on every resume: a
                     // segment made again since, and its pods, are stopped
                     // first, and written into the segments step before
-                    // they are touched.
+                    // they are touched. A step back ends the reconcile.
                     let pool = self.name.clone();
                     if self.running(&owned, |d| d.name != pool).await? {
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
-                        continue;
+                        return Ok(BLOCKED);
                     }
                     // A pool with a parent lets its hub go only on the
                     // current hub's word, read now, that its record is
-                    // withdrawn: a hub that restarted since the drain has
-                    // published a record again, so the pool drains again,
-                    // with a bound of its own.
-                    if self.pool.spec.pool.parent.is_some()
-                        && hub_of(&owned, &self.name).is_some_and(|hub| hub.replicas != Some(0))
-                        && !self.cx.hubs.withdrawn(&self.name).await.unwrap_or(false)
-                    {
-                        self.status.withdrawn = false;
-                        self.condition(
-                            "Withdrawn",
-                            false,
-                            "HubRestarted",
-                            "the pool's hub no longer says its record is withdrawn: the pool drains again",
-                        );
-                        self.ahead(StopStep::Drain, &owned, None).await?;
-                        continue;
+                    // withdrawn.
+                    let parented = self.pool.spec.pool.parent.is_some()
+                        && hub_of(&owned, &self.name).is_some_and(|hub| hub.replicas != Some(0));
+                    if parented {
+                        match self.cx.hubs.withdrawn(&self.name).await {
+                            Ok(true) => {}
+                            // A hub that says its record is not withdrawn
+                            // published one since the drain's withdrawal:
+                            // a new hub, which drains again with a bound
+                            // of its own.
+                            Ok(false) => {
+                                self.status.withdrawn = false;
+                                self.condition(
+                                    "Withdrawn",
+                                    false,
+                                    "HubRestarted",
+                                    "the pool's hub no longer says its record is withdrawn: the pool drains again",
+                                );
+                                self.ahead(StopStep::Drain, &owned, None).await?;
+                                return Ok(BLOCKED);
+                            }
+                            // A probe that fails proves nothing: the step
+                            // stays, and its bound runs on, so a hub that
+                            // keeps failing ends the wait closed.
+                            Err(error) => return Ok(self.unproven(&stop, &error)),
+                        }
                     }
                     if self.hub(&owned).await? {
                         return Ok(BUSY);
@@ -140,8 +150,9 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                 StopStep::Release => {
                     if self.running(&owned, |_| true).await? {
                         // A pod of the pool runs again: the stop starts its
-                        // segments over.
-                        StopStep::Segments
+                        // segments over, in the next reconcile.
+                        self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
+                        return Ok(BLOCKED);
                     } else {
                         let kept: Vec<String> =
                             finalizers.into_iter().filter(|f| f != FINALIZER).collect();
@@ -227,22 +238,30 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             self.condition("Withdrawn", true, "Withdrawn", "");
             return Ok(None);
         }
+        Ok(Some(self.unproven(stop, "its hub does not say so yet")))
+    }
+
+    /// When to look again while the pool's withdrawal is not proven, for
+    /// `why`: soon, until the drain's bound from the stop's start has run
+    /// out; then the finalizer stays, with the `Withdrawn` condition and an
+    /// event.
+    fn unproven(&mut self, stop: &Stopping, why: &str) -> Duration {
         let started = millis(&stop.since).unwrap_or(self.now_ms);
         let bound = self.drain_bound();
         let waited = u64::try_from(self.now_ms.saturating_sub(started)).unwrap_or(0);
-        if waited > u64::try_from(bound.as_millis()).unwrap_or(u64::MAX) {
-            self.warn(
-                "Withdrawn",
-                false,
-                "WithdrawalUnproven",
-                &format!(
-                    "the pool's hub has not said within {} s that its drained record is withdrawn, so the pool is not deleted: its parent would still hold its record. The stop goes on once the hub says so; or withdraw the pool on its parent's hub, and remove the finalizer `{FINALIZER}` by hand",
-                    bound.as_secs()
-                ),
-            );
-            return Ok(Some(BLOCKED));
+        if waited <= u64::try_from(bound.as_millis()).unwrap_or(u64::MAX) {
+            return BUSY;
         }
-        Ok(Some(BUSY))
+        self.warn(
+            "Withdrawn",
+            false,
+            "WithdrawalUnproven",
+            &format!(
+                "the pool's hub has not said within {} s that its drained record is withdrawn ({why}), so the pool is not deleted: its parent would still hold its record. The stop goes on once the hub says so; or withdraw the pool on its parent's hub, and remove the finalizer `{FINALIZER}` by hand",
+                bound.as_secs()
+            ),
+        );
+        BLOCKED
     }
 
     /// The longest stop grace of the pool's segments, and the margin.

@@ -85,7 +85,6 @@ async fn a_successful_withdrawal_recheck_reaches_the_hub_stop() {
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "F14: alternating failed hub rechecks and successful drain probes loop inside one reconcile"]
 async fn intermittent_withdrawal_probe_errors_yield_instead_of_restarting_drain_forever() {
     let (returned, calls, fake) = recheck(true).await;
     assert!(!released(&fake));
@@ -99,4 +98,64 @@ async fn intermittent_withdrawal_probe_errors_yield_instead_of_restarting_drain_
         returned,
         "one reconcile did not return in 300 simulated seconds, making {calls} withdrawal probes while cycling through drain and hub"
     );
+}
+
+/// A hub whose withdrawal probe keeps failing at the hub step keeps the
+/// step: it never sends the stop back to drain, and once the drain's bound
+/// from the stop's start has run out, the finalizer stays, with the
+/// `Withdrawn` condition and one event.
+#[tokio::test]
+async fn a_hub_whose_probe_keeps_failing_fails_closed_at_the_bound() {
+    struct Failing<'a>(&'a Fake);
+
+    impl Hubs for Failing<'_> {
+        async fn health(&self, pool: &str) -> Result<Health, String> {
+            Hubs::health(self.0, pool).await
+        }
+
+        async fn withdrawn(&self, _: &str) -> Result<bool, String> {
+            Err("the withdrawal probe's connection was reset".into())
+        }
+
+        async fn drain(&self, pool: &str) -> Result<Drain, String> {
+            Hubs::drain(self.0, pool).await
+        }
+
+        async fn presence(&self, pool: &str, presence: gdl_k8s::Presence) -> Result<(), String> {
+            Hubs::presence(self.0, pool, presence).await
+        }
+    }
+
+    let fake = running(true).await;
+    fake.delete(false);
+    fake.reconcile(0).await.expect("drain and suspend segments");
+    fake.settle();
+    fake.state().events.clear();
+    fake.state().log.clear();
+    let hubs = Failing(&fake);
+    let cx = Context {
+        pools: &fake,
+        hubs: &hubs,
+        namespace: "ns",
+    };
+    // The bound: the segments' grace, 10 s and 30 s, and 60 s.
+    for now in [1_000, 50_000, 101_000, 102_000] {
+        reconcile(&cx, &fake.pool().expect("pool"), now)
+            .await
+            .expect("a reconcile");
+        assert_eq!(step(&fake), Some(StopStep::Hub), "at {now}");
+    }
+    assert_eq!(
+        condition(&fake, "Withdrawn"),
+        Some(("False".into(), "WithdrawalUnproven".into()))
+    );
+    assert_eq!(fake.state().events, ["WithdrawalUnproven"]);
+    assert_eq!(
+        fake.state().objects[&(Kind::Deployment, "p".into())]
+            .live
+            .replicas,
+        Some(1)
+    );
+    assert!(!released(&fake));
+    assert!(fake.log().iter().all(|e| !e.starts_with("status Drain")));
 }
