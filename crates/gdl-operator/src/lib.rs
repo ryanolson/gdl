@@ -10,6 +10,7 @@
 
 mod cluster;
 mod crd;
+mod lease;
 mod manifests;
 mod probe;
 mod run;

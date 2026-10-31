@@ -30,11 +30,11 @@ The Role grants only what the scaler uses, in its namespace:
 | `apps` `deployments` | get, list, watch, patch | Read the target, and write its `replicas` |
 | core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
-| `coordination.k8s.io` `leases` | get, create, update, patch | Hold the Lease `gdl-operator`, so that one operator acts at a time |
+| `coordination.k8s.io` `leases` | get, create, patch | Hold the Lease `gdl-operator`, so that one operator acts at a time |
 
 It grants no delete, and nothing on Secrets, ServiceAccounts, or Namespaces. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
-The operator acts only while it holds the Lease `gdl-operator` in its namespace, which names it by its pod (`POD_NAME`, from the downward API). It renews the lease every 10 s, and the lease lapses 15 s after the last renewal, so a second operator, during a rollout or once a node loses touch, waits until the first lets go or lapses. An operator that loses the lease exits, and a clean stop frees it at once. The lease keeps two operators from deciding at once; the write fences below keep a decision made just before the lease went from landing.
+The operator acts only while it holds the Lease `gdl-operator` in its namespace, which names it by its pod (`POD_NAME`, from the downward API). Each operator judges time by its own clock alone, never by another node's. The holder renews every 5 s, and counts each hold from the moment it sent a renewal that then succeeded: it stops acting 10 s after that, the 15 s lease less a third, unless a later renewal succeeds. Every write checks that first. An operator that waits takes a held lease only once the lease record has gone unchanged for 15 s since it first saw it so. So a holder whose renewals hang, or a node that loses touch, stops acting at least 5 s before another can take the lease. This rests on the nodes' clocks running at about the same rate, as they do on EKS and kind; the third is the margin for their difference and a request's time on the wire. An operator that loses the lease exits, and a clean stop frees it at once. The lease keeps two operators from deciding at once; the write fences below keep a decision made just before the lease went from landing.
 
 ## Let `deploy` make the scalers
 

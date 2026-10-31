@@ -110,24 +110,22 @@ async fn scale_with_lease(stall_renewal: bool) -> Vec<(String, i32)> {
     });
     let client = Client::new(service, "test");
     // The shorter lease exercises expiration without waiting the production lease's 15 seconds.
-    let manager = |identity: &'static str| {
-        kube_lease_manager::LeaseManagerBuilder::new(client.clone(), crate::NAME)
-            .with_namespace("test")
-            .with_identity(identity)
-            .with_duration(2)
-            .with_grace(1)
+    let elector = |identity: &str| {
+        crate::lease::Elector::new(
+            client.clone(),
+            "test",
+            crate::NAME,
+            identity,
+            Duration::from_secs(2),
+        )
     };
-    let (mut leading, held) = manager("operator-a")
-        .build()
-        .await
-        .expect("manager")
-        .watch()
-        .await;
-    tokio::time::timeout(Duration::from_secs(3), leading.wait_for(|leads| *leads))
+    let first = elector("operator-a");
+    tokio::time::timeout(Duration::from_secs(3), first.acquire())
         .await
         .expect("first leader responds")
         .expect("first leader");
-    let mut successor = None;
+    let clock = first.clock();
+    let holding = tokio::spawn(async move { first.hold().await });
     if stall_renewal {
         tokio::time::timeout(Duration::from_secs(3), renewal.notified())
             .await
@@ -142,13 +140,9 @@ async fn scale_with_lease(stall_renewal: bool) -> Vec<(String, i32)> {
             (expires - k8s_openapi::jiff::Timestamp::now().as_millisecond()).max(0) as u64;
         tokio::time::sleep(Duration::from_millis(remaining + 1)).await;
         assert!(k8s_openapi::jiff::Timestamp::now().as_millisecond() >= expires);
-        let (mut next, task) = manager("operator-b")
-            .build()
-            .await
-            .expect("successor manager")
-            .watch()
-            .await;
-        tokio::time::timeout(Duration::from_secs(3), next.wait_for(|leads| *leads))
+        // The successor takes the lease once it has seen the record
+        // unchanged for a whole lease, by its own clock.
+        tokio::time::timeout(Duration::from_secs(5), elector("operator-b").acquire())
             .await
             .expect("successor responds")
             .expect("successor leads");
@@ -156,12 +150,11 @@ async fn scale_with_lease(stall_renewal: bool) -> Vec<(String, i32)> {
             state.lock().expect("API state").lease["spec"]["holderIdentity"],
             "operator-b"
         );
-        successor = Some((next, task));
     }
     let shared = Arc::new(Shared {
-        leading: leading.clone(),
+        lease: Arc::clone(&clock),
         scalers: Api::namespaced(client.clone(), "test"),
-        cluster: KubeCluster::new(client, "test"),
+        cluster: KubeCluster::new(client, "test").leased(clock),
         probe: HttpProbe::new("test").expect("probe"),
         victims: Victims::default(),
     });
@@ -169,14 +162,8 @@ async fn scale_with_lease(stall_renewal: bool) -> Vec<(String, i32)> {
         .await
         .expect("reconcile responds")
         .expect("reconcile");
-    drop(leading);
-    held.abort();
-    let _ = held.await;
-    if let Some((next, task)) = successor {
-        drop(next);
-        task.abort();
-        let _ = task.await;
-    }
+    holding.abort();
+    let _ = holding.await;
     std::mem::take(&mut state.lock().expect("API state").writes)
 }
 
@@ -185,8 +172,9 @@ async fn a_current_lease_holder_scales() {
     assert_eq!(scale_with_lease(false).await, [("operator-a".into(), 3)]);
 }
 
+/// About 4 s: the successor waits out a 2 s lease after the stalled
+/// renewal, and then sees the record unchanged for another.
 #[tokio::test]
-#[ignore = "F9: a blocked renewal leaves the former leader writing after lease expiration"]
 async fn a_lease_holder_stops_writing_when_renewal_stalls_past_expiration() {
     let writes = scale_with_lease(true).await;
     assert!(

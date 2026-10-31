@@ -147,6 +147,6 @@ fn the_role_grants_only_what_the_scaler_uses() {
     assert_eq!(leases["apiGroups"][0], "coordination.k8s.io");
     assert_eq!(
         leases["verbs"],
-        serde_json::json!(["get", "create", "update", "patch"])
+        serde_json::json!(["get", "create", "patch"])
     );
 }

@@ -1,9 +1,10 @@
 //! The operator's controller: every `GdlScaler` in one namespace,
 //! reconciled when it or its target Deployment changes, and again when a
-//! reconcile asks, while this operator holds the Lease `gdl-operator`.
-//! Every write also carries the read it was decided on, so a reconcile
-//! that runs on as the lease is lost writes nothing stale; the lease keeps
-//! two operators from deciding at once.
+//! reconcile asks, while this operator holds the Lease `gdl-operator`
+//! by its own clock (`crate::lease`). Every write checks the hold first,
+//! and carries the read it was decided on: the lease keeps two operators
+//! from deciding at once, and the fences keep a decision made on a stale
+//! read from landing.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use kube::runtime::watcher;
 use kube::{Api, Client, ResourceExt};
 
 use crate::cluster::KubeCluster;
+use crate::lease::{Clock, Elector};
 use crate::probe::HttpProbe;
 use crate::scaler::Context;
 use crate::{GdlScaler, Victims};
@@ -23,14 +25,12 @@ use crate::{GdlScaler, Victims};
 /// When to try again after a reconcile that failed.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// How long the lease holds without a renewal, and how long before its
-/// end the holder renews it.
-const LEASE: u64 = 15;
-const RENEW: u64 = 5;
+/// How long the lease holds without a renewal.
+const LEASE: Duration = Duration::from_secs(15);
 
 struct Shared {
-    /// Whether this operator holds the lease.
-    leading: tokio::sync::watch::Receiver<bool>,
+    /// Whether this operator holds the lease, by its own clock.
+    lease: Arc<Clock>,
     scalers: Api<GdlScaler>,
     cluster: KubeCluster,
     probe: HttpProbe,
@@ -44,23 +44,17 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     let client = Client::try_default().await?;
     // The pod's name, from the downward API: two pods never share one.
     let identity = std::env::var("POD_NAME").map_err(|_| anyhow::anyhow!("POD_NAME is not set"))?;
-    let lease = kube_lease_manager::LeaseManagerBuilder::new(client.clone(), crate::NAME)
-        .with_namespace(namespace)
-        .with_identity(&identity)
-        .with_duration(LEASE)
-        .with_grace(RENEW)
-        .build()
-        .await?;
-    let (mut leading, held) = lease.watch().await;
+    let elector = Elector::new(client.clone(), namespace, crate::NAME, &identity, LEASE);
     tracing::info!(%identity, "waiting for the lease");
-    leading.wait_for(|leads| *leads).await?;
+    elector.acquire().await?;
     tracing::info!(%identity, "holds the lease");
+    let lease = elector.clock();
     let scalers: Api<GdlScaler> = Api::namespaced(client.clone(), namespace);
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let shared = Arc::new(Shared {
-        leading: leading.clone(),
+        lease: Arc::clone(&lease),
         scalers: scalers.clone(),
-        cluster: KubeCluster::new(client, namespace),
+        cluster: KubeCluster::new(client, namespace).leased(lease),
         probe: HttpProbe::new(namespace).map_err(anyhow::Error::msg)?,
         victims,
     });
@@ -76,25 +70,17 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
                 tracing::warn!(%error, "reconcile");
             }
         });
-    let lost = async {
-        // A closed channel is a lease task that ended: no longer held.
-        let _ = leading.wait_for(|leads| !*leads).await;
-    };
     let outcome = tokio::select! {
         () = controller => Ok(()),
-        () = lost => Err(anyhow::anyhow!("lost the lease")),
+        () = elector.hold() => Err(anyhow::anyhow!("lost the lease")),
     };
-    // Dropping the last receiver ends the lease task, which hands back
-    // the manager: a clean stop frees the lease for the next operator.
-    drop(leading);
-    if let Ok(Ok(lease)) = held.await {
-        let _ = lease.release().await;
-    }
+    // A clean stop frees the lease for the next operator at once.
+    elector.release().await;
     outcome
 }
 
 async fn reconcile(scaler: Arc<GdlScaler>, shared: Arc<Shared>) -> Result<Action, Failed> {
-    if !*shared.leading.borrow() {
+    if !shared.lease.current() {
         return Ok(Action::requeue(RETRY));
     }
     // The watch's copy can predate the status the last reconcile wrote,

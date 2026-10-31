@@ -219,6 +219,8 @@ pub struct KubeCluster {
     pods: Api<Pod>,
     slices: Api<EndpointSlice>,
     scalers: Api<GdlScaler>,
+    /// The lease every write needs to be held, by this operator's clock.
+    lease: Option<std::sync::Arc<crate::lease::Clock>>,
 }
 
 impl KubeCluster {
@@ -229,6 +231,27 @@ impl KubeCluster {
             pods: Api::namespaced(client.clone(), namespace),
             slices: Api::namespaced(client.clone(), namespace),
             scalers: Api::namespaced(client, namespace),
+            lease: None,
+        }
+    }
+
+    /// The same, writing only while `clock` says this operator holds the
+    /// lease.
+    pub fn leased(self, clock: std::sync::Arc<crate::lease::Clock>) -> Self {
+        Self {
+            lease: Some(clock),
+            ..self
+        }
+    }
+
+    /// Refuse a write once the lease has lapsed by this operator's clock:
+    /// another operator may hold it now.
+    fn holds(&self) -> Result<(), Refused> {
+        match &self.lease {
+            Some(clock) if !clock.current() => Err(Refused::Failed(
+                "this operator's lease has lapsed: it stops acting".into(),
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -239,6 +262,7 @@ impl KubeCluster {
         pod: &PodView,
         mut metadata: serde_json::Value,
     ) -> Result<(), Refused> {
+        self.holds()?;
         metadata["uid"] = pod.uid.clone().into();
         self.pods
             .patch(
@@ -292,6 +316,7 @@ impl Cluster for KubeCluster {
     }
 
     async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
+        self.holds()?;
         // A forced apply of the one field: the scaler is its designated
         // owner, so force is its normal mode and it meets no field
         // conflict, and it changes no other field. Its uid and
@@ -336,6 +361,7 @@ impl Cluster for KubeCluster {
         status: &GdlScalerStatus,
         version: Option<&str>,
     ) -> Result<Option<String>, Refused> {
+        self.holds()?;
         // A merge patch replaces a list whole, and removes a field set to
         // null: the encoding leaves out an empty list and an absent
         // field, which the patch would then keep as they were, so each is
