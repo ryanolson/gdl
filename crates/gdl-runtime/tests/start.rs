@@ -196,3 +196,33 @@ async fn a_registration_committed_before_a_proxy_error_can_finish_starting() {
     hub.shutdown().await.expect("valid test fixture");
     launched.expect("a proxy error after a committed registration must be recoverable");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F2: an unanswered first registration never reports waiting for the hub"]
+async fn an_unanswered_first_registration_reports_what_the_start_waits_for() {
+    let hub = hub_on(0, 0, spec()).await;
+    let proxy = Proxy::new(hub.control_addr()).await;
+    proxy.hold(b"POST /v1/instances");
+    let config = settings(hub.public_addr().port(), proxy.port, 20_000);
+    let process = Process::start(&config).await.expect("the process starts");
+    let deployment = spec();
+    let launch = config.launch(&process, "a", SEGMENTS, &deployment, async { Ok(()) });
+    let probe = async {
+        proxy.holding().await;
+        let address = process.system_address().expect("a system listener");
+        let health = get(address, "/health").await;
+        let live = get(address, "/live").await;
+        proxy.release();
+        (health, live)
+    };
+    let (launched, ((health_code, body), (live_code, _))) =
+        tokio::time::timeout(WAIT, async { tokio::join!(launch, probe) })
+            .await
+            .expect("the registration and probes ended within the wait");
+    launched.expect("the released registration succeeds");
+    hub.shutdown().await.expect("valid test fixture");
+    assert_eq!(health_code, 503, "{body}");
+    assert_eq!(live_code, 200);
+    assert!(body.contains("\"phase\":\"starting\""), "{body}");
+    assert!(body.contains("\"waiting\":\"hub\""), "{body}");
+}
