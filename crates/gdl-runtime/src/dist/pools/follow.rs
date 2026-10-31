@@ -1103,7 +1103,8 @@ impl Followed {
     /// List `key`'s pool as `listing`, which arrived at `now`, says, or
     /// no longer ([`Listings`]); and take what it says of the pool's hub of
     /// its epoch ([`Evidence`]). A pool no longer listed forgets what was
-    /// said of it, as its list, unless it withdrew.
+    /// said of it, as its list, unless it withdrew; a follow of it still
+    /// shown says its own word again.
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
             Some(listing) => {
@@ -1126,6 +1127,13 @@ impl Followed {
             None => {
                 self.listings.withdraw(&key);
                 self.evidence.unlist(&key);
+                // A follow still shown, as one a pool's own watch has yet
+                // to drop, keeps its own word: its row is never read with
+                // no word of its hub.
+                if let Some(follow) = self.follows.get(&key) {
+                    let (epoch, state) = (follow.epoch, follow.state);
+                    self.witness(&key, epoch, state);
+                }
             }
         }
         self.listings_changed += 1;

@@ -160,8 +160,8 @@ fn a_withdrawn_pool_reads_the_epoch_it_withdrew_at() {
 
 /// A pool listed again by a later hub of it, after its withdrawal, is
 /// listed and not withdrawn, at the later epoch, before it is followed
-/// again. Unlisted after that, as for a change of deployment, it is
-/// neither: the withdrawal it ended does not come back.
+/// again. Unlisted after that, as for a change of deployment, it is not
+/// withdrawn: the withdrawal it ended does not come back.
 #[test]
 fn a_pool_listed_again_after_its_withdrawal_is_not_withdrawn() {
     let (mut follows, pools, _, _) = follower();
@@ -175,7 +175,18 @@ fn a_pool_listed_again_after_its_withdrawal_is_not_withdrawn() {
     follows.apply(followed(M1, 2, 6), now);
     assert_eq!(read(&pools, M1), (false, Some(6)), "followed again");
     follows.apply(listed(M1, None), now);
-    assert_eq!(read(&pools, M1), (false, None), "unlisted, not withdrawn");
+    assert_eq!(
+        read(&pools, M1),
+        (false, Some(6)),
+        "unlisted, not withdrawn: its follow, still shown, keeps its word"
+    );
+    follows.apply(dropped(M1, 2), now);
+    follows.apply(listed(M1, None), now);
+    assert_eq!(
+        read(&pools, M1),
+        (false, None),
+        "unlisted, and not followed"
+    );
 }
 
 /// A listing no later than the withdrawal's hub keeps the pool withdrawn:
@@ -756,7 +767,6 @@ fn a_rewatch_never_reuses_an_earlier_hubs_acceptance_epoch() {
 /// not then be read with no evidence: a policy would read a follow of a hub
 /// with no word of that hub.
 #[test]
-#[ignore = "guard class 3, held for the marshal's ruling: the relay's unlisting forgets a pool's evidence while its own watch still shows its row"]
 fn a_row_on_a_pools_own_watch_keeps_its_evidence_when_the_relay_unlists_it() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
