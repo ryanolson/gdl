@@ -72,6 +72,15 @@ pub(super) fn routes(record: &PoolRecord, feed: Arc<Feed>, relay: Arc<Relay>) ->
     if let Err(error) = gdl_cgroup::register(&process) {
         tracing::warn!(%error, "the hub's metrics leave out its process's figures");
     }
+    route(own, feed, relay, process)
+}
+
+fn route(
+    own: [String; 3],
+    feed: Arc<Feed>,
+    relay: Arc<Relay>,
+    process: prometheus::Registry,
+) -> Router {
     Router::new().route(
         ROUTE,
         get(move || {
@@ -144,3 +153,6 @@ fn family(name: &str, help: &str, metrics: Vec<proto::Metric>) -> MetricFamily {
     family.set_metric(metrics);
     family
 }
+
+#[cfg(test)]
+mod tests;
