@@ -61,6 +61,7 @@ pub(super) type Key = (String, String);
 
 mod ack;
 mod avoid;
+mod evidence;
 mod listings;
 mod own;
 
@@ -68,6 +69,7 @@ use ack::Ack;
 #[cfg(test)]
 pub(super) use ack::{ACK_POLL, ACK_RETRY, SCANNED};
 use avoid::Avoiding;
+use evidence::Evidence;
 use listings::Listings;
 pub(super) use own::Asked;
 use own::Own;
@@ -126,16 +128,12 @@ pub(crate) struct Follows<R> {
     /// The number of the last watch of its own asked for.
     watches: u64,
     /// The pools the hub said withdrew their records after a drain, each
-    /// with the generation its withdrawal named and the epoch of the hub
-    /// of the pool that withdrew: kept when the relay is watched again,
-    /// since a snapshot holds no withdrawal, until a later generation of
-    /// the pool is shown, or a listing from a later hub of it, which only
-    /// a newer record of the pool starts. Generations are the hub's, and a
+    /// with the generation its withdrawal named: a later generation of the
+    /// pool shown, which only a newer record of the pool starts, ends the
+    /// withdrawal the pool's evidence holds, also for a hub of an earlier
+    /// build, whose epochs are all 0. Generations are the hub's, and a
     /// chooser does not outlive its hub, so they only grow while it runs.
-    withdrawn: BTreeMap<Key, (u64, u64)>,
-    /// Raised on every change of `withdrawn`, so that the follower makes a
-    /// class's epochs again only when they may have changed.
-    withdrawals_changed: u64,
+    withdrawn: BTreeMap<Key, u64>,
     /// The newest generation of each pool this follower was shown, over
     /// every watch: what fences a withdrawal of an earlier one, which may
     /// arrive late on another watch, also after a snapshot that no longer
@@ -145,16 +143,16 @@ pub(crate) struct Follows<R> {
     /// made from: the count of the listings' changes, each followed pool
     /// with whether it is offered, and the count of the kinds' changes.
     indexes: HashMap<String, IndexMade>,
-    /// Each class's pools' epochs as last made, with the counts of the
-    /// listings' and the withdrawals' changes they were made from.
-    epochs: HashMap<String, EpochsMade>,
+    /// Each class's pools' evidence as last made, with the count of the
+    /// evidence's changes it was made from.
+    evidence: HashMap<String, EvidenceMade>,
 }
 
 /// A class's property indexes, and what they were made from.
 type IndexMade = ((u64, Vec<(String, bool)>, u64), Arc<PropertyIndexes>);
 
-/// A class's pools' epochs, by name, and what they were made from.
-type EpochsMade = ((u64, u64), Arc<[(Box<str>, u64)]>);
+/// A class's pools' evidence, by name, and the count it was made at.
+type EvidenceMade = (u64, Arc<[(Box<str>, gdl::PoolEvidence)]>);
 
 impl<R: Registry> Follows<R> {
     pub(crate) fn new(
@@ -187,10 +185,9 @@ impl<R: Registry> Follows<R> {
             asked: Vec::new(),
             watches: 0,
             withdrawn: BTreeMap::new(),
-            withdrawals_changed: 0,
             newest: BTreeMap::new(),
             indexes: HashMap::new(),
-            epochs: HashMap::new(),
+            evidence: HashMap::new(),
         }
     }
 
@@ -254,24 +251,10 @@ impl<R: Registry> Follows<R> {
         }
         match change {
             Change::Table => {}
-            Change::Withdrawn(generation) => {
-                if self
-                    .newest
-                    .get(&key)
-                    .is_some_and(|newest| *newest > generation)
-                {
+            Change::Withdrawn(generation, epoch) => {
+                if !self.withdraw(&key, generation, epoch) {
                     return;
                 }
-                // The hub unlists the pool just before it says so, so the
-                // epoch of its last listing is that of the hub that
-                // withdrew.
-                let epoch = self.followed.listings.last_epoch(&key).unwrap_or(0);
-                let named = self
-                    .withdrawn
-                    .entry(key.clone())
-                    .or_insert((generation, epoch));
-                *named = (named.0.max(generation), named.1.max(epoch));
-                self.withdrawals_changed += 1;
             }
             Change::Ended(follow) => {
                 self.publish(&key);
@@ -421,6 +404,8 @@ impl<R: Registry> Follows<R> {
         }
         let held = std::mem::take(&mut self.followed.listings);
         followed.listings.carry(held, followed.listed);
+        let held = std::mem::take(&mut self.followed.evidence);
+        followed.evidence.carry(held, followed.listed);
         followed.listings_changed += self.followed.listings_changed + 1;
         self.followed = followed;
         let shown: Vec<(Key, u64)> = self
@@ -674,73 +659,53 @@ impl<R: Registry> Follows<R> {
             self.pools.store(segment, EntryTable::new(pools));
             return;
         };
-        self.relisted();
-        let withdrawn = self
-            .withdrawn
-            .keys()
-            .filter(|(of, _)| *of == class)
-            .map(|(_, pool)| Box::from(pool.as_str()))
-            .collect();
-        let draining = self
-            .followed
-            .listings
-            .draining(&class)
-            .map(Box::from)
-            .collect();
         let properties = self.index(&class);
-        let epochs = self.epochs(&class);
+        let evidence = self.evidence(&class);
         self.pools.store(
             segment,
             EntryTable::new(pools)
-                .with_withdrawn(withdrawn)
-                .with_draining(draining)
-                .with_epochs(epochs)
+                .with_evidence(evidence)
                 .with_properties(properties),
         );
     }
 
-    /// End each withdrawal that a listing from a later hub of its pool
-    /// supersedes: the hub lists a pool again only from a record newer
-    /// than its withdrawal, and a later hub numbers its epoch past every
-    /// write of the pool before it. A listing of the same epoch, as from a
-    /// hub of an earlier build that numbers none, ends nothing: a later
-    /// follow of the pool does ([`Follows::shown`]). The withdrawal is
-    /// removed, not passed over, so that the pool unlisted later does not
-    /// read as withdrawn again.
-    fn relisted(&mut self) {
-        let listings = &self.followed.listings;
-        let before = self.withdrawn.len();
-        self.withdrawn
-            .retain(|key, (_, epoch)| listings.epoch(key).is_none_or(|listed| listed <= *epoch));
-        if self.withdrawn.len() != before {
-            self.withdrawals_changed += 1;
+    /// Hold `key`'s pool withdrawn, as the hub said, naming `generation`,
+    /// at `epoch`: whether the withdrawal was taken, since one of an
+    /// earlier generation than one shown is ignored. A relay of an earlier
+    /// build sends no epoch, so its withdrawal is of epoch 0: it is never
+    /// dated by another event's arrival.
+    fn withdraw(&mut self, key: &Key, generation: u64, epoch: u64) -> bool {
+        if self
+            .newest
+            .get(key)
+            .is_some_and(|newest| *newest > generation)
+        {
+            return false;
         }
+        let named = self.withdrawn.entry(key.clone()).or_insert(generation);
+        *named = (*named).max(generation);
+        let withdrawn =
+            gdl::PoolEvidence::new(epoch, gdl::PoolCondition::Live).with_withdrawn(true);
+        if self.followed.evidence.take(key, withdrawn, None) {
+            self.followed.listings_changed += 1;
+        }
+        true
     }
 
-    /// `class`'s pools' epochs, by name: each listed pool's, and each
-    /// withdrawn pool's, the later of the two for a pool that is both.
-    /// The ones made last, unless a listing or a withdrawal changed since.
-    fn epochs(&mut self, class: &str) -> Arc<[(Box<str>, u64)]> {
-        let made = (self.followed.listings_changed, self.withdrawals_changed);
-        if let Some((at, epochs)) = self.epochs.get(class)
+    /// `class`'s pools' evidence, by name: the one made last, unless the
+    /// evidence changed since. A table is stored on every summary a pool
+    /// sends, and the evidence changes far less often.
+    fn evidence(&mut self, class: &str) -> Arc<[(Box<str>, gdl::PoolEvidence)]> {
+        let made = self.followed.listings_changed;
+        if let Some((at, evidence)) = self.evidence.get(class)
             && *at == made
         {
-            return Arc::clone(epochs);
+            return Arc::clone(evidence);
         }
-        let mut epochs: BTreeMap<&str, u64> = self.followed.listings.epochs(class).collect();
-        for ((of, pool), (_, epoch)) in &self.withdrawn {
-            if of == class {
-                let held = epochs.entry(pool.as_str()).or_insert(*epoch);
-                *held = (*held).max(*epoch);
-            }
-        }
-        let epochs: Arc<[(Box<str>, u64)]> = epochs
-            .into_iter()
-            .map(|(pool, epoch)| (Box::from(pool), epoch))
-            .collect();
-        self.epochs
-            .insert(class.to_string(), (made, Arc::clone(&epochs)));
-        epochs
+        let evidence = self.followed.evidence.of(class);
+        self.evidence
+            .insert(class.to_string(), (made, Arc::clone(&evidence)));
+        evidence
     }
 
     /// `class`'s property indexes: the ones made last, unless what they
@@ -792,10 +757,12 @@ impl<R: Registry> Follows<R> {
         if self
             .withdrawn
             .get(key)
-            .is_some_and(|(named, _)| *named < generation)
+            .is_some_and(|named| *named < generation)
         {
             self.withdrawn.remove(key);
-            self.withdrawals_changed += 1;
+            if self.followed.evidence.unwithdraw(key) {
+                self.followed.listings_changed += 1;
+            }
         }
     }
 }
@@ -834,15 +801,18 @@ struct Followed {
     /// Where each pool's offers are counted, if the chooser records them.
     meters: Option<PoolMeters>,
     /// What the hub lists of each pool of the classes sent to, followed or
-    /// not, for the property index, with since when a missing pool has been
-    /// silent, dated back on arrival: a snapshot holds every listed pool,
-    /// so it replaces them whole.
+    /// not, for the property index: a snapshot holds every listed pool, so
+    /// it replaces them whole.
     listings: Listings,
+    /// What the hub has said of each pool, dated by the epoch of the hub
+    /// it is about, with since when a missing pool has been silent, dated
+    /// back on arrival.
+    evidence: Evidence,
     /// Whether the snapshot said the hub's listings were whole.
     listed: bool,
-    /// Raised on every change of `listings` or `listed`, and carried over
-    /// a snapshot, so that the follower makes a class's index again only
-    /// when it may have changed.
+    /// Raised on every change of `listings`, `evidence`, or `listed`, and
+    /// carried over a snapshot, so that the follower makes a class's index
+    /// and evidence again only when they may have changed.
     listings_changed: u64,
 }
 
@@ -867,8 +837,9 @@ enum Change {
     Held(InstanceId),
     /// The follow no longer holds this instance.
     Released(InstanceId),
-    /// The hub said the pool withdrew its record, naming this generation.
-    Withdrawn(u64),
+    /// The hub said the pool withdrew its record, naming this generation,
+    /// at this epoch: 0 from a relay of an earlier build.
+    Withdrawn(u64, u64),
 }
 
 impl Followed {
@@ -882,6 +853,7 @@ impl Followed {
             fresh_periods,
             meters,
             listings: Listings::default(),
+            evidence: Evidence::default(),
             listed: false,
             listings_changed: 0,
         }
@@ -913,6 +885,7 @@ impl Followed {
                 class,
                 pool,
                 generation,
+                epoch,
                 region,
                 state,
                 load,
@@ -932,6 +905,8 @@ impl Followed {
                     return None;
                 }
                 self.generations.insert(key.clone(), generation);
+                // The follow is word of the hub it links to, first-hand.
+                self.witness(&key, epoch, state);
                 // Counted by the pool's name, so that every generation of
                 // it counts into one series.
                 let figures = self
@@ -945,6 +920,7 @@ impl Followed {
                     key.clone(),
                     Follow::new(
                         generation,
+                        epoch,
                         region,
                         state,
                         load.and_then(|load| received(load, load_age_ms, now))
@@ -968,7 +944,10 @@ impl Followed {
                 state,
             } => {
                 let key = (class, pool);
-                self.current(&key, generation)?.set_state(state);
+                let follow = self.current(&key, generation)?;
+                follow.set_state(state);
+                let epoch = follow.epoch;
+                self.witness(&key, epoch, state);
                 Some((key, Change::Table))
             }
             FollowEvent::Load {
@@ -1084,6 +1063,8 @@ impl Followed {
                 class,
                 pool,
                 generation,
+                epoch,
+                ..
             } => {
                 if !wanted.contains_key(&class) {
                     return None;
@@ -1096,7 +1077,7 @@ impl Followed {
                 {
                     return None;
                 }
-                Some((key, Change::Withdrawn(generation)))
+                Some((key, Change::Withdrawn(generation, epoch)))
             }
             FollowEvent::Listed {
                 class,
@@ -1122,7 +1103,9 @@ impl Followed {
     }
 
     /// List `key`'s pool as `listing`, which arrived at `now`, says, or
-    /// no longer ([`Listings`]).
+    /// no longer ([`Listings`]); and take what it says of the pool's hub of
+    /// its epoch ([`Evidence`]). A pool no longer listed forgets what was
+    /// said of it, as its list, unless it withdrew.
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
             Some(listing) => {
@@ -1134,11 +1117,36 @@ impl Followed {
                         "a listing holds properties that do not check: they are left out"
                     );
                 }
-                self.listings.take(key, listing, now);
+                let silent = listing
+                    .missing_age_ms
+                    .and_then(|age| now.checked_sub(Duration::from_millis(age)));
+                let evidence = gdl::PoolEvidence::new(listing.epoch, listing.condition)
+                    .with_draining(listing.draining);
+                self.evidence.take(&key, evidence, silent);
+                self.listings.take(key, listing);
             }
-            None => self.listings.withdraw(&key),
+            None => {
+                self.listings.withdraw(&key);
+                self.evidence.unlist(&key);
+            }
         }
         self.listings_changed += 1;
+    }
+
+    /// Take what a follow of `key`'s pool's hub of `epoch`, in `state`,
+    /// says of the pool: that it drains, if its state says so. A follow
+    /// says nothing of the pool's condition, which is the hub's listing's:
+    /// of the same hub it keeps the condition held, and of a later hub the
+    /// pool is live, its link up and its record new.
+    fn witness(&mut self, key: &Key, epoch: u64, state: PoolState) {
+        let held = self.evidence.get(key).filter(|held| held.epoch() == epoch);
+        let condition = held.map_or(gdl::PoolCondition::Live, |held| held.condition());
+        let said =
+            gdl::PoolEvidence::new(epoch, condition).with_draining(state == PoolState::Draining);
+        let silent = self.evidence.silent(key);
+        if self.evidence.take(key, said, silent) {
+            self.listings_changed += 1;
+        }
     }
 
     /// The version of the property list the hub lists for `key`'s pool: 0
@@ -1154,18 +1162,26 @@ impl Followed {
         self.listings
             .iter()
             .filter(|((of, _), _)| *of == class)
-            .flat_map(|(key, (listing, silent))| {
+            .flat_map(|(key, listing)| {
                 let offered = self.follows.get(key).is_some_and(Follow::offers);
+                // The condition and its silence are the pool's evidence,
+                // of the latest hub of it: never an earlier hub's condition
+                // that came with a newer list.
+                let condition = self
+                    .evidence
+                    .get(key)
+                    .map_or(listing.condition, |evidence| evidence.condition());
+                let silent = self.evidence.silent(key);
                 listing.properties.entries.iter().map(move |entry| {
                     let pool = PropertyPool::new(
                         key.1.clone(),
                         listing.region.clone(),
                         entry.state,
-                        listing.condition,
+                        condition,
                     )
                     .with_offered(offered);
                     let pool = match silent {
-                        Some(since) => pool.with_missing_since(*since),
+                        Some(since) => pool.with_missing_since(since),
                         None => pool,
                     };
                     (entry.property.clone(), pool)
@@ -1251,6 +1267,9 @@ fn received(load: LoadSummary, age_ms: Option<u64>, now: Instant) -> Option<Load
 #[derive(Debug)]
 struct Follow {
     generation: u64,
+    /// The epoch of the pool's hub the follow links to: every event of the
+    /// follow is word of that hub.
+    epoch: u64,
     region: String,
     state: PoolState,
     /// The pool's load summary, as it arrived.
@@ -1287,6 +1306,7 @@ struct Follow {
 impl Follow {
     fn new(
         generation: u64,
+        epoch: u64,
         region: String,
         state: PoolState,
         load: Option<Load>,
@@ -1295,6 +1315,7 @@ impl Follow {
     ) -> Self {
         Self {
             generation,
+            epoch,
             region,
             state,
             load,
@@ -1305,7 +1326,7 @@ impl Follow {
                 .iter()
                 .map(|segment| (segment.clone(), Arc::default()))
                 .collect(),
-            leases: Arc::new(Leases::counted(figures)),
+            leases: Arc::new(Leases::counted(figures).of_epoch(epoch)),
             revision: 1,
             offered: true,
             changes: 0,
@@ -1428,6 +1449,7 @@ impl Follow {
             pool: key.1.clone(),
             id: super::pool_id(&key.0, &key.1),
             generation: self.generation,
+            epoch: self.epoch,
             region: self.region.clone(),
             state: self.state,
             load: self.load,

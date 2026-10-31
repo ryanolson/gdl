@@ -159,6 +159,7 @@ impl Pools {
                 class: pool.class.clone(),
                 pool: pool.pool.clone(),
                 generation: pool.generation,
+                epoch: pool.epoch,
                 region: pool.region.clone(),
                 state: pool.state,
                 load: pool.load.map(|load| *load.summary()),
@@ -317,8 +318,8 @@ impl Pools {
 }
 
 /// What a node reads of the tables: the table an entry segment's pool
-/// policy chooses from, with the class's withdrawn pools and its property
-/// indexes, in one load, and the pools the chooser holds gone, in one
+/// policy chooses from, with what the hub said of each pool and the
+/// class's property indexes, in one load, and the pools the chooser holds gone, in one
 /// more. No table is made for a
 /// gone mark: the next read sees the damping the chooser's choices read.
 /// The two loads are not one moment, but a mark holds the follow it was
@@ -340,8 +341,8 @@ impl gdl::__runtime::PoolSource for Pools {
         let table = slot.load();
         let damped = self.shared.damping.view();
         read(
-            gdl::ClassPools::new(&table.views, &table.withdrawn)
-                .with_draining(&table.draining)
+            gdl::ClassPools::new(&table.views)
+                .with_evidence(&table.evidence)
                 .with_damped(&damped)
                 .with_properties(&table.properties),
         );
@@ -370,6 +371,9 @@ pub struct FollowedPool {
     /// The generation of the hub's follow of the pool that the table is
     /// from: a refollow is a new one, and nothing of an earlier one is kept.
     pub generation: u64,
+    /// The epoch of the pool's hub that the follow links to: 0 from a hub
+    /// of an earlier build.
+    pub epoch: u64,
     /// The region the pool runs in.
     pub region: String,
     /// The pool's state, as its hub last sent it.
@@ -425,26 +429,19 @@ pub(crate) type Slot = Arc<ArcSwap<EntryTable>>;
 
 /// One entry segment's table: each followed pool of its class, ordered by
 /// class and pool, and each as a pool policy sees it, index for index;
-/// and the pools of the class whose records were withdrawn.
+/// and what the hub said of each pool of the class.
 #[derive(Debug, Default)]
 pub(crate) struct EntryTable {
     pub(crate) pools: Box<[Arc<PoolTable>]>,
     /// `pools` as a pool policy sees them, made with the table so that a
     /// choice borrows them rather than making them per request.
     pub(crate) views: Box<[gdl::Pool]>,
-    /// The pools of the class the hub said withdrew their records after
-    /// a drain, by name, sorted: kept beside the pools, in the same table,
-    /// so that a node reads both from one snapshot. A withdrawn pool may
-    /// still be in `pools` until its follow is dropped.
-    pub(crate) withdrawn: Box<[Box<str>]>,
-    /// The pools of the class whose listing says they drain, by name,
-    /// sorted, followed or not: kept beside the pools for the same reason.
-    pub(crate) draining: Box<[Box<str>]>,
-    /// The hub epoch of each pool of the class the hub lists, followed or
-    /// not, or said withdrew, by name, sorted: kept beside the pools for
-    /// the same reason, and shared by the tables made while no listing or
-    /// withdrawal changes, since a table is stored on every summary.
-    pub(crate) epochs: Arc<[(Box<str>, u64)]>,
+    /// What the hub said of each pool of the class, followed or not, by
+    /// name, sorted ([`gdl::PoolEvidence`]): kept beside the pools, in the
+    /// same table, so that a policy and a node read both from one
+    /// snapshot, and shared by the tables made while it does not change,
+    /// since a table is stored on every summary.
+    pub(crate) evidence: Arc<[(Box<str>, gdl::PoolEvidence)]>,
     /// The class's property indexes, shared by the tables of each of its
     /// entry segments, and made again only when what they list, or the
     /// kinds they decode, change.
@@ -458,43 +455,28 @@ impl EntryTable {
         Self {
             pools,
             views,
-            withdrawn: Box::default(),
-            draining: Box::default(),
-            epochs: Arc::default(),
+            evidence: Arc::from([]),
             properties: Arc::default(),
         }
     }
 
     /// `request` with what the table holds of the class beside its pools:
-    /// its property indexes, and its draining and withdrawn pools and
-    /// their epochs. Every request a pool policy reads is filled here, so
-    /// that what it reads of the class is the same table's as its pools.
+    /// its property indexes, and what the hub said of each pool. Every
+    /// request a pool policy reads is filled here, so that what it reads
+    /// of the class is the same table's as its pools.
     pub(crate) fn fill<'t, H>(
         &'t self,
         request: gdl::PoolRequest<'t, H>,
     ) -> gdl::PoolRequest<'t, H> {
         request
             .with_properties(&self.properties)
-            .with_draining(&self.draining)
-            .with_withdrawn(&self.withdrawn)
-            .with_epochs(&self.epochs)
+            .with_evidence(&self.evidence)
     }
 
-    /// The table with the class's `withdrawn` pools, sorted.
-    pub(crate) fn with_withdrawn(mut self, withdrawn: Box<[Box<str>]>) -> Self {
-        self.withdrawn = withdrawn;
-        self
-    }
-
-    /// The table with the class's `draining` pools, sorted.
-    pub(crate) fn with_draining(mut self, draining: Box<[Box<str>]>) -> Self {
-        self.draining = draining;
-        self
-    }
-
-    /// The table with the hub epochs of the class's pools, sorted by name.
-    pub(crate) fn with_epochs(mut self, epochs: Arc<[(Box<str>, u64)]>) -> Self {
-        self.epochs = epochs;
+    /// The table with what the hub said of the class's pools, sorted by
+    /// name.
+    pub(crate) fn with_evidence(mut self, evidence: Arc<[(Box<str>, gdl::PoolEvidence)]>) -> Self {
+        self.evidence = evidence;
         self
     }
 
@@ -514,6 +496,8 @@ pub(crate) struct PoolTable {
     /// of the pool: what a request that the pool declined excludes.
     pub(crate) id: u64,
     pub(crate) generation: u64,
+    /// The epoch of the pool's hub the follow links to ([`gdl::Pool::epoch`]).
+    pub(crate) epoch: u64,
     pub(crate) region: String,
     pub(crate) state: PoolState,
     /// The pool's load summary, as it arrived.
@@ -552,7 +536,8 @@ impl PoolTable {
         let view = gdl::Pool::new(&*self.class, &*self.pool, &*self.region, self.state)
             .with_entries(self.eligible.len())
             .with_properties_version(self.properties_version)
-            .with_follow(self.generation, self.changes);
+            .with_follow(self.generation, self.changes)
+            .with_epoch(self.epoch);
         match self.load {
             Some(load) => view.with_load(load),
             None => view,

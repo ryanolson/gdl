@@ -704,7 +704,7 @@ pub fn address(hub: &Hub) -> String {
 }
 
 /// `event` as a hub without the property index sent it: the follow without
-/// its listing, and the marker without its flag. `None` for a `listed`
+/// its listing or its epoch, and the marker without its flag. `None` for a `listed`
 /// event, which only the property index reads ([`crate`]'s `listed` tests).
 pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEvent> {
     use gdl_watch::FollowEvent;
@@ -729,6 +729,7 @@ pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEv
             load,
             load_age_ms,
             listing: None,
+            epoch: 0,
         }),
         event => Some(event),
     }

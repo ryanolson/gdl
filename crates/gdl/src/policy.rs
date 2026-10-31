@@ -133,6 +133,13 @@ impl ChoiceHeld {
     pub fn accepted(&mut self) {
         self.0.accepted();
     }
+
+    /// The chosen pool accepted the offer, by its hub of `epoch`
+    /// ([`ChoiceLease::accepted_at`]).
+    #[inline]
+    pub fn accepted_at(&mut self, epoch: u64) {
+        self.0.accepted_at(epoch);
+    }
 }
 
 impl PoolChoice {
@@ -144,8 +151,9 @@ impl PoolChoice {
     }
 
     /// Keep `lease` with the choice. The runtime calls its
-    /// [`accepted`](ChoiceLease::accepted) when the chosen pool accepts
-    /// the offer, then holds it while the sending segment holds the
+    /// [`accepted_at`](ChoiceLease::accepted_at), which calls
+    /// [`accepted`](ChoiceLease::accepted) unless the lease says otherwise,
+    /// when the chosen pool accepts the offer, then holds it while the sending segment holds the
     /// request, as a selector's lease is held. It drops `lease` without
     /// telling it when the pool declines the offer, when the offer is
     /// never sent, when the outcome is unknown (no answer came, so the
@@ -222,12 +230,23 @@ impl NoPool {
 
 /// What a pool policy keeps with its choice to learn its outcome
 /// ([`PoolChoice::with_lease`]): told once if the chosen pool accepts the
-/// offer, and dropped when the runtime lets it go.
+/// offer, with the epoch of the pool's hub it accepted under, and dropped
+/// when the runtime lets it go.
 pub trait ChoiceLease: Send + 'static {
     /// The pool this lease's choice went to accepted the offer: it admitted
     /// the request and will answer it. Called at most once, on the
     /// sending segment's task, before the request's response starts.
     fn accepted(&mut self);
+
+    /// [`accepted`](ChoiceLease::accepted), by the pool's hub of `epoch`:
+    /// the hub whose follow the offer went to ([`Pool::epoch`]), which can
+    /// be a later hub of the pool than the row the policy chose from, when
+    /// the chosen instance is still eligible under a later follow. The
+    /// runtime calls this one; by default it calls `accepted`.
+    fn accepted_at(&mut self, epoch: u64) {
+        let _ = epoch;
+        self.accepted();
+    }
 }
 
 /// One followed pool of the class a hand-off enters, as a policy sees it:
@@ -249,6 +268,8 @@ pub struct Pool {
     /// is passed over until either changes ([`Damped::is_gone`]).
     generation: u64,
     changes: u64,
+    /// The epoch of the pool's hub that the follow is of.
+    epoch: u64,
 }
 
 impl Pool {
@@ -272,6 +293,7 @@ impl Pool {
             properties_version: 0,
             generation: 0,
             changes: 0,
+            epoch: 0,
         }
     }
 
@@ -289,6 +311,13 @@ impl Pool {
     #[inline]
     pub fn with_entries(mut self, entries: usize) -> Self {
         self.entries = entries;
+        self
+    }
+
+    /// The pool as a follow of its hub of `epoch` ([`epoch`](Pool::epoch)).
+    #[inline]
+    pub fn with_epoch(mut self, epoch: u64) -> Self {
+        self.epoch = epoch;
         self
     }
 
@@ -364,6 +393,17 @@ impl Pool {
     #[inline]
     pub fn properties_version(&self) -> u64 {
         self.properties_version
+    }
+
+    /// The epoch of the pool's hub that this row is a follow of: the hub
+    /// the chooser offers to when it chooses the row. A follow is of one
+    /// hub of the pool, since the chooser's hub follows a pool only at the
+    /// epoch of its record, so a policy that keeps the epoch a request
+    /// was accepted under reads it here, first-hand, or from its lease
+    /// ([`ChoiceLease::accepted_at`]). 0 from a hub of an earlier build.
+    #[inline]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Whether the pool takes work: `ready` or `degraded`, with an entry
@@ -461,12 +501,110 @@ pub fn pool_id(class: &str, pool: &str) -> u64 {
     hasher.finish()
 }
 
+/// What the chooser's hub last said of one pool, and the epoch of the hub
+/// of the pool it is about: whether the pool is live, missing, or scaled
+/// to 0, whether it drains, and whether it withdrew its record. The four
+/// are one value so that a reader never pairs one hub's state with
+/// another hub's epoch.
+///
+/// A pool's hub numbers its epoch past every write of the pool before it,
+/// so the epoch orders the hubs of one pool. The chooser keeps the value of
+/// the latest epoch it has word of: one of an earlier hub is dropped whole,
+/// and one of a later hub replaces it whole. Of one hub, the later word
+/// wins, but a withdrawal lasts, and a drain lasts until the pool
+/// withdraws, since the hub that said them cannot undo them. A policy that keeps the epoch a request was accepted under
+/// acts only on evidence at or past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolEvidence {
+    epoch: u64,
+    condition: PoolCondition,
+    draining: bool,
+    withdrawn: bool,
+}
+
+impl PoolEvidence {
+    /// The pool, in `condition`, as its hub of `epoch` is: not draining,
+    /// not withdrawn.
+    #[inline]
+    pub const fn new(epoch: u64, condition: PoolCondition) -> Self {
+        Self {
+            epoch,
+            condition,
+            draining: false,
+            withdrawn: false,
+        }
+    }
+
+    /// The evidence, with the pool draining or not.
+    #[inline]
+    pub const fn with_draining(mut self, draining: bool) -> Self {
+        self.draining = draining;
+        self
+    }
+
+    /// The evidence, with the pool's record withdrawn or not.
+    #[inline]
+    pub const fn with_withdrawn(mut self, withdrawn: bool) -> Self {
+        self.withdrawn = withdrawn;
+        self
+    }
+
+    /// The epoch of the pool's hub that the evidence is about. 0 from a
+    /// hub of an earlier build, which numbers none.
+    #[inline]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Whether the pool is live, missing, or scaled to 0, as the chooser's
+    /// hub sees it ([`PoolCondition`]).
+    #[inline]
+    pub const fn condition(&self) -> PoolCondition {
+        self.condition
+    }
+
+    /// Whether the pool drains: its record or its follow said so. A pool
+    /// that drains is not followed for long, so this tells a draining pool
+    /// whose follow was dropped from one whose hub has not reported.
+    #[inline]
+    pub const fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    /// Whether the pool withdrew its record after its drain, as the
+    /// chooser's hub saw in the pool directory: a pool drained on purpose.
+    /// A pool whose lease expired or whose link failed is not withdrawn.
+    #[inline]
+    pub const fn is_withdrawn(&self) -> bool {
+        self.withdrawn
+    }
+
+    /// `incoming`, which arrived after `self`, merged into it: the value
+    /// of the later epoch whole, or, of one epoch, `incoming`, keeping a
+    /// withdrawal, and a drain until the pool withdraws: neither can be
+    /// undone by the hub that said it.
+    #[doc(hidden)]
+    pub fn merged(self, incoming: Self) -> Self {
+        match incoming.epoch.cmp(&self.epoch) {
+            std::cmp::Ordering::Less => self,
+            std::cmp::Ordering::Greater => incoming,
+            std::cmp::Ordering::Equal => {
+                let withdrawn = incoming.withdrawn || self.withdrawn;
+                Self {
+                    withdrawn,
+                    draining: !withdrawn && (incoming.draining || self.draining),
+                    ..incoming
+                }
+            }
+        }
+    }
+}
+
 /// What a pool policy sees of one attempt: the request's context and
 /// head, the chooser's region, the pools the request excluded and why
 /// each that declined it did, the pools the chooser damps, the chooser's
-/// clock, the attempt's turn, and the class's property indexes, draining
-/// and withdrawn pools, and its pools' hub epochs, from the table it
-/// chooses from.
+/// clock, the attempt's turn, and the class's property indexes and what
+/// the chooser's hub said of each pool, from the table it chooses from.
 pub struct PoolRequest<'a, H> {
     cx: &'a Cx,
     head: &'a H,
@@ -479,9 +617,7 @@ pub struct PoolRequest<'a, H> {
     turn: u64,
     random: Option<&'a RandomState>,
     properties: &'a PropertyIndexes,
-    draining: &'a [Box<str>],
-    withdrawn: &'a [Box<str>],
-    epochs: &'a [(Box<str>, u64)],
+    evidence: &'a [(Box<str>, PoolEvidence)],
 }
 
 impl<H> Clone for PoolRequest<'_, H> {
@@ -512,9 +648,7 @@ impl<'a, H> PoolRequest<'a, H> {
             turn: 0,
             random: None,
             properties: &NO_PROPERTIES,
-            draining: &[],
-            withdrawn: &[],
-            epochs: &[],
+            evidence: &[],
         }
     }
 
@@ -586,108 +720,66 @@ impl<'a, H> PoolRequest<'a, H> {
         self.properties
     }
 
-    /// The request with the names of the class's pools that its hub lists
-    /// as draining, sorted: the runtime gives those of the table the
-    /// policy chooses from, as for [`with_properties`](Self::with_properties).
+    /// The request with what the chooser's hub said of each pool of the
+    /// class, by name, sorted by name ([`evidence`](Self::evidence)): the
+    /// runtime gives that of the table the policy chooses from, as for
+    /// [`with_properties`](Self::with_properties).
     #[inline]
-    pub fn with_draining(mut self, draining: &'a [Box<str>]) -> Self {
-        self.draining = draining;
+    pub fn with_evidence(mut self, evidence: &'a [(Box<str>, PoolEvidence)]) -> Self {
+        self.evidence = evidence;
         self
     }
 
-    /// Whether the chooser's hub lists the pool named `name` as draining,
-    /// followed or not ([`ClassPools::is_draining`](crate::ClassPools::is_draining)),
-    /// from the same table as the pools the policy chooses from and its
-    /// [`properties`](Self::properties): a drain and the rows a policy
-    /// reads are always one table's, never a newer drain over older rows.
-    /// A drain that lands after the table was loaded is seen by the next
-    /// attempt. `false` for a request built without them.
+    /// What the chooser's hub last said of the pool named `name`, followed
+    /// or not, with the epoch of the hub of the pool it is about
+    /// ([`PoolEvidence`]), from the same table as the pools the policy
+    /// chooses from and its [`properties`](Self::properties): what the hub
+    /// says of a pool and the rows a policy reads are always one table's,
+    /// never newer evidence over older rows. Evidence that lands after the
+    /// table was loaded is seen by the next attempt. `None` when the
+    /// chooser has no word of the pool, and for a request built without
+    /// it.
     #[inline]
-    pub fn is_draining(&self, name: &str) -> bool {
-        !self.draining.is_empty() && self.draining_in(name)
+    pub fn evidence(&self, name: &str) -> Option<PoolEvidence> {
+        if self.evidence.is_empty() {
+            return None;
+        }
+        self.evidence_in(name)
     }
 
-    /// [`is_draining`](Self::is_draining) once some pool drains: a search
-    /// of the names, out of line, so that a policy's pass over its pools
+    /// [`evidence`](Self::evidence) once some pool has some: a search of
+    /// the names, out of line, so that a policy's pass over its pools
     /// inlines only the branch.
     #[cold]
     #[inline(never)]
-    fn draining_in(&self, name: &str) -> bool {
-        self.draining
-            .binary_search_by(|draining| (**draining).cmp(name))
-            .is_ok()
+    fn evidence_in(&self, name: &str) -> Option<PoolEvidence> {
+        self.evidence
+            .binary_search_by(|(of, _)| (**of).cmp(name))
+            .ok()
+            .map(|at| self.evidence[at].1)
     }
 
-    /// The request with the names of the class's pools that its hub said
-    /// withdrew their records, sorted: the runtime gives those of the
-    /// table the policy chooses from, as for
-    /// [`with_draining`](Self::with_draining).
+    /// The epoch of the pool's evidence ([`PoolEvidence::epoch`]): `None`
+    /// when the chooser has no word of the pool.
     #[inline]
-    pub fn with_withdrawn(mut self, withdrawn: &'a [Box<str>]) -> Self {
-        self.withdrawn = withdrawn;
-        self
+    pub fn epoch(&self, name: &str) -> Option<u64> {
+        self.evidence(name).map(|evidence| evidence.epoch())
+    }
+
+    /// Whether the chooser's hub lists the pool named `name` as draining,
+    /// followed or not ([`PoolEvidence::is_draining`]).
+    #[inline]
+    pub fn is_draining(&self, name: &str) -> bool {
+        self.evidence(name)
+            .is_some_and(|evidence| evidence.is_draining())
     }
 
     /// Whether the chooser's hub said the pool named `name` withdrew its
-    /// record after its drain ([`ClassPools::is_withdrawn`](crate::ClassPools::is_withdrawn)),
-    /// from the same table as the pools the policy chooses from: a pool
-    /// drained on purpose, which has no row. A pool whose lease expired,
-    /// whose link failed, or that the chooser never saw is not withdrawn.
-    /// A listing of the pool from a later hub of it, or a later follow,
-    /// ends the withdrawal: the pool was started again. `false` for a
-    /// request built without them.
+    /// record after its drain ([`PoolEvidence::is_withdrawn`]).
     #[inline]
     pub fn is_withdrawn(&self, name: &str) -> bool {
-        !self.withdrawn.is_empty() && self.withdrawn_in(name)
-    }
-
-    /// [`is_withdrawn`](Self::is_withdrawn) once some pool withdrew, out
-    /// of line, as for [`is_draining`](Self::is_draining).
-    #[cold]
-    #[inline(never)]
-    fn withdrawn_in(&self, name: &str) -> bool {
-        self.withdrawn
-            .binary_search_by(|withdrawn| (**withdrawn).cmp(name))
-            .is_ok()
-    }
-
-    /// The request with the hub epochs of the class's pools, by name,
-    /// sorted by name: the runtime gives those of the table the policy
-    /// chooses from, as for [`with_draining`](Self::with_draining).
-    #[inline]
-    pub fn with_epochs(mut self, epochs: &'a [(Box<str>, u64)]) -> Self {
-        self.epochs = epochs;
-        self
-    }
-
-    /// The epoch of the newest hub of the pool named `name` that the
-    /// chooser's hub has word of, from the same table as the pools the
-    /// policy chooses from, followed or not: the epoch of its listing, or,
-    /// for a withdrawn pool ([`is_withdrawn`](Self::is_withdrawn)), of the
-    /// hub that withdrew it. A pool's hub numbers its epoch past every
-    /// write its pool made before, so an epoch orders the hubs of one pool:
-    /// a policy that keeps the epoch a request was accepted under can tell
-    /// evidence about that hub, or a later one, from evidence about an
-    /// earlier one. `Some(0)` for a pool listed by a hub of an earlier
-    /// build, which sends none. `None` when the chooser holds no word of
-    /// the pool, and for a request built without them.
-    #[inline]
-    pub fn epoch(&self, name: &str) -> Option<u64> {
-        if self.epochs.is_empty() {
-            return None;
-        }
-        self.epoch_in(name)
-    }
-
-    /// [`epoch`](Self::epoch) once some pool is listed: a search of the
-    /// names, out of line.
-    #[cold]
-    #[inline(never)]
-    fn epoch_in(&self, name: &str) -> Option<u64> {
-        self.epochs
-            .binary_search_by(|(listed, _)| (**listed).cmp(name))
-            .ok()
-            .map(|at| self.epochs[at].1)
+        self.evidence(name)
+            .is_some_and(|evidence| evidence.is_withdrawn())
     }
 
     /// The same attempt, with `head` read from its bytes.
@@ -707,9 +799,7 @@ impl<'a, H> PoolRequest<'a, H> {
             turn: self.turn,
             random: self.random,
             properties: self.properties,
-            draining: self.draining,
-            withdrawn: self.withdrawn,
-            epochs: self.epochs,
+            evidence: self.evidence,
         }
     }
 

@@ -54,7 +54,7 @@ fn a_missing_pool_is_silent_since_its_first_silence() {
         (PoolCondition::Missing, Some(35_000))
     );
     // The link lost after the write: the write is still the first silence.
-    listings.lose(CLASS, POOL, Some(t0 + second * 10));
+    listings.lose(CLASS, POOL, Some((t0 + second * 10, None)));
     assert_eq!(
         shown(&listings, t0 + second * 40),
         (PoolCondition::Missing, Some(40_000))
@@ -63,7 +63,7 @@ fn a_missing_pool_is_silent_since_its_first_silence() {
     // A newer write: silent only since the link was lost, and a second
     // loss keeps the first.
     listings.record(&record(2, Presence::Serving), None);
-    listings.lose(CLASS, POOL, Some(t0 + second * 20));
+    listings.lose(CLASS, POOL, Some((t0 + second * 20, None)));
     assert_eq!(
         shown(&listings, t0 + second * 41),
         (PoolCondition::Missing, Some(31_000))
@@ -84,7 +84,7 @@ fn a_missing_pool_is_silent_since_its_first_silence() {
     );
 
     // Lost, then scaled to 0: not silent.
-    listings.lose(CLASS, POOL, Some(t0 + second * 52));
+    listings.lose(CLASS, POOL, Some((t0 + second * 52, None)));
     listings.record(&record(4, Presence::ScaledToZero), None);
     assert_eq!(
         shown(&listings, t0 + second * 60),
@@ -102,7 +102,7 @@ fn only_a_new_silence_is_sent_again() {
     listings.record(&record(1, Presence::Serving), None);
     assert!(listings.changed(CLASS, POOL, t0).is_some(), "first shown");
 
-    listings.lose(CLASS, POOL, Some(t0 + second * 10));
+    listings.lose(CLASS, POOL, Some((t0 + second * 10, None)));
     let lost = listings
         .changed(CLASS, POOL, t0 + second * 12)
         .expect("missing");
@@ -110,7 +110,7 @@ fn only_a_new_silence_is_sent_again() {
     assert_eq!(lost.missing_age_ms, Some(2_000));
 
     // The same loss again, and the record read again unchanged: nothing.
-    listings.lose(CLASS, POOL, Some(t0 + second * 13));
+    listings.lose(CLASS, POOL, Some((t0 + second * 13, None)));
     listings.record(&record(1, Presence::Serving), None);
     assert_eq!(listings.changed(CLASS, POOL, t0 + second * 14), None);
 

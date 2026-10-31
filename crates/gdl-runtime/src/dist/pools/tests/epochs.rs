@@ -39,10 +39,39 @@ fn listed(pool: &str, epoch: Option<u64>) -> FollowEvent {
     }
 }
 
-/// The follow `generation` of `pool`, ready, with its listing from its hub
-/// of `epoch`, as a snapshot sends it.
+/// The follow `generation` of `pool`'s hub of `epoch`, ready, with its
+/// listing, as a snapshot sends it.
 fn followed(pool: &str, generation: u64, epoch: u64) -> FollowEvent {
-    match follow(pool, generation, PoolState::Ready) {
+    match follow_at(pool, generation, epoch, PoolState::Ready) {
+        FollowEvent::Follow {
+            class,
+            pool,
+            generation,
+            epoch,
+            region,
+            state,
+            load,
+            load_age_ms,
+            ..
+        } => FollowEvent::Follow {
+            class,
+            pool,
+            generation,
+            epoch,
+            region,
+            state,
+            load,
+            load_age_ms,
+            listing: Some(listing(epoch)),
+        },
+        _ => unreachable!("a follow"),
+    }
+}
+
+/// The follow `generation` of `pool`'s hub of `epoch`, in `state`, with no
+/// listing, as a live follow is sent.
+fn follow_at(pool: &str, generation: u64, epoch: u64, state: PoolState) -> FollowEvent {
+    match follow(pool, generation, state) {
         FollowEvent::Follow {
             class,
             pool,
@@ -56,31 +85,35 @@ fn followed(pool: &str, generation: u64, epoch: u64) -> FollowEvent {
             class,
             pool,
             generation,
+            epoch,
             region,
             state,
             load,
             load_age_ms,
-            listing: Some(listing(epoch)),
+            listing: None,
         },
         _ => unreachable!("a follow"),
     }
 }
 
-fn withdrawn(pool: &str, generation: u64) -> FollowEvent {
+/// The withdrawal of `pool`, naming its follow `generation`, at `epoch`.
+fn withdrawn(pool: &str, generation: u64, epoch: u64) -> FollowEvent {
     FollowEvent::Withdrawn {
         class: "model_x".into(),
         pool: pool.into(),
         generation,
+        epoch,
+        properties_version: 0,
     }
 }
 
-/// The hub drains `pool`'s follow `generation`, drops it, unlists the
-/// pool, and says it withdrew, in the order a hub sends them.
-fn withdraw(pool: &str, generation: u64) -> [FollowEvent; 3] {
+/// The hub of `epoch` drains `pool`'s follow `generation`, drops it,
+/// unlists the pool, and says it withdrew, in the order a hub sends them.
+fn withdraw(pool: &str, generation: u64, epoch: u64) -> [FollowEvent; 3] {
     [
         dropped(pool, generation),
         listed(pool, None),
-        withdrawn(pool, generation),
+        withdrawn(pool, generation, epoch),
     ]
 }
 
@@ -116,7 +149,7 @@ fn a_withdrawn_pool_reads_the_epoch_it_withdrew_at() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.apply(followed(M1, 1, 5), now);
-    for event in withdraw(M1, 1) {
+    for event in withdraw(M1, 1, 5) {
         follows.apply(event, now);
     }
     assert_eq!(read(&pools, M1), (true, Some(5)));
@@ -133,7 +166,7 @@ fn a_pool_listed_again_after_its_withdrawal_is_not_withdrawn() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.apply(followed(M1, 1, 5), now);
-    for event in withdraw(M1, 1) {
+    for event in withdraw(M1, 1, 5) {
         follows.apply(event, now);
     }
     follows.apply(listed(M1, Some(6)), now);
@@ -153,14 +186,14 @@ fn a_listing_no_later_than_the_withdrawal_keeps_it() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.apply(followed(M1, 1, 5), now);
-    for event in withdraw(M1, 1) {
+    for event in withdraw(M1, 1, 5) {
         follows.apply(event, now);
     }
     follows.apply(listed(M1, Some(5)), now);
     assert_eq!(read(&pools, M1), (true, Some(5)), "the same hub");
 
     follows.apply(followed(M2, 1, 0), now);
-    for event in withdraw(M2, 1) {
+    for event in withdraw(M2, 1, 0) {
         follows.apply(event, now);
     }
     follows.apply(listed(M2, Some(0)), now);
@@ -176,7 +209,7 @@ fn a_rewatch_that_lists_the_pool_again_ends_its_withdrawal() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
     follows.apply(followed(M1, 1, 5), now);
-    for event in withdraw(M1, 1) {
+    for event in withdraw(M1, 1, 5) {
         follows.apply(event, now);
     }
     let mut snapshot = follows.snapshot();
@@ -200,7 +233,7 @@ fn epochs_are_made_again_only_when_a_listing_or_withdrawal_changes() {
     let now = Instant::now();
     follows.apply(followed(M1, 1, 5), now);
     follows.apply(listed(M2, Some(7)), now);
-    let before = Arc::clone(&pools.table("f").expect("a table").epochs);
+    let before = Arc::clone(&pools.table("f").expect("a table").evidence);
     follows.apply(
         FollowEvent::Load {
             class: "model_x".into(),
@@ -210,10 +243,13 @@ fn epochs_are_made_again_only_when_a_listing_or_withdrawal_changes() {
         },
         now,
     );
-    let after = Arc::clone(&pools.table("f").expect("a table").epochs);
-    assert!(Arc::ptr_eq(&before, &after), "a summary changes no epoch");
+    let after = Arc::clone(&pools.table("f").expect("a table").evidence);
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "a summary changes no evidence"
+    );
     follows.apply(listed(M2, Some(8)), now);
-    let relisted = Arc::clone(&pools.table("f").expect("a table").epochs);
+    let relisted = Arc::clone(&pools.table("f").expect("a table").evidence);
     assert!(!Arc::ptr_eq(&after, &relisted));
     assert_eq!(read(&pools, M2), (false, Some(8)));
 }
@@ -320,7 +356,6 @@ fn an_epoch_moves_on_its_own_past_a_held_list() {
 }
 
 #[test]
-#[ignore = "F3: keep_newer pairs an earlier hub's missing or scaled condition with the held later epoch, so it can move a later pin"]
 fn an_earlier_hubs_condition_does_not_move_a_later_pin() {
     use super::properties::{TEST, Test};
 
@@ -423,5 +458,211 @@ fn an_earlier_hubs_condition_does_not_move_a_later_pin() {
     assert!(
         observed.iter().all(|(_, _, _, _, moves)| !moves),
         "epoch-5 conditions must not become epoch-6 evidence against a pin accepted at epoch 6: {observed:?}"
+    );
+}
+
+/// What a policy reads of `pool`'s evidence, and the epoch of its row.
+fn evidence(pools: &Pools, pool: &str) -> (Option<gdl::PoolEvidence>, Option<u64>) {
+    let table = pools.table("f").expect("a table");
+    let cx = gdl::Cx::new();
+    let request = table.fill(PoolRequest::new(&cx, &(), "r", Instant::now()));
+    let row = table
+        .views
+        .iter()
+        .find(|view| view.name() == pool)
+        .map(gdl::Pool::epoch);
+    (request.evidence(pool), row)
+}
+
+fn at(epoch: u64, condition: PoolCondition) -> gdl::PoolEvidence {
+    gdl::PoolEvidence::new(epoch, condition)
+}
+
+/// `pool` listed by its hub of `epoch`, in `condition`.
+fn listed_in(pool: &str, epoch: u64, condition: PoolCondition) -> FollowEvent {
+    let mut listing = listing(epoch);
+    listing.condition = condition;
+    FollowEvent::Listed {
+        class: "model_x".into(),
+        pool: pool.into(),
+        generation: 0,
+        listing: Some(listing),
+    }
+}
+
+fn state_of(pool: &str, generation: u64, state: PoolState) -> FollowEvent {
+    FollowEvent::State {
+        class: "model_x".into(),
+        pool: pool.into(),
+        generation,
+        state,
+    }
+}
+
+/// A follower holding `M1` followed at generation 2 by its hub of epoch 6,
+/// listed live.
+fn held_at_six() -> (
+    super::super::follow::Follows<super::Recorded>,
+    Pools,
+    Instant,
+) {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 2, 6), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(6, PoolCondition::Live)), Some(6))
+    );
+    (follows, pools, now)
+}
+
+/// A relay's listing stamps its epoch: one of an earlier hub is dropped
+/// whole, condition and drain with it, and one of a later hub is taken
+/// whole.
+#[test]
+fn a_listing_stamps_its_epoch() {
+    let (mut follows, pools, now) = held_at_six();
+    follows.take(listed_in(M1, 5, PoolCondition::Missing), now);
+    follows.take(listed_in(M1, 5, PoolCondition::ScaledToZero), now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(6, PoolCondition::Live)),
+        "earlier"
+    );
+    follows.take(listed_in(M1, 7, PoolCondition::Missing), now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(7, PoolCondition::Missing)),
+        "later"
+    );
+}
+
+/// A follow stamps the epoch of the hub it links to, and so does its row:
+/// one of a later hub, live, with no listing, moves the evidence on and
+/// keeps no condition of the earlier hub; a state change of a follow of
+/// an earlier hub is dropped.
+#[test]
+fn a_follow_and_its_state_stamp_their_hubs_epoch() {
+    let (mut follows, pools, now) = held_at_six();
+    follows.take(listed_in(M1, 6, PoolCondition::Missing), now);
+    follows.take(follow_at(M1, 3, 7, PoolState::Ready), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(7, PoolCondition::Live)), Some(7))
+    );
+    follows.take(state_of(M1, 3, PoolState::Draining), now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(7, PoolCondition::Live).with_draining(true)),
+        "its own hub's drain"
+    );
+
+    let (mut follows, pools, now) = held_at_six();
+    follows.take(listed_in(M1, 7, PoolCondition::Live), now);
+    follows.take(state_of(M1, 2, PoolState::Draining), now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(7, PoolCondition::Live)),
+        "the drain of a follow of an earlier hub"
+    );
+}
+
+/// A withdrawal stamps its own epoch: one of an earlier hub is dropped,
+/// and one of the held hub or a later one is taken. A dropped follow, and
+/// an unlisting of a pool that withdrew, change nothing.
+#[test]
+fn a_withdrawal_stamps_its_epoch() {
+    let (mut follows, pools, now) = held_at_six();
+    follows.take(withdrawn(M1, 2, 5), now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(6, PoolCondition::Live)),
+        "earlier"
+    );
+    follows.take(dropped(M1, 2), now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (Some(at(6, PoolCondition::Live)), None),
+        "dropped"
+    );
+    follows.take(withdrawn(M1, 2, 6), now);
+    let gone = at(6, PoolCondition::Live).with_withdrawn(true);
+    assert_eq!(evidence(&pools, M1).0, Some(gone));
+    follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1).0, Some(gone), "unlisted after");
+}
+
+/// A pool's own watch stamps what it installs with the epoch its own
+/// events carry, in its snapshot and after it: an earlier hub's word is
+/// dropped, and a later hub's is taken, with no listing from the relay.
+#[test]
+fn a_pools_own_watch_stamps_its_hubs_epoch() {
+    for (event, expected, row) in [
+        (followed(M1, 1, 5), at(6, PoolCondition::Live), Some(5)),
+        (
+            follow_at(M1, 3, 7, PoolState::Ready),
+            at(7, PoolCondition::Live),
+            Some(7),
+        ),
+    ] {
+        let (mut follows, pools, now) = held_at_six();
+        follows.unknown(gdl_watch::UnknownFollowEvent {
+            kind: "paused".into(),
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+        });
+        let asked = follows.asked().pop().expect("a watch of its own");
+        for event in [event, FollowEvent::Synced { listed: true }] {
+            follows.own(
+                asked.key.clone(),
+                asked.watch,
+                Ok(gdl_watch::Watched::Event(event)),
+                now,
+            );
+        }
+        assert_eq!(evidence(&pools, M1), (Some(expected), row), "its snapshot");
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(follow_at(
+                M1,
+                4,
+                8,
+                PoolState::Ready,
+            ))),
+            now,
+        );
+        assert_eq!(
+            evidence(&pools, M1),
+            (Some(at(8, PoolCondition::Live)), Some(8)),
+            "after its snapshot"
+        );
+    }
+}
+
+/// A rewatch's snapshot is taken pool by pool after what is held: an
+/// earlier hub's word is dropped whole, and a later hub's taken.
+#[test]
+fn a_rewatch_stamps_each_pools_epoch() {
+    let (mut follows, pools, now) = held_at_six();
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(listed_in(M1, 5, PoolCondition::Missing), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(6, PoolCondition::Live)),
+        "earlier"
+    );
+
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(listed_in(M1, 7, PoolCondition::ScaledToZero), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        evidence(&pools, M1).0,
+        Some(at(7, PoolCondition::ScaledToZero)),
+        "later"
     );
 }

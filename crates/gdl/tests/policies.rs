@@ -7,8 +7,9 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use gdl::{
-    Cx, Damped, HomeFirst, Load, LoadSummary, NoPool, Pool, PoolChoice, PoolPolicies, PoolPolicy,
-    PoolRequest, PoolState, Projected, Projection, RoundRobin,
+    Cx, Damped, HomeFirst, Load, LoadSummary, NoPool, Pool, PoolChoice, PoolCondition,
+    PoolEvidence, PoolPolicies, PoolPolicy, PoolRequest, PoolState, Projected, Projection,
+    RoundRobin,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -189,8 +190,13 @@ fn a_policy_reads_which_pools_drain_from_its_request() {
     let cx = Cx::new();
     let head = hinted("llama");
     // `llama-0`'s follow was dropped: it is not among the pools.
-    let draining: [Box<str>; 2] = ["llama-0".into(), "llama-1".into()];
-    let request = PoolRequest::new(&cx, &head, HOME, now).with_draining(&draining);
+    let draining = PoolEvidence::new(3, PoolCondition::Live).with_draining(true);
+    let evidence: [(Box<str>, PoolEvidence); 3] = [
+        ("llama-0".into(), draining),
+        ("llama-1".into(), draining),
+        ("llama-2".into(), PoolEvidence::new(3, PoolCondition::Live)),
+    ];
+    let request = PoolRequest::new(&cx, &head, HOME, now).with_evidence(&evidence);
     assert!(request.is_draining("llama-0"), "a pool no longer followed");
     assert!(request.is_draining("llama-1"), "a followed pool");
     assert!(!request.is_draining("llama-2"));
@@ -202,11 +208,12 @@ fn a_policy_reads_which_pools_drain_from_its_request() {
     let undrained = PoolRequest::new(&cx, &head, HOME, now);
     assert!(!undrained.is_draining("llama-1"));
     assert_eq!(Undrained.choose(undrained, &pools).map(|c| c.at()), Ok(0));
-    let every: [Box<str>; 2] = ["llama-1".into(), "llama-2".into()];
+    let every: [(Box<str>, PoolEvidence); 2] =
+        [("llama-1".into(), draining), ("llama-2".into(), draining)];
     assert_eq!(
         Undrained
             .choose(
-                PoolRequest::new(&cx, &head, HOME, now).with_draining(&every),
+                PoolRequest::new(&cx, &head, HOME, now).with_evidence(&every),
                 &pools
             )
             .map(|c| c.at()),
@@ -618,16 +625,22 @@ fn a_policy_reads_epochs_and_withdrawals_from_its_request() {
     let cx = Cx::new();
     let head = hinted("llama");
     // `llama-0` withdrew at epoch 7; `llama-3` is listed, with no row.
-    let epochs: [(Box<str>, u64); 4] = [
-        ("llama-0".into(), 7),
-        ("llama-1".into(), 5),
-        ("llama-2".into(), 0),
-        ("llama-3".into(), 9),
+    let live = |epoch| PoolEvidence::new(epoch, PoolCondition::Live);
+    let evidence: [(Box<str>, PoolEvidence); 4] = [
+        ("llama-0".into(), live(7).with_withdrawn(true)),
+        ("llama-1".into(), live(5)),
+        ("llama-2".into(), live(0)),
+        (
+            "llama-3".into(),
+            PoolEvidence::new(9, PoolCondition::Missing),
+        ),
     ];
-    let withdrawn: [Box<str>; 1] = ["llama-0".into()];
-    let request = PoolRequest::new(&cx, &head, HOME, now)
-        .with_epochs(&epochs)
-        .with_withdrawn(&withdrawn);
+    let request = PoolRequest::new(&cx, &head, HOME, now).with_evidence(&evidence);
+    assert_eq!(
+        request.evidence("llama-3"),
+        Some(PoolEvidence::new(9, PoolCondition::Missing)),
+        "one value: the condition with the epoch it is of"
+    );
     assert_eq!(request.epoch("llama-0"), Some(7), "the withdrawing hub's");
     assert_eq!(request.epoch("llama-1"), Some(5));
     assert_eq!(
@@ -661,5 +674,45 @@ fn a_policy_reads_epochs_and_withdrawals_from_its_request() {
         choose(8),
         Err(NoPool::because("the pin has no row")),
         "a withdrawal older than the pin says nothing of it"
+    );
+}
+
+/// Evidence of an earlier hub is dropped whole, and evidence of a later
+/// hub replaces it whole: a condition never pairs with another hub's
+/// epoch. Of one hub, the later word wins, but a withdrawal lasts, and a
+/// drain lasts until the pool withdraws.
+#[test]
+fn evidence_of_an_earlier_hub_is_dropped_whole() {
+    let at = |epoch, condition| PoolEvidence::new(epoch, condition);
+    let held = at(6, PoolCondition::Live).with_draining(true);
+    for earlier in [
+        at(5, PoolCondition::Missing),
+        at(5, PoolCondition::ScaledToZero),
+        at(5, PoolCondition::Live).with_withdrawn(true),
+    ] {
+        assert_eq!(held.merged(earlier), held, "{earlier:?}");
+    }
+    let later = at(7, PoolCondition::Missing);
+    assert_eq!(held.merged(later), later, "a later hub's, drain and all");
+    assert_eq!(
+        held.merged(at(6, PoolCondition::Missing)),
+        at(6, PoolCondition::Missing).with_draining(true),
+        "of one hub, the later word, and the drain holds"
+    );
+    let withdrawn = at(6, PoolCondition::Live).with_withdrawn(true);
+    assert_eq!(
+        held.merged(withdrawn),
+        withdrawn,
+        "a withdrawal ends the drain"
+    );
+    assert_eq!(
+        withdrawn.merged(at(6, PoolCondition::Live)),
+        withdrawn,
+        "of one hub, a withdrawal lasts"
+    );
+    assert_eq!(
+        withdrawn.merged(at(7, PoolCondition::Live)),
+        at(7, PoolCondition::Live),
+        "a later hub of the pool ends it"
     );
 }

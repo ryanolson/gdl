@@ -224,6 +224,7 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
                 class,
                 pool,
                 generation,
+                ..
             } = relay.next().await.expect("the relay lives")
             {
                 return (class, pool, generation);

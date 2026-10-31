@@ -20,6 +20,8 @@ fn withdrawn(pool: &str, generation: u64) -> FollowEvent {
         class: "model_x".into(),
         pool: pool.into(),
         generation,
+        epoch: 0,
+        properties_version: 0,
     }
 }
 

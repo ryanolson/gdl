@@ -193,9 +193,11 @@ impl Relay {
         });
     }
 
-    /// The pool `pool` of `class` withdrew its record: if it was ever
-    /// followed, say so, naming its latest follow, which may have closed.
-    pub(crate) fn withdrawn(&self, class: &str, pool: &str) {
+    /// The pool of `withdrawal` withdrew its record: if it was ever
+    /// followed, say so, naming its latest follow, which may have closed,
+    /// with the withdrawal's epoch and the list version it keeps.
+    pub(crate) fn withdrawn(&self, withdrawal: &gdl_pools::Withdrawal) {
+        let (class, pool) = (&*withdrawal.class, &*withdrawal.pool);
         let mut shared = self.lock();
         shared.unlist(class, pool);
         let Some(&generation) = shared
@@ -209,6 +211,8 @@ impl Relay {
             class: class.to_string(),
             pool: pool.to_string(),
             generation,
+            epoch: withdrawal.epoch,
+            properties_version: withdrawal.properties_version,
         });
     }
 
@@ -747,9 +751,10 @@ impl Shared {
         } = pools.remove(pool).expect("the follow was just found");
         // The relay closes a follow in `settle`, never here: a follow that
         // ends here lost its link, or was replaced, so its pool is missing
-        // until a later one is installed.
+        // until a later one is installed, as a word of the hub it linked to.
+        let epoch = installed.as_ref().map(Installed::epoch);
         self.listings
-            .lose(class, pool, Some(std::time::Instant::now()));
+            .lose(class, pool, Some((std::time::Instant::now(), epoch)));
         self.relist(class, pool);
         let Some(installed) = installed else {
             return;

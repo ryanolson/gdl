@@ -224,6 +224,7 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
                     class: "model_x".into(),
                     pool: pool.clone(),
                     generation: 1,
+                    epoch: 0,
                     region: "r".into(),
                     state: PoolState::Draining,
                     load: None,

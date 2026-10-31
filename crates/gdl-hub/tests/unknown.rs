@@ -322,6 +322,7 @@ async fn a_followed_pool_is_withheld_for_an_unknown_event_until_it_is_read_again
                 class: "model_x".into(),
                 pool: M.into(),
                 generation,
+                epoch: 0,
                 region: like.region.clone(),
                 state: PoolState::Unavailable,
                 load: None,

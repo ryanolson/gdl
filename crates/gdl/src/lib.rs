@@ -56,8 +56,8 @@ pub use items::{Items, items};
 pub use metrics::{GaugeReadings, Metrics, ScrapeGaugeVec};
 pub use policy::{
     ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool,
-    PoolChoice, PoolCondition, PoolPolicies, PoolPolicy, PoolRequest, PoolState, PropertyState,
-    RoundRobin,
+    PoolChoice, PoolCondition, PoolEvidence, PoolPolicies, PoolPolicy, PoolRequest, PoolState,
+    PropertyState, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime

@@ -342,6 +342,7 @@ impl Installed {
             class: self.class.clone(),
             pool: self.pool.clone(),
             generation,
+            epoch: self.epoch,
             region: self.region.clone(),
             state: self.shown(),
             load: self.load,

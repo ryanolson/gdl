@@ -237,9 +237,7 @@ impl<D: PoolDirectory> Follows<'_, D> {
             && self.view.withdrawn(&withdrawal.pool) == Some(withdrawal.version())
         {
             self.unlease(&withdrawal.pool);
-            self.follower
-                .relay
-                .withdrawn(&self.follower.class, &withdrawal.pool);
+            self.follower.relay.withdrawn(&withdrawal);
         }
     }
 

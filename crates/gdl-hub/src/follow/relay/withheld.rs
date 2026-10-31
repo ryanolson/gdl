@@ -89,6 +89,7 @@ fn follow(pool: &str, generation: u64, state: PoolState) -> FollowEvent {
         class: "model_x".into(),
         pool: pool.into(),
         generation,
+        epoch: 1,
         region: "r".into(),
         state,
         load: None,

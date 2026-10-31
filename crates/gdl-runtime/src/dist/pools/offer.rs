@@ -669,6 +669,7 @@ mod tests {
                 pool: "m1".into(),
                 id: pool_id("model_x", "m1"),
                 generation: 1,
+                epoch: 0,
                 region: "home".into(),
                 state: PoolState::Ready,
                 load: super::super::tests::idle(),
@@ -819,6 +820,7 @@ mod tests {
                     pool: name.into(),
                     id: pool_id("model_x", name),
                     generation: 1,
+                    epoch: 0,
                     region: "home".into(),
                     state: PoolState::Ready,
                     load: super::super::tests::idle(),
@@ -954,6 +956,7 @@ mod tests {
                     pool: name.into(),
                     id: pool_id("model_x", name),
                     generation: 1,
+                    epoch: 0,
                     region: "home".into(),
                     state: PoolState::Ready,
                     load: super::super::tests::idle(),
@@ -1105,6 +1108,7 @@ mod tests {
                 pool: name.into(),
                 id: pool_id("model_x", name),
                 generation: 1,
+                epoch: 0,
                 region: "home".into(),
                 state: PoolState::Ready,
                 load: super::super::tests::idle(),
@@ -1285,6 +1289,7 @@ mod tests {
                     pool: name.into(),
                     id: pool_id("model_x", name),
                     generation: 1,
+                    epoch: 0,
                     region: "home".into(),
                     state: PoolState::Ready,
                     load: super::super::tests::idle(),
@@ -1405,6 +1410,7 @@ mod tests {
                     pool: (*name).into(),
                     id: pool_id("model_x", name),
                     generation: 1,
+                    epoch: 0,
                     region: "home".into(),
                     state: PoolState::Ready,
                     load: super::super::tests::idle(),
@@ -1488,6 +1494,7 @@ mod tests {
                     pool: pool.pool.clone(),
                     id: pool.id,
                     generation: pool.generation,
+                    epoch: 0,
                     region: pool.region.clone(),
                     state: pool.state,
                     load: pool.load,
@@ -1831,6 +1838,7 @@ mod tests {
                 pool: "m1".into(),
                 id: pool_id("model_x", "m1"),
                 generation: 1,
+                epoch: 0,
                 region: "home".into(),
                 state: PoolState::Ready,
                 load: super::super::tests::idle(),
@@ -1953,16 +1961,15 @@ mod tests {
                 followed_with(&layout, &["m1", "m2", "m3", "m4", "m5"], &policies);
             // `m0`'s follow was dropped while it drains, and `m6` withdrew.
             let followed = pools.table("d").expect("a table").pools.clone();
-            let epochs = ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]
-                .map(|name| (Box::from(name), 1))
+            let evidence = ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]
+                .map(|name| {
+                    let evidence = gdl::PoolEvidence::new(1, gdl::PoolCondition::Live)
+                        .with_draining(matches!(name, "m0" | "m2"))
+                        .with_withdrawn(name == "m6");
+                    (Box::from(name), evidence)
+                })
                 .into();
-            pools.store(
-                "d",
-                EntryTable::new(followed)
-                    .with_draining(Box::new(["m0".into(), "m2".into()]))
-                    .with_withdrawn(Box::new(["m6".into()]))
-                    .with_epochs(epochs),
-            );
+            pools.store("d", EntryTable::new(followed).with_evidence(evidence));
             let excluded = [pool_id("model_x", "m4")];
             crossing.declined(pool_id("model_x", "m1"), Decline::Full, None);
             crossing.declined(pool_id("model_x", "m2"), Decline::Full, None);

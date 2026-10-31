@@ -35,9 +35,10 @@ const UNOFFERED: usize = 1 << (usize::BITS - 1);
 /// One follow's word, shared by every table its follow makes, with the
 /// counts of its pool's offers, if the chooser records them: the same for
 /// every follow of the pool. With them, the requests that wait for room
-/// in the pool.
+/// in the pool, and the epoch of the pool's hub the follow links to, which
+/// an offer that takes a lease is made to.
 #[derive(Debug, Default)]
-pub(crate) struct Leases(AtomicUsize, Option<&'static PoolFigures>, Room);
+pub(crate) struct Leases(AtomicUsize, Option<&'static PoolFigures>, Room, u64);
 
 /// The requests that wait for room in a follow's pool, and the
 /// generation of the follow's lease ends they wait for to move.
@@ -55,7 +56,13 @@ struct Room {
 impl Leases {
     /// The word of a follow whose pool's offers count into `figures`.
     pub(crate) fn counted(figures: Option<&'static PoolFigures>) -> Self {
-        Self(AtomicUsize::new(0), figures, Room::default())
+        Self(AtomicUsize::new(0), figures, Room::default(), 0)
+    }
+
+    /// The word of a follow of the pool's hub of `epoch`.
+    pub(crate) fn of_epoch(mut self, epoch: u64) -> Self {
+        self.3 = epoch;
+        self
     }
 
     /// The counts of the pool's offers, if the chooser records them.
@@ -350,11 +357,12 @@ impl PoolLease {
     }
 
     /// The pool accepted the offer: tell the pool policy's lease, if it
-    /// gave one.
+    /// gave one, with the epoch of the pool's hub whose follow the lease is
+    /// on, which can be a later hub than the row the policy chose from.
     #[inline]
     pub(crate) fn accepted(&mut self) {
         if let Some(choice) = &mut self.choice {
-            choice.accepted();
+            choice.accepted_at(self.follow.as_ref().map_or(0, |follow| follow.3));
         }
     }
 }

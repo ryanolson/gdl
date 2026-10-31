@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use crate::policy::{Damped, Pool};
+use crate::policy::{Damped, Pool, PoolEvidence};
 
 mod index;
 
@@ -233,10 +233,18 @@ impl FollowedPools {
                     .filter(|pool| gone.iter().any(|(c, n)| *c == class && n == pool.name()))
                     .fold(Damped::EMPTY, |damped, pool| damped.with_gone(pool));
                 let index = properties.remove(&class).unwrap_or_default();
+                let mut evidence: BTreeMap<Box<str>, PoolEvidence> = BTreeMap::new();
+                let live = PoolEvidence::new(0, crate::PoolCondition::Live);
+                for name in withdrawn {
+                    evidence.insert(name, live.with_withdrawn(true));
+                }
+                for name in draining {
+                    let held = evidence.entry(name).or_insert(live);
+                    *held = held.with_draining(true);
+                }
                 let table = FixedTable {
                     pools: pools.into(),
-                    withdrawn: withdrawn.into(),
-                    draining: draining.into(),
+                    evidence: evidence.into_iter().collect(),
                     damped,
                     properties: index,
                 };
@@ -425,8 +433,7 @@ pub trait PoolSource: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy)]
 pub struct ClassPools<'a> {
     pools: &'a [Pool],
-    withdrawn: &'a [Box<str>],
-    draining: &'a [Box<str>],
+    evidence: &'a [(Box<str>, PoolEvidence)],
     damped: &'a Damped,
     properties: &'a PropertyIndexes,
 }
@@ -435,24 +442,35 @@ pub struct ClassPools<'a> {
 static NONE_GONE: Damped = Damped::EMPTY;
 
 impl<'a> ClassPools<'a> {
-    /// The view of `pools`, sorted by name, and `withdrawn`, sorted, with
-    /// no pool gone.
+    /// The view of `pools`, sorted by name, with no evidence and no pool
+    /// gone.
     #[doc(hidden)]
-    pub fn new(pools: &'a [Pool], withdrawn: &'a [Box<str>]) -> Self {
+    pub fn new(pools: &'a [Pool]) -> Self {
         Self {
             pools,
-            withdrawn,
-            draining: &[],
+            evidence: &[],
             damped: &NONE_GONE,
             properties: &NO_PROPERTIES,
         }
     }
 
-    /// The view with the pools whose listing says they drain, `draining`,
-    /// sorted: from the same table as its pools.
+    /// The view with what the hub said of each pool, sorted by name: from
+    /// the same table as its pools.
     #[doc(hidden)]
-    pub fn with_draining(self, draining: &'a [Box<str>]) -> Self {
-        Self { draining, ..self }
+    pub fn with_evidence(self, evidence: &'a [(Box<str>, PoolEvidence)]) -> Self {
+        Self { evidence, ..self }
+    }
+
+    /// What the chooser's hub last said of the pool named `name`, followed
+    /// or not, with the epoch of the hub it is about ([`PoolEvidence`]):
+    /// the value a pool policy reads with
+    /// [`PoolRequest::evidence`](crate::PoolRequest::evidence). `None` when
+    /// the chooser has no word of the pool.
+    pub fn evidence(&self, name: &str) -> Option<PoolEvidence> {
+        self.evidence
+            .binary_search_by(|(of, _)| (**of).cmp(name))
+            .ok()
+            .map(|at| self.evidence[at].1)
     }
 
     /// The view with the pools `damped` holds gone: the chooser's damping
@@ -527,14 +545,16 @@ impl<'a> ClassPools<'a> {
     /// the pool, or a listing of it from a later hub of it, ends the
     /// withdrawal: the pool was started again.
     pub fn is_withdrawn(&self, name: &str) -> bool {
-        self.withdrawn
-            .binary_search_by(|withdrawn| (**withdrawn).cmp(name))
-            .is_ok()
+        self.evidence(name)
+            .is_some_and(|evidence| evidence.is_withdrawn())
     }
 
     /// The names of the withdrawn pools, sorted.
     pub fn withdrawn(&self) -> impl Iterator<Item = &'a str> + 'a {
-        self.withdrawn.iter().map(|name| &**name)
+        self.evidence
+            .iter()
+            .filter(|(_, evidence)| evidence.is_withdrawn())
+            .map(|(name, _)| &**name)
     }
 
     /// Whether the chooser's hub lists the pool named `name` as draining:
@@ -559,9 +579,8 @@ impl<'a> ClassPools<'a> {
     /// A pool this chooser never saw, and one listed by a hub of an
     /// earlier build, is not draining.
     pub fn is_draining(&self, name: &str) -> bool {
-        self.draining
-            .binary_search_by(|draining| (**draining).cmp(name))
-            .is_ok()
+        self.evidence(name)
+            .is_some_and(|evidence| evidence.is_draining())
     }
 
     /// Whether the chooser holds the followed pool named `name` gone: the
@@ -584,12 +603,12 @@ type Tables = BTreeMap<String, FixedTable>;
 /// a test gives them, before they are sorted.
 type Gathered = (Vec<Pool>, Vec<Box<str>>, Vec<Box<str>>);
 
-/// One class's fixed table: its pools by name, its withdrawn and its
-/// draining pools, its gone pools, and its property indexes.
+/// One class's fixed table: its pools by name, the evidence of its
+/// withdrawn and its draining pools, its gone pools, and its property
+/// indexes.
 struct FixedTable {
     pools: Box<[Pool]>,
-    withdrawn: Box<[Box<str>]>,
-    draining: Box<[Box<str>]>,
+    evidence: Box<[(Box<str>, PoolEvidence)]>,
     damped: Damped,
     properties: PropertyIndexes,
 }
@@ -603,8 +622,8 @@ impl PoolSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassPools<'_>)) {
         if let Some(table) = self.tables.get(class) {
             read(
-                ClassPools::new(&table.pools, &table.withdrawn)
-                    .with_draining(&table.draining)
+                ClassPools::new(&table.pools)
+                    .with_evidence(&table.evidence)
                     .with_damped(&table.damped)
                     .with_properties(&table.properties),
             );

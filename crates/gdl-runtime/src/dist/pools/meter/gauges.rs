@@ -237,6 +237,7 @@ mod tests {
             pool: pool.into(),
             id: pool_id("model_x", pool),
             generation: 1,
+            epoch: 0,
             region: region.into(),
             state,
             load,

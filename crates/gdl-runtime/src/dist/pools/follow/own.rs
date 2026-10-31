@@ -187,13 +187,16 @@ impl<R: Registry> Follows<R> {
     /// registered before a table shows them, and held before the follows
     /// they replace let go, so that an instance in both is never
     /// unregistered; one no follow holds any more is unregistered after the
-    /// drain. The listing its current follow carried is taken as one on
-    /// the relay's watch is, its epoch the later of the two; a snapshot of
-    /// one follow sends no other listing.
+    /// drain. The listing its current follow carried, and what its follows
+    /// say of the pool's hub, are taken as on the relay's watch: the
+    /// evidence of the later hub wins.
     fn install_own(&mut self, key: &Key, mut filling: Followed, unread: bool, now: Instant) {
-        // The listing its follow carried, so that a request never reads
-        // the row it installs with the epoch of an earlier hub's listing.
-        if self.followed.listings.take_from(&mut filling.listings, key) {
+        // The listing and the evidence its follow carried, each dated by
+        // the hub it is about, so that a request never reads the row it
+        // installs with an earlier hub's epoch.
+        let listed = self.followed.listings.take_from(&mut filling.listings, key);
+        let witnessed = self.followed.evidence.take_from(&mut filling.evidence, key);
+        if listed || witnessed {
             self.followed.listings_changed += 1;
         }
         let mut fresh = filling.follows.remove(key);

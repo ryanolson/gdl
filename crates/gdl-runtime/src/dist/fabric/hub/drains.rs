@@ -136,6 +136,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
             class: "model_x".into(),
             pool: "m1".into(),
             generation: 1,
+            epoch: 0,
             region: "r".into(),
             state: PoolState::Ready,
             load: None,

@@ -809,6 +809,7 @@ mod tests {
             class: "model_x".into(),
             pool: "m".into(),
             generation: 2,
+            epoch: 0,
             region: "r".into(),
             state: PoolState::Ready,
             load: None,

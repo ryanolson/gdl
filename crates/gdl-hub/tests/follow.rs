@@ -522,6 +522,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
                 class: "model_x".into(),
                 pool: POOL.into(),
                 generation,
+                epoch: 0,
                 region: "us-east-1".into(),
                 state: PoolState::Ready,
                 load: None,
@@ -923,7 +924,7 @@ async fn a_withdrawal_after_the_drop_is_relayed() {
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    records.until(PoolState::Ready).await;
+    let (ready, _) = records.until(PoolState::Ready).await;
     let (global_hub, global_pool) = serve_pool(global_default(), &directory, timing()).await;
     let chooser = Instance::chooser(&global_hub).await;
     let mut watch = global_pool.follows();
@@ -961,13 +962,19 @@ async fn a_withdrawal_after_the_drop_is_relayed() {
         instance.leave().await;
     }
     let event = next(&mut watch).await;
-    assert_eq!(
-        event,
-        FollowEvent::Withdrawn {
-            class: "model_x".into(),
-            pool: POOL.into(),
-            generation,
-        }
+    // At the epoch of the hub of the pool that withdrew.
+    assert!(
+        matches!(
+            &event,
+            FollowEvent::Withdrawn {
+                class,
+                pool,
+                generation: of,
+                epoch,
+                ..
+            } if class == "model_x" && pool == POOL && *of == generation && *epoch == ready.epoch
+        ),
+        "{event:?}"
     );
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");

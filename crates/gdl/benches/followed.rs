@@ -22,7 +22,7 @@ use arc_swap::ArcSwap;
 use criterion::{Criterion, criterion_group, criterion_main};
 use gdl::__runtime::PoolSource;
 use gdl::{
-    ClassPools, Damped, FollowedPools, Pool, PoolCondition, PoolState, PropertyIndex,
+    ClassPools, Damped, FollowedPools, Pool, PoolCondition, PoolEvidence, PoolState, PropertyIndex,
     PropertyIndexes, PropertyKind, PropertyPool, PropertyState,
 };
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ const SHARD: PropertyKind<Shard> = PropertyKind::new("shard");
 
 struct Table {
     views: Box<[Pool]>,
-    withdrawn: Box<[Box<str>]>,
+    evidence: Box<[(Box<str>, PoolEvidence)]>,
     properties: Arc<PropertyIndexes>,
 }
 
@@ -51,7 +51,8 @@ impl PoolSource for Tables {
             let table = slot.load();
             let damped = self.1.load();
             read(
-                ClassPools::new(&table.views, &table.withdrawn)
+                ClassPools::new(&table.views)
+                    .with_evidence(&table.evidence)
                     .with_damped(&damped)
                     .with_properties(&table.properties),
             );
@@ -92,7 +93,10 @@ fn followed() -> FollowedPools {
     }));
     let table = Table {
         views,
-        withdrawn: Box::new([Box::from("model-x-09-us-east-1")]),
+        evidence: Box::new([(
+            Box::from("model-x-09-us-east-1"),
+            PoolEvidence::new(0, PoolCondition::Live).with_withdrawn(true),
+        )]),
         properties: Arc::new(PropertyIndexes::new(true).with(&SHARD, index)),
     };
     let tables = Tables(
@@ -101,7 +105,7 @@ fn followed() -> FollowedPools {
                 "global".to_string(),
                 Arc::new(ArcSwap::from_pointee(Table {
                     views: Box::new([]),
-                    withdrawn: Box::new([]),
+                    evidence: Box::new([]),
                     properties: Arc::default(),
                 })),
             ),

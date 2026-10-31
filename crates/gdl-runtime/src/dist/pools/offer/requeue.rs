@@ -193,6 +193,7 @@ impl Fleet {
                 pool: name.into(),
                 id: pool_id("model_x", name),
                 generation: 1,
+                epoch: 0,
                 region: "home".into(),
                 state: PoolState::Ready,
                 load: super::super::tests::idle(),

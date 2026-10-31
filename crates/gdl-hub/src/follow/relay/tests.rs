@@ -428,6 +428,7 @@ fn only_the_current_generation_writes() {
         class: "model_x".into(),
         pool: "m".into(),
         generation,
+        epoch: 1,
         region: "r".into(),
         state,
         load: None,
@@ -573,4 +574,118 @@ fn an_instance_that_leaves_while_hidden_is_sent_left() {
         }]
     );
     assert_eq!(sent(&mut pool, left(&unseen)), [], "never sent");
+}
+
+/// The pool `m` of `model_x`, from its hub of `epoch`.
+fn installed_at(epoch: u64, state: PoolState) -> Installed {
+    Installed::new(
+        "m".into(),
+        "model_x".into(),
+        "r".into(),
+        "hub:1".into(),
+        epoch,
+        state,
+        None,
+    )
+}
+
+/// The epochs the `follow` events among `events` say.
+fn follow_epochs(events: &[FollowEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            FollowEvent::Follow { epoch, .. } => Some(*epoch),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A follow says the epoch of the hub it follows, first-hand from its
+/// link: as it is installed, in a whole watch's snapshot, and in a watch
+/// of the one follow.
+#[test]
+fn a_follow_says_the_epoch_of_the_hub_it_follows() {
+    let relay = held();
+    let mut live = relay.watch(None);
+    pending(&mut live);
+    relay.record(&record_of(5, PoolState::Ready), None);
+    let (generation, _) = relay.begin("model_x", "m");
+    relay.install(generation, installed_at(5, PoolState::Ready));
+    assert_eq!(follow_epochs(&pending(&mut live)), [5], "installed");
+    assert_eq!(
+        follow_epochs(&pending(&mut relay.watch(None))),
+        [5],
+        "a snapshot"
+    );
+    assert_eq!(
+        follow_epochs(&pending(&mut relay.watch_of("model_x", "m"))),
+        [5],
+        "a watch of the one follow"
+    );
+}
+
+/// A withdrawal says the epoch of its tombstone and the list version it
+/// keeps.
+#[test]
+fn a_withdrawal_says_its_epoch() {
+    let relay = held();
+    let mut live = relay.watch(None);
+    pending(&mut live);
+    let (generation, _) = relay.begin("model_x", "m");
+    relay.withdrawn(&gdl_pools::Withdrawal {
+        class: "model_x".into(),
+        pool: "m".into(),
+        epoch: 7,
+        seq: 2,
+        properties_version: 3,
+    });
+    assert!(pending(&mut live).contains(&FollowEvent::Withdrawn {
+        class: "model_x".into(),
+        pool: "m".into(),
+        generation,
+        epoch: 7,
+        properties_version: 3,
+    }));
+}
+
+/// The listing's condition and epoch are one hub's: a link that ended
+/// makes the pool missing at the epoch of the hub it linked to, and a
+/// record of a later hub, read before that hub's follow is installed,
+/// lists the pool live at the later epoch, not missing because of the
+/// earlier hub's link. A record whose lease passed is missing at its own
+/// epoch.
+#[test]
+fn a_lost_link_makes_only_its_own_hub_missing() {
+    let listing = |relay: &Relay| {
+        relay
+            .lock()
+            .listings
+            .listing("model_x", "m", std::time::Instant::now())
+            .map(|listing| (listing.epoch, listing.condition))
+            .expect("listed")
+    };
+    let relay = held();
+    relay.record(&record_of(5, PoolState::Ready), None);
+    let (generation, _) = relay.begin("model_x", "m");
+    relay.install(generation, installed_at(5, PoolState::Ready));
+    assert_eq!(listing(&relay), (5, gdl_pools::PoolCondition::Live));
+    relay.end("model_x", "m", generation);
+    assert_eq!(
+        listing(&relay),
+        (5, gdl_pools::PoolCondition::Missing),
+        "its link lost"
+    );
+    relay.record(&record_of(6, PoolState::Ready), None);
+    assert_eq!(
+        listing(&relay),
+        (6, gdl_pools::PoolCondition::Live),
+        "a later hub, whose link is not yet up"
+    );
+
+    let lapsed = held();
+    lapsed.record(
+        &record_of(5, PoolState::Ready),
+        Some(std::time::Instant::now()),
+    );
+    assert_eq!(listing(&lapsed), (5, gdl_pools::PoolCondition::Missing));
 }

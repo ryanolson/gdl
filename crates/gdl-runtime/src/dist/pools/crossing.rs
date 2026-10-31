@@ -779,6 +779,7 @@ mod tests {
             pool: name.into(),
             id: super::super::pool_id("model_x", name),
             generation: 1,
+            epoch: 0,
             region: "home".into(),
             state,
             load: super::super::tests::idle(),
@@ -1617,6 +1618,11 @@ mod tests {
         assert_eq!(chosen, ids[1], "the pool the index lists");
     }
 
+    /// A live pool, as its hub of `epoch` says.
+    fn live(epoch: u64) -> gdl::PoolEvidence {
+        gdl::PoolEvidence::new(epoch, gdl::PoolCondition::Live)
+    }
+
     /// `pool`, with its property-list version at `tag`: a mark that tells
     /// one test table from another, not a drain's order.
     fn tagged(name: &str, state: PoolState, eligible: &[InstanceId], tag: u64) -> Arc<PoolTable> {
@@ -1734,7 +1740,7 @@ mod tests {
             tagged("m1", PoolState::Draining, &ids[..1], 2),
             tagged("m2", PoolState::Unavailable, &ids[1..], 2),
         ]))
-        .with_draining(Box::new(["m1".into()]));
+        .with_evidence(Arc::from([("m1".into(), live(0).with_draining(true))]));
         let (crossing, policy) = pinned([before, drained]);
         let cx = Cx::new();
         let random = RandomState::new();
@@ -1769,7 +1775,7 @@ mod tests {
                 tagged("m2", PoolState::Ready, &ids[1..], tag),
             ]));
             if tag % 2 == 1 {
-                made.with_draining(Box::new(["m1".into()]))
+                made.with_evidence(Arc::from([("m1".into(), live(0).with_draining(true))]))
             } else {
                 made
             }
@@ -1807,20 +1813,15 @@ mod tests {
         const TABLES: u64 = 8;
         let ids = ids(2);
         let table = |tag: u64| {
-            let made = EntryTable::new(Box::new([
+            EntryTable::new(Box::new([
                 tagged("m1", PoolState::Ready, &ids[..1], tag),
                 tagged("m2", PoolState::Ready, &ids[1..], tag),
             ]))
-            .with_epochs(Arc::from([
-                ("m1".into(), tag),
-                ("m2".into(), 1),
-                ("m3".into(), 100 + tag),
-            ]));
-            if tag % 2 == 1 {
-                made.with_withdrawn(Box::new(["m1".into()]))
-            } else {
-                made
-            }
+            .with_evidence(Arc::from([
+                ("m1".into(), live(tag).with_withdrawn(tag % 2 == 1)),
+                ("m2".into(), live(1)),
+                ("m3".into(), live(100 + tag)),
+            ]))
         };
         let (crossing, policy) = pinned((0..TABLES).map(table));
         let cx = Cx::new();
@@ -1840,6 +1841,106 @@ mod tests {
             .map(|tag| (tag, tag % 2 == 1, Some(tag), Some(100 + tag)))
             .collect();
         assert_eq!(policy.evidence(), one_table);
+    }
+
+    /// Records the epochs its leases are told the offer was accepted at.
+    struct Accepting(Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl gdl::ChoiceLease for Accepting {
+        fn accepted(&mut self) {
+            unreachable!("the runtime tells the epoch");
+        }
+
+        fn accepted_at(&mut self, epoch: u64) {
+            self.0.lock().expect("unpoisoned").push(epoch);
+        }
+    }
+
+    /// Chooses the first pool, with a lease that records its acceptance.
+    struct FirstWithLease(Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl gdl::PoolPolicy for FirstWithLease {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            _: PoolRequest<'_, gdl::Encoded>,
+            _: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
+            Ok(gdl::PoolChoice::new(0).with_lease(Accepting(Arc::clone(&self.0))))
+        }
+    }
+
+    /// Chooses the first instance, and, while it chooses, stores `next`
+    /// once, if given: the pool followed again, its hub restarted, with
+    /// the same instance.
+    struct Restarting {
+        table: Arc<ArcSwap<EntryTable>>,
+        next: std::sync::Mutex<Option<EntryTable>>,
+    }
+
+    impl gdl::Selector for Restarting {
+        type Head = gdl::Encoded;
+
+        async fn select<'a>(
+            &'a self,
+            _: gdl::Request<'a, gdl::Encoded>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            if let Some(next) = self.next.lock().expect("unpoisoned").take() {
+                self.table.store(Arc::new(next));
+            }
+            Ok(gdl::Choice::new(
+                instances.get(0).expect("the pool has an entry"),
+            ))
+        }
+    }
+
+    /// `m`'s row, in follow `generation` of its hub of `epoch`, with
+    /// `eligible`.
+    fn row_of(generation: u64, epoch: u64, eligible: &[InstanceId]) -> Arc<PoolTable> {
+        let mut row = Arc::try_unwrap(pool("m", PoolState::Ready, eligible)).expect("one owner");
+        row.generation = generation;
+        row.epoch = epoch;
+        row.leases = Arc::new(super::super::lease::Leases::default().of_epoch(epoch));
+        Arc::new(row)
+    }
+
+    /// A choice the selector makes while the pool's hub restarts, of an
+    /// instance still eligible under the later hub's follow, is offered
+    /// under that follow: the policy's lease is told the later hub's epoch,
+    /// not the epoch of the row it chose from. The control keeps its row's.
+    #[tokio::test]
+    async fn an_acceptance_says_the_epoch_of_the_follow_it_was_offered_under() {
+        let instance = ids(1);
+        for (restarts, expected) in [(false, 5), (true, 7)] {
+            let mut crossing = crossing(
+                vec![row_of(1, 5, &instance)],
+                Within::Policy(Policy::RoundRobin),
+            );
+            let accepted = Arc::new(std::sync::Mutex::new(Vec::new()));
+            crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(
+                FirstWithLease(Arc::clone(&accepted)),
+            )));
+            let next = restarts.then(|| EntryTable::new(Box::new([row_of(2, 7, &instance)])));
+            let selector = gdl::__runtime::Typed(Arc::new(Restarting {
+                table: Arc::clone(&crossing.target.table),
+                next: std::sync::Mutex::new(next),
+            }));
+            let cx = Cx::new();
+            let (chosen, _, _, mut lease) = crossing
+                .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+                .await
+                .expect("chosen")
+                .expect("a pool");
+            assert_eq!(chosen, instance[0]);
+            lease.accepted();
+            assert_eq!(
+                *accepted.lock().expect("unpoisoned"),
+                [expected],
+                "restarts: {restarts}"
+            );
+        }
     }
 
     #[tokio::test]

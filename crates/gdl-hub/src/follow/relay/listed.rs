@@ -14,6 +14,13 @@
 //! is not ordered by the list's version, which a later hub can reuse when
 //! the one before it ran ahead of the later one's clock.
 //!
+//! A listing's condition is of the hub of its epoch, as its drain is: a
+//! record whose lease passed makes the pool missing at the record's epoch,
+//! and a link that ended at the epoch of the hub it linked to. A record of
+//! a later hub, read before that hub's follow is installed, lists the pool
+//! as its record says, not missing because of the earlier hub's link, so
+//! that a reader never reads one hub's condition with another's epoch.
+//!
 //! A missing pool's listing says how long it has been silent, as an age at
 //! the moment it is sent. The listings hold the instant on the hub's
 //! clock, and the caller passes the time, as to a `PoolView`.
@@ -45,11 +52,12 @@ struct Listed {
     region: String,
     presence: Presence,
     /// The record's lease passed without a new write: when the follower
-    /// saw its last write.
-    lapsed: Option<Instant>,
+    /// saw its last write, and the record's epoch.
+    lapsed: Option<(Instant, u64)>,
     /// The pool's follow's link ended without the relay closing it, and
-    /// no later follow has been installed: when it ended.
-    lost: Option<Instant>,
+    /// no later follow has been installed: when it ended, and the epoch of
+    /// the hub it linked to.
+    lost: Option<(Instant, u64)>,
     /// The newest list seen, from the record or the link.
     properties: PropertyList,
     /// What the relay last sent of the pool after a snapshot, with no age,
@@ -69,11 +77,26 @@ struct Listed {
 }
 
 impl Listed {
+    /// When the record lapsed, if it is of the listing's epoch.
+    fn lapsed(&self) -> Option<Instant> {
+        self.lapsed
+            .filter(|(_, epoch)| *epoch == self.epoch)
+            .map(|(at, _)| at)
+    }
+
+    /// When the link was lost, if it was to the hub of the listing's
+    /// epoch.
+    fn lost(&self) -> Option<Instant> {
+        self.lost
+            .filter(|(_, epoch)| *epoch == self.epoch)
+            .map(|(at, _)| at)
+    }
+
     /// The listing, with no age.
     fn listing(&self) -> Listing {
         let condition = if self.presence == Presence::ScaledToZero {
             PoolCondition::ScaledToZero
-        } else if self.lapsed.is_some() || self.lost.is_some() {
+        } else if self.lapsed().is_some() || self.lost().is_some() {
             PoolCondition::Missing
         } else {
             PoolCondition::Live
@@ -95,7 +118,7 @@ impl Listed {
         if self.presence == Presence::ScaledToZero {
             return None;
         }
-        match (self.lapsed, self.lost) {
+        match (self.lapsed(), self.lost()) {
             (Some(lapsed), Some(lost)) => Some(lapsed.min(lost)),
             (lapsed, lost) => lapsed.or(lost),
         }
@@ -189,7 +212,7 @@ impl Listings {
             .or_insert_with(|| Listed {
                 region: record.region.clone(),
                 presence: record.presence,
-                lapsed,
+                lapsed: lapsed.map(|at| (at, record.epoch)),
                 lost: None,
                 properties: PropertyList::default(),
                 sent: None,
@@ -203,7 +226,11 @@ impl Listings {
             listed.dirty = true;
         }
         Listed::set(&mut listed.presence, record.presence, &mut listed.dirty);
-        Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
+        Listed::set(
+            &mut listed.lapsed,
+            lapsed.map(|at| (at, record.epoch)),
+            &mut listed.dirty,
+        );
         listed.take_draining(record.state == PoolState::Draining, record.epoch);
         if !listed.taken || record.properties_version > listed.properties.version {
             // Logged where the properties are taken, so a record read again
@@ -232,15 +259,27 @@ impl Listings {
     /// `lapsed` says, lapsed.
     pub(super) fn lapse(&mut self, class: &str, pool: &str, lapsed: Instant) {
         if let Some(listed) = self.get_mut(class, pool) {
-            Listed::set(&mut listed.lapsed, Some(lapsed), &mut listed.dirty);
+            // The lease that passed is the latest record's, of the
+            // listing's epoch: a link is only ever to the hub of the
+            // record it began from.
+            let lapsed = Some((lapsed, listed.epoch));
+            Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
         }
     }
 
-    /// The pool's follow was lost at `lost`, or, with `None`, a new one
-    /// installed. A loss while the pool is already lost keeps the first.
-    pub(super) fn lose(&mut self, class: &str, pool: &str, lost: Option<Instant>) {
+    /// The pool's follow was lost at `lost`, its link to the hub of the
+    /// epoch given, or of the listing's epoch for a follow whose link never
+    /// came up; or, with `None`, a new one installed. A loss while the
+    /// pool is already lost to the same hub keeps the first.
+    pub(super) fn lose(&mut self, class: &str, pool: &str, lost: Option<(Instant, Option<u64>)>) {
         if let Some(listed) = self.get_mut(class, pool) {
-            let lost = lost.map(|at| listed.lost.unwrap_or(at));
+            let lost = lost.map(|(at, epoch)| {
+                let epoch = epoch.unwrap_or(listed.epoch);
+                match listed.lost {
+                    Some((first, of)) if of == epoch => (first, of),
+                    _ => (at, epoch),
+                }
+            });
             Listed::set(&mut listed.lost, lost, &mut listed.dirty);
         }
     }

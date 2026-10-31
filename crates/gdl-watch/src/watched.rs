@@ -226,6 +226,7 @@ mod tests {
                 class: class.clone(),
                 pool: name.clone(),
                 generation: 1,
+                epoch: 0,
                 region: "r".into(),
                 state: PoolState::Ready,
                 load: None,
@@ -281,6 +282,8 @@ mod tests {
                 class: class.clone(),
                 pool: name.clone(),
                 generation: 1,
+                epoch: 0,
+                properties_version: 0,
             },
             FollowEvent::Listed {
                 class,
@@ -392,6 +395,104 @@ mod tests {
         );
     }
 
+    /// A follow carries the epoch of the hub it follows, absent when 0. A
+    /// reader of an earlier build reads it as the follow it knew, and a
+    /// reader of this build reads one from an earlier hub as epoch 0.
+    #[test]
+    fn a_follows_epoch_reads_both_ways_across_builds() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            Follow { pool: String, generation: u64 },
+        }
+        let follow = |epoch| FollowEvent::Follow {
+            class: "c".into(),
+            pool: "m".into(),
+            generation: 2,
+            epoch,
+            region: "r".into(),
+            state: PoolState::Ready,
+            load: None,
+            load_age_ms: None,
+            listing: None,
+        };
+        let json = serde_json::to_value(follow(1_700_000_000_000)).expect("json");
+        assert_eq!(json["epoch"], serde_json::json!(1_700_000_000_000_u64));
+        assert_eq!(
+            serde_json::from_value::<Earlier>(json).expect("an earlier reader reads it"),
+            Earlier::Follow {
+                pool: "m".into(),
+                generation: 2
+            }
+        );
+        let earlier = serde_json::to_value(follow(0)).expect("json");
+        assert!(earlier.get("epoch").is_none(), "absent when 0");
+        assert_eq!(
+            serde_json::from_value::<FollowEvent>(earlier).expect("read"),
+            follow(0)
+        );
+    }
+
+    /// A withdrawal carries the epoch of the hub of the pool that withdrew
+    /// and the list version it kept, absent when 0. A reader of an earlier
+    /// build reads it as the withdrawal it knew, and a reader of this
+    /// build reads one from an earlier hub, which sends neither, as 0.
+    #[test]
+    fn a_withdrawal_reads_both_ways_across_builds() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            Withdrawn {
+                class: String,
+                pool: String,
+                generation: u64,
+            },
+        }
+        let sent = FollowEvent::Withdrawn {
+            class: "c".into(),
+            pool: "m".into(),
+            generation: 2,
+            epoch: 1_700_000_000_000,
+            properties_version: 9,
+        };
+        let json = serde_json::to_value(&sent).expect("json");
+        assert_eq!(json["epoch"], serde_json::json!(1_700_000_000_000_u64));
+        assert_eq!(json["properties_version"], serde_json::json!(9));
+        assert_eq!(
+            serde_json::from_value::<Earlier>(json.clone()).expect("an earlier reader reads it"),
+            Earlier::Withdrawn {
+                class: "c".into(),
+                pool: "m".into(),
+                generation: 2
+            }
+        );
+        let earlier = serde_json::json!({
+            "event": "withdrawn", "class": "c", "pool": "m", "generation": 2
+        });
+        assert_eq!(
+            serde_json::from_value::<FollowEvent>(earlier.clone()).expect("read"),
+            FollowEvent::Withdrawn {
+                class: "c".into(),
+                pool: "m".into(),
+                generation: 2,
+                epoch: 0,
+                properties_version: 0,
+            }
+        );
+        let quiet = FollowEvent::Withdrawn {
+            class: "c".into(),
+            pool: "m".into(),
+            generation: 2,
+            epoch: 0,
+            properties_version: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(&quiet).expect("json"),
+            earlier,
+            "absent when 0"
+        );
+    }
+
     /// A reader of an earlier build reads the property index's fields of known
     /// events as the events it knew, and the new kinds as kinds it does not
     /// know: the relay's names its follow, so the reader fails closed for
@@ -491,6 +592,7 @@ mod tests {
             class: "c".into(),
             pool: "m".into(),
             generation: 2,
+            epoch: 0,
             region: "r".into(),
             state: PoolState::Ready,
             load: None,

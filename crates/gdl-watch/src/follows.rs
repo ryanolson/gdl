@@ -72,6 +72,12 @@ use velo::{InstanceId, PeerInfo};
 /// no longer holds the record send none. A watch's snapshot holds no
 /// withdrawal, so a consumer that begins after one never learns of it.
 ///
+/// What the relay says of a pool is dated by the epoch of the pool's hub
+/// it is about: a `follow` by the epoch of the hub it follows, a
+/// `withdrawn` by the withdrawal's, and a listing by its `epoch`. A
+/// consumer keeps what is said of the latest hub of a pool, whichever
+/// watch said it, and never dates one event by another's arrival.
+///
 /// Every event but [`FollowEvent::Synced`] names its follow by its class,
 /// pool, and generation, and an event a later build adds must too: a
 /// reader that does not know its kind fails closed for that pool until it
@@ -95,6 +101,12 @@ pub enum FollowEvent {
         state: PoolState,
         /// The load of the pool's entry segments, as its hub last sent it.
         load: Option<LoadSummary>,
+        /// The epoch of the pool's hub that the follow is of: the hub
+        /// follows a pool only at the epoch of its record, so every event
+        /// of the follow is of that hub. Absent when 0, and from a hub of
+        /// an earlier build.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        epoch: u64,
         /// How long before this event the relay received `load`, in
         /// milliseconds: a consumer dates the summary back by it, so that
         /// a summary the relay has held for a while does not read as new
@@ -253,14 +265,27 @@ pub enum FollowEvent {
     /// The pool withdrew its record from the pool directory after its
     /// drain: it was drained on purpose. It may come after the follow's
     /// [`FollowEvent::Dropped`]. A later follow of the pool, which a hub
-    /// begins only from a newer record, ends it.
+    /// begins only from a newer record, ends it, and so does a listing of
+    /// the pool at a later epoch than `epoch`.
     Withdrawn {
         /// The pool's class.
         class: String,
         /// The pool, named within its class.
         pool: String,
-        /// The generation of the pool's latest follow.
+        /// The generation of the pool's latest follow, or 0 for a pool
+        /// the hub never followed.
         generation: u64,
+        /// The epoch of the withdrawal: of the hub of the pool that
+        /// withdrew, or of the command on its parent's hub that withdrew
+        /// it. A later hub of the pool numbers its epoch past it. Absent
+        /// when 0, and from a hub of an earlier build.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        epoch: u64,
+        /// The version of the pool's property list that its withdrawal's
+        /// tombstone keeps. Absent when 0, and from a hub of an earlier
+        /// build.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        properties_version: u64,
     },
 }
 

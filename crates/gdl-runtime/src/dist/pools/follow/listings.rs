@@ -7,77 +7,52 @@
 //! before its link sends the newer list. So a listing, or a snapshot, can
 //! carry an older list than the one held. A version names one list, so a
 //! lower version is never a newer list: the held list stays, and the
-//! listing's other fields are taken. A held list is forgotten only when
-//! the hub says the pool is no longer listed, by a withdrawal, or by a
-//! snapshot that says the hub's listings are whole and does not name the
-//! pool. A snapshot that is not whole says nothing of a pool it does not
-//! name, which keeps its listing.
+//! listing's region is taken. A held list is forgotten only when the hub
+//! says the pool is no longer listed, by a withdrawal, or by a snapshot
+//! that says the hub's listings are whole and does not name the pool. A
+//! snapshot that is not whole says nothing of a pool it does not name,
+//! which keeps its listing.
 //!
-//! Whether the pool drains is held and forgotten with the listing, but
-//! ordered by the epoch of the pool's hub that said it, not by the list's
-//! version: a drain lasts for the life of its hub's process, so a listing
-//! of a later epoch clears it, one of the same epoch can only set it, and
-//! one of an earlier epoch says nothing. A drain does not change the list's
-//! version, and after a directory that forgot the pool, a later hub can
-//! list a version the hub before it listed, when that hub ran ahead of its
-//! clock.
-//!
-//! The epoch of each pool's last listing is kept once the hub unlists it,
-//! until it is listed again: the hub unlists a pool just before it says
-//! the pool withdrew, and the follower dates the withdrawal by that epoch.
+//! What a listing says of the pool's condition and drain, and its epoch,
+//! is evidence about one hub of the pool, ordered by that hub's epoch, not
+//! by the list's version ([`super::evidence`]): a later hub can list a
+//! version the hub before it listed, when that hub ran ahead of its clock.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
-use gdl::PoolCondition;
 use gdl_watch::Listing;
-use tokio::time::Instant;
 
 use super::Key;
 
-/// Each listed pool's listing, with since when a missing pool has been
-/// silent, dated back on arrival.
+/// Each listed pool's listing.
 #[derive(Default)]
 pub(super) struct Listings {
-    held: BTreeMap<Key, (Listing, Option<Instant>)>,
-    /// The epoch of each unlisted pool's last listing.
-    unlisted: BTreeMap<Key, u64>,
+    held: BTreeMap<Key, Listing>,
 }
 
 impl Listings {
-    /// Take `listing` of `key`'s pool, which arrived at `now`, keeping the
-    /// list held if it has a higher version. A missing pool's silence is
-    /// dated back here, once, so that an index made later reads the same
-    /// instant.
-    pub(super) fn take(&mut self, key: Key, mut listing: Listing, now: Instant) {
+    /// Take `listing` of `key`'s pool, keeping the list held if it has a
+    /// higher version.
+    pub(super) fn take(&mut self, key: Key, mut listing: Listing) {
         keep_newer(self.held.get(&key), &mut listing);
-        self.unlisted.remove(&key);
-        let silent = listing
-            .missing_age_ms
-            .filter(|_| listing.condition == PoolCondition::Missing)
-            .and_then(|age| now.checked_sub(Duration::from_millis(age)));
-        self.held.insert(key, (listing, silent));
+        self.held.insert(key, listing);
     }
 
     /// Take `key`'s listing from `from`, the snapshot of a watch of the
     /// pool's own, if it holds one, by the rules of [`Listings::take`]:
-    /// whether it did. The silence it holds was dated back on arrival.
+    /// whether it did.
     pub(super) fn take_from(&mut self, from: &mut Listings, key: &Key) -> bool {
-        let Some((mut listing, silent)) = from.held.remove(key) else {
+        let Some(listing) = from.held.remove(key) else {
             return false;
         };
-        keep_newer(self.held.get(key), &mut listing);
-        self.unlisted.remove(key);
-        self.held.insert(key.clone(), (listing, silent));
+        self.take(key.clone(), listing);
         true
     }
 
     /// The hub withdrew `key`'s pool from its listings: it holds no list,
     /// so listed again it starts afresh.
     pub(super) fn withdraw(&mut self, key: &Key) {
-        if let Some((listing, _)) = self.held.remove(key) {
-            self.unlisted.insert(key.clone(), listing.epoch);
-        }
+        self.held.remove(key);
     }
 
     /// These listings, a snapshot's, take the place of `held`: each pool
@@ -85,14 +60,9 @@ impl Listings {
     /// A pool it does not name is forgotten only if the snapshot is
     /// `whole`, and otherwise keeps its held listing.
     pub(super) fn carry(&mut self, held: Self, whole: bool) {
-        for (key, epoch) in held.unlisted {
-            if !self.held.contains_key(&key) {
-                self.unlisted.entry(key).or_insert(epoch);
-            }
-        }
         for (key, entry) in held.held {
             match self.held.get_mut(&key) {
-                Some((listing, _)) => keep_newer(Some(&entry), listing),
+                Some(listing) => keep_newer(Some(&entry), listing),
                 None if !whole => {
                     self.held.insert(key, entry);
                 }
@@ -105,70 +75,21 @@ impl Listings {
     pub(super) fn version(&self, key: &Key) -> u64 {
         self.held
             .get(key)
-            .map_or(0, |(listing, _)| listing.properties.version)
+            .map_or(0, |listing| listing.properties.version)
     }
 
-    /// The epoch of `key`'s pool's listing, or, once it is unlisted, of
-    /// its last one: `None` if it was never listed.
-    pub(super) fn last_epoch(&self, key: &Key) -> Option<u64> {
-        match self.held.get(key) {
-            Some((listing, _)) => Some(listing.epoch),
-            None => self.unlisted.get(key).copied(),
-        }
-    }
-
-    /// The epoch of `key`'s pool's listing, if it is listed.
-    pub(super) fn epoch(&self, key: &Key) -> Option<u64> {
-        self.held.get(key).map(|(listing, _)| listing.epoch)
-    }
-
-    /// The names of `class`'s listed pools, in order, each with the epoch
-    /// of its listing.
-    pub(super) fn epochs<'a>(
-        &'a self,
-        class: &'a str,
-    ) -> impl Iterator<Item = (&'a str, u64)> + 'a {
-        self.held
-            .range((class.to_string(), String::new())..)
-            .take_while(move |((of, _), _)| of == class)
-            .map(|((_, pool), (listing, _))| (pool.as_str(), listing.epoch))
-    }
-
-    /// The names of `class`'s pools whose listing says they drain, in
-    /// order.
-    pub(super) fn draining<'a>(&'a self, class: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        self.held
-            .range((class.to_string(), String::new())..)
-            .take_while(move |((of, _), _)| of == class)
-            .filter(|(_, (listing, _))| listing.draining)
-            .map(|((_, pool), _)| pool.as_str())
-    }
-
-    /// Each listed pool, in key order, with its listing and silence.
-    pub(super) fn iter(&self) -> impl Iterator<Item = (&Key, &(Listing, Option<Instant>))> {
+    /// Each listed pool, in key order, with its listing.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&Key, &Listing)> {
         self.held.iter()
     }
 }
 
 /// Keep `held`'s property list in place of `listing`'s when it has a
-/// higher version. Keep whether the pool drains, with its epoch, when
-/// `held` is of a later hub, and keep a drain of the same hub, since it
-/// cannot be cancelled. Take every other field of `listing`. So the epoch
-/// is the later of the two whichever list is kept: a request reads it
-/// beside the row of the hub it names.
-fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
-    let Some((held, _)) = held else {
-        return;
-    };
-    if held.properties.version > listing.properties.version {
+/// higher version.
+fn keep_newer(held: Option<&Listing>, listing: &mut Listing) {
+    if let Some(held) = held
+        && held.properties.version > listing.properties.version
+    {
         listing.properties.clone_from(&held.properties);
-    }
-    match held.epoch.cmp(&listing.epoch) {
-        std::cmp::Ordering::Greater => {
-            listing.draining = held.draining;
-            listing.epoch = held.epoch;
-        }
-        std::cmp::Ordering::Equal => listing.draining |= held.draining,
-        std::cmp::Ordering::Less => {}
     }
 }

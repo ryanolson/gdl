@@ -173,7 +173,6 @@ async fn next(events: &mut Events) -> FollowEvent {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F2: a live follow on a pool's own watch installs the successor row before the whole relay's listing supplies its epoch"]
 async fn a_reconnected_own_watch_dates_a_live_successor_before_the_relay_catches_up() {
     let spec = spec();
     let model_directory = MemoryDirectory::new();
