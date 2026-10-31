@@ -110,6 +110,9 @@ struct Kube {
 enum Operator {
     /// Acts on each generation at once, and says the pool is ready.
     Ready,
+    /// The next generation's status write lands before its apply, then
+    /// the operator stops. The preceding hub health remains in status.
+    Applying,
     /// Holds each generation after the first, as a hub change without
     /// `allowPoolRestart` is held, with this message.
     Holds(&'static str),
@@ -150,6 +153,14 @@ impl Kube {
         let condition = |kind: &str, on: bool, message: &str| json!({"type": kind, "status": if on { "True" } else { "False" }, "observedGeneration": generation, "message": message});
         pool["status"] = match &self.operator {
             Operator::Absent => Value::Null,
+            Operator::Applying if generation > 1 => json!({
+                "observedGeneration": generation,
+                "phase": "Ready",
+                "conditions": [
+                    condition("Applied", false, ""),
+                    {"type": "Healthy", "status": "True", "observedGeneration": generation - 1, "message": "ready"},
+                ],
+            }),
             Operator::Holds(message)
                 if generation > 1 && pool["spec"]["allowPoolRestart"] != true =>
             {

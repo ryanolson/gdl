@@ -517,3 +517,26 @@ fn down_leaves_a_gdl_pool_recreated_by_another_fleet_after_the_list() {
         "down deleted another fleet's replacement pool; result={result:?}, replacement={replacement:?}",
     );
 }
+
+#[test]
+#[ignore = "F6: deploy accepts the previous Ready phase after the new generation is observed but before it is applied"]
+fn a_write_ahead_status_does_not_finish_the_deploy_before_the_apply() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (_, mut kube) = fakes(&log);
+    deploy_allowing(&mirror, &files, &mut kube, &log, false).expect("first deployment is ready");
+    kube.operator = Operator::Applying;
+
+    let result = deploy_allowing(&mirror, &files, &mut kube, &log, true);
+    let key = ("GdlPool".to_string(), "global-us".to_string());
+    let pool = &kube.objects["kind-use1"][&key];
+    assert_eq!(pool["metadata"]["generation"], 2);
+    assert_eq!(pool["status"]["observedGeneration"], 2);
+    assert_eq!(pool["status"]["conditions"][0]["type"], "Applied");
+    assert_eq!(pool["status"]["conditions"][0]["status"], "False");
+    assert!(
+        result.is_err(),
+        "the operator stopped before applying generation 2, but deploy reported success: {result:?}",
+    );
+}
