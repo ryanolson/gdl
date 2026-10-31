@@ -61,6 +61,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
         pool_policies: BTreeMap::new(),
         selectors: BTreeMap::new(),
         policy_needs: BTreeMap::new(),
+        selector_needs: BTreeMap::new(),
         allocator: Allocator::DEFAULT,
         problems: Vec::new(),
     }
@@ -1647,4 +1648,119 @@ fn check_refuses_a_selector_table_it_can_judge_unread() {
         error.contains("builds a node, entry adapter, or pool policy `by_model`"),
         "{error}"
     );
+}
+
+/// A bound selector says what it reads in its `NEEDS`, for the class of
+/// each crossing it routes: held to the class's supply as a pool policy
+/// is, and named in the problem. A provider in the entry segment, or
+/// `[pools.<class>] provides`, meets it.
+#[test]
+fn a_bound_selector_needs_kinds_from_the_class_it_routes_into() {
+    let routed =
+        |pools| engines(pools).route("D", gdl_model::RequestRouter::Selector("by_shard".into()));
+    // Only the selector needs `shard` here.
+    let graph = |providers: &[&str]| {
+        let mut manifest = declared(providers);
+        manifest.properties[0].needs.clear();
+        manifest
+    };
+    let bound = |pools| {
+        let mut spec = spec(routed(pools), &[("D", "tiny_nodes::D")]);
+        spec.selectors
+            .insert("by_shard".into(), router("tiny_router::ByShard"));
+        spec.selector_needs
+            .insert("by_shard".into(), vec!["shard".into()]);
+        spec
+    };
+    let unsupplied = bound(gdl_model::PoolPolicy::default());
+    let unmet = "selector `by_shard` needs property `shard` from class `engines`, but no entry segment of class `engines` (`engine`) hosts a node that provides it, and `[pools.engines] provides` does not name it";
+    let checked = check(&unsupplied, &graph(&[])).expect_err("unsupplied");
+    assert_eq!(checked.to_string(), unmet);
+    let built = rendered(&unsupplied, &graph(&[]), Path::new("/work/out")).expect_err("unsupplied");
+    assert_eq!(built.to_string(), unmet);
+
+    check(&unsupplied, &graph(&["D"])).expect("D provides it in the entry segment");
+    let provided = bound(gdl_model::PoolPolicy {
+        provides: vec!["shard".into()],
+        ..Default::default()
+    });
+    check(&provided, &graph(&[])).expect("the pools' settings provide it");
+}
+
+/// A crossing inside a class reads no pools of it: a selector there that
+/// needs a kind is refused, since no pool of its class is chosen.
+#[test]
+fn a_selector_inside_a_class_reads_no_pools() {
+    let (manifest, _) = chain("by_shard", "by_shard");
+    let mut manifest = Manifest {
+        properties: declared(&[]).properties,
+        ..manifest
+    };
+    manifest.properties[0].needs.clear();
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\"]\n[segment.prep]\nnodes = [\"F\"]\n[segment.engine]\nnodes = [\"D\"]\n\
+         [routing]\nD = { selector = \"by_shard\" }\n\
+         [class.global]\nsegments = [\"front\", \"prep\", \"engine\"]\n",
+    )
+    .expect("a placement");
+    let mut spec = spec(
+        placement,
+        &[("F", "tiny_nodes::Prep"), ("D", "tiny_nodes::Engine")],
+    );
+    spec.selectors
+        .insert("by_shard".into(), router("tiny_router::ByShard"));
+    spec.selector_needs
+        .insert("by_shard".into(), vec!["shard".into()]);
+    let error = check(&spec, &manifest)
+        .expect_err("no pool is read")
+        .to_string();
+    assert!(
+        error.contains(
+            "selector `by_shard` needs property `shard` from class `global`, but no class sends to class `global`, so none of its pools is chosen"
+        ),
+        "{error}"
+    );
+    // Without classes, no segment follows pools at all.
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\"]\n[segment.prep]\nnodes = [\"F\"]\n[segment.engine]\nnodes = [\"D\"]\n\
+         [routing]\nD = { selector = \"by_shard\" }\n",
+    )
+    .expect("a placement");
+    spec.placements = placement.into();
+    let error = check(&spec, &manifest)
+        .expect_err("no pool is read")
+        .to_string();
+    assert!(
+        error.contains(
+            "selector `by_shard` needs property `shard`, but the placement has no classes, so its segment follows no pools"
+        ),
+        "{error}"
+    );
+}
+
+/// A selector's `NEEDS` is checked, never hashed: binding a selector with
+/// needs, or with none, leaves the contract's hash and the placement's as
+/// they are, as a pool policy's needs do.
+#[test]
+fn a_selectors_needs_change_no_hash() {
+    let placement = engines(gdl_model::PoolPolicy {
+        provides: vec!["shard".into()],
+        ..Default::default()
+    })
+    .route("D", gdl_model::RequestRouter::Selector("by_shard".into()));
+    let mut manifest = declared(&[]);
+    manifest.properties[0].needs.clear();
+    let hashes = |needs: &[&str]| {
+        let mut spec = spec(placement.clone(), &[("D", "tiny_nodes::D")]);
+        spec.selectors
+            .insert("by_shard".into(), router("tiny_router::ByShard"));
+        spec.selector_needs.insert(
+            "by_shard".into(),
+            needs.iter().map(|kind| kind.to_string()).collect(),
+        );
+        let layout = check(&spec, &manifest).expect("checked");
+        let files = rendered(&spec, &manifest, Path::new("/work/out")).expect("rendered");
+        (layout.contract_hash(), layout.placement_hash(), files)
+    };
+    assert_eq!(hashes(&[]), hashes(&["shard"]));
 }

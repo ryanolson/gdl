@@ -24,3 +24,12 @@ pub struct Answer {
     /// The text.
     pub text: String,
 }
+
+/// The shard an instance serves, as a property's key.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, gdl_message::Message,
+)]
+pub struct Shard {
+    /// Its name.
+    pub name: String,
+}

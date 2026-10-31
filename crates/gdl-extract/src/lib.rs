@@ -667,11 +667,12 @@ pub struct PolicyEntry {
     pub ty: String,
     /// What it reads of the request's head.
     pub head: PolicyHead,
-    /// The property kinds a pool policy reads, as its `NEEDS` names them:
-    /// each must be supplied by the class it chooses for. Always written,
+    /// The property kinds a pool policy or a selector reads, as its `NEEDS`
+    /// names them: each must be supplied by the class a policy chooses for,
+    /// or by the class of each crossing a selector routes. Always written,
     /// and required: an entry written before they were read cannot say
-    /// that its policy needs nothing, so it is refused, and its crate is
-    /// read again. A selector names none.
+    /// that its type needs nothing, so it is refused, and its crate is read
+    /// again.
     pub needs: Vec<String>,
 }
 

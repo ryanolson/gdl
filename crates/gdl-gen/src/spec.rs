@@ -96,6 +96,9 @@ pub struct Spec {
     /// The property kinds each bound pool policy reads, as its `NEEDS`
     /// names them: known once its crate is read, and empty before.
     pub(crate) policy_needs: BTreeMap<String, Vec<String>>,
+    /// The property kinds each bound selector reads, as its `NEEDS` names
+    /// them: known once its crate is read, and empty before.
+    pub(crate) selector_needs: BTreeMap<String, Vec<String>>,
     /// The global allocator of each generated segment binary.
     pub(crate) allocator: Allocator,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -773,6 +776,7 @@ impl Spec {
             pool_policies,
             selectors,
             policy_needs: BTreeMap::new(),
+            selector_needs: BTreeMap::new(),
             allocator: raw
                 .binary
                 .and_then(|binary| binary.allocator)

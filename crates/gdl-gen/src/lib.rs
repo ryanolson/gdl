@@ -168,8 +168,11 @@ fn bound<'s>(
         spec.policy_needs = needs;
     }
     if !spec.selectors.is_empty() {
-        let problems = selectors::resolve(&spec, target, from, &prepared.manifest, resolution);
-        spec.to_mut().problems.extend(problems);
+        let (problems, needs) =
+            selectors::resolve(&spec, target, from, &prepared.manifest, resolution);
+        let spec = spec.to_mut();
+        spec.problems.extend(problems);
+        spec.selector_needs = needs;
     }
     Ok(spec)
 }

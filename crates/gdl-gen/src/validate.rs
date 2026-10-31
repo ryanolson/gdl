@@ -125,8 +125,9 @@ pub(crate) fn unbound(
 
 /// The readers of property kinds that the graph does not draw, in
 /// `layout`: each entry's adapters, which run beside the source that hosts
-/// the service, and each bound pool policy, for each class it chooses for.
-/// A policy whose crate is not read yet reads nothing here.
+/// the service, each bound pool policy, for each class it chooses for, and
+/// each bound selector, for the class of each crossing it routes. A policy
+/// or a selector whose crate is not read yet reads nothing here.
 fn consumers(
     spec: &Spec,
     manifest: &gdl_model::Manifest,
@@ -171,7 +172,11 @@ fn consumers(
                 })
             })
     });
-    entries.chain(policies).collect()
+    let selectors = spec.selector_needs.iter().flat_map(|(name, needs)| {
+        let needs: Vec<&str> = needs.iter().map(String::as_str).collect();
+        gdl_model::selector_consumers(layout, name, &needs)
+    });
+    entries.chain(policies).chain(selectors).collect()
 }
 
 /// Check each layout's placement, and the bindings, against the manifest,

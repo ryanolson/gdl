@@ -199,7 +199,7 @@ fn entry(
         Some((expr, at)) => read_needs(&expr).map_err(|why| Skipped {
             name: written.clone(),
             path: None,
-            problem: format!("{at}: pool policy `{written}` {why}"),
+            problem: format!("{at}: {} `{written}` {why}", kind.noun()),
         })?,
     };
     Ok(PolicyEntry {

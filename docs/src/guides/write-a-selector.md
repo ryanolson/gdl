@@ -50,6 +50,33 @@ Ok(Choice::new(chosen).with_lease(Release(Arc::clone(&count))))
 
 The runtime drops the lease when the sending segment stops holding the request, and also when it asks again after a decline or a membership change. Take no global lock in `select`: it runs for every hand-off.
 
+### Read the pools' properties
+
+A selector can read the properties of the pools its segment follows, as a node does ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)). Name each kind it reads in its `NEEDS`, and register each in its build:
+
+```rust
+impl Selector for ByShard {
+    type Head = Encoded;
+    const NEEDS: &'static [&'static str] = &["shard"];
+    // select ...
+}
+
+impl Build for ByShard {
+    // ...
+    async fn build(_: ByShardSettings, (): ()) -> gdl::Result<Self> {
+        let followed = gdl::FollowedPools::current();
+        followed.register(&SHARD)?;
+        Ok(ByShard { followed })
+    }
+}
+```
+
+- `cargo gdl check`, `generate`, and `build` read `NEEDS` from the source, as a list of string literals. Each kind must be declared in the graph, and supplied by the class of each crossing the selector routes: an entry segment of the class hosts a node that provides it, or `[pools.<class>] provides` names it ([Define a graph](define-a-graph.md#declare-properties)). The error names the kind, the selector, and the class.
+- The selector reads the pools of the class it sends into. So a selector on a crossing inside a class, or in a placement without classes, reads no pools, and a `NEEDS` there is refused.
+- The selector's build may register only the kinds its `NEEDS` names, as a pool policy's `properties` may. Its segment's nodes' needs do not count.
+- A selector registered in code is held to the same supply when its segment is deployed, and the segment does not start otherwise.
+- `NEEDS` enters no hash. By default a selector needs none.
+
 ## 3. Bind it in the spec
 
 For a generated binary, implement `gdl::Build` too: the segment builds the selector from its settings, as it builds a node.

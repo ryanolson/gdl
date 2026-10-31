@@ -1578,6 +1578,7 @@ fn a_crate_offers_its_selectors_with_their_heads() {
         selectors,
         [
             ("Both", "read_policies::Both", "encoded".to_string()),
+            ("ByModel", "read_policies::ByModel", "encoded".to_string()),
             (
                 "ByPart",
                 "read_policies::ByPart",
@@ -1595,6 +1596,16 @@ fn a_crate_offers_its_selectors_with_their_heads() {
         "{:?}",
         offer.policies
     );
+    // A selector's `NEEDS` is read as a pool policy's is.
+    let needs = |name: &str| {
+        offer
+            .selectors
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.needs.clone())
+    };
+    assert_eq!(needs("ByModel"), Some(vec!["model".to_string()]));
+    assert_eq!(needs("ByWords"), Some(Vec::new()));
     let skipped: Vec<(&str, &str)> = offer
         .skipped_selectors
         .iter()
@@ -1602,11 +1613,17 @@ fn a_crate_offers_its_selectors_with_their_heads() {
         .collect();
     assert_eq!(
         skipped.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-        ["AnySelector", "Unreached"],
+        ["ByConstant", "AnySelector", "Unreached"],
         "{skipped:?}"
     );
     assert!(
-        skipped[0].1.contains("selector `AnySelector` is generic"),
+        skipped[0]
+            .1
+            .contains("selector `ByConstant` writes `NEEDS` as `KINDS`"),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped[1].1.contains("selector `AnySelector` is generic"),
         "{skipped:?}"
     );
     // A catalogue entry keeps them, and one without selectors is written as

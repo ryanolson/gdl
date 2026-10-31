@@ -172,9 +172,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** an absent field does not prove the default encoding. An extractor from before codec selection can miss a newer annotation.
 - **Recovery:** remove the entry the error names. Add directory or registry crates again with `cargo gdl extract` and the same `--catalog` directory. Import Git crates again through the composer. See [The catalogue and the source reader](../concepts/catalogue.md).
 
-### A pool policy's catalogue entry without `needs` requires re-extraction
-- **What:** a saved pool policy without `needs` stops the catalogue from loading, and the error names the file.
-- **Why:** an entry that the reader wrote before it read `NEEDS` would read as a policy that needs nothing, and a check from the catalogue would hold no class to a supply for it. So the field is always written, and an entry without it is refused.
+### A pool policy's or a selector's catalogue entry without `needs` requires re-extraction
+- **What:** a saved pool policy or selector without `needs` stops the catalogue from loading, and the error names the file.
+- **Why:** an entry that the reader wrote before it read `NEEDS` would read as a policy or a selector that needs nothing, and a check from the catalogue would hold no class to a supply for it. So the field is always written, and an entry without it is refused.
 - **Recovery:** remove the entry the error names, then add the crate again as for an entry without encoding metadata, above.
 
 ### A `Streamed` named through a type alias cannot cross segments

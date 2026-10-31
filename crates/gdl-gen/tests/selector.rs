@@ -155,7 +155,7 @@ fn check_refuses_a_selector_it_cannot_resolve() {
     .expect_err("an unknown type");
     assert!(
         error.contains(
-            "[selector.by_text]: crate `selector-router` implements no selector `ByName`; it implements `ByText`"
+            "[selector.by_text]: crate `selector-router` implements no selector `ByName`; it implements `ByShard`, `ByText`"
         ),
         "{error}"
     );
@@ -207,4 +207,45 @@ fn check_refuses_a_selector_whose_head_does_not_fit_its_crossing() {
     // Through `Model` alone, across the same three segments, it fits.
     let fits = text.replace("Prep = { selector = \"by_text\" }\n", "");
     check(&fits, &fixture_text("selector.gdl")).expect("the head fits");
+}
+
+/// `by_shard` reads property kind `shard` of the pools that `front`
+/// follows: its `NEEDS`, read from its source, holds the class of the
+/// crossing it routes, `model`, to a supply of it, as a pool policy's
+/// does. A provider in the class's entry segment, or `[pools.model]
+/// provides`, meets it.
+#[test]
+fn check_holds_a_selectors_needs_to_its_crossings_class() {
+    let graph = |provides: &str| {
+        fixture_text("selector.gdl")
+            .replace(
+                "name = \"selector\", schema = 1;",
+                "name = \"selector\", schema = 1;\nproperty shard: Shard;",
+            )
+            .replace(
+                "sink    Model: Prepared -> stream Answer;",
+                &format!("sink    Model: Prepared -> stream Answer{provides};"),
+            )
+    };
+    let spec = |pools: &str| {
+        fixture_text("gdl.toml")
+            .replace("selector = \"by_text\"", "selector = \"by_shard\"")
+            .replace("[selector.by_text]", "[selector.by_shard]")
+            .replace("selector_router::ByText", "selector_router::ByShard")
+            + "\n[class.global]\nsegments = [\"front\"]\n\n[class.model]\nsegments = [\"model\"]\n"
+            + pools
+    };
+    let error = check(&spec(""), &graph("")).expect_err("unsupplied");
+    assert!(
+        error.contains(
+            "selector `by_shard` needs property `shard` from class `model`, but no entry segment of class `model` (`model`) hosts a node that provides it, and `[pools.model] provides` does not name it"
+        ),
+        "{error}"
+    );
+    check(&spec(""), &graph(" provides shard")).expect("the model provides it");
+    check(
+        &spec("\n[pools.model]\nprovides = [\"shard\"]\n"),
+        &graph(""),
+    )
+    .expect("the model's pools provide it");
 }

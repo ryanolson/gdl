@@ -266,6 +266,33 @@ pub mod selectors {
         }
     }
 
+    /// Reads the bytes, and the property kind `model` of the pools its
+    /// segment follows.
+    pub struct ByModel;
+
+    impl Selector for ByModel {
+        type Head = Encoded;
+        const NEEDS: &'static [&'static str] = &["model"];
+
+        async fn select<'a>(&'a self, _: Request<'a, Encoded>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
+    /// Names its needs by a constant, which the reader does not follow.
+    pub struct ByConstant;
+
+    const KINDS: &[&str] = &["model"];
+
+    impl Selector for ByConstant {
+        type Head = Encoded;
+        const NEEDS: &'static [&'static str] = KINDS;
+
+        async fn select<'a>(&'a self, _: Request<'a, Encoded>, i: Instances<'a>) -> gdl::Result<Choice<'a>> {
+            Ok(Choice::new(i.get(0).expect("never empty")))
+        }
+    }
+
     /// Generic: no one type to name.
     pub struct AnySelector<T>(T);
 
@@ -306,7 +333,7 @@ pub mod selectors {
 }
 
 pub use selectors::local::Pretender;
-pub use selectors::{AnySelector, Both, ByPart, ByWords};
+pub use selectors::{AnySelector, Both, ByConstant, ByModel, ByPart, ByWords};
 
 /// The kinds a policy could name through a constant.
 const KINDS: &[&str] = &["model"];

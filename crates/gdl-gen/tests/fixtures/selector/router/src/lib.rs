@@ -53,3 +53,35 @@ impl Selector for ByText {
         Ok(Choice::new(instances.get(0).expect("never empty")))
     }
 }
+
+/// Sends every request to the first instance. It reads the property kind
+/// `shard` of the pools its segment follows, so its crossing's class must
+/// supply it.
+pub struct ByShard;
+
+impl Build for ByShard {
+    type Config = ByShardSettings;
+    type Metrics = ();
+
+    async fn build(_: ByShardSettings, (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// [`ByShard`] takes no settings.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByShardSettings {}
+
+impl Selector for ByShard {
+    type Head = gdl::Encoded;
+    const NEEDS: &'static [&'static str] = &["shard"];
+
+    async fn select<'a>(
+        &'a self,
+        _: Request<'a, gdl::Encoded>,
+        instances: Instances<'a>,
+    ) -> Result<Choice<'a>> {
+        Ok(Choice::new(instances.get(0).expect("never empty")))
+    }
+}

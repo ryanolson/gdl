@@ -97,15 +97,18 @@ pub(crate) fn problems(
 /// reader can reach: a crate it cannot read, a type that is not a selector
 /// the crate offers, and a selector whose `Head` does not fit a request
 /// that crosses through it. The heads are checked only where `resolution`
-/// gives the graph's messages their identity: a graph file's.
+/// gives the graph's messages their identity: a graph file's. Also the
+/// property kinds each selector the reader found needs, by name, as its
+/// `NEEDS` names them.
 pub(crate) fn resolve(
     spec: &Spec,
     target: &std::path::Path,
     from: Offers<'_>,
     manifest: &gdl_model::Manifest,
     resolution: Option<&crate::Resolution>,
-) -> Vec<String> {
+) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
     let mut problems = Vec::new();
+    let mut needs = std::collections::BTreeMap::new();
     for (name, bind) in &spec.selectors {
         let at = format!("[selector.{name}]");
         let offer = match read_offer(spec, &at, bind, target, from) {
@@ -124,17 +127,20 @@ pub(crate) fn resolve(
             "selector",
         ) {
             Err(problem) => problems.push(format!("{at}: {problem}")),
-            Ok(selector) => problems.extend(
-                resolution
-                    .into_iter()
-                    .flat_map(|resolution| {
-                        misfits(spec, manifest, resolution, name, &selector.head)
-                    })
-                    .map(|problem| format!("{at}: {problem}")),
-            ),
+            Ok(selector) => {
+                needs.insert(name.clone(), selector.needs.clone());
+                problems.extend(
+                    resolution
+                        .into_iter()
+                        .flat_map(|resolution| {
+                            misfits(spec, manifest, resolution, name, &selector.head)
+                        })
+                        .map(|problem| format!("{at}: {problem}")),
+                )
+            }
         }
     }
-    problems
+    (problems, needs)
 }
 
 /// Why selector `name`, which reads `head`, does not fit a request that
