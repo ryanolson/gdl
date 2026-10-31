@@ -222,11 +222,22 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         true
     }
 
-    /// Set condition `kind` to a state a person must act on: when it
-    /// changes, it is also recorded as an event, once the status is
-    /// stored.
+    /// Set condition `kind` to a state a person must act on: when its
+    /// status, its reason, or its generation changes, it is also recorded
+    /// as an event, once the status is stored.
     pub(super) fn warn(&mut self, kind: &str, on: bool, reason: &str, message: &str) {
-        if self.condition(kind, on, reason, message) {
+        // An event says a change of the condition: its status, its reason,
+        // or the generation it speaks of. The message, which may carry an
+        // error's text, changes on each failure, and is not a change.
+        let key = |conditions: &[Condition]| {
+            conditions
+                .iter()
+                .find(|c| c.type_ == kind)
+                .map(|c| (c.status.clone(), c.reason.clone(), c.observed_generation))
+        };
+        let before = key(&self.status.conditions);
+        self.condition(kind, on, reason, message);
+        if key(&self.status.conditions) != before {
             self.events.push((reason.to_string(), message.to_string()));
         }
     }

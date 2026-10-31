@@ -30,7 +30,6 @@ impl Hubs for Errors<'_> {
 }
 
 #[tokio::test]
-#[ignore = "F15: changing probe errors repeat the withdrawal warning event"]
 async fn changing_probe_errors_emit_one_withdrawal_warning() {
     let fake = running(true).await;
     fake.delete(false);
