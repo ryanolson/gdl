@@ -197,7 +197,6 @@ async fn retirement_between_reads_does_not_regress_a_member_that_stays() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F5: the membership recheck accepts a replacement registration with the same id"]
 async fn a_reused_id_does_not_preserve_the_departed_registration() {
     let served = Served::new().await;
     let (node, client) = member(&served).await;

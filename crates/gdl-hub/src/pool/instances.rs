@@ -15,6 +15,7 @@ use futures::future::try_join_all;
 use gdl_model::{SegmentPhase, segment_service};
 use gdl_watch::{InstancePhase, Instances, PoolInstance};
 use velo_hub::client::HubServices;
+use velo_hub::store::Incarnation;
 use velo_hub::velo::discovery::ServiceDiscovery;
 use velo_hub::velo::transports::utils::parse_endpoints;
 use velo_hub::velo::{InstanceId, PeerInfo};
@@ -47,7 +48,7 @@ pub(super) async fn list(
     let members = admission.members();
     let segments: BTreeSet<&str> = members
         .iter()
-        .map(|(segment, _)| segment.as_str())
+        .map(|(_, segment, _)| segment.as_str())
         .collect();
     // velo-hub keeps its service directory to itself, and serves one
     // service per read. The segments are read at once, and each segment's
@@ -82,17 +83,19 @@ pub(super) async fn list(
     }
     // A member that left during the reads has lost its services, and
     // would read as `joining`, a phase before the one it had: it is left
-    // out, as a list made a moment later would leave it out.
-    let staying: HashSet<InstanceId> = admission
+    // out, as a list made a moment later would leave it out. A
+    // registration is told by its incarnation as well as its id, since the
+    // id can come back, even for another segment, while the reads run.
+    let staying: HashSet<(InstanceId, Incarnation)> = admission
         .members()
         .into_iter()
-        .map(|(_, peer)| peer.instance_id)
+        .map(|(incarnation, _, peer)| (peer.instance_id, incarnation))
         .collect();
     let mut loads = feed.loads(Instant::now());
     let instances = members
         .into_iter()
-        .filter(|(_, peer)| staying.contains(&peer.instance_id))
-        .map(|(segment, peer)| {
+        .filter(|(incarnation, _, peer)| staying.contains(&(peer.instance_id, *incarnation)))
+        .map(|(_, segment, peer)| {
             let phase = phases
                 .get(&peer.instance_id)
                 .copied()

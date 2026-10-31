@@ -109,12 +109,20 @@ impl GraphAdmission {
         Some((member.registration.segment.clone(), member.peer.clone()))
     }
 
-    /// Every member, with its segment and peer, as `/members` shows them.
-    pub(crate) fn members(&self) -> Vec<(String, PeerInfo)> {
+    /// Every member, with its segment and peer, as `/members` shows them,
+    /// and the incarnation of its registration, which a later registration
+    /// of the same instance does not share.
+    pub(crate) fn members(&self) -> Vec<(Incarnation, String, PeerInfo)> {
         let members = self.members.lock().expect("membership lock");
         members
             .values()
-            .map(|(_, member)| (member.registration.segment.clone(), member.peer.clone()))
+            .map(|(incarnation, member)| {
+                (
+                    *incarnation,
+                    member.registration.segment.clone(),
+                    member.peer.clone(),
+                )
+            })
             .collect()
     }
 }
