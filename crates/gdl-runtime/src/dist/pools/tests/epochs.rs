@@ -318,3 +318,110 @@ fn an_epoch_moves_on_its_own_past_a_held_list() {
         "a newer list, from an earlier hub"
     );
 }
+
+#[test]
+#[ignore = "F3: keep_newer pairs an earlier hub's missing or scaled condition with the held later epoch, so it can move a later pin"]
+fn an_earlier_hubs_condition_does_not_move_a_later_pin() {
+    use super::properties::{TEST, Test};
+
+    fn property_listing(epoch: u64, version: u64, condition: PoolCondition) -> Listing {
+        let mut listing = listing(epoch);
+        listing.condition = condition;
+        listing.missing_age_ms = (condition == PoolCondition::Missing).then_some(60_000);
+        listing.properties.version = version;
+        listing.properties.entries.push(gdl_pools::PoolProperty {
+            property: gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "a" }))
+                .expect("a property"),
+            state: gdl::PropertyState::Ready,
+            since: version,
+        });
+        listing
+    }
+
+    fn with_listing(listing: Listing) -> FollowEvent {
+        let mut event = followed(M1, 1, listing.epoch);
+        if let FollowEvent::Follow { listing: shown, .. } = &mut event {
+            *shown = Some(listing);
+        }
+        event
+    }
+
+    let mut observed = Vec::new();
+    for path in ["take", "carry", "install_own"] {
+        for condition in [PoolCondition::Missing, PoolCondition::ScaledToZero] {
+            let (mut follows, pools, _, _) = follower();
+            let now = Instant::now();
+            follows.take(
+                with_listing(property_listing(6, 10, PoolCondition::Live)),
+                now,
+            );
+            assert_eq!(read(&pools, M1), (false, Some(6)));
+            let pin = 6;
+
+            // An older socket's snapshot was made before the live epoch-6 listing.
+            let earlier = property_listing(5, 12, condition);
+            match path {
+                "take" => follows.take(
+                    FollowEvent::Listed {
+                        class: "model_x".into(),
+                        pool: M1.into(),
+                        generation: 1,
+                        listing: Some(earlier),
+                    },
+                    now,
+                ),
+                "carry" => {
+                    let mut snapshot = follows.snapshot();
+                    snapshot.apply(with_listing(earlier), now);
+                    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+                    follows.resnapshot(snapshot, now);
+                }
+                _ => {
+                    follows.unknown(gdl_watch::UnknownFollowEvent {
+                        kind: "paused".into(),
+                        class: "model_x".into(),
+                        pool: M1.into(),
+                        generation: 1,
+                    });
+                    let asked = follows.asked().pop().expect("a recovery watch");
+                    for event in [with_listing(earlier), FollowEvent::Synced { listed: true }] {
+                        follows.own(
+                            asked.key.clone(),
+                            asked.watch,
+                            Ok(gdl_watch::Watched::Event(event)),
+                            now,
+                        );
+                    }
+                }
+            }
+            let table = pools.table("f").expect("a table");
+            let cx = gdl::Cx::new();
+            let request = table.fill(PoolRequest::new(&cx, &(), "r", now));
+            let property: Test =
+                serde_json::from_value(serde_json::json!({ "name": "a" })).expect("a key");
+            let row = &request
+                .properties()
+                .get(&TEST)
+                .expect("the kind")
+                .get(&property)[0]
+                .1;
+            let epoch = request.epoch(M1).expect("an epoch");
+            assert_eq!(epoch, 6, "the epoch must keep its own order");
+            assert_eq!(
+                list_version(&pools, M1),
+                12,
+                "the newer property list is kept"
+            );
+            let moves_pin = epoch >= pin
+                && matches!(
+                    row.condition(),
+                    PoolCondition::Missing | PoolCondition::ScaledToZero
+                );
+            observed.push((path, condition, epoch, row.condition(), moves_pin));
+        }
+    }
+    assert!(
+        observed.iter().all(|(_, _, _, _, moves)| !moves),
+        "epoch-5 conditions must not become epoch-6 evidence against a pin accepted at epoch 6: {observed:?}"
+    );
+}
