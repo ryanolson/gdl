@@ -537,8 +537,25 @@ impl HubSession {
 
     /// Leave the hub at once, rather than when the lease runs out, so that
     /// no peer's drain waits for this instance.
+    ///
+    /// An announcement the hub has not answered holds the client's lock,
+    /// which the leave needs too. So the leave queues for the lock first,
+    /// and only then is the announcement cut: the leave goes next, and
+    /// takes the announcement off the hub with the rest. Cut first, the
+    /// announcement's dropped guard could withdraw it ahead of the leave,
+    /// and the hub would list this instance without `retired` until it
+    /// left.
     pub(crate) async fn leave(&self) {
-        let _ = tokio::time::timeout(POLL * 50, self.client.unregister()).await;
+        let leave = async {
+            let mut unregister = std::pin::pin!(self.client.unregister());
+            if futures::poll!(unregister.as_mut()).is_pending() {
+                for (_, announcing) in &self.unanswered {
+                    announcing.abort();
+                }
+                let _ = unregister.await;
+            }
+        };
+        let _ = tokio::time::timeout(POLL * 50, leave).await;
     }
 
     /// Whether the lease is lost.

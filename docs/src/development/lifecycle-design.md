@@ -82,6 +82,8 @@ A retiring instance X announces `retired` first, then withdraws `ready` and `loa
 
 X retries `retired` until its drain's bound. An attempt that the hub has not answered is never given up. X waits for it again rather than sending a second one. Past the bound, X keeps the attempt until it leaves the hub. When the hub answers late, the registration lands and stays. The same holds for `ready`, `drained`, and `detach`.
 
+The client sends one change at a time, so the leave waits behind the attempt's open request. X queues the leave first, and only then cuts the attempt. The leave then goes next, and takes the announcement off the hub with the rest. If X cut the attempt first, the withdrawal of its dropped registration could go ahead of the leave, and the hub would list X without `retired` until X left.
+
 **Why:** the hub may have stored `retired` and only answered late. velo-hub's client withdraws a service whose registration is dropped. So an attempt dropped at its timeout withdrew a `retired` that the hub held. The hub then listed X as `ready` and `loaded` and not retired: a joiner took X into its roster, and a pool counted X as usable again. Peers that were already following were not affected, since they keep the retirement once they have seen it. `crates/gdl-runtime/tests/rosters/unanswered.rs` holds the case.
 
 **Rejected: do not drain while the hub lists X as ready, and retry the retirement.** X already retries until its drain's bound, so this either stops at the bound with the same listing, or holds X past its bound.

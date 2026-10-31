@@ -43,9 +43,9 @@ async fn listed(services: &velo_hub::client::HubServices, id: InstanceId) -> Lis
 /// answers only after the engine has stopped waiting. From the moment the
 /// hub holds `retired`, it must not list the engine as one to route to
 /// again while it drains, and a front that joins meanwhile must not take
-/// it into its roster. The engine still leaves within its bound. The test
-/// runs about 8 s: the drain's bound, 3 s, and the leave, which it holds
-/// for its 5 s limit so that the listing after the drain can be read.
+/// it into its roster. The engine still leaves within its bound, and its
+/// leave takes it off the hub. The test runs for the drain's bound, 3 s,
+/// and holds the leave until a front has joined after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
     let placement = two();
@@ -128,11 +128,21 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
                 .iter()
                 .any(|peer| peer.instance_id() == first_id);
             joiner = Some((process, launch, stopped.elapsed().as_millis(), routes));
+            // The engine has drained by now, and its leave waits at the
+            // proxy: an announcement the hub has not answered must not
+            // hold the leave back.
+            // Its drain ended at the bound, so its leave is due well
+            // within the leave's own 5 s limit.
+            let leaving = tokio::time::timeout(Duration::from_secs(2), control.holding()).await;
+            assert!(leaving.is_ok(), "the engine never sent its leave");
+            control.release();
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let exited = stopped.elapsed();
-    control.release();
+    // Its leave took it off the hub, `retired` included, and nothing else
+    // did first.
+    let gone = listed(&services, first_id).await;
     control.answer();
     recorder.abort();
 
@@ -169,10 +179,19 @@ async fn a_retirement_the_hub_answers_late_still_takes_the_instance_out() {
         "the front never promised to avoid it\n{report}"
     );
     assert_eq!(after, 0, "the front sent it work after its stop\n{report}");
-    // Still bounded: the drain, and the leave's 5 s limit, which the test
-    // held; then slack for a loaded host.
+    assert_eq!(
+        gone,
+        Listed {
+            ready: false,
+            loaded: false,
+            retired: false,
+        },
+        "the engine is still listed after it left\n{report}"
+    );
+    // Still bounded: the drain, the joiner's launch, which holds the
+    // leave, then slack for a loaded host.
     assert!(
-        exited < DRAIN + Duration::from_secs(5 + 3),
+        exited < DRAIN + Duration::from_secs(3),
         "the engine took {exited:?} to leave\n{report}"
     );
 }
