@@ -1,0 +1,364 @@
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "labels": {
+      "gdl.dev/setup": "gdl-operator"
+    },
+    "name": "gdlscalers.gdl.dev"
+  },
+  "spec": {
+    "group": "gdl.dev",
+    "names": {
+      "kind": "GdlScaler",
+      "plural": "gdlscalers",
+      "shortNames": [
+        "gscaler"
+      ],
+      "singular": "gdlscaler"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.replicas",
+            "name": "Desired",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".status.replicas",
+            "name": "Current",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".status.readyReplicas",
+            "name": "Ready",
+            "type": "integer"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for GdlScalerSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "description": "What a `GdlScaler` asks for: how many instances of one segment of one\npool run, and how one is removed.",
+                "properties": {
+                  "drainBound": {
+                    "description": "How long a victim's drain may take, as `<n>ms`, `<n>s`, `<n>m` or\n`<n>h`: the segment's `drain_ms`. Kubernetes enforces it in signal\nmode, at the pod's grace; the scaler reports a drain that ran past\nit.",
+                    "nullable": true,
+                    "pattern": "^[0-9]+(ms|s|m|h)$",
+                    "type": "string"
+                  },
+                  "maxConcurrentDrains": {
+                    "description": "How many instances drain at once: 1 by default.",
+                    "format": "int32",
+                    "minimum": 1.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "metricsPrefix": {
+                    "description": "The prefix of the segment's metric names, its `[system]\nmetrics_prefix`: `dynamo_component` by default.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "minReplicas": {
+                    "description": "The fewest it scales to: the segment's quorum by default, never\nbelow 1, since the last instance of a segment is not avoided.",
+                    "format": "int32",
+                    "minimum": 1.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "pool": {
+                    "description": "The pool whose segment it scales; its hub's Service has the pool's\nname.",
+                    "type": "string"
+                  },
+                  "replicas": {
+                    "description": "How many instances to run. An HPA writes it through `/scale`. Until\nit is set, the scaler does nothing.",
+                    "format": "int32",
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "retire": {
+                    "description": "How a victim is retired.",
+                    "enum": [
+                      "signal"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "routingGrace": {
+                    "description": "How long after a victim leaves its entry Service's endpoints the\nscaler waits before it deletes the pod, for kube-proxy and load\nbalancers to stop sending to it: `10s` by default.",
+                    "nullable": true,
+                    "pattern": "^[0-9]+(ms|s|m|h)$",
+                    "type": "string"
+                  },
+                  "segment": {
+                    "description": "The segment.",
+                    "type": "string"
+                  },
+                  "service": {
+                    "description": "The segment's entry Service, when it has one: a victim leaves its\nendpoints before it drains.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "suspend": {
+                    "description": "A hold of the target at a count, whatever the scaler's `replicas`.",
+                    "enum": [
+                      "zero"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "targetRef": {
+                    "description": "The object whose `replicas` it writes.",
+                    "properties": {
+                      "apiVersion": {
+                        "description": "`apps/v1`.",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "description": "`Deployment`.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Its name, in the scaler's namespace.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "apiVersion",
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "victim": {
+                    "description": "The registered victim policy that chooses the instance to remove:\n`fewestAdmitted` by default.",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "pool",
+                  "segment",
+                  "targetRef"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "What the scaler observed and did.",
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "description": "`Scaling`, `Blocked`, and `Suspended`.",
+                    "items": {
+                      "description": "Condition contains details for one aspect of the current state of this API Resource.",
+                      "properties": {
+                        "lastTransitionTime": {
+                          "description": "lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "message": {
+                          "description": "message is a human readable message indicating details about the transition. This may be an empty string.",
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "description": "observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.",
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "reason": {
+                          "description": "reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.",
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "status of the condition, one of True, False, Unknown.",
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "type of condition in CamelCase or in foo.example.com/CamelCase.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "lastTransitionTime",
+                        "message",
+                        "reason",
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "last": {
+                    "description": "The last removal that ended.",
+                    "nullable": true,
+                    "properties": {
+                      "chosen": {
+                        "description": "The uid of the pod the scaler chose.",
+                        "type": "string"
+                      },
+                      "deleted": {
+                        "description": "The uid of the pod that was deleted.",
+                        "type": "string"
+                      },
+                      "durationMs": {
+                        "description": "From the choice until the pod was gone.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "outcome": {
+                        "description": "`removed`, `overran` (gone, after its drain bound), or\n`kubernetesChoseAnother`.",
+                        "enum": [
+                          "removed",
+                          "overran",
+                          "kubernetesChoseAnother"
+                        ],
+                        "type": "string"
+                      },
+                      "pod": {
+                        "description": "The victim's pod.",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "description": "Why it was chosen, or why another went.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chosen",
+                      "deleted",
+                      "durationMs",
+                      "outcome",
+                      "pod",
+                      "reason"
+                    ],
+                    "type": "object"
+                  },
+                  "observedGeneration": {
+                    "description": "The generation of the spec it last acted on.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "readyReplicas": {
+                    "default": 0,
+                    "description": "The target's pods that are ready.",
+                    "format": "int32",
+                    "type": "integer"
+                  },
+                  "replicas": {
+                    "default": 0,
+                    "description": "The target's current count, which `/scale` reports to an HPA.",
+                    "format": "int32",
+                    "type": "integer"
+                  },
+                  "retiring": {
+                    "description": "The victims chosen and not gone yet.",
+                    "items": {
+                      "description": "A victim the scaler chose, kept until its pod is gone.",
+                      "properties": {
+                        "admitted": {
+                          "default": 0,
+                          "description": "Its admitted requests when chosen.",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "anchors": {
+                          "default": 0,
+                          "description": "Its open anchors when chosen.",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "egress": {
+                          "default": 0,
+                          "description": "Its egress permits in use when chosen.",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "instance": {
+                          "description": "Its instance's velo address, `ip:port`, when the hub listed it.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "phase": {
+                          "description": "Where its removal is.",
+                          "enum": [
+                            "unrouting",
+                            "deleting"
+                          ],
+                          "type": "string"
+                        },
+                        "pod": {
+                          "description": "Its pod's name.",
+                          "type": "string"
+                        },
+                        "since": {
+                          "description": "When it was chosen, RFC 3339.",
+                          "type": "string"
+                        },
+                        "uid": {
+                          "description": "Its pod's uid, by which the scaler tracks it.",
+                          "type": "string"
+                        },
+                        "unrouted": {
+                          "description": "When it left its entry Service's endpoints, RFC 3339: the routing\ngrace counts from here.",
+                          "nullable": true,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "phase",
+                        "pod",
+                        "since",
+                        "uid"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "selector": {
+                    "default": "",
+                    "description": "The selector of the target's pods, as text, for an HPA.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "GdlScaler",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "scale": {
+            "labelSelectorPath": ".status.selector",
+            "specReplicasPath": ".spec.replicas",
+            "statusReplicasPath": ".status.replicas"
+          },
+          "status": {}
+        }
+      }
+    ]
+  }
+}

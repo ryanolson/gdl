@@ -1,6 +1,6 @@
 # Workspace crates
 
-The root workspace has fourteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
+The root workspace has fifteen crates. Each example is its own workspace, outside the root, so that its generated segment crates link only the node implementations they host.
 
 | Crate | Depends on | Contents |
 |---|---|---|
@@ -18,6 +18,7 @@ The root workspace has fourteen crates. Each example is its own workspace, outsi
 | `gdl-watch` | `gdl-pools`, `gdl-model`, velo's peer types | The watches a pool's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
 | `gdl-cgroup` | prometheus alone | What a gdl process serves about itself: prometheus's process collector, and its cgroup v2's CPU use and throttling, CPU quota, and memory, read from its own cgroup's files when `/metrics` is scraped. Every segment and every hub registers both, so the runtime and the hub share this crate rather than the hub depending on the runtime. See [The process's own figures](../operations/observability.md#the-processs-own-figures) |
 | `gdl-hub` | `gdl-pools`, `gdl-watch`, `gdl-cgroup`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a pool's hub the `gdl-pool` extension, with the `relay` backend's reports to a parent's hub, and the `gdl-keyed` keyed record service. With its `dynamodb` feature, off by default, the binary also takes the `dynamodb` backend, through `gdl-pools-dynamodb`, and runs its tables step (`gdl-hub --tables`). See [Discovery](../concepts/hub.md) and [Classes and pools](../concepts/pools.md) |
+| `gdl-operator` | `gdl-model`, kube-rs (no velo) | The Kubernetes operator: the `GdlScaler` custom resource and its controller, which scales a pool's segment through `/scale` and chooses the instance to remove by a registered victim policy, from the hub's instance list and each pod's `/metrics`. It reaches the Kubernetes API and the hub's HTTP routes alone: `crates/gdl-operator/tests/dependencies.rs` fails if velo or `gdl-watch` is in its normal dependencies, and it reads the instance list through a mirror of its own that a test holds to `gdl-watch`'s type. See [Scale a segment with the operator](../guides/operator.md) |
 
 ## The `gdl` and `gdl-runtime` split
 

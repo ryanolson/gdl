@@ -1,0 +1,39 @@
+[package]
+name = "gdl-operator"
+description = "The gdl Kubernetes operator: GdlScaler scales a pool's segment, choosing the instance to remove by its load and letting it drain before its pod goes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The operator talks to the Kubernetes API and to the hub's HTTP routes
+# alone: it never links velo (`tests/dependencies.rs`), so it reads the
+# hub's instance list through a mirror of its own (`src/probe.rs`), not
+# through gdl-watch.
+[dependencies]
+anyhow = "1"
+futures = { workspace = true }
+gdl-model = { path = "../gdl-model" }
+# The Kubernetes 1.35 API: the version kind's node runs in the proof.
+k8s-openapi = { version = "0.28", features = ["v1_35", "schemars"] }
+kube = { version = "4.2", default-features = false, features = ["client", "derive", "ring", "runtime", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+schemars = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+# The instance list's contract: the hub's own type, encoded, must read
+# into the operator's mirror. A dev-dependency only, so velo is never in
+# the operator's binary.
+gdl-watch = { path = "../gdl-watch" }
+tokio = { workspace = true, features = ["test-util"] }
+velo = { workspace = true }
+
+[lints]
+workspace = true

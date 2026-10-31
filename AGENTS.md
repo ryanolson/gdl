@@ -66,6 +66,7 @@ The suite runs on every change, so its speed is part of its correctness.
 - Primary struct and its impl first in a file; supporting types below or in private submodules.
 - Comments explain why, not what. A comment that needs a long reason points to the book chapter (`docs/src/...`), never to a plan.
 - Every velo call lives in the runtime's velo module. `gdl` never depends on velo: a node crate must build without the transport (`crates/gdl/tests/dependencies.rs`). Generated code and node implementations never call velo directly.
+- The operator (`gdl-operator`) talks only to the Kubernetes API and to a pool hub's HTTP routes. It never links velo or `gdl-watch` (`crates/gdl-operator/tests/dependencies.rs`).
 - Responses are never correlated through a map or a request id. They reach their consumer through a minted stream anchor or a return value.
 - Performance is a correctness property: no global locks on the hot path; per-request bookkeeping (the admission ledger) is sharded and touched only at segment entry and retirement; measure before claiming a speedup.
 

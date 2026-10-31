@@ -1,0 +1,6 @@
+# The build reads the workspace's sources alone.
+.git
+.k8s-tools
+target
+**/target
+docs/book
