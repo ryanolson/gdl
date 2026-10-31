@@ -385,4 +385,140 @@ mod tests {
             assert!(given_offer(&[offer], "router", "router", &elsewhere).is_err());
         }
     }
+
+    #[test]
+    #[ignore = "F1: the catalogue accepts unresolved and ambiguous commit prefixes"]
+    fn a_given_git_revision_must_be_resolvable_and_unambiguous() {
+        let repo = GitFixture::new();
+        let first = repo.offer(&repo.first);
+        let second = repo.offer(&repo.second);
+        let mut catalog =
+            gdl_extract::Catalog::load(&repo.dir.path().join("catalog")).expect("catalogue");
+        for offer in [first.clone(), second.clone()] {
+            catalog
+                .add(gdl_extract::Entry {
+                    added: "2026-10-30T00:00:00Z".into(),
+                    checksum: None,
+                    offer,
+                })
+                .expect("different versions can both be in the catalogue");
+        }
+        let mut given: Vec<_> = catalog.entries().map(|entry| &entry.offer).collect();
+        for offer in [&first, &second] {
+            let rev = offer.source.rsplit_once('#').expect("commit").1;
+            assert_eq!(
+                offers(&[repo.listed(rev)], repo.dir.path(), Offers::Given(&given))
+                    .expect("a full commit selects its offer")[0]
+                    .source,
+                offer.source
+            );
+        }
+        let mut accepted = Vec::new();
+        for len in [1, 2, 3, 4] {
+            let rev = &repo.first[..len];
+            let listed = [repo.listed(rev)];
+            let error = offers(&listed, repo.dir.path(), Offers::Read)
+                .expect_err("Cargo must reject an unresolved or ambiguous abbreviation");
+            assert!(error.to_string().contains("code=Ambiguous (-5)"), "{error}");
+            for _ in 0..2 {
+                if let Ok(found) = offers(&listed, repo.dir.path(), Offers::Given(&given)) {
+                    accepted.push(format!("{rev}: {}", found[0].source));
+                }
+                given.reverse();
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "the catalogue accepts revisions that Cargo rejects, and order chooses the commit:\n{}",
+            accepted.join("\n")
+        );
+    }
+
+    struct GitFixture {
+        dir: tempfile::TempDir,
+        url: String,
+        first: String,
+        second: String,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let dir = tempfile::Builder::new()
+                .prefix("gdl-revision-")
+                .tempdir()
+                .expect("fixture directory");
+            let path = dir.path().join("repo");
+            std::fs::create_dir_all(path.join("src")).expect("source directory");
+            let manifest = "[package]\nname = \"review-router\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n";
+            std::fs::write(path.join("Cargo.toml"), manifest).expect("manifest");
+            std::fs::write(path.join("src/lib.rs"), "pub const VALUE: u32 = 1;\n").expect("source");
+            let mut repo = Self {
+                url: format!(
+                    "file://{}",
+                    path.canonicalize().expect("repository").display()
+                ),
+                dir,
+                first: String::new(),
+                second: String::new(),
+            };
+            repo.git(&["init", "--quiet", "--object-format=sha1"]);
+            repo.git(&["add", "."]);
+            repo.git(&["commit", "--quiet", "-m", "first"]);
+            repo.first = repo.git(&["rev-parse", "HEAD"]);
+            std::fs::write(path.join("Cargo.toml"), manifest.replace("0.1.0", "0.2.0"))
+                .expect("second manifest");
+            std::fs::write(path.join("src/lib.rs"), "pub const VALUE: u32 = 2;\n")
+                .expect("second source");
+            repo.git(&["add", "."]);
+            // A fixed collision avoids mining commit hashes during the test.
+            repo.git(&["commit", "--quiet", "-m", "collision-68092"]);
+            repo.second = repo.git(&["rev-parse", "HEAD"]);
+            assert_ne!(repo.first, repo.second);
+            assert_eq!(&repo.first[..4], &repo.second[..4]);
+            repo
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(self.dir.path().join("repo"))
+                .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "gdl-test")
+                .env("GIT_AUTHOR_EMAIL", "gdl@example.invalid")
+                .env("GIT_COMMITTER_NAME", "gdl-test")
+                .env("GIT_COMMITTER_EMAIL", "gdl@example.invalid")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output")
+                .trim()
+                .to_string()
+        }
+
+        fn listed(&self, rev: &str) -> spec::ListedCrate {
+            spec::ListedCrate {
+                package: "review-router".into(),
+                lib: "review_router".into(),
+                source: spec::CrateSource::Git {
+                    url: self.url.clone(),
+                    rev: rev.into(),
+                },
+            }
+        }
+
+        fn offer(&self, rev: &str) -> Offer {
+            offers(&[self.listed(rev)], self.dir.path(), Offers::Read)
+                .expect("read the Git fixture")
+                .remove(0)
+        }
+    }
 }
