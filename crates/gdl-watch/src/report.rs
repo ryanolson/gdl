@@ -20,6 +20,42 @@ use serde::{Deserialize, Serialize};
 /// placement hash is not its own, or that is not newer than what it holds.
 pub const REPORT_ROUTE: &str = "/report";
 
+/// The query parameter of a report of a record written after reading the
+/// pool's last write ([`gdl_pools::PoolDirectory::publish_after`]): its
+/// value is [`after_value`]. The parent writes the record only while that
+/// is still the child's last write, or it holds none. A parent of an
+/// earlier build ignores it, and writes the record as it writes any.
+pub const AFTER: &str = "after";
+
+/// [`AFTER`]'s value for a write made after reading the last write at
+/// `last`: `<epoch>.<seq>`, or `none` when none was read.
+pub fn after_value(last: Option<Version>) -> String {
+    match last {
+        Some(Version { epoch, seq }) => format!("{epoch}.{seq}"),
+        None => "none".to_owned(),
+    }
+}
+
+/// The last write an [`AFTER`] value names, as [`after_value`] writes it.
+///
+/// # Errors
+///
+/// A value of another shape: the report is malformed.
+pub fn parse_after(value: &str) -> Result<Option<Version>, DirectoryError> {
+    if value == "none" {
+        return Ok(None);
+    }
+    let parsed = value
+        .split_once('.')
+        .and_then(|(epoch, seq)| Some((epoch.parse().ok()?, seq.parse().ok()?)));
+    match parsed {
+        Some((epoch, seq)) => Ok(Some(Version { epoch, seq })),
+        None => Err(DirectoryError::Malformed(format!(
+            "`{AFTER}={value}` names no write: it is `<epoch>.<seq>` or `none`"
+        ))),
+    }
+}
+
 /// The route of what a parent pool's hub holds for one child, under the
 /// extension's, on its public listener: `GET` answers `200 OK` with the
 /// [`gdl_pools::PoolRecord`] it holds for the pool `pool` of `class`,

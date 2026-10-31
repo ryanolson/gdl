@@ -93,7 +93,7 @@ impl Backend for Endless {
     }
 }
 
-const CASES: [&str; 10] = [
+const CASES: [&str; 11] = [
     "malformed_writes_are_refused",
     "writes_are_ordered_by_epoch_and_seq",
     "a_watch_sees_its_class_snapshot_then_changes",
@@ -101,6 +101,7 @@ const CASES: [&str; 10] = [
     "a_lagging_watcher_is_cut_off",
     "a_dropped_watch_is_released",
     "the_last_write_of_a_pool_is_read",
+    "a_write_after_a_read_lands_only_on_that_write",
     "a_record_stays_until_withdrawn",
     "a_watch_sees_every_record_of_its_class",
     "a_record_arrives_whole",

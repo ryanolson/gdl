@@ -17,7 +17,7 @@ use super::{
     RELEASE_ROUTE, REPORT_ROUTE, RelayWatcher, Report, ReportRefusal, ReportReply, UnknownEvent,
     UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
-use gdl_pools::{DirectoryError, LastWrite};
+use gdl_pools::{DirectoryError, LastWrite, Version};
 use serde::Serialize;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
@@ -148,17 +148,38 @@ impl PoolWatcher {
     /// cannot be reached, or answers anything else, is
     /// [`DirectoryError::Unavailable`].
     pub async fn report(&self, hub: &str, report: &Report) -> Result<Duration, DirectoryError> {
+        self.send_report(hub, report, None).await
+    }
+
+    /// [`PoolWatcher::report`] of a record written after reading the pool's
+    /// last write at `last` ([`crate::AFTER`]): the parent writes it only
+    /// while that is still the pool's last write, or it holds none, and
+    /// refuses it as not newer otherwise. A parent of an earlier build
+    /// writes it as any report.
+    pub async fn report_after(
+        &self,
+        hub: &str,
+        report: &Report,
+        last: Option<Version>,
+    ) -> Result<Duration, DirectoryError> {
+        self.send_report(hub, report, Some(last)).await
+    }
+
+    async fn send_report(
+        &self,
+        hub: &str,
+        report: &Report,
+        after: Option<Option<Version>>,
+    ) -> Result<Duration, DirectoryError> {
         gdl_model::check_hub_address(hub).map_err(DirectoryError::Unavailable)?;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{REPORT_ROUTE}");
         let unavailable =
             |e: &dyn std::fmt::Display| DirectoryError::Unavailable(format!("POST {url}: {e}"));
-        let response = self
-            .http
-            .post(&url)
-            .json(report)
-            .send()
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let mut request = self.http.post(&url).json(report);
+        if let Some(last) = after {
+            request = request.query(&[(crate::AFTER, crate::after_value(last))]);
+        }
+        let response = request.send().await.map_err(|e| unavailable(&e))?;
         let status = response.status();
         let body = response.bytes().await.map_err(|e| unavailable(&e))?;
         if status.is_success() {

@@ -157,12 +157,23 @@ impl MemoryDirectory {
     /// [`PoolDirectory::publish`], which never waits: so that a caller on
     /// a blocking thread can write.
     pub(crate) fn put(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        self.put_after(record, None)
+    }
+
+    /// [`PoolDirectory::publish_after`] when `after` is `Some`, else
+    /// [`PoolDirectory::publish`]; it never waits.
+    pub(crate) fn put_after(
+        &self,
+        record: PoolRecord,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         record.check()?;
         let (class, pool) = (record.class.clone(), record.name.clone());
         self.write(
             &class,
             &pool,
             Held::Record(Box::new(record.clone())),
+            after,
             |token| PoolEvent::Put { record, token },
         )
     }
@@ -175,7 +186,7 @@ impl MemoryDirectory {
             version: withdrawal.version(),
             properties_version: withdrawal.properties_version,
         };
-        self.write(&class, &pool, held, |token| PoolEvent::Withdrawn {
+        self.write(&class, &pool, held, None, |token| PoolEvent::Withdrawn {
             withdrawal,
             token,
         })
@@ -194,6 +205,7 @@ impl MemoryDirectory {
         class: &str,
         pool: &str,
         held: Held,
+        after: Option<Option<Version>>,
         event: impl FnOnce(ResumeToken) -> PoolEvent,
     ) -> Result<(), DirectoryError> {
         let offered = held.version();
@@ -201,15 +213,9 @@ impl MemoryDirectory {
         let base = self.shared.base;
         let mut state = self.shared.lock();
         let entry = state.class(class, base);
-        if let Some(current) = entry.pools.get(pool)
-            && offered <= current.version()
-        {
-            return Err(DirectoryError::NotNewer {
-                class: class.to_owned(),
-                pool: pool.to_owned(),
-                held: current.version(),
-                offered,
-            });
+        let current = entry.pools.get(pool).map(Held::version);
+        if let Some(refused) = crate::directory::refused(class, pool, current, offered, after) {
+            return Err(refused);
         }
         entry.pools.insert(pool.to_owned(), held);
         entry.head += 1;
@@ -234,6 +240,14 @@ impl PoolDirectory for MemoryDirectory {
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.remove(withdrawal)
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> Result<(), DirectoryError> {
+        self.put_after(record, Some(last))
     }
 
     async fn last_write(

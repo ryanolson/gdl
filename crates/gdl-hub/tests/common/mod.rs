@@ -469,17 +469,33 @@ impl Gated {
     }
 }
 
-impl PoolDirectory for Gated {
-    type Watch = MemoryWatch;
-
-    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+impl Gated {
+    /// Wait while the gate is shut, counted as held.
+    async fn pass(&self) {
         let mut open = self.open.subscribe();
         if !*open.borrow_and_update() {
             self.held.send_modify(|held| *held += 1);
             let _ = open.wait_for(|open| *open).await;
             self.held.send_modify(|held| *held -= 1);
         }
+    }
+}
+
+impl PoolDirectory for Gated {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        self.pass().await;
         self.inner.publish(record).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<gdl_pools::Version>,
+    ) -> Result<(), DirectoryError> {
+        self.pass().await;
+        self.inner.publish_after(record, last).await
     }
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
@@ -530,15 +546,18 @@ impl Resolving {
 impl PoolDirectory for Resolving {
     type Watch = MemoryWatch;
 
-    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
-        let mut names = self.names.subscribe();
-        let address = names
-            .wait_for(|names| names.contains_key(&record.hub))
-            .await
-            .expect("the names live")[&record.hub]
-            .clone();
-        record.hub = address;
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        let record = resolved(&self.names, record).await;
         self.inner.publish(record).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<gdl_pools::Version>,
+    ) -> Result<(), DirectoryError> {
+        let record = resolved(&self.names, record).await;
+        self.inner.publish_after(record, last).await
     }
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
@@ -632,15 +651,18 @@ impl<D: PoolDirectory> Named<D> {
 impl<D: PoolDirectory> PoolDirectory for Named<D> {
     type Watch = D::Watch;
 
-    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
-        let mut names = self.names.subscribe();
-        let address = names
-            .wait_for(|names| names.contains_key(&record.hub))
-            .await
-            .expect("the names live")[&record.hub]
-            .clone();
-        record.hub = address;
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        let record = resolved(&self.names, record).await;
         self.inner.publish(record).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<gdl_pools::Version>,
+    ) -> Result<(), DirectoryError> {
+        let record = resolved(&self.names, record).await;
+        self.inner.publish_after(record, last).await
     }
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
@@ -658,6 +680,22 @@ impl<D: PoolDirectory> PoolDirectory for Named<D> {
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> D::Watch {
         self.inner.watch(class, from)
     }
+}
+
+/// `record` with its hub's name resolved to the address `names` gives it,
+/// once it does.
+async fn resolved(
+    names: &watch::Sender<HashMap<String, String>>,
+    mut record: PoolRecord,
+) -> PoolRecord {
+    let mut names = names.subscribe();
+    let address = names
+        .wait_for(|names| names.contains_key(&record.hub))
+        .await
+        .expect("the names live")[&record.hub]
+        .clone();
+    record.hub = address;
+    record
 }
 
 /// The public listener of `hub`, as another hub reaches it.

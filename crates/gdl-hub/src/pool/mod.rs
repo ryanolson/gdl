@@ -720,12 +720,12 @@ impl<D: PoolDirectory> PoolReadiness<D> {
         match (&self.reports, write) {
             (Some(reports), gdl_pools::CommandWrite::Record(record)) => {
                 Arc::clone(reports)
-                    .take(gdl_watch::Report::Record(*record))
+                    .take(gdl_watch::Report::Record(*record), None)
                     .await?;
             }
             (Some(reports), gdl_pools::CommandWrite::Withdrawal(withdrawal)) => {
                 Arc::clone(reports)
-                    .take(gdl_watch::Report::Withdrawal(withdrawal))
+                    .take(gdl_watch::Report::Withdrawal(withdrawal), None)
                     .await?;
             }
             (None, write) => write.to(&*self.directory).await?,
@@ -1004,21 +1004,33 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                 )
                 .route(
                     gdl_watch::REPORT_ROUTE,
-                    post(move |Json(report): Json<gdl_watch::Report>| async move {
-                        match Arc::clone(&reports).take(report).await {
-                            Ok(reply) => Json(reply).into_response(),
-                            Err(refused) => {
-                                let status = match refused {
-                                    gdl_pools::DirectoryError::Malformed(_) => {
-                                        StatusCode::BAD_REQUEST
-                                    }
-                                    _ => StatusCode::CONFLICT,
-                                };
-                                let refusal = gdl_watch::ReportRefusal::of(refused);
-                                (status, Json(refusal)).into_response()
+                    post(
+                        move |Query(query): Query<ReportQuery>,
+                              Json(report): Json<gdl_watch::Report>| async move {
+                            let taken = match query
+                                .after
+                                .as_deref()
+                                .map(gdl_watch::parse_after)
+                                .transpose()
+                            {
+                                Ok(after) => Arc::clone(&reports).take(report, after).await,
+                                Err(malformed) => Err(malformed),
+                            };
+                            match taken {
+                                Ok(reply) => Json(reply).into_response(),
+                                Err(refused) => {
+                                    let status = match refused {
+                                        gdl_pools::DirectoryError::Malformed(_) => {
+                                            StatusCode::BAD_REQUEST
+                                        }
+                                        _ => StatusCode::CONFLICT,
+                                    };
+                                    let refusal = gdl_watch::ReportRefusal::of(refused);
+                                    (status, Json(refusal)).into_response()
+                                }
                             }
-                        }
-                    }),
+                        },
+                    ),
                 )
         });
         Router::new()
@@ -1331,6 +1343,13 @@ struct WatchQuery {
     pool: Option<String>,
     run: Option<u64>,
     generation: Option<u64>,
+}
+
+/// A report's query: the last write its record was written after, if it
+/// names one ([`gdl_watch::AFTER`]).
+#[derive(Deserialize)]
+struct ReportQuery {
+    after: Option<String>,
 }
 
 /// The relay's query: the chooser that holds the watch, if it names one

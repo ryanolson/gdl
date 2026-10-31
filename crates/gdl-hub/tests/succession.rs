@@ -209,6 +209,14 @@ impl PoolDirectory for Stale {
         self.inner.publish(record).await
     }
 
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<gdl_pools::Version>,
+    ) -> Result<(), DirectoryError> {
+        self.inner.publish_after(record, last).await
+    }
+
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.inner.withdraw(withdrawal).await
     }
@@ -291,6 +299,14 @@ async fn a_successor_with_a_failed_reread_stays_past_the_retained_tombstone() {
             self.inner.publish(record).await
         }
 
+        async fn publish_after(
+            &self,
+            record: PoolRecord,
+            last: Option<gdl_pools::Version>,
+        ) -> Result<(), DirectoryError> {
+            self.inner.publish_after(record, last).await
+        }
+
         async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
             self.inner.withdraw(withdrawal).await
         }
@@ -328,7 +344,6 @@ async fn a_successor_with_a_failed_reread_stays_past_the_retained_tombstone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F4: a predecessor crossing a block after the startup read can outrun the successor's first list"]
 async fn a_successor_stays_past_a_predecessor_that_writes_during_its_start() {
     #[derive(Clone)]
     struct Racing {
@@ -345,6 +360,19 @@ async fn a_successor_stays_past_a_predecessor_that_writes_during_its_start() {
                 self.inner.publish(self.latest.clone()).await?;
             }
             self.inner.publish(record).await
+        }
+
+        // The predecessor's write lands before the hub's first write of
+        // either kind.
+        async fn publish_after(
+            &self,
+            record: PoolRecord,
+            last: Option<gdl_pools::Version>,
+        ) -> Result<(), DirectoryError> {
+            if !self.raced.swap(true, Ordering::SeqCst) {
+                self.inner.publish(self.latest.clone()).await?;
+            }
+            self.inner.publish_after(record, last).await
         }
 
         async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {

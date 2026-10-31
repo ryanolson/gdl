@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gdl_pools::{
     DirectoryError, LastWrite, LoadSummary, PoolDirectory, PoolRecord, PoolState, Presence,
-    Withdrawal,
+    Version, Withdrawal,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -282,6 +282,10 @@ struct Writer {
     /// Under the `relay` backend, where the pool's last write is read: its
     /// parent's hub.
     parent: Option<HubDirectory>,
+    /// The version of the pool's last write the hub read and numbered past:
+    /// until a write is stored, each lands only while that is still the
+    /// last write ([`PoolDirectory::publish_after`]).
+    read: Option<Version>,
     /// The longest a write may take: one that takes longer is overtaken by
     /// the next, rather than holding up the heartbeat.
     bound: Duration,
@@ -317,10 +321,16 @@ impl Writer {
             .ok()
             .and_then(Option::as_ref)
             .map(|last| last.version().epoch);
+        let read = last
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(LastWrite::version);
         let writer = Self {
             epoch: epoch.map_or(now, |last| now.max(last.saturating_add(1))),
             seq: 0,
             parent,
+            read,
             bound,
             stored: false,
         };
@@ -352,7 +362,17 @@ impl Writer {
             seq: self.seq,
             ..record.clone()
         };
-        let Ok(written) = tokio::time::timeout(self.bound, directory.publish(write)).await else {
+        // Until a write is stored, one lands only on the write the hub read:
+        // a write another hub made since could carry a list version past
+        // the one this hub numbered from.
+        let after = (!self.stored).then_some(self.read);
+        let publishing = async {
+            match after {
+                Some(last) => directory.publish_after(write, last).await,
+                None => directory.publish(write).await,
+            }
+        };
+        let Ok(written) = tokio::time::timeout(self.bound, publishing).await else {
             tracing::warn!(bound = ?self.bound, "the pool's record was not published in time");
             return;
         };
@@ -376,9 +396,10 @@ impl Writer {
                 tracing::warn!(%held, %offered, "the directory refused the pool's record as not newer");
                 if held.epoch == self.epoch && self.stored {
                     self.seq = held.seq;
-                } else if held.epoch >= self.epoch && !self.stored {
-                    // Nothing has been stored under this epoch, so no reader
-                    // knows it: it can still move past the one held. The
+                } else if !self.stored {
+                    // A later write than the one the hub read, at any epoch:
+                    // nothing has been stored under this epoch, so no reader
+                    // knows it, and it can still move past the one held. The
                     // properties' versions follow the write held, read
                     // again, so they stay above the ones it published. An
                     // equal epoch is a predecessor's that started in the
@@ -399,8 +420,9 @@ impl Writer {
                     let epoch = last
                         .as_ref()
                         .map_or(held.epoch, |last| held.epoch.max(last.version().epoch));
-                    self.epoch = epoch.saturating_add(1);
+                    self.epoch = self.epoch.max(epoch.saturating_add(1));
                     self.seq = 0;
+                    self.read = last.as_ref().map(LastWrite::version);
                     feed.raise_floor(super::properties::floor_after(
                         self.epoch,
                         last.as_ref().map(LastWrite::properties_version),

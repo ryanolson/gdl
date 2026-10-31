@@ -169,27 +169,26 @@ impl RelayDirectory {
     /// not newer than what the directory holds. It runs on a blocking
     /// thread, whole, so a caller that stops waiting cannot leave a write
     /// stored and not taken.
-    async fn write(&self, write: Write) -> Result<(), DirectoryError> {
+    async fn write(
+        &self,
+        write: Write,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         let Some(store) = self.store.clone() else {
-            return write.apply(&self.records);
+            return write.apply(&self.records, after);
         };
         let records = self.records.clone();
         tokio::task::spawn_blocking(move || {
             let _writes = store.writes.lock().unwrap_or_else(PoisonError::into_inner);
             let (class, pool) = write.pool();
-            let offered = write.version();
-            if let Some((held, _)) = records.held(class, pool)
-                && offered <= held
+            let held = records.held(class, pool).map(|(held, _)| held);
+            if let Some(refused) =
+                crate::directory::refused(class, pool, held, write.version(), after)
             {
-                return Err(DirectoryError::NotNewer {
-                    class: class.to_owned(),
-                    pool: pool.to_owned(),
-                    held,
-                    offered,
-                });
+                return Err(refused);
             }
-            file::write(&store.root.join(class), class, pool, write.held())?;
-            write.apply(&records)
+            file::write(&store.root.join(class), class, pool, write.held(), None)?;
+            write.apply(&records, after)
         })
         .await
         .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
@@ -202,12 +201,21 @@ impl PoolDirectory for RelayDirectory {
     async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         // Before any path is made of its names.
         record.check()?;
-        self.write(Write::Record(record)).await
+        self.write(Write::Record(record), None).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> Result<(), DirectoryError> {
+        record.check()?;
+        self.write(Write::Record(record), Some(last)).await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
-        self.write(Write::Withdrawal(withdrawal)).await
+        self.write(Write::Withdrawal(withdrawal), None).await
     }
 
     async fn last_write(
@@ -259,9 +267,13 @@ impl Write {
     }
 
     /// Take the write into `records`, which hands it to their watchers.
-    fn apply(self, records: &MemoryDirectory) -> Result<(), DirectoryError> {
+    fn apply(
+        self,
+        records: &MemoryDirectory,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         match self {
-            Write::Record(record) => records.put(record),
+            Write::Record(record) => records.put_after(record, after),
             Write::Withdrawal(withdrawal) => records.remove(withdrawal),
         }
     }

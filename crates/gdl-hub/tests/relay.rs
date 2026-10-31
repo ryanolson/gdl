@@ -1551,3 +1551,48 @@ async fn a_child_of_a_parent_of_an_earlier_build_starts_as_before() {
     assert!(first.properties_version >= first.epoch << 20, "{first:?}");
     child.hub.shutdown().await.expect("the child's hub stops");
 }
+
+/// A child's first record after a restart is written after reading its
+/// last write: the parent writes it only while that is still the child's
+/// last write, or it holds none, and refuses it as not newer otherwise, even
+/// at a later epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_writes_a_record_after_a_read_only_on_that_write() {
+    let parent = relay_pool(&spec(), global(), quiet_timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
+    let at = address(&parent.hub);
+    let lease = Duration::from_secs(30);
+    let at_version = |epoch, seq| Some(gdl_pools::Version { epoch, seq });
+    let record = |epoch, seq| child_record("model-x-01", &nowhere(), (epoch, seq), lease);
+    watcher
+        .report_after(&at, &Report::Record(record(5, 1)), None)
+        .await
+        .expect("a first record, of which none was read");
+    match watcher
+        .report_after(&at, &Report::Record(record(6, 1)), None)
+        .await
+    {
+        Err(DirectoryError::NotNewer { held, .. }) if (held.epoch, held.seq) == (5, 1) => {}
+        other => panic!("a record after a read of none: {other:?}"),
+    }
+    watcher
+        .report(&at, &Report::Record(record(5, 2)))
+        .await
+        .expect("the hub before writes again");
+    match watcher
+        .report_after(&at, &Report::Record(record(6, 1)), at_version(5, 1))
+        .await
+    {
+        Err(DirectoryError::NotNewer { held, .. }) if (held.epoch, held.seq) == (5, 2) => {}
+        other => panic!("a record after a read of a write since replaced: {other:?}"),
+    }
+    watcher
+        .report_after(&at, &Report::Record(record(6, 1)), at_version(5, 2))
+        .await
+        .expect("a record after a read of the last write");
+    assert_eq!(
+        held(&parent.directory, "model_x").await["model-x-01"].version(),
+        gdl_pools::Version { epoch: 6, seq: 1 }
+    );
+    parent.hub.shutdown().await.expect("the parent stops");
+}

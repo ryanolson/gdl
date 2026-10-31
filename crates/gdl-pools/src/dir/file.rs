@@ -260,7 +260,17 @@ pub(crate) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
 ///
 /// The read and the rename are not one step: two processes writing one
 /// pool is a misconfiguration this does not arbitrate.
-pub(crate) fn write(dir: &Path, class: &str, pool: &str, held: Held) -> Result<(), DirectoryError> {
+///
+/// With `after` (`Some`), a write made after reading the pool's last write
+/// at that version lands only while the file still holds it, or no write.
+/// The compare shares the read with the check that the write is newer.
+pub(crate) fn write(
+    dir: &Path,
+    class: &str,
+    pool: &str,
+    held: Held,
+    after: Option<Option<Version>>,
+) -> Result<(), DirectoryError> {
     let path = dir.join(format!("{pool}.json"));
     let unavailable = |what: &str, error: io::Error| {
         DirectoryError::Unavailable(format!("{what} {}: {error}", path.display()))
@@ -270,15 +280,14 @@ pub(crate) fn write(dir: &Path, class: &str, pool: &str, held: Held) -> Result<(
         held,
     };
     match load(&path, class, pool) {
-        Ok(Some(current)) if entry.version() <= current.version() => {
-            return Err(DirectoryError::NotNewer {
-                class: class.to_owned(),
-                pool: pool.to_owned(),
-                held: current.version(),
-                offered: entry.version(),
-            });
+        Ok(current) => {
+            let current = current.map(|current| current.version());
+            if let Some(refused) =
+                crate::directory::refused(class, pool, current, entry.version(), after)
+            {
+                return Err(refused);
+            }
         }
-        Ok(_) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         // Unreadable, as distinct from not parsing: the version it holds is
         // unknown, so it is not written over.

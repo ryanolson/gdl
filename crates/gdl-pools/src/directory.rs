@@ -70,6 +70,46 @@ pub trait PoolDirectory: Send + Sync + 'static {
         record: PoolRecord,
     ) -> impl Future<Output = Result<(), DirectoryError>> + Send;
 
+    /// Store `record` as [`PoolDirectory::publish`] does, and only while
+    /// the pool's last write is still the one the caller read at `last`
+    /// (`None`: it read none), or the directory holds no write of the pool.
+    /// Otherwise the write is refused as [`DirectoryError::NotNewer`], at
+    /// the version held, and the caller reads the last write again. A hub
+    /// that starts makes its first write so, since it numbered its list
+    /// past the write it read: a write landing on a later one could carry a
+    /// lower list version than that one.
+    ///
+    /// The default reads the last write ([`PoolDirectory::last_write`]),
+    /// compares, and then publishes. That is not one step: a write between
+    /// the read and the publish is not seen, so the window is one read and
+    /// one write. The backends in this crate, and the DynamoDB one, compare
+    /// in the write itself.
+    fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> impl Future<Output = Result<(), DirectoryError>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            let held = self
+                .last_write(&record.class, &record.name)
+                .await?
+                .map(|held| held.version());
+            if let Some(refused) = refused(
+                &record.class,
+                &record.name,
+                held,
+                record.version(),
+                Some(last),
+            ) {
+                return Err(refused);
+            }
+            self.publish(record).await
+        }
+    }
+
     /// Remove a pool's record and leave a tombstone at the withdrawal's
     /// version, if it is newer than what the directory holds for the pool.
     /// A pool the directory has never held gets the tombstone all the same.
@@ -114,6 +154,27 @@ pub trait PoolDirectory: Send + Sync + 'static {
     ///
     /// An error ends the watch.
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> Self::Watch;
+}
+
+/// Why a write at `offered` of `pool` of `class` may not land on the
+/// directory's last write of the pool, at `held`: it is not newer, or,
+/// for a write made after reading the last write at `after` (`Some`), the
+/// directory holds another. `None` when it may land.
+pub(crate) fn refused(
+    class: &str,
+    pool: &str,
+    held: Option<Version>,
+    offered: Version,
+    after: Option<Option<Version>>,
+) -> Option<DirectoryError> {
+    let held = held?;
+    let moved = after.is_some_and(|after| after != Some(held));
+    (offered <= held || moved).then(|| DirectoryError::NotNewer {
+        class: class.to_owned(),
+        pool: pool.to_owned(),
+        held,
+        offered,
+    })
 }
 
 /// The last write a directory took for one pool
@@ -231,7 +292,9 @@ pub enum DirectoryError {
     #[error("{0}")]
     Malformed(String),
     /// A write that is not newer than what the directory holds for the
-    /// pool: a record or the tombstone of its withdrawal.
+    /// pool: a record or the tombstone of its withdrawal. For
+    /// [`PoolDirectory::publish_after`], also a write whose pool's last
+    /// write is no longer the one its caller read.
     #[error("pool `{pool}` of class `{class}`: {offered} is not newer than {held}")]
     NotNewer {
         /// The pool's class.

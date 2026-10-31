@@ -263,12 +263,13 @@ self.records.set(key, value, gdl::Expected::Absent);     // does not wait
 
 ## The pool directory
 
-The pool directory holds one record per pool, keyed by class and name. Each record is written only by its own pool's hub. Publishing is how a pool becomes visible: its hub calls `publish` when it starts, on each change, and as its heartbeat. Where the record goes is the backend's business. The `gdl_pools::PoolDirectory` trait has four operations:
+The pool directory holds one record per pool, keyed by class and name. Each record is written only by its own pool's hub. Publishing is how a pool becomes visible: its hub calls `publish` when it starts, on each change, and as its heartbeat. Where the record goes is the backend's business. The `gdl_pools::PoolDirectory` trait has five operations:
 
 - `publish` stores a record if it is newer than what the directory holds.
 - `withdraw` removes a record and leaves a tombstone at its version, so a late publish cannot bring it back. A newer epoch can. The tombstone keeps the pool's last list version, which a later hub numbers past.
 - `watch` yields the class's current records, then `Synced` with a resume token, then each change with its token. A token the backend no longer serves, a token of another class, or a watcher that falls behind its buffer ends the watch with `Resnapshot`. The caller then watches again from the start.
-- `last_write` reads a pool's last write, its record or its tombstone. Its default reads the record from a new watch's snapshot, so a backend that keeps tombstones answers with them.
+- `last_write` reads a pool's last write, its record or its tombstone. Its default reads the record from a new watch's snapshot, so a backend that keeps tombstones answers with them. A read it cannot answer is an error, never none.
+- `publish_after` publishes a record only while the pool's last write is still the one its caller read, or the directory holds none. A hub's first write is made so ([Pools design](../development/pools-design.md#a-hub-numbers-past-the-pools-last-write)).
 
 An operator's commands for a pool whose hub is gone use the same two writes ([A pool whose hub is gone](#a-pool-whose-hub-is-gone)), so they work with every backend.
 

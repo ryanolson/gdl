@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gdl_pools::{
     DirectoryError, LastWrite, MemoryLimits, MemoryWatch, PoolDirectory, PoolRecord,
-    RelayDirectory, Withdrawal,
+    RelayDirectory, Version, Withdrawal,
 };
 use gdl_watch::{PoolWatcher, Report, ReportReply};
 use tokio::sync::watch;
@@ -117,6 +117,18 @@ impl HubDirectory {
         parent.watcher.held(&parent.hub, class, pool).await
     }
 
+    /// The parent answered a report of a record with `lease`: its next
+    /// reports go at the cadence it asks for, within a third of the lease
+    /// whatever it says, so that two lost reports do not drop the pool.
+    fn answered(&self, lease: Duration, answer: Duration) {
+        let cadence = answer.clamp(MIN_CADENCE, (lease / 3).max(MIN_CADENCE));
+        self.cadence.send_if_modified(|current| {
+            let changed = *current != Some(cadence);
+            *current = Some(cadence);
+            changed
+        });
+    }
+
     /// Report `report` to the parent: the interval of its answer.
     async fn report(&self, report: Report) -> Result<Option<Duration>, DirectoryError> {
         let Some(parent) = &self.parent else {
@@ -132,20 +144,42 @@ impl PoolDirectory for HubDirectory {
     async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
         let lease = record.lease;
         if let Some(answer) = self.report(Report::Record(record)).await? {
-            // Within a third of the record's lease whatever the parent
-            // says, so that two lost reports do not drop the pool.
-            let cadence = answer.clamp(MIN_CADENCE, (lease / 3).max(MIN_CADENCE));
-            self.cadence.send_if_modified(|current| {
-                let changed = *current != Some(cadence);
-                *current = Some(cadence);
-                changed
-            });
+            self.answered(lease, answer);
         }
         Ok(())
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         self.report(Report::Withdrawal(withdrawal)).await.map(drop)
+    }
+
+    /// The parent's hub compares: see [`gdl_watch::AFTER`]. A parent of an
+    /// earlier build writes the record as any report.
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> Result<(), DirectoryError> {
+        let Some(parent) = &self.parent else {
+            return Ok(());
+        };
+        let lease = record.lease;
+        let answer = parent
+            .watcher
+            .report_after(&parent.hub, &Report::Record(record), last)
+            .await?;
+        self.answered(lease, answer);
+        Ok(())
+    }
+
+    /// The pool's own last write, which its parent's hub holds: see
+    /// [`HubDirectory::held`].
+    async fn last_write(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
+        self.held(class, pool).await
     }
 
     fn watch(&self, class: &str, from: Option<gdl_pools::ResumeToken>) -> MemoryWatch {
@@ -210,16 +244,19 @@ impl Reports {
     /// comes, a report runs to the end of its write in a task of its own,
     /// so a request that ends early cannot let the next report be checked
     /// before its write is done.
+    /// A record written after the child read its last write at `after`
+    /// (`Some`) is written only while that is still the child's last write.
     pub(crate) async fn take(
         self: Arc<Self>,
         report: Report,
+        after: Option<Option<Version>>,
     ) -> Result<ReportReply, DirectoryError> {
         let interval = self.interval(&report);
         let turn = Arc::clone(&self.order).lock_owned().await;
         tokio::spawn(async move {
             let _turn = turn;
             match self.verify(report)? {
-                Some(verified) => self.write(verified).await,
+                Some(verified) => self.write(verified, after).await,
                 None => Ok(()),
             }
         })
@@ -299,9 +336,16 @@ impl Reports {
     /// Write what `verified` carries. The directory still refuses a write
     /// that is not newer, which settles two reports of one pool verified at
     /// once.
-    pub(crate) async fn write(&self, verified: VerifiedReport) -> Result<(), DirectoryError> {
+    pub(crate) async fn write(
+        &self,
+        verified: VerifiedReport,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         match verified.0 {
-            Report::Record(record) => self.children.publish(record).await,
+            Report::Record(record) => match after {
+                Some(last) => self.children.publish_after(record, last).await,
+                None => self.children.publish(record).await,
+            },
             Report::Withdrawal(withdrawal) => self.children.withdraw(withdrawal).await,
         }
     }

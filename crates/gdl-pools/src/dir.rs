@@ -16,7 +16,8 @@ use tokio::{
 };
 
 use crate::{
-    DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Withdrawal,
+    DirectoryError, LastWrite, PoolDirectory, PoolEvent, PoolRecord, ResumeToken, Version,
+    Withdrawal,
 };
 
 pub(crate) mod file;
@@ -166,12 +167,18 @@ impl DirDirectory {
             .map_or(0, |class| class.watchers.len())
     }
 
-    async fn write(&self, class: String, pool: String, held: Held) -> Result<(), DirectoryError> {
+    async fn write(
+        &self,
+        class: String,
+        pool: String,
+        held: Held,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         let io = Arc::clone(&self.shared.lock().class(&class, self.shared.base).io);
         let dir = self.shared.root.join(&class);
         tokio::task::spawn_blocking(move || {
             let _io = io.lock().unwrap_or_else(PoisonError::into_inner);
-            file::write(&dir, &class, &pool, held)
+            file::write(&dir, &class, &pool, held, after)
         })
         .await
         .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
@@ -185,14 +192,27 @@ impl PoolDirectory for DirDirectory {
         // Before any path is made of its names.
         record.check()?;
         let (class, pool) = (record.class.clone(), record.name.clone());
-        self.write(class, pool, Held::Record(Box::new(record)))
+        self.write(class, pool, Held::Record(Box::new(record)), None)
+            .await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> Result<(), DirectoryError> {
+        // Before any path is made of its names.
+        record.check()?;
+        let (class, pool) = (record.class.clone(), record.name.clone());
+        self.write(class, pool, Held::Record(Box::new(record)), Some(last))
             .await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
         let (class, pool) = (withdrawal.class.clone(), withdrawal.pool.clone());
-        self.write(class, pool, Held::tombstone(withdrawal)).await
+        self.write(class, pool, Held::tombstone(withdrawal), None)
+            .await
     }
 
     async fn last_write(

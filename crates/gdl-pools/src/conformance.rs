@@ -144,6 +144,7 @@ pub async fn run<B: Backend>(backend: &B) {
     case!(a_lagging_watcher_is_cut_off, Some(Rule::Changes));
     case!(a_dropped_watch_is_released);
     case!(the_last_write_of_a_pool_is_read);
+    case!(a_write_after_a_read_lands_only_on_that_write);
     case!(a_record_stays_until_withdrawn, Some(Rule::Kept));
     case!(
         a_watch_sees_every_record_of_its_class,
@@ -242,6 +243,18 @@ async fn publish<D: PoolDirectory>(
     record: PoolRecord,
 ) -> Result<(), DirectoryError> {
     within("publish", directory.publish(record)).await
+}
+
+async fn publish_after<D: PoolDirectory>(
+    directory: &D,
+    record: PoolRecord,
+    last: Option<Version>,
+) -> Result<(), DirectoryError> {
+    within(
+        "a write after a read",
+        directory.publish_after(record, last),
+    )
+    .await
 }
 
 async fn withdraw<D: PoolDirectory>(directory: &D, w: Withdrawal) -> Result<(), DirectoryError> {
@@ -800,6 +813,60 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
             format_args!("after a restart, m2's last write reads {last:?}, not its withdrawal"),
         );
     }
+}
+
+/// A hub's first write is made after reading the pool's last write, and
+/// lands only while that is still the last write, or the directory holds
+/// none: so a write another writer made after the read refuses it as not
+/// newer, at the version held, even when the hub's epoch is later.
+async fn a_write_after_a_read_lands_only_on_that_write<B: Backend>(backend: &B) {
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
+    let at = |epoch, seq| Some(Version { epoch, seq });
+    publish(&writer, record(MODEL, "m1", 1, 1))
+        .await
+        .expect("m1");
+    publish_after(&reader, record(MODEL, "m1", 2, 1), at(1, 1))
+        .await
+        .expect("m1 past the write it read");
+    not_newer(
+        publish_after(&reader, record(MODEL, "m1", 3, 1), at(1, 1)).await,
+        (2, 1),
+        (3, 1),
+    );
+    publish(&writer, record(MODEL, "m2", 1, 1))
+        .await
+        .expect("m2");
+    not_newer(
+        publish_after(&reader, record(MODEL, "m2", 2, 1), None).await,
+        (1, 1),
+        (2, 1),
+    );
+    publish(&writer, record(MODEL, "m3", 1, 1))
+        .await
+        .expect("m3");
+    withdraw(&writer, withdrawal(MODEL, "m3", 1, 2))
+        .await
+        .expect("m3's withdrawal");
+    not_newer(
+        publish_after(&reader, record(MODEL, "m3", 2, 1), at(1, 1)).await,
+        (1, 2),
+        (2, 1),
+    );
+    publish_after(&reader, record(MODEL, "m3", 2, 1), at(1, 2))
+        .await
+        .expect("m3 past its tombstone");
+    publish_after(&reader, record(MODEL, "m4", 1, 1), None)
+        .await
+        .expect("m4, of which none was read");
+    publish_after(&reader, record(MODEL, "m5", 1, 1), at(7, 7))
+        .await
+        .expect("m5, which the directory no longer holds");
+    // A write that is not newer is refused whatever it read.
+    not_newer(
+        publish_after(&reader, record(MODEL, "m1", 2, 1), at(2, 1)).await,
+        (2, 1),
+        (2, 1),
+    );
 }
 
 /// A hub that starts reads its pool's last write, through any handle: the

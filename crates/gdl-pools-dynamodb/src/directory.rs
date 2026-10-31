@@ -162,6 +162,9 @@ impl DynamoDirectory {
     /// Put `item`, a write of `pool` of `class` at `version`, if it is
     /// newer than the pool's item, and, given `kept`, only while the pool's
     /// item names that list: the list the item it replaced named, if any.
+    /// Given `after` (`Some`), only while the pool's item is the write the
+    /// caller read at that version, or there is none: the table compares
+    /// in the same conditional put.
     async fn put(
         &self,
         class: &str,
@@ -169,16 +172,27 @@ impl DynamoDirectory {
         version: Version,
         item: Item,
         kept: Option<ListKey>,
+        after: Option<Option<Version>>,
     ) -> Result<Option<ListKey>, Refusal> {
         let (mut names, mut values) = item::newer(version);
-        let condition = match kept {
-            None => item::NEWER.to_owned(),
-            Some(kept) => {
-                names.insert("#names".into(), item::NAMES.into());
-                values.insert(":names".into(), AttributeValue::S(kept.sort_key()));
-                format!("({}) AND #names = :names", item::NEWER)
-            }
-        };
+        let mut condition = item::NEWER.to_owned();
+        if let Some(kept) = kept {
+            names.insert("#names".into(), item::NAMES.into());
+            values.insert(":names".into(), AttributeValue::S(kept.sort_key()));
+            condition = format!("({condition}) AND #names = :names");
+        }
+        if let Some(after) = after {
+            let read = match after {
+                Some(read) => {
+                    values.insert(":read_epoch".into(), item::number(read.epoch));
+                    values.insert(":read_seq".into(), item::number(read.seq));
+                    "(#epoch = :read_epoch AND #seq = :read_seq)"
+                }
+                // Read as none: only an item that holds no write is it.
+                None => "attribute_not_exists(#epoch)",
+            };
+            condition = format!("({condition}) AND (attribute_not_exists(#epoch) OR {read})");
+        }
         let put = self
             .shared
             .client
@@ -206,6 +220,8 @@ impl DynamoDirectory {
                 };
                 let held = match held.and_then(item::version) {
                     Some(held) if held >= version => held,
+                    // Newer, but not the write the caller read.
+                    Some(held) if after.is_some_and(|after| after != Some(held)) => held,
                     // Older, or no item at all: only the list it names
                     // refused a write that kept one.
                     _ if kept.is_some() => {
@@ -296,6 +312,7 @@ impl DynamoDirectory {
     /// Write a pool's item, as [`Self::put`] does, and then mark the list
     /// of the item it replaced to expire, if the new item is a record at a
     /// higher `properties_version`. A withdrawal expires nothing.
+    #[allow(clippy::too_many_arguments)]
     async fn write(
         &self,
         class: &str,
@@ -304,8 +321,9 @@ impl DynamoDirectory {
         item: Item,
         properties_version: Option<u64>,
         kept: Option<ListKey>,
+        after: Option<Option<Version>>,
     ) -> Result<(), Refusal> {
-        let before = self.put(class, pool, version, item, kept).await?;
+        let before = self.put(class, pool, version, item, kept, after).await?;
         if let Some(before) = before.filter(|before| {
             properties_version.is_some_and(|now| now > before.properties_version())
         }) {
@@ -343,10 +361,14 @@ impl From<DirectoryError> for Refusal {
     }
 }
 
-impl PoolDirectory for DynamoDirectory {
-    type Watch = DynamoWatch;
-
-    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+impl DynamoDirectory {
+    /// [`PoolDirectory::publish`], or, given `after` (`Some`),
+    /// [`PoolDirectory::publish_after`].
+    async fn publish_with(
+        &self,
+        record: PoolRecord,
+        after: Option<Option<Version>>,
+    ) -> Result<(), DirectoryError> {
         record.check()?;
         let mut encoded = item::record(&record, item::next_order())?;
         let (class, pool) = (record.class.as_str(), record.name.as_str());
@@ -363,7 +385,15 @@ impl PoolDirectory for DynamoDirectory {
         let properties_version = Some(record.properties_version);
         let Some((key, list)) = encoded.list.take() else {
             return Ok(self
-                .write(class, pool, version, encoded.item, properties_version, None)
+                .write(
+                    class,
+                    pool,
+                    version,
+                    encoded.item,
+                    properties_version,
+                    None,
+                    after,
+                )
                 .await?);
         };
         // A write at the epoch of the handle's last write of the pool, with
@@ -385,6 +415,7 @@ impl PoolDirectory for DynamoDirectory {
                     kept,
                     properties_version,
                     Some(cached.key),
+                    after,
                 )
                 .await
             {
@@ -396,8 +427,16 @@ impl PoolDirectory for DynamoDirectory {
             }
         }
         self.put_list(pool, list).await?;
-        self.write(class, pool, version, encoded.item, properties_version, None)
-            .await?;
+        self.write(
+            class,
+            pool,
+            version,
+            encoded.item,
+            properties_version,
+            None,
+            after,
+        )
+        .await?;
         self.written().insert(
             owner,
             Written {
@@ -406,6 +445,22 @@ impl PoolDirectory for DynamoDirectory {
             },
         );
         Ok(())
+    }
+}
+
+impl PoolDirectory for DynamoDirectory {
+    type Watch = DynamoWatch;
+
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        self.publish_with(record, None).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<Version>,
+    ) -> Result<(), DirectoryError> {
+        self.publish_with(record, Some(last)).await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
@@ -419,6 +474,7 @@ impl PoolDirectory for DynamoDirectory {
                 &withdrawal.pool,
                 withdrawal.version(),
                 item,
+                None,
                 None,
                 None,
             )

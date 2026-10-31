@@ -79,14 +79,15 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 .await
                 .expect("the blocker starts in time")
                 .expect("the blocker starts");
-            let mut publishing =
-                Box::pin(std::sync::Arc::clone(&reports).take(Report::Record(record.clone())));
+            let mut publishing = Box::pin(
+                std::sync::Arc::clone(&reports).take(Report::Record(record.clone()), None),
+            );
             let published = match futures::poll!(publishing.as_mut()) {
                 Poll::Ready(answer) => Some(answer),
                 Poll::Pending => None,
             };
             let mut withdrawing = Box::pin(
-                std::sync::Arc::clone(&reports).take(Report::Withdrawal(withdrawal.clone())),
+                std::sync::Arc::clone(&reports).take(Report::Withdrawal(withdrawal.clone()), None),
             );
             let answer = match futures::poll!(withdrawing.as_mut()) {
                 Poll::Ready(answer) => Some(answer),

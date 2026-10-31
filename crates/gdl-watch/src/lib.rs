@@ -60,7 +60,10 @@ pub use keyed::{
     KeyedReply, keyed_path,
 };
 pub use limits::{WatchFailure, WatchLimits};
-pub use report::{HELD_ROUTE, REPORT_ROUTE, Report, ReportRefusal, ReportReply, held_path};
+pub use report::{
+    AFTER, HELD_ROUTE, REPORT_ROUTE, Report, ReportRefusal, ReportReply, after_value, held_path,
+    parse_after,
+};
 pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};
 
 /// The name the pool's extension mounts its routes under, at

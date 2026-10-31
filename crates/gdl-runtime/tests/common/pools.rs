@@ -297,10 +297,10 @@ impl Resolving {
     }
 }
 
-impl PoolDirectory for Resolving {
-    type Watch = MemoryWatch;
-
-    async fn publish(&self, mut record: PoolRecord) -> Result<(), DirectoryError> {
+impl Resolving {
+    /// `record` once publishes are not held, with its hub's name resolved to
+    /// its address, once it is.
+    async fn resolved(&self, mut record: PoolRecord) -> PoolRecord {
         let mut held = self.publishes.subscribe();
         held.wait_for(|held| !held).await.expect("the hold lives");
         let mut names = self.names.subscribe();
@@ -310,7 +310,25 @@ impl PoolDirectory for Resolving {
             .expect("the names live")[&record.hub]
             .clone();
         record.hub = address;
+        record
+    }
+}
+
+impl PoolDirectory for Resolving {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+        let record = self.resolved(record).await;
         self.inner.publish(record).await
+    }
+
+    async fn publish_after(
+        &self,
+        record: PoolRecord,
+        last: Option<gdl_pools::Version>,
+    ) -> Result<(), DirectoryError> {
+        let record = self.resolved(record).await;
+        self.inner.publish_after(record, last).await
     }
 
     async fn withdraw(&self, withdrawal: gdl_pools::Withdrawal) -> Result<(), DirectoryError> {
