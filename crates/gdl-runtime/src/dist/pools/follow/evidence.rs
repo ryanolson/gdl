@@ -32,6 +32,9 @@ use tokio::time::Instant;
 
 use super::Key;
 
+#[cfg(test)]
+mod tests;
+
 /// Each pool's evidence, with since when a missing pool has been silent.
 #[derive(Default)]
 pub(super) struct Evidence {

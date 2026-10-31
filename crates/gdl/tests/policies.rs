@@ -717,6 +717,48 @@ fn evidence_of_an_earlier_hub_is_dropped_whole() {
     );
 }
 
+/// Of one hub, every field from either side: the condition is the later
+/// word's, a withdrawal from either side lasts, and a drain from either
+/// side lasts unless the pool withdrew. Which side is the later word
+/// matters only for the condition, so only a matrix over it tells the
+/// held value from the incoming one.
+#[test]
+fn of_one_hub_each_field_merges_from_either_side() {
+    let values = || {
+        [
+            PoolCondition::Live,
+            PoolCondition::Missing,
+            PoolCondition::ScaledToZero,
+        ]
+        .into_iter()
+        .flat_map(|condition| {
+            [(false, false), (true, false), (false, true), (true, true)].map(
+                move |(draining, withdrawn)| {
+                    PoolEvidence::new(6, condition)
+                        .with_draining(draining)
+                        .with_withdrawn(withdrawn)
+                },
+            )
+        })
+    };
+    let mut cases = 0;
+    for held in values() {
+        for incoming in values() {
+            let withdrawn = held.is_withdrawn() || incoming.is_withdrawn();
+            let expected = PoolEvidence::new(6, incoming.condition())
+                .with_withdrawn(withdrawn)
+                .with_draining(!withdrawn && (held.is_draining() || incoming.is_draining()));
+            assert_eq!(
+                held.merged(incoming),
+                expected,
+                "held {held:?}, incoming {incoming:?}"
+            );
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 144);
+}
+
 /// A pool that declined an offer as gone in a follow of one hub is not
 /// gone in the follow of a later hub of it, though that hub numbers its
 /// follows from 1 again and the two share a generation and a count of
