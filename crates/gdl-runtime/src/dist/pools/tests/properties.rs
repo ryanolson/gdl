@@ -14,8 +14,9 @@ use gdl_pools::{LoadSummary, PoolProperty};
 use gdl_watch::{FollowEvent, Listing, PropertyList};
 use tokio::time::Instant;
 
+use super::super::follow::Follows;
 use super::super::{Damping, Pools};
-use super::{M1, M2, follow, follower};
+use super::{M1, M2, Recorded, dropped, follow, follower};
 use crate::dist::counting::{counted, counting};
 
 /// The test property type: a name, then a partition and a version.
@@ -614,7 +615,6 @@ fn a_lower_version_never_replaces_a_held_list_while_listed() {
 
 /// An incomplete directory snapshot does not withdraw a pool.
 #[test]
-#[ignore = "F2: an incomplete relay snapshot forgets the held property-list version"]
 fn an_incomplete_relay_snapshot_keeps_the_last_listed_version() {
     let (mut follows, pools, _, _) = follower();
     let node = handle(&pools);
@@ -659,6 +659,132 @@ fn an_incomplete_relay_snapshot_keeps_the_last_listed_version() {
         seen,
         "an incomplete snapshot reset the still-listed pool: before={seen:?}, during={during:?}, after={:?}",
         read(),
+    );
+}
+
+/// The version and the state of `qwen-32b` in `M1`'s list, from one read of
+/// `node`, with the pool's condition: `None` while the pool is not
+/// followed or does not list it.
+fn held(node: &FollowedPools) -> Option<(u64, PropertyState, PoolCondition)> {
+    node.read("model_x", |pools| {
+        let version = pools.pool(M1)?.properties_version();
+        let (_, set) = listed(pools.properties(), "qwen-32b").first()?;
+        Some((version, set.state(), set.condition()))
+    })
+    .flatten()
+}
+
+/// A follower holding `M1`'s list at version 5, `ready`, and the handle a
+/// node reads it with.
+fn holding_five() -> (Follows<Recorded>, FollowedPools, Instant) {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let now = Instant::now();
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
+    follows.apply(
+        listed_event(
+            M1,
+            Some(listing(
+                PoolCondition::Live,
+                &[("qwen-32b", PropertyState::Ready)],
+                5,
+            )),
+        ),
+        now,
+    );
+    assert_eq!(
+        held(&node),
+        Some((5, PropertyState::Ready, PoolCondition::Live))
+    );
+    (follows, node, now)
+}
+
+/// An older list, at version 3, that says `starting`.
+fn older() -> Listing {
+    listing(
+        PoolCondition::Live,
+        &[("qwen-32b", PropertyState::Starting)],
+        3,
+    )
+}
+
+/// Nothing but a withdrawal or a whole snapshot without the pool forgets
+/// its list: not a lapse or a lost link, which list the pool `missing`,
+/// not a dropped follow, and not a snapshot that is not whole, whether it
+/// names the pool with an older list or does not name it. Through each,
+/// the pool stays in the index at the version a node reads, and an older
+/// list after it does not take the held one's place.
+#[test]
+fn only_a_withdrawal_or_a_whole_snapshot_forgets_a_pools_list() {
+    let (mut follows, node, now) = holding_five();
+    let five = |condition| Some((5, PropertyState::Ready, condition));
+
+    // A lapse: the hub lists the pool missing, with an older list.
+    let lapsed = missing(&[("qwen-32b", PropertyState::Starting)], 3, Some(1_000));
+    follows.apply(listed_event(M1, Some(lapsed)), now);
+    assert_eq!(held(&node), five(PoolCondition::Missing), "a lapse");
+
+    // The follow is dropped, and the pool followed again, with its record's
+    // older list.
+    follows.apply(dropped(M1, 1), now);
+    follows.apply(follow(M1, 2, PoolState::Ready), now);
+    follows.apply(listed_event(M1, Some(older())), now);
+    assert_eq!(held(&node), five(PoolCondition::Live), "a dropped follow");
+
+    // A snapshot that is not whole, naming no pool.
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(follow(M1, 2, PoolState::Ready), now);
+    snapshot.apply(FollowEvent::Synced { listed: false }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        held(&node),
+        five(PoolCondition::Live),
+        "a snapshot that is not whole keeps a pool it does not name"
+    );
+    follows.take(listed_event(M1, Some(older())), now);
+    assert_eq!(held(&node), five(PoolCondition::Live), "then an older list");
+
+    // Snapshots that name the pool with an older list, whole or not.
+    for whole in [false, true] {
+        let mut snapshot = follows.snapshot();
+        snapshot.apply(follow(M1, 2, PoolState::Ready), now);
+        snapshot.apply(listed_event(M1, Some(older())), now);
+        snapshot.apply(FollowEvent::Synced { listed: whole }, now);
+        follows.resnapshot(snapshot, now);
+        assert_eq!(
+            held(&node),
+            five(PoolCondition::Live),
+            "a snapshot naming an older list, whole: {whole}"
+        );
+    }
+}
+
+/// A withdrawal forgets a pool's list, and so does a whole snapshot that
+/// does not name the pool: listed again, the pool starts afresh, at any
+/// version.
+#[test]
+fn a_withdrawal_or_a_whole_snapshot_forgets_a_pools_list() {
+    let (mut follows, node, now) = holding_five();
+    follows.apply(listed_event(M1, None), now);
+    assert_eq!(held(&node), None, "withdrawn");
+    follows.apply(listed_event(M1, Some(older())), now);
+    assert_eq!(
+        held(&node),
+        Some((3, PropertyState::Starting, PoolCondition::Live)),
+        "listed afresh after a withdrawal"
+    );
+
+    let (mut follows, node, now) = holding_five();
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(follow(M1, 1, PoolState::Ready), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    assert_eq!(held(&node), None, "a whole snapshot without the pool");
+    follows.take(listed_event(M1, Some(older())), now);
+    assert_eq!(
+        held(&node),
+        Some((3, PropertyState::Starting, PoolCondition::Live)),
+        "listed afresh after a whole snapshot without it"
     );
 }
 

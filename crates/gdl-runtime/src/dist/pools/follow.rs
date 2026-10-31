@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use gdl::Load;
 use gdl::{PropertyIndexes, PropertyPool};
-use gdl_pools::{LoadSummary, PoolCondition, PoolState};
+use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::{FollowEvent, Listing, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
@@ -61,12 +61,14 @@ pub(super) type Key = (String, String);
 
 mod ack;
 mod avoid;
+mod listings;
 mod own;
 
 use ack::Ack;
 #[cfg(test)]
 pub(super) use ack::{ACK_POLL, ACK_RETRY, SCANNED};
 use avoid::Avoiding;
+use listings::Listings;
 pub(super) use own::Asked;
 use own::Own;
 
@@ -397,9 +399,8 @@ impl<R: Registry> Follows<R> {
         for id in released {
             self.schedule(id, now);
         }
-        for (key, (listing, _)) in &mut followed.listings {
-            keep_newer(self.followed.listings.get(key), listing);
-        }
+        let held = std::mem::take(&mut self.followed.listings);
+        followed.listings.carry(held, followed.listed);
         followed.listings_changed += self.followed.listings_changed + 1;
         self.followed = followed;
         let shown: Vec<(Key, u64)> = self
@@ -761,29 +762,13 @@ struct Followed {
     /// not, for the property index, with since when a missing pool has been
     /// silent, dated back on arrival: a snapshot holds every listed pool,
     /// so it replaces them whole.
-    listings: BTreeMap<Key, (Listing, Option<Instant>)>,
+    listings: Listings,
     /// Whether the snapshot said the hub's listings were whole.
     listed: bool,
     /// Raised on every change of `listings` or `listed`, and carried over
     /// a snapshot, so that the follower makes a class's index again only
     /// when it may have changed.
     listings_changed: u64,
-}
-
-/// Keep the property list of `held`, the listing of a pool still listed,
-/// in place of `listing`'s when it is of a higher version; take every
-/// other field of `listing`. A hub takes a pool's list from its record and
-/// from its follow link, which race, and a hub that restarted lists the
-/// pool from its record before its link sends the newer list, so a later
-/// listing can carry an older list. A version names one list, so a lower
-/// version is never a newer list. A pool no longer listed holds no list:
-/// listed again, it starts afresh.
-fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
-    if let Some((held, _)) = held
-        && held.properties.version > listing.properties.version
-    {
-        listing.properties.clone_from(&held.properties);
-    }
 }
 
 /// What one event changed in a pool's follow, beyond its table.
@@ -821,7 +806,7 @@ impl Followed {
             generations: HashMap::new(),
             fresh_periods,
             meters,
-            listings: BTreeMap::new(),
+            listings: Listings::default(),
             listed: false,
             listings_changed: 0,
         }
@@ -1062,12 +1047,10 @@ impl Followed {
     }
 
     /// List `key`'s pool as `listing`, which arrived at `now`, says, or
-    /// no longer. A missing pool's silence is dated back here, once, so
-    /// that an index made later reads the same instant.
+    /// no longer ([`Listings`]).
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
-            Some(mut listing) => {
-                keep_newer(self.listings.get(&key), &mut listing);
+            Some(listing) => {
                 if !listing.properties.dropped.is_empty() {
                     tracing::debug!(
                         class = %key.0,
@@ -1076,15 +1059,9 @@ impl Followed {
                         "a listing holds properties that do not check: they are left out"
                     );
                 }
-                let silent = listing
-                    .missing_age_ms
-                    .filter(|_| listing.condition == PoolCondition::Missing)
-                    .and_then(|age| now.checked_sub(Duration::from_millis(age)));
-                self.listings.insert(key, (listing, silent));
+                self.listings.take(key, listing, now);
             }
-            None => {
-                self.listings.remove(&key);
-            }
+            None => self.listings.withdraw(&key),
         }
         self.listings_changed += 1;
     }
@@ -1092,9 +1069,7 @@ impl Followed {
     /// The version of the property list the hub lists for `key`'s pool: 0
     /// with no listing.
     fn properties_version(&self, key: &Key) -> u64 {
-        self.listings
-            .get(key)
-            .map_or(0, |(listing, _)| listing.properties.version)
+        self.listings.version(key)
     }
 
     /// Every property `class`'s pools list, as this view lists them, each
@@ -1103,7 +1078,7 @@ impl Followed {
     fn listed(&self, class: &str) -> Vec<(gdl_model::PropertyKey, PropertyPool)> {
         self.listings
             .iter()
-            .filter(|((of, _), _)| of == class)
+            .filter(|((of, _), _)| *of == class)
             .flat_map(|(key, (listing, silent))| {
                 let offered = self.follows.get(key).is_some_and(Follow::offers);
                 listing.properties.entries.iter().map(move |entry| {
