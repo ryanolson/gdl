@@ -417,3 +417,85 @@ async fn a_successor_stays_past_a_predecessor_that_writes_during_its_start() {
     hub.shutdown().await.expect("the hub stops");
     assert_past(&latest, &next);
 }
+
+/// A predecessor can store an operator's revocation after the successor's
+/// first read. After its conditional write is refused, the successor must
+/// keep the history of the record it reads again, as it does at startup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F5: the reread raises the list version but drops the newer record's revocations"]
+async fn a_successor_keeps_a_revocation_stored_after_its_first_read() {
+    #[derive(Clone)]
+    struct RacingRevocation {
+        inner: MemoryDirectory,
+        latest: PoolRecord,
+        raced: Arc<AtomicBool>,
+    }
+
+    impl PoolDirectory for RacingRevocation {
+        type Watch = MemoryWatch;
+
+        async fn publish(&self, record: PoolRecord) -> Result<(), DirectoryError> {
+            self.inner.publish(record).await
+        }
+
+        async fn publish_after(
+            &self,
+            record: PoolRecord,
+            last: Option<gdl_pools::Version>,
+        ) -> Result<(), DirectoryError> {
+            if !self.raced.swap(true, Ordering::SeqCst) {
+                self.inner.publish(self.latest.clone()).await?;
+            }
+            self.inner.publish_after(record, last).await
+        }
+
+        async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+            self.inner.withdraw(withdrawal).await
+        }
+
+        async fn last_write(
+            &self,
+            class: &str,
+            pool: &str,
+        ) -> Result<Option<LastWrite>, DirectoryError> {
+            self.inner.last_write(class, pool).await
+        }
+
+        fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+            self.inner.watch(class, from)
+        }
+    }
+
+    let epoch = millis_now() + 600_000;
+    let last = predecessor(epoch, floor(epoch));
+    let revoked = gdl_model::PropertyKey::new("test", serde_json::json!({ "name": "m" }))
+        .expect("a property key");
+    let latest = PoolRecord {
+        seq: last.seq + 1,
+        properties_version: last.properties_version + (1 << 20) + 1,
+        revoked: vec![revoked.clone()],
+        ..last.clone()
+    };
+    let directory = MemoryDirectory::new();
+    seed(&directory, &last, Left::Listed).await;
+    let through = RacingRevocation {
+        inner: directory.clone(),
+        latest: latest.clone(),
+        raced: Arc::default(),
+    };
+    let mut records = Records::new(&directory);
+    let (hub, _pool) = hub_of(settings(), through, timing()).await;
+    let next = loop {
+        let record = records.next().await;
+        if record.epoch > epoch {
+            break record;
+        }
+    };
+    hub.shutdown().await.expect("the hub stops");
+    assert_past(&latest, &next);
+    assert_eq!(
+        next.revoked,
+        [revoked],
+        "a successful predecessor write must survive the successor's reread"
+    );
+}
