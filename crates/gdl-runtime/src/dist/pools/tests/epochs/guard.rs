@@ -18,12 +18,17 @@
 //! - (b) an acceptance's epoch is never older than the epoch of the row
 //!   whose follow took the offer;
 //! - (c) the evidence is never of an earlier hub than the row beside it,
-//!   as a policy reads both from one table.
+//!   as a policy reads both from one table;
+//! - (d) once the follower has heard the hub of a shown row drain, and has
+//!   not heard it withdraw, the evidence beside the row shows the drain:
+//!   a drain lasts for its hub's life. What the follower has heard is
+//!   kept from the walk, as each watch delivers it. Not for a relay of an
+//!   earlier build, which dates every hub 0.
 //!
 //! On a failure it prints the seed and the steps. `GDL_EPOCH_GUARD_SEEDS`
 //! sets how many seeds run (a soak), and `GDL_EPOCH_GUARD_SEED` runs one.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,7 +44,7 @@ use super::super::super::lease::PoolLease;
 use super::super::{M1, Recorded, follower, peer};
 
 /// The seeds the suite runs, and the steps of each.
-const SEEDS: u64 = 64;
+const SEEDS: u64 = 1024;
 const STEPS: usize = 400;
 
 /// splitmix64: a generator a seed reproduces on every host.
@@ -250,6 +255,75 @@ struct Wire {
     own: Option<(Asked, VecDeque<FollowEvent>)>,
 }
 
+/// What the follower has heard of the pool's hubs, by epoch, from what
+/// each watch delivered and the follower takes: of a pool read from its
+/// own watch, the relay's watch says only its listings and withdrawals,
+/// and a watch's snapshot is heard once its marker is.
+#[derive(Default)]
+struct Heard {
+    /// Each generation's hub, from the follows delivered.
+    generations: HashMap<u64, u64>,
+    drained: HashSet<u64>,
+    withdrawn: HashSet<u64>,
+    /// The pool's own watch's snapshot, until its marker.
+    filling: Option<Vec<FollowEvent>>,
+}
+
+impl Heard {
+    fn hear(&mut self, event: &FollowEvent) {
+        match event {
+            FollowEvent::Follow {
+                generation,
+                epoch,
+                state,
+                listing,
+                ..
+            } => {
+                self.generations.insert(*generation, *epoch);
+                if *state == PoolState::Draining {
+                    self.drained.insert(*epoch);
+                }
+                if let Some(listing) = listing.as_ref().filter(|listing| listing.draining) {
+                    self.drained.insert(listing.epoch);
+                }
+            }
+            FollowEvent::State {
+                generation,
+                state: PoolState::Draining,
+                ..
+            } => {
+                if let Some(epoch) = self.generations.get(generation) {
+                    self.drained.insert(*epoch);
+                }
+            }
+            FollowEvent::Listed {
+                listing: Some(listing),
+                ..
+            } if listing.draining => {
+                self.drained.insert(listing.epoch);
+            }
+            FollowEvent::Withdrawn { epoch, .. } => {
+                self.withdrawn.insert(*epoch);
+            }
+            _ => {}
+        }
+    }
+
+    /// The pool's own watch delivered `event`.
+    fn hear_own(&mut self, event: &FollowEvent) {
+        match &mut self.filling {
+            Some(filling) if matches!(event, FollowEvent::Synced { .. }) => {
+                for heard in std::mem::take(filling) {
+                    self.hear(&heard);
+                }
+                self.filling = None;
+            }
+            Some(filling) => filling.push(event.clone()),
+            None => self.hear(event),
+        }
+    }
+}
+
 impl Wire {
     fn send(&mut self, hub: &mut Hub, event: FollowEvent) {
         hub.note(&event);
@@ -314,6 +388,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         relay: VecDeque::new(),
         own: None,
     };
+    let mut heard = Heard::default();
     let mut chosen: Option<velo::InstanceId> = None;
     let mut taken: Vec<Taken> = Vec::new();
     let mut trace = Vec::new();
@@ -371,6 +446,22 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     let listed = hub.listed_event();
                     wire.send(&mut hub, listed);
                     format!("follow {} drains", follow.generation)
+                }
+                // A draining follow the relay withholds, as when its pool
+                // is unread: unavailable, while its hub still drains.
+                Some(mut follow) if follow.installed => {
+                    follow.state = PoolState::Unavailable;
+                    hub.follow = Some(follow);
+                    wire.send(
+                        &mut hub,
+                        FollowEvent::State {
+                            class: "model_x".into(),
+                            pool: M1.into(),
+                            generation: follow.generation,
+                            state: PoolState::Unavailable,
+                        },
+                    );
+                    format!("follow {} is withheld, unavailable", follow.generation)
                 }
                 _ => "nothing to drain".into(),
             },
@@ -462,7 +553,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                     }
                 }
                 let whole = rng.chance(70);
-                rewatch(&mut follows, &mut hub, &mut wire, whole, now);
+                rewatch(&mut follows, &mut hub, &mut wire, &mut heard, whole, now);
                 format!(
                     "the relay restarts, the pool's hub too: {restarted}, at {}; rewatched whole: {whole}",
                     hub.epoch
@@ -470,7 +561,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
             }
             10 | 11 => {
                 let whole = rng.chance(70);
-                rewatch(&mut follows, &mut hub, &mut wire, whole, now);
+                rewatch(&mut follows, &mut hub, &mut wire, &mut heard, whole, now);
                 format!("the relay rewatched, whole: {whole}")
             }
             // An event of a kind the follower does not know: the pool is
@@ -487,6 +578,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                         Some(asked) => {
                             let snapshot = hub.own_snapshot().into();
                             wire.own = Some((asked, snapshot));
+                            heard.filling = Some(Vec::new());
                             format!("the pool is read from its own watch, generation {generation}")
                         }
                         None => "no own watch asked".into(),
@@ -497,11 +589,13 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
             // The pool's own watch is opened again.
             13 if wire.own.is_some() => {
                 let (asked, _) = wire.own.take().expect("an own watch");
+                heard.filling = None;
                 follows.own(asked.key, asked.watch, Err(WatchEnd::Closed), now);
                 match follows.asked().pop() {
                     Some(asked) => {
                         let snapshot = hub.own_snapshot().into();
                         wire.own = Some((asked, snapshot));
+                        heard.filling = Some(Vec::new());
                         "the own watch reconnects".into()
                     }
                     None => "the own watch is let go".into(),
@@ -510,6 +604,14 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
             14..=16 => match wire.relay.pop_front() {
                 Some(event) => {
                     let said = format!("relay delivers {event:?}");
+                    if wire.own.is_none()
+                        || matches!(
+                            event,
+                            FollowEvent::Listed { .. } | FollowEvent::Withdrawn { .. }
+                        )
+                    {
+                        heard.hear(&event);
+                    }
                     follows.take(event, now);
                     said
                 }
@@ -519,6 +621,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                 Some((asked, events)) => match events.pop_front() {
                     Some(event) => {
                         let said = format!("own watch delivers {event:?}");
+                        heard.hear_own(&event);
                         follows.own(
                             asked.key.clone(),
                             asked.watch,
@@ -596,7 +699,15 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
         };
         trace.push(what);
         let (evidence, row) = read(&pools);
-        if let Err(broke) = check(&hub, evidence, row) {
+        if let Err(broke) = check(&hub, evidence, row).and_then(|()| {
+            // A relay of an earlier build dates every hub 0: a drain
+            // cannot be tied to one hub.
+            if hub.earlier {
+                Ok(())
+            } else {
+                lasts(&heard, evidence, row)
+            }
+        }) {
             return Err((trace, broke));
         }
     }
@@ -641,14 +752,42 @@ fn check(
     Ok(())
 }
 
+/// (d): the evidence beside a row of a hub the follower heard drain, and
+/// not withdraw, shows the drain.
+fn lasts(
+    heard: &Heard,
+    evidence: Option<gdl::PoolEvidence>,
+    row: Option<(u64, u64)>,
+) -> Result<(), String> {
+    match (evidence, row) {
+        (Some(evidence), Some((generation, epoch)))
+            if evidence.epoch() == epoch
+                && heard.drained.contains(&epoch)
+                && !heard.withdrawn.contains(&epoch)
+                && !evidence.is_draining() =>
+        {
+            Err(format!(
+                "(d) {evidence:?} beside the row of follow {generation} of epoch {epoch}, whose hub the follower heard drain"
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The relay begins a follow of the pool's current record.
 fn begin(hub: &mut Hub) {
     hub.generation += 1;
+    // A hub that drains says so to every follow of it.
+    let draining = hub.listing.is_some_and(|(_, _, draining)| draining);
     hub.follow = Some(Following {
         generation: hub.generation,
         epoch: hub.epoch,
         installed: false,
-        state: PoolState::Ready,
+        state: if draining {
+            PoolState::Draining
+        } else {
+            PoolState::Ready
+        },
     });
 }
 
@@ -675,13 +814,16 @@ fn rewatch(
     follows: &mut Follows<Recorded>,
     hub: &mut Hub,
     wire: &mut Wire,
+    heard: &mut Heard,
     whole: bool,
     now: Instant,
 ) {
     wire.relay.clear();
     wire.own = None;
+    heard.filling = None;
     let mut snapshot = follows.snapshot();
     for event in hub.snapshot(whole) {
+        heard.hear(&event);
         snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
