@@ -396,3 +396,91 @@ async fn a_runtime_gauge_cannot_collide_with_the_velo_bridge() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "F2: a draining source with a held local request reports zero for every drain gauge"]
+async fn a_local_request_is_not_reported_as_drained_while_its_body_still_holds_it() {
+    let placement = Placement::new().segment("only", common::REFERENCE_NODES);
+    let manifest = reference_manifest(|_| true);
+    let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-local-drain-")
+        .tempdir()
+        .expect("roster directory");
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = 10000\n[system]\nport = 0\n",
+        dir.path().display()
+    );
+    let config: ProcessConfig<Nothing> =
+        ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
+            .expect("settings");
+    let process = Process::start(&config).await.expect("process");
+    let registry = process.registry(&spec, "only").expect("registry");
+    let launch = config
+        .launch(&process, "only", &["only"], &spec, async { Ok(()) })
+        .await
+        .expect("launch");
+    let deployment = Deployment::new(
+        launch.node(),
+        &manifest,
+        &placement,
+        "only",
+        launch.roster(),
+        RuntimeConfig {
+            metrics: Some(registry.clone()),
+            ..RuntimeConfig::default()
+        },
+    )
+    .expect("deployment");
+    let events = Events::new();
+    let root = reference_graph(&deployment, &events).expect("graph");
+    let segment = deployment.start(root).expect("start");
+    process.serve_metrics(registry).expect("served");
+    let (holding, held) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let served = tokio::spawn(launch.serve(segment, move |segment, shutdown| async move {
+        let cx = Cx::new();
+        let mut out = segment
+            .call(
+                cx.clone(),
+                prompt(
+                    "local-held",
+                    Plan {
+                        tokens: 1,
+                        hold_at_end: true,
+                        ..Plan::default()
+                    },
+                ),
+            )
+            .await?;
+        assert!(out.next().await.is_some_and(|item| item.is_ok()));
+        holding.send(()).expect("the test waits for the request");
+        released.await.expect("the test releases the request");
+        cx.request_stop();
+        assert!(collect(out).await.iter().all(Result::is_ok));
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the request starts in time")
+        .expect("the body holds the request");
+    process.stop();
+    reaches(&process, "instance_phase", Some("draining"), 1.0).await;
+    assert!(!served.is_finished(), "the body still holds its request");
+    let mut held = Vec::new();
+    for gauge in ["admission_admitted", "egress_in_use", "active_anchors"] {
+        held.push((gauge, read(&process, gauge, None).await.expect("a gauge")));
+    }
+    let still_held = held.iter().any(|(_, value)| *value > 0.0);
+    release.send(()).expect("the body waits for release");
+    tokio::time::timeout(WAIT, served)
+        .await
+        .expect("the instance drains")
+        .expect("its task")
+        .expect("it served");
+    assert!(
+        still_held,
+        "draining and every holding zero while a local request is held: {held:?}"
+    );
+}
