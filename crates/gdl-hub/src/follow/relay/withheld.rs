@@ -22,6 +22,7 @@ fn installed(pool: &str, state: PoolState) -> Installed {
         "model_x".into(),
         "r".into(),
         "hub:1".into(),
+        1,
         state,
         None,
     )
@@ -209,6 +210,7 @@ fn a_withheld_pool_is_unavailable_until_it_is_read_again() {
         "model_x".into(),
         "r".into(),
         "hub:1".into(),
+        1,
         PoolState::Ready,
         Some(load),
     );

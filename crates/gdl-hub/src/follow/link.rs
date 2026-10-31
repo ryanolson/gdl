@@ -180,6 +180,7 @@ async fn snapshot(events: &mut Events, record: &PoolRecord) -> Option<Snapshot> 
                 class,
                 record.region.clone(),
                 record.hub.clone(),
+                epoch,
                 state,
                 load,
             )

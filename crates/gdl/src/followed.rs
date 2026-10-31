@@ -545,14 +545,15 @@ impl<'a> ClassPools<'a> {
     /// holds while the pool is listed, which is why it is read here and
     /// not from a [`Pool`].
     ///
-    /// It holds through the same rules as the property list
-    /// ([`Pool::properties_version`]). A drain does not change the list
-    /// and cannot be cancelled, so it is cleared only by a listing whose
-    /// list is newer than the one held when the pool drained, which only a
-    /// later hub of the pool, started again, sends. A listing with an
-    /// older list changes nothing. It is forgotten with the listing: when
-    /// the pool withdraws its record ([`ClassPools::is_withdrawn`]), or
-    /// when a whole snapshot of the hub's listings no longer names it.
+    /// A drain cannot be cancelled and lasts for the life of the pool's
+    /// hub process, so it is ordered by that hub's epoch: only a listing
+    /// from a later hub of the pool, started again, clears it, and one
+    /// from an earlier hub changes nothing. It is not ordered by the
+    /// property list's version ([`Pool::properties_version`]), which a
+    /// drain does not change and a later hub can repeat. It is forgotten
+    /// with the listing, as the list is: when the pool withdraws its
+    /// record ([`ClassPools::is_withdrawn`]), or when a whole snapshot of
+    /// the hub's listings no longer names it.
     /// A pool this chooser never saw, and one listed by a hub of an
     /// earlier build, is not draining.
     pub fn is_draining(&self, name: &str) -> bool {

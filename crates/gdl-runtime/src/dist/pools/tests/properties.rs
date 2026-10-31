@@ -75,6 +75,7 @@ fn listing(
         },
         missing_age_ms: None,
         draining: false,
+        epoch: 0,
     }
 }
 
@@ -860,10 +861,12 @@ fn drains(node: &FollowedPools) -> (bool, u64) {
     .expect("the class has a table")
 }
 
-/// `M1`'s listing with its list at `version`, draining or not.
-fn draining_at(version: u64, draining: bool) -> Listing {
+/// `M1`'s listing from its hub of `epoch`, with its list at `version`,
+/// draining or not.
+fn draining_at(epoch: u64, version: u64, draining: bool) -> Listing {
     Listing {
         draining,
+        epoch,
         ..listing(
             PoolCondition::Live,
             &[("qwen-32b", PropertyState::Ready)],
@@ -872,56 +875,65 @@ fn draining_at(version: u64, draining: bool) -> Listing {
     }
 }
 
-/// A pool's drain holds by the property list's rules. A listing that says
-/// it drains is taken at once, also with the list held, since a drain does
-/// not change the list. One that does not is taken only with a newer list:
-/// an older or the same list does not clear it, nor does a lapse or a
-/// dropped follow, after which a node still reads it draining though it no
-/// longer reads a `Pool`. A newer list clears it, as a hub of the pool
-/// started again sends, and a draining listing with an older list after it
-/// does not set it again.
+/// A pool's drain is ordered by the epoch of the pool's hub. A listing
+/// that says it drains is taken at once. One of the same hub that does not
+/// is from before the drain, at any list version, and does not clear it,
+/// nor does a lapse or a dropped follow, after which a node still reads it
+/// draining though it no longer reads a `Pool`. A later hub's listing
+/// clears it, also at the same or a lower list version, as a hub whose
+/// clock is behind the one before it can list; the list keeps its own
+/// order. A draining listing of the hub before, after it, does not set it
+/// again.
 #[test]
-fn a_pools_drain_is_cleared_only_by_a_newer_list() {
+fn a_pools_drain_is_cleared_only_by_a_later_hub() {
     let (mut follows, node, now) = holding_five();
     assert_eq!(drains(&node), (false, 5), "ready");
-    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
-    assert_eq!(drains(&node), (true, 5), "the same list, draining");
+    follows.apply(listed_event(M1, Some(draining_at(1, 5, true))), now);
+    assert_eq!(drains(&node), (true, 5), "the hub says it drains");
 
-    for (version, what) in [(5, "the same list"), (3, "an older list")] {
-        follows.apply(listed_event(M1, Some(draining_at(version, false))), now);
-        assert_eq!(drains(&node), (true, 5), "{what}, not draining");
+    for (version, what) in [
+        (5, "the same list"),
+        (3, "an older list"),
+        (6, "a newer list"),
+    ] {
+        follows.apply(listed_event(M1, Some(draining_at(1, version, false))), now);
+        assert!(drains(&node).0, "the same hub, {what}, not draining");
     }
     let lapsed = Listing {
-        draining: false,
+        epoch: 1,
         ..missing(&[("qwen-32b", PropertyState::Ready)], 3, Some(1_000))
     };
     follows.apply(listed_event(M1, Some(lapsed)), now);
-    assert_eq!(drains(&node), (true, 5), "a lapse");
+    assert_eq!(drains(&node), (true, 6), "a lapse");
     follows.apply(dropped(M1, 1), now);
     assert_eq!(drains(&node), (true, 0), "the follow dropped: listed still");
     follows.apply(follow(M1, 2, PoolState::Ready), now);
-    follows.apply(listed_event(M1, Some(draining_at(3, false))), now);
-    assert_eq!(drains(&node), (true, 5), "followed again, an older list");
+    follows.apply(listed_event(M1, Some(draining_at(1, 3, false))), now);
+    assert_eq!(drains(&node), (true, 6), "followed again, an older list");
 
-    follows.apply(listed_event(M1, Some(draining_at(6, false))), now);
-    assert_eq!(drains(&node), (false, 6), "a newer list, not draining");
-    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
-    assert_eq!(drains(&node), (false, 6), "an older list, draining");
+    follows.apply(listed_event(M1, Some(draining_at(2, 6, false))), now);
+    assert_eq!(drains(&node), (false, 6), "a later hub, the same list");
+    follows.apply(listed_event(M1, Some(draining_at(1, 7, true))), now);
+    assert_eq!(
+        drains(&node),
+        (false, 7),
+        "the hub before, draining: the list is newer, the drain is not"
+    );
 }
 
 /// A pool's drain is held through a relay restart, whose snapshot lists
-/// the pool from its record, with an older list and before its link says
-/// it drains, and through a snapshot that is not whole and does not name
-/// it. A withdrawal forgets it, and so does a whole snapshot that does not
-/// name the pool: listed again, the pool starts afresh.
+/// the pool from its record, before its link says it drains, and through a
+/// snapshot that is not whole and does not name it. A withdrawal forgets
+/// it, and so does a whole snapshot that does not name the pool: listed
+/// again, the pool starts afresh.
 #[test]
 fn a_pools_drain_is_held_while_listed_and_forgotten_with_its_listing() {
     let (mut follows, node, now) = holding_five();
-    follows.apply(listed_event(M1, Some(draining_at(5, true))), now);
+    follows.apply(listed_event(M1, Some(draining_at(1, 5, true))), now);
     assert_eq!(drains(&node), (true, 5));
 
     let mut restarted = follows.snapshot();
-    restarted.apply(listed_event(M1, Some(draining_at(3, false))), now);
+    restarted.apply(listed_event(M1, Some(draining_at(1, 3, false))), now);
     restarted.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(restarted, now);
     assert_eq!(drains(&node), (true, 0), "a relay restart");
@@ -935,10 +947,10 @@ fn a_pools_drain_is_held_while_listed_and_forgotten_with_its_listing() {
 
     follows.apply(listed_event(M1, None), now);
     assert_eq!(drains(&node), (false, 0), "withdrawn");
-    follows.apply(listed_event(M1, Some(draining_at(3, false))), now);
+    follows.apply(listed_event(M1, Some(draining_at(1, 3, false))), now);
     assert!(!drains(&node).0, "listed afresh");
 
-    follows.apply(listed_event(M1, Some(draining_at(3, true))), now);
+    follows.apply(listed_event(M1, Some(draining_at(1, 3, true))), now);
     let mut whole = follows.snapshot();
     whole.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(whole, now);

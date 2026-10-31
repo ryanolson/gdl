@@ -29,7 +29,6 @@ use gdl_watch::{FollowEvent, Listing, LoadReport};
 use tokio::sync::watch;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "F1: a ready successor can retain the draining predecessor's property version"]
 async fn a_ready_successor_is_not_listed_draining_after_the_epochs_version_budget() {
     let directory = Resolving::new();
     let epoch = u64::try_from(

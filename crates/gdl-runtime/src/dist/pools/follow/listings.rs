@@ -13,10 +13,12 @@
 //! pool. A snapshot that is not whole says nothing of a pool it does not
 //! name, which keeps its listing.
 //!
-//! Whether the pool drains is held by the same rules, with the list: a
-//! drain does not change the list, so a listing of the same list that
-//! does not say it drains is from before the drain, and only a newer list,
-//! which only a later hub of the pool sends, clears it.
+//! Whether the pool drains is held and forgotten with the listing, but
+//! ordered by the epoch of the pool's hub that said it, not by the list's
+//! version: a drain lasts for the life of its hub's process, so a listing
+//! of a later epoch clears it, one of the same epoch can only set it, and
+//! one of an earlier epoch says nothing. A later hub can list the same
+//! version as the hub before it, when that hub ran ahead of its clock.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -94,8 +96,8 @@ impl Listings {
 }
 
 /// Keep `held`'s property list in place of `listing`'s when it has a
-/// higher version, and whether the pool drains with it; keep a drain with
-/// the same version too, since a drain does not change the list and
+/// higher version. Keep whether the pool drains, with its epoch, when
+/// `held` is of a later hub, and keep a drain of the same hub, since it
 /// cannot be cancelled. Take every other field of `listing`.
 fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
     let Some((held, _)) = held else {
@@ -103,8 +105,13 @@ fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) 
     };
     if held.properties.version > listing.properties.version {
         listing.properties.clone_from(&held.properties);
-        listing.draining = held.draining;
-    } else if held.properties.version == listing.properties.version {
-        listing.draining |= held.draining;
+    }
+    match held.epoch.cmp(&listing.epoch) {
+        std::cmp::Ordering::Greater => {
+            listing.draining = held.draining;
+            listing.epoch = held.epoch;
+        }
+        std::cmp::Ordering::Equal => listing.draining |= held.draining,
+        std::cmp::Ordering::Less => {}
     }
 }

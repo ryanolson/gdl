@@ -30,6 +30,7 @@ fn installed_pool(pool: &str, state: PoolState) -> Installed {
         "model_x".into(),
         "r".into(),
         "hub:1".into(),
+        1,
         state,
         None,
     )
@@ -157,6 +158,7 @@ async fn a_snapshot_sends_the_summary_with_its_age() {
             "model_x".into(),
             "r".into(),
             "hub:1".into(),
+            1,
             PoolState::Ready,
             load,
         )

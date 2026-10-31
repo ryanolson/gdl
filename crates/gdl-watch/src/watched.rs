@@ -437,22 +437,25 @@ mod tests {
             properties: crate::PropertyList::default(),
             missing_age_ms: Some(4000),
             draining: false,
+            epoch: 0,
         };
         // Draining is sent only when true, so an earlier reader, which
         // ignores it, reads a draining listing as before, and a listing
         // from an earlier hub reads as not draining.
         let draining = crate::Listing {
             draining: true,
+            epoch: 7,
             ..listing.clone()
         };
         let sent = serde_json::to_value(&draining).expect("json");
-        assert_eq!(sent["draining"], true);
+        assert_eq!(
+            (&sent["draining"], &sent["epoch"]),
+            (&serde_json::json!(true), &serde_json::json!(7))
+        );
+        let quiet = serde_json::to_value(&listing).expect("json");
         assert!(
-            serde_json::to_value(&listing)
-                .expect("json")
-                .get("draining")
-                .is_none(),
-            "absent when false"
+            quiet.get("draining").is_none() && quiet.get("epoch").is_none(),
+            "absent when false and 0"
         );
         assert!(
             !serde_json::from_value::<crate::Listing>(serde_json::json!({

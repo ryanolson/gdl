@@ -1075,7 +1075,8 @@ impl Shared {
             .and_then(|follow| follow.installed.as_ref())
             && let Some(properties) = installed.properties()
         {
-            listings.link_properties(class, pool, properties, installed.draining());
+            listings.link_draining(class, pool, installed.epoch(), installed.draining());
+            listings.link_properties(class, pool, properties);
         }
         if let Some(listing) = self
             .listings

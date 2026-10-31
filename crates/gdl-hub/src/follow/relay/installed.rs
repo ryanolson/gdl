@@ -35,6 +35,9 @@ pub(crate) struct Installed {
     /// The pool's property entries as its watch last sent them: `None` from a
     /// hub of an earlier build.
     properties: Option<PropertyList>,
+    /// The epoch of the pool's hub, which its watch's first event named:
+    /// the link installs a follow only when it is its record's.
+    epoch: u64,
 }
 
 impl Installed {
@@ -49,6 +52,7 @@ impl Installed {
         class: String,
         region: String,
         hub: String,
+        epoch: u64,
         state: PoolState,
         load: Option<LoadSummary>,
     ) -> Self {
@@ -57,6 +61,7 @@ impl Installed {
             class,
             region,
             hub,
+            epoch,
             state,
             load,
             received: Instant::now(),
@@ -82,6 +87,11 @@ impl Installed {
     /// Whether the pool's link last said it drains, withheld or not.
     pub(super) fn draining(&self) -> bool {
         self.state == PoolState::Draining
+    }
+
+    /// The epoch of the pool's hub.
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// The state the relay shows: the one the pool last sent, or

@@ -305,11 +305,23 @@ pub struct Listing {
     /// of an earlier build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_age_ms: Option<u64>,
-    /// Whether the pool drains: its record or its follow link said so.
-    /// A drain does not change the property list, and cannot be
-    /// cancelled, so the hub clears it only with a newer list than the
-    /// one it held when the pool drained, which only a later hub of the
-    /// pool sends. Absent when false, and from a hub of an earlier build.
+    /// Whether the pool drains: its record or its follow link said so,
+    /// from the hub of `epoch`. A drain cannot be cancelled, and lasts
+    /// for the life of that hub's process, so only a later hub of the
+    /// pool clears it. Absent when false, and from a hub of an earlier
+    /// build.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draining: bool,
+    /// The epoch of the newest hub of the pool that the listing's hub has
+    /// heard from, by its record or its follow link: what orders
+    /// `draining`. A reader takes `draining` from a listing of a later
+    /// epoch, adds it from one of the same epoch, and keeps its own over
+    /// one of an earlier epoch. Absent when 0, and from a hub of an
+    /// earlier build.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub epoch: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
