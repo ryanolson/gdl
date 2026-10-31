@@ -95,9 +95,14 @@ pub fn children(
     let mut objects = Vec::new();
     let config = render.config_map();
     let checksum = checksum(&config);
+    // The hub reads only the pool's deployment from the ConfigMap: a
+    // change to a segment's settings replaces that segment's pods, and
+    // never the hub, whose restart drains the pool.
+    let hub_checksum =
+        crate::labels::checksum(&json!({"data": {"deployment.json": pool.deployment}}));
     objects.push(config);
     objects.extend(render.state_claim());
-    objects.push(render.hub(&checksum));
+    objects.push(render.hub(&hub_checksum));
     objects.push(render.hub_service());
     for (segment, settings) in pool.segments.iter().zip(&settings) {
         objects.push(render.segment(segment, settings, &checksum));
@@ -430,8 +435,9 @@ impl Render<'_> {
     }
 
     /// A Deployment of `replicas` pods of `segment` with `pod` as their
-    /// spec, which `checksum`, the pool's ConfigMap's, replaces when the
-    /// settings change: a ConfigMap's change alone restarts no pod. Each pod
+    /// spec, which `checksum`, of what the pods read from the pool's
+    /// ConfigMap, replaces when that changes: a ConfigMap's change alone
+    /// restarts no pod. Each pod
     /// says where it serves its metrics (`scrape`). Without `replicas`, the
     /// Deployment leaves the field to the one manager that owns it.
     #[allow(clippy::too_many_arguments)]

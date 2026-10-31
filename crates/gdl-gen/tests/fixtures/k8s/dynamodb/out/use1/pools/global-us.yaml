@@ -49,7 +49,7 @@
     "template": {
       "metadata": {
         "annotations": {
-          "gdl.dev/config": "3dad74e221897c07",
+          "gdl.dev/config": "44f44a5c1ec01aca",
           "prometheus.io/path": "/v1/ext/gdl-pool/metrics",
           "prometheus.io/port": "1337",
           "prometheus.io/scrape": "true"
