@@ -91,7 +91,17 @@ pub struct Settings {
 
 impl gdl_runtime::Hosted for Settings {
     const KEYS: &'static [&'static str] = &["node"];
-    const NAMES: &'static [&'static str] = &["Detokenize", "Format"];
+    const NODES: &'static [&'static str] = &["Detokenize", "Format"];
+    const ADAPTERS: &'static [&'static str] = &[];
+    const GRAPH_NODES: &'static [&'static str] = &[
+        "Engine",
+        "Frontend",
+        "Preprocess",
+        "Truncate",
+        "Number",
+        "Detokenize",
+        "Format",
+    ];
 }
 
 #[derive(Default, serde::Deserialize)]
