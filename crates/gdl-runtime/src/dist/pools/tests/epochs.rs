@@ -215,3 +215,42 @@ fn epochs_are_made_again_only_when_a_listing_or_withdrawal_changes() {
     assert!(!Arc::ptr_eq(&after, &relisted));
     assert_eq!(read(&pools, M2), (false, Some(8)));
 }
+
+#[test]
+#[ignore = "F1: a recovery snapshot installs its row but discards its listing and epoch"]
+fn an_own_watch_snapshot_keeps_the_epoch_of_its_new_row() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    assert_eq!(read(&pools, M1), (false, Some(5)));
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("a recovery watch");
+
+    // The recovery snapshot reaches the restarted pool before the relay
+    // socket delivers its listing.
+    for event in [followed(M1, 2, 6), FollowEvent::Synced { listed: true }] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    assert_eq!(
+        super::table(&pools, M1)
+            .expect("the recovered row")
+            .generation,
+        2,
+        "the row is from the restarted pool"
+    );
+    assert_eq!(
+        read(&pools, M1),
+        (false, Some(6)),
+        "a pin accepted under the recovered row needs that hub's epoch"
+    );
+}
