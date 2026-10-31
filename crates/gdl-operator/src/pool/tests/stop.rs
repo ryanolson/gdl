@@ -320,3 +320,46 @@ async fn a_resumed_hub_step_stops_recreated_segments_before_scaling_the_hub() {
         fake.log(),
     );
 }
+
+#[tokio::test]
+#[ignore = "F8: a hub restarted after withdrawal is stopped without withdrawing its new record"]
+async fn a_hub_restart_during_the_segments_step_requires_fresh_withdrawal() {
+    let fake = running(true).await;
+    fake.delete(false);
+    fake.reconcile(1_000)
+        .await
+        .expect("drain and suspend segments");
+    assert_eq!(step(&fake), Some(StopStep::Segments));
+    assert!(fake.status().withdrawn);
+    fake.settle();
+
+    // A container restart keeps the Deployment uid but starts a new
+    // publisher, which writes a record again and has not withdrawn it.
+    let hub_uid = fake.uid(Kind::Deployment, "p");
+    {
+        let mut state = fake.state();
+        state.drained = false;
+        state.withdraws = false;
+        state.log.clear();
+    }
+    assert!(!Hubs::withdrawn(&fake, "p").await.expect("new hub"));
+    assert_eq!(fake.uid(Kind::Deployment, "p"), hub_uid);
+    fake.reconcile(2_000)
+        .await
+        .expect("resume with a new publisher");
+    fake.settle();
+    fake.reconcile(3_000).await.expect("resume the stop again");
+
+    assert!(
+        !released(&fake),
+        "the current hub's record is not withdrawn, so the finalizer must stay: {:?}",
+        fake.log(),
+    );
+    assert_eq!(
+        fake.state().objects[&(Kind::Deployment, "p".into())]
+            .live
+            .replicas,
+        Some(1),
+        "keep the current hub until it proves its new record withdrawn",
+    );
+}
