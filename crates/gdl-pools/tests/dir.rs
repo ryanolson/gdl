@@ -744,3 +744,27 @@ async fn a_pool_file_that_does_not_hold_its_write_is_not_read_as_none() {
     }
     assert_eq!(directory.last_write("model_x", "m3").await, Ok(None));
 }
+
+/// A write numbered past a read cannot land on a pool's file that does not
+/// hold its write: what the file held is unknown. A write that depends on
+/// no read replaces it, as before.
+#[tokio::test]
+async fn a_write_after_a_read_does_not_replace_a_file_that_holds_no_write() {
+    let temp = temp();
+    let class = temp.path().join("model_x");
+    std::fs::create_dir_all(&class).expect("the class directory");
+    std::fs::write(class.join("m1.json"), "{").expect("a file cut short");
+    let directory = DirDirectory::new(temp.path());
+    assert!(matches!(
+        directory.publish_after(record("m1", 5, 1), None).await,
+        Err(DirectoryError::Unavailable(_))
+    ));
+    directory
+        .publish(record("m1", 5, 1))
+        .await
+        .expect("a write that depends on no read");
+    assert!(matches!(
+        directory.last_write("model_x", "m1").await,
+        Ok(Some(LastWrite::Record(_)))
+    ));
+}

@@ -1596,3 +1596,25 @@ async fn a_parent_writes_a_record_after_a_read_only_on_that_write() {
     );
     parent.hub.shutdown().await.expect("the parent stops");
 }
+
+/// A parent whose kept file of a child did not decode when it started does
+/// not know what the child last wrote: it answers the child's read with an
+/// error, which the child reads again, never with a 404, which would let it
+/// number from its clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_answers_an_unknown_kept_write_as_a_failed_read() {
+    let state = state();
+    let class = state.path().join("model_x");
+    std::fs::create_dir_all(&class).expect("the class directory");
+    std::fs::write(class.join("model-x-01.json"), "{").expect("a file cut short");
+    let parent = relay_pool(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let watcher = PoolWatcher::new().expect("a client");
+    let read = watcher
+        .held(&address(&parent.hub), "model_x", "model-x-01")
+        .await;
+    parent.hub.shutdown().await.expect("the parent stops");
+    assert!(
+        matches!(read, Err(DirectoryError::Unavailable(_))),
+        "{read:?}"
+    );
+}

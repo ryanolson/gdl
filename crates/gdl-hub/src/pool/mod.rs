@@ -988,16 +988,21 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                     get(
                         move |Path((class, pool)): Path<(String, String)>| async move {
                             match holding.last(&class, &pool) {
-                                Some(gdl_pools::LastWrite::Record(record)) => {
+                                // What the child last wrote is unknown: a
+                                // failed read, which it reads again, never
+                                // a 404, which says it wrote nothing.
+                                Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+                                    .into_response(),
+                                Ok(Some(gdl_pools::LastWrite::Record(record))) => {
                                     Json(record).into_response()
                                 }
                                 // A child of an earlier build reads no
                                 // record, as it did; a later one reads the
                                 // tombstone, to number past it.
-                                Some(gdl_pools::LastWrite::Withdrawn(withdrawal)) => {
+                                Ok(Some(gdl_pools::LastWrite::Withdrawn(withdrawal))) => {
                                     (StatusCode::NOT_FOUND, Json(withdrawal)).into_response()
                                 }
-                                None => StatusCode::NOT_FOUND.into_response(),
+                                Ok(None) => StatusCode::NOT_FOUND.into_response(),
                             }
                         },
                     ),

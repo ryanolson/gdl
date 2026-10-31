@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
@@ -48,6 +49,11 @@ struct Store {
     /// children's reports, at their heartbeat, never from the request
     /// path, so one lock for every pool costs nothing that matters.
     writes: Mutex<()>,
+    /// The pools, by class and name, whose kept file did not decode when
+    /// the directory opened: what they last wrote is unknown, so a read of
+    /// it is an error, never none. A write that does not depend on what
+    /// was read replaces the file, and the pool is known again.
+    unknown: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl RelayDirectory {
@@ -75,9 +81,11 @@ impl RelayDirectory {
     /// [`DirectoryError::Unavailable`] when `root` cannot be made or read,
     /// or a pool's file in it cannot be read: a directory that opened
     /// without a record it holds would read a silent pool as gone. A file
-    /// that does not hold its pool's record or tombstone is passed over, as
-    /// the `dir` backend passes it over, and the pool's next write
-    /// replaces it.
+    /// that does not hold its pool's record or tombstone is passed over by
+    /// its watches, as the `dir` backend passes it over, but its pool's
+    /// last write is unknown ([`RelayDirectory::unknown`]): a read of it is
+    /// an error, and a write numbered past a read is refused, until a write
+    /// that depends on no read, or a withdrawal, replaces the file.
     pub fn open(root: impl Into<PathBuf>, limits: MemoryLimits) -> Result<Self, DirectoryError> {
         let root = root.into();
         let unavailable = |what: &str, path: &Path, error: std::io::Error| {
@@ -87,6 +95,7 @@ impl RelayDirectory {
         // Positions of their own, so that a token of a directory opened
         // before over the same state is answered with `Resnapshot`.
         let records = MemoryDirectory::with_base(limits, crate::dir::base());
+        let mut unknown = BTreeSet::new();
         let classes =
             std::fs::read_dir(&root).map_err(|error| unavailable("reading", &root, error))?;
         for class in classes {
@@ -109,7 +118,11 @@ impl RelayDirectory {
             }
             let pools = file::scan(&path, &name, &Files::new())
                 .map_err(|error| unavailable("reading", &path, error))?;
-            for entry in pools.into_values().filter_map(|seen| seen.entry) {
+            for (pool, seen) in pools {
+                let Some(entry) = seen.entry else {
+                    unknown.insert((name.clone(), pool));
+                    continue;
+                };
                 match (entry.record(), entry.withdrawal(&name)) {
                     (Some(record), _) => records.put(record.clone())?,
                     (None, Some(withdrawal)) => records.remove(withdrawal)?,
@@ -122,6 +135,7 @@ impl RelayDirectory {
             store: Some(Arc::new(Store {
                 root,
                 writes: Mutex::default(),
+                unknown: Mutex::new(unknown),
             })),
         })
     }
@@ -152,8 +166,31 @@ impl RelayDirectory {
     /// The last write the directory took for `pool` of `class`, its record
     /// or the tombstone of its withdrawal: a restarted child numbers past
     /// it.
-    pub fn last(&self, class: &str, pool: &str) -> Option<LastWrite> {
-        self.records.last(class, pool)
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryError::Unavailable`] for a pool whose kept file did not
+    /// decode when the directory opened, until a write replaces it.
+    pub fn last(&self, class: &str, pool: &str) -> Result<Option<LastWrite>, DirectoryError> {
+        if self.unknown(class, pool) {
+            return Err(DirectoryError::Unavailable(format!(
+                "the kept file of pool `{pool}` of class `{class}` does not decode"
+            )));
+        }
+        Ok(self.records.last(class, pool))
+    }
+
+    /// Whether the kept file of `pool` of `class` did not decode when the
+    /// directory opened, and no write has replaced it since: what the pool
+    /// last wrote is unknown.
+    pub fn unknown(&self, class: &str, pool: &str) -> bool {
+        self.store.as_ref().is_some_and(|store| {
+            store
+                .unknown
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&(class.to_owned(), pool.to_owned()))
+        })
     }
 
     /// Whether the latest write the directory took for `pool` of `class`
@@ -181,6 +218,15 @@ impl RelayDirectory {
         tokio::task::spawn_blocking(move || {
             let _writes = store.writes.lock().unwrap_or_else(PoisonError::into_inner);
             let (class, pool) = write.pool();
+            let key = (class.to_owned(), pool.to_owned());
+            let mut unknown = store.unknown.lock().unwrap_or_else(PoisonError::into_inner);
+            // A write numbered past a read cannot land on a write that is
+            // unknown; one that depends on no read replaces it.
+            if after.is_some() && unknown.contains(&key) {
+                return Err(DirectoryError::Unavailable(format!(
+                    "the kept file of pool `{pool}` of class `{class}` does not decode"
+                )));
+            }
             let held = records.held(class, pool).map(|(held, _)| held);
             if let Some(refused) =
                 crate::directory::refused(class, pool, held, write.version(), after)
@@ -188,7 +234,9 @@ impl RelayDirectory {
                 return Err(refused);
             }
             file::write(&store.root.join(class), class, pool, write.held(), None)?;
-            write.apply(&records, after)
+            write.apply(&records, after)?;
+            unknown.remove(&key);
+            Ok(())
         })
         .await
         .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
@@ -223,7 +271,7 @@ impl PoolDirectory for RelayDirectory {
         class: &str,
         pool: &str,
     ) -> Result<Option<LastWrite>, DirectoryError> {
-        Ok(self.last(class, pool))
+        self.last(class, pool)
     }
 
     /// A resume token is a place in this directory's watches: a directory

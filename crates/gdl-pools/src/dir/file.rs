@@ -280,6 +280,14 @@ pub(crate) fn write(
         held,
     };
     match load(&path, class, pool) {
+        // A file that does not hold the pool's write is replaced, but not
+        // by a write numbered past a read: what it held is unknown.
+        Ok(None) if after.is_some() => {
+            return Err(DirectoryError::Unavailable(format!(
+                "{} does not hold the pool's write",
+                path.display()
+            )));
+        }
         Ok(current) => {
             let current = current.map(|current| current.version());
             if let Some(refused) =

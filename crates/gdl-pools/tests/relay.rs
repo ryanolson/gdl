@@ -322,7 +322,6 @@ fn a_state_directory_that_cannot_be_read_is_refused() {
 /// Reopening a parent's store must not turn an undecodable retained
 /// tombstone into a bare 404 for its restarted child.
 #[tokio::test]
-#[ignore = "F8: reopening a relay store skips an undecodable tombstone and last_write answers none"]
 async fn an_undecodable_relay_tombstone_is_an_unknown_read() {
     let temp = temp();
     let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
@@ -439,4 +438,32 @@ async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
         Some(Version { epoch: 7, seq: 2 }),
         "the resumed reader missed a stored write before the restart"
     );
+}
+
+/// A pool whose kept file did not decode when the relay opened refuses a
+/// write numbered past a read, and a withdrawal or a write that depends on
+/// no read replaces the file: the pool's last write is known again.
+#[tokio::test]
+async fn an_unknown_kept_write_is_replaced_only_by_a_write_that_reads_nothing() {
+    let temp = temp();
+    let class = temp.path().join("model_x");
+    std::fs::create_dir_all(&class).expect("the class directory");
+    std::fs::write(class.join("m1.json"), "{").expect("a file cut short");
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    assert!(directory.unknown("model_x", "m1"));
+    assert!(matches!(
+        directory
+            .publish_after(record("m1", 1, Duration::from_secs(30)), None)
+            .await,
+        Err(DirectoryError::Unavailable(_))
+    ));
+    directory
+        .withdraw(withdrawal("m1", 2))
+        .await
+        .expect("a withdrawal replaces the file");
+    assert!(!directory.unknown("model_x", "m1"));
+    assert!(matches!(
+        directory.last_write("model_x", "m1").await,
+        Ok(Some(gdl_pools::LastWrite::Withdrawn(_)))
+    ));
 }

@@ -233,8 +233,13 @@ impl Reports {
     }
 
     /// The last write held for the child `pool` of `class`: its record,
-    /// expired or not, or the tombstone of its withdrawal.
-    pub(crate) fn last(&self, class: &str, pool: &str) -> Option<LastWrite> {
+    /// expired or not, or the tombstone of its withdrawal. An error for a
+    /// child whose kept file did not decode: what it last wrote is unknown.
+    pub(crate) fn last(
+        &self,
+        class: &str,
+        pool: &str,
+    ) -> Result<Option<LastWrite>, DirectoryError> {
         self.children.last(class, pool)
     }
 
@@ -314,7 +319,11 @@ impl Reports {
             }
             Report::Withdrawal(withdrawal) => {
                 withdrawal.check()?;
-                if !self.children.holds_record(&class, &pool) {
+                // A pool whose kept file did not decode may hold a record:
+                // its withdrawal replaces the file.
+                if !self.children.holds_record(&class, &pool)
+                    && !self.children.unknown(&class, &pool)
+                {
                     return Ok(None);
                 }
                 withdrawal.version()
