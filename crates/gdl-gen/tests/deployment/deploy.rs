@@ -100,6 +100,9 @@ struct Kube {
     /// What the gdl operator says in the status of each `GdlPool` it is
     /// given.
     operator: Operator,
+    /// The contexts whose user may not list `GdlPool`s, though their
+    /// cluster has the CRD.
+    forbidden_pools: Vec<&'static str>,
 }
 
 /// What the fake's gdl operator does with a `GdlPool`.
@@ -137,6 +140,7 @@ impl Kube {
             owners: BTreeMap::new(),
             raced: 0,
             operator: Operator::Ready,
+            forbidden_pools: Vec::new(),
         }
     }
 
@@ -553,6 +557,11 @@ impl gdl_gen::Kube for Kube {
                     ));
                 }
                 let pools = rest[1] == "gdlpools.gdl.dev";
+                if pools && self.forbidden_pools.contains(&context.as_str()) {
+                    return Ok(gdl_gen::Reply::failed(
+                        "Error from server (Forbidden): gdlpools.gdl.dev is forbidden: User \"deployer\" cannot list resource \"gdlpools\" in API group \"gdl.dev\" in the namespace \"gdl-api\"",
+                    ));
+                }
                 assert!(
                     pools || !rest[1].contains("gdlpools"),
                     "a GdlPool is listed alone: {args:?}"

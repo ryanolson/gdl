@@ -371,3 +371,52 @@ fn a_pool_whose_gdl_pool_is_gone_is_named() {
         "{error}"
     );
 }
+
+/// A cluster without the operator needs nothing of it. Where it has no gdl
+/// CRDs, `deploy` and `down` make no GdlPool call at all; where it has them
+/// and the deployer may not list GdlPools, the 403 is no failure there: a
+/// deployer without that right made none.
+#[test]
+fn a_plain_cluster_needs_no_gdl_pool_rights() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &plain_fleet());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.without_scalers = vec!["kind-use1", "kind-euw1"];
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    down(&files, &mut kube).expect("down");
+    let calls = commands(&log);
+    assert!(
+        calls
+            .iter()
+            .all(|args| args.iter().all(|a| !a.contains("gdlpools"))),
+        "{calls:?}"
+    );
+
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.forbidden_pools = vec!["kind-use1", "kind-euw1"];
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    down(&files, &mut kube).expect("down");
+    assert!(
+        commands(&log)
+            .iter()
+            .any(|args| args.contains(&"gdlpools.gdl.dev".to_string())),
+        "the list was asked"
+    );
+}
+
+/// A cluster the operator runs needs to list its GdlPools: a 403 there
+/// stops the deploy.
+#[test]
+fn an_operated_cluster_needs_its_gdl_pool_rights() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.forbidden_pools = vec!["kind-use1"];
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("refused")
+        .to_string();
+    assert!(error.contains("Forbidden"), "{error}");
+}

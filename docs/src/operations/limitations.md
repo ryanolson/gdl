@@ -549,7 +549,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** never force-delete the operator's pod, and let Kubernetes remove a lost node. If it happens, once only one operator runs, check each `GdlScaler`'s status, and the deletion cost and `gdl.dev/routable` label of its segment's pods.
 
 ### A `GdlPool` deleted with foreground propagation skips its ordered stop
-- **What:** a `GdlPool`'s finalizer stops the pool in order while every object of it still exists: a drain for a pool with a parent, then its segments, then its hub. Under background propagation, the default of `kubectl delete`, garbage collection deletes the pool's objects only after the finalizer is gone. Under foreground propagation (`kubectl delete --cascade=foreground`) it deletes them while the finalizer still runs, in no order, so a top pool's hub can stop before its segments, and an admitted request that needs the hub can fail. Each instance still drains on its own SIGTERM. The operator says so in the pool's `ForegroundDelete` condition and in an event, and still removes its finalizer once no pod of the pool runs.
+- **What:** a `GdlPool`'s finalizer stops the pool in order while every object of it still exists: a drain for a pool with a parent, then its segments, then its hub. Under background propagation, the default of `kubectl delete`, garbage collection deletes the pool's objects only after the finalizer is gone. Under foreground propagation (`kubectl delete --cascade=foreground`) it deletes them while the finalizer still runs, in no order, so a top pool's hub can stop before its segments, and an admitted request that needs the hub can fail. Each instance still drains on its own SIGTERM. The operator says so in the pool's `ForegroundDelete` condition and in an event, and still removes its finalizer once no pod of the pool runs: the pool goes, but its ordered stop is not guaranteed.
 - **Workaround:** delete a `GdlPool` with background propagation, as `cargo gdl` does.
 
 ### A pool's stop waits on its hub to say it withdrew
@@ -558,6 +558,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### A change that restarts a pool's hub waits for `allowPoolRestart`
 - **What:** a hub restart drains its pool ([A segment does not outlive a hub restart](#a-segment-does-not-outlive-a-hub-restart)). So the operator holds a `GdlPool` generation that changes its hub's pod template, such as a new deployment or hub image, and applies nothing of it, not even its segments' changes, until `allowPoolRestart` is set. The pool's `PoolRestartPending` condition and an event name the held generation.
+- **DynamoDB Local:** the hubs of a fleet's other clusters name the Local by its pod IP, in their variables. A Local made again gets a new IP, which changes those hubs' pod template, so their pools in a cluster the operator runs are held until a deploy with `--allow-pool-restart`.
 - **Workaround:** set `allowPoolRestart` on the pool when its restart is wanted.
 
 ### The operator changes no object it did not make

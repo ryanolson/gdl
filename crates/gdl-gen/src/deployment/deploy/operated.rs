@@ -136,7 +136,10 @@ impl Operated {
     }
 }
 
-/// The `GdlPool`s of `cluster` that carry its fleet's and its labels.
+/// The `GdlPool`s of `cluster` that carry its fleet's and its labels: none
+/// where the cluster has no `GdlPool` CRD, which is then not asked, and none
+/// where it does not ask for the operator and the deployer may not list
+/// them.
 pub(super) fn pools(
     kube: &mut dyn Kube,
     cluster: &Cluster,
@@ -145,13 +148,22 @@ pub(super) fn pools(
     if !cluster.pools {
         return Ok(Vec::new());
     }
-    let reply = run(
-        kube,
-        cluster.at().pools(&cluster.selector),
-        budget,
-        None,
-        &format!("listing the fleet's GdlPools in cluster `{}`", cluster.name),
-    )?;
+    let args = bounded(cluster.at().pools(&cluster.selector), budget);
+    let reply = kube.run(&args, None)?;
+    // A deployer of a cluster the operator does not run may have no right on
+    // GdlPools, and then made none: there is nothing of the operator's to
+    // find. Where the operator runs the pools, the deployer needs the list.
+    if !reply.success && !cluster.operator && reply.stderr.contains("(Forbidden)") {
+        return Ok(Vec::new());
+    }
+    if !reply.success {
+        return Err(Error::new(format!(
+            "listing the fleet's GdlPools in cluster `{}`: `kubectl {}` failed: {}",
+            cluster.name,
+            args.join(" "),
+            reply.stderr.trim()
+        )));
+    }
     Operated::list(&reply.stdout)
         .map_err(|e| Error::new(format!("cluster `{}`: {e}", cluster.name)))
 }
