@@ -717,3 +717,30 @@ async fn a_tombstone_of_an_earlier_build_is_read_with_list_version_zero() {
         Err(DirectoryError::NotNewer { .. })
     ));
 }
+
+/// A pool's file that does not hold its write, as one cut short or of
+/// another pool, is an unknown read, never a pool with no write: a hub that
+/// read it as none would number below the write it lost sight of.
+#[tokio::test]
+async fn a_pool_file_that_does_not_hold_its_write_is_not_read_as_none() {
+    let temp = temp();
+    let class = temp.path().join("model_x");
+    std::fs::create_dir_all(&class).expect("the class directory");
+    std::fs::write(class.join("m1.json"), "{").expect("a file cut short");
+    std::fs::write(
+        class.join("m2.json"),
+        r#"{"order":1,"withdrawn":{"pool":"m9","epoch":4,"seq":2}}"#,
+    )
+    .expect("another pool's tombstone");
+    let directory = DirDirectory::new(temp.path());
+    for pool in ["m1", "m2"] {
+        assert!(
+            matches!(
+                directory.last_write("model_x", pool).await,
+                Err(DirectoryError::Unavailable(_))
+            ),
+            "{pool}"
+        );
+    }
+    assert_eq!(directory.last_write("model_x", "m3").await, Ok(None));
+}

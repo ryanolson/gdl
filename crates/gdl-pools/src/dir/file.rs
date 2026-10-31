@@ -303,7 +303,8 @@ pub(crate) fn write(dir: &Path, class: &str, pool: &str, held: Held) -> Result<(
 }
 
 /// The last write `class/pool.json` in the class directory `dir` holds:
-/// None when there is no such file, or it holds anything else.
+/// None when there is no such file. A file that holds anything else is an
+/// unknown read, an error, never none.
 pub(crate) fn read(
     dir: &Path,
     class: &str,
@@ -311,7 +312,11 @@ pub(crate) fn read(
 ) -> Result<Option<LastWrite>, DirectoryError> {
     let path = dir.join(format!("{pool}.json"));
     match load(&path, class, pool) {
-        Ok(entry) => Ok(entry.map(|entry| entry.last(class))),
+        Ok(Some(entry)) => Ok(Some(entry.last(class))),
+        Ok(None) => Err(DirectoryError::Unavailable(format!(
+            "{} does not hold the pool's write",
+            path.display()
+        ))),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(DirectoryError::Unavailable(format!(
             "reading {}: {error}",
