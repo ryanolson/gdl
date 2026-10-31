@@ -14,6 +14,7 @@ use figment::providers::Serialized;
 use futures::future::{BoxFuture, LocalBoxFuture};
 use velo::Velo;
 
+use crate::EntryNeed;
 use crate::config::build_node;
 use crate::dist::{Roster, RuntimeConfig};
 use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig, Reserved};
@@ -77,9 +78,10 @@ pub trait SegmentBinary {
     /// the contract's `property_types()`.
     fn property_types() -> Vec<PropertyType>;
 
-    /// The property kinds the segment's entry adapters read: their
-    /// entries' `needs`. Its nodes' needs are in the graph.
-    const ENTRY_NEEDS: &'static [&'static str];
+    /// The property kinds the segment's entry adapters read, each with its
+    /// class and its adapters: their entries' `needs`. Its nodes' needs
+    /// are in the graph.
+    const ENTRY_NEEDS: &'static [EntryNeed];
 
     /// Start the segment's graph on `node`, with every instance in
     /// `roster`, and say what it serves once every segment is ready.
@@ -305,7 +307,9 @@ impl Builder {
         name: &str,
         table: Option<toml::Table>,
     ) -> std::result::Result<(), Failure> {
-        let built = Arc::new(self.build::<P>(name, table).await?);
+        // Under the segment's handle, not a reader's: `NEEDS` name no class,
+        // and a policy may share its name with an adapter.
+        let built = Arc::new(self.build_under::<P>(&self.followed, name, table).await?);
         self.pool_policies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -397,9 +401,22 @@ impl Builder {
     }
 
     /// Build `T`, the implementation of node `node` (as the graph spells
-    /// it), from its settings table, with its metrics registered.
+    /// it, or an entry adapter as its binding names it), from its settings
+    /// table, with its metrics registered. Its handle reads the classes
+    /// `node`'s own needs name ([`FollowedPools::needed_class`]).
     pub async fn build<T: Build>(
         &self,
+        node: &str,
+        table: Option<toml::Table>,
+    ) -> std::result::Result<T, Failure> {
+        self.build_under(&self.followed.reader(node), node, table)
+            .await
+    }
+
+    /// [`Builder::build`], with `followed` as the build's handle.
+    async fn build_under<T: Build>(
+        &self,
+        followed: &FollowedPools,
         node: &str,
         table: Option<toml::Table>,
     ) -> std::result::Result<T, Failure> {
@@ -409,7 +426,7 @@ impl Builder {
         let none = GraphConfig::new();
         let graph = self.graph.get(node).unwrap_or(&none);
         let providers = Figment::from(Serialized::defaults(table.unwrap_or_default()));
-        self.followed
+        followed
             .scope(
                 self.records.scope(
                     self.properties

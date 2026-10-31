@@ -165,7 +165,7 @@ impl gdl_runtime::SegmentBinary for Binary {
         contract::property_types()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         hosts: Nodes,

@@ -560,7 +560,7 @@ impl<const REGISTERS: bool> gdl_runtime::SegmentBinary for Frontend<REGISTERS> {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         _: (),
@@ -681,7 +681,7 @@ impl gdl_runtime::SegmentBinary for GatedFrontend {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         (): (),
@@ -780,7 +780,7 @@ impl gdl_runtime::SegmentBinary for Counting {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         (): (),

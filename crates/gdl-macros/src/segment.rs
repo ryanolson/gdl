@@ -24,7 +24,7 @@ use syn::{Ident, LitStr};
 mod input;
 
 pub(crate) use input::Segment;
-use input::{Crossing, Serve, Service};
+use input::{Crossing, Need, Serve, Service};
 
 pub(crate) fn expand(segment: &Segment, krate: &TokenStream) -> TokenStream {
     let consts = consts(segment);
@@ -144,18 +144,24 @@ fn root_type(root: &Ident, krate: &TokenStream) -> TokenStream {
     }
 }
 
-/// The property kinds the segment's entry adapters read.
-fn entry_needs(segment: &Segment) -> &[LitStr] {
-    segment
+/// What the segment's entries need, as the runtime takes it.
+fn entry_needs(segment: &Segment, krate: &TokenStream) -> Vec<TokenStream> {
+    let needs = segment
         .serve
         .hosts()
         .1
-        .map_or(&[][..], |service| service.needs.as_slice())
+        .map_or(&[][..], |service| &service.needs);
+    needs
+        .iter()
+        .map(|Need { kind, class, adapters }| {
+            quote!(#krate::EntryNeed { kind: #kind, class: #class, adapters: &[#(#adapters),*] })
+        })
+        .collect()
 }
 
 fn start(segment: &Segment, krate: &TokenStream) -> TokenStream {
     let roots = &segment.roots;
-    let needs = entry_needs(segment);
+    let needs = entry_needs(segment, krate);
     let root = if roots.len() == 1 {
         root_type(&roots[0], krate)
     } else {
@@ -288,7 +294,7 @@ fn binary(segment: &Segment, krate: &TokenStream) -> TokenStream {
         }
     });
     let start = start_fn(segment, krate, &built, frontend.is_some());
-    let entry_needs = entry_needs(segment);
+    let entry_needs = entry_needs(segment, krate);
     quote! {
         #settings
         #hosts
@@ -312,7 +318,7 @@ fn binary(segment: &Segment, krate: &TokenStream) -> TokenStream {
             fn property_types() -> ::std::vec::Vec<#krate::gdl::PropertyType> {
                 contract::property_types()
             }
-            const ENTRY_NEEDS: &'static [&'static str] = &[#(#entry_needs),*];
+            const ENTRY_NEEDS: &'static [#krate::EntryNeed] = &[#(#entry_needs),*];
             #start
         }
     }

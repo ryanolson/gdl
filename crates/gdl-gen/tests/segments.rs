@@ -207,33 +207,16 @@ fn every_segment_call_is_the_pinned_one() {
     );
 }
 
-/// The kinds a service's entries need reach the service block of the
-/// segment that hosts it, as one `needs` line: each kind once, in name
-/// order, whichever entries name it. A service whose entries need none
-/// writes no line, as every pinned call above shows.
+/// What a service's entries need reaches the service block of the segment
+/// that hosts it: each kind of each entry, with its class and the adapters
+/// of that entry, which read it. A service whose entries need none writes
+/// no list, as every pinned call above shows.
 #[test]
-fn a_services_entry_needs_are_one_sorted_line() {
-    let api = std::fs::read_to_string(root().join("examples/api/gdl.toml")).expect("api");
-    let spec =
-        api.replacen(
-            "[entry.chat]\n",
-            "[entry.chat]\nneeds = { shard = \"engines\", region = \"engines\" }\n",
-            1,
-        )
-        .replacen(
-            "[entry.responses]\n",
-            "[entry.responses]\nneeds = { shard = \"engines\" }\n",
-            1,
-        ) + "[class.global]\nsegments = [\"front\"]\n[class.engines]\nsegments = [\"engine\"]\n";
-    let graph = "name = \"api\", schema = 1;\n\
-        property shard: Prompt;\n\
-        property region: Prompt;\n\
-        source Http: Prompt -> stream Chunk;\n\
-        sink Engine: Prompt -> stream Chunk provides shard, region;\n\
-        topology: Http => Engine;\n";
+fn a_services_entry_needs_name_their_class_and_adapters() {
+    let (spec, graph) = common::api_needing_properties();
     let libraries = libraries(&Case::Text {
         spec,
-        graph: graph.into(),
+        graph,
         dir: root().join("examples/api"),
     });
     let front = &libraries
@@ -243,11 +226,18 @@ fn a_services_entry_needs_are_one_sorted_line() {
         .1;
     let lines: Vec<&str> = front
         .lines()
-        .filter(|line| line.trim_start().starts_with("needs:"))
+        .skip_while(|line| line.trim_start() != "needs: [")
+        .take_while(|line| line.trim_start() != "];")
+        .skip(1)
+        .map(str::trim)
         .collect();
     assert_eq!(
         lines,
-        ["        needs: [\"region\", \"shard\"];"],
+        [
+            "\"region\" = \"engines\" [\"Http_chat_f0\", \"Http_chat_b0\"];",
+            "\"shard\" = \"engines\" [\"Http_chat_f0\", \"Http_chat_b0\"];",
+            "\"shard\" = \"engines\" [\"Http_responses_op\"];",
+        ],
         "{front}"
     );
     let engine = &libraries
@@ -256,4 +246,55 @@ fn a_services_entry_needs_are_one_sorted_line() {
         .expect("the engine segment")
         .1;
     assert!(!engine.contains("needs:"), "{engine}");
+}
+
+/// An entry's `needs` are in neither hash: they leave the generated
+/// contract and the placement as they were, since nothing that crosses
+/// between segments depends on them.
+#[test]
+fn an_entry_need_changes_neither_hash() {
+    let (needing, graph) = common::api_needing_properties();
+    let bare: String = needing
+        .lines()
+        .filter(|line| !line.starts_with("needs = "))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(bare, needing);
+    let rendered = |spec: &str| {
+        let dir = root().join("examples/api");
+        let spec = gdl_gen::Spec::from_text(spec, &graph, &dir).expect("spec");
+        let out = tempfile::Builder::new()
+            .prefix("gdl-segments-")
+            .tempdir()
+            .expect("scratch");
+        gdl_gen::render(&spec, out.path(), &target("gdl-gen-tests")).expect("render")
+    };
+    let text = |files: &gdl_gen::Files, path: &str| {
+        let (_, text) = files
+            .iter()
+            .find(|(file, _)| file.as_path() == Path::new(path))
+            .expect("a generated file");
+        text.clone()
+    };
+    let (one, other) = (rendered(&needing), rendered(&bare));
+    let placement = |library: String| {
+        let (_, rest) = library
+            .split_once("placement: r#\"")
+            .expect("the placement");
+        let (placement, _) = rest.split_once("\"#").expect("its end");
+        placement.to_string()
+    };
+    assert_eq!(
+        text(&one, "contract/src/lib.rs"),
+        text(&other, "contract/src/lib.rs")
+    );
+    assert_ne!(
+        text(&one, "front/src/lib.rs"),
+        text(&other, "front/src/lib.rs"),
+        "the need reaches the segment"
+    );
+    assert_eq!(
+        placement(text(&one, "front/src/lib.rs")),
+        placement(text(&other, "front/src/lib.rs"))
+    );
 }

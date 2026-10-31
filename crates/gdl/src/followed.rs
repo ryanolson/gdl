@@ -38,6 +38,10 @@ tokio::task_local! {
 pub struct FollowedPools {
     source: Arc<OnceLock<Arc<dyn PoolSource>>>,
     kinds: PropertyKinds,
+    /// The class each kind's need names, by kind, for the node or entry
+    /// adapter this handle is scoped to ([`FollowedPools::reader`]). Held
+    /// here, not looked up, so that a read takes no lock.
+    needs: Arc<BTreeMap<String, String>>,
 }
 
 impl FollowedPools {
@@ -194,6 +198,39 @@ impl FollowedPools {
         handle
     }
 
+    /// The class that the reader being built names in its need of `kind`:
+    /// `sets` for a graph node that says `needs model from sets`, and for
+    /// an adapter of an entry whose table says
+    /// `needs = { model = "sets" }`. `cargo gdl check` proves that the
+    /// class supplies the kind, so a node that takes the class from here,
+    /// and not from a setting of its own, reads the class the check
+    /// covered:
+    ///
+    /// ```
+    /// # use gdl::{FollowedPools, PropertyKind};
+    /// const MODEL: PropertyKind<String> = PropertyKind::new("model");
+    ///
+    /// // In a node's tests. In its build: `FollowedPools::current()`.
+    /// let followed = FollowedPools::new().with_need(&MODEL, "sets");
+    /// assert_eq!(followed.needed_class(&MODEL), Some("sets"));
+    /// ```
+    ///
+    /// `None` for a kind the reader does not name, also when another
+    /// reader of its segment names it: two readers of one segment can name
+    /// two classes for one kind. `None` outside a build, and in a selector
+    /// or a pool policy, whose `NEEDS` name kinds and no class. It reads
+    /// what the graph and the spec declared, so it needs no bound handle.
+    pub fn needed_class<T>(&self, kind: &crate::PropertyKind<T>) -> Option<&str> {
+        self.needs.get(kind.name()).map(String::as_str)
+    }
+
+    /// The same handle, whose reader names `class` in its need of `kind`,
+    /// for a node's tests ([`FollowedPools::needed_class`]).
+    pub fn with_need<T>(mut self, kind: &crate::PropertyKind<T>, class: impl Into<String>) -> Self {
+        Arc::make_mut(&mut self.needs).insert(kind.name().to_string(), class.into());
+        self
+    }
+
     /// Whether the runtime has bound the handle to a chooser's tables.
     pub fn is_bound(&self) -> bool {
         self.source.get().is_some()
@@ -288,6 +325,18 @@ impl FollowedPools {
         Self {
             source: Arc::clone(&self.source),
             kinds: self.kinds.limited(needs, reader),
+            needs: Arc::default(),
+        }
+    }
+
+    /// A handle on the same pools and kinds for `reader`, a node or an
+    /// entry adapter, holding the needs the runtime declared for it
+    /// ([`PropertyKinds::declare_need`]).
+    #[doc(hidden)]
+    pub fn reader(&self, reader: &str) -> Self {
+        Self {
+            needs: Arc::new(self.kinds.needs_of(reader)),
+            ..self.clone()
         }
     }
 
@@ -509,6 +558,57 @@ mod tests {
             .register(&TEST)
             .expect("outside a build, a handle of its own");
         assert_eq!(segment.kinds().changes(), before + 1);
+    }
+
+    /// A reader reads the class its own need of a kind names, from any
+    /// handle it took in its build, with no chooser bound. A kind it does
+    /// not name reads nothing, also when another reader's need names it,
+    /// so two readers of a segment can name two classes.
+    #[tokio::test]
+    async fn a_reader_reads_the_class_its_need_names() {
+        const MODEL: crate::PropertyKind<String> = crate::PropertyKind::new("model");
+        const OTHER: crate::PropertyKind<String> = crate::PropertyKind::new("other");
+        let segment = FollowedPools::new();
+        segment.kinds().declare_need("gate", "model", "sets");
+        segment.kinds().declare_need("door", "model", "shared");
+        segment.kinds().declare_need("door", "other", "sets");
+
+        let gate = segment.reader("gate");
+        let taken = gate.scope(async { FollowedPools::current() }).await;
+        assert!(!taken.is_bound());
+        assert_eq!(taken.needed_class(&MODEL), Some("sets"));
+        assert_eq!(taken.clone().needed_class(&MODEL), Some("sets"));
+        assert_eq!(taken.needed_class(&OTHER), None, "the door's need");
+        assert_eq!(segment.reader("door").needed_class(&MODEL), Some("shared"));
+        assert_eq!(segment.reader("door").needed_class(&OTHER), Some("sets"));
+        assert_eq!(segment.reader("list").needed_class(&MODEL), None);
+        assert_eq!(segment.needed_class(&MODEL), None, "no reader");
+        assert_eq!(FollowedPools::current().needed_class(&MODEL), None);
+    }
+
+    /// A selector's `NEEDS` name no class, so its handle reads none, even
+    /// a handle limited from a reader's.
+    #[test]
+    fn a_selector_reads_no_class() {
+        const MODEL: crate::PropertyKind<String> = crate::PropertyKind::new("model");
+        let segment = FollowedPools::new();
+        segment.kinds().declare_need("gate", "model", "sets");
+        let limited = segment.reader("gate").limited(&["model"], "selector `s`");
+        assert_eq!(limited.needed_class(&MODEL), None);
+    }
+
+    /// A node's test gives its handle the need a graph or a spec would,
+    /// beside fixed tables, and later clones and a scoped build read it.
+    #[tokio::test]
+    async fn a_test_gives_a_handle_a_need() {
+        const MODEL: crate::PropertyKind<String> = crate::PropertyKind::new("model");
+        let pools = [Pool::new("sets", "s1", "r", PoolState::Ready)];
+        let fixed = FollowedPools::fixed(pools, std::iter::empty::<(String, String)>())
+            .with_need(&MODEL, "sets");
+        let taken = fixed.scope(async { FollowedPools::current() }).await;
+        let class = taken.needed_class(&MODEL).expect("the need").to_string();
+        assert_eq!(class, "sets");
+        assert_eq!(taken.read(&class, |pools| pools.pools().len()), Some(1));
     }
 
     /// A node reads the region of the chooser's own pool from its handle:

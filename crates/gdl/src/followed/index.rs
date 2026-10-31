@@ -7,7 +7,7 @@
 
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -397,6 +397,9 @@ struct Registered {
     /// The kinds the segment's nodes and entry adapters say they need, of
     /// the declared ones: what a node may register.
     needed: BTreeSet<String>,
+    /// Each node's and entry adapter's needs: by reader, the class each
+    /// kind names.
+    needs: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// One registered kind, with the function that decodes its keys.
@@ -525,6 +528,32 @@ impl PropertyKinds {
             .needed
             .extend(needed.iter().map(|kind| kind.to_string()));
         Ok(())
+    }
+
+    /// Record that `reader`, a node or an entry adapter, names `class` in
+    /// its need of `kind`: what [`FollowedPools::needed_class`] gives it.
+    ///
+    /// [`FollowedPools::needed_class`]: crate::FollowedPools::needed_class
+    #[doc(hidden)]
+    pub fn declare_need(&self, reader: &str, kind: &str, class: &str) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .needs
+            .entry(reader.to_string())
+            .or_default()
+            .insert(kind.to_string(), class.to_string());
+    }
+
+    /// What `reader` needs: by kind, the class its need names.
+    pub(super) fn needs_of(&self, reader: &str) -> BTreeMap<String, String> {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .needs
+            .get(reader)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// A handle on the same kinds that registers only `needs`, for

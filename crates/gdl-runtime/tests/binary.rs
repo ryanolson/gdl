@@ -35,6 +35,17 @@ mod shards {
     }
 }
 
+mod gated {
+    gdl_runtime::graph! {
+        name = "gated", schema = 1;
+        property shard: super::Shard;
+        source Ask: u32 -> stream u32;
+        operator Gate: (u32 -> stream u32) over (u32 -> stream u32) needs shard from west;
+        sink Serve: u32 -> stream u32 provides shard;
+        topology: Ask => Gate { Serve };
+    }
+}
+
 /// The key of the `shards` graph's property kind.
 #[derive(serde::Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct Shard {
@@ -311,7 +322,7 @@ impl<const SETS: u8> gdl_runtime::SegmentBinary for Providing<SETS> {
         shards::property_types()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         serve: Serve<SETS>,
@@ -383,7 +394,7 @@ impl<const NEEDS: bool> gdl_runtime::SegmentBinary for ReadingSelector<NEEDS> {
         shards::property_types()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         serve: Serve<0>,
@@ -392,6 +403,112 @@ impl<const NEEDS: bool> gdl_runtime::SegmentBinary for ReadingSelector<NEEDS> {
         runtime: RuntimeConfig,
     ) -> gdl::Result<Serving> {
         Providing::<0>::start(serve, node, roster, runtime)
+    }
+}
+
+/// A node or an entry adapter that keeps, as it is built, the class its
+/// need of `shard` names.
+struct ReadsClass(Option<String>);
+
+impl gdl::Build for ReadsClass {
+    type Config = toml::Table;
+    type Metrics = ();
+    async fn build(_config: toml::Table, (): ()) -> gdl::Result<Self> {
+        let followed = gdl::FollowedPools::current();
+        let class = followed.needed_class(&gdl::PropertyKind::<Shard>::new("shard"));
+        Ok(Self(class.map(str::to_string)))
+    }
+}
+
+/// A pool policy and a selector, whose `NEEDS` name no class: one that
+/// reads a class fails its build, whatever name it is built under.
+struct ReadsNoClass;
+
+impl gdl::Build for ReadsNoClass {
+    type Config = toml::Table;
+    type Metrics = ();
+    async fn build(_config: toml::Table, (): ()) -> gdl::Result<Self> {
+        let followed = gdl::FollowedPools::current();
+        match followed.needed_class(&gdl::PropertyKind::<Shard>::new("shard")) {
+            None => Ok(Self),
+            Some(class) => Err(gdl::Error::node(format!("reads class {class}"))),
+        }
+    }
+}
+
+impl gdl::Selector for ReadsNoClass {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, gdl::Encoded>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+
+impl gdl::PoolPolicy for ReadsNoClass {
+    type Head = gdl::Encoded;
+
+    fn choose(
+        &self,
+        _: gdl::PoolRequest<'_, gdl::Encoded>,
+        _: &[gdl::Pool],
+    ) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        Err(gdl::NoPool::new())
+    }
+}
+
+/// A segment binary that builds its readers as a generated one does, then
+/// fails with what each read: the test needs nothing after the build.
+struct ReadingClasses;
+
+impl gdl_runtime::SegmentBinary for ReadingClasses {
+    const PACKAGE: &'static str = "gated-only";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = Settings;
+    type Hosts = ();
+
+    async fn build(_settings: Settings, builder: &Builder) -> Result<(), Failure> {
+        let mut read = Vec::new();
+        for reader in ["Gate", "ask_chat_op", "Ask_models_op", "Ask"] {
+            let built = builder.build::<ReadsClass>(reader, None).await?;
+            read.push(format!("{reader}={:?}", built.0));
+        }
+        builder
+            .build_pool_policy::<ReadsNoClass>("ask_chat_op", None)
+            .await?;
+        builder.selector::<ReadsNoClass>("ask_chat_op").await?;
+        Err(read.join(" ").into())
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        Ok(DeploymentSpec::new(
+            gated::manifest(),
+            Placement::new().segment("only", ["Ask", "Gate", "Serve"]),
+        )?)
+    }
+
+    fn property_types() -> Vec<gdl_runtime::gdl::PropertyType> {
+        gated::property_types()
+    }
+
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[gdl_runtime::EntryNeed {
+        kind: "shard",
+        class: "east",
+        adapters: &["ask_chat_op"],
+    }];
+
+    fn start(
+        (): (),
+        _node: gdl_runtime::velo::Velo,
+        _roster: &Roster,
+        _runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        unreachable!("a failed build starts nothing")
     }
 }
 
@@ -435,7 +552,7 @@ impl gdl_runtime::SegmentBinary for Adder {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         add: Add,
@@ -493,7 +610,7 @@ impl gdl_runtime::SegmentBinary for Stopping {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         _add: Add,
@@ -531,7 +648,7 @@ impl gdl_runtime::SegmentBinary for Conflicting {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         _add: Add,
@@ -570,7 +687,7 @@ impl<First: Named, Second: Named> gdl_runtime::SegmentBinary for Clashing<First,
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         _add: Add,
@@ -627,6 +744,7 @@ async fn a_segment_binary_runs_its_lifecycle() {
     a_registered_selector_is_built_with_its_settings_and_metrics().await;
     a_provider_sets_only_its_declared_kind_and_type().await;
     a_selector_reads_only_the_kinds_its_needs_name().await;
+    a_built_node_and_adapter_read_the_class_of_their_need().await;
 }
 
 /// A selector reads the kinds its `NEEDS` names, as a pool policy does,
@@ -646,6 +764,19 @@ async fn a_selector_reads_only_the_kinds_its_needs_name() {
             "selector `reads` reads property kind `shard`, which its `NEEDS` does not name"
         ),
         "{error}"
+    );
+}
+
+/// Through the binary's own build, a graph node reads the class of its
+/// need and an entry adapter that of its entry, each from the handle
+/// `FollowedPools::current` gives it. A reader with no need reads nothing,
+/// and a pool policy named like an adapter does not read its class.
+async fn a_built_node_and_adapter_read_the_class_of_their_need() {
+    let (_dir, file) = settings("");
+    let error = run::<ReadingClasses>(&[file]).await.expect_err("it fails");
+    assert_eq!(
+        error,
+        "Gate=Some(\"west\") ask_chat_op=Some(\"east\") Ask_models_op=None Ask=None"
     );
 }
 
@@ -885,7 +1016,7 @@ impl gdl_runtime::SegmentBinary for Selecting {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         add: Add,
@@ -940,7 +1071,7 @@ impl gdl_runtime::SegmentBinary for Plain {
         Vec::new()
     }
 
-    const ENTRY_NEEDS: &'static [&'static str] = &[];
+    const ENTRY_NEEDS: &'static [gdl_runtime::EntryNeed] = &[];
 
     fn start(
         add: Add,

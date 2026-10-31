@@ -24,8 +24,8 @@
 //! port: the receiving node, the declaration trait, the port, and `head` or
 //! `item` for one part of a streamed port. `serve` is `json_lines`, `none`,
 //! `frontend Node = path`, or `service { ... }`: the frontend, the clients'
-//! type, the entry adapters, the roots the entries reach by index, and each
-//! entry's expression, or none.
+//! type, the entry adapters, the roots the entries reach by index, each
+//! entry's expression, or none, and what the entries need, if anything.
 
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Ident, LitInt, LitStr, Path, Token, braced, bracketed};
@@ -95,9 +95,17 @@ pub(crate) struct Service {
     pub(crate) pipelines: Vec<(Ident, usize)>,
     /// Each entry's field, and its pipeline unless it is off.
     pub(crate) entries: Vec<(Ident, Option<Expr>)>,
-    /// The property kinds the entries' adapters read: `needs: ["model"];`,
-    /// left out when they read none.
-    pub(crate) needs: Vec<LitStr>,
+    /// What the entries need, one line for each kind of each entry: left
+    /// out when they need none.
+    pub(crate) needs: Vec<Need>,
+}
+
+/// One kind an entry needs, its class, and the entry's adapters, which
+/// read it: `"model" = "sets" ["Http_chat_op"];`.
+pub(crate) struct Need {
+    pub(crate) kind: LitStr,
+    pub(crate) class: LitStr,
+    pub(crate) adapters: Vec<LitStr>,
 }
 
 /// An entry adapter: its name in the settings, its variable, its type.
@@ -317,7 +325,7 @@ impl Parse for Service {
         })?;
         end()?;
         key(input, "entries")?;
-        let entries = entries(input, |input| {
+        let wired = entries(input, |input| {
             let field = input.parse()?;
             if input.peek(Token![;]) {
                 return Ok((field, None));
@@ -330,7 +338,15 @@ impl Parse for Service {
             Vec::new()
         } else {
             key(input, "needs")?;
-            let needs = list(input)?;
+            let needs = entries(input, |input| {
+                let kind = input.parse()?;
+                input.parse::<Token![=]>()?;
+                Ok(Need {
+                    kind,
+                    class: input.parse()?,
+                    adapters: list(input)?,
+                })
+            })?;
             end()?;
             needs
         };
@@ -340,7 +356,7 @@ impl Parse for Service {
             clients,
             adapters,
             pipelines,
-            entries,
+            entries: wired,
             needs,
         })
     }

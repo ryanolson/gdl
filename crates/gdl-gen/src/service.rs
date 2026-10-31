@@ -12,9 +12,6 @@ use std::collections::BTreeMap;
 pub(crate) struct ServiceBinding {
     pub(crate) clients: String,
     pub(crate) entries: Vec<EntryBinding>,
-    /// The property kinds the entries' adapters read, each once, in name
-    /// order: the runtime lets them register these.
-    pub(crate) needs: Vec<String>,
 }
 impl ServiceBinding {
     pub(crate) fn nodes(&self) -> Vec<&EntryNode> {
@@ -50,6 +47,8 @@ pub(crate) struct EntryBinding {
     pub(crate) field: String,
     pub(crate) path: String,
     pub(crate) pipeline: Option<EntryHop>,
+    /// The entry's `needs`: each kind its adapters read, with its class.
+    pub(crate) needs: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct EntryNode {
@@ -80,7 +79,7 @@ impl EntryHop {
         targets
     }
 
-    fn nodes(&self) -> Vec<&EntryNode> {
+    pub(crate) fn nodes(&self) -> Vec<&EntryNode> {
         let mut nodes: Vec<_> = self
             .forward
             .iter()
@@ -322,6 +321,9 @@ pub(crate) fn bind(
     for endpoint in &node.entries {
         let enabled = config.get(&endpoint.enabled) == Some(&ConfigValue::Bool(true));
         let selected = binder.spec.entry.get(&endpoint.name).cloned();
+        let needs = selected
+            .as_ref()
+            .map_or_else(BTreeMap::new, |entry| entry.needs.clone());
         let pipeline = if enabled {
             match selected {
                 Some(selected) => match binder.hop(
@@ -360,6 +362,7 @@ pub(crate) fn bind(
             field: endpoint.name.clone(),
             path: endpoint.path.clone(),
             pipeline,
+            needs,
         });
     }
     for name in binder.spec.entry.keys() {
@@ -376,16 +379,9 @@ pub(crate) fn bind(
             .problems
             .push("a service must have at least one enabled, wired entry".into());
     }
-    let needs: std::collections::BTreeSet<String> = binder
-        .spec
-        .entry
-        .values()
-        .flat_map(|entry| entry.needs.keys().cloned())
-        .collect();
     binder.spec.service = Some(ServiceBinding {
         clients: clients.clone(),
         entries,
-        needs: needs.into_iter().collect(),
     });
 }
 

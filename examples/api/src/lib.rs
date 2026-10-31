@@ -160,7 +160,7 @@ async fn call<R: serde::de::DeserializeOwned + Send + 'static, I: Serialize + Se
 }
 
 /// Shared internal request.
-#[derive(Serialize, Deserialize, gdl::Message)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, gdl::Message)]
 pub struct Prompt {
     pub text: String,
 }

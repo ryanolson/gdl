@@ -27,6 +27,30 @@ pub fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The spec and the graph of the api example, split in two classes, whose
+/// `chat` and `responses` entries need property kinds of the second.
+pub fn api_needing_properties() -> (String, String) {
+    let api = std::fs::read_to_string(root().join("examples/api/gdl.toml")).expect("api");
+    let spec =
+        api.replacen(
+            "[entry.chat]\n",
+            "[entry.chat]\nneeds = { shard = \"engines\", region = \"engines\" }\n",
+            1,
+        )
+        .replacen(
+            "[entry.responses]\n",
+            "[entry.responses]\nneeds = { shard = \"engines\" }\n",
+            1,
+        ) + "[class.global]\nsegments = [\"front\"]\n[class.engines]\nsegments = [\"engine\"]\n";
+    let graph = "name = \"api\", schema = 1;\n\
+        property shard: Prompt;\n\
+        property region: Prompt;\n\
+        source Http: Prompt -> stream Chunk;\n\
+        sink Engine: Prompt -> stream Chunk provides shard, region;\n\
+        topology: Http => Engine;\n";
+    (spec, graph.to_string())
+}
+
 /// A command that runs generated binary `path`, without the caller's
 /// `RUST_LOG`: under a verbose filter a binary can fill a stderr pipe that
 /// its test no longer reads, and stop until it is read.

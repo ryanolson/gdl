@@ -1317,6 +1317,7 @@ dependencies = [
  "gdl-model",
  "gdl-pools",
  "gdl-runtime",
+ "gdl-syntax",
  "gdl-watch",
  "prometheus",
  "rmp-serde",

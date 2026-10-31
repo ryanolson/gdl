@@ -49,6 +49,7 @@ tokio-util = { workspace = true }
 gdl-pools = { path = "../gdl-pools" }
 gdl-hub = { path = "../gdl-hub" }
 gdl-runtime = { path = ".", features = ["fault-injection", "hub", "json-lines"] }
+gdl-syntax = { path = "../gdl-syntax" }
 figment = { workspace = true, features = ["test"] }
 criterion = { workspace = true }
 velo = { workspace = true }

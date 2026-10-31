@@ -21,7 +21,7 @@ mod wire;
 pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use config::build_node;
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
-pub use declared::declare_properties;
+pub use declared::{EntryNeed, declare_properties};
 #[doc(hidden)]
 pub use dist::EncodedItem;
 pub use dist::{

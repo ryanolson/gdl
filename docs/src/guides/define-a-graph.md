@@ -43,7 +43,7 @@ topology: Front => Gate { Engine };
 
 - `property <kind>: <Message>;` goes among the nodes. The kind is a settings key's shape: lowercase letters, digits, and `_`. The message must be a wire type, as the type of an edge that may be cut is, and its Rust type must implement `Ord`, since a reader's index sorts by it.
 - `provides a, b` lists the kinds a node's instance sets with `InstanceProperties::set`. Only a node in an entry segment of a class reports them.
-- `needs a from x, b from y` lists the kinds a node reads, each from the pools of a class of the placement. The class name is then part of the contract.
+- `needs a from x, b from y` lists the kinds a node reads, each from the pools of a class of the placement. The class name is then part of the contract, and the node reads it with `FollowedPools::needed_class` ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)).
 - A built-in identity provides and needs nothing. Each kind is declared once, and a node names a kind once in each list.
 
 An entry adapter or a pool policy reads a kind too. It says so outside the graph: an adapter in its `[entry.<name>]` table, and a policy in its Rust type ([Write a pool policy](write-a-pool-policy.md#2-implement-gdlpoolpolicy)). A class whose pools serve a kind from their settings, not from a node, says so in its `[pools.<class>]` table ([Spec reference](../appendix/spec-reference.md#placement)).

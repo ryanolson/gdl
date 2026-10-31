@@ -167,9 +167,9 @@ fn disabled_service_clients_keep_their_expansion_check() {
     );
 }
 
-/// A service whose entries read property kinds says so in the call, and
-/// both the binary and the library's `start` give them to the runtime, so
-/// its adapters may register them.
+/// A service whose entries need property kinds says so in the call, and
+/// both the binary and the library's `start` give the runtime each kind
+/// with its class and adapters, so that an adapter reads its own class.
 #[test]
 fn a_services_entry_needs_reach_the_runtime() {
     let thin = fixtures().join("api/front.thin.rs");
@@ -177,7 +177,7 @@ fn a_services_entry_needs_reach_the_runtime() {
         .expect("the library")
         .replacen(
             "        ];\n    };\n}",
-            "        ];\n        needs: [\"model\", \"region\"];\n    };\n}",
+            "        ];\n        needs: [\n            \"model\" = \"sets\" [\"a\", \"b\"];\n            \"region\" = \"east\" [];\n        ];\n    };\n}",
             1,
         );
     let library = syn::parse_file(&text).expect("a library that parses");
@@ -191,13 +191,16 @@ fn a_services_entry_needs_reach_the_runtime() {
         .expect("a segment! call");
     let segment: Segment = syn::parse2(call).expect("the call parses");
     let expansion = expand(&segment, &quote!(gdl_runtime)).to_string();
+    let needs = "& [gdl_runtime :: EntryNeed { kind : \"model\" , class : \"sets\" , adapters : & [\"a\" , \"b\"] } , \
+        gdl_runtime :: EntryNeed { kind : \"region\" , class : \"east\" , adapters : & [] }]";
     assert!(
-        expansion
-            .contains("const ENTRY_NEEDS : & 'static [& 'static str] = & [\"model\" , \"region\"]"),
+        expansion.contains(&format!(
+            "const ENTRY_NEEDS : & 'static [gdl_runtime :: EntryNeed] = {needs}"
+        )),
         "{expansion}"
     );
     assert!(
-        expansion.contains("& contract :: property_types () , & [\"model\" , \"region\"] ,"),
+        expansion.contains(&format!("& contract :: property_types () , {needs} ,")),
         "{expansion}"
     );
 }
