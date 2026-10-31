@@ -291,3 +291,6 @@ impl Cluster for KubeCluster {
             .map_err(|e| format!("GdlScaler `{name}` status: {e}"))
     }
 }
+
+#[cfg(test)]
+mod tests;

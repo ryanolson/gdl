@@ -28,6 +28,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+http = "1"
+tower = { version = "0.5", features = ["util"] }
 # The instance list's contract: the hub's own type, encoded, must read
 # into the operator's mirror. A dev-dependency only, so velo is never in
 # the operator's binary.
