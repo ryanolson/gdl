@@ -340,7 +340,9 @@ async fn a_retirement_the_hub_never_answers_leaves_the_drain_its_time() {
     .await
     .expect("the engine closed its entries");
     control.answer();
-    left(first_served).await;
+    // The whole drain, its wait for an empty ledger included, then the
+    // shutdown and the leave, once the hub has answered.
+    let exited = left(first_served).await - stopped;
 
     for process in [&front_process, &second_process] {
         process.stop();
@@ -353,6 +355,10 @@ async fn a_retirement_the_hub_never_answers_leaves_the_drain_its_time() {
     assert!(
         closed < released + Duration::from_millis(1_500),
         "released at {released:?}, the engine closed at {closed:?}, near its {BOUND:?} bound"
+    );
+    assert!(
+        exited < BOUND,
+        "released at {released:?}, the engine left at {exited:?}, past its {BOUND:?} bound"
     );
 }
 
