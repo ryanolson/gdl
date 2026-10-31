@@ -29,6 +29,46 @@ use tokio::sync::watch;
 use velo_hub::Hub;
 use velo_hub::axum::{Json, Router, routing::post};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F3: a malformed nonempty 404 tombstone is silently read as no retained write"]
+async fn a_malformed_withdrawal_response_is_an_error() {
+    use velo_hub::axum::{extract::Path, http::StatusCode, routing::get};
+
+    let app = Router::new().route(
+        &format!("/v1/ext/{}{}", gdl_watch::EXTENSION, gdl_watch::HELD_ROUTE),
+        get(|Path((_class, pool)): Path<(String, String)>| async move {
+            let body = if pool == "bare" {
+                ""
+            } else {
+                r#"{"class":"model_x","pool":"model-x-01","epoch":42,"seq":2,"properties_version":"broken"}"#
+            };
+            (StatusCode::NOT_FOUND, body)
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("an address").to_string();
+    let serving = tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
+    let watcher = PoolWatcher::new().expect("a client");
+    assert_eq!(
+        tokio::time::timeout(WAIT, watcher.held(&address, "model_x", "bare"))
+            .await
+            .expect("the bare response arrives"),
+        Ok(None),
+        "a parent of an earlier build still returns no write"
+    );
+    let result = tokio::time::timeout(WAIT, watcher.held(&address, "model_x", "model-x-01"))
+        .await
+        .expect("the malformed response arrives");
+    serving.abort();
+    let _ = serving.await;
+    assert!(
+        matches!(result, Err(DirectoryError::Unavailable(_))),
+        "a malformed tombstone must not erase the retained numbering floor: {result:?}"
+    );
+}
+
 /// A pool's hub under the `relay` backend: its directory reports its
 /// record to its parent's hub, if its settings name one, and holds the
 /// records its children report.
