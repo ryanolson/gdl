@@ -780,6 +780,9 @@ fn a_deploy_runs_its_steps_in_order() {
             "docker",
             "kind-euw1:list",
             "kind-use1:list",
+            // euw1 does not ask for the operator: its segment Deployments
+            // are read for an owner of `replicas` that would conflict.
+            "kind-euw1:read",
             "kind-euw1:namespace",
             "kind-euw1:create-namespace",
             "kind-euw1:base",

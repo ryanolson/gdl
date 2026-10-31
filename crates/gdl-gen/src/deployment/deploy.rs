@@ -168,6 +168,10 @@ pub fn deploy(
     )?;
     let rendered = Rendered::of(&files, &clusters)?;
     unmoved(kube, &fleet, &clusters, &how.waits)?;
+    for cluster in clusters.0.iter().filter(|cluster| !cluster.scaler) {
+        let pools = &rendered.0[&cluster.name].pools;
+        scaled::refuse_opted_out(kube, cluster, pools, &how.waits)?;
+    }
     // Every object this run applied, in any cluster, by its uid: none is
     // pruned, even where two clusters' contexts reach one namespace.
     let mut applied = BTreeSet::new();

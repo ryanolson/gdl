@@ -276,3 +276,57 @@ fn an_entry_service_selects_on_routable_once_every_pod_has_it() {
     let service = held(&kube, "kind-use1", "Service", FRONT);
     assert_eq!(service["spec"]["selector"]["gdl.dev/routable"], "true");
 }
+
+/// A cluster that no longer asks for the operator, whose segment
+/// Deployment's `replicas` `gdl-scaler` still owns: `gdl`'s apply of the
+/// count would conflict with it, so the deploy refuses before it applies
+/// anything, naming the cluster and the segment.
+#[test]
+fn a_cluster_that_opts_out_with_scaled_segments_is_refused() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let mut kube = Kube::new(&log);
+    kube.holds(
+        "kind-euw1",
+        json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "model-x-eu-engine", "namespace": "gdl-api", "labels": {
+                "gdl.dev/fleet": "api", "gdl.dev/pool": "model-x-eu", "gdl.dev/segment": "engine",
+                "gdl.dev/class": "model_x",
+            }},
+            "spec": {"replicas": 4},
+        }),
+    );
+    kube.owners.insert(
+        (
+            "kind-euw1".into(),
+            "Deployment".into(),
+            "model-x-eu-engine".into(),
+        ),
+        ["gdl-scaler".to_string()].into(),
+    );
+    let mut docker = Docker {
+        log: Rc::clone(&log),
+        fail: false,
+    };
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("refused")
+        .to_string();
+    for part in [
+        "cluster `euw1`",
+        "model-x-eu-engine",
+        "scaler = true",
+        "GdlScaler",
+    ] {
+        assert!(error.contains(part), "{part} in {error}");
+    }
+    assert!(
+        !steps(&log)
+            .iter()
+            .any(|s| s.ends_with(":pools") || s.ends_with(":base")),
+        "{:?}",
+        steps(&log)
+    );
+}

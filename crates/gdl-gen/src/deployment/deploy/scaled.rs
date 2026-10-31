@@ -83,6 +83,64 @@ pub(super) fn apply(
     Ok(applied)
 }
 
+/// Refuse `cluster`, which does not ask for the operator, when the
+/// operator's manager still owns the `replicas` of a segment Deployment
+/// that `pools` renders: `gdl`'s apply of the count would conflict with
+/// it, and only after other objects had changed. Read before anything is
+/// applied, in any cluster.
+pub(super) fn refuse_opted_out(
+    kube: &mut dyn Kube,
+    cluster: &Cluster,
+    pools: &str,
+    waits: &Waits,
+) -> Result<(), Error> {
+    let mut scaled = Vec::new();
+    for object in documents(pools)? {
+        if object["kind"] != "Deployment" || object["spec"].get("replicas").is_none() {
+            continue;
+        }
+        let name = object["metadata"]["name"].as_str().unwrap_or_default();
+        if object["metadata"]["labels"]["gdl.dev/segment"] == "hub" {
+            continue;
+        }
+        let reference = format!("deployments.apps/{name}");
+        let reply = run(
+            kube,
+            cluster.at().object(&reference),
+            waits.objects,
+            None,
+            &format!("reading {reference} in cluster `{}`", cluster.name),
+        )?;
+        if reply.stdout.trim().is_empty() {
+            continue;
+        }
+        let live: Value = serde_json::from_str(&reply.stdout)
+            .map_err(|e| Error::new(format!("`kubectl get {reference}` printed no JSON: {e}")))?;
+        if replica_owners(&live)
+            .iter()
+            .any(|owner| owner == SCALER_MANAGER)
+        {
+            scaled.push(name.to_string());
+        }
+    }
+    if scaled.is_empty() {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "cluster `{}` does not set `scaler = true`, but the gdl operator still owns the `replicas` of {}: an apply of the fleet's count would conflict with it. Keep `[cluster.{}] scaler = true`; or delete the operator's GdlScalers there (`kubectl --context {} --namespace {} delete {} --selector gdl.dev/fleet=<fleet>`) and set each Deployment's count, then deploy again",
+        cluster.name,
+        scaled
+            .iter()
+            .map(|name| format!("Deployment `{name}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        cluster.name,
+        cluster.context,
+        cluster.namespace,
+        super::SCALERS
+    )))
+}
+
 /// Bootstrap the `replicas` of each of `scaled`, a scaler's name and its
 /// quorum: its Deployment's, then its own.
 fn bootstrap_all(
