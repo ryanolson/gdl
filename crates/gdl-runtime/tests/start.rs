@@ -226,3 +226,34 @@ async fn an_unanswered_first_registration_reports_what_the_start_waits_for() {
     assert!(body.contains("\"phase\":\"starting\""), "{body}");
     assert!(body.contains("\"waiting\":\"hub\""), "{body}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F4: a refused start leaves health waiting for the hub"]
+async fn a_refused_start_stops_reporting_a_hub_wait() {
+    let mut other = spec();
+    other.graph.name = "other".into();
+    let hub = hub_on(0, 0, other).await;
+    let config = settings(hub.public_addr().port(), hub.control_addr().port(), 60_000);
+    let process = Process::start(&config).await.expect("the process starts");
+    let launched = tokio::time::timeout(
+        WAIT,
+        config.launch(&process, "a", SEGMENTS, &spec(), async { Ok(()) }),
+    )
+    .await
+    .expect("a permanent refusal ends the start");
+    let Err(error) = launched else {
+        panic!("the hub refuses another graph")
+    };
+    assert!(error.to_string().contains("400"), "{error}");
+    let (code, body) = get(
+        process.system_address().expect("a system listener"),
+        "/health",
+    )
+    .await;
+    hub.shutdown().await.expect("valid test fixture");
+    assert_eq!(code, 503, "{body}");
+    assert!(
+        !body.contains("\"waiting\":\"hub\""),
+        "a start that already returned a permanent refusal is no longer waiting: {body}"
+    );
+}
