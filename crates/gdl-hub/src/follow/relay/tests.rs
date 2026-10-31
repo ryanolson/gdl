@@ -72,7 +72,6 @@ fn state(state: PoolState) -> PoolWatchEvent {
 }
 
 #[test]
-#[ignore = "F2: draining from a link without a property list never reaches its listing"]
 fn a_link_without_properties_still_lists_its_pool_draining() {
     let record: gdl_pools::PoolRecord = serde_json::from_value(serde_json::json!({
         "name": "m",

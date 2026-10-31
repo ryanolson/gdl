@@ -1073,10 +1073,14 @@ impl Shared {
             .get(class)
             .and_then(|pools| pools.get(pool))
             .and_then(|follow| follow.installed.as_ref())
-            && let Some(properties) = installed.properties()
         {
+            // A drain is ordered by the hub's epoch, not by the list, so a
+            // link that sends no list, from a hub of an earlier build,
+            // still says it.
             listings.link_draining(class, pool, installed.epoch(), installed.draining());
-            listings.link_properties(class, pool, properties);
+            if let Some(properties) = installed.properties() {
+                listings.link_properties(class, pool, properties);
+            }
         }
         if let Some(listing) = self
             .listings
