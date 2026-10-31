@@ -162,6 +162,17 @@ async fn a_withdrawal_the_watch_shows_is_relayed() {
     let pool = record();
     let (hub, global) = hub_of(global_default(), directory.clone(), timing()).await;
     let mut relay = global.follows();
+    // A watch begun before the directory's first snapshot is in takes its
+    // own only once that is, and sees no change from before: read to its
+    // marker, so that the withdrawal below comes after it.
+    tokio::time::timeout(WAIT, async {
+        while !matches!(
+            relay.next().await.expect("the relay lives"),
+            FollowEvent::Synced { .. }
+        ) {}
+    })
+    .await
+    .expect("the relay's snapshot is whole");
     let key = ("model_x".to_string(), pool.name.clone());
     let mut following = global.following();
     directory.publish(pool.clone()).await.expect("stored");
