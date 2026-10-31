@@ -317,7 +317,8 @@ pub struct Listing {
     /// `draining`. A reader takes `draining` from a listing of a later
     /// epoch, adds it from one of the same epoch, and keeps its own over
     /// one of an earlier epoch. Absent when 0, and from a hub of an
-    /// earlier build.
+    /// earlier build; a reader then orders `draining` by the list's
+    /// version.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub epoch: u64,
 }

@@ -1,7 +1,6 @@
 use super::*;
 
 #[test]
-#[ignore = "F3: a relay without listing epochs cannot clear a drain after a ready successor"]
 fn a_ready_successor_from_a_relay_without_epochs_clears_a_drain() {
     let (mut follows, node, now) = holding_five();
     let read = |version, draining| {
@@ -96,4 +95,18 @@ fn a_successor_after_directory_loss_can_change_its_drain_at_a_lower_epoch() {
         [true, false],
         "a successor's drain is independent of the predecessor after directory loss"
     );
+}
+
+/// With one epoch unknown, the list orders the drain both ways: a listing
+/// with no epoch, of an older or the same list, does not clear a drain
+/// that a hub of a known epoch said.
+#[test]
+fn without_an_epoch_an_older_or_the_same_list_keeps_a_drain() {
+    let (mut follows, node, now) = holding_five();
+    follows.apply(listed_event(M1, Some(draining_at(2, 6, true))), now);
+    assert_eq!(drains(&node), (true, 6), "a known hub drains");
+    for version in [5, 6] {
+        follows.apply(listed_event(M1, Some(draining_at(0, version, false))), now);
+        assert_eq!(drains(&node), (true, 6), "list {version}, no epoch");
+    }
 }

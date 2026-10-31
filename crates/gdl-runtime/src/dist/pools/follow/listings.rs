@@ -19,6 +19,8 @@
 //! of a later epoch clears it, one of the same epoch can only set it, and
 //! one of an earlier epoch says nothing. A later hub can list the same
 //! version as the hub before it, when that hub ran ahead of its clock.
+//! A relay of an earlier build sends no epoch: then the drain goes with
+//! the list's version.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -99,19 +101,33 @@ impl Listings {
 /// higher version. Keep whether the pool drains, with its epoch, when
 /// `held` is of a later hub, and keep a drain of the same hub, since it
 /// cannot be cancelled. Take every other field of `listing`.
+///
+/// A relay of an earlier build sends no epoch, which reads as 0. When
+/// either epoch is 0, the drain goes with the list instead: kept with a
+/// held list of a higher version, added with one of the same version, and
+/// taken as the listing says with a newer list, as a later hub's is.
 fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
     let Some((held, _)) = held else {
         return;
     };
-    if held.properties.version > listing.properties.version {
+    let by_list = held.properties.version.cmp(&listing.properties.version);
+    if by_list == std::cmp::Ordering::Greater {
         listing.properties.clone_from(&held.properties);
     }
-    match held.epoch.cmp(&listing.epoch) {
+    let order = if held.epoch == 0 || listing.epoch == 0 {
+        by_list
+    } else {
+        held.epoch.cmp(&listing.epoch)
+    };
+    match order {
         std::cmp::Ordering::Greater => {
             listing.draining = held.draining;
             listing.epoch = held.epoch;
         }
-        std::cmp::Ordering::Equal => listing.draining |= held.draining,
+        std::cmp::Ordering::Equal => {
+            listing.draining |= held.draining;
+            listing.epoch = listing.epoch.max(held.epoch);
+        }
         std::cmp::Ordering::Less => {}
     }
 }
