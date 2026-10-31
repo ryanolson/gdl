@@ -9,6 +9,8 @@ use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::{FollowEvent, PoolWatchEvent};
 use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
+mod guard;
+
 fn peer() -> PeerInfo {
     PeerInfo::new(
         InstanceId::new_v4(),

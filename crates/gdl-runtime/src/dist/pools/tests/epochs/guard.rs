@@ -297,7 +297,7 @@ fn read(pools: &Pools) -> (Option<gdl::PoolEvidence>, Option<(u64, u64)>) {
 
 /// Run `seed` for `steps`: the steps taken, or the steps up to the first
 /// broken invariant, with what broke.
-fn run(seed: u64, steps: usize, rows: bool) -> Result<(), (Vec<String>, String)> {
+fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
     let mut rng = Rng(seed);
     let (mut follows, pools, _, _) = follower();
     let start = Instant::now();
@@ -596,7 +596,7 @@ fn run(seed: u64, steps: usize, rows: bool) -> Result<(), (Vec<String>, String)>
         };
         trace.push(what);
         let (evidence, row) = read(&pools);
-        if let Err(broke) = check(&hub, evidence, row.filter(|_| rows)) {
+        if let Err(broke) = check(&hub, evidence, row) {
             return Err((trace, broke));
         }
     }
@@ -702,10 +702,11 @@ fn seeds() -> Vec<u64> {
     (0..count).collect()
 }
 
-/// Run the guard over its seeds, checking (c) if `rows`.
-fn guard(rows: bool) {
+/// The guard, over a fixed set of seeds; see the module's documentation.
+#[test]
+fn every_interleaving_keeps_each_state_with_its_hubs_epoch() {
     for seed in seeds() {
-        if let Err((trace, broke)) = run(seed, STEPS, rows) {
+        if let Err((trace, broke)) = run(seed, STEPS) {
             let steps: Vec<String> = trace
                 .iter()
                 .enumerate()
@@ -717,18 +718,4 @@ fn guard(rows: bool) {
             );
         }
     }
-}
-
-/// The guard's invariants (a) and (b), over a fixed set of seeds; see the
-/// module's documentation.
-#[test]
-fn every_interleaving_keeps_each_state_with_its_hubs_epoch() {
-    guard(false);
-}
-
-/// The guard's invariant (c) too.
-#[test]
-#[ignore = "guard class 3, held for the marshal's ruling: invariant (c) fails on seeds 11, 32, 39, 44 and 51 of 0..64, when the relay's unlisting forgets the evidence of a row a pool's own watch still shows"]
-fn every_interleaving_keeps_the_evidence_beside_its_rows() {
-    guard(true);
 }
