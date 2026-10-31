@@ -312,8 +312,8 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### A process's CPU seconds count whole seconds
 - **What:** `process_cpu_seconds_total` rises in steps of one second. A rate over a short window, or of a process that uses little CPU, reads 0 or 1 by turns.
-- **Why:** prometheus's process collector divides the kernel's clock ticks by the tick rate in integers, and its counter holds integers. The cgroup's throttled time, `process_cgroup_cpu_throttled_seconds_total`, is in microseconds.
-- **Workaround:** read the rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
+- **Why:** prometheus's process collector divides the kernel's clock ticks by the tick rate in integers, and its counter holds integers.
+- **Workaround:** read `process_cgroup_cpu_usage_seconds_total`, the cgroup's CPU use to the microsecond, which is the precise figure under cgroup v2. Off cgroup v2, read the process's rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
 - **Lifts:** a prometheus release whose collector counts fractions of a second.
 
 ## Tooling

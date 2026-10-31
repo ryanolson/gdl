@@ -1,5 +1,6 @@
 //! The process's cgroup v2 figures, read from its own cgroup's files each
-//! time the registry is scraped: CPU throttling, the CPU quota, and memory.
+//! time the registry is scraped: CPU use and throttling, the CPU quota, and
+//! memory.
 //!
 //! A process limited to a CPU quota reads at most its quota in CPU seconds,
 //! however much more it needs; the throttled time is the rest. Nothing here
@@ -17,7 +18,19 @@ use prometheus::proto::{self, MetricFamily, MetricType};
 /// Where cgroup v2 is mounted.
 const MOUNT: &str = "/sys/fs/cgroup";
 
-/// The families: name, help, and type.
+/// The families: name and help.
+const USAGE: (&str, &str) = (
+    "process_cgroup_cpu_usage_seconds_total",
+    "CPU time used by the process's cgroup, in seconds, to the microsecond (cpu.stat usage_usec).",
+);
+const USER: (&str, &str) = (
+    "process_cgroup_cpu_user_seconds_total",
+    "User CPU time used by the process's cgroup, in seconds (cpu.stat user_usec).",
+);
+const SYSTEM: (&str, &str) = (
+    "process_cgroup_cpu_system_seconds_total",
+    "System CPU time used by the process's cgroup, in seconds (cpu.stat system_usec).",
+);
 const PERIODS: (&str, &str) = (
     "process_cgroup_cpu_periods_total",
     "CPU quota periods that have elapsed for the process's cgroup (cpu.stat nr_periods).",
@@ -70,6 +83,9 @@ impl CgroupCollector {
     /// The collector of the cgroup whose files are in `dir`.
     pub(crate) fn at(dir: Option<PathBuf>) -> Self {
         let descs = [
+            USAGE,
+            USER,
+            SYSTEM,
             PERIODS,
             THROTTLED_PERIODS,
             THROTTLED_SECONDS,
@@ -104,6 +120,9 @@ impl Collector for CgroupCollector {
 /// The cgroup's figures at one scrape, each `None` when unread.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Reading {
+    pub(crate) usage_seconds: Option<f64>,
+    pub(crate) user_seconds: Option<f64>,
+    pub(crate) system_seconds: Option<f64>,
     pub(crate) periods: Option<u64>,
     pub(crate) throttled_periods: Option<u64>,
     pub(crate) throttled_seconds: Option<f64>,
@@ -119,12 +138,16 @@ impl Reading {
         let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok();
         let stat = read("cpu.stat");
         let stat = |key: &str| stat.as_deref().and_then(|text| stat_value(text, key));
+        let seconds = |key: &str| stat(key).map(|usec| usec as f64 / 1e6);
         let (quota_cores, period_seconds) = read("cpu.max").map_or((None, None), |text| max(&text));
         let bytes = |file: &str| read(file).and_then(|text| text.trim().parse().ok());
         Self {
+            usage_seconds: seconds("usage_usec"),
+            user_seconds: seconds("user_usec"),
+            system_seconds: seconds("system_usec"),
             periods: stat("nr_periods"),
             throttled_periods: stat("nr_throttled"),
-            throttled_seconds: stat("throttled_usec").map(|usec| usec as f64 / 1e6),
+            throttled_seconds: seconds("throttled_usec"),
             quota_cores,
             period_seconds,
             memory_bytes: bytes("memory.current"),
@@ -135,6 +158,9 @@ impl Reading {
     fn families(&self) -> Vec<MetricFamily> {
         let as_f64 = |value: Option<u64>| value.map(|value| value as f64);
         [
+            (USAGE, MetricType::COUNTER, self.usage_seconds),
+            (USER, MetricType::COUNTER, self.user_seconds),
+            (SYSTEM, MetricType::COUNTER, self.system_seconds),
             (PERIODS, MetricType::COUNTER, as_f64(self.periods)),
             (
                 THROTTLED_PERIODS,

@@ -66,19 +66,19 @@ A segment binary records the runtime's figures only while its listener is on: wi
 Every segment and every pool's hub serves figures of its own process, read when `/metrics` is scraped, so nothing runs on the request path. A segment serves them beside its registry, with its identity labels. A hub serves them on its metrics route, with no labels. Neither adds a prefix, so the names are the same in every component, and dashboards built for the Prometheus client libraries read them as they are.
 
 - **The process**, from prometheus's process collector, on Linux only: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_threads`, and `process_start_time_seconds`.
-- **Its cgroup**, from the cgroup v2 files of the process's own cgroup, which `/proc/self/cgroup` names: CPU throttling from `cpu.stat`, the quota from `cpu.max`, and memory from `memory.current` and `memory.peak` ([A process's own figures](../appendix/metrics.md#a-processs-own-figures)).
+- **Its cgroup**, from the cgroup v2 files of the process's own cgroup, which `/proc/self/cgroup` names: CPU use and throttling from `cpu.stat`, the quota from `cpu.max`, and memory from `memory.current` and `memory.peak` ([A process's own figures](../appendix/metrics.md#a-processs-own-figures)).
 
-A figure that cannot be read is left out, and the scrape goes on: under cgroup v1, off Linux, or when a file is missing or unreadable. `cpu.stat` has the throttling keys only where the cgroup's CPU controller is on, as it is for a container with a CPU limit. A quota of `max` is no quota: `process_cgroup_cpu_quota_cores` is absent.
+A figure that cannot be read is left out, and the scrape goes on: under cgroup v1, off Linux, or when a file is missing or unreadable. `cpu.stat` always has the usage keys, and the throttling keys only where the cgroup's CPU controller is on, as it is for a container with a CPU limit. A quota of `max` is no quota: `process_cgroup_cpu_quota_cores` is absent.
 
-**A segment's real CPU need under a limit.** A process limited to a CPU quota uses at most its quota in CPU seconds, however much more it needs. Throttled time is the rest. Read the need over a window as CPU seconds plus throttled seconds:
+**A segment's real CPU need under a limit.** A process limited to a CPU quota uses at most its quota in CPU seconds, however much more it needs. Throttled time is the rest. Read the need over a window as the cgroup's CPU use plus its throttled time, both to the microsecond:
 
 ```promql
-rate(process_cpu_seconds_total[1m]) + rate(process_cgroup_cpu_throttled_seconds_total[1m])
+rate(process_cgroup_cpu_usage_seconds_total[1m]) + rate(process_cgroup_cpu_throttled_seconds_total[1m])
 ```
 
-The first term alone flattens at `process_cgroup_cpu_quota_cores`. A window in which `process_cgroup_cpu_throttled_periods_total` rises is capped: the process waited for its quota, and its latency includes the wait. `process_cgroup_memory_peak_bytes` is the most the cgroup has held since it started, so a step of a load test reads its peak against a fresh process, or as the rise over the step.
+The cgroup is the container's, so in a pod of one container its use is the process's. CPU per request is the use's rate over the rate of the requests the segment served. The first term alone flattens at `process_cgroup_cpu_quota_cores`. A window in which `process_cgroup_cpu_throttled_periods_total` rises is capped: the process waited for its quota, and its latency includes the wait. `process_cgroup_memory_peak_bytes` is the most the cgroup has held since it started, so a step of a load test reads its peak against a fresh process, or as the rise over the step.
 
-`process_cpu_seconds_total` counts whole seconds: prometheus's collector rounds the kernel's ticks down. Read it as a rate over a minute or more. The cgroup's throttled time is in microseconds.
+`process_cpu_seconds_total` counts whole seconds: prometheus's collector rounds the kernel's ticks down. Where the cgroup's figures exist, read `process_cgroup_cpu_usage_seconds_total` instead. Otherwise read the process's as a rate over a minute or more.
 
 ## Reading the runtime's figures
 

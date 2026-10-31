@@ -1,6 +1,6 @@
 [package]
 name = "gdl-cgroup"
-description = "A process's own CPU and memory figures, and its cgroup v2's CPU throttling, quota, and memory, read when the registry is scraped"
+description = "A process's own CPU and memory figures, and its cgroup v2's CPU use and throttling, quota, and memory, read when the registry is scraped"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

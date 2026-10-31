@@ -31,6 +31,9 @@ fn reads_every_figure() {
     assert_eq!(
         Reading::of(dir.path()),
         Reading {
+            usage_seconds: Some(9.0),
+            user_seconds: Some(6.0),
+            system_seconds: Some(3.0),
             periods: Some(1200),
             throttled_periods: Some(300),
             throttled_seconds: Some(4.5),
@@ -71,14 +74,22 @@ fn missing_files_leave_their_figures_out() {
 }
 
 /// With the cpu controller off for the cgroup, `cpu.stat` holds only the
-/// usage keys.
+/// usage keys: the usage is read, the throttling left out.
 #[test]
 fn a_stat_without_throttling_keys_leaves_them_out() {
     let dir = cgroup(&[(
         "cpu.stat",
-        "usage_usec 9000000\nuser_usec 6000000\nsystem_usec 3000000\n",
+        "usage_usec 9000001\nuser_usec 6000000\nsystem_usec 3000001\n",
     )]);
-    assert_eq!(Reading::of(dir.path()), Reading::default());
+    assert_eq!(
+        Reading::of(dir.path()),
+        Reading {
+            usage_seconds: Some(9.000001),
+            user_seconds: Some(6.0),
+            system_seconds: Some(3.000001),
+            ..Reading::default()
+        }
+    );
 }
 
 #[test]
@@ -86,7 +97,7 @@ fn malformed_values_are_left_out() {
     let dir = cgroup(&[
         (
             "cpu.stat",
-            "nr_periods many\nnr_throttled\nthrottled_usec -1\n",
+            "usage_usec 1.5\nnr_periods many\nnr_throttled\nthrottled_usec -1\n",
         ),
         ("cpu.max", "100000 0\n"),
         ("memory.current", "max\n"),
@@ -170,12 +181,15 @@ fn serves_counters_and_gauges_in_base_units() {
         ("process_cgroup_cpu_period_seconds", "gauge", 0.1),
         ("process_cgroup_cpu_periods_total", "counter", 1200.0),
         ("process_cgroup_cpu_quota_cores", "gauge", 1.5),
+        ("process_cgroup_cpu_system_seconds_total", "counter", 3.0),
         (
             "process_cgroup_cpu_throttled_periods_total",
             "counter",
             300.0,
         ),
         ("process_cgroup_cpu_throttled_seconds_total", "counter", 4.5),
+        ("process_cgroup_cpu_usage_seconds_total", "counter", 9.0),
+        ("process_cgroup_cpu_user_seconds_total", "counter", 6.0),
         ("process_cgroup_memory_bytes", "gauge", 1024.0),
         ("process_cgroup_memory_peak_bytes", "gauge", 2048.0),
     ]

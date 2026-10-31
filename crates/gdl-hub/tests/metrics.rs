@@ -183,20 +183,23 @@ async fn a_hub_shows_its_process_figures() {
         assert!(served("process_cpu_seconds_total"), "{text}");
         assert!(served("process_resident_memory_bytes"), "{text}");
     }
-    // The cgroup's memory, where this host has it for this process.
-    let memory = std::fs::read_to_string("/proc/self/cgroup")
+    // The cgroup's CPU use and memory, where this host has them for this
+    // process.
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
         .and_then(|text| {
             text.lines()
                 .find_map(|line| line.strip_prefix("0::").map(str::to_string))
         })
-        .map(|own| {
-            std::path::Path::new("/sys/fs/cgroup")
-                .join(own.trim_start_matches('/'))
-                .join("memory.current")
-        });
-    if memory.is_some_and(|file| file.exists()) {
-        assert!(served("process_cgroup_memory_bytes"), "{text}");
+        .map(|own| std::path::Path::new("/sys/fs/cgroup").join(own.trim_start_matches('/')));
+    if let Some(cgroup) = cgroup {
+        let stat = std::fs::read_to_string(cgroup.join("cpu.stat")).unwrap_or_default();
+        if stat.lines().any(|line| line.starts_with("usage_usec ")) {
+            assert!(served("process_cgroup_cpu_usage_seconds_total"), "{text}");
+        }
+        if cgroup.join("memory.current").exists() {
+            assert!(served("process_cgroup_memory_bytes"), "{text}");
+        }
     }
     hub.shutdown().await.expect("the hub stops");
 }

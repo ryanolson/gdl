@@ -471,6 +471,12 @@ async fn the_process_figures_are_served_unprefixed() {
     };
     let cgroup = std::path::Path::new("/sys/fs/cgroup").join(own.trim_start_matches('/'));
     let stat = std::fs::read_to_string(cgroup.join("cpu.stat")).unwrap_or_default();
+    if stat.lines().any(|line| line.starts_with("usage_usec ")) {
+        assert!(
+            identity("process_cgroup_cpu_usage_seconds_total").is_some(),
+            "{scrape}"
+        );
+    }
     if stat.lines().any(|line| line.starts_with("nr_periods ")) {
         for name in [
             "process_cgroup_cpu_periods_total",

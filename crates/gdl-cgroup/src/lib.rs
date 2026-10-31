@@ -1,5 +1,5 @@
 //! The figures a gdl process serves about itself: prometheus's process
-//! collector, and its cgroup v2's CPU throttling, CPU quota, and memory
+//! collector, and its cgroup v2's CPU use and throttling, CPU quota, and memory
 //! ([`CgroupCollector`]). Every segment and every hub registers both with
 //! [`register`]. Each is read when the registry is scraped, never on the
 //! request path. See `docs/src/operations/observability.md`.
