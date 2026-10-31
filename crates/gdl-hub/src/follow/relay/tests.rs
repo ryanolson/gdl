@@ -120,6 +120,92 @@ fn a_link_without_properties_still_lists_its_pool_draining() {
     );
 }
 
+/// The record of `m` from its hub of `epoch`, in `state`.
+fn record_of(epoch: u64, state: PoolState) -> gdl_pools::PoolRecord {
+    serde_json::from_value(serde_json::json!({
+        "name": "m",
+        "class": "model_x",
+        "region": "r",
+        "home": "global",
+        "contract": 1,
+        "placement": 1,
+        "state": state,
+        "epoch": epoch,
+        "seq": 1,
+        "hub": "hub:1"
+    }))
+    .expect("a record")
+}
+
+/// Whether each listing among `events` says the pool drains, with its
+/// epoch.
+fn drains(events: &[FollowEvent]) -> Vec<(bool, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            FollowEvent::Follow {
+                listing: Some(listing),
+                ..
+            }
+            | FollowEvent::Listed {
+                listing: Some(listing),
+                ..
+            } => Some((listing.draining, listing.epoch)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A relay of this build sends a drain only with the epoch of the hub that
+/// said it, never with none: from the pool's record, from its follow link,
+/// and from a relay started again that reads the record. A chooser takes
+/// a listing with no epoch to be from a relay of an earlier build, which
+/// sends no drain.
+#[test]
+fn a_relay_sends_a_drain_only_with_its_hubs_epoch() {
+    let saying = |sent: &[(bool, u64)], epoch: u64, path: &str| {
+        assert!(
+            sent.contains(&(true, epoch)),
+            "{path}: no drain sent: {sent:?}"
+        );
+        assert!(
+            sent.iter().all(|(draining, of)| !draining || *of == epoch),
+            "{path}: a drain with another epoch: {sent:?}"
+        );
+    };
+
+    let relay = held();
+    let mut watch = relay.watch(None);
+    relay.record(&record_of(7, PoolState::Ready), None);
+    relay.record(&record_of(7, PoolState::Draining), None);
+    saying(&drains(&pending(&mut watch)), 7, "the record");
+
+    let relay = held();
+    let mut watch = relay.watch(None);
+    relay.record(&record_of(1, PoolState::Ready), None);
+    let (generation, _) = relay.begin("model_x", "m");
+    relay.install(generation, installed(PoolState::Ready));
+    relay.apply("model_x", "m", generation, state(PoolState::Draining));
+    let linked = drains(&pending(&mut watch));
+    saying(&linked, 1, "the link");
+    assert!(
+        relay
+            .lock()
+            .listings
+            .listing("model_x", "m", std::time::Instant::now())
+            .is_some_and(|listing| listing.draining),
+        "the link's drain is listed"
+    );
+
+    let restarted = held();
+    restarted.record(&record_of(7, PoolState::Draining), None);
+    saying(
+        &drains(&pending(&mut restarted.watch(None))),
+        7,
+        "a relay started again",
+    );
+}
+
 /// The events the watch has now.
 fn pending(watch: &mut super::FollowsWatch) -> Vec<FollowEvent> {
     let mut events = Vec::new();
