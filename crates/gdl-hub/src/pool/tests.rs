@@ -356,3 +356,129 @@ fn settings() -> PoolSettings {
     )
     .expect("valid test fixture")
 }
+
+/// A directory read can overtake the feed's retirement watch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "F2: a retired instance keeps its load until the feed observes retirement"]
+async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    use gdl_model::{SegmentPhase, segment_service};
+    use gdl_watch::{InstancePhase, LoadReport};
+    use velo_hub::Lease;
+    use velo_hub::client::HubClient;
+    use velo_hub::store::Incarnation;
+    use velo_hub::velo::Velo;
+    use velo_hub::velo::discovery::ServiceEvent;
+    use velo_hub::velo::transports::tcp::TcpTransportBuilder;
+
+    let spec = spec();
+    let admission = Arc::new(GraphAdmission::new(spec.clone()));
+    let mut config = HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = Hub::builder(config)
+        .extension(Arc::clone(&admission))
+        .serve()
+        .await
+        .expect("the hub serves");
+    let tcp = TcpTransportBuilder::new()
+        .bind_addr("127.0.0.1:0".parse().expect("an address"))
+        .build()
+        .expect("a TCP transport");
+    let node = Velo::builder()
+        .add_transport(Arc::new(tcp))
+        .build()
+        .await
+        .expect("a velo node");
+    let client = HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(hub.public_addr().port())
+        .control_port(hub.control_addr().port())
+        .build()
+        .expect("a hub client");
+    let registration = client
+        .register(
+            &node,
+            BTreeMap::from([(
+                "gdl".to_string(),
+                serde_json::to_value(spec.registration("f").expect("segment f"))
+                    .expect("a registration"),
+            )]),
+        )
+        .await
+        .expect("the hub admits the instance");
+    let feed = super::feed::Feed::new(
+        "pool".into(),
+        "model_x".into(),
+        vec![("f".into(), true)],
+        Duration::from_secs(10),
+        16,
+        Duration::from_secs(30),
+        Vec::new(),
+    );
+    feed.restore(None, 0);
+    let lease = Lease {
+        incarnation: Incarnation::from_u64(1),
+        epoch: registration.epoch,
+    };
+    feed.joined("f", lease.incarnation, lease.epoch, node.peer_info());
+    let ready = client
+        .register_service(&segment_service("f", SegmentPhase::Ready))
+        .await
+        .expect("the hub takes ready");
+    feed.observe(
+        0,
+        super::count::Watched::Ready,
+        &ServiceEvent::Added(node.instance_id()),
+    );
+    feed.report(
+        node.instance_id(),
+        lease,
+        LoadReport {
+            dropped: Vec::new(),
+            properties: Default::default(),
+            admitted: 3,
+            limit: 8,
+            refusals: 1,
+        },
+        Instant::now(),
+    )
+    .expect("the feed takes the load");
+    let services = client.services();
+    let before = super::instances::list(&admission, &services, &feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(before.instances.len(), 1);
+    assert_eq!(before.instances[0].phase, InstancePhase::Ready);
+    assert_eq!(before.instances[0].load.expect("a load").admitted, 3);
+
+    let retired = client
+        .register_service(&segment_service("f", SegmentPhase::Retired))
+        .await
+        .expect("the hub takes retirement");
+    // Hold the watch event to make the directory/feed interleaving deterministic.
+    let during = super::instances::list(&admission, &services, &feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(during.instances.len(), 1);
+    assert_eq!(during.instances[0].phase, InstancePhase::Retired);
+
+    feed.observe(
+        0,
+        super::count::Watched::Retired,
+        &ServiceEvent::Added(node.instance_id()),
+    );
+    let after = super::instances::list(&admission, &services, &feed)
+        .await
+        .expect("the directory answers");
+    assert_eq!(after.instances[0].phase, InstancePhase::Retired);
+    assert_eq!(after.instances[0].load, None);
+    drop((ready, retired));
+    hub.shutdown().await.expect("the hub stops");
+    assert_eq!(
+        during.instances[0].load, None,
+        "the list attaches load to an instance it reports as retired"
+    );
+}
