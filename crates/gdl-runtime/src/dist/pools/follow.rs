@@ -397,6 +397,9 @@ impl<R: Registry> Follows<R> {
         for id in released {
             self.schedule(id, now);
         }
+        for (key, (listing, _)) in &mut followed.listings {
+            keep_newer(self.followed.listings.get(key), listing);
+        }
         followed.listings_changed += self.followed.listings_changed + 1;
         self.followed = followed;
         let shown: Vec<(Key, u64)> = self
@@ -767,6 +770,22 @@ struct Followed {
     listings_changed: u64,
 }
 
+/// Keep the property list of `held`, the listing of a pool still listed,
+/// in place of `listing`'s when it is of a higher version; take every
+/// other field of `listing`. A hub takes a pool's list from its record and
+/// from its follow link, which race, and a hub that restarted lists the
+/// pool from its record before its link sends the newer list, so a later
+/// listing can carry an older list. A version names one list, so a lower
+/// version is never a newer list. A pool no longer listed holds no list:
+/// listed again, it starts afresh.
+fn keep_newer(held: Option<&(Listing, Option<Instant>)>, listing: &mut Listing) {
+    if let Some((held, _)) = held
+        && held.properties.version > listing.properties.version
+    {
+        listing.properties.clone_from(&held.properties);
+    }
+}
+
 /// What one event changed in a pool's follow, beyond its table.
 enum Change {
     /// Only what the table shows.
@@ -1047,7 +1066,8 @@ impl Followed {
     /// that an index made later reads the same instant.
     fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
-            Some(listing) => {
+            Some(mut listing) => {
+                keep_newer(self.listings.get(&key), &mut listing);
                 if !listing.properties.dropped.is_empty() {
                     tracing::debug!(
                         class = %key.0,

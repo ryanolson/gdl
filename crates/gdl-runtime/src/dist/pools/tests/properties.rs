@@ -493,7 +493,6 @@ fn a_pools_property_version_is_its_listings() {
 
 /// A relay restart must not replace a link's newer list with its stored list.
 #[test]
-#[ignore = "F1: a relay resnapshot and reinstalled follow expose a lower property-list version"]
 fn a_relay_restart_keeps_the_version_learned_before_its_record() {
     let (mut follows, pools, _, _) = follower();
     let node = handle(&pools);
@@ -541,6 +540,75 @@ fn a_relay_restart_keeps_the_version_learned_before_its_record() {
         seen,
         "the still-listed pool went backwards when the relay reinstalled its follow: before={seen:?}, during={during:?}, after={:?}",
         read(),
+    );
+}
+
+/// While a pool stays listed, a listing of a lower version never replaces
+/// the list held, even one that says something else, which the numbering
+/// rules out: the version and the index a node reads stay those of the
+/// newer list, and the listing's other fields are still taken. A pool that
+/// is no longer listed, by a withdrawal or a snapshot without it, holds no
+/// list, so listed again it starts afresh, at any version.
+#[test]
+fn a_lower_version_never_replaces_a_held_list_while_listed() {
+    let (mut follows, pools, _, _) = follower();
+    let node = handle(&pools);
+    let read = || {
+        node.read("model_x", |pools| {
+            let version = pools.pool(M1)?.properties_version();
+            let listed = listed(pools.properties(), "qwen-32b");
+            let (_, set) = listed.first()?;
+            Some((version, set.state(), set.condition()))
+        })
+        .flatten()
+    };
+    let now = Instant::now();
+    let at = |state, version| listing(PoolCondition::Live, &[("qwen-32b", state)], version);
+    follows.apply(follow(M1, 1, PoolState::Ready), now);
+    follows.apply(listed_event(M1, Some(at(PropertyState::Ready, 5))), now);
+    assert_eq!(read(), Some((5, PropertyState::Ready, PoolCondition::Live)));
+
+    // A lower version that says something else: the held list stays, and
+    // the condition is taken.
+    let older = Listing {
+        condition: PoolCondition::Missing,
+        ..at(PropertyState::Starting, 4)
+    };
+    follows.apply(listed_event(M1, Some(older)), now);
+    assert_eq!(
+        read(),
+        Some((5, PropertyState::Ready, PoolCondition::Missing)),
+        "the newer list stays; the condition is the listing's"
+    );
+    // The same version again, and a higher one, are taken.
+    follows.apply(listed_event(M1, Some(at(PropertyState::Ready, 5))), now);
+    assert_eq!(read(), Some((5, PropertyState::Ready, PoolCondition::Live)));
+    follows.apply(listed_event(M1, Some(at(PropertyState::Draining, 6))), now);
+    assert_eq!(
+        read(),
+        Some((6, PropertyState::Draining, PoolCondition::Live))
+    );
+
+    // Withdrawn, then listed again: afresh, at a lower version.
+    follows.apply(listed_event(M1, None), now);
+    assert_eq!(read(), None, "no longer listed");
+    follows.apply(listed_event(M1, Some(at(PropertyState::Starting, 2))), now);
+    assert_eq!(
+        read(),
+        Some((2, PropertyState::Starting, PoolCondition::Live)),
+        "listed again starts afresh"
+    );
+
+    // A snapshot that no longer lists the pool lets it go too.
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(follow(M1, 1, PoolState::Ready), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    follows.apply(listed_event(M1, Some(at(PropertyState::Ready, 1))), now);
+    assert_eq!(
+        read(),
+        Some((1, PropertyState::Ready, PoolCondition::Live)),
+        "unlisted by a snapshot, then listed afresh"
     );
 }
 
