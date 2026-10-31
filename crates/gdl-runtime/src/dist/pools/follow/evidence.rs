@@ -16,7 +16,7 @@
 //! says its word again, when the relay unlists a pool its own watch still
 //! shows, says the drain whatever order the words came in. An epoch is
 //! forgotten once neither the pool's evidence nor its shown follow is of
-//! that hub or an earlier one, or the pool is forgotten.
+//! that hub, or the pool is forgotten: at most two epochs per pool.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -99,21 +99,18 @@ impl Evidence {
             .is_some_and(|drained| drained.contains(&epoch))
     }
 
-    /// Forget the drains of `key`'s pool's hubs earlier than both its
-    /// evidence and `shown`, the epoch of its follow shown, if any: every
-    /// one once neither is held.
+    /// Keep only the drains of `key`'s pool's hubs a reader can still ask
+    /// for: of the hub its evidence is of, and of the hub of `shown`, its
+    /// follow shown, if any. So the record holds at most two epochs, however
+    /// many hubs of the pool come and go.
     pub(super) fn settle(&mut self, key: &Key, shown: Option<u64>) {
         let held = self.get(key).map(|evidence| evidence.epoch());
-        let floor = match (held, shown) {
-            (Some(held), Some(shown)) => Some(held.min(shown)),
-            (held, shown) => held.or(shown),
+        let Some(drained) = self.drained.get_mut(key) else {
+            return;
         };
-        match (floor, self.drained.get_mut(key)) {
-            (Some(floor), Some(drained)) => drained.retain(|epoch| *epoch >= floor),
-            (None, Some(_)) => {
-                self.drained.remove(key);
-            }
-            (_, None) => {}
+        drained.retain(|epoch| Some(*epoch) == held || Some(*epoch) == shown);
+        if drained.is_empty() {
+            self.drained.remove(key);
         }
     }
 
@@ -191,7 +188,6 @@ impl Evidence {
 }
 
 #[test]
-#[ignore = "F9: failed own-watch reconnects retain a drain for every later hub"]
 fn reconnect_failures_do_not_retain_every_restarted_hubs_drain() {
     use std::collections::BTreeSet;
     use std::time::Duration;
@@ -296,8 +292,16 @@ fn reconnect_failures_do_not_retain_every_restarted_hubs_drain() {
         asked = follows.asked().pop().expect("a failed watch is reopened");
         assert_eq!(follows.followed.follows[&key].epoch, 5);
         assert!(follows.followed.follows[&key].unread);
+        // At most one epoch for the follow shown, and one for the evidence.
+        let held = follows
+            .followed
+            .evidence
+            .drained
+            .get(&key)
+            .map_or(0, BTreeSet::len);
+        assert!(held <= 2, "{held} drain epochs held at hub {epoch}");
         if epoch == 133 || epoch == 261 {
-            retained.push(follows.followed.evidence.drained[&key].len());
+            retained.push(held);
         }
     }
     now += Duration::from_secs(2);
@@ -310,7 +314,16 @@ fn reconnect_failures_do_not_retain_every_restarted_hubs_drain() {
         now,
     );
     assert!(!follows.followed.follows.contains_key(&key));
-    assert_eq!(follows.followed.evidence.drained[&key].len(), 1);
+    assert!(
+        follows
+            .followed
+            .evidence
+            .drained
+            .get(&key)
+            .map_or(0, BTreeSet::len)
+            <= 1,
+        "no follow shown: at most the evidence's hub"
+    );
     assert_eq!(
         retained[1], retained[0],
         "a fixed unread follow and failed own reconnects retain {retained:?} drain epochs after 128 and 256 completed hub lives"
