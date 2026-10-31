@@ -189,3 +189,130 @@ impl Evidence {
             .collect()
     }
 }
+
+#[test]
+#[ignore = "F9: failed own-watch reconnects retain a drain for every later hub"]
+fn reconnect_failures_do_not_retain_every_restarted_hubs_drain() {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    use gdl_pools::PoolState;
+    use gdl_watch::{FollowEvent, Listing, UnknownFollowEvent, WatchEnd};
+
+    use super::{Follows, Wanted};
+    use crate::dist::fabric::Registry;
+    use crate::dist::pools::{Pools, damping::Damping};
+    use crate::dist::roster::Roster;
+
+    struct QuietRegistry;
+    impl Registry for QuietRegistry {
+        fn register(&self, _: velo::PeerInfo) -> gdl::Result<()> {
+            panic!("no instance is exposed");
+        }
+
+        fn unregister(&self, _: velo::InstanceId) {
+            panic!("no instance is held");
+        }
+    }
+
+    let pools = Pools::new(
+        "r",
+        [("model_x", "f")],
+        Damping::default(),
+        gdl::PropertyKinds::new(),
+    );
+    let wanted = Wanted::from([("model_x".into(), BTreeSet::from(["f".into()]))]);
+    let mut follows = Follows::new(
+        pools,
+        QuietRegistry,
+        Arc::clone(Roster::new().live()),
+        Duration::from_secs(10),
+        wanted,
+        3,
+        None,
+    );
+    let mut now = Instant::now();
+    let key: Key = ("model_x".into(), "m1".into());
+    follows.take(
+        FollowEvent::Follow {
+            class: key.0.clone(),
+            pool: key.1.clone(),
+            generation: 1,
+            epoch: 5,
+            region: "r".into(),
+            state: PoolState::Ready,
+            load: None,
+            load_age_ms: None,
+            listing: None,
+        },
+        now,
+    );
+    follows.unknown(UnknownFollowEvent {
+        kind: "paused".into(),
+        class: key.0.clone(),
+        pool: key.1.clone(),
+        generation: 1,
+    });
+    let mut asked = follows.asked().pop().expect("the own watch is opened");
+    let mut retained = Vec::new();
+    for epoch in 6..=261 {
+        now += Duration::from_secs(2);
+        follows.take(
+            FollowEvent::Listed {
+                class: key.0.clone(),
+                pool: key.1.clone(),
+                generation: epoch,
+                listing: Some(Listing {
+                    region: "r".into(),
+                    condition: PoolCondition::Live,
+                    properties: gdl_watch::PropertyList::default(),
+                    missing_age_ms: None,
+                    draining: true,
+                    epoch,
+                }),
+            },
+            now,
+        );
+        follows.take(
+            FollowEvent::Listed {
+                class: key.0.clone(),
+                pool: key.1.clone(),
+                generation: epoch,
+                listing: None,
+            },
+            now,
+        );
+        follows.take(
+            FollowEvent::Withdrawn {
+                class: key.0.clone(),
+                pool: key.1.clone(),
+                generation: epoch,
+                epoch,
+                properties_version: 0,
+            },
+            now,
+        );
+        follows.own(asked.key, asked.watch, Err(WatchEnd::Failed), now);
+        asked = follows.asked().pop().expect("a failed watch is reopened");
+        assert_eq!(follows.followed.follows[&key].epoch, 5);
+        assert!(follows.followed.follows[&key].unread);
+        if epoch == 133 || epoch == 261 {
+            retained.push(follows.followed.evidence.drained[&key].len());
+        }
+    }
+    now += Duration::from_secs(2);
+    follows.own(
+        asked.key,
+        asked.watch,
+        Ok(gdl_watch::Watched::Event(FollowEvent::Synced {
+            listed: true,
+        })),
+        now,
+    );
+    assert!(!follows.followed.follows.contains_key(&key));
+    assert_eq!(follows.followed.evidence.drained[&key].len(), 1);
+    assert_eq!(
+        retained[1], retained[0],
+        "a fixed unread follow and failed own reconnects retain {retained:?} drain epochs after 128 and 256 completed hub lives"
+    );
+}
