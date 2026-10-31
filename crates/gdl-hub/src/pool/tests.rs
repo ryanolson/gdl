@@ -22,6 +22,8 @@ use gdl_model::WatchCaps;
 /// How long any one observation may take before the test fails.
 const WAIT: Duration = Duration::from_secs(5);
 
+mod listing;
+
 /// Each route's cap in these tests.
 const CAP: usize = 2;
 
