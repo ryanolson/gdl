@@ -461,6 +461,34 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "F3: a hash in the bound Git ref is mistaken for the resolved commit"]
+    fn a_hash_inside_a_git_ref_must_not_replace_the_resolved_commit() {
+        let repo = GitFixture::new();
+        let rev = format!("{}#{}", &repo.first[..12], repo.first);
+        repo.git(&["tag", &rev, &repo.second]);
+        let tagged = repo.offer(&rev);
+        assert_eq!(tagged.version, "0.2.0");
+        assert_eq!(
+            tagged.source,
+            format!("git+{}?rev={rev}#{}", repo.url, repo.second)
+        );
+        let expected = repo.offer(&repo.first);
+        assert_eq!(expected.version, "0.1.0");
+        let found = offers(
+            &[repo.listed(&repo.first)],
+            repo.dir.path(),
+            Offers::Given(&[&tagged]),
+        );
+        assert!(
+            found.is_err(),
+            "revision {} resolves to {}, but the catalogue substitutes {:?}",
+            repo.first,
+            expected.source,
+            found.as_ref().map(|offers| &offers[0].source)
+        );
+    }
+
     struct GitFixture {
         dir: tempfile::TempDir,
         url: String,
