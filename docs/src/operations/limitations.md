@@ -777,6 +777,14 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Why:** the drain of the follow's hub may be known only through a word of another hub that the chooser has since replaced. A record kept of every hub's drain would grow by one for each hub of the pool, since a lagging watch can show a follow of any earlier hub ([Pools design](../development/pools-design.md)).
 - **Impact:** a policy that moves a request on a drain at or past the epoch it kept holds the request instead, while the pool reads unknown. It needs a pool read from its own watch, which happens only between builds that differ in their relay events.
 
+### A pool's own snapshot can read a drained hub live after an unlisting
+- **What:** a chooser reads a pool from its own watch, and that watch's snapshot of the pool's hub is taken before the hub drains. The relay's watch then says the hub drains and unlists the pool, which forgets the drain, since a follow of an earlier hub was shown ([What the chooser builds](../concepts/pool-routing.md#what-the-chooser-builds)). When the snapshot is then delivered, its hub's epoch is the fence's, so it is taken, and the pool reads that hub live and not draining until its next word.
+- **Why:** the fence keeps the forgotten value's epoch, not its drain.
+- **Impact:** a gdl policy can offer the pool once more: its draining entry declines the offer as gone, so the request spends one declined offer and moves on. A set router's pin holds, since it moves only on a drain it reads.
+- **What ends it:** the pool's own watch sends the hub's drain after the snapshot, and the pool reads draining from then. So does a later word of the pool: its follow's drop, a later hub's follow, or a listing.
+- **Test:** `a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain` in `crates/gdl-runtime/src/dist/pools/tests/epochs/recovery.rs`, ignored; `a_stale_snapshot_at_the_fence_reads_draining_once_its_watch_says_so` shows the window close, and `a_watch_of_one_follow_says_a_drain_after_its_snapshot` in `crates/gdl-hub/src/follow/relay/tests.rs` shows the hub send the drain.
+- **Lifts:** a fence that keeps the forgotten value's drain with its epoch.
+
 ### Evidence of one hub of a pool is taken in the order it arrives
 - **What:** a chooser keeps what its hub says of a pool by the epoch of the pool's hub it is about ([What the chooser builds](../concepts/pool-routing.md#what-the-chooser-builds)). Of one hub, the later word wins, whichever watch it came on: a `missing` from the relay's watch and a live follow from a pool's own watch, both of one hub, are taken in the order they arrive. Only a withdrawal and a drain last, since the hub that said them cannot undo them.
 - **Why:** the epoch orders the hubs of a pool, not the changes within one hub's life, and the relay's watch and a pool's own watch are not ordered with each other.
