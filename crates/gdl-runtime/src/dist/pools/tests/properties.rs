@@ -19,6 +19,8 @@ use super::super::{Damping, Pools};
 use super::{M1, M2, Recorded, dropped, follow, follower};
 use crate::dist::counting::{counted, counting};
 
+mod recovery;
+
 /// The test property type: a name, then a partition and a version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(super) struct Test {
