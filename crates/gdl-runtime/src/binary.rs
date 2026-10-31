@@ -16,7 +16,7 @@ use velo::Velo;
 
 use crate::config::build_node;
 use crate::dist::{Roster, RuntimeConfig};
-use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig};
+use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig, Reserved};
 use gdl::Build;
 use gdl::Cx;
 use gdl::Metrics;
@@ -131,6 +131,7 @@ pub async fn run_segment<B: SegmentBinary>(
     let builder = Builder::new(
         B::GRAPH_CONFIG,
         registry.clone(),
+        process.reserved(),
         config.selector_tables().clone(),
         config.runtime.records.clone(),
     )?;
@@ -227,6 +228,9 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub struct Builder {
     graph: BTreeMap<String, GraphConfig>,
     registry: prometheus::Registry,
+    /// The names `registry` refuses under the metrics prefix, asked first
+    /// so that the build names the prefix and the process figure.
+    reserved: Reserved,
     /// Each metric registered so far, by name, with the node that defined
     /// it first.
     defined: Mutex<BTreeMap<String, (String, MetricField)>>,
@@ -257,12 +261,14 @@ impl Builder {
     fn new(
         graph: &str,
         registry: prometheus::Registry,
+        reserved: Reserved,
         tables: BTreeMap<String, toml::Table>,
         records: HubRecords,
     ) -> std::result::Result<Self, Failure> {
         Ok(Self {
             graph: toml::from_str(graph)?,
             registry,
+            reserved,
             defined: Mutex::new(BTreeMap::new()),
             tables,
             selectors: Mutex::new(Selectors::new()),
@@ -414,10 +420,12 @@ impl Builder {
             .map_err(|e| format!("building {node}: {e}").into())
     }
 
-    /// Refuse a metric that another node defined differently. Prometheus
-    /// refuses a second help text or label set with a message that names
-    /// neither node, and takes a second kind without a word, which breaks
-    /// the scrape.
+    /// Refuse a metric that another node defined differently, or that the
+    /// metrics prefix would serve as one of the process's own figures.
+    /// Prometheus refuses a second help text or label set with a message
+    /// that names neither node, and takes a second kind without a word,
+    /// which breaks the scrape; the registry refuses a process figure's
+    /// name too, but names neither the prefix nor the figure.
     fn define(
         &self,
         node: &str,
@@ -425,6 +433,9 @@ impl Builder {
     ) -> std::result::Result<(), Failure> {
         let mut defined = self.defined.lock().unwrap_or_else(|e| e.into_inner());
         for definition in definitions {
+            if let Some(refusal) = self.reserved.refusal(&definition.name) {
+                return Err(format!("building {node}: {refusal}").into());
+            }
             match defined.get(&definition.name) {
                 Some((first, earlier)) if *earlier != definition => {
                     return Err(format!(

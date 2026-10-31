@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use prometheus::core::Collector;
-
 use super::{CgroupCollector, Reading, own};
 
 /// A cgroup directory holding `files`, each a name and its contents.
@@ -227,6 +225,10 @@ fn registers_once() {
     names.sort_unstable();
     names.dedup();
     assert_eq!(names.len(), count, "a family twice: {names:?}");
+    let families = crate::families();
+    for name in &names {
+        assert!(families.contains(name), "{name} is not in families()");
+    }
     #[cfg(target_os = "linux")]
     assert!(
         names.iter().any(|name| name == "process_cpu_seconds_total"),
@@ -240,17 +242,9 @@ fn registers_once() {
 /// the family would appear twice in one scrape.
 #[test]
 fn every_name_is_reserved_from_nodes() {
-    let cgroup = CgroupCollector::at(None);
-    let names = cgroup.desc().into_iter().map(|desc| desc.fq_name.clone());
-    #[cfg(target_os = "linux")]
-    let names = names.chain(
-        prometheus::process_collector::ProcessCollector::for_self()
-            .desc()
-            .into_iter()
-            .map(|desc| desc.fq_name.clone())
-            .collect::<Vec<_>>(),
-    );
-    for name in names {
+    let names = crate::families();
+    assert!(names.len() >= 10, "{names:?}");
+    for name in &names {
         assert!(
             gdl_model::RUNTIME_METRICS.contains(&name.as_str()),
             "{name} is not reserved"

@@ -68,6 +68,8 @@ Every segment and every pool's hub serves figures of its own process, read when 
 - **The process**, from prometheus's process collector, on Linux only: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_threads`, and `process_start_time_seconds`.
 - **Its cgroup**, from the cgroup v2 files of the process's own cgroup, which `/proc/self/cgroup` names: CPU use and throttling from `cpu.stat`, the quota from `cpu.max`, and memory from `memory.current` and `memory.peak` ([A process's own figures](../appendix/metrics.md#a-processs-own-figures)).
 
+No family appears twice in one scrape: a node metric whose prefixed name is one of these figures' is refused when it registers ([Reserved names](../appendix/metrics.md#reserved-names)).
+
 A figure that cannot be read is left out, and the scrape goes on: under cgroup v1, off Linux, or when a file is missing or unreadable. `cpu.stat` always has the usage keys, and the throttling keys only where the cgroup's CPU controller is on, as it is for a container with a CPU limit. A quota of `max` is no quota: `process_cgroup_cpu_quota_cores` is absent.
 
 **A segment's real CPU need under a limit.** A process limited to a CPU quota uses at most its quota in CPU seconds, however much more it needs. Throttled time is the rest. Read the need over a window as the cgroup's CPU use plus its throttled time, both to the microsecond:

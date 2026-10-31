@@ -25,3 +25,22 @@ pub fn register(registry: &prometheus::Registry) -> prometheus::Result<()> {
     ))?;
     registry.register(Box::new(CgroupCollector::for_self()))
 }
+
+/// The name of every family [`register`] adds, whether or not a scrape can
+/// read it. A registry served beside these must not serve one of them too.
+pub fn families() -> Vec<String> {
+    use prometheus::core::Collector;
+    let mut names: Vec<String> = CgroupCollector::at(None)
+        .desc()
+        .into_iter()
+        .map(|desc| desc.fq_name.clone())
+        .collect();
+    #[cfg(target_os = "linux")]
+    names.extend(
+        prometheus::process_collector::ProcessCollector::for_self()
+            .desc()
+            .into_iter()
+            .map(|desc| desc.fq_name.clone()),
+    );
+    names
+}

@@ -7,6 +7,7 @@
 mod barrier;
 mod origins;
 mod pool;
+mod reserved;
 mod system;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ use crate::dist::{
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::PoolSettings;
+pub(crate) use reserved::Reserved;
 use system::{Health, Phase, SystemSettings};
 
 /// The settings of one segment process. `H` is what the segment hosts: the
@@ -1375,7 +1377,8 @@ impl Process {
     /// `uptime_seconds` from the start. `/metrics` serves it only once it
     /// is given to [`serve_metrics`](Self::serve_metrics), and with it the
     /// process's own figures (`process_*`, `process_cgroup_*`), under the
-    /// same labels but never the prefix.
+    /// same labels but never the prefix. It refuses a metric whose prefixed
+    /// name is one of those figures'.
     pub fn registry(
         &self,
         deployment: &gdl_model::DeploymentSpec,
@@ -1421,9 +1424,22 @@ impl Process {
             ));
         }
         registry.register(Box::new(uptime)).map_err(metrics_error)?;
+        let reserved = self.reserved();
+        if !reserved.is_empty() {
+            registry
+                .register(Box::new(reserved))
+                .map_err(metrics_error)?;
+        }
         gdl_cgroup::register(&own).map_err(metrics_error)?;
         self.health.own_metrics(own);
         Ok(registry)
+    }
+
+    /// The metric names [`registry`](Self::registry) refuses under the
+    /// process's metrics prefix: those it would serve as one of the
+    /// process's own figures.
+    pub(crate) fn reserved(&self) -> Reserved {
+        Reserved::new(self.metrics_prefix.as_deref())
     }
 
     /// Serve `registry` on `/metrics`, once nothing more registers in it:

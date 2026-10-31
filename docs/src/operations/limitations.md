@@ -316,6 +316,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** read `process_cgroup_cpu_usage_seconds_total`, the cgroup's CPU use to the microsecond, which is the precise figure under cgroup v2. Off cgroup v2, read the process's rate over a minute or more. See [The process's own figures](observability.md#the-processs-own-figures).
 - **Lifts:** a prometheus release whose collector counts fractions of a second.
 
+### Some processes do not serve their own figures
+- **What:** a hub that is not a pool's hub has no metrics route, so it serves no `process_*` figures. A program that embeds a segment and serves a registry it made itself, not one from `Process::registry`, serves none either.
+- **Workaround:** an embedding program calls `gdl_cgroup::register` on a registry of its own and serves it. See [The process's own figures](observability.md#the-processs-own-figures).
+
 ## Tooling
 
 ### The composer does not list marked message re-exports

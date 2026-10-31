@@ -123,6 +123,19 @@ impl Named for GaugedWait {
     const NODE: &'static str = "Gauged";
 }
 
+/// `threads`, which `metrics_prefix = "process"` serves as the process's
+/// own `process_threads`.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "defined to clash, never counted")]
+struct Threads {
+    /// Worker threads.
+    threads: gdl::prometheus::Gauge,
+}
+
+impl Named for Threads {
+    const NODE: &'static str = "Threaded";
+}
+
 /// `wait_seconds` as a histogram, with the help of [`GaugedWait`]'s.
 #[derive(gdl::Metrics)]
 #[expect(dead_code, reason = "defined to clash, never counted")]
@@ -604,6 +617,7 @@ async fn a_segment_binary_runs_its_lifecycle() {
     a_health_check_reads_the_settings_after_its_flag().await;
     a_conflicting_table_fails_before_the_instance_meets_its_peers().await;
     nodes_that_define_one_metric_differently_fail_to_build().await;
+    a_metric_served_as_a_process_figure_fails_to_build().await;
     a_gauge_and_a_histogram_of_one_name_fail_to_build().await;
     histograms_of_one_name_with_other_buckets_fail_to_build().await;
     gauges_of_one_name_with_other_labels_fail_to_build().await;
@@ -754,6 +768,20 @@ async fn histograms_of_one_name_with_other_buckets_fail_to_build() {
     assert_eq!(
         error,
         "building Rebucketed: its metric `wait_seconds` differs from node Timed's: metrics of one name in a segment share their kind, help, labels, and buckets"
+    );
+}
+
+/// A node metric that the metrics prefix would serve under the name of one
+/// of the process's own figures fails the build, which names the prefix,
+/// the metric, and the figure; prometheus would name neither of the last.
+async fn a_metric_served_as_a_process_figure_fails_to_build() {
+    let (_dir, file) = settings("[system]\nmetrics_prefix = \"process\"\n[node.Add]\namount = 5\n");
+    let error = run::<Clashing<GaugedWait, Threads>>(&[file])
+        .await
+        .expect_err("a clash");
+    assert_eq!(
+        error,
+        "building Threaded: its metric `threads` is served as `process_threads` under `metrics_prefix` \"process\", the name of one of the process's own figures: name the metric otherwise, or choose another prefix"
     );
 }
 
