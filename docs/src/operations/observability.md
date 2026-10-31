@@ -38,6 +38,12 @@ Both bodies are dynamo's JSON with gdl's phase added:
 {"status":"ready","uptime":12.345,"phase":"ready"}
 ```
 
+While the start waits for a hub that is not up yet, the body adds `"waiting":"hub"`:
+
+```json
+{"status":"notready","uptime":3.210,"phase":"starting","waiting":"hub"}
+```
+
 `status` is `ready` or `notready`. `phase` is `starting`, `ready`, or `draining`. Draining is final: a process that began to drain does not become ready again. The listener stays up through the drain, so the probes see it. [Segment lifecycle](../concepts/lifecycle.md) defines the phases, the barrier, and the drain.
 
 `<binary> --healthcheck <config.toml> [override.toml ...]` asks a running instance's health path and exits with success only on 200. It reads the same settings as the instance. It dials loopback when the host is unspecified, so an image needs no HTTP client. It refuses a missing listener and port `0`, and it waits at most 5 s for the answer.

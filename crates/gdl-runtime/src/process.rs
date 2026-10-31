@@ -48,6 +48,7 @@ use system::{Health, Phase, SystemSettings};
 /// # host = "hub"          # address then advertises what HOSTNAME resolves to. `public_port`,
 ///                         # `control_port`, and `heartbeat_ms` (5000) are optional
 /// rendezvous_ms = 30000   # optional: how long to wait for the other instances
+/// hub_wait_ms = 300000    # optional, with a hub: how long the start waits for the hub to answer
 /// [instances]             # optional, with a roster: instances per segment, 1 by default
 /// [min_replicas]          # optional, with a hub: loaded instances to wait for, 1 by default
 /// [runtime]               # optional: the runtime's own settings
@@ -77,6 +78,9 @@ pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
     hub: Option<HubAddress>,
+    /// Read only when the hub feature is on, as `[hub]`'s ports are.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    hub_wait_ms: u64,
     rendezvous_ms: u64,
     instances: BTreeMap<String, usize>,
     min_replicas: BTreeMap<String, usize>,
@@ -100,6 +104,8 @@ struct Settings {
     listen: SocketAddr,
     roster: Option<PathBuf>,
     hub: Option<HubAddress>,
+    #[serde(default = "default_hub_wait_ms")]
+    hub_wait_ms: u64,
     #[serde(default = "default_rendezvous_ms")]
     rendezvous_ms: u64,
     #[serde(default)]
@@ -136,10 +142,11 @@ pub trait Hosted: DeserializeOwned {
 /// `GDL_` variables read: the build scripts use the same prefix
 /// (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`), and a variable meant for them must
 /// not stop a segment from starting.
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "listen",
     "roster",
     "hub",
+    "hub_wait_ms",
     "rendezvous_ms",
     "instances",
     "min_replicas",
@@ -151,6 +158,13 @@ const KEYS: [&str; 10] = [
 
 fn default_rendezvous_ms() -> u64 {
     30_000
+}
+
+/// Long enough for a hub's pod to be scheduled, pull its image, and start,
+/// when a deployment starts every pod at once; a segment that gives up
+/// sooner is restarted and logs an error on every first deploy.
+fn default_hub_wait_ms() -> u64 {
+    300_000
 }
 
 /// Where the discovery hub is, and how the lease with it is kept: `[hub]`
@@ -266,6 +280,7 @@ impl<H: Hosted> ProcessConfig<H> {
             listen: settings.listen,
             roster: settings.roster,
             hub: settings.hub,
+            hub_wait_ms: settings.hub_wait_ms,
             rendezvous_ms: settings.rendezvous_ms,
             instances: settings.instances,
             min_replicas: settings.min_replicas,
@@ -293,6 +308,7 @@ impl<H: Hosted> ProcessConfig<H> {
             listen,
             roster,
             hub,
+            hub_wait_ms,
             rendezvous_ms,
             instances,
             min_replicas,
@@ -307,6 +323,7 @@ impl<H: Hosted> ProcessConfig<H> {
             listen,
             roster,
             hub,
+            hub_wait_ms,
             rendezvous_ms,
             instances,
             min_replicas,
@@ -486,13 +503,19 @@ impl<H> ProcessConfig<H> {
                     control_port,
                     heartbeat_ms,
                 } = hub;
-                let mut session = HubSession::register(
+                // A hub that is not up yet is waited for, not ready
+                // meanwhile: on Kubernetes every pod starts at once, and
+                // one that exited would be restarted with a growing delay.
+                let health = &process.health;
+                let mut session = HubSession::register_within(
                     host,
                     *public_port,
                     *control_port,
                     &node,
                     deployment.registration(segment)?,
                     Duration::from_millis(*heartbeat_ms),
+                    Duration::from_millis(self.hub_wait_ms),
+                    |waiting| health.waiting_for_hub(waiting),
                 )
                 .await?;
                 // The nodes, built already, reach the pool hub's records

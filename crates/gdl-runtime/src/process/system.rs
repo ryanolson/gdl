@@ -5,7 +5,7 @@
 //! paths do not justify a server dependency in every segment binary.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -157,6 +157,8 @@ impl Phase {
 /// listener: the phase, and the process's metrics once they exist.
 pub(crate) struct Health {
     phase: AtomicU8,
+    /// Set while the start asks a hub that is not up yet.
+    hub: AtomicBool,
     started: Instant,
     /// The process's registry, served once nothing more registers in it;
     /// until then `/metrics` answers with no metrics, not an error, which
@@ -177,6 +179,7 @@ impl Health {
     pub(crate) fn new() -> Self {
         Self {
             phase: AtomicU8::new(Phase::Starting as u8),
+            hub: AtomicBool::new(false),
             started: Instant::now(),
             registry: OnceLock::new(),
             own: OnceLock::new(),
@@ -265,12 +268,23 @@ impl Health {
             });
     }
 
-    /// dynamo's body, with gdl's phase added.
+    /// Whether the start is waiting for its hub to answer, which the
+    /// health body says while it lasts.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    pub(crate) fn waiting_for_hub(&self, waiting: bool) {
+        self.hub.store(waiting, Ordering::Release);
+    }
+
+    /// dynamo's body, with gdl's phase added, and what a start waits for.
     fn body(&self) -> (bool, String) {
         let phase = self.phase();
         let ready = phase == Phase::Ready;
+        let waiting = match self.hub.load(Ordering::Acquire) {
+            true => ",\"waiting\":\"hub\"",
+            false => "",
+        };
         let body = format!(
-            "{{\"status\":\"{}\",\"uptime\":{:.3},\"phase\":\"{}\"}}",
+            "{{\"status\":\"{}\",\"uptime\":{:.3},\"phase\":\"{}\"{waiting}}}",
             if ready { "ready" } else { "notready" },
             self.uptime(),
             phase.name()

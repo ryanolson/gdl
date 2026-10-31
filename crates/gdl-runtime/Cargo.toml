@@ -97,6 +97,10 @@ name = "pools"
 required-features = ["hub"]
 
 [[test]]
+name = "start"
+required-features = ["hub"]
+
+[[test]]
 name = "choosers"
 required-features = ["hub"]
 

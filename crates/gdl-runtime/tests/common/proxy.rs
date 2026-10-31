@@ -110,6 +110,11 @@ impl Proxy {
         *self.tamper.refuse.lock().expect("lock") = Some(pattern.to_vec());
     }
 
+    /// Pass on the requests [`Proxy::refuse`] answered.
+    pub fn stop_refusing(&self) {
+        *self.tamper.refuse.lock().expect("lock") = None;
+    }
+
     /// Pass the held requests on.
     pub fn release(&self) {
         self.tamper.hold.send_replace(None);

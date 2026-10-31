@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use velo::discovery::{ServiceDiscovery, ServiceEvent, ServiceRegistrationGuard};
 use velo::{InstanceId, PeerInfo, Velo};
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
+use velo_hub::protocol::ErrorCode;
 
 /// A segment's hub registration, kept alive from the moment it is made,
 /// and the phases it announces: `loaded`, once its nodes are ready to work;
@@ -63,9 +64,77 @@ impl HubSession {
             .register(node, BTreeMap::from([("gdl".to_string(), payload)]))
             .await
             .map_err(failure)?;
+        Ok(Self::kept(client, registration, heartbeat))
+    }
+
+    /// [`HubSession::register`] at a segment's start, when its hub may not
+    /// be up yet: a hub that cannot be reached, or that answers it is not
+    /// ready, is asked again after a wait that doubles from 100 ms up to
+    /// 2 s, with jitter, until `wait` has passed. `waiting` is told `true`
+    /// once an attempt failed so, and `false` once the hub admitted the
+    /// instance. Any other answer, such as the hub refusing the
+    /// registration, ends the start at once: asking again cannot change it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "register's, with the wait and its report"
+    )]
+    pub(crate) async fn register_within(
+        host: &str,
+        public_port: u16,
+        control_port: u16,
+        node: &Velo,
+        registration: SegmentRegistration,
+        heartbeat: Duration,
+        wait: Duration,
+        waiting: impl Fn(bool),
+    ) -> Result<Self> {
+        let client = HubClient::builder()
+            .host(host)
+            .public_port(public_port)
+            .control_port(control_port)
+            .build()
+            .map_err(failure)?;
+        let payload = serde_json::to_value(&registration).map_err(failure)?;
+        let extensions = BTreeMap::from([("gdl".to_string(), payload)]);
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut backoff = gdl_watch::Backoff::new(HUB_WAIT, HUB_WAIT_CAP);
+        let mut last = None;
+        loop {
+            let attempt = client.register(node, extensions.clone());
+            let error = match tokio::time::timeout_at(deadline, attempt).await {
+                Ok(Ok(_)) => break,
+                Ok(Err(error)) if !not_up(&error) => return Err(failure(error)),
+                Ok(Err(error)) => error.to_string(),
+                // A hub that took the connection and has not answered: the
+                // error before, if there was one, says more.
+                Err(_) => last.take().unwrap_or_else(|| "no answer".to_string()),
+            };
+            let now = tokio::time::Instant::now();
+            let pause = backoff.wait(None, gdl_watch::WatchEnd::Failed, now);
+            if now + pause >= deadline {
+                tokio::time::sleep_until(deadline).await;
+                return Err(failure(format!(
+                    "the hub at {host}:{control_port} did not admit this instance within {} ms: {error}",
+                    wait.as_millis()
+                )));
+            }
+            if last.is_none() {
+                tracing::warn!(%error, hub = %format!("{host}:{control_port}"), "the hub is not up yet; waiting for it");
+                waiting(true);
+            }
+            last = Some(error);
+            tokio::time::sleep(pause).await;
+        }
+        waiting(false);
+        Ok(Self::kept(client, registration, heartbeat))
+    }
+
+    /// The session of `client`, registered as `registration`, with its
+    /// lease kept from now by a heartbeat every `heartbeat`.
+    fn kept(client: HubClient, registration: SegmentRegistration, heartbeat: Duration) -> Self {
         let (report, lost) = watch::channel(None);
         let lease = tokio::spawn(keep_lease(client.clone(), heartbeat, report));
-        Ok(Self {
+        Self {
             client,
             registration,
             loaded: None,
@@ -77,7 +146,7 @@ impl HubSession {
             lease,
             lost,
             follower: None,
-        })
+        }
     }
 
     /// Announce that this instance's nodes are ready, then wait until at
@@ -891,6 +960,27 @@ async fn keep_lease(client: HubClient, heartbeat: Duration, report: watch::Sende
     }
 }
 
+/// Whether a failed first registration means the hub is not up yet: it
+/// could not be reached, or it answered that it is starting or busy, or a
+/// proxy in front of it answered that it is not there. Every other answer,
+/// a refusal of the registration included, is the same however often it is
+/// asked. An answer that does not decode is not a hub's, nor is 502 from
+/// the hub: it could not reach this instance over velo, which waiting does
+/// not mend.
+fn not_up(error: &ClientError) -> bool {
+    match error {
+        ClientError::Transport(error) => !error.is_decode(),
+        ClientError::Hub { code, .. } => matches!(code, ErrorCode::Unavailable | ErrorCode::Busy),
+        ClientError::Unexpected { status, .. } => matches!(status.as_u16(), 502..=504),
+        _ => false,
+    }
+}
+
+/// The first wait for a hub that is not up yet at a segment's start, and
+/// the most it doubles to: a hub that comes up is found within 2 s.
+const HUB_WAIT: Duration = Duration::from_millis(100);
+const HUB_WAIT_CAP: Duration = Duration::from_secs(2);
+
 /// Whether a failed hub call means the registration is gone, rather than
 /// the hub being momentarily unreachable.
 fn is_final(error: &ClientError) -> bool {
@@ -1144,6 +1234,54 @@ mod tests {
                 address.expect("an IPv4 literal resolves"),
                 "127.0.0.1:7000".parse().expect("valid test fixture")
             );
+        }
+    }
+
+    /// Which failed first registrations a start waits out: a hub that is
+    /// starting or busy, or a proxy that finds it gone. A refusal, or a
+    /// hub that cannot reach the instance, ends the start.
+    mod starting {
+        use super::super::not_up;
+        use velo_hub::client::ClientError;
+        use velo_hub::protocol::ErrorCode;
+
+        fn answered(code: ErrorCode) -> ClientError {
+            ClientError::Hub {
+                status: code.status(),
+                code,
+                message: String::new(),
+            }
+        }
+
+        fn unexpected(code: ErrorCode) -> ClientError {
+            ClientError::Unexpected {
+                status: code.status(),
+                body: String::new(),
+            }
+        }
+
+        #[test]
+        fn a_hub_that_is_not_up_is_waited_for() {
+            assert!(not_up(&answered(ErrorCode::Unavailable)));
+            assert!(not_up(&answered(ErrorCode::Busy)));
+            assert!(not_up(&unexpected(ErrorCode::Unavailable)));
+            assert!(not_up(&unexpected(ErrorCode::BadGateway)));
+        }
+
+        #[test]
+        fn an_answer_that_asking_again_cannot_change_ends_the_start() {
+            for code in [
+                ErrorCode::BadRequest,
+                ErrorCode::Conflict,
+                ErrorCode::Unauthorized,
+                ErrorCode::NotFound,
+                ErrorCode::BadGateway,
+                ErrorCode::Internal,
+            ] {
+                assert!(!not_up(&answered(code)), "{code:?}");
+            }
+            assert!(!not_up(&unexpected(ErrorCode::BadRequest)));
+            assert!(!not_up(&ClientError::NotRegistered));
         }
     }
 

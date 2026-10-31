@@ -20,6 +20,7 @@ A segment binary takes its settings from TOML files (`segment config.toml [overr
 | `roster` | none | a roster directory that every instance shares, fresh for each deployment |
 | `[hub]` | none | the discovery hub (below) |
 | `rendezvous_ms` | 30000 | the bound on each launch wait: the roster, the barrier, and the `ready` announcement |
+| `hub_wait_ms` | 300000 | with `[hub]`: how long the start waits for a hub that is not up yet ([Segment lifecycle](../concepts/lifecycle.md)) |
 | `[instances]` | 1 per segment | with `roster`: the exact count of each segment to wait for |
 | `[min_replicas]` | 1 per segment | with `[hub]`: the loaded instances of each segment to wait for |
 | `[runtime]` | below | the runtime's own settings |

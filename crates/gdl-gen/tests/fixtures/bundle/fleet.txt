@@ -430,6 +430,7 @@ segments = ["engine"]
 //! # [hub]                 # or the discovery hub: exactly one of the two
 //! # host = "hub"          # its host; public_port, control_port, and heartbeat_ms (5000) are optional
 //! rendezvous_ms = 30000   # optional: how long to wait for the other instances
+//! hub_wait_ms = 300000    # optional, with a hub: how long the start waits for the hub to answer
 //! [instances]             # optional, with a roster: instances per segment, 1 by default
 //! [min_replicas]          # optional, with a hub: loaded instances per segment to wait for, 1 by default
 //! [runtime]               # optional: gdl_runtime::RuntimeConfig
@@ -578,6 +579,7 @@ segments = ["engine"]
 //! # [hub]                      # or the discovery hub: exactly one of the two
 //! # host = "hub"               # its host; public_port, control_port, and heartbeat_ms (5000) are optional
 //! rendezvous_ms = 30000        # optional: how long to wait for the other instances
+//! hub_wait_ms = 300000         # optional, with a hub: how long the start waits for the hub to answer
 //! [instances]                  # optional, with a roster: instances per segment, 1 by default
 //! [min_replicas]               # optional, with a hub: loaded instances per segment to wait for, 1 by default
 //! [runtime]                    # optional: gdl_runtime::RuntimeConfig

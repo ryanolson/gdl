@@ -128,6 +128,11 @@ impl Unit<'_> {
                 "optional: how long to wait for the other instances".to_string(),
             ),
             (
+                "hub_wait_ms = 300000".to_string(),
+                "optional, with a hub: how long the start waits for the hub to answer"
+                    .to_string(),
+            ),
+            (
                 "[instances]".to_string(),
                 "optional, with a roster: instances per segment, 1 by default".to_string(),
             ),

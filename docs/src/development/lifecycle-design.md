@@ -20,6 +20,14 @@ Under a hub, an instance registers before its nodes are ready, and keeps the lea
 
 **Why:** the hub then knows that the process is live while a node loads. A node that loads for longer than the hub's lease is not reaped meanwhile.
 
+## Wait for the hub at start
+
+An instance whose hub cannot be reached, or answers that it is not ready, asks again with a jittered backoff until `hub_wait_ms`. It exits at once on any other answer.
+
+**Why:** Kubernetes starts a pool's hub and segments together, and no pod waits for another. An instance that exited at its first failed request was restarted, logged errors on every first deploy, and could fall into a crash-loop backoff that the deploy's health wait then sat through. Compose hid this, since its segments start after the hub's health check.
+
+**Rejected: an init container that waits for the hub's health.** It needs a second image in every pod, and it would wait on the hub's health, not on the answer to the registration itself. The instance knows which answers can change by waiting; an init container would have to repeat that rule. **Rejected: waiting on every error.** A hub that refuses the registration, a binary built for another graph, would refuse it every time; waiting would only delay the error by `hub_wait_ms`.
+
 ## The readiness order
 
 An instance announces `serving` before it waits for the instances it sends to. Its roster is held from the launch until that wait is over.

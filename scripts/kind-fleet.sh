@@ -11,6 +11,8 @@
 #   - `deploy` and `down` leave the owner's label and annotations, the last-applied one among them, as they were:
 #     `deploy` applies no Namespace that exists, and only labels it with the fleet's labels, which `down` removes;
 #   - `deploy` builds and pushes the images, applies the objects, and waits until each pool's health answers 200;
+#   - no container of the fleet restarted during the first deploy: a segment whose pool's hub is not up yet waits
+#     for it rather than exiting;
 #   - the global pool's health answers 200 through the API server's service proxy, and a request through
 #     `kubectl port-forward` is answered;
 #   - the cluster's one node is labelled and tainted as a node group of the fleet's own, and every pod of the fleet
@@ -306,6 +308,14 @@ ${placed}
 expected:
 ${expected_placed}"
 echo "kind-fleet.sh: every pod runs on the tainted node group, with its requests and limits"
+# The hubs and segments start together: a segment that exited before its hub answered would show a restart.
+restarts="$(k --namespace gdl-api get pods --selector gdl.dev/fleet=api --output json | jq -r '.items[]
+  | [.metadata.name, ([.status.containerStatuses[].restartCount] | add)] | map(tostring) | join(" ")' | sort)"
+echo "kind-fleet.sh: restarts after the first deploy:"
+echo "${restarts}"
+if awk '$2 != 0 { found = 1 } END { exit !found }' <<<"${restarts}"; then
+  fail "a container of the fleet restarted during the first deploy"
+fi
 echo "kind-fleet.sh: every pool is healthy, and the global pool holds both model pools"
 
 # A request through a port-forward of the global pool's entry Service.
