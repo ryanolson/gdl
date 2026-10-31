@@ -9,6 +9,9 @@ use super::*;
 #[path = "operator/after.rs"]
 mod after;
 
+#[path = "operator/level.rs"]
+mod level;
+
 fn fakes(log: &Log) -> (Docker, Kube) {
     (
         Docker {
