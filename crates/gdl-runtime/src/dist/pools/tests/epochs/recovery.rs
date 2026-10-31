@@ -268,7 +268,6 @@ fn a_stale_listing_after_an_unlisting_does_not_hide_a_heard_drain() {
 /// A snapshot taken before a drain must not clear it when its marker
 /// arrives after an unlisting that fenced the same hub.
 #[test]
-#[ignore = "known limit: a snapshot of a pool's own hub, taken before its drain and delivered after an unlisting that forgot the drain, reads that hub live until its next word (operations/limitations.md)"]
 fn a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain() {
     let (mut follows, pools, _, _) = follower();
     let now = Instant::now();
@@ -323,10 +322,9 @@ fn a_stale_snapshot_at_the_fence_does_not_hide_a_heard_drain() {
     );
 }
 
-/// The window of the limit above closes: the pool's own watch, whose
-/// snapshot was taken before its hub drained, says the drain after the
-/// snapshot, as the hub's own test shows, and the pool reads draining from
-/// then.
+/// The pool's own watch, whose snapshot was taken before its hub drained,
+/// also says the drain after the snapshot, as the hub's own test shows, and
+/// the pool reads draining then too.
 #[test]
 fn a_stale_snapshot_at_the_fence_reads_draining_once_its_watch_says_so() {
     let (mut follows, pools, _, _) = follower();
@@ -375,5 +373,58 @@ fn a_stale_snapshot_at_the_fence_reads_draining_once_its_watch_says_so() {
             Some(6)
         ),
         "the window closes at the follow's own drain"
+    );
+}
+
+/// A rewatch whose snapshot names a fenced pool at the fence's hub merges
+/// with the forgotten value: a snapshot that is not whole shows the hub's
+/// follow withheld, unavailable, and the drain the fence kept lasts.
+#[test]
+fn a_rewatch_at_the_fence_keeps_its_drain() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    follows.take(followed(M1, 1, 5), now);
+    follows.unknown(gdl_watch::UnknownFollowEvent {
+        kind: "paused".into(),
+        class: "model_x".into(),
+        pool: M1.into(),
+        generation: 1,
+    });
+    let asked = follows.asked().pop().expect("an own watch");
+    for event in [followed(M1, 1, 5), FollowEvent::Synced { listed: true }] {
+        follows.own(
+            asked.key.clone(),
+            asked.watch,
+            Ok(gdl_watch::Watched::Event(event)),
+            now,
+        );
+    }
+    let mut draining = listing(6);
+    draining.draining = true;
+    follows.take(
+        FollowEvent::Listed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 2,
+            listing: Some(draining),
+        },
+        now,
+    );
+    follows.take(listed(M1, None), now);
+    assert_eq!(evidence(&pools, M1), (None, Some(5)), "fenced at hub 6");
+    let mut snapshot = follows.snapshot();
+    for event in [
+        follow_at(M1, 2, 6, PoolState::Unavailable),
+        FollowEvent::Synced { listed: false },
+    ] {
+        snapshot.apply(event, now);
+    }
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        evidence(&pools, M1),
+        (
+            Some(at(6, PoolCondition::Live).with_draining(true)),
+            Some(6)
+        )
     );
 }

@@ -754,8 +754,7 @@ fn an_uninstalled_follow_cannot_mark_a_successor_hub_missing() {
 }
 
 /// A watch of one follow, opened before its pool drains, says the drain
-/// after its snapshot: what ends a chooser's window in which that follow's
-/// snapshot, taken before the drain, reads the pool live.
+/// after its snapshot, on the same watch.
 #[test]
 fn a_watch_of_one_follow_says_a_drain_after_its_snapshot() {
     let relay = held();

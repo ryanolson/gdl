@@ -17,10 +17,12 @@
 //! pool reads unknown until a later word: what is held is of another hub,
 //! and a lagging watch can show a follow of any earlier hub, so no record
 //! of each hub's word could stay complete without growing for each one.
-//! Forgetting keeps the forgotten value's epoch as a fence: the pool reads
-//! unknown, and a later word of an earlier hub is dropped, as the merge
-//! rule drops it, so that forgetting never lowers the pool's newest hub.
-//! The first word of the fenced hub or a later one ends the fence.
+//! Forgetting keeps the forgotten value as a fence: the pool reads unknown,
+//! and a later word of an earlier hub is dropped, as the merge rule drops
+//! it, so that forgetting never lowers the pool's newest hub. A word of the
+//! fenced hub merges with the forgotten value under the same rule, so its
+//! drain and its withdrawal last; the first word of the fenced hub or a
+//! later one ends the fence.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,8 +36,9 @@ use super::Key;
 #[derive(Default)]
 pub(super) struct Evidence {
     held: BTreeMap<Key, (PoolEvidence, Option<Instant>)>,
-    /// The epoch of each pool's forgotten value, while it reads unknown.
-    fences: BTreeMap<Key, u64>,
+    /// Each pool's forgotten value, while it reads unknown: its epoch, and
+    /// what lasts within it.
+    fences: BTreeMap<Key, PoolEvidence>,
 }
 
 impl Evidence {
@@ -49,13 +52,11 @@ impl Evidence {
         silent: Option<Instant>,
     ) -> bool {
         let silent = silent.filter(|_| incoming.condition() == PoolCondition::Missing);
-        if self
-            .fences
-            .get(key)
-            .is_some_and(|fence| incoming.epoch() < *fence)
-        {
-            return false;
-        }
+        let incoming = match self.fences.get(key) {
+            Some(fence) if incoming.epoch() < fence.epoch() => return false,
+            Some(fence) => fence.merged(incoming),
+            None => incoming,
+        };
         self.fences.remove(key);
         match self.held.get_mut(key) {
             None => {
@@ -93,14 +94,14 @@ impl Evidence {
     /// `key`'s pool is no longer listed: what was said of it is forgotten,
     /// as its list is, unless it withdrew, or it is of the hub of `shown`,
     /// the epoch of the pool's follow still shown, whose word it then is.
-    /// What is forgotten leaves its epoch as the pool's fence.
+    /// What is forgotten stays as the pool's fence.
     pub(super) fn unlist(&mut self, key: &Key, shown: Option<u64>) {
         if self
             .get(key)
             .is_some_and(|held| !held.is_withdrawn() && Some(held.epoch()) != shown)
             && let Some((held, _)) = self.held.remove(key)
         {
-            self.fences.insert(key.clone(), held.epoch());
+            self.fences.insert(key.clone(), held);
         }
     }
 
@@ -119,15 +120,16 @@ impl Evidence {
     /// does not name keeps the held value if the snapshot is not `whole`,
     /// or if it withdrew, since a snapshot holds no withdrawal; it is
     /// forgotten otherwise, as its listing is. A fenced pool stays fenced
-    /// unless the snapshot names it at or past its fence, or forgets it.
+    /// unless the snapshot names it at or past its fence, or forgets it;
+    /// named at the fence's hub, it merges with the forgotten value.
     pub(super) fn carry(&mut self, held: Self, whole: bool) {
         for (key, fence) in held.fences {
-            match self.held.get(&key) {
-                Some((shown, _)) if shown.epoch() < fence => {
+            match self.held.get_mut(&key) {
+                Some((shown, _)) if shown.epoch() < fence.epoch() => {
                     self.held.remove(&key);
                     self.fences.insert(key, fence);
                 }
-                Some(_) => {}
+                Some((shown, _)) => *shown = fence.merged(*shown),
                 None if !whole => {
                     self.fences.insert(key, fence);
                 }

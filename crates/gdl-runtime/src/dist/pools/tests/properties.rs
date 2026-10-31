@@ -925,9 +925,11 @@ fn a_pools_drain_is_cleared_only_by_a_later_hub() {
 
 /// A pool's drain is held through a relay restart, whose snapshot lists
 /// the pool from its record, before its link says it drains, and through a
-/// snapshot that is not whole and does not name it. A withdrawal forgets
-/// it, and so does a whole snapshot that does not name the pool: listed
-/// again, the pool starts afresh.
+/// snapshot that is not whole and does not name it. An unlisting forgets
+/// the pool, but its fence keeps the drain, so the same hub listed again
+/// still drains, since a drain lasts for its hub's life; a later hub starts
+/// afresh. A whole snapshot that does not name the pool forgets it, fence
+/// and all.
 #[test]
 fn a_pools_drain_is_held_while_listed_and_forgotten_with_its_listing() {
     let (mut follows, node, now) = holding_five();
@@ -948,11 +950,17 @@ fn a_pools_drain_is_held_while_listed_and_forgotten_with_its_listing() {
     assert_eq!(drains(&node), (true, 0), "an incomplete snapshot");
 
     follows.apply(listed_event(M1, None), now);
-    assert_eq!(drains(&node), (false, 0), "withdrawn");
+    assert_eq!(drains(&node), (false, 0), "unlisted");
     follows.apply(listed_event(M1, Some(draining_at(1, 3, false))), now);
-    assert!(!drains(&node).0, "listed afresh");
+    assert!(
+        drains(&node).0,
+        "the same hub, listed again: its drain lasts"
+    );
+    follows.apply(listed_event(M1, None), now);
+    follows.apply(listed_event(M1, Some(draining_at(2, 3, false))), now);
+    assert!(!drains(&node).0, "a later hub, listed afresh");
 
-    follows.apply(listed_event(M1, Some(draining_at(1, 3, true))), now);
+    follows.apply(listed_event(M1, Some(draining_at(2, 3, true))), now);
     let mut whole = follows.snapshot();
     whole.apply(FollowEvent::Synced { listed: true }, now);
     follows.resnapshot(whole, now);
