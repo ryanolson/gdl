@@ -10,6 +10,9 @@ use tower::service_fn;
 
 use super::*;
 
+#[path = "tests/kind.rs"]
+mod kind;
+
 /// A request: its method, its path and query, and its body.
 type Seen = (String, String, Value);
 
