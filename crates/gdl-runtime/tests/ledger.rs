@@ -360,41 +360,58 @@ async fn velos_families_are_served_beside_the_registry_when_asked() {
     }
 }
 
+/// A `metrics_prefix` under which the runtime's names are served under
+/// names that start with `velo_` would serve a family twice once velo's
+/// metrics are on: `velo_streaming` serves `active_anchors` as velo's
+/// `velo_streaming_active_anchors`. The registry is refused, with the
+/// setting on or off, so turning it on cannot change what a fleet serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "F1: the velo_streaming prefix serves active_anchors twice when velo metrics are enabled"]
 async fn a_runtime_gauge_cannot_collide_with_the_velo_bridge() {
     let placement = Placement::new()
         .segment("front", ["A", "B", "F", "E", "G"])
         .segment("side", ["C", "D"]);
-    let manifest = reference_manifest(|_| true);
-    let spec = DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid fixture");
-    let (_dir, instances) = launched(
-        &spec,
-        "velo_metrics = true\nmetrics_prefix = \"velo_streaming\"\n",
-    )
-    .await;
-    for ((process, launch, registry), segment) in instances.into_iter().zip(["front", "side"]) {
-        let _deployment = Deployment::new(
-            launch.node(),
-            &manifest,
-            &placement,
-            segment,
-            launch.roster(),
-            RuntimeConfig {
-                metrics: Some(registry.clone()),
-                ..RuntimeConfig::default()
-            },
-        )
-        .expect("deployment");
-        process.serve_metrics(registry).expect("served");
-        let scrape = scrape(&process).await;
-        let family = "# TYPE velo_streaming_active_anchors gauge";
-        assert_eq!(
-            scrape.lines().filter(|line| *line == family).count(),
-            1,
-            "a runtime gauge and velo's bridge serve the same family: {scrape}"
-        );
+    let spec = DeploymentSpec::new(reference_manifest(|_| true), placement).expect("valid fixture");
+    for velo in ["true", "false"] {
+        for prefix in ["velo_streaming", "velo"] {
+            let dir = tempfile::Builder::new()
+                .prefix("gdl-ledger-")
+                .tempdir()
+                .expect("roster directory");
+            let settings = format!(
+                "listen = \"127.0.0.1:0\"\nroster = {:?}\n[system]\nport = 0\nvelo_metrics = {velo}\nmetrics_prefix = {prefix:?}\n",
+                dir.path().display()
+            );
+            let config: ProcessConfig<Nothing> =
+                ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
+                    .expect("settings");
+            let process = Process::start(&config).await.expect("process");
+            let Err(error) = process.registry(&spec, "front") else {
+                panic!("a registry under `{prefix}` with velo_metrics = {velo}");
+            };
+            let error = error.to_string();
+            assert!(
+                error.contains(&format!("{prefix:?}"))
+                    && error.contains(&format!("`{prefix}_requests_total`")),
+                "{error}"
+            );
+        }
     }
+    // A prefix that only starts like velo's is not refused.
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-ledger-")
+        .tempdir()
+        .expect("roster directory");
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nroster = {:?}\n[system]\nport = 0\nvelo_metrics = true\nmetrics_prefix = \"velocity\"\n",
+        dir.path().display()
+    );
+    let config: ProcessConfig<Nothing> =
+        ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
+            .expect("settings");
+    let process = Process::start(&config).await.expect("process");
+    process
+        .registry(&spec, "front")
+        .expect("a registry under `velocity`");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

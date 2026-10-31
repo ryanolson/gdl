@@ -22,7 +22,8 @@ A segment refuses to start when:
 - `port` is above 65535;
 - a probe path does not start with `/` or holds a space;
 - the two probe paths are the same, or either one is `/metrics`;
-- `metrics_prefix` is not empty and is not letters, digits, `_`, and `:`, starting with a letter, `_`, or `:`.
+- `metrics_prefix` is not empty and is not letters, digits, `_`, and `:`, starting with a letter, `_`, or `:`;
+- `metrics_prefix` is `velo` or starts with `velo_`, with `velo_metrics` on or off. The runtime's names would then be served under names that start with `velo_`, as velo's are: `velo_streaming` serves `active_anchors` as velo's `velo_streaming_active_anchors`. The error names the prefix and the first such name. The process refuses it when it makes its registry.
 
 The listener reads HTTP by hand: one request per connection, and only `GET`. It answers at most 64 connections at once. A request head over 8 KiB gets 431, and a head not sent within 5 s gets 408. Another path gets 404, and another method gets 405.
 

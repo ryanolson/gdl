@@ -1421,12 +1421,33 @@ impl Process {
     /// `[system] velo_metrics`, velo's (`velo_*`), under the same labels but
     /// never the prefix. It refuses a metric whose prefixed name is one of
     /// those figures', or starts with `velo_`.
+    ///
+    /// # Errors
+    ///
+    /// When it was made already, or when the metrics prefix serves the
+    /// runtime's names under names that start with `velo_` (`velo`,
+    /// `velo_streaming`), with `velo_metrics` on or off.
     pub fn registry(
         &self,
         deployment: &gdl_model::DeploymentSpec,
         segment: &str,
     ) -> Result<prometheus::Registry> {
         let registration = deployment.registration(segment)?;
+        // Refused with velo's metrics on or off, so that turning them on
+        // cannot change what a fleet serves.
+        if let Some(served) = self.reserved().served_as_velo() {
+            let prefix = self.metrics_prefix.as_deref().unwrap_or_default();
+            let name = served
+                .strip_prefix(&format!("{prefix}_"))
+                .unwrap_or(&served);
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "`system.metrics_prefix` {prefix:?} serves the runtime's `{name}` as `{served}`, and velo's own metrics are served under names that start with `{}`: choose another prefix",
+                    gdl_model::VELO_METRICS
+                ),
+            ));
+        }
         let labels = [
             (
                 gdl_model::NAMESPACE_LABEL,

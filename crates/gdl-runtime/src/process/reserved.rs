@@ -63,6 +63,19 @@ impl Reserved {
         }
     }
 
+    /// The runtime's first name that the prefix serves under a name that
+    /// starts with `velo_`, as it is served, if any. Such a prefix serves
+    /// every name of the registry there, so this one names it.
+    pub(crate) fn served_as_velo(&self) -> Option<String> {
+        let prefix = self.prefix.as_deref()?;
+        let figures = gdl_cgroup::families();
+        gdl_model::RUNTIME_METRICS
+            .iter()
+            .filter(|name| !figures.iter().any(|figure| figure == *name))
+            .map(|name| format!("{prefix}_{name}"))
+            .find(|served| served.starts_with(gdl_model::VELO_METRICS))
+    }
+
     /// Whether no name is refused, as under the default prefix.
     pub(crate) fn is_empty(&self) -> bool {
         self.names.is_empty()
