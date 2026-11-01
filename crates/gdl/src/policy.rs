@@ -165,11 +165,11 @@ impl PoolChoice {
 
     /// Put on the offer the view of the pool this choice decided on
     /// ([`OfferView`](crate::OfferView)): the epoch of the chosen row's
-    /// hub and the number of the load summary the row holds, for a pool
-    /// that admits by them. The runtime sends none when the row has no
-    /// summary, or one from a hub of a build before the numbers. Ask only
-    /// for a choice the pool may decline on that ground, as a session's
-    /// first turn: a pinned turn asks for none.
+    /// hub and the number of the load summary the row holds, which the
+    /// entry's nodes read from the request's context once it is admitted.
+    /// The runtime sends none when the row has no summary, or one from a
+    /// hub of a build before the numbers. Ask only on a choice a pool may
+    /// judge by it, as a session's first turn: a pinned turn asks for none.
     #[inline]
     pub fn with_view(mut self) -> Self {
         self.at |= VIEW;

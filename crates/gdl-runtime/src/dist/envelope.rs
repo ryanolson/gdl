@@ -119,7 +119,6 @@ const FIELDS: u8 = 0x97;
 
 /// The room an encoder leaves after a request's head, for the view an offer
 /// writes after it: `[epoch, sequence]` takes at most 19 bytes.
-#[cfg_attr(not(feature = "hub"), allow(dead_code))]
 pub(crate) const TAIL_ROOM: usize = gdl::__runtime::TAIL_ROOM;
 
 /// A [`Forward`] as it arrives, its head borrowed from the bytes, so that
@@ -165,12 +164,18 @@ impl Forward {
 
     /// The envelope an offer sent, `bytes`, with the view after it, if one
     /// is there ([`Head::view`]). The head is borrowed to find where it
-    /// ends, then copied once with what follows it, as [`decode`] copies
-    /// the head alone.
+    /// ends, then copied once, as [`decode`] copies it, with room for the
+    /// view after it. Bytes after the envelope that are not a view are
+    /// neither kept nor copied.
     pub(crate) fn read(bytes: &[u8]) -> Result<Self> {
         let arrived: Arrived<'_> = rmp_serde::from_slice(bytes).map_err(codec)?;
         // The head is a slice of `bytes`, so what follows it is the rest.
-        let start = arrived.payload.as_ptr() as usize - bytes.as_ptr() as usize;
+        let end =
+            arrived.payload.as_ptr() as usize - bytes.as_ptr() as usize + arrived.payload.len();
+        let mut payload = Vec::with_capacity(arrived.payload.len() + TAIL_ROOM);
+        payload.extend_from_slice(arrived.payload);
+        let mut payload = Head::from(payload);
+        payload.set_view(read_view(&bytes[end..]));
         Ok(Self {
             version: arrived.version,
             identity: arrived.identity,
@@ -178,7 +183,7 @@ impl Forward {
             pos: arrived.pos,
             cx: arrived.cx,
             reply: arrived.reply,
-            payload: Head::carrying(bytes[start..].to_vec(), arrived.payload.len()),
+            payload,
         })
     }
 
@@ -252,17 +257,6 @@ impl Head {
         })
     }
 
-    /// `carried`, a head of `len` bytes and whatever followed it as it
-    /// arrived.
-    fn carrying(carried: Vec<u8>, len: usize) -> Self {
-        Self {
-            // A head that arrived is at most msgpack's 4 GiB.
-            len: u32::try_from(len).unwrap_or(u32::MAX),
-            buffer: Buffer::Room(carried),
-            at: 0,
-        }
-    }
-
     fn at(&self) -> usize {
         self.at as usize
     }
@@ -280,12 +274,7 @@ impl Head {
     /// build, which decodes the envelope's seven fields and stops, ignores
     /// it. None when no view follows the head, or what follows is not one.
     pub(crate) fn view(&self) -> Option<OfferView> {
-        let after = &self.carried()[self.len as usize..];
-        if after.is_empty() {
-            return None;
-        }
-        let (epoch, sequence) = rmp_serde::from_slice::<(u64, u64)>(after).ok()?;
-        Some(OfferView { epoch, sequence })
+        read_view(&self.carried()[self.len as usize..])
     }
 
     /// Carry `view` after the head, in place of any view before. Before the
@@ -293,7 +282,6 @@ impl Head {
     /// after it; after, the buffer is shared with that offer's send, so a
     /// different view takes a copy of the head, as the next offer's copy
     /// would.
-    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
     pub(crate) fn set_view(&mut self, view: Option<OfferView>) {
         if self.view() == view {
             return;
@@ -304,10 +292,13 @@ impl Head {
                 buffer.truncate(end);
                 buffer
             }
+            // A copy with room in front, so that the next offer writes the
+            // envelope into it rather than copying the head again.
             Buffer::Sent(bytes) => {
-                let mut buffer = Vec::with_capacity(self.len as usize + TAIL_ROOM);
+                let mut buffer = Vec::with_capacity(HEADER_ROOM + self.len as usize + TAIL_ROOM);
+                buffer.resize(HEADER_ROOM, 0);
                 buffer.extend_from_slice(&bytes[self.at()..end]);
-                self.at = 0;
+                self.at = HEADER_ROOM as u32;
                 buffer
             }
         };
@@ -317,6 +308,15 @@ impl Head {
         }
         self.buffer = Buffer::Room(buffer);
     }
+}
+
+/// The view in `after`, the bytes after a head, if they begin with one.
+fn read_view(after: &[u8]) -> Option<OfferView> {
+    if after.is_empty() {
+        return None;
+    }
+    let (epoch, sequence) = rmp_serde::from_slice::<(u64, u64)>(after).ok()?;
+    Some(OfferView { epoch, sequence })
 }
 
 fn too_large(len: usize) -> Error {
@@ -337,8 +337,12 @@ impl std::ops::Deref for Head {
 /// A head with no room in front of it, as an envelope that arrived holds.
 impl From<Vec<u8>> for Head {
     fn from(head: Vec<u8>) -> Self {
-        let len = head.len();
-        Self::carrying(head, len)
+        Self {
+            // A head that arrived is at most msgpack's 4 GiB.
+            len: u32::try_from(head.len()).unwrap_or(u32::MAX),
+            buffer: Buffer::Room(head),
+            at: 0,
+        }
     }
 }
 
@@ -720,7 +724,7 @@ mod tests {
 
     /// Reading an offer at the entry allocates what decoding it did before
     /// views, with a view or without: the head is copied once, out of the
-    /// bytes that arrived, with the view's few bytes after it.
+    /// bytes that arrived, into a buffer with room for the view after it.
     #[test]
     fn reading_an_offer_allocates_what_decoding_it_did() {
         let codec = Codec::<Image>::new(Encoding::Msgpack);
@@ -743,19 +747,86 @@ mod tests {
                 counting(false);
                 let after = take_sizes();
                 assert_eq!(read.payload.view(), view);
-                // The view comes with the head, in the same allocation.
-                let view_bytes = read.payload.carried().len() - read.payload.len();
+                // The head's copy holds room for the view, in the same
+                // allocation.
                 assert_eq!(
                     after.bytes,
-                    before.bytes + view_bytes,
+                    before.bytes + TAIL_ROOM,
                     "a head of {len} B, view {view:?}"
                 );
                 assert!(
-                    after.largest <= before.largest + view_bytes,
+                    after.largest <= before.largest + TAIL_ROOM,
                     "a head of {len} B, view {view:?}"
                 );
                 drop((decoded, read));
             }
+        }
+    }
+
+    /// A failover to another pool whose view differs, or that has none,
+    /// copies a large head once, as a failover with the same view does:
+    /// the new view is written into a copy that keeps room in front for
+    /// the envelope, so sending it copies nothing more.
+    #[test]
+    fn a_failover_with_another_view_copies_the_head_once() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let other = OfferView {
+            epoch: VIEW.epoch,
+            sequence: VIEW.sequence + 1,
+        };
+        for next in [Some(other), None, Some(VIEW)] {
+            let image = Image {
+                url: "a".repeat(4 * 1024 * 1024),
+                detail: "high".into(),
+            };
+            let mut envelope = hand_off(&codec, image, &[]);
+            envelope.payload.set_view(Some(VIEW));
+            envelope.wire().expect("the first offer");
+            take_sizes();
+            counting(true);
+            envelope.payload.set_view(next);
+            let bytes = envelope.wire().expect("the failover's offer");
+            counting(false);
+            let sizes = take_sizes();
+            assert!(
+                sizes.bytes <= bytes.len() + 2 * HEADER_ROOM + TAIL_ROOM,
+                "{} B allocated for an offer of {} B, next view {next:?}",
+                sizes.bytes,
+                bytes.len()
+            );
+            assert_eq!(Forward::read(&bytes).expect("read").payload.view(), next);
+        }
+    }
+
+    /// Bytes after the envelope that are not a view are not kept, however
+    /// many: the entry keeps the head, and a view only when one is there.
+    #[test]
+    fn an_offer_keeps_only_its_head_and_view() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let image = Image {
+            url: "a".into(),
+            detail: "low".into(),
+        };
+        let junk = vec![0xc1; 1024 * 1024];
+        for view in [None, Some(VIEW)] {
+            let mut envelope = hand_off(&codec, image_like(&image), &[]);
+            envelope.payload.set_view(view);
+            let mut bytes = envelope.wire().expect("wire").to_vec();
+            bytes.extend_from_slice(&junk);
+            let back = Forward::read(&bytes).expect("read");
+            assert_eq!(back.payload.view(), view);
+            let kept = back.payload.carried().len() - back.payload.len();
+            assert!(
+                kept <= TAIL_ROOM,
+                "{kept} B kept after the head, view {view:?}"
+            );
+        }
+    }
+
+    fn image_like(image: &Image) -> Image {
+        Image {
+            url: image.url.clone(),
+            detail: image.detail.clone(),
         }
     }
 

@@ -173,7 +173,7 @@ let committed = |pool: &Pool| {
 
 Compare the sizes with each other, not with `instances`: they cover the same instances, which during a roll are only those of the new build.
 
-A choice can carry the view it was made on to the pool: `PoolChoice::new(at).with_view()`. The pool's entry reads it as `cx.ext::<gdl::OfferView>()`: the epoch of the pool's hub and the number of the summary the policy read. Ask for it only on a choice the pool may decline on that ground, such as a session's first turn (`request.head().hint.first_turn`), not on a pinned turn. A choice with a view is the same size as one without, and the view adds about 19 bytes to the offer.
+A choice can carry the view it was made on to the pool: `PoolChoice::new(at).with_view()`. The pool's entry reads it as `cx.ext::<gdl::OfferView>()`: the epoch of the pool's hub and the number of the summary the policy read. Ask for it only on a choice a pool may judge by it, such as a session's first turn (`request.head().hint.first_turn`), not on a pinned turn. The entry reads it after it admitted the request: nothing yet declines an offer by its view. A choice with a view is the same size as one without, and the view adds about 19 bytes to the offer.
 
 ## 3. Test it without a runtime
 
