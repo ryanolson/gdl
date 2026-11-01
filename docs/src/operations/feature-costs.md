@@ -458,7 +458,9 @@ GDL_OFFERS=<200|400> valgrind --tool=callgrind --callgrind-out-file=/dev/null '-
 | Inside `accept_forward`, per offer, three rounds | 10,310 to 10,394 | 10,358 to 10,392 |
 | The whole test, per offer, seven rounds (median) | 31,067 to 31,631 (31,543) | 31,368 to 31,881 (31,770) |
 
-The entry's path is the same within its spread. The whole test runs velo's threads, which spread a round by about 560 instructions, so it cannot show a load and a branch.
+The entry's path is the same within its spread.
+
+At the chooser, an offer's lease on its pool's follow, which a request holds for its whole response, is three words, one more than before: whether the choice asked for the view, so that a re-queued re-offer takes its row's view even when the first offer could carry none (`a_lease_is_three_words`). `send_forward`'s future stays within its bound (`a_first_offer_is_no_larger_than_a_hand_off_was`). The whole test runs velo's threads, which spread a round by about 560 instructions, so it cannot show a load and a branch.
 
 ## Reading the followed pools
 

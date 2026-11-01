@@ -225,3 +225,58 @@ async fn the_gate_never_hides_that_the_pool_is_gone() {
         .expect_err("declined");
     assert_eq!(refused.decline, Decline::Gone, "{}", refused.error);
 }
+
+/// The counter of declined offers counts only offers from another class:
+/// a hand-off within the pool that its admission refuses is not one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hand_off_within_the_pool_is_not_a_declined_offer() {
+    for crossing in [true, false] {
+        let node = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let placement = if crossing {
+            placement().class("global", ["a"]).class("model_x", ["d"])
+        } else {
+            placement()
+        };
+        let deployment = Deployment::new(
+            node,
+            &manifest(),
+            &placement,
+            "d",
+            &Roster::new(),
+            RuntimeConfig {
+                admission_limit: 1,
+                admission_wait: Duration::from_millis(1),
+                ..RuntimeConfig::default()
+            },
+        )
+        .expect("a deployment");
+        let codec = || Some(Codec::<String>::new(Default::default()));
+        let hop = deployment
+            .hop(
+                0,
+                FwdEnd::new(codec()),
+                DSink::new(Arc::new(Echo)),
+                BwdEnd::new(codec()),
+            )
+            .expect("the hop");
+        let mut entries = Entries::default();
+        hop.register(&mut entries);
+        let segment = deployment.start(hop).expect("started");
+        let rt = segment.runtime();
+        let enter = entries.forward(0, 1).expect("the entry");
+        let held = rt.admission.admit(7).await.expect("the only permit");
+        let refused = tokio::time::timeout(WAIT, enter(offer(rt, "first", None)))
+            .await
+            .expect("answered in time")
+            .expect_err("no room");
+        assert_eq!(refused.decline, Decline::Full);
+        assert_eq!(
+            rt.served.declined_as(Decline::Full),
+            u64::from(crossing),
+            "crossing a class: {crossing}"
+        );
+        drop(held);
+    }
+}

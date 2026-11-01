@@ -424,20 +424,45 @@ fn read_view(after: &[u8]) -> Option<OfferView> {
     if after.is_empty() {
         return None;
     }
-    // A chooser of the build before the fleet's fullest fill sends two.
-    if let Ok((epoch, sequence)) = rmp_serde::from_slice::<(u64, u64)>(after) {
-        return Some(OfferView {
-            epoch,
-            sequence,
-            fill_max_ppm: None,
-        });
+    rmp_serde::from_slice::<WireView>(after)
+        .ok()
+        .map(|view| view.0)
+}
+
+/// A view as it is read: `[epoch, sequence]`, as a chooser of the build
+/// before the fleet's fullest fill sends it, or `[epoch, sequence,
+/// fill_max_ppm]`, in one pass.
+struct WireView(OfferView);
+
+impl<'de> Deserialize<'de> for WireView {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Elements;
+        impl<'de> serde::de::Visitor<'de> for Elements {
+            type Value = WireView;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("[epoch, sequence] or [epoch, sequence, fill_max_ppm]")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<WireView, A::Error> {
+                let missing = || serde::de::Error::invalid_length(0, &self);
+                let epoch = seq.next_element()?.ok_or_else(missing)?;
+                let sequence = seq.next_element()?.ok_or_else(missing)?;
+                let fill_max_ppm = seq.next_element()?;
+                Ok(WireView(OfferView {
+                    epoch,
+                    sequence,
+                    fill_max_ppm,
+                }))
+            }
+        }
+        deserializer.deserialize_seq(Elements)
     }
-    let (epoch, sequence, fill_max_ppm) = rmp_serde::from_slice::<(u64, u64, u32)>(after).ok()?;
-    Some(OfferView {
-        epoch,
-        sequence,
-        fill_max_ppm: Some(fill_max_ppm),
-    })
 }
 
 /// Write `view` as an offer carries it after the head:

@@ -127,16 +127,26 @@ impl Damping {
     /// The pool `pool` declined an offer of `view` over its budget at
     /// `now`: pass it over until the chooser holds a newer summary of it
     /// ([`Damping::forget_budgets`]), or for `period`, one of its summary
-    /// periods, whichever comes first. It never doubles a window. A window
-    /// that still lasts is left as it is, as for any decline, and a pool
-    /// gone keeps its mark.
+    /// periods, whichever comes first. It never doubles a window. A full
+    /// pool's window that still lasts is left as it is, as for any decline,
+    /// and a pool gone keeps its mark. A budget mark of an older summary
+    /// gives way, and one of the same or a newer summary stays.
     pub(crate) fn budget(&self, pool: u64, view: (u64, u64), period: Duration, now: Instant) {
         self.change(|damped| {
             if damped.holds_gone(pool) {
                 return None;
             }
-            if damped.window(pool).is_some_and(|window| window.until > now) {
-                return None;
+            match damped.budget_of(pool) {
+                // A mark of an older summary gives way: this summary's
+                // budget is spent, whatever the older one's refusal does.
+                Some(marked) if marked < view => {}
+                // The same summary's mark, or a newer one's, stays as it is.
+                Some(_) => return None,
+                // A full pool's window that lasts is left as it is.
+                None if damped.window(pool).is_some_and(|window| window.until > now) => {
+                    return None;
+                }
+                None => {}
             }
             Some(damped.with_budget(pool, view, now + period))
         });
@@ -574,5 +584,27 @@ mod tests {
         damping.decline(POOL + 1, start);
         damping.accept(POOL + 1);
         assert!(!damping.view().is_damped(POOL + 1), "a full pool's ends");
+    }
+
+    /// A refusal over the budget of a newer summary replaces the mark of an
+    /// older one, so that a refusal of the older summary that lands first
+    /// and is forgotten as stale leaves the newer one's mark: the newer
+    /// summary's budget is spent.
+    #[test]
+    fn a_newer_budget_mark_replaces_an_older_one() {
+        let start = Instant::now();
+        let damping = Damping::default();
+        damping.budget(POOL, (1, 7), SECOND * 10, start);
+        damping.budget(POOL, (1, 8), SECOND * 10, start);
+        // The older refusal finds summary 8 shown, and forgets marks before it.
+        damping.forget_budgets(|_, view| view >= (1, 8));
+        assert!(
+            damping.view().is_damped(POOL),
+            "summary 8's budget is spent"
+        );
+        // An older refusal after a newer mark leaves the newer mark.
+        damping.budget(POOL, (1, 7), SECOND * 10, start);
+        damping.forget_budgets(|_, view| view >= (1, 8));
+        assert!(damping.view().is_damped(POOL));
     }
 }

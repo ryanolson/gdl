@@ -409,6 +409,18 @@ mod wakes;
 
 #[cfg(test)]
 mod tests {
+
+    /// A lease is three words: the follow's leases, the policy's lease on
+    /// the choice, and whether the choice asked for the view. A request
+    /// holds one for its whole response.
+    #[test]
+    fn a_lease_is_three_words() {
+        assert_eq!(
+            std::mem::size_of::<super::PoolLease>(),
+            3 * std::mem::size_of::<usize>()
+        );
+    }
+
     use std::cell::RefCell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

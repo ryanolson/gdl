@@ -202,6 +202,17 @@ impl Damped {
         self.marked(pool, Mark::Budget { until, view })
     }
 
+    /// The view of `pool`'s budget mark, if it has one, whether or not
+    /// the mark has passed.
+    #[doc(hidden)]
+    #[inline]
+    pub fn budget_of(&self, pool: u64) -> Option<(u64, u64)> {
+        match self.mark(pool)? {
+            Mark::Budget { view, .. } => Some(view),
+            Mark::Window(_) | Mark::Gone(_) => None,
+        }
+    }
+
     /// Whether `pool` is marked over its budget, whether or not the mark
     /// has passed.
     #[doc(hidden)]

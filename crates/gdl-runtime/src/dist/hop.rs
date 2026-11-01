@@ -613,7 +613,8 @@ where
                         let hop = Arc::clone(&hop);
                         Box::pin(async move {
                             let accepted = hop.accept_forward(envelope).await;
-                            if let Err(refused) = &accepted
+                            if hop.offer
+                                && let Err(refused) = &accepted
                                 && super::offers::declines(&refused.error)
                             {
                                 hop.rt.served.decline(refused.decline);
@@ -1130,13 +1131,15 @@ where
         // The node's own gate, after the properties the offer wants and
         // before admission, with the view decoded here, so that a decline
         // takes no permit. One load and a branch while no gate is set.
+        // Decoded once, for the gate and for the context.
+        let view = envelope.payload.view();
         if self.offer
             && let Some(gate) = rt.config.gate.gate()
             && let Some(decline) = {
                 // A pool that drains, or declines by its own policy, says
                 // so first: a budget must not hide that it is gone.
                 rt.check_offer()?;
-                gate(&cx, envelope.payload.view(), &envelope.payload)
+                gate(&cx, view, &envelope.payload)
             }
         {
             return Err(Refusal {
@@ -1192,7 +1195,7 @@ where
         // The view the chooser decided on, for the entry's nodes to read:
         // only an offer whose pool policy asked for it carries one. Once
         // admitted, so that a refused offer allocates nothing for it.
-        if let Some(view) = envelope.payload.view() {
+        if let Some(view) = view {
             cx.insert_ext(view);
         }
         Ok((cx, share, egress))
