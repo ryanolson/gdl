@@ -114,6 +114,9 @@ struct Entry {
     /// When above 0, it declines over its budget every offer whose view is
     /// of an earlier summary than this, as a pool's gate does.
     newer_than: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether it takes an offer with no view all the same, as a gate takes
+    /// a pinned turn.
+    takes_pinned: Arc<AtomicBool>,
     offered: Arc<AtomicUsize>,
     /// The keys of the meta each offer carried, in order.
     metas: Arc<Mutex<Vec<Vec<String>>>>,
@@ -162,14 +165,16 @@ impl Fleet {
                 absent: Arc::new(AtomicBool::new(false)),
                 budget: Arc::new(AtomicBool::new(false)),
                 newer_than: Arc::default(),
+                takes_pinned: Arc::default(),
                 offered: Arc::new(AtomicUsize::new(0)),
                 metas: Arc::default(),
             };
-            let (left, absent, budget, newer_than, offered, metas) = (
+            let (left, absent, budget, newer_than, takes_pinned, offered, metas) = (
                 Arc::clone(&entry.full),
                 Arc::clone(&entry.absent),
                 Arc::clone(&entry.budget),
                 Arc::clone(&entry.newer_than),
+                Arc::clone(&entry.takes_pinned),
                 Arc::clone(&entry.offered),
                 Arc::clone(&entry.metas),
             );
@@ -186,12 +191,9 @@ impl Fleet {
                     offered.fetch_add(1, Ordering::SeqCst);
                     let forward = Forward::read(&message).expect("a forward hand-off");
                     let stale = newer_than.load(Ordering::SeqCst);
-                    if stale > 0
-                        && forward
-                            .payload
-                            .view()
-                            .is_none_or(|view| view.sequence < stale)
-                    {
+                    let view = forward.payload.view();
+                    let pinned = view.is_none() && takes_pinned.load(Ordering::SeqCst);
+                    if stale > 0 && !pinned && view.is_none_or(|view| view.sequence < stale) {
                         let reply = replies_budget.clone();
                         return Box::pin(async move { reply });
                     }
@@ -601,6 +603,129 @@ async fn a_re_queued_budget_decline_offers_once_per_summary() {
         .expect("taken in time");
     sent.expect("m1 took it at summary 3");
     assert_eq!(fleet.offered(), [3, 0, 0]);
+}
+
+/// A request that waits for a newer summary of a pool over its budget
+/// waits a round at a time while other requests the pool takes end: each
+/// end it has seen is not a reason to look again at once. Its rounds stay
+/// as few as its backoff makes, and it is taken once the summary is newer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_waiting_on_a_spent_summary_does_not_spin() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    fleet.entries[0].takes_pinned.store(true, Ordering::SeqCst);
+    let waiting = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&waiting, &cx);
+    tokio::pin!(sending);
+    let waited = tokio::time::timeout(Duration::from_millis(50), &mut sending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    // A pinned turn the pool takes: its lease's end is seen by the wait.
+    let pinned = fleet.router(Keeping::default());
+    let (sent, _) = fleet.send(&pinned, &Cx::new()).await;
+    sent.expect("m1 took the pinned turn");
+    let before = super::SPENT_ROUNDS.load(Ordering::SeqCst);
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
+    assert!(
+        waited.is_err(),
+        "taken over the budget: {:?} offers, {} rounds, {:?}",
+        fleet.offered(),
+        super::SPENT_ROUNDS.load(Ordering::SeqCst) - before,
+        waited.map(|w| w.0.err())
+    );
+    let rounds = super::SPENT_ROUNDS.load(Ordering::SeqCst) - before;
+    // At a backoff of 1 ms, about 200 rounds: a spin makes many more.
+    assert!(rounds < 2_000, "{rounds} rounds in 200 ms");
+    fleet.number(3);
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("taken in time");
+    sent.expect("m1 took it at summary 3");
+}
+
+/// Two requests that wait for a newer summary of one pool over its budget
+/// do not hand a lease's end back and forth: neither can use it, and
+/// each waits a round at a time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_requests_waiting_on_a_spent_summary_do_not_spin() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    fleet.entries[0].takes_pinned.store(true, Ordering::SeqCst);
+    let waiting = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let both = futures::future::join(fleet.send(&waiting, &cx), fleet.send(&waiting, &cx));
+    tokio::pin!(both);
+    let waited = tokio::time::timeout(Duration::from_millis(50), &mut both).await;
+    assert!(waited.is_err(), "taken over the budget");
+    let pinned = fleet.router(Keeping::default());
+    let (sent, _) = fleet.send(&pinned, &Cx::new()).await;
+    sent.expect("m1 took the pinned turn");
+    let before = super::SPENT_ROUNDS.load(Ordering::SeqCst);
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut both).await;
+    assert!(waited.is_err(), "taken over the budget");
+    let rounds = super::SPENT_ROUNDS.load(Ordering::SeqCst) - before;
+    // At a backoff of 1 ms, about 400 rounds for the two: a spin makes
+    // many more.
+    assert!(rounds < 4_000, "{rounds} rounds in 200 ms");
+    fleet.number(3);
+    let ((first, _), (second, _)) = tokio::time::timeout(Duration::from_secs(3), both)
+        .await
+        .expect("taken in time");
+    first.expect("m1 took the first at summary 3");
+    second.expect("m1 took the second at summary 3");
+}
+
+/// A request that waits for a newer summary of a pool over its budget
+/// takes no lease's end from a request that waits for room: the one
+/// declined as full is offered again when a lease ends, well before its
+/// backoff, though the other waited first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_waiting_on_a_spent_summary_leaves_ends_to_a_full_one() {
+    let fleet = Fleet::new(RuntimeConfig {
+        pool_requeue_backoff: Duration::from_secs(10),
+        ..RuntimeConfig::default()
+    })
+    .await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    fleet.entries[0].takes_pinned.store(true, Ordering::SeqCst);
+    let requeue = || Keeping {
+        requeue: true,
+        ..Keeping::default()
+    };
+    let spent = fleet.router(Keeping {
+        view: true,
+        ..requeue()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let spending = fleet.send(&spent, &cx);
+    tokio::pin!(spending);
+    let waited = tokio::time::timeout(Duration::from_millis(50), &mut spending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    fleet.decline([1, 0, 0]);
+    let full = fleet.router(requeue());
+    let filling = fleet.send(&full, &cx);
+    tokio::pin!(filling);
+    let waited = tokio::time::timeout(Duration::from_millis(50), &mut filling).await;
+    assert!(waited.is_err(), "taken while full");
+    assert_eq!(fleet.offered()[0], 2, "each waits after one offer");
+    let pinned = fleet.router(Keeping::default());
+    let (sent, _) = fleet.send(&pinned, &Cx::new()).await;
+    sent.expect("m1 took the pinned turn");
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(2), filling)
+        .await
+        .expect("woken by the end, not its backoff");
+    sent.expect("m1 took the request declined as full");
 }
 
 /// A request that waits for a newer summary of a pool over its budget

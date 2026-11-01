@@ -709,7 +709,7 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Lifts:** a measurement that a pass-over after a budget's decline is worth its rule.
 
 ### A request re-queued over a pool's budget waits for its next summary
-- **What:** a request whose policy keeps it with a pool that declined it over its budget is offered to the pool again only once the pool shows a newer summary. If the pool's summaries stop while it still takes work, the request leaves when the policy no longer takes the pool: under `home_first`, once the summary is stale (three periods by default). Under `round_robin`, or a registered policy that takes a pool whatever its summary, it waits until its deadline.
+- **What:** a request whose policy keeps it with a pool that declined it over its budget is offered to the pool again only once the pool shows a newer summary, which it looks for once a backoff (`[runtime] pool_requeue_backoff_ms`). If the pool's summaries stop while it still takes work, the request leaves when the policy no longer takes the pool: under `home_first`, once the summary is stale (three periods by default). Under `round_robin`, or a registered policy that takes a pool whatever its summary, it waits until its deadline.
 - **Lifts:** a wait bounded by the pool's period as well as by the request's deadline.
 
 ### A pool's budget is the node's, and each chooser's fullest fill is its own

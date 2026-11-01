@@ -387,24 +387,34 @@ impl Runtime {
             .flatten()
             .map(|view| (view.epoch, view.sequence));
         loop {
+            // A request waiting on a spent summary waits a backoff, and
+            // takes no lease's end: it could not use the room, and two
+            // such requests would pass one end back and forth.
+            match spent.map(|spent| crossing.still_spent(pool, spent)) {
+                Some(Some(true)) => {
+                    #[cfg(test)]
+                    SPENT_ROUNDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let after =
+                        tokio::time::Instant::now().checked_add(self.config.pool_requeue_backoff);
+                    let until = match (after, deadline) {
+                        (Some(after), Some(deadline)) => Some(after.min(deadline)),
+                        (after, deadline) => after.or(deadline),
+                    };
+                    if let Some(until) = until {
+                        tokio::time::sleep_until(until).await;
+                    }
+                    cx.check()?;
+                    continue;
+                }
+                Some(None) => return Ok(Requeued::Unavailable),
+                Some(Some(false)) | None => {}
+            }
             // Held until the request offers again: any way out of this
             // round before the offer passes the wake to the next waiter.
             let woken = crossing
                 .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
-            if let Some(spent) = spent {
-                match crossing.still_spent(pool, spent) {
-                    // Before a lease is taken, whose end would wake this
-                    // wait at once: the request waits another round.
-                    Some(true) => {
-                        drop(woken);
-                        continue;
-                    }
-                    Some(false) => {}
-                    None => return Ok(Requeued::Unavailable),
-                }
-            }
             // A re-offer whose choice asked for the view takes its row's,
             // even when the first offer could carry none.
             let wants_view = seen.wants_view();
@@ -492,6 +502,12 @@ impl Runtime {
         }
     }
 }
+
+/// The rounds re-queued requests waited on a spent summary without an
+/// offer, so that a test sees the wait not spin.
+#[cfg(test)]
+pub(super) static SPENT_ROUNDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// A request re-queued for a pool, counted under the pool when the chooser
 /// records its offers: once as it is re-queued, and once more if it ends at
