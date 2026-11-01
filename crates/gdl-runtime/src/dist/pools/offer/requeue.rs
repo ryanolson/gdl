@@ -754,6 +754,42 @@ async fn a_request_waiting_on_a_spent_summary_leaves_a_pool_that_stops() {
     assert_eq!(fleet.offered(), [1, 1, 0]);
 }
 
+/// A request that waits for a newer summary of a pool over its budget
+/// leaves the pool as soon as its follow is withdrawn, not at its next
+/// look, as a request waiting for room does: with a backoff longer than
+/// its deadline, another pool takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "a waiting request sleeps its backoff, which a withdrawn follow does not end: it leaves at its next look, or fails at its deadline first"]
+async fn a_request_waiting_on_a_spent_summary_leaves_before_its_backoff() {
+    let fleet = Fleet::new(RuntimeConfig {
+        pool_requeue_backoff: Duration::from_secs(10),
+        ..RuntimeConfig::default()
+    })
+    .await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    let router = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&router, &cx);
+    tokio::pin!(sending);
+    let waited = tokio::time::timeout(Duration::from_millis(100), &mut sending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    let table = fleet.pools.table("d").expect("the table");
+    let m1 = table.pools.iter().find(|shown| shown.pool == POOLS[0]);
+    let withdrawn = Arc::clone(&m1.expect("m1").leases);
+    fleet.store_numbered(1, false);
+    withdrawn.unoffer();
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("left in time");
+    sent.expect("m2 took it");
+    assert_eq!(fleet.offered(), [1, 1, 0]);
+}
+
 /// A pool that never takes the re-queued request keeps it until its
 /// deadline, which fails it with `DeadlineExceeded`; no other pool is
 /// offered it.
