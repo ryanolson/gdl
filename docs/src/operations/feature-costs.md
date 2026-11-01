@@ -441,6 +441,7 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 - **The larger rows cost under 1 instruction per `home_first` pick.**
 - **An offer with a view allocates what one without does, at the chooser.** `an_accepted_first_offer_allocates_what_a_roster_hand_off_does` counts 6 allocations per accepted first offer with a policy and 11 with a selector, with a view and without.
 - **The entry takes 2 allocations for a view, once it admits the request:** the context's map of extensions and the value (`a_view_in_the_arrived_context_takes_two_allocations`). An offer without a view, and one the entry refuses, take none for it. The head's encoder leaves 24 bytes after the head, so the view is written in place. An entry reads an offer in the allocations it used before, its head's copy 24 bytes larger to hold a view (`reading_an_offer_allocates_what_decoding_it_did`). A failover to a pool with another view copies a head once, as one with the same view does (`a_failover_with_another_view_copies_the_head_once`).
+- **A head of 745 to 768 bytes is now serialized twice.** The head's encoder keeps 24 bytes free after every head, on every crossing, so a head fits the first buffer in place up to 744 bytes, not 768. A head in between is serialized once to count it and once into a buffer of its size, as a larger head always was.
 - **A head with no room after it costs one allocation for a view.** A head that is not encoded by an edge's codec, as a test's bare `Vec`, grows to take the view.
 
 ## Reading the followed pools
