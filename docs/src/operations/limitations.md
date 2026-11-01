@@ -704,9 +704,9 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Workaround:** roll the hubs before the instances and the choosers.
 - **Lifts:** relays that keep the fields they do not know.
 
-### A pool cannot decline an offer by the view it carries
-- **What:** an offer can carry the view of the pool its chooser decided on, and the entry's node can read it, but only after the entry has admitted the request. A node cannot decline an offer by it, so a pool cannot yet admit a session's first turn against a budget for each summary.
-- **Lifts:** a hook before admission that can decline an offer, with a reason whose damping lasts at most until the chooser holds a newer summary of the pool.
+### A pool's budget is the node's, and each chooser's fullest fill is its own
+- **What:** gdl carries what a pool budgets first turns by (the view, the fleet's fullest fill, and the pool's own summary) and lets its gate decline an offer, but the budget itself is node code: how it counts the leases admitted since a summary, and how it splits one budget over the pool's entry instances. Two choosers can carry a different fullest fill for one summary, each from its own table, so one pool can judge two offers of one summary by two budgets.
+- **Lifts:** a budget kept by the pool's hub, or the session ledger's owner, for every entry instance.
 
 ### An instance's own decline walks the pool in table order
 - **What:** after an entry instance declines a request as its own (`Decline::Instance`), the chooser offers it to the pool's other entry instances in the order of the pool's table when the decline landed, from the one after the decliner. It does not rank them by load, and a selector is asked about one instance at a time, so it cannot either. An instance that joined the pool after the decline is not offered the request. Each instance that declines costs one round trip, so a pool where only its last instance serves a request costs the request a round trip per instance before it.

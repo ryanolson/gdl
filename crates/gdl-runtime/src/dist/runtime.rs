@@ -23,7 +23,8 @@ use gdl::Cx;
 use gdl::Decline;
 use gdl::{Error, ErrorKind, Result};
 use gdl::{
-    FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, PoolPolicies, Selectors,
+    FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, OfferGate,
+    PoolPolicies, Selectors,
 };
 use gdl_model::{Layout, RequestRouter};
 
@@ -140,6 +141,11 @@ pub struct RuntimeConfig {
     /// `Builder` gives it to the nodes it builds, and an entry instance in
     /// a pool reports what they set with its load reports.
     pub kv: InstanceKv,
+    /// The gate by which the segment's nodes decide each offer from
+    /// another class before admission, and read their own pool's latest
+    /// summary. Not a setting: a segment binary's `Builder` gives it to the
+    /// nodes it builds.
+    pub gate: OfferGate,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -233,6 +239,7 @@ impl Default for RuntimeConfig {
             records: HubRecords::new(),
             properties: InstanceProperties::new(),
             kv: InstanceKv::new(),
+            gate: OfferGate::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -325,6 +332,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             records: HubRecords::new(),
             properties: InstanceProperties::new(),
             kv: InstanceKv::new(),
+            gate: OfferGate::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };
@@ -588,6 +596,8 @@ const INSTANCE: u8 = 0b0010;
 const FULL: u8 = 0b0001;
 /// The segment's own refusal, as not present.
 const NOT_PRESENT: u8 = 0b1_0000;
+/// The segment's own refusal, as over its budget.
+const BUDGET: u8 = 0b10_0000;
 
 /// Velo handler names for one deployment.
 pub(crate) struct Names {
@@ -746,6 +756,7 @@ impl Runtime {
             Decline::NotPresent => NOT_PRESENT,
             Decline::Gone => GONE,
             Decline::Instance => INSTANCE,
+            Decline::Budget => BUDGET,
         };
         self.set_policy(policy);
     }
@@ -800,6 +811,11 @@ impl Runtime {
             (
                 "the instance's segment does not have what work from another pool wants, by its own policy",
                 Decline::NotPresent,
+            )
+        } else if declining & BUDGET != 0 {
+            (
+                "the instance's segment is over its budget for work from another pool, by its own policy",
+                Decline::Budget,
             )
         } else {
             (

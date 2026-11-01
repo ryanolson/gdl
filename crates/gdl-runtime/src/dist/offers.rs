@@ -92,6 +92,7 @@ pub(crate) fn declines(error: &Error) -> bool {
 const GONE: &str = "gone";
 const INSTANCE: &str = "instance";
 const NOT_PRESENT: &str = "not_present";
+const BUDGET: &str = "budget";
 
 /// What an entry that declined a forward hand-off answers: the refusal,
 /// encoded as every build reads it, then, for any reason but
@@ -107,6 +108,7 @@ pub(crate) fn refusal(error: &Error, decline: Decline) -> Result<Vec<u8>> {
         Decline::Gone => reply.extend(envelope::encode(&GONE)?),
         Decline::Instance => reply.extend(envelope::encode(&INSTANCE)?),
         Decline::NotPresent => reply.extend(envelope::encode(&NOT_PRESENT)?),
+        Decline::Budget => reply.extend(envelope::encode(&BUDGET)?),
     }
     Ok(reply)
 }
@@ -124,6 +126,7 @@ fn decline(reply: &[u8]) -> Decline {
         Ok(GONE) => Decline::Gone,
         Ok(INSTANCE) => Decline::Instance,
         Ok(NOT_PRESENT) => Decline::NotPresent,
+        Ok(BUDGET) => Decline::Budget,
         _ => Decline::Full,
     }
 }
@@ -434,6 +437,8 @@ pub(crate) fn offered_hops<'a, B: Boundary + 'a>(
 #[cfg(test)]
 mod failover;
 #[cfg(test)]
+mod gate;
+#[cfg(test)]
 mod wants;
 
 #[cfg(test)]
@@ -477,6 +482,38 @@ mod tests {
             Answer::Missed(Missed::Declined(error, decline)) => (error.kind(), decline),
             _ => panic!("not a decline"),
         }
+    }
+
+    /// A budget's refusal carries its reason after the refusal, as the
+    /// others do: this build reads it as a budget's, and a build that knows
+    /// the earlier reasons and not this one reads it as a full pool's, so
+    /// a chooser of that build damps the pool for one window.
+    #[test]
+    fn a_budget_refusal_is_read_here_and_as_full_by_an_earlier_build() {
+        let error = Error::new(ErrorKind::Overloaded, "over its budget");
+        let before = encode(&Err::<Accepted, Error>(error.clone())).expect("encode");
+        let budget = refusal(&error, Decline::Budget).expect("encode");
+        assert!(budget.starts_with(&before) && budget.len() > before.len());
+        let older: Result<Accepted, Error> = decode(&budget).expect("an older build reads it");
+        assert_eq!(older.expect_err("a refusal"), error);
+        // How a build that knows gone, the instance's, and not present
+        // reads it.
+        let earlier = |reply: &[u8]| {
+            let mut after = reply;
+            rmp_serde::decode::from_read::<_, serde::de::IgnoredAny>(&mut after)
+                .expect("the refusal");
+            match rmp_serde::from_slice::<&str>(after) {
+                Ok("gone") => Decline::Gone,
+                Ok("instance") => Decline::Instance,
+                Ok("not_present") => Decline::NotPresent,
+                _ => Decline::Full,
+            }
+        };
+        assert_eq!(earlier(&budget), Decline::Full);
+        assert_eq!(
+            declined(read(budget)),
+            (ErrorKind::Overloaded, Decline::Budget)
+        );
     }
 
     /// A refusal as gone, or as the instance's, carries its reason after

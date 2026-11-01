@@ -75,6 +75,11 @@ impl Damping {
         }
     }
 
+    /// The window after a pool's first decline.
+    pub(crate) fn first(&self) -> Duration {
+        self.first
+    }
+
     /// The damped pools now, for one choice: one load, no lock, no
     /// allocation.
     pub(crate) fn view(&self) -> Guard<Arc<Damped>> {
@@ -119,6 +124,32 @@ impl Damping {
         self.change(|damped| (!damped.holds_gone_since(pool)).then(|| damped.with_gone(pool)));
     }
 
+    /// The pool `pool` declined an offer of `view` over its budget at
+    /// `now`: pass it over until the chooser holds a newer summary of it
+    /// ([`Damping::forget_budgets`]), or for `period`, one of its summary
+    /// periods, whichever comes first. It never doubles a window. A window
+    /// that still lasts is left as it is, as for any decline, and a pool
+    /// gone keeps its mark.
+    pub(crate) fn budget(&self, pool: u64, view: (u64, u64), period: Duration, now: Instant) {
+        self.change(|damped| {
+            if damped.holds_gone(pool) {
+                return None;
+            }
+            if damped.window(pool).is_some_and(|window| window.until > now) {
+                return None;
+            }
+            Some(damped.with_budget(pool, view, now + period))
+        });
+    }
+
+    /// Forget each budget mark that `keep` refuses, given the pool and the
+    /// view its decline was of: a new table refuses those whose pool it
+    /// shows with a newer summary. Nothing is written while no mark is
+    /// refused.
+    pub(crate) fn forget_budgets(&self, keep: impl Fn(u64, (u64, u64)) -> bool) {
+        self.change(|damped| damped.retain_budgets(&keep));
+    }
+
     /// Forget each mark as gone that `keep` refuses, given the pool and
     /// the generation and count of changes it declined in: the follower
     /// refuses those whose follow changed or is no longer held. Such a
@@ -160,7 +191,8 @@ impl Damping {
         let length = match damped.window(pool) {
             None => self.first,
             Some(window) if window.until > now => return None,
-            Some(window) => (window.length * 2).min(self.max),
+            // A budget's mark has no length: the next window is the first.
+            Some(window) => (window.length * 2).clamp(self.first, self.max),
         };
         let window = Window {
             until: now + length,
@@ -485,5 +517,47 @@ mod tests {
             assert!(!chosen(&pools, &before, now).contains("heavy"));
             assert_eq!(chosen(&pools, &after, now), names(&["light"]));
         }
+    }
+
+    /// A pool that declines over its budget is passed over until the
+    /// chooser holds a newer summary of it, or for one of its periods,
+    /// whichever comes first: a newer view of the same hub, or any view of
+    /// a later hub, clears it, and an older or equal one does not.
+    #[test]
+    fn a_budget_mark_lasts_until_a_newer_view_or_one_period() {
+        let start = Instant::now();
+        let damping = Damping::default();
+        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        assert_eq!(damping.view().left(POOL, start), 10_000);
+        assert!(damping.view().is_damped(POOL));
+        damping.forget_budgets(|_, view| view >= (3, 7));
+        assert!(damping.view().is_damped(POOL), "an equal view keeps it");
+        damping.forget_budgets(|_, view| view >= (3, 8));
+        assert!(!damping.view().is_damped(POOL), "a newer summary ends it");
+        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        damping.forget_budgets(|_, view| view >= (4, 1));
+        assert!(!damping.view().is_damped(POOL), "a later hub ends it");
+        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        assert_eq!(damping.view().left(POOL, start + SECOND * 10), 0);
+    }
+
+    /// A budget's mark never doubles a window: a full decline once it has
+    /// passed starts at the first window. A budget decline while a full
+    /// window lasts leaves it, as any decline does; and a pool gone keeps
+    /// its mark.
+    #[test]
+    fn a_budget_mark_never_doubles_and_leaves_a_lasting_window() {
+        let start = Instant::now();
+        let damping = Damping::default();
+        damping.budget(POOL, (1, 1), SECOND * 60, start);
+        let passed = start + SECOND * 61;
+        damping.decline(POOL, passed);
+        assert_eq!(damping.view().left(POOL, passed), 1_000, "the first window");
+        damping.budget(POOL, (1, 2), SECOND * 60, passed);
+        assert_eq!(
+            damping.view().left(POOL, passed),
+            1_000,
+            "the full window lasts as it was"
+        );
     }
 }

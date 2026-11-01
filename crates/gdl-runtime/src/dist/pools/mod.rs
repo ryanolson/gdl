@@ -234,8 +234,24 @@ impl Pools {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Replace `segment`'s table.
+    /// Replace `segment`'s table, and forget each budget mark of a pool it
+    /// shows with a newer summary than the one its decline was of: the
+    /// next summary is a new budget. One load of the marks, and a branch
+    /// while no pool is marked.
     fn store(&self, segment: &str, table: EntryTable) {
+        let shown = |pool: u64| {
+            table
+                .pools
+                .iter()
+                .find(|shown| shown.id == pool)
+                .map(|shown| {
+                    let sequence = shown.load.map_or(0, |load| load.summary().sequence);
+                    (shown.epoch, sequence)
+                })
+        };
+        self.shared
+            .damping
+            .forget_budgets(|pool, view| shown(pool).is_none_or(|now| now <= view));
         if let Some(slot) = self.shared.segments.get(segment) {
             slot.store(Arc::new(table));
         }
@@ -446,17 +462,30 @@ pub(crate) struct EntryTable {
     /// entry segments, and made again only when what they list, or the
     /// kinds they decode, change.
     pub(crate) properties: Arc<gdl::PropertyIndexes>,
+    /// The fullest fill of `pools` ([`gdl::KvLoad::fill`]), in millionths,
+    /// over those whose summary has one: what an offer's view carries
+    /// ([`gdl::OfferView::fill_max_ppm`]). Made with the table, so that a
+    /// view never pairs one table's summary with another's fill, and a
+    /// choice does nothing for it.
+    pub(crate) fill_max_ppm: Option<u32>,
 }
 
 impl EntryTable {
     /// The table of `pools`, with their views, and no withdrawn pool.
     pub(crate) fn new(pools: Box<[Arc<PoolTable>]>) -> Self {
         let views = pools.iter().map(|pool| pool.view()).collect();
+        let fill_max_ppm = pools
+            .iter()
+            .filter_map(|pool| pool.load?.summary().kv.fill())
+            .reduce(f64::max)
+            // A fill past 4,294 is clamped: no pool holds that.
+            .map(|fill| (fill * 1_000_000.0).round().min(f64::from(u32::MAX)) as u32);
         Self {
             pools,
             views,
             evidence: Arc::from([]),
             properties: Arc::default(),
+            fill_max_ppm,
         }
     }
 
@@ -532,14 +561,15 @@ pub(crate) struct PoolTable {
 
 impl PoolTable {
     /// The view an offer to the pool carries when its choice asks for one:
-    /// the epoch of the hub the follow links to, and the number of the
-    /// load summary this table holds. None while it holds no summary, or
+    /// the epoch of the hub the follow links to, the number of the load
+    /// summary this table holds, and its entry table's fullest fill. None while it holds no summary, or
     /// one from a hub of a build before the numbers.
-    pub(crate) fn offer_view(&self) -> Option<gdl::OfferView> {
+    pub(crate) fn offer_view(&self, fill_max_ppm: Option<u32>) -> Option<gdl::OfferView> {
         let sequence = self.load?.summary().sequence;
         (sequence > 0).then_some(gdl::OfferView {
             epoch: self.epoch,
             sequence,
+            fill_max_ppm,
         })
     }
 

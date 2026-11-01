@@ -374,6 +374,19 @@ A pool policy can put the view it chose on, the pair above, on its offer (`PoolC
 
 **Rejected: a field of `Forward`.** Every hand-off's future holds the envelope twice, so a 24-byte field made `send_forward`'s future 64 bytes larger, past the bound `a_first_offer_is_no_larger_than_a_hand_off_was` holds. The head's start and length share one word instead, and the view costs the envelope nothing.
 
+## A pool budgets first turns by the view it is offered
+
+Many choosers that read one load summary can all choose one pool before its next summary, as when a pool scaled to 0 hands back its sessions at one instant. A lease on each chooser stops one chooser from doing it, not many. The pool is the one place that sees every placement, so it budgets them: an offer whose choice asked for the view (`PoolChoice::with_view`) carries the summary it was chosen on, and the pool's gate admits a session's first turn while what it has admitted since that summary is under a budget. The simulator measured the budget's form: capacity × max(0, fill_max − fill + 0.2), with fill_max the fleet's fullest fill. A budget of capacity less committed and reserved KV is 0 under the normal overcommit of warm KV, and declined most first turns at twice the load.
+
+gdl's part is what the budget needs, and the means to decline. The arithmetic and the count of what was admitted are the node's.
+
+- **The fleet's fullest fill comes with the view.** A chooser holds every pool's summary; a pool's entry sees only its own. The chooser computes the fullest fill with each table, from the same rows a policy chooses from, so that a view never pairs one table's summary with another's fill, and a pick does nothing for it. **Rejected: entry hubs that follow their sibling pools**, which changes the follow topology for one number. **Rejected: the parent's hub sending the fleet's fill down**, a new channel off the offer's path. A view with no fullest fill is budgeted as if the pool were the fullest: a margin of capacity, never no bound and never no room.
+- **The gate runs before admission, after the properties the offer wants.** A decline then takes no permit. The view is decoded there, from the head's buffer, and given to the gate. With no gate set, an offer costs a load and a branch.
+- **A budget's decline is its own reason.** A chooser of an earlier build reads it as full. A chooser of this build asks the policy whether to re-queue the request, as for a full pool, and otherwise damps the pool until it holds a newer summary of it, or for one period: the next summary is a new budget. **Rejected: doubling the window**, which keeps a pool out for longer than its budget lasts. **Rejected: no damping**, under which the chooser offers the same stale view again and is declined in a loop within one period. **Rejected: a separate wait in the runtime** for a pin move that every pool declines: the policy's re-queue is that wait.
+- **A re-queued request's re-offer carries its row's newer view.** It comes from the table the re-offer chooses from. A re-offer with the first view would be declined until its deadline.
+
+`crates/gdl-runtime/src/dist/offers/gate.rs`, `crates/gdl-runtime/src/dist/pools/offer/requeue.rs`, and `crates/gdl-pools/tests/kv.rs` test these.
+
 ## What stays fixed
 
 A change of graph or placement changes the hashes, so the new version's pools and the old version's pools do not see each other. Such a change is a lockstep rollout of new pools of every class, region by region, blue and green. A new class changes the placement, so it is a rollout too. Builds of the same contract and placement roll per pool.

@@ -106,6 +106,33 @@ impl KvLoad {
         self
     }
 
+    /// The share of the pool's capacity its live sessions hold or are
+    /// expected to grow into: (committed + reserved) / capacity, with
+    /// reserved KV that is not reported counted as none. `None` without a
+    /// capacity above 0 or committed KV.
+    pub fn fill(&self) -> Option<f64> {
+        let capacity = self.capacity().filter(|capacity| *capacity > 0)?;
+        let held = self
+            .committed()?
+            .saturating_add(self.reserved().unwrap_or(0));
+        Some(held as f64 / capacity as f64)
+    }
+
+    /// The KV this pool may admit for first turns over one load summary,
+    /// in tokens: capacity × max(0, `fill_max` − [`fill`](KvLoad::fill) +
+    /// `margin`), with `fill_max` the fleet's fullest fill, as a chooser
+    /// carries it on its offer. A `fill_max` that is not known is this
+    /// pool's own fill, so the budget is `margin` of capacity: it still
+    /// admits work, and is never without bound. `None` when the pool has
+    /// no fill.
+    pub fn budget(&self, fill_max: Option<f64>, margin: f64) -> Option<u64> {
+        let fill = self.fill()?;
+        let capacity = self.capacity()? as f64;
+        let share = (fill_max.unwrap_or(fill) - fill + margin).max(0.0);
+        // A share past 2^53 tokens rounds; a budget is far under it.
+        Some((capacity * share).round() as u64)
+    }
+
     /// Whether no number is set.
     #[inline]
     pub fn is_none(&self) -> bool {

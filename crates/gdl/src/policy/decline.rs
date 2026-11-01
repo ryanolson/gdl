@@ -28,4 +28,15 @@ pub enum Decline {
     /// pool's other entry instances, and damps nothing, so that the pool
     /// still takes the requests it serves.
     NotPresent,
+    /// The pool's own gate declined a first turn against the budget it
+    /// holds for the view the offer carries ([`crate::OfferGate`]): it has
+    /// admitted enough since that load summary, or the view is too old.
+    /// The pool's policy is asked whether to keep the request with it
+    /// ([`crate::PoolPolicy::requeue`]), as for a full pool. Otherwise the
+    /// chooser passes the pool over until it holds a newer summary of it,
+    /// or for one of its summary periods, whichever comes first, and never
+    /// longer: the next summary is a new budget. A chooser of a build
+    /// before this reason reads it as [`Decline::Full`], and damps the
+    /// pool for its first window, doubling after.
+    Budget,
 }

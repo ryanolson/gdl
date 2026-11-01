@@ -165,8 +165,10 @@ impl PoolChoice {
 
     /// Put on the offer the view of the pool this choice decided on
     /// ([`OfferView`](crate::OfferView)): the epoch of the chosen row's
-    /// hub and the number of the load summary the row holds, which the
-    /// entry's nodes read from the request's context once it is admitted.
+    /// hub, the number of the load summary the row holds, and the fullest
+    /// fill in the table the policy chose from. The pool's gate reads it
+    /// before admission ([`OfferGate`](crate::OfferGate)), and the entry's
+    /// nodes from the request's context once it is admitted.
     /// The runtime sends none when the row has no summary, or one from a
     /// hub of a build before the numbers. Ask only on a choice a pool may
     /// judge by it, as a session's first turn: a pinned turn asks for none.

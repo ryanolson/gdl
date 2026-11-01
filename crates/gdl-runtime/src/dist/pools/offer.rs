@@ -66,7 +66,7 @@ pub(crate) fn answer(
             crossing.accepted(pool);
             held.accepted();
         }
-        Answer::Missed(Missed::Declined(_, Decline::Full)) => {}
+        Answer::Missed(Missed::Declined(_, Decline::Full | Decline::Budget)) => {}
         Answer::Missed(Missed::Declined(_, decline)) => {
             crossing.declined(pool, *decline, held.pool_lease());
         }
@@ -224,7 +224,7 @@ impl Runtime {
                         if let Some(decline) = last {
                             declines.push((pool, decline));
                         }
-                        if last == Some(Decline::Full) {
+                        if matches!(last, Some(Decline::Full | Decline::Budget)) {
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
                                 let requeueing = Requeueing::new(crossing.figures(pool), cx);
@@ -256,6 +256,8 @@ impl Runtime {
                                     }
                                     Requeued::Unavailable => {}
                                 }
+                            } else if last == Some(Decline::Budget) {
+                                crossing.declined_budget(pool, envelope.payload.view());
                             } else {
                                 crossing.declined(pool, Decline::Full, None);
                             }
@@ -378,9 +380,12 @@ impl Runtime {
                 .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
+            // Only an offer whose policy asked for the view carries one,
+            // and only such a re-offer takes its row's newer one.
+            let mut view = envelope.payload.view();
             let chosen = match crossing.within() {
                 Within::Policy(policy) => {
-                    match crossing.pick_again(pool, *policy, self.random(), choice) {
+                    match crossing.pick_again(pool, *policy, self.random(), choice, &mut view) {
                         Some((to, lease)) => Again::Chosen((to, Held::pool(None, lease))),
                         None => Again::Unavailable,
                     }
@@ -390,7 +395,15 @@ impl Runtime {
                 } => {
                     envelope.cx = WireCx::of(cx);
                     let chosen = crossing
-                        .choose_again(pool, &**selector, cx, &envelope.payload, *encoding, choice)
+                        .choose_again(
+                            pool,
+                            &**selector,
+                            cx,
+                            &envelope.payload,
+                            *encoding,
+                            choice,
+                            &mut view,
+                        )
                         .await?;
                     match chosen {
                         Again::Chosen((to, picked, lease)) => {
@@ -409,6 +422,7 @@ impl Runtime {
                 Again::Stale => continue,
                 Again::Unavailable => return Ok(Requeued::Unavailable),
             };
+            envelope.set_view(view);
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, self::timed(timed, &held))?;
             if let Some(woken) = woken {
@@ -426,7 +440,9 @@ impl Runtime {
                 Answer::Missed(then) => {
                     *seen = Seen::of(held.pool_lease(), ends);
                     *choice = held.missed();
-                    if !matches!(then, Missed::Declined(_, Decline::Full)) {
+                    // A pool still full, or still over its budget, keeps
+                    // the request; any other miss ends the wait.
+                    if !matches!(then, Missed::Declined(_, Decline::Full | Decline::Budget)) {
                         return Ok(Requeued::Missed(to, then));
                     }
                 }

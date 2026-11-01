@@ -190,3 +190,53 @@ fn a_summary_holds_the_kv_numbers_as_plain_words() {
     assert_eq!(std::mem::size_of::<KvLoad>(), 40);
     assert_eq!(std::mem::size_of::<LoadSummary>(), 88);
 }
+
+/// A pool's budget for first turns over one summary, as P5 takes it:
+/// capacity × max(0, the fleet's fullest fill − this pool's fill + the
+/// margin), where a fill is (committed + reserved) / capacity. A fleet's
+/// fullest fill that is not known is this pool's own, so the budget is the
+/// margin's share of capacity: never nothing, and never without bound.
+#[test]
+fn a_budget_is_the_headroom_under_the_fullest_pool_and_a_margin() {
+    let kv = KvLoad::NONE
+        .with_capacity(1_000)
+        .with_committed(500)
+        .with_reserved(100);
+    // fill 0.6; fullest 0.9: 1,000 × (0.9 − 0.6 + 0.2).
+    assert_eq!(kv.budget(Some(0.9), 0.2), Some(500));
+    // The fullest pool is this one: the margin alone.
+    assert_eq!(kv.budget(Some(0.6), 0.2), Some(200));
+    // Unknown: as if this were the fullest.
+    assert_eq!(kv.budget(None, 0.2), Some(200));
+    // Fuller than the fleet's fullest by more than the margin: nothing.
+    assert_eq!(kv.budget(Some(0.3), 0.2), Some(0));
+    // Reserved KV unknown counts as none.
+    let committed_only = KvLoad::NONE.with_capacity(1_000).with_committed(600);
+    assert_eq!(committed_only.budget(None, 0.2), Some(200));
+    // No budget without capacity and committed KV, or with no capacity.
+    assert_eq!(
+        KvLoad::NONE.with_capacity(1_000).budget(Some(0.9), 0.2),
+        None
+    );
+    assert_eq!(KvLoad::NONE.with_committed(1).budget(Some(0.9), 0.2), None);
+    assert_eq!(
+        KvLoad::NONE
+            .with_capacity(0)
+            .with_committed(0)
+            .budget(Some(0.9), 0.2),
+        None
+    );
+}
+
+/// A pool's fill, for the fleet's fullest: only a pool that reports
+/// capacity above 0 and committed KV has one.
+#[test]
+fn a_fill_needs_capacity_and_committed_kv() {
+    let kv = KvLoad::NONE
+        .with_capacity(1_000)
+        .with_committed(700)
+        .with_reserved(100);
+    assert_eq!(kv.fill(), Some(0.8));
+    assert_eq!(KvLoad::NONE.with_capacity(1_000).fill(), None);
+    assert_eq!(KvLoad::NONE.with_capacity(0).with_committed(5).fill(), None);
+}

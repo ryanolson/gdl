@@ -876,9 +876,17 @@ impl gdl::PoolPolicy for Viewing {
             .ok_or_else(gdl::NoPool::new)?;
         let pool = &pools[at];
         if let Some(load) = pool.load() {
+            // The fleet's fullest fill, over the pools the policy sees: one
+            // here.
+            let fill_max_ppm = pools
+                .iter()
+                .filter_map(|pool| pool.load()?.summary().kv.fill())
+                .reduce(f64::max)
+                .map(|fill| (fill * 1_000_000.0).round() as u32);
             let view = gdl::OfferView {
                 epoch: pool.epoch(),
                 sequence: load.summary().sequence,
+                fill_max_ppm,
             };
             *self.read.lock().expect("unpoisoned") = Some((load.summary().kv, view));
         }
@@ -896,7 +904,8 @@ impl gdl::PoolPolicy for Viewing {
 /// hub. A policy that asks for the view puts on its offer the epoch and
 /// the summary's number of the very row it chose, and the entry's node
 /// reads them from its context; an offer whose policy did not ask carries
-/// none.
+/// none. The entry's gate is asked of each offer with the same view,
+/// before admission, and shows the pool's own summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
     let spec = spec_of(placement().pool_policy(
@@ -910,8 +919,19 @@ async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
     let kv = gdl::InstanceKv::new();
     kv.set(KV);
     let given = kv.clone();
+    // The model's gate keeps the view of each offer it is asked about.
+    let gate = gdl::OfferGate::new();
+    let gated: Arc<std::sync::Mutex<Vec<Option<gdl::OfferView>>>> = Arc::default();
+    let gating = Arc::clone(&gated);
+    gate.set(move |_: &Cx, view: Option<gdl::OfferView>, _: &[u8]| {
+        gating.lock().expect("unpoisoned").push(view);
+        None
+    })
+    .expect("set");
+    let gate_of = gate.clone();
     let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
         kv: given.clone(),
+        gate: gate_of.clone(),
         ..limited(runtime)
     };
     let pool = Model {
@@ -972,8 +992,23 @@ async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
         .expect("the policy chose");
     assert_eq!(seen, KV, "the policy reads the node's numbers");
     assert!(decided.sequence > 0, "{decided:?}");
+    assert_eq!(decided.fill_max_ppm, Some(375_000), "30,000 of 80,000");
     let arrived = events.cx_of("B:viewed");
     assert_eq!(arrived.ext::<gdl::OfferView>(), Some(&decided));
+    assert_eq!(
+        gated.lock().expect("unpoisoned").last().copied().flatten(),
+        Some(decided),
+        "the gate was asked with the view, before admission"
+    );
+    // The gate shows the pool's own summary, as its hub sent it, with the
+    // node's numbers: the summary the view named, or a later one.
+    let (epoch, own) = gate.own().expect("the pool's own summary");
+    assert_eq!(epoch, decided.epoch);
+    assert!(
+        own.sequence >= decided.sequence,
+        "{own:?} against {decided:?}"
+    );
+    assert_eq!(own.kv, KV);
 
     viewing.store(false, std::sync::atomic::Ordering::SeqCst);
     drop(hold(&chooser, "plain").await);
@@ -982,6 +1017,11 @@ async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
         arrived.ext::<gdl::OfferView>(),
         None,
         "no view was asked for"
+    );
+    assert_eq!(
+        gated.lock().expect("unpoisoned").last().copied(),
+        Some(None),
+        "the gate was asked with no view"
     );
     drop(chooser);
     shut([hub, m1.hub]).await;

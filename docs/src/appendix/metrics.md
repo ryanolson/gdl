@@ -90,14 +90,15 @@ A chooser registers more families: what became of each offer it made to a pool o
 | `declined_gone` | The entry declined it, saying that its pool is gone. |
 | `declined_instance` | The entry declined it as its own: it cannot serve the request, and another entry instance of its pool may. |
 | `declined_not_present` | The entry declined it, saying that it does not have the property the request wants. |
+| `declined_budget` | The entry's gate declined it over the pool's budget for the view the offer carried. |
 | `unsent` | velo refused to send it. No entry said anything. |
 | `outcome_unknown` | The send failed after velo took it, or no answer came within the setup timeout. The request fails with `OutcomeUnknown`. |
 | `failed` | The entry answered with another error of the request's own, or with an answer the chooser could not read. |
 
-- Each offer counts once, under the pool it went to. So a pool's eight series add up to the offers made to it. Each request's first offer is not a failover, and neither is an offer of a re-queued request to its pool, so over all pools, `pool_failovers_total` is the sum of `pool_offers_total` less the requests that reached an offer, less those re-queued offers.
+- Each offer counts once, under the pool it went to. So a pool's nine series add up to the offers made to it. Each request's first offer is not a failover, and neither is an offer of a re-queued request to its pool, so over all pools, `pool_failovers_total` is the sum of `pool_offers_total` less the requests that reached an offer, less those re-queued offers.
 - An offer counts only when the chooser reads its answer. A request that no pool may take (`Routing`), a request whose pool policy or selector fails, and a request dropped while it waits for the answer count nothing.
 - A pool's series appear at zero when the chooser first follows the pool. They are kept by the pool's name, not its follow, so every generation of the pool counts into the same series. They stay for the life of the process, also after the pool's follow is dropped ([limitations](../operations/limitations.md#a-choosers-pool-series-stay-for-the-life-of-its-process)).
-- The pools bound the series: eight and one for each pool of each class the chooser sends to that its hub followed.
+- The pools bound the series: nine and one for each pool of each class the chooser sends to that its hub followed.
 - The chooser counts the decline that the entry gave, not what it did with it. A gone decline of an offer made under an earlier generation of the pool damps the pool, and still counts as `declined_gone`.
 - A round trip starts once the offer is encoded and given to velo, and ends when the chooser reads its answer. It holds the wire both ways and the entry's admission, and, for `outcome_unknown`, the wait up to the setup timeout. An offer over loopback takes about 20 to 30 µs, so it falls in the first bucket, 100 µs.
 

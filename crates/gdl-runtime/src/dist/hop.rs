@@ -1122,6 +1122,18 @@ where
             }
             None => None,
         };
+        // The node's own gate, after the properties the offer wants and
+        // before admission, with the view decoded here, so that a decline
+        // takes no permit. One load and a branch while no gate is set.
+        if self.offer
+            && let Some(gate) = rt.config.gate.gate()
+            && let Some(decline) = gate(&cx, envelope.payload.view(), &envelope.payload)
+        {
+            return Err(Refusal {
+                error: Error::new(ErrorKind::Overloaded, "the pool's gate declined the offer"),
+                decline,
+            });
+        }
         let mut share = match setup(
             &cx,
             rt.config.setup_timeout,

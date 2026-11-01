@@ -103,10 +103,24 @@ impl fmt::Debug for InstanceKv {
 ///
 /// [`PoolChoice::with_view`]: crate::PoolChoice::with_view
 /// [`LoadSummary::sequence`]: crate::LoadSummary::sequence
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OfferView {
     /// The epoch of the pool's hub.
     pub epoch: u64,
     /// The number of the load summary.
     pub sequence: u64,
+    /// The fullest fill of the class's pools in the chooser's table the
+    /// choice was made from ([`KvLoad::fill`]), in millionths: the largest
+    /// over the pools that report capacity above 0 and committed KV. `None`
+    /// when no pool does, or from a chooser of a build before it. A pool
+    /// that budgets by it ([`KvLoad::budget`]) takes `None` as its own
+    /// fill, never as no bound and never as no room.
+    pub fill_max_ppm: Option<u32>,
+}
+
+impl OfferView {
+    /// [`fill_max_ppm`](OfferView::fill_max_ppm) as a share.
+    pub fn fill_max(&self) -> Option<f64> {
+        self.fill_max_ppm.map(|ppm| f64::from(ppm) / 1_000_000.0)
+    }
 }

@@ -44,7 +44,13 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     let (learns, mut learned) = watch::channel(Learned::default());
     // Before the watch is asked for, so that its bound has run by then.
     let began = tokio::time::Instant::now();
-    let task = tokio::spawn(run(watcher, server.address.clone(), Some(me), learns));
+    let task = tokio::spawn(run(
+        watcher,
+        server.address.clone(),
+        Some(me),
+        learns,
+        gdl::OfferGate::new(),
+    ));
     let snapshot = [
         pool(PoolState::Draining),
         PoolWatchEvent::Retired {
@@ -120,7 +126,13 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         stalls: false,
         foreign: false,
         retired: None,
-        watch: tokio::spawn(run(watcher, server.address.clone(), Some(me), learns)),
+        watch: tokio::spawn(run(
+            watcher,
+            server.address.clone(),
+            Some(me),
+            learns,
+            gdl::OfferGate::new(),
+        )),
     };
     let mut step = REWATCH;
     while step < REWATCH_CAP {

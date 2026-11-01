@@ -237,7 +237,7 @@ impl PoolDrain {
         let address = crate::dist::pools::hub_address(host, public_port);
         let (learns, learned) = watch::channel(Learned::default());
         let retiree = matches!(role, Role::Entry { .. }).then_some(me);
-        let watch = tokio::spawn(run(watcher, address, retiree, learns));
+        let watch = tokio::spawn(run(watcher, address, retiree, learns, runtime.gate.clone()));
         Ok(Some(Self {
             learned,
             role,
@@ -500,7 +500,11 @@ async fn run(
     address: String,
     retiree: Option<InstanceId>,
     learns: watch::Sender<Learned>,
+    gate: gdl::OfferGate,
 ) {
+    // The epoch of the hub the watch is of, from its first event, which
+    // each load summary after it is of.
+    let mut epoch = 0;
     let mut refused: Option<String> = None;
     let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
     loop {
@@ -534,6 +538,20 @@ async fn run(
                             break;
                         }
                     };
+                    // The pool's own summary, for its nodes' gate
+                    // ([`gdl::OfferGate::own`]): as it comes, snapshot or not.
+                    match event {
+                        PoolWatchEvent::Pool {
+                            epoch: of, load, ..
+                        } => {
+                            epoch = of;
+                            gate.set_own(load.map(|load| (epoch, load)));
+                        }
+                        PoolWatchEvent::Load { load } => {
+                            gate.set_own(load.map(|load| (epoch, load)));
+                        }
+                        _ => {}
+                    }
                     let heard = Heard::of(&event, retiree);
                     let done = match (snapshot.as_mut(), event) {
                         (Some(filling), PoolWatchEvent::Synced) => {

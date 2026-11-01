@@ -233,6 +233,34 @@ impl Crossing {
         }
     }
 
+    /// The pool `pool` declined an offer of `view` over its budget, and
+    /// its policy did not keep the request with it: pass it over until the
+    /// chooser holds a newer summary of it than `view`, or the one its
+    /// current table shows when the offer carried none, or for one of its
+    /// summary periods, whichever comes first ([`super::Damping::budget`]).
+    /// A pool the table no longer shows is left as it is. Read only on a
+    /// decline.
+    pub(crate) fn declined_budget(&self, pool: u64, view: Option<gdl::OfferView>) {
+        let target = &self.target;
+        let table = target.table.load();
+        let Some(shown) = table.pools.iter().find(|shown| shown.id == pool) else {
+            return;
+        };
+        let summary = shown.load.map(|load| *load.summary());
+        let view = view.map_or_else(
+            || (shown.epoch, summary.map_or(0, |summary| summary.sequence)),
+            |view| (view.epoch, view.sequence),
+        );
+        // A pool with no summary period is passed over for the first window.
+        let period = summary
+            .map(|summary| std::time::Duration::from_millis(summary.period_ms))
+            .filter(|period| !period.is_zero())
+            .unwrap_or(target.damping.first());
+        target
+            .damping
+            .budget(pool, view, period, tokio::time::Instant::now());
+    }
+
     /// The pool policy's [`NoPool`] for a request whose every pool it
     /// `left` the chooser holds gone, when the policy chooses no other
     /// pool for it: what the requests after it meet, since no choice
@@ -320,14 +348,18 @@ impl Crossing {
     /// current table, while the pool policy still takes the pool
     /// ([`gdl::PoolPolicy::eligible`]) and its follow is offered. `None`
     /// once it is not, and the request leaves the pool. The pool policy is
-    /// not asked to choose: it chose the pool. One load of the table, a
-    /// search of its pools, the clock, and the lease, with no allocation.
+    /// not asked to choose: it chose the pool. When the offer carries a
+    /// view (`carried` is `Some`), it becomes the row's, from the same table,
+    /// so that a re-offer says the summary it is made on. One load of the
+    /// table, a search of its pools, the clock, and the lease, with no
+    /// allocation.
     pub(crate) fn pick_again(
         &self,
         pool: u64,
         policy: Policy,
         random: &RandomState,
         choice: &mut Option<ChoiceHeld>,
+        carried: &mut Option<OfferView>,
     ) -> Option<(InstanceId, PoolLease)> {
         let target = &self.target;
         let table = target.table.load();
@@ -343,6 +375,9 @@ impl Crossing {
         let lease = PoolLease::take(&shown.leases)?;
         let sequence = shown.turn.fetch_add(1, Ordering::Relaxed);
         let chosen = shown.eligible[turn(policy, sequence, shown.eligible.len(), random)];
+        if carried.is_some() {
+            *carried = shown.offer_view(table.fill_max_ppm);
+        }
         Some((chosen, lease.with_choice(choice.take())))
     }
 
@@ -354,6 +389,7 @@ impl Crossing {
     /// the pool still takes work, so the request stays with it
     /// ([`Again::Stale`]): it is not a reason to leave a pool the policy
     /// re-queued the request for.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn choose_again(
         &self,
         pool: u64,
@@ -362,6 +398,7 @@ impl Crossing {
         head: &[u8],
         encoding: Encoding,
         choice: &mut Option<ChoiceHeld>,
+        carried: &mut Option<OfferView>,
     ) -> Result<Again<(InstanceId, Picked, PoolLease)>> {
         let target = &self.target;
         let policy = |current: &gdl::Pool| {
@@ -382,6 +419,12 @@ impl Crossing {
             if shown.offered.is_empty() || !policy(view) {
                 return Ok(Again::Unavailable);
             }
+            // The view of the row this round chooses from, taken before the
+            // selector's wait, as a first choice's is.
+            let shown_view = carried
+                .is_some()
+                .then(|| shown.offer_view(table.fill_max_ppm))
+                .flatten();
             let shown = Arc::clone(shown);
             let picked = selector
                 .select(
@@ -398,6 +441,9 @@ impl Crossing {
             let lease = still_eligible(&current, &shown, chosen, policy)
                 .and_then(|now| PoolLease::take(&now.leases));
             if let Some(lease) = lease {
+                if carried.is_some() {
+                    *carried = shown_view;
+                }
                 return Ok(Again::Chosen((
                     chosen,
                     picked,
@@ -565,7 +611,9 @@ impl Crossing {
                 (
                     pool,
                     choice,
-                    wants_view.then(|| pool.offer_view()).flatten(),
+                    wants_view
+                        .then(|| pool.offer_view(table.fill_max_ppm))
+                        .flatten(),
                 )
             })
             .ok_or_else(NoPool::new))
@@ -879,12 +927,28 @@ mod tests {
         }));
         let cx = Cx::new().with_timeout(Duration::from_secs(5));
         let result = crossing
-            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None)
+            .choose_again(
+                id,
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                &mut None,
+                &mut None,
+            )
             .await;
         assert!(selector.0.calls.load(Ordering::SeqCst) >= CHOICES);
         assert!(cx.check().is_ok(), "the deadline has not passed");
         let control = crossing
-            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None)
+            .choose_again(
+                id,
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                &mut None,
+                &mut None,
+            )
             .await
             .expect("the selector succeeds once the entries stop changing");
         assert!(
@@ -958,6 +1022,7 @@ mod tests {
                 previous.id,
                 Policy::RoundRobin,
                 &RandomState::new(),
+                &mut None,
                 &mut None,
             )
             .expect("the same pool still takes work under its new follow");
@@ -1520,11 +1585,79 @@ mod tests {
                 view,
                 Some(gdl::OfferView {
                     epoch: 1,
-                    sequence: 7
+                    sequence: 7,
+                    fill_max_ppm: None,
                 }),
                 "replaced by ({epoch}, {sequence})"
             );
         }
+    }
+
+    /// The fleet's fullest fill an offer carries is the table's own, made
+    /// with it from the rows a policy chooses from: the largest fill of the
+    /// rows that report capacity above 0 and committed KV. A table with no
+    /// such row carries none.
+    #[test]
+    fn an_offer_carries_its_tables_fullest_fill() {
+        let ids = ids(4);
+        let cx = Cx::new();
+        let random = RandomState::new();
+        let leases = Arc::default();
+        let with_kv = |name: &str, eligible: &[InstanceId], kv: gdl::KvLoad| {
+            let mut table = Arc::try_unwrap(numbered(
+                pool(name, PoolState::Ready, eligible),
+                1,
+                5,
+                &leases,
+            ))
+            .expect("one owner");
+            table.load = table.load.map(|load| {
+                gdl::Load::new(
+                    gdl::LoadSummary {
+                        kv,
+                        ..*load.summary()
+                    },
+                    load.arrived(),
+                )
+            });
+            Arc::new(table)
+        };
+        let kv = |capacity, committed| {
+            gdl::KvLoad::NONE
+                .with_capacity(capacity)
+                .with_committed(committed)
+        };
+        let rows = vec![
+            with_kv("m1", &ids[..1], kv(1_000, 500)),
+            with_kv("m2", &ids[1..2], kv(1_000, 900)),
+            // No capacity: not counted, though it would be the fullest.
+            with_kv("m3", &ids[2..3], kv(0, 5_000)),
+            // No committed KV: not counted.
+            with_kv("m4", &ids[3..], gdl::KvLoad::NONE.with_capacity(10)),
+        ];
+        let mut viewed = crossing(rows, Within::Policy(Policy::RoundRobin));
+        viewed.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(Viewed)));
+        let mut view = None;
+        viewed
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut view)
+            .expect("no error")
+            .expect("a pick");
+        assert_eq!(view.and_then(|view| view.fill_max_ppm), Some(900_000));
+
+        let none = vec![with_kv(
+            "m4",
+            &ids[3..],
+            gdl::KvLoad::NONE.with_capacity(10),
+        )];
+        let mut unknown = crossing(none, Within::Policy(Policy::RoundRobin));
+        unknown.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(Viewed)));
+        unknown
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut view)
+            .expect("no error")
+            .expect("a pick");
+        let view = view.expect("a numbered row's view");
+        assert_eq!(view.fill_max_ppm, None);
+        assert_eq!((view.epoch, view.sequence), (1, 5));
     }
 
     /// A choice whose policy asks for no view puts none on the offer, and
@@ -1543,6 +1676,7 @@ mod tests {
         let mut view = Some(gdl::OfferView {
             epoch: 9,
             sequence: 9,
+            ..Default::default()
         });
         plain
             .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut view)

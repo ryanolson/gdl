@@ -22,7 +22,7 @@ use super::super::meter::{FAILOVERS, PoolMeters, REQUEUE_DEADLINES, REQUEUES};
 use super::super::{EntryTable, PoolTable, Pools, pool_id, targets};
 use super::tests::layout_under;
 use crate::dist::counting::Counted;
-use crate::dist::envelope::{Accepted, Forward, VERSION, WireCx, decode, encode};
+use crate::dist::envelope::{Accepted, Forward, VERSION, WireCx, encode};
 use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
 use crate::dist::offers::refusal;
 use crate::dist::roster::{Policy, Roster, selector_id};
@@ -37,6 +37,8 @@ use crate::dist::runtime::{Router, Runtime, RuntimeConfig, Within};
 #[derive(Default)]
 struct Keeping {
     requeue: bool,
+    /// Whether its choices put the view on their offers.
+    view: bool,
     stubborn: bool,
     told: Option<Arc<AtomicUsize>>,
     seen: Arc<std::sync::Mutex<Vec<Option<Decline>>>>,
@@ -60,6 +62,11 @@ impl PoolPolicy for Keeping {
             .position(|pool| pool.takes_work() && open(pool))
             .ok_or_else(NoPool::new)?;
         let choice = PoolChoice::new(at);
+        let choice = if self.view {
+            choice.with_view()
+        } else {
+            choice
+        };
         Ok(match &self.told {
             Some(told) => choice.with_lease(Told(Arc::clone(told))),
             None => choice,
@@ -67,7 +74,11 @@ impl PoolPolicy for Keeping {
     }
 
     fn requeue(&self, request: PoolRequest<'_, Encoded>, pool: &Pool) -> bool {
-        self.requeue && request.declined(pool) == Some(Decline::Full)
+        self.requeue
+            && matches!(
+                request.declined(pool),
+                Some(Decline::Full | Decline::Budget)
+            )
     }
 }
 
@@ -98,6 +109,11 @@ struct Entry {
     full: Arc<AtomicUsize>,
     /// Whether it declines the offers after those as not present.
     absent: Arc<AtomicBool>,
+    /// Whether its declines in `full` say over its budget, not full.
+    budget: Arc<AtomicBool>,
+    /// When above 0, it declines over its budget every offer whose view is
+    /// of an earlier summary than this, as a pool's gate does.
+    newer_than: Arc<std::sync::atomic::AtomicU64>,
     offered: Arc<AtomicUsize>,
     /// The keys of the meta each offer carried, in order.
     metas: Arc<Mutex<Vec<Vec<String>>>>,
@@ -134,6 +150,7 @@ impl Fleet {
         let refused = Error::new(ErrorKind::Overloaded, "refused");
         let full = refusal(&refused, Decline::Full).expect("encode");
         let not_present = refusal(&refused, Decline::NotPresent).expect("encode");
+        let over_budget = refusal(&refused, Decline::Budget).expect("encode");
         let accepted = encode(&Ok::<Accepted, Error>(None)).expect("encode");
         let registry = Registry::new();
         let meters = PoolMeters::register(&registry).expect("registered");
@@ -143,21 +160,41 @@ impl Fleet {
             let entry = Entry {
                 full: Arc::new(AtomicUsize::new(0)),
                 absent: Arc::new(AtomicBool::new(false)),
+                budget: Arc::new(AtomicBool::new(false)),
+                newer_than: Arc::default(),
                 offered: Arc::new(AtomicUsize::new(0)),
                 metas: Arc::default(),
             };
-            let (left, absent, offered, metas) = (
+            let (left, absent, budget, newer_than, offered, metas) = (
                 Arc::clone(&entry.full),
                 Arc::clone(&entry.absent),
+                Arc::clone(&entry.budget),
+                Arc::clone(&entry.newer_than),
                 Arc::clone(&entry.offered),
                 Arc::clone(&entry.metas),
             );
             entries.push(entry);
-            let replies = [full.clone(), not_present.clone(), accepted.clone()];
+            let replies_budget = over_budget.clone();
+            let replies = [
+                full.clone(),
+                not_present.clone(),
+                accepted.clone(),
+                over_budget.clone(),
+            ];
             Fabric::new(node.clone(), None, None, Duration::from_secs(30))
                 .register(&rt.names().forward, move |message| {
                     offered.fetch_add(1, Ordering::SeqCst);
-                    let forward: Forward = decode(&message).expect("a forward hand-off");
+                    let forward = Forward::read(&message).expect("a forward hand-off");
+                    let stale = newer_than.load(Ordering::SeqCst);
+                    if stale > 0
+                        && forward
+                            .payload
+                            .view()
+                            .is_none_or(|view| view.sequence < stale)
+                    {
+                        let reply = replies_budget.clone();
+                        return Box::pin(async move { reply });
+                    }
                     // An offer that arrives past its deadline is answered
                     // with the request's own error, as an entry does.
                     let cx = match forward
@@ -177,7 +214,9 @@ impl Fleet {
                     let full = left
                         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                         .is_ok();
-                    let reply = if full {
+                    let reply = if full && budget.load(Ordering::SeqCst) {
+                        replies[3].clone()
+                    } else if full {
                         replies[0].clone()
                     } else if absent.load(Ordering::SeqCst) {
                         replies[1].clone()
@@ -309,6 +348,47 @@ impl Fleet {
         fewest
     }
 
+    /// Store the table again with each pool's summary numbered
+    /// `sequence`, of hub epoch 1.
+    fn number(&self, sequence: u64) {
+        let table = self.pools.table("d").expect("the table");
+        let pools: Vec<Arc<PoolTable>> = table
+            .pools
+            .iter()
+            .map(|shown| {
+                let load = shown.load.map(|load| {
+                    let summary = gdl::LoadSummary {
+                        sequence,
+                        ..*load.summary()
+                    };
+                    gdl::Load::new(summary, load.arrived())
+                });
+                Arc::new(PoolTable {
+                    class: shown.class.clone(),
+                    pool: shown.pool.clone(),
+                    id: shown.id,
+                    generation: shown.generation,
+                    epoch: 1,
+                    region: shown.region.clone(),
+                    state: shown.state,
+                    load,
+                    eligible: shown.eligible.clone(),
+                    offered: shown.offered.clone(),
+                    retired: shown.retired.clone(),
+                    unread: shown.unread,
+                    turn: Arc::clone(&shown.turn),
+                    offering: shown.offering,
+                    revision: shown.revision,
+                    changes: shown.changes,
+                    leases: Arc::clone(&shown.leases),
+                    properties_version: shown.properties_version,
+                })
+            })
+            .collect();
+        drop(table);
+        self.pools.store("d", EntryTable::new(pools.into()));
+    }
+
     /// The failovers counted under each pool.
     /// The requests re-queued for `m1`, and those of them that ended at
     /// their deadline.
@@ -372,6 +452,133 @@ async fn a_re_queued_request_is_offered_to_its_pool_again_with_no_failover() {
     assert_eq!(fleet.failovers(), [0.0, 1.0, 0.0]);
     let m1 = &fleet.pools.followed("d")[0];
     assert!(m1.damped.is_some(), "{m1:?}");
+}
+
+/// A pool that declines over its budget is asked about as a full one is:
+/// a policy that re-queues the request keeps it with the pool, which takes
+/// it once it has room, with no failover and no damping. The control: a
+/// policy that does not re-queue it sends it to the next pool, and the
+/// pool is passed over for no longer than one of its summary periods.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_budget_decline_is_asked_about_and_re_queued_as_a_full_one_is() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.entries[0].budget.store(true, Ordering::SeqCst);
+    let seen = Arc::default();
+    let router = fleet.router(Keeping {
+        requeue: true,
+        seen: Arc::clone(&seen),
+        ..Keeping::default()
+    });
+    fleet.decline([2, 0, 0]);
+    let (sent, _) = fleet.send(&router, &Cx::new()).await;
+    sent.expect("m1 took it");
+    assert_eq!(fleet.offered(), [3, 0, 0]);
+    assert_eq!(fleet.failovers(), [0.0, 0.0, 0.0]);
+    assert_eq!(offers(&fleet.registry, "m1", "declined_budget"), Some(2.0));
+    assert_eq!(fleet.requeues().0, 1.0);
+    let m1 = &fleet.pools.followed("d")[0];
+    assert!(m1.damped.is_none(), "{m1:?}");
+
+    let router = fleet.router(Keeping::default());
+    fleet.decline([1, 0, 0]);
+    let (sent, _) = fleet.send(&router, &Cx::new()).await;
+    sent.expect("m2 took it");
+    let start = tokio::time::Instant::now();
+    assert_eq!(fleet.offered(), [4, 1, 0], "the control");
+    assert_eq!(fleet.failovers(), [0.0, 1.0, 0.0]);
+    let damped = fleet.pools.damping().view();
+    let id = pool_id("model_x", "m1");
+    assert!(damped.is_damped(id));
+    // The pool's summary period, 60 s: never longer.
+    assert!(
+        damped.left(id, start) <= 60_000,
+        "{}",
+        damped.left(id, start)
+    );
+    assert!(
+        damped.left(id, start) > 1_000,
+        "a budget's mark, not a first window"
+    );
+
+    // A table that shows the same summary keeps the mark; one with a newer
+    // summary of the pool ends it, as the next summary is a new budget.
+    let numbered = |sequence: u64| {
+        let table = fleet.pools.table("d").expect("the table");
+        let pools: Vec<Arc<PoolTable>> = table
+            .pools
+            .iter()
+            .map(|shown| {
+                let load = shown.load.map(|load| {
+                    let summary = gdl::LoadSummary {
+                        sequence: if shown.id == id { sequence } else { 0 },
+                        ..*load.summary()
+                    };
+                    gdl::Load::new(summary, load.arrived())
+                });
+                Arc::new(PoolTable {
+                    class: shown.class.clone(),
+                    pool: shown.pool.clone(),
+                    id: shown.id,
+                    generation: shown.generation,
+                    epoch: shown.epoch,
+                    region: shown.region.clone(),
+                    state: shown.state,
+                    load,
+                    eligible: shown.eligible.clone(),
+                    offered: shown.offered.clone(),
+                    retired: shown.retired.clone(),
+                    unread: shown.unread,
+                    turn: Arc::clone(&shown.turn),
+                    offering: shown.offering,
+                    revision: shown.revision,
+                    changes: shown.changes,
+                    leases: Arc::clone(&shown.leases),
+                    properties_version: shown.properties_version,
+                })
+            })
+            .collect();
+        EntryTable::new(pools.into())
+    };
+    fleet.pools.store("d", numbered(0));
+    assert!(
+        fleet.pools.damping().view().is_damped(id),
+        "the same summary"
+    );
+    fleet.pools.store("d", numbered(1));
+    assert!(
+        !fleet.pools.damping().view().is_damped(id),
+        "a newer summary"
+    );
+}
+
+/// A request re-queued after its pool declined it over its budget is
+/// offered again with the view of the pool's row as the re-offer's table
+/// shows it: once that table shows a newer summary, the pool takes it,
+/// before its deadline. While the summary is the same, so is the view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_re_queued_request_carries_its_pools_newer_view() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(2, Ordering::SeqCst);
+    let router = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&router, &cx);
+    tokio::pin!(sending);
+    // Declined at summary 1, again and again: the same view.
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
+    assert!(waited.is_err(), "taken before a newer summary");
+    assert!(fleet.offered()[0] > 1, "re-queued: {:?}", fleet.offered());
+    assert_eq!(fleet.offered()[1..], [0, 0]);
+    fleet.number(2);
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("taken in time");
+    sent.expect("m1 took it at summary 2");
+    assert_eq!(fleet.offered()[1..], [0, 0], "no other pool");
 }
 
 /// A pool that never takes the re-queued request keeps it until its

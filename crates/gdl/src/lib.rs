@@ -24,6 +24,7 @@ mod compose;
 mod cx;
 mod error;
 mod followed;
+mod gate;
 mod identity;
 #[doc(hidden)]
 mod items;
@@ -47,6 +48,7 @@ pub use error::{Error, ErrorKind, Result};
 pub use followed::{
     ClassPools, FollowedPools, PropertyIndex, PropertyIndexes, PropertyKinds, PropertyPool,
 };
+pub use gate::{Gate, OfferGate};
 pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{
     ConfigField, ConfigSchema, ConfigValue, Encoding, EntryState, MetricField, MetricKind,

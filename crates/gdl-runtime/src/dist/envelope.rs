@@ -399,7 +399,7 @@ impl Head {
         };
         if let Some(view) = view {
             // A `Vec`'s writer does not fail.
-            let _ = write(&mut buffer, &(view.epoch, view.sequence));
+            let _ = write_view(&mut buffer, view);
         }
         self.buffer = Buffer::Room(buffer);
     }
@@ -424,8 +424,31 @@ fn read_view(after: &[u8]) -> Option<OfferView> {
     if after.is_empty() {
         return None;
     }
-    let (epoch, sequence) = rmp_serde::from_slice::<(u64, u64)>(after).ok()?;
-    Some(OfferView { epoch, sequence })
+    // A chooser of the build before the fleet's fullest fill sends two.
+    if let Ok((epoch, sequence)) = rmp_serde::from_slice::<(u64, u64)>(after) {
+        return Some(OfferView {
+            epoch,
+            sequence,
+            fill_max_ppm: None,
+        });
+    }
+    let (epoch, sequence, fill_max_ppm) = rmp_serde::from_slice::<(u64, u64, u32)>(after).ok()?;
+    Some(OfferView {
+        epoch,
+        sequence,
+        fill_max_ppm: Some(fill_max_ppm),
+    })
+}
+
+/// Write `view` as an offer carries it after the head:
+/// `[epoch, sequence, fill_max_ppm]`, or `[epoch, sequence]` without the
+/// fleet's fullest fill, which an entry of the build before it reads too.
+/// At most 24 bytes ([`TAIL_ROOM`]).
+fn write_view(out: &mut Vec<u8>, view: OfferView) -> Result<()> {
+    match view.fill_max_ppm {
+        Some(ppm) => write(out, &(view.epoch, view.sequence, ppm)),
+        None => write(out, &(view.epoch, view.sequence)),
+    }
 }
 
 fn too_large(len: usize) -> Error {
@@ -678,14 +701,78 @@ mod tests {
     /// then the view as `[epoch, sequence]`.
     fn with_trailer(envelope: &Forward, view: OfferView) -> Vec<u8> {
         let mut expected = encode(envelope).expect("encode");
-        expected.extend(encode(&(view.epoch, view.sequence)).expect("encode"));
+        write_view(&mut expected, view).expect("encode");
         expected
     }
 
     const VIEW: OfferView = OfferView {
         epoch: 1_793_000_000_123,
         sequence: 7,
+        fill_max_ppm: Some(850_000),
     };
+
+    /// A view carries the fleet's fullest fill as a third element; an
+    /// entry of the build before it, which reads two, reads a view of
+    /// three as none, and has no gate to miss it. A view of two, from a
+    /// chooser of that build, reads here with no fullest fill. The widest
+    /// view fits the room after the head.
+    #[test]
+    fn a_view_carries_the_fleets_fullest_fill_both_ways() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let image = Image {
+            url: "a".repeat(700),
+            detail: "high".into(),
+        };
+        let widest = OfferView {
+            epoch: u64::MAX,
+            sequence: u64::MAX,
+            fill_max_ppm: Some(u32::MAX),
+        };
+        let mut envelope = hand_off(&codec, image_like(&image), &[]);
+        envelope.set_view(Some(widest));
+        let written = envelope.payload.as_ptr() as usize;
+        let bytes = envelope.wire().expect("wire");
+        assert_eq!(bytes[..], with_trailer(&envelope, widest)[..]);
+        let head = envelope.payload.len();
+        let after = bytes.len() - head - TAIL_ROOM;
+        assert_eq!(
+            bytes[after..].as_ptr() as usize,
+            written,
+            "the widest view did not fit after the head"
+        );
+        assert_eq!(
+            Forward::read(&bytes).expect("read").payload.view(),
+            Some(widest)
+        );
+        assert_eq!(
+            Forward::read(&bytes)
+                .expect("read")
+                .payload
+                .view()
+                .and_then(|view| view.fill_max()),
+            Some(f64::from(u32::MAX) / 1_000_000.0)
+        );
+
+        // The entry of the build before: it reads two elements after the
+        // head, or no view.
+        let earlier = |after: &[u8]| rmp_serde::from_slice::<(u64, u64)>(after).ok();
+        let back: Forward = decode(&bytes).expect("an earlier entry reads it");
+        let head_end = bytes.len() - (bytes.len() - encode(&back).expect("encode").len());
+        assert_eq!(earlier(&bytes[head_end..]), None);
+
+        // A chooser of the build before sends two elements.
+        let mut two = encode(&back).expect("encode");
+        two.extend(encode(&(VIEW.epoch, VIEW.sequence)).expect("encode"));
+        let read = Forward::read(&two).expect("read");
+        assert_eq!(
+            read.payload.view(),
+            Some(OfferView {
+                epoch: VIEW.epoch,
+                sequence: VIEW.sequence,
+                fill_max_ppm: None,
+            })
+        );
+    }
 
     /// An offer carries its view after the envelope, for heads on each side
     /// of msgpack's length bounds and of the first buffer, and in JSON. A
@@ -697,6 +784,7 @@ mod tests {
         let other = OfferView {
             epoch: VIEW.epoch + 1,
             sequence: 1,
+            ..Default::default()
         };
         for encoding in [Encoding::Msgpack, Encoding::Json] {
             let codec = Codec::<serde_bytes::ByteBuf>::new(encoding);
@@ -790,7 +878,8 @@ mod tests {
             let written = envelope.payload.as_ptr() as usize;
             let head = envelope.payload.len();
             let bytes = envelope.wire().expect("wire");
-            let trailer = encode(&(VIEW.epoch, VIEW.sequence)).expect("encode").len();
+            let trailer =
+                with_trailer(&envelope, VIEW).len() - encode(&envelope).expect("encode").len();
             let sent = &bytes[bytes.len() - trailer - head..];
             assert_eq!(
                 sent.as_ptr() as usize,
@@ -939,6 +1028,7 @@ mod tests {
         let other = OfferView {
             epoch: VIEW.epoch,
             sequence: VIEW.sequence + 1,
+            ..Default::default()
         };
         let before = crate::dist::counting::counted();
         counting(true);
@@ -951,9 +1041,8 @@ mod tests {
         );
         let written = envelope.payload.as_ptr() as usize;
         let again = envelope.wire().expect("the failover's offer");
-        let trailer = encode(&(other.epoch, other.sequence))
-            .expect("encode")
-            .len();
+        let trailer =
+            with_trailer(&envelope, other).len() - encode(&envelope).expect("encode").len();
         let head = envelope.payload.len();
         let sent = &again[again.len() - trailer - head..];
         assert_eq!(
@@ -990,6 +1079,7 @@ mod tests {
         let other = OfferView {
             epoch: VIEW.epoch,
             sequence: VIEW.sequence + 1,
+            ..Default::default()
         };
         let large = "m".repeat(2 * HEADER_ROOM);
         for meta in [&[][..], &[("large", large.as_str())][..]] {

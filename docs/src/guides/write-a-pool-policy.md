@@ -154,7 +154,7 @@ fn requeue(&self, request: PoolRequest<'_, Projected<Hinted>>, pool: &Pool) -> b
 }
 ```
 
-- The runtime asks `requeue` once per pool and request, only after the pool declined the request as full. `true` makes the chooser wait for room in that pool and offer the request to it again, until it takes it. Its deadline fails it with `DeadlineExceeded`. `false`, the default, sends it to another pool, as before.
+- The runtime asks `requeue` once per pool and request, only after the pool declined the request as full or over its budget (`Decline::Budget`, from the pool's gate); `request.declined(pool)` says which. A request re-queued after a budget's decline is offered again with the pool's newer view once the chooser holds its next summary, so a router that wants a pin move to wait one summary answers `true` for it. `true` makes the chooser wait for room in that pool and offer the request to it again, until it takes it. Its deadline fails it with `DeadlineExceeded`. `false`, the default, sends it to another pool, as before.
 - The pool is not damped, and the waits count no failover. The choice's lease is kept, and learns of the acceptance.
 - When the pool declines the request for another reason, such as `Decline::NotPresent`, or no longer takes work as `eligible` sees it, as when it drains, the runtime calls `choose` again, and does not ask `requeue` about that pool again. `request.declined(pool)` then gives the pool's last reason: `Decline::NotPresent` after such a decline, and still `Decline::Full` for a pool that stopped taking work.
 - `requeue` reads the head as `choose` does, and runs only on a full decline's path.
@@ -173,7 +173,7 @@ let committed = |pool: &Pool| {
 
 Compare the sizes with each other, not with `instances`: they cover the same instances, which during a roll are only those of the new build.
 
-A choice can carry the view it was made on to the pool: `PoolChoice::new(at).with_view()`. The pool's entry reads it as `cx.ext::<gdl::OfferView>()`: the epoch of the pool's hub and the number of the summary the policy read. Ask for it only on a choice a pool may judge by it, such as a session's first turn (`request.head().hint.first_turn`), not on a pinned turn. The entry reads it after it admitted the request: nothing yet declines an offer by its view. A choice with a view is the same size as one without, and the view adds about 19 bytes to the offer.
+A choice can carry the view it was made on to the pool: `PoolChoice::new(at).with_view()`. The pool's entry reads it as `cx.ext::<gdl::OfferView>()`: the epoch of the pool's hub and the number of the summary the policy read. Ask for it only on a choice a pool may judge by it, such as a session's first turn (`request.head().hint.first_turn`), not on a pinned turn. The pool's gate can decline the offer by it before admission ([A pool's gate](../concepts/pool-routing.md#a-pools-gate)). The view also carries the fullest fill in the table the policy chose from (`OfferView::fill_max`). A choice with a view is the same size as one without, and the view adds at most 24 bytes to the offer.
 
 ## 3. Test it without a runtime
 
