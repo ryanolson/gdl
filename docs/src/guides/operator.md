@@ -83,7 +83,7 @@ Group `gdl.dev`, version `v1alpha1`, namespaced. One scaler per segment of a poo
 | `status.replicas`, `status.selector` | The target's count and its pods' selector, which `/scale` reports to an HPA |
 | `status.readyReplicas` | Its ready pods |
 | `status.retiring` | The victims chosen and not gone yet: each one's pod and its uid, its Deployment's uid, the count it is removed at (`target`), and its phase: `unrouting`, `committing`, or `removing` |
-| `status.last` | The last removal: the pod chosen, the pod deleted, why, how long it took, and how it ended |
+| `status.last` | The last removal: the name of the pod chosen (`pod`), the uids of the pod chosen and the pod deleted (`chosen`, `deleted`), why, how long it took, and how it ended |
 | `status.conditions` | `Scaling`, `Blocked`, and `Suspended` |
 
 A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses any other, a `retire` other than `signal`, and a `minReplicas` below 1.
@@ -202,11 +202,11 @@ Every write carries the read it was decided on. A status write carries the scale
 |---|---|
 | `fewestAdmitted` (the default) | The pod with the least load: the shortest drain. A pod whose load could not be read ranks last |
 | `newest` | The newest pod |
-| `fewestCommittedKv` | The pod with the least committed KV: the least warm cache lost. A tie goes as in `fewestAdmitted` |
+| `fewestCommittedKv` | The pod with the least committed KV: the least warm cache lost. A tie goes to the pod with the fewest admitted requests, then to the newest pod |
 
 `fewestCommittedKv` reads each pod's `kv_committed` from its hub's instance list ([Listing the instances](../concepts/pools.md#listing-the-instances)). The hub counts a load report for up to three report periods, so the number can be that old. A pod with no number is unknown, not empty: it ranks after every pod with a number. Its instance reports none, or its hub does not list it or does not answer. When no pod has a number, as with a hub of an earlier build, the policy chooses as `fewestAdmitted` does.
 
-The choice is best effort, as for every policy. The operator gives the victim the lowest deletion cost and lowers the count, but the ReplicaSet deletes a pod that is not ready first ([Why a deletion cost](#why-a-deletion-cost)). `status.last` names the pod chosen and the pod deleted, so a reader can compare them.
+The choice is best effort, as for every policy. The operator gives the victim the lowest deletion cost and lowers the count, but the ReplicaSet deletes a pod that is not ready first ([Why a deletion cost](#why-a-deletion-cost)). `status.last` holds the uid of the pod chosen (`chosen`) and of the pod deleted (`deleted`), so a reader compares them by uid: a new pod can take the name of one that went. It names only the chosen pod (`pod`).
 
 A policy is registered by name, as pool policies are: `Victims::add(name, policy)` with a `VictimPolicy`, which ranks one candidate (`rank`) and can rank its ties (`tie_rank`). A scaler that names a policy no one registered is blocked (`UnknownVictimPolicy`).
 
