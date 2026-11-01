@@ -29,4 +29,4 @@ pub use pool::{
 };
 pub use probe::{Instance, InstanceLoad, Instances};
 pub use run::run;
-pub use victim::{Candidate, FEWEST_ADMITTED, NEWEST, VictimPolicy, Victims};
+pub use victim::{Candidate, FEWEST_ADMITTED, FEWEST_COMMITTED_KV, NEWEST, VictimPolicy, Victims};

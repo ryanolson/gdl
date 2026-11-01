@@ -49,6 +49,12 @@ pub struct InstanceLoad {
     pub admitted: u64,
     /// Its admission limit.
     pub limit: u64,
+    /// Its committed KV, in tokens: the KV of the sessions active within
+    /// the pool's cache target, resident or evicted. `None` when its nodes
+    /// set none, or from a hub of a build from before the numbers, which
+    /// leaves the field out.
+    #[serde(default)]
+    pub kv_committed: Option<u64>,
 }
 
 impl Instances {
@@ -234,6 +240,14 @@ pub fn load_of(metrics: Option<&Held>, instance: Option<&Instance>) -> Option<u6
         .or_else(|| instance.and_then(|i| i.load).map(|load| load.admitted))
 }
 
+/// A pod's committed KV, from its hub's latest load report of it as an
+/// entry instance. `None` when the hub did not answer or list it, or its
+/// report has no number. A report counts for up to three report periods,
+/// so the number may be that old.
+pub fn committed_of(instance: Option<&Instance>) -> Option<u64> {
+    instance?.load?.kv_committed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,7 +299,7 @@ process_cpu_seconds_total 1.5
         let instances: Instances = serde_json::from_value(serde_json::json!({
             "instances": [
                 {"segment": "engine", "peer": {"ignored": true}, "addresses": ["10.0.0.7:4000"], "phase": "ready",
-                 "load": {"admitted": 2, "limit": 8, "refusals": 0, "age_ms": 10}},
+                 "load": {"admitted": 2, "limit": 8, "refusals": 0, "age_ms": 10, "kv_committed": 640}},
                 {"segment": "engine", "addresses": ["10.0.0.8:4000"], "phase": "retired"},
                 {"segment": "engine", "addresses": [], "phase": "someLaterPhase"},
             ]
@@ -293,6 +307,9 @@ process_cpu_seconds_total 1.5
         .expect("a list");
         let seven = instances.at("10.0.0.7").expect("listed");
         assert_eq!(seven.load.map(|load| load.admitted), Some(2));
+        assert_eq!(committed_of(Some(seven)), Some(640));
+        assert_eq!(committed_of(instances.at("10.0.0.8")), None);
+        assert_eq!(committed_of(None), None);
         assert!(instances.at("10.0.0.9").is_none());
         assert_eq!(load_of(None, Some(seven)), Some(2));
         let metrics = Held {

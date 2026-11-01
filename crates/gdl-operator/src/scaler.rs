@@ -433,6 +433,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     held.get(&pod.uid),
                     instance_of(instances.as_ref(), pod),
                 ),
+                committed: crate::probe::committed_of(instance_of(instances.as_ref(), pod)),
             })
             .collect();
         let Some(chosen) = self.cx.victims.choose(spec.victim(), &ranked, count) else {
@@ -478,6 +479,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             tracing::info!(
                 pod = %pod.name,
                 load = ?candidate.load,
+                committed = ?candidate.committed,
                 policy = spec.victim(),
                 "chose a victim"
             );

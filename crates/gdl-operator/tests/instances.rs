@@ -26,10 +26,11 @@ fn the_hubs_list_reads_into_the_mirror() {
         limit: 8,
         refusals: 1,
         age_ms: 40,
-        // The operator's mirror reads none of them, and is not refused for
-        // them.
+        // The operator's mirror reads only the committed KV, and is not
+        // refused for the rest.
         kv: gdl_pools::KvLoad::NONE
             .with_capacity(80_000)
+            .with_committed(12_000)
             .with_eviction_age_ms(9_000),
     };
     let phases = [
@@ -62,11 +63,36 @@ fn the_hubs_list_reads_into_the_mirror() {
         let expected = (phase == "ready").then_some(gdl_operator::InstanceLoad {
             admitted: 3,
             limit: 8,
+            kv_committed: Some(12_000),
         });
         assert_eq!(read.load, expected);
     }
     assert_eq!(
         mirror.at("10.0.0.1").map(|i| i.phase.as_str()),
         Some("ready")
+    );
+}
+
+#[test]
+fn an_instance_without_kv_numbers_reads_as_no_committed_kv() {
+    let load = InstanceLoad {
+        admitted: 1,
+        limit: 4,
+        refusals: 0,
+        age_ms: 0,
+        kv: gdl_pools::KvLoad::NONE.with_capacity(80_000),
+    };
+    let hub = Instances {
+        instances: vec![instance(InstancePhase::Ready, "10.0.0.1:7000", Some(load))],
+    };
+    let text = serde_json::to_string(&hub).expect("the hub's list encodes");
+    let mirror: gdl_operator::Instances = serde_json::from_str(&text).expect("the mirror reads it");
+    assert_eq!(
+        mirror.instances[0].load,
+        Some(gdl_operator::InstanceLoad {
+            admitted: 1,
+            limit: 4,
+            kv_committed: None,
+        })
     );
 }

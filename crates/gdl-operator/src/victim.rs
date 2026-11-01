@@ -1,8 +1,9 @@
 //! Victim policies: how a `GdlScaler` chooses the instance to remove. A
-//! policy ranks each candidate; the scaler removes the lowest rank, and a
-//! tie goes to the newest pod, the one with the least work behind it. A
-//! policy is registered by name, as pool policies are, so that a fleet can
-//! add its own.
+//! policy ranks each candidate; the scaler removes the lowest rank. A
+//! policy may break its own ties with a second rank, and a tie left goes
+//! to the newest pod, the one with the least work behind it. A policy is
+//! registered by name, as pool policies are, so that a fleet can add its
+//! own.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,6 +14,10 @@ pub const FEWEST_ADMITTED: &str = "fewestAdmitted";
 
 /// The newest pod.
 pub const NEWEST: &str = "newest";
+
+/// The instance with the least committed KV, whose loss costs the least
+/// warm cache.
+pub const FEWEST_COMMITTED_KV: &str = "fewestCommittedKv";
 
 /// A pod the scaler may remove, with what it read of its instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +32,25 @@ pub struct Candidate {
     /// those are more ([`crate::Held::load`]). `None` when neither its
     /// `/metrics` nor its hub answered.
     pub load: Option<u64>,
+    /// Its committed KV, in tokens, from its hub's latest load report
+    /// ([`crate::InstanceLoad::kv_committed`]). The hub counts a report
+    /// for up to three report periods, so the number may be that old.
+    /// `None` when its hub did not answer or list it, or reports no
+    /// number for it.
+    pub committed: Option<u64>,
 }
 
 /// Ranks candidates: the lowest rank is removed first.
 pub trait VictimPolicy: Send + Sync {
     /// `candidate`'s rank.
     fn rank(&self, candidate: &Candidate) -> u64;
+
+    /// Of candidates of equal [`rank`](VictimPolicy::rank), the lowest of
+    /// this goes first. The same for every candidate by default, so that
+    /// a tie goes to the newest pod.
+    fn tie_rank(&self, _candidate: &Candidate) -> u64 {
+        0
+    }
 }
 
 /// The fewest admitted requests first. A candidate whose load could not
@@ -57,8 +75,28 @@ impl VictimPolicy for Newest {
     }
 }
 
-/// The registered victim policies, by name: [`FEWEST_ADMITTED`] and
-/// [`NEWEST`], and any a fleet adds.
+/// The least committed KV first. A candidate with no number ranks after
+/// every one with a number: unknown is not empty. A tie, and so a pool
+/// whose hub reports no KV, follows [`FewestAdmitted`], so that the choice
+/// is the default policy's.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FewestCommittedKv;
+
+impl VictimPolicy for FewestCommittedKv {
+    fn rank(&self, candidate: &Candidate) -> u64 {
+        // `u64::MAX` is the rank of no number, so a number never takes it.
+        candidate
+            .committed
+            .map_or(u64::MAX, |committed| committed.min(u64::MAX - 1))
+    }
+
+    fn tie_rank(&self, candidate: &Candidate) -> u64 {
+        FewestAdmitted.rank(candidate)
+    }
+}
+
+/// The registered victim policies, by name: [`FEWEST_ADMITTED`],
+/// [`NEWEST`] and [`FEWEST_COMMITTED_KV`], and any a fleet adds.
 #[derive(Clone)]
 pub struct Victims {
     policies: BTreeMap<String, Arc<dyn VictimPolicy>>,
@@ -69,6 +107,7 @@ impl Default for Victims {
         let mut policies: BTreeMap<String, Arc<dyn VictimPolicy>> = BTreeMap::new();
         policies.insert(FEWEST_ADMITTED.into(), Arc::new(FewestAdmitted));
         policies.insert(NEWEST.into(), Arc::new(Newest));
+        policies.insert(FEWEST_COMMITTED_KV.into(), Arc::new(FewestCommittedKv));
         Self { policies }
     }
 }
@@ -105,9 +144,9 @@ impl Victims {
     }
 
     /// The `count` candidates `name` removes first, in order: the lowest
-    /// rank, and of equal ranks the newest pod, and of pods created in the
-    /// same millisecond the greater uid, so that every reader agrees.
-    /// `None` when no policy has the name.
+    /// rank, and of equal ranks the lowest tie rank, then the newest pod,
+    /// and of pods created in the same millisecond the greater uid, so
+    /// that every reader agrees. `None` when no policy has the name.
     pub fn choose<'c>(
         &self,
         name: &str,
@@ -115,9 +154,14 @@ impl Victims {
         count: usize,
     ) -> Option<Vec<&'c Candidate>> {
         let policy = self.get(name)?;
-        let mut ranked: Vec<(u64, &Candidate)> = candidates
+        let mut ranked: Vec<((u64, u64), &Candidate)> = candidates
             .iter()
-            .map(|candidate| (policy.rank(candidate), candidate))
+            .map(|candidate| {
+                (
+                    (policy.rank(candidate), policy.tie_rank(candidate)),
+                    candidate,
+                )
+            })
             .collect();
         ranked.sort_by(|(a_rank, a), (b_rank, b)| {
             a_rank
@@ -139,6 +183,14 @@ mod tests {
             uid: uid.into(),
             created_ms,
             load,
+            committed: None,
+        }
+    }
+
+    fn reporting(uid: &str, created_ms: i64, load: u64, committed: Option<u64>) -> Candidate {
+        Candidate {
+            committed,
+            ..candidate(uid, created_ms, Some(load))
         }
     }
 
@@ -198,6 +250,72 @@ mod tests {
         let victims = Victims::default();
         let candidates = [candidate("a", 1, Some(0)), candidate("b", 2, Some(100))];
         assert_eq!(chosen(&victims, NEWEST, &candidates, 1), ["b"]);
+    }
+
+    #[test]
+    fn the_least_committed_kv_goes_first() {
+        let victims = Victims::default();
+        let candidates = [
+            reporting("a", 1, 0, Some(5)),
+            reporting("b", 2, 9, Some(2)),
+            reporting("c", 3, 0, Some(9)),
+        ];
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 3),
+            ["b", "a", "c"]
+        );
+    }
+
+    #[test]
+    fn a_committed_kv_tie_follows_the_default_order() {
+        let victims = Victims::default();
+        let candidates = [
+            reporting("a", 1, 1, Some(4)),
+            reporting("b", 3, 7, Some(4)),
+            reporting("c", 2, 1, Some(4)),
+        ];
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 3),
+            chosen(&victims, FEWEST_ADMITTED, &candidates, 3),
+        );
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 3),
+            ["c", "a", "b"],
+            "the fewest admitted, then the newest pod"
+        );
+    }
+
+    #[test]
+    fn no_committed_kv_ranks_after_every_number() {
+        let victims = Victims::default();
+        let candidates = [
+            reporting("a", 9, 0, None),
+            reporting("b", 1, 50, Some(u64::MAX)),
+            reporting("c", 2, 40, Some(70_000)),
+        ];
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 3),
+            ["c", "b", "a"]
+        );
+    }
+
+    #[test]
+    fn without_committed_kv_it_chooses_as_the_default_policy() {
+        let victims = Victims::default();
+        let candidates = [
+            reporting("a", 1, 5, None),
+            reporting("b", 2, 1, None),
+            candidate("c", 4, None),
+            reporting("d", 3, 1, None),
+        ];
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 4),
+            chosen(&victims, FEWEST_ADMITTED, &candidates, 4),
+        );
+        assert_eq!(
+            chosen(&victims, FEWEST_COMMITTED_KV, &candidates, 4),
+            ["d", "b", "a", "c"]
+        );
     }
 
     #[test]

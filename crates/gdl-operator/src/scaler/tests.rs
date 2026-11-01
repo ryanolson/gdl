@@ -477,6 +477,72 @@ async fn the_hubs_report_stands_in_for_metrics_that_do_not_answer() {
     assert_eq!(victim.instance.as_deref(), Some("10.0.0.1:7000"));
 }
 
+/// The fake's hub listing pods 1 to 3 as ready, each with `committed[n]`
+/// as its committed KV, or with no KV field for `None`, as a hub of a
+/// build from before the numbers sends.
+fn list_committed(fake: &Fake, committed: [Option<u64>; 3]) {
+    let instances = committed
+        .iter()
+        .enumerate()
+        .map(|(n, kv)| {
+            let mut load =
+                serde_json::json!({"admitted": 0, "limit": 4, "refusals": 0, "age_ms": 5});
+            if let Some(kv) = kv {
+                load["kv_committed"] = (*kv).into();
+                load["kv_capacity"] = 80_000.into();
+            }
+            serde_json::json!({
+                "segment": "front", "addresses": [format!("10.0.0.{}:7000", n + 1)],
+                "phase": "ready", "load": load,
+            })
+        })
+        .collect::<Vec<_>>();
+    *fake.instances.lock().expect("instances") = Some(
+        serde_json::from_value(serde_json::json!({ "instances": instances })).expect("a list"),
+    );
+}
+
+fn fewest_committed_kv(replicas: i32) -> GdlScalerSpec {
+    let mut spec = spec(Some(replicas));
+    spec.victim = Some(crate::FEWEST_COMMITTED_KV.into());
+    spec
+}
+
+#[tokio::test]
+async fn the_least_committed_kv_goes_whatever_the_admitted_load() {
+    // The default policy would take pod-3: the fewest admitted, the newest.
+    let fake = Fake::with(&[0, 3, 0]);
+    list_committed(&fake, [Some(5), Some(2), Some(9)]);
+    assert_eq!(once(&fake, &fewest_committed_kv(2), 0).await, BUSY);
+    assert_eq!(
+        fake.take_writes(),
+        ["pod-2 cost Some(-2147483648)", "replicas 2"]
+    );
+}
+
+#[tokio::test]
+async fn a_pod_whose_hub_gives_no_committed_kv_goes_after_one_that_does() {
+    let fake = Fake::with(&[0, 3, 0]);
+    list_committed(&fake, [None, Some(40_000), None]);
+    once(&fake, &fewest_committed_kv(2), 0).await;
+    assert_eq!(status(&fake).retiring[0].pod, "pod-2");
+}
+
+#[tokio::test]
+async fn without_committed_kv_it_chooses_as_the_default_policy() {
+    for listed in [true, false] {
+        let fake = Fake::with(&[0, 3, 0]);
+        if listed {
+            list_committed(&fake, [None, None, None]);
+        }
+        once(&fake, &fewest_committed_kv(2), 0).await;
+        assert_eq!(status(&fake).retiring[0].pod, "pod-3", "listed: {listed}");
+        let default = Fake::with(&[0, 3, 0]);
+        once(&default, &spec(Some(2)), 0).await;
+        assert_eq!(status(&default).retiring[0].pod, "pod-3");
+    }
+}
+
 #[tokio::test]
 async fn a_scale_down_waits_for_a_rollout_a_terminating_pod_and_a_pod_not_ready() {
     let fake = Fake::with(&[0, 0, 0]);
