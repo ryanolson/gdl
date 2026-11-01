@@ -198,6 +198,7 @@ impl Hub {
             generation,
             segment: "f".into(),
             peer: entry().clone(),
+            joined: 1,
         }
     }
 

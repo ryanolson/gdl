@@ -48,6 +48,7 @@ fn ready() -> PoolWatchEvent {
             InstanceId::new_v4(),
             WorkerAddress::from_encoded(b"tcp://127.0.0.1:1".to_vec()),
         ),
+        joined: 1,
     }
 }
 

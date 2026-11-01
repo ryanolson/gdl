@@ -219,6 +219,7 @@ impl Fleet {
                 load: super::super::tests::idle(),
                 eligible: ids.clone().into(),
                 offered: ids.iter().copied().map(selector_id).collect(),
+                stamps: gdl::JoinStamps::default(),
                 retired: Box::new([]),
                 unread: false,
                 turn: Arc::new(AtomicUsize::new(0)),

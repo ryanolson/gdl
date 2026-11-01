@@ -518,6 +518,13 @@ pub enum PoolWatchEvent {
         segment: String,
         /// Who it is and where it is reached, as the hub's members name it.
         peer: PeerInfo,
+        /// Its join stamp: the hub's number of its first registration in
+        /// this hub process, which grows in the order the hub registers
+        /// its instances. A re-registration keeps it, and it is the same
+        /// on every snapshot. Absent when 0, and from a hub of an earlier
+        /// build, which a reader takes as an unknown join order.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        joined: u64,
     },
     /// An entry instance retired: no new work may be sent to it. Sent
     /// again, with `acknowledged`, once every pool that followed this one
@@ -553,4 +560,9 @@ pub enum PoolWatchEvent {
         /// The instance.
         instance: InstanceId,
     },
+}
+
+/// Whether a number field is 0, so that it is not sent.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

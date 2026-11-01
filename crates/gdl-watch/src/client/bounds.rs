@@ -164,6 +164,7 @@ fn the_default_limit_takes_the_largest_peer_a_hub_admits() {
     let ready = PoolWatchEvent::Ready {
         segment: "s".repeat(64),
         peer,
+        joined: u64::MAX,
     };
     let sent = format!(
         "data: {}\n\n",

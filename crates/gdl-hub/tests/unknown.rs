@@ -148,6 +148,7 @@ impl Watch {
             self.send(&PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: (*peer).clone(),
+                joined: stamp(peer),
             })
             .await;
         }
@@ -230,7 +231,14 @@ fn exposed(generation: u64, peer: &PeerInfo) -> FollowEvent {
         generation,
         segment: "f".into(),
         peer: peer.clone(),
+        joined: stamp(peer),
     }
+}
+
+/// The join stamp the scripted pool sends for `peer`, its own, so that a
+/// test sees that the relay carries each instance's.
+fn stamp(peer: &PeerInfo) -> u64 {
+    (peer.instance_id().as_u128() % 997) as u64 + 1
 }
 
 /// How many ready pools of `model_x` the global's hub counts, once it is
@@ -506,6 +514,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_pool_withheld() {
         .send(&PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: a.clone(),
+            joined: stamp(&a),
         })
         .await;
     first.send(&PoolWatchEvent::Synced).await;
@@ -678,6 +687,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
     let ready = serde_json::to_string(&PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: b.clone(),
+        joined: stamp(&b),
     })
     .expect("an event serializes");
     first.offer(&degraded).await;
@@ -748,6 +758,7 @@ async fn an_unknown_event_in_the_reading_keeps_the_pool_withheld() {
         .send(&PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: a.clone(),
+            joined: stamp(&a),
         })
         .await;
     second.send(&PoolWatchEvent::Synced).await;

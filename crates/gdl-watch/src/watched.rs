@@ -190,6 +190,7 @@ mod tests {
             PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: peer.clone(),
+                joined: 1,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -251,6 +252,7 @@ mod tests {
                 generation: 1,
                 segment: "f".into(),
                 peer,
+                joined: 1,
             },
             FollowEvent::Retired {
                 class: class.clone(),
@@ -490,6 +492,85 @@ mod tests {
             serde_json::to_value(&quiet).expect("json"),
             earlier,
             "absent when 0"
+        );
+    }
+
+    /// An entry instance's join stamp crosses both hops, the pool's watch
+    /// (`ready`) and the relay (`exposed`), absent when 0. A reader of an
+    /// earlier build reads each as the event it knew, and a reader of this
+    /// build reads one from an earlier hub, which sends none, as 0.
+    #[test]
+    fn a_join_stamp_reads_both_ways_across_builds() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            Ready {
+                segment: String,
+                peer: PeerInfo,
+            },
+            Exposed {
+                class: String,
+                pool: String,
+                generation: u64,
+                segment: String,
+                peer: PeerInfo,
+            },
+        }
+        let instance = InstanceId::new_v4();
+        let peer = PeerInfo::new(instance, WorkerAddress::from_encoded(b"tcp://t".to_vec()));
+        let ready = |joined| PoolWatchEvent::Ready {
+            segment: "f".into(),
+            peer: peer.clone(),
+            joined,
+        };
+        let exposed = |joined| FollowEvent::Exposed {
+            class: "c".into(),
+            pool: "m".into(),
+            generation: 2,
+            segment: "f".into(),
+            peer: peer.clone(),
+            joined,
+        };
+        let sent = [
+            serde_json::to_value(ready(41)).expect("json"),
+            serde_json::to_value(exposed(41)).expect("json"),
+        ];
+        let read = [
+            Earlier::Ready {
+                segment: "f".into(),
+                peer: peer.clone(),
+            },
+            Earlier::Exposed {
+                class: "c".into(),
+                pool: "m".into(),
+                generation: 2,
+                segment: "f".into(),
+                peer: peer.clone(),
+            },
+        ];
+        for (sent, read) in sent.iter().zip(read) {
+            assert_eq!(sent["joined"], serde_json::json!(41), "{sent}");
+            assert_eq!(
+                serde_json::from_value::<Earlier>(sent.clone())
+                    .expect("an earlier reader reads it"),
+                read
+            );
+        }
+        let mut earlier = serde_json::to_value(ready(0)).expect("json");
+        assert!(earlier.get("joined").is_none(), "absent when 0");
+        assert_eq!(
+            serde_json::from_value::<PoolWatchEvent>(earlier.clone()).expect("read"),
+            ready(0)
+        );
+        assert!(
+            PoolWatchEvent::unknown(&earlier.to_string()).is_none(),
+            "a known kind"
+        );
+        earlier = serde_json::to_value(exposed(0)).expect("json");
+        assert!(earlier.get("joined").is_none(), "absent when 0");
+        assert_eq!(
+            serde_json::from_value::<FollowEvent>(earlier).expect("read"),
+            exposed(0)
         );
     }
 

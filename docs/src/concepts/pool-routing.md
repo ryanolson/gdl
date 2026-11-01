@@ -91,7 +91,7 @@ For each entry segment its hops enter, and each followed pool, the chooser keeps
 - the pool's state and region;
 - its load summary, with the time it reached the chooser's hub, on the chooser's clock (`FollowedPool::load`, `load_age`);
 - whether it is offered, and at which revision (`FollowedPool::offered`, `revision`);
-- its exposed entry instances;
+- its exposed entry instances, each with its join stamp;
 - its retired entry instances, which are never routed to again.
 
 Beside the pools, each table holds the class's property indexes ([The property index](#the-property-index)), which every table of the class shares.

@@ -381,6 +381,33 @@ impl Instance<'_> {
     }
 }
 
+/// A pool row's join stamps, index for index with its entry instances,
+/// and the epoch of the hub they are of, which the row owns and each
+/// selection from it borrows.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JoinStamps {
+    joined: Box<[u64]>,
+    epoch: u64,
+}
+
+impl JoinStamps {
+    /// The stamps `joined` of the hub of `epoch`.
+    pub fn new(joined: Box<[u64]>, epoch: u64) -> Self {
+        Self { joined, epoch }
+    }
+
+    /// Each instance's stamp, 0 where unknown.
+    pub fn joined(&self) -> &[u64] {
+        &self.joined
+    }
+
+    /// The epoch of the hub the stamps are of.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 /// An instance's id: the runtime's instance id, as 128 bits. Shown as 32
 /// hex digits, as the metrics' `worker_id` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

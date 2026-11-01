@@ -357,6 +357,7 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
             generation: 1,
             segment: "g".into(),
             peer: g.clone(),
+            joined: 1,
         },
     ] {
         snapshot.apply(event, now);

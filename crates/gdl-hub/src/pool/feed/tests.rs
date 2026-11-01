@@ -88,6 +88,7 @@ async fn a_ready_instance_is_sent_once_its_peer_is_known() {
         [PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: early,
+            joined: 1,
         }]
     );
     feed.observe(
@@ -129,6 +130,7 @@ async fn a_departure_is_fenced_by_incarnation_and_final() {
         [PoolWatchEvent::Ready {
             segment: "f".into(),
             peer: member.clone(),
+            joined: 2,
         }],
         "a stale removal is no departure"
     );
@@ -210,6 +212,7 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
             PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
+                joined: 1,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -252,6 +255,7 @@ async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_bef
             PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
+                joined: 1,
             },
             PoolWatchEvent::Retired {
                 segment: "f".into(),
@@ -302,6 +306,7 @@ async fn a_watch_opened_again_completes_a_departure() {
             PoolWatchEvent::Ready {
                 segment: "f".into(),
                 peer: member,
+                joined: 1,
             },
             PoolWatchEvent::Left {
                 segment: "f".into(),
@@ -628,4 +633,75 @@ fn a_list_in_a_later_block_waits_for_a_stored_record_in_it() {
     assert_eq!(listed(&pending(&mut late)), [3 * block]);
     assert!(feed.revoke(key, false) > 3 * block);
     assert_eq!(listed(&pending(&mut early)), [3 * block + 1], "at once");
+}
+
+/// Each ready instance carries its join stamp: the incarnation of its
+/// first registration in this hub. An authenticated re-registration,
+/// which the hub numbers past every earlier one while the instance stays
+/// ready, keeps the stamp, on the live watch and on every later
+/// snapshot, so a session cut off at it is not moved off the instance.
+/// The stamp ends with the registration: an instance that registers
+/// again after it left is stamped anew.
+#[tokio::test]
+async fn a_re_registration_keeps_the_first_join_stamp() {
+    let feed = feed();
+    let mut watch = watch(&feed);
+    let (first, second) = (peer(), peer());
+    let ready = |peer: &PeerInfo, joined| PoolWatchEvent::Ready {
+        segment: "f".into(),
+        peer: peer.clone(),
+        joined,
+    };
+    for (peer, incarnation) in [(&first, 3), (&second, 5)] {
+        feed.joined(
+            "f",
+            Incarnation::from_u64(incarnation),
+            RegistrationEpoch::new(),
+            peer.clone(),
+        );
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(peer.instance_id()));
+    }
+    assert_eq!(pending(&mut watch), [ready(&first, 3), ready(&second, 5)]);
+
+    feed.joined(
+        "f",
+        Incarnation::from_u64(9),
+        RegistrationEpoch::new(),
+        first.clone(),
+    );
+    feed.removed(removal(first.instance_id(), 3));
+    assert_eq!(pending(&mut watch), [], "a renewal is no news");
+    let snapshot = pending(&mut watch_now(&feed));
+    let stamps: Vec<_> = snapshot
+        .iter()
+        .filter(|event| matches!(event, PoolWatchEvent::Ready { .. }))
+        .cloned()
+        .collect();
+    let mut expected = vec![ready(&first, 3), ready(&second, 5)];
+    expected.sort_by_key(|event| match event {
+        PoolWatchEvent::Ready { peer, .. } => peer.instance_id().as_u128(),
+        _ => 0,
+    });
+    assert_eq!(stamps, expected, "a snapshot after the renewal");
+
+    let id = first.instance_id();
+    feed.removed(removal(id, 9));
+    feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+    feed.joined(
+        "f",
+        Incarnation::from_u64(12),
+        RegistrationEpoch::new(),
+        first.clone(),
+    );
+    feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+    assert_eq!(
+        pending(&mut watch),
+        [
+            PoolWatchEvent::Left {
+                segment: "f".into(),
+                instance: id,
+            },
+            ready(&first, 12),
+        ]
+    );
 }

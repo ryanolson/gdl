@@ -86,11 +86,22 @@ async fn peer(hub: &Hub, id: InstanceId) -> PeerInfo {
         .expect("a member")
 }
 
-fn ready(peer: PeerInfo) -> PoolWatchEvent {
+fn ready(peer: PeerInfo, joined: u64) -> PoolWatchEvent {
     PoolWatchEvent::Ready {
         segment: "f".into(),
         peer,
+        joined,
     }
+}
+
+/// The join stamp of the `ready` event `event`, which a pool's hub of this
+/// build always sends.
+fn stamp(event: &PoolWatchEvent) -> u64 {
+    let PoolWatchEvent::Ready { joined, .. } = event else {
+        panic!("not ready: {event:?}");
+    };
+    assert!(*joined > 0, "no join stamp: {event:?}");
+    *joined
 }
 
 fn state(state: PoolState) -> PoolWatchEvent {
@@ -118,7 +129,8 @@ struct View {
     epoch: u64,
     state: Option<PoolState>,
     retired: HashSet<InstanceId>,
-    ready: HashMap<InstanceId, PeerInfo>,
+    /// Each ready instance, with its join stamp.
+    ready: HashMap<InstanceId, (PeerInfo, u64)>,
 }
 
 impl View {
@@ -137,12 +149,14 @@ impl View {
                 self.state = Some(*state);
             }
             PoolWatchEvent::State { state, .. } => self.state = Some(*state),
-            PoolWatchEvent::Ready { peer, .. } => {
+            PoolWatchEvent::Ready { peer, joined, .. } => {
                 assert!(
                     !self.retired.contains(&peer.instance_id()),
                     "a retired instance sent as ready"
                 );
-                let known = self.ready.insert(peer.instance_id(), peer.clone());
+                let known = self
+                    .ready
+                    .insert(peer.instance_id(), (peer.clone(), *joined));
                 assert!(known.is_none(), "an instance sent as ready twice");
             }
             PoolWatchEvent::Retired { instance, .. } => {
@@ -189,8 +203,9 @@ async fn the_snapshot_holds_the_pool_and_its_entry_instances() {
     .await;
 
     let mut watch = watching(&hub).await;
+    let first = snapshot(&mut watch).await;
     assert_eq!(
-        snapshot(&mut watch).await,
+        first,
         [
             pool(published.epoch, PoolState::Degraded),
             PoolWatchEvent::Retired {
@@ -198,7 +213,7 @@ async fn the_snapshot_holds_the_pool_and_its_entry_instances() {
                 instance: retiring.id(),
                 acknowledged: true,
             },
-            ready(peer(&hub, serving.id()).await),
+            ready(peer(&hub, serving.id()).await, stamp(&first[2])),
             PoolWatchEvent::Synced,
         ]
     );
@@ -234,7 +249,16 @@ async fn each_change_arrives_in_order() {
     let mut joining = Instance::join(&hub, "f").await;
     joining.announce(SegmentPhase::Ready).await;
     let joined = next(&mut watch).await;
-    assert_eq!(joined, ready(peer(&hub, joining.id()).await));
+    assert_eq!(
+        joined,
+        ready(peer(&hub, joining.id()).await, stamp(&joined))
+    );
+    // Its stamp is later than those of the instances registered before it.
+    let earlier: Vec<u64> = view.ready.values().map(|(_, at)| *at).collect();
+    assert!(
+        earlier.iter().all(|&at| at < stamp(&joined)),
+        "{earlier:?} {joined:?}"
+    );
     view.apply(&joined);
 
     let mut inside = Instance::join(&hub, "d").await;
@@ -292,9 +316,10 @@ async fn a_pool_below_its_quorum_is_watched_with_its_instances() {
     health(&pool_readiness, "f at 1", |h| usable(h, "f") == 1).await;
 
     let mut watch = watching(&hub).await;
-    let entered = ready(peer(&hub, entry.id()).await);
+    let first = snapshot(&mut watch).await;
+    let entered = ready(peer(&hub, entry.id()).await, stamp(&first[1]));
     assert_eq!(
-        snapshot(&mut watch).await,
+        first,
         [
             pool(published.epoch, PoolState::Unavailable),
             entered.clone(),
@@ -315,15 +340,16 @@ async fn a_pool_below_its_quorum_is_watched_with_its_instances() {
         snapshot(&mut again).await,
         [
             pool(published.epoch, PoolState::Ready),
-            entered,
+            entered.clone(),
             PoolWatchEvent::Synced,
         ]
     );
     // The next event on both is the next change: nothing came between.
     let mut later = Instance::join(&hub, "f").await;
     later.announce(SegmentPhase::Ready).await;
-    let joined = ready(peer(&hub, later.id()).await);
-    assert_eq!(next(&mut watch).await, joined);
+    let joined = next(&mut watch).await;
+    assert_eq!(joined, ready(peer(&hub, later.id()).await, stamp(&joined)));
+    assert!(stamp(&joined) > stamp(&entered));
     assert_eq!(next(&mut again).await, joined);
     hub.shutdown().await.expect("the hub stops");
 }
@@ -468,9 +494,10 @@ async fn a_hub_that_stops_ends_its_watches_and_its_successor_has_a_later_epoch()
     // The first hub's watch goes on.
     let mut entry = Instance::join(&first, "f").await;
     entry.announce(SegmentPhase::Ready).await;
+    let entered = next(&mut watch).await;
     assert_eq!(
-        next(&mut watch).await,
-        ready(peer(&first, entry.id()).await)
+        entered,
+        ready(peer(&first, entry.id()).await, stamp(&entered))
     );
     health(&first_pool, "f at 1", |h| usable(h, "f") == 1).await;
 

@@ -856,6 +856,7 @@ mod tests {
                 .copied()
                 .map(crate::dist::roster::selector_id)
                 .collect(),
+            stamps: gdl::JoinStamps::default(),
             retired: Box::new([]),
             unread: false,
             turn,

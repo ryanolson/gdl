@@ -215,7 +215,7 @@ impl<R: Registry> Follows<R> {
             let unreachable: Vec<InstanceId> = follow
                 .exposed
                 .iter()
-                .filter(|(_, (_, peer))| !self.register(peer))
+                .filter(|(_, entry)| !self.register(&entry.peer))
                 .map(|(id, _)| *id)
                 .collect();
             for id in unreachable {

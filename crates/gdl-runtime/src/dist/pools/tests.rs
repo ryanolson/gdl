@@ -164,7 +164,14 @@ fn exposed(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
         generation,
         segment: "f".into(),
         peer: peer.clone(),
+        joined: stamp(peer),
     }
+}
+
+/// A join stamp for `peer`, its own, so that a test sees whose stamp a
+/// table holds.
+fn stamp(peer: &PeerInfo) -> u64 {
+    (peer.instance_id().as_u128() % 997) as u64 + 1
 }
 
 fn retired(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
@@ -518,6 +525,94 @@ fn a_state_that_exposes_nothing_empties_the_table() {
     );
 }
 
+/// The pool's join stamps, as `segment`'s table holds them for `pool`:
+/// each eligible instance's, index for index, and the lowest and highest
+/// a pool policy reads.
+fn stamps(pools: &Pools, pool: &str) -> (Vec<u64>, Option<u64>, Option<u64>) {
+    let table = pools.table("f").expect("a table");
+    let (held, view) = table
+        .pools
+        .iter()
+        .zip(&table.views)
+        .find(|(held, _)| held.pool == pool)
+        .expect("held");
+    assert_eq!(held.stamps.joined().len(), held.eligible.len());
+    assert_eq!(held.stamps.epoch(), held.epoch);
+    (
+        held.stamps.joined().to_vec(),
+        view.joined_from(),
+        view.joined_through(),
+    )
+}
+
+/// Each eligible instance keeps the join stamp the relay sent for it,
+/// index for index with the table's instances, while a state hides it and
+/// once it is exposed again, and across a snapshot of the same follow;
+/// the pool policy reads the lowest and highest. One instance with no
+/// stamp, from a hub of an earlier build, makes both unknown.
+#[test]
+fn a_table_keeps_each_instances_join_stamp() {
+    let (mut follows, pools, _, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, PoolState::Ready),
+            exposed(M1, 1, &x),
+            exposed(M1, 1, &y),
+        ],
+    );
+    let mut both = [&x, &y];
+    both.sort_by_key(|peer| peer.instance_id().as_u128());
+    let expected: Vec<u64> = both.iter().map(|peer| stamp(peer)).collect();
+    let (low, high) = (
+        expected.iter().copied().min(),
+        expected.iter().copied().max(),
+    );
+    assert_eq!(stamps(&pools, M1), (expected.clone(), low, high));
+
+    live(
+        &mut follows,
+        now,
+        [
+            state(M1, 1, PoolState::Unavailable),
+            state(M1, 1, PoolState::Ready),
+            exposed(M1, 1, &x),
+            exposed(M1, 1, &y),
+        ],
+    );
+    assert_eq!(stamps(&pools, M1), (expected.clone(), low, high));
+
+    let mut snapshot = follows.snapshot();
+    for event in [
+        follow(M1, 1, PoolState::Ready),
+        exposed(M1, 1, &x),
+        exposed(M1, 1, &y),
+    ] {
+        snapshot.apply(event, now);
+    }
+    follows.resnapshot(snapshot, now);
+    assert_eq!(stamps(&pools, M1), (expected, low, high));
+
+    let earlier = peer();
+    live(
+        &mut follows,
+        now,
+        [FollowEvent::Exposed {
+            class: "model_x".into(),
+            pool: M1.into(),
+            generation: 1,
+            segment: "f".into(),
+            peer: earlier.clone(),
+            joined: 0,
+        }],
+    );
+    let (held, from, through) = stamps(&pools, M1);
+    assert_eq!((held.len(), from, through), (3, None, None));
+}
+
 /// Only the entry segments of the chooser's own hops are kept: another
 /// segment's instances and another class's pools are neither tabled nor
 /// registered.
@@ -537,6 +632,7 @@ fn only_the_entry_segments_sent_to_are_kept() {
                 generation: 1,
                 segment: "d".into(),
                 peer: x.clone(),
+                joined: 1,
             },
             FollowEvent::Follow {
                 listing: None,
@@ -555,6 +651,7 @@ fn only_the_entry_segments_sent_to_are_kept() {
                 generation: 1,
                 segment: "f".into(),
                 peer: x.clone(),
+                joined: 1,
             },
         ],
     );

@@ -195,6 +195,12 @@ pub enum FollowEvent {
         segment: String,
         /// Who it is and where it is reached, as its pool's hub names it.
         peer: PeerInfo,
+        /// Its join stamp, as the pool's watch sent it
+        /// ([`PoolWatchEvent::Ready`](crate::PoolWatchEvent::Ready)): the
+        /// same on every snapshot and every exposure. Absent when 0, and
+        /// from a hub of an earlier build.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        joined: u64,
     },
     /// An entry instance of a followed pool retired: no new work may be
     /// sent to it.

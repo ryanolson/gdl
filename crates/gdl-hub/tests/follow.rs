@@ -514,6 +514,16 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     let mut watch = follows(&global_hub).await;
     let serving_peer = peer(&model_hub, serving.id()).await;
     let first = snapshot(&mut watch).await;
+    // The serving instance's join stamp: its first registration's number in
+    // the pool's hub, which the relay carries on.
+    let joined = first
+        .iter()
+        .find_map(|event| match event {
+            FollowEvent::Exposed { joined, .. } => Some(*joined),
+            _ => None,
+        })
+        .expect("an exposed instance");
+    assert!(joined > 0, "the relay dropped the join stamp");
     assert_eq!(
         first,
         [
@@ -541,6 +551,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
                 generation,
                 segment: "f".into(),
                 peer: serving_peer.clone(),
+                joined,
             },
             FollowEvent::Synced { listed: false },
         ]
@@ -577,12 +588,14 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     );
     relay.apply(&event);
     let mut exposed = HashMap::new();
+    let mut stamps = HashMap::new();
     for _ in 0..2 {
         let event = next(&mut watch).await;
         relay.apply(&event);
-        let FollowEvent::Exposed { peer, .. } = event else {
+        let FollowEvent::Exposed { peer, joined, .. } = event else {
             panic!("{event:?}");
         };
+        stamps.insert(peer.instance_id(), joined);
         exposed.insert(peer.instance_id(), peer);
     }
     assert_eq!(
@@ -592,11 +605,104 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
             (joining.id(), peer(&model_hub, joining.id()).await),
         ])
     );
+    // Exposed again, the serving instance keeps its stamp, and the one
+    // that registered after it has a later one.
+    assert_eq!(stamps[&serving.id()], joined);
+    assert!(stamps[&joining.id()] > joined, "{stamps:?}");
 
     // A watch opened now holds what the first one has seen.
     let mut again = follows(&global_hub).await;
     assert_eq!(Relay::of(&snapshot(&mut again).await), relay);
     global_hub.shutdown().await.expect("the hub stops");
+    model_hub.shutdown().await.expect("the hub stops");
+}
+
+/// The join stamp of each instance `events` exposes, by id.
+fn exposed_stamps(events: &[FollowEvent]) -> HashMap<InstanceId, u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            FollowEvent::Exposed { peer, joined, .. } => Some((peer.instance_id(), *joined)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The join stamps the relay on `hub` exposes, once it exposes each of
+/// `ids`, as a new watch's snapshot shows them.
+async fn stamps_on(hub: &Hub, ids: [InstanceId; 2]) -> HashMap<InstanceId, u64> {
+    let mut watch = follows(hub).await;
+    let mut relay = Relay::of(&snapshot(&mut watch).await);
+    until(&mut watch, &mut relay, "both instances exposed", |relay| {
+        let exposed = relay.exposed(POOL);
+        ids.iter().all(|id| exposed.contains(id))
+    })
+    .await;
+    drop(watch);
+    exposed_stamps(&snapshot(&mut follows(hub).await).await)
+}
+
+/// An entry instance that registers again, with the credential it holds,
+/// while it stays ready, keeps the stamp of its first registration,
+/// though the hub numbers the new one past an instance that joined after
+/// it: on a new watch of the pool, on a new watch of the relay, and on the
+/// relay of a new global hub, which reads the pool afresh. So a session
+/// cut off between the two keeps its instance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_registration_again_keeps_the_first_join_stamp() {
+    let directory = Resolving::new();
+    let (model_hub, model_pool) = serve_pool(
+        model(POOL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (_quorum, _) = meet_the_quorum(&model_hub).await;
+    let mut first = Instance::join(&model_hub, "f").await;
+    first.announce(SegmentPhase::Ready).await;
+    let mut later = Instance::join(&model_hub, "f").await;
+    later.announce(SegmentPhase::Ready).await;
+    health(&model_pool, "f at 3", |h| usable(h, "f") == 3).await;
+    let (global_hub, _global_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let ids = [first.id(), later.id()];
+    let before = stamps_on(&global_hub, ids).await;
+    let (at, after) = (before[&first.id()], before[&later.id()]);
+    assert!(0 < at && at < after, "{before:?}");
+
+    first.register_again().await;
+    let model_address = format!("127.0.0.1:{}", model_hub.public_addr().port());
+    let watcher = PoolWatcher::new().expect("a client");
+    let mut own = tokio::time::timeout(WAIT, watcher.watch(&model_address))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub serves the watch");
+    let mut ready = HashMap::new();
+    loop {
+        let item = tokio::time::timeout(WAIT, own.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch goes on")
+            .expect("the watch does not fail");
+        match item.event() {
+            Some(gdl_watch::PoolWatchEvent::Ready { peer, joined, .. }) => {
+                ready.insert(peer.instance_id(), joined);
+            }
+            Some(gdl_watch::PoolWatchEvent::Synced) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        (ready[&first.id()], ready[&later.id()]),
+        (at, after),
+        "the pool's watch"
+    );
+    let again = stamps_on(&global_hub, ids).await;
+    assert_eq!(again, before, "the relay's watch");
+    global_hub.shutdown().await.expect("the hub stops");
+    let (fresh_hub, _fresh_pool) = serve_pool(global_default(), &directory, timing()).await;
+    let fresh = stamps_on(&fresh_hub, ids).await;
+    assert_eq!(fresh, before, "a new global hub's relay");
+    fresh_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
 

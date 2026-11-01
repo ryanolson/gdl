@@ -520,6 +520,10 @@ pub(crate) struct PoolTable {
     /// table so that a selection borrows it rather than converting each
     /// id per request.
     pub(crate) offered: Box<[gdl::InstanceId]>,
+    /// Each eligible instance's join stamp, index for index, of the hub of
+    /// `epoch`: 0 where the pool's hub, or one between, is of an earlier
+    /// build. A selection borrows it.
+    pub(crate) stamps: gdl::JoinStamps,
     pub(crate) retired: Box<[InstanceId]>,
     /// Whether the pool is unread ([`FollowedPool::unread`]): `eligible`
     /// is then empty.
@@ -563,7 +567,8 @@ impl PoolTable {
             .with_entries(self.eligible.len())
             .with_properties_version(self.properties_version)
             .with_follow(self.generation, self.changes)
-            .with_epoch(self.epoch);
+            .with_epoch(self.epoch)
+            .with_joined(self.stamps.joined());
         match self.load {
             Some(load) => view.with_load(load),
             None => view,

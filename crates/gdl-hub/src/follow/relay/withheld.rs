@@ -32,6 +32,7 @@ fn ready(peer: &PeerInfo) -> PoolWatchEvent {
     PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: peer.clone(),
+        joined: super::tests::stamp(peer),
     }
 }
 
@@ -70,6 +71,7 @@ fn exposed(pool: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
         generation,
         segment: "f".into(),
         peer: peer.clone(),
+        joined: super::tests::stamp(peer),
     }
 }
 

@@ -343,8 +343,8 @@ impl<R: Registry> Follows<R> {
             .chain(followed.closing.values_mut())
         {
             let mut unreachable = Vec::new();
-            for (id, (_, peer)) in &follow.exposed {
-                if !self.register(peer) {
+            for (id, entry) in &follow.exposed {
+                if !self.register(&entry.peer) {
                     unreachable.push(*id);
                 }
             }
@@ -1000,12 +1000,18 @@ impl Followed {
                 generation,
                 segment,
                 peer,
+                joined,
             } => {
                 if !wants(&class, &segment) {
                     return None;
                 }
                 let key = (class, pool);
-                let change = self.current(&key, generation)?.expose(segment, peer)?;
+                let entry = Entry {
+                    segment,
+                    peer,
+                    joined,
+                };
+                let change = self.current(&key, generation)?.expose(entry)?;
                 Some((key, change))
             }
             FollowEvent::Retired {
@@ -1286,12 +1292,12 @@ struct Follow {
     state: PoolState,
     /// The pool's load summary, as it arrived.
     load: Option<Load>,
-    /// Exposed entry instances that have not retired, with their segments.
-    exposed: HashMap<InstanceId, (String, PeerInfo)>,
+    /// Exposed entry instances that have not retired.
+    exposed: HashMap<InstanceId, Entry>,
     /// Entry instances a state that takes no work hid: not routable, and
     /// held until they retire, leave, or are exposed again, or the follow
     /// is dropped, since what was offered to them may still be under way.
-    hidden: HashMap<InstanceId, (String, PeerInfo)>,
+    hidden: HashMap<InstanceId, Entry>,
     /// Retired entry instances, with their segments: never exposed again.
     retired: HashMap<InstanceId, String>,
     /// The built-in routers' turn per entry segment, carried into each
@@ -1367,19 +1373,20 @@ impl Follow {
         }
     }
 
-    /// `peer` of `segment` is exposed: the change, if any. One the state
-    /// hid is held already; one that is exposed already, or retired, or
-    /// exposed while the state allows none, changes nothing.
-    fn expose(&mut self, segment: String, peer: PeerInfo) -> Option<Change> {
-        let id = peer.instance_id();
+    /// `entry` is exposed: the change, if any. One the state hid is held
+    /// already; one that is exposed already, or retired, or exposed while
+    /// the state allows none, changes nothing.
+    fn expose(&mut self, entry: Entry) -> Option<Change> {
+        let id = entry.peer.instance_id();
         if !self.exposes() || self.exposed.contains_key(&id) || self.retired.contains_key(&id) {
             return None;
         }
         if self.hidden.remove(&id).is_some() {
-            self.exposed.insert(id, (segment, peer));
+            self.exposed.insert(id, entry);
             return Some(Change::Table);
         }
-        self.exposed.insert(id, (segment, peer.clone()));
+        let peer = entry.peer.clone();
+        self.exposed.insert(id, entry);
         Some(Change::Exposed(peer))
     }
 
@@ -1441,13 +1448,14 @@ impl Follow {
     fn table(&self, key: &Key, segment: &str, properties_version: u64) -> PoolTable {
         #[cfg(test)]
         READ.with(|read| read.set(read.get() + self.exposed.len() + self.retired.len()));
-        let mut eligible: Vec<InstanceId> = self
+        let mut exposed: Vec<(InstanceId, u64)> = self
             .exposed
             .iter()
-            .filter(|(_, (of, _))| self.offers() && of == segment)
-            .map(|(id, _)| *id)
+            .filter(|(_, entry)| self.offers() && entry.segment == segment)
+            .map(|(id, entry)| (*id, entry.joined))
             .collect();
-        eligible.sort_by_key(InstanceId::as_u128);
+        exposed.sort_by_key(|(id, _)| id.as_u128());
+        let (eligible, joined): (Vec<InstanceId>, Vec<u64>) = exposed.into_iter().unzip();
         let mut retired: Vec<InstanceId> = self
             .retired
             .iter()
@@ -1467,6 +1475,7 @@ impl Follow {
             load: self.load,
             eligible: eligible.into_boxed_slice(),
             offered,
+            stamps: gdl::JoinStamps::new(joined.into_boxed_slice(), self.epoch),
             retired: retired.into_boxed_slice(),
             unread: self.unread,
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
@@ -1477,6 +1486,15 @@ impl Follow {
             properties_version,
         }
     }
+}
+
+/// An exposed entry instance: its segment, who it is, and its join stamp,
+/// as the relay sent them.
+#[derive(Debug, Clone)]
+struct Entry {
+    segment: String,
+    peer: PeerInfo,
+    joined: u64,
 }
 
 #[cfg(test)]

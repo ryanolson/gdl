@@ -82,6 +82,7 @@ fn exposed(peer: &PeerInfo) -> FollowEvent {
         generation: 1,
         segment: "f".into(),
         peer: peer.clone(),
+        joined: stamp(peer),
     }
 }
 
@@ -89,7 +90,14 @@ fn ready(peer: &PeerInfo) -> PoolWatchEvent {
     PoolWatchEvent::Ready {
         segment: "f".into(),
         peer: peer.clone(),
+        joined: stamp(peer),
     }
+}
+
+/// A join stamp for `peer`, its own, so that a test sees whose stamp an
+/// exposure carries.
+pub(super) fn stamp(peer: &PeerInfo) -> u64 {
+    (peer.instance_id().as_u128() % 997) as u64 + 1
 }
 
 fn state(state: PoolState) -> PoolWatchEvent {
@@ -469,6 +477,7 @@ fn only_the_current_generation_writes() {
         generation: first,
         segment: "f".into(),
         peer: instance.clone(),
+        joined: stamp(&instance),
     };
     assert_eq!(
         pending(&mut watch),

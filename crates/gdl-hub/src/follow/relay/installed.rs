@@ -22,9 +22,9 @@ pub(crate) struct Installed {
     received: Instant,
     /// Retired entry instances, with their segments: never exposed.
     retired: HashMap<InstanceId, String>,
-    /// Ready entry instances that have not retired, with their segments:
-    /// exposed while the state allows.
-    ready: HashMap<InstanceId, (String, PeerInfo)>,
+    /// Ready entry instances that have not retired, with their segments
+    /// and join stamps: exposed while the state allows.
+    ready: HashMap<InstanceId, Ready>,
     /// The ready instances the relay has sent as exposed in this follow: a
     /// consumer keeps them reachable while the follow lives, so each is
     /// sent `left` when it leaves, whatever the state is by then.
@@ -153,7 +153,7 @@ impl Installed {
         let gone: Vec<(InstanceId, String)> = self
             .ready
             .iter()
-            .map(|(id, (segment, _))| (*id, segment.clone()))
+            .map(|(id, ready)| (*id, ready.segment.clone()))
             .chain(
                 self.retired
                     .iter()
@@ -182,10 +182,14 @@ impl Installed {
                 &mut send,
             );
         }
-        for (segment, peer) in fresh.ready.into_values() {
+        for ready in fresh.ready.into_values() {
             self.apply(
                 generation,
-                PoolWatchEvent::Ready { segment, peer },
+                PoolWatchEvent::Ready {
+                    segment: ready.segment,
+                    peer: ready.peer,
+                    joined: ready.joined,
+                },
                 &mut send,
             );
         }
@@ -265,12 +269,23 @@ impl Installed {
                     load,
                 });
             }
-            PoolWatchEvent::Ready { segment, peer } => {
+            PoolWatchEvent::Ready {
+                segment,
+                peer,
+                joined,
+            } => {
                 let id = peer.instance_id();
                 if self.retired.contains_key(&id) || self.ready.contains_key(&id) {
                     return;
                 }
-                self.ready.insert(id, (segment.clone(), peer.clone()));
+                self.ready.insert(
+                    id,
+                    Ready {
+                        segment: segment.clone(),
+                        peer: peer.clone(),
+                        joined,
+                    },
+                );
                 if self.exposes() {
                     self.sent.insert(id);
                     send(FollowEvent::Exposed {
@@ -279,6 +294,7 @@ impl Installed {
                         generation,
                         segment,
                         peer,
+                        joined,
                     });
                 }
             }
@@ -371,17 +387,27 @@ impl Installed {
 
     /// Every ready instance, as exposed.
     fn exposed(&self, generation: u64) -> Vec<FollowEvent> {
-        let mut ready: Vec<(&InstanceId, &(String, PeerInfo))> = self.ready.iter().collect();
-        ready.sort_by_key(|(id, (segment, _))| (segment, id.as_u128()));
+        let mut ready: Vec<(&InstanceId, &Ready)> = self.ready.iter().collect();
+        ready.sort_by_key(|(id, ready)| (&ready.segment, id.as_u128()));
         ready
             .into_iter()
-            .map(|(_, (segment, peer))| FollowEvent::Exposed {
+            .map(|(_, ready)| FollowEvent::Exposed {
                 class: self.class.clone(),
                 pool: self.pool.clone(),
                 generation,
-                segment: segment.clone(),
-                peer: peer.clone(),
+                segment: ready.segment.clone(),
+                peer: ready.peer.clone(),
+                joined: ready.joined,
             })
             .collect()
     }
+}
+
+/// A ready entry instance as the pool's watch sent it: its segment, who it
+/// is, and its join stamp, which every exposure of it carries.
+#[derive(Debug)]
+struct Ready {
+    segment: String,
+    peer: PeerInfo,
+    joined: u64,
 }

@@ -151,6 +151,8 @@ pub fn config() -> HubConfig {
 pub struct Instance {
     client: HubClient,
     segment: &'static str,
+    /// What it registers with, for a registration again.
+    payload: serde_json::Value,
     phases: HashMap<SegmentPhase, HubServiceRegistration>,
     node: Velo,
     /// The address its velo node listens on.
@@ -200,11 +202,15 @@ impl Instance {
         let registration = spec.registration(segment).expect("valid test fixture");
         let payload = serde_json::to_value(&registration).expect("valid test fixture");
         client
-            .register(&node, BTreeMap::from([("gdl".to_string(), payload)]))
+            .register(
+                &node,
+                BTreeMap::from([("gdl".to_string(), payload.clone())]),
+            )
             .await?;
         Ok(Self {
             client,
             segment,
+            payload,
             phases: HashMap::new(),
             node,
             listening,
@@ -223,6 +229,20 @@ impl Instance {
     /// The velo peer it registered with.
     pub fn peer(&self) -> velo_hub::velo::PeerInfo {
         self.node.peer_info()
+    }
+
+    /// Register again with the credential the client holds: the hub
+    /// replaces the registration, numbering it past every earlier one,
+    /// and the instance stays in the services it announced.
+    #[allow(dead_code, reason = "not every test binary registers again")]
+    pub async fn register_again(&self) {
+        self.client
+            .register(
+                &self.node,
+                BTreeMap::from([("gdl".to_string(), self.payload.clone())]),
+            )
+            .await
+            .expect("the hub takes the registration again");
     }
 
     pub async fn announce(&mut self, phase: SegmentPhase) {

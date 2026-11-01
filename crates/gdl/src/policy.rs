@@ -306,6 +306,10 @@ pub struct Pool {
     changes: u64,
     /// The epoch of the pool's hub that the follow is of.
     epoch: u64,
+    /// The lowest and highest join stamps of the entry instances it
+    /// offers, 0 when unknown.
+    joined_from: u64,
+    joined_through: u64,
 }
 
 impl Pool {
@@ -330,6 +334,8 @@ impl Pool {
             generation: 0,
             changes: 0,
             epoch: 0,
+            joined_from: 0,
+            joined_through: 0,
         }
     }
 
@@ -354,6 +360,23 @@ impl Pool {
     #[inline]
     pub fn with_epoch(mut self, epoch: u64) -> Self {
         self.epoch = epoch;
+        self
+    }
+
+    /// The pool with the join stamps of the entry instances it offers
+    /// ([`crate::Instance::joined`]), from which it keeps the lowest and
+    /// the highest: none when `joined` is empty or holds a 0.
+    pub fn with_joined(mut self, joined: &[u64]) -> Self {
+        let (from, through) = joined
+            .iter()
+            .fold((u64::MAX, 0), |(from, through), &stamp| {
+                (from.min(stamp), through.max(stamp))
+            });
+        (self.joined_from, self.joined_through) = if joined.is_empty() || from == 0 {
+            (0, 0)
+        } else {
+            (from, through)
+        };
         self
     }
 
@@ -440,6 +463,27 @@ impl Pool {
     #[inline]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The highest join stamp ([`crate::Instance::joined`]) among the entry
+    /// instances the pool offers, in its hub of [`epoch`](Pool::epoch): a
+    /// session's cutoff ([`crate::JoinedThrough`]) when it chooses this
+    /// row first, so that an instance that joins the pool later never takes
+    /// it. `None` when the pool offers none, or the join order of one is
+    /// unknown: a stamp of 0, from a hub of an earlier build.
+    #[inline]
+    pub fn joined_through(&self) -> Option<u64> {
+        (self.joined_through > 0).then_some(self.joined_through)
+    }
+
+    /// The lowest join stamp among the entry instances the pool offers,
+    /// under the same rules as [`joined_through`](Pool::joined_through).
+    /// A pool of the same epoch as a session's cutoff offers none of the
+    /// instances it may be ranked on when this is past the cutoff: every
+    /// one has left, and the cutoff can move up.
+    #[inline]
+    pub fn joined_from(&self) -> Option<u64> {
+        (self.joined_from > 0).then_some(self.joined_from)
     }
 
     /// Whether the pool takes work: `ready` or `degraded`, with an entry
@@ -1163,6 +1207,42 @@ fn mix(draw: u64, nth: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
+
+    /// A pool's join stamps: the lowest and highest of its offered entry
+    /// instances', and neither when it offers none, or when one is 0, from
+    /// a hub of an earlier build. With a session's cutoff of 20, a pool
+    /// offering instances joined at 10 and 30 still offers one at or below
+    /// it, and one offering 25 and 30 does not: the highest is 30 in both,
+    /// so only the lowest tells them apart.
+    #[test]
+    fn a_pool_reads_its_lowest_and_highest_join_stamps() {
+        let pool = |joined: &[u64]| {
+            Pool::new("model", "m", "r", PoolState::Ready)
+                .with_entries(joined.len())
+                .with_joined(joined)
+        };
+        let kept = pool(&[30, 10]);
+        let emptied = pool(&[25, 30]);
+        assert_eq!(
+            (kept.joined_from(), kept.joined_through()),
+            (Some(10), Some(30))
+        );
+        assert_eq!(
+            (emptied.joined_from(), emptied.joined_through()),
+            (Some(25), Some(30))
+        );
+        let cutoff = 20;
+        assert!(kept.joined_from().is_some_and(|from| from <= cutoff));
+        assert!(emptied.joined_from().is_some_and(|from| from > cutoff));
+        for unknown in [pool(&[]), pool(&[0, 30]), pool(&[30, 0])] {
+            assert_eq!(
+                (unknown.joined_from(), unknown.joined_through()),
+                (None, None)
+            );
+        }
+        let bare = Pool::new("model", "m", "r", PoolState::Ready).with_entries(2);
+        assert_eq!((bare.joined_from(), bare.joined_through()), (None, None));
+    }
 
     /// A summary is fresh for three of its periods after it arrived,
     /// unless the chooser is given another count.

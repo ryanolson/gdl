@@ -271,6 +271,7 @@ impl Fleet {
                 load: super::super::tests::idle(),
                 eligible: Box::new([id]),
                 offered: Box::new([selector_id(id)]),
+                stamps: gdl::JoinStamps::default(),
                 retired: Box::new([]),
                 unread: false,
                 turn: Arc::new(AtomicUsize::new(0)),
@@ -421,6 +422,7 @@ impl Fleet {
                     } else {
                         Box::new([])
                     },
+                    stamps: gdl::JoinStamps::default(),
                     retired: shown.retired.clone(),
                     unread: shown.unread,
                     turn: Arc::clone(&shown.turn),

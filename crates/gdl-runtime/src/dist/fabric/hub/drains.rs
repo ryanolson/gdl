@@ -148,6 +148,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
             generation: 1,
             segment: "sink".into(),
             peer: peer.peer_info(),
+            joined: 1,
         },
     ] {
         chooser.apply(event, start);

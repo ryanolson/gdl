@@ -296,6 +296,7 @@ mod tests {
                 .iter()
                 .map(|id| crate::dist::roster::selector_id(*id))
                 .collect(),
+            stamps: gdl::JoinStamps::default(),
             retired: Box::new([]),
             unread: false,
             turn: Arc::new(AtomicUsize::new(0)),
