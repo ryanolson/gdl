@@ -143,23 +143,57 @@ impl Forward {
     /// included. A later one, as a failover makes, or one whose fields do
     /// not fit the room, copies the head and its view after them.
     pub(crate) fn wire(&mut self) -> Result<Bytes> {
-        let mut header = [0u8; HEADER_ROOM];
-        let mut free = &mut header[..];
-        let fits = self.write_header(&mut free).is_ok();
-        let len = HEADER_ROOM - free.len();
+        let mut room = [0u8; HEADER_ROOM];
+        let mut free = &mut room[..];
+        // A header past the room on the stack, as large meta makes, is
+        // written to the heap: a failover's copy of the head can still have
+        // room in front for it (`Forward::set_view`).
+        let spilled;
+        let header = if self.write_header(&mut free).is_ok() {
+            let len = HEADER_ROOM - free.len();
+            &room[..len]
+        } else {
+            let mut written = Vec::new();
+            self.write_header(&mut written)?;
+            spilled = written;
+            &spilled[..]
+        };
+        let len = header.len();
         let at = self.payload.at();
-        if let (true, Buffer::Room(buffer)) = (fits && len <= at, &mut self.payload.buffer) {
+        if let (true, Buffer::Room(buffer)) = (len <= at, &mut self.payload.buffer) {
             let start = at - len;
-            buffer[start..at].copy_from_slice(&header[..len]);
+            buffer[start..at].copy_from_slice(header);
             let bytes = Bytes::from(std::mem::take(buffer));
             self.payload.buffer = Buffer::Sent(bytes.clone());
             return Ok(bytes.slice(start..));
         }
         let carried = self.payload.carried();
-        let mut bytes = Vec::with_capacity(2 * HEADER_ROOM + carried.len());
-        self.write_header(&mut bytes)?;
+        let mut bytes = Vec::with_capacity(len + carried.len());
+        bytes.extend_from_slice(header);
         bytes.extend_from_slice(carried);
         Ok(Bytes::from(bytes))
+    }
+
+    /// Carry `view` after the head, in place of any view before
+    /// ([`Head::set_view`]). When that takes a copy of a head an offer
+    /// already sent, the copy has room in front for the envelope's header
+    /// as it is now, so the next offer copies nothing more.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    pub(crate) fn set_view(&mut self, view: Option<OfferView>) {
+        if self.payload.view() == view {
+            return;
+        }
+        let room = match self.payload.buffer {
+            Buffer::Room(_) => HEADER_ROOM,
+            Buffer::Sent(_) => {
+                let mut header = Vec::new();
+                match self.write_header(&mut header) {
+                    Ok(()) => header.len().max(HEADER_ROOM),
+                    Err(_) => HEADER_ROOM,
+                }
+            }
+        };
+        self.payload.set_view_with_room(view, room);
     }
 
     /// The envelope an offer sent, `bytes`, with the view after it, if one
@@ -283,6 +317,11 @@ impl Head {
     /// different view takes a copy of the head, as the next offer's copy
     /// would.
     pub(crate) fn set_view(&mut self, view: Option<OfferView>) {
+        self.set_view_with_room(view, HEADER_ROOM);
+    }
+
+    /// [`Head::set_view`], with `room` in front of a copy it takes.
+    fn set_view_with_room(&mut self, view: Option<OfferView>, room: usize) {
         if self.view() == view {
             return;
         }
@@ -295,10 +334,11 @@ impl Head {
             // A copy with room in front, so that the next offer writes the
             // envelope into it rather than copying the head again.
             Buffer::Sent(bytes) => {
-                let mut buffer = Vec::with_capacity(HEADER_ROOM + self.len as usize + TAIL_ROOM);
-                buffer.resize(HEADER_ROOM, 0);
+                let mut buffer = Vec::with_capacity(room + self.len as usize + TAIL_ROOM);
+                buffer.resize(room, 0);
                 buffer.extend_from_slice(&bytes[self.at()..end]);
-                self.at = HEADER_ROOM as u32;
+                // A header is far under 4 GiB.
+                self.at = u32::try_from(room).unwrap_or(u32::MAX);
                 buffer
             }
         };
@@ -763,10 +803,26 @@ mod tests {
         }
     }
 
+    /// The entry puts an offer's view in the request's context once it
+    /// admits the request: two allocations, the context's map of
+    /// extensions and the value. An offer without a view adds none.
+    #[test]
+    fn a_view_in_the_arrived_context_takes_two_allocations() {
+        let mut cx = Cx::new();
+        let before = crate::dist::counting::counted();
+        counting(true);
+        cx.insert_ext(VIEW);
+        counting(false);
+        assert_eq!(crate::dist::counting::counted() - before, 2);
+        assert_eq!(cx.ext::<OfferView>(), Some(&VIEW));
+    }
+
     /// A failover to another pool whose view differs, or that has none,
-    /// copies a large head once, as a failover with the same view does:
-    /// the new view is written into a copy that keeps room in front for
-    /// the envelope, so sending it copies nothing more.
+    /// copies a large head once, as a failover with the same view does,
+    /// also when its selector's meta grew the envelope past the room an
+    /// encoder leaves: the new view is written into a copy that keeps room
+    /// in front for the envelope as it is, so sending it copies nothing
+    /// more.
     #[test]
     fn a_failover_with_another_view_copies_the_head_once() {
         let codec = Codec::<Image>::new(Encoding::Msgpack);
@@ -774,27 +830,41 @@ mod tests {
             epoch: VIEW.epoch,
             sequence: VIEW.sequence + 1,
         };
-        for next in [Some(other), None, Some(VIEW)] {
-            let image = Image {
-                url: "a".repeat(4 * 1024 * 1024),
-                detail: "high".into(),
-            };
-            let mut envelope = hand_off(&codec, image, &[]);
-            envelope.payload.set_view(Some(VIEW));
-            envelope.wire().expect("the first offer");
-            take_sizes();
-            counting(true);
-            envelope.payload.set_view(next);
-            let bytes = envelope.wire().expect("the failover's offer");
-            counting(false);
-            let sizes = take_sizes();
-            assert!(
-                sizes.bytes <= bytes.len() + 2 * HEADER_ROOM + TAIL_ROOM,
-                "{} B allocated for an offer of {} B, next view {next:?}",
-                sizes.bytes,
-                bytes.len()
-            );
-            assert_eq!(Forward::read(&bytes).expect("read").payload.view(), next);
+        let large = "m".repeat(2 * HEADER_ROOM);
+        for meta in [&[][..], &[("large", large.as_str())][..]] {
+            for next in [Some(other), None, Some(VIEW)] {
+                let image = Image {
+                    url: "a".repeat(4 * 1024 * 1024),
+                    detail: "high".into(),
+                };
+                let mut envelope = hand_off(&codec, image, &[]);
+                envelope.set_view(Some(VIEW));
+                envelope.wire().expect("the first offer");
+                take_sizes();
+                counting(true);
+                // As a failover's selector adds its meta, then the view.
+                envelope.cx.add_meta(
+                    meta.iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect(),
+                );
+                envelope.set_view(next);
+                let bytes = envelope.wire().expect("the failover's offer");
+                counting(false);
+                let sizes = take_sizes();
+                let case = format!("next view {next:?}, meta of {} B", meta.len());
+                // One copy of the head, and the meta's own few allocations:
+                // far under a second copy.
+                assert!(
+                    sizes.bytes <= bytes.len() + 64 * 1024,
+                    "{} B allocated for an offer of {} B, {case}",
+                    sizes.bytes,
+                    bytes.len()
+                );
+                let back = Forward::read(&bytes).expect("read");
+                assert_eq!(back.payload.view(), next, "{case}");
+                assert_eq!(back.payload[..], envelope.payload[..], "{case}");
+            }
         }
     }
 

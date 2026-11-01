@@ -1109,11 +1109,6 @@ where
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
         let mut cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        // The view the chooser decided on, for the entry's nodes to read:
-        // only an offer whose pool policy asked for it carries one.
-        if let Some(view) = envelope.payload.view() {
-            cx.insert_ext(view);
-        }
         // Before admission, so that an offer the instance cannot serve
         // takes no permit and waits for none; after a drain's refusal,
         // which says more, since it holds for every request. The version
@@ -1171,6 +1166,12 @@ where
             && wanted.version(pos) != version
         {
             wanted.check(pos, &envelope.payload)?;
+        }
+        // The view the chooser decided on, for the entry's nodes to read:
+        // only an offer whose pool policy asked for it carries one. Once
+        // admitted, so that a refused offer allocates nothing for it.
+        if let Some(view) = envelope.payload.view() {
+            cx.insert_ext(view);
         }
         Ok((cx, share, egress))
     }

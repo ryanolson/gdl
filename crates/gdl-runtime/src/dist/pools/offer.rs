@@ -113,7 +113,7 @@ impl Runtime {
                     &mut view,
                 )?;
                 Ok(picked.map(|(instance, pool, lease)| {
-                    envelope.payload.set_view(view);
+                    envelope.set_view(view);
                     (instance, pool, Held::pool(None, lease))
                 }))
             }
@@ -133,7 +133,7 @@ impl Runtime {
                     .await?;
                 Ok(chosen.map(|(instance, pool, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
-                    envelope.payload.set_view(view);
+                    envelope.set_view(view);
                     (instance, pool, Held::pool(picked.lease, lease))
                 }))
             }
