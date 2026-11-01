@@ -239,44 +239,6 @@ impl Crossing {
         }
     }
 
-    /// The pool `pool` declined an offer of `view` over its budget, and
-    /// its policy did not keep the request with it: pass it over until the
-    /// chooser holds a newer summary of it than `view`, or the one its
-    /// current table shows when the offer carried none, or for one of its
-    /// summary periods, whichever comes first ([`super::Damping::budget`]).
-    /// A pool the table no longer shows is left as it is. Read only on a
-    /// decline.
-    pub(crate) fn declined_budget(&self, pool: u64, view: Option<gdl::OfferView>) {
-        let target = &self.target;
-        let table = target.table.load();
-        let Some(shown) = table.pools.iter().find(|shown| shown.id == pool) else {
-            return;
-        };
-        let Some(now) = table.view_of(pool) else {
-            return;
-        };
-        let view = view.map_or(now, |view| (view.epoch, view.sequence));
-        // A pool with no summary period is passed over for the first window.
-        let period = shown
-            .load
-            .map(|load| std::time::Duration::from_millis(load.summary().period_ms))
-            .filter(|period| !period.is_zero())
-            .unwrap_or(target.damping.first());
-        // The rule ([`super::damping`]) marks nothing when the table shows a
-        // newer summary: that is a new budget.
-        target
-            .damping
-            .budget(pool, view, Some(now), period, tokio::time::Instant::now());
-        // A newer table stored since the load above forgot the marks before
-        // this one was made: read it again, and forget this one if so.
-        let current = target.table.load();
-        if let Some(newer) = current.view_of(pool) {
-            target.damping.forget_budgets(|marked, of| {
-                marked != pool || super::damping::budget_stays(of, newer)
-            });
-        }
-    }
-
     /// The pool policy's [`NoPool`] for a request whose every pool it
     /// `left` the chooser holds gone, when the policy chooses no other
     /// pool for it: what the requests after it meet, since no choice
@@ -1681,41 +1643,6 @@ mod tests {
         let view = view.expect("a numbered row's view");
         assert_eq!(view.fill_max_ppm, None);
         assert_eq!((view.epoch, view.sequence), (1, 5));
-    }
-
-    /// A refusal over budget of a view older than the summary the
-    /// chooser's table already shows marks nothing: that summary is a new
-    /// budget. One of the same summary marks the pool.
-    #[test]
-    fn a_late_budget_refusal_marks_nothing() {
-        let ids = ids(1);
-        let leases = Arc::default();
-        let viewed = crossing(
-            vec![numbered(pool("m", PoolState::Ready, &ids), 1, 8, &leases)],
-            Within::Policy(Policy::RoundRobin),
-        );
-        let id = super::super::pool_id("model_x", "m");
-        let older = gdl::OfferView {
-            epoch: 1,
-            sequence: 7,
-            fill_max_ppm: None,
-        };
-        viewed.declined_budget(id, Some(older));
-        assert!(
-            !viewed.target.damping.view().is_damped(id),
-            "a newer summary is held"
-        );
-        viewed.declined_budget(
-            id,
-            Some(gdl::OfferView {
-                sequence: 8,
-                ..older
-            }),
-        );
-        assert!(
-            viewed.target.damping.view().is_damped(id),
-            "the same summary"
-        );
     }
 
     /// A choice whose policy asks for no view puts none on the offer, and

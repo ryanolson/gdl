@@ -234,23 +234,11 @@ impl Pools {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Replace `segment`'s table, and forget each budget mark of a pool it
-    /// shows with a newer summary than the one its decline was of: the
-    /// next summary is a new budget. One load of the marks, and a branch
-    /// while no pool is marked.
+    /// Replace `segment`'s table.
     fn store(&self, segment: &str, table: EntryTable) {
-        let table = Arc::new(table);
-        // Stored first, then the marks: a refusal that marks a pool after
-        // this forgetting reads this table, and sees the newer summary
-        // itself ([`Crossing::declined_budget`]).
         if let Some(slot) = self.shared.segments.get(segment) {
-            slot.store(Arc::clone(&table));
+            slot.store(Arc::new(table));
         }
-        self.shared.damping.forget_budgets(|pool, view| {
-            table
-                .view_of(pool)
-                .is_none_or(|shown| damping::budget_stays(view, shown))
-        });
     }
 
     /// Run `act` while no registration of the follower can change, with
@@ -483,14 +471,6 @@ impl EntryTable {
             properties: Arc::default(),
             fill_max_ppm,
         }
-    }
-
-    /// The (epoch, sequence) of the summary the table shows of `pool`,
-    /// with sequence 0 for none: what a budget's mark is compared with.
-    pub(crate) fn view_of(&self, pool: u64) -> Option<(u64, u64)> {
-        let shown = self.pools.iter().find(|shown| shown.id == pool)?;
-        let sequence = shown.load.map_or(0, |load| load.summary().sequence);
-        Some((shown.epoch, sequence))
     }
 
     /// `request` with what the table holds of the class beside its pools:

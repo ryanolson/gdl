@@ -458,7 +458,7 @@ async fn a_re_queued_request_is_offered_to_its_pool_again_with_no_failover() {
 /// a policy that re-queues the request keeps it with the pool, which takes
 /// it once it has room, with no failover and no damping. The control: a
 /// policy that does not re-queue it sends it to the next pool, and the
-/// pool is passed over for no longer than one of its summary periods.
+/// pool is not damped, so the next request is offered to it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_budget_decline_is_asked_about_and_re_queued_as_a_full_one_is() {
     let fleet = Fleet::new(backoff()).await;
@@ -483,72 +483,16 @@ async fn a_budget_decline_is_asked_about_and_re_queued_as_a_full_one_is() {
     fleet.decline([1, 0, 0]);
     let (sent, _) = fleet.send(&router, &Cx::new()).await;
     sent.expect("m2 took it");
-    let start = tokio::time::Instant::now();
     assert_eq!(fleet.offered(), [4, 1, 0], "the control");
     assert_eq!(fleet.failovers(), [0.0, 1.0, 0.0]);
-    let damped = fleet.pools.damping().view();
-    let id = pool_id("model_x", "m1");
-    assert!(damped.is_damped(id));
-    // The pool's summary period, 60 s: never longer.
-    assert!(
-        damped.left(id, start) <= 60_000,
-        "{}",
-        damped.left(id, start)
-    );
-    assert!(
-        damped.left(id, start) > 1_000,
-        "a budget's mark, not a first window"
-    );
-
-    // A table that shows the same summary keeps the mark; one with a newer
-    // summary of the pool ends it, as the next summary is a new budget.
-    let numbered = |sequence: u64| {
-        let table = fleet.pools.table("d").expect("the table");
-        let pools: Vec<Arc<PoolTable>> = table
-            .pools
-            .iter()
-            .map(|shown| {
-                let load = shown.load.map(|load| {
-                    let summary = gdl::LoadSummary {
-                        sequence: if shown.id == id { sequence } else { 0 },
-                        ..*load.summary()
-                    };
-                    gdl::Load::new(summary, load.arrived())
-                });
-                Arc::new(PoolTable {
-                    class: shown.class.clone(),
-                    pool: shown.pool.clone(),
-                    id: shown.id,
-                    generation: shown.generation,
-                    epoch: shown.epoch,
-                    region: shown.region.clone(),
-                    state: shown.state,
-                    load,
-                    eligible: shown.eligible.clone(),
-                    offered: shown.offered.clone(),
-                    retired: shown.retired.clone(),
-                    unread: shown.unread,
-                    turn: Arc::clone(&shown.turn),
-                    offering: shown.offering,
-                    revision: shown.revision,
-                    changes: shown.changes,
-                    leases: Arc::clone(&shown.leases),
-                    properties_version: shown.properties_version,
-                })
-            })
-            .collect();
-        EntryTable::new(pools.into())
-    };
-    fleet.pools.store("d", numbered(0));
-    assert!(
-        fleet.pools.damping().view().is_damped(id),
-        "the same summary"
-    );
-    fleet.pools.store("d", numbered(1));
-    assert!(
-        !fleet.pools.damping().view().is_damped(id),
-        "a newer summary"
-    );
+    // A budget's decline damps nothing: the next request is offered to the
+    // pool again, which takes it once its budget has room.
+    let m1 = &fleet.pools.followed("d")[0];
+    assert!(m1.damped.is_none(), "{m1:?}");
+    let router = fleet.router(Keeping::default());
+    let (sent, _) = fleet.send(&router, &Cx::new()).await;
+    sent.expect("m1 took it");
+    assert_eq!(fleet.offered(), [5, 1, 0], "offered m1 again at once");
 }
 
 /// A request re-queued after its pool declined it over its budget is

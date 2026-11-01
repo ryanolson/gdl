@@ -28,9 +28,6 @@ pub struct Damped {
     /// Whether any pool is gone, so that a choice while none is reads
     /// nothing more.
     gone: bool,
-    /// Whether any pool is marked over its budget, so that a new table
-    /// clears none while none is.
-    budget: bool,
 }
 
 /// One damped pool's window: when it ends, and how long it was, which the
@@ -48,12 +45,6 @@ pub struct Window {
 enum Mark {
     Window(Window),
     Gone(Follow),
-    /// Declined over its budget for the view (epoch, sequence): a window
-    /// that never doubles, and that a newer summary of the pool ends.
-    Budget {
-        until: Instant,
-        view: (u64, u64),
-    },
 }
 
 /// A pool's follow as a chooser's table shows it, by the epoch of the hub
@@ -85,7 +76,6 @@ impl Damped {
         pools: Vec::new(),
         latest: None,
         gone: false,
-        budget: false,
     };
 
     /// The pools in `windows` damped, each until the instant given with
@@ -170,7 +160,7 @@ impl Damped {
     pub fn retain_gone(&self, keep: impl Fn(u64, (u64, u64, u64)) -> bool) -> Option<Self> {
         let stale = |(id, mark): &(u64, Mark)| match mark {
             Mark::Gone(follow) => !keep(*id, (follow.epoch, follow.generation, follow.changes)),
-            Mark::Window(_) | Mark::Budget { .. } => false,
+            Mark::Window(_) => false,
         };
         if !self.gone || !self.pools.iter().any(stale) {
             return None;
@@ -194,65 +184,12 @@ impl Damped {
             .count()
     }
 
-    /// The list with `pool` marked over its budget for `view`, the
-    /// (epoch, sequence) its decline was of, until `until`, in place of any
-    /// mark it had.
-    #[doc(hidden)]
-    pub fn with_budget(&self, pool: u64, view: (u64, u64), until: Instant) -> Self {
-        self.marked(pool, Mark::Budget { until, view })
-    }
-
-    /// The view of `pool`'s budget mark, if it has one, whether or not
-    /// the mark has passed.
-    #[doc(hidden)]
-    #[inline]
-    pub fn budget_of(&self, pool: u64) -> Option<(u64, u64)> {
-        match self.mark(pool)? {
-            Mark::Budget { view, .. } => Some(view),
-            Mark::Window(_) | Mark::Gone(_) => None,
-        }
-    }
-
-    /// Whether `pool` is marked over its budget, whether or not the mark
-    /// has passed.
-    #[doc(hidden)]
-    #[inline]
-    pub fn holds_budget(&self, pool: u64) -> bool {
-        self.budget && matches!(self.mark(pool), Some(Mark::Budget { .. }))
-    }
-
-    /// The list without each budget mark that `keep` refuses, given the
-    /// pool's id and the view its decline was of, or `None` when it
-    /// refuses none. Other marks stay.
-    #[doc(hidden)]
-    pub fn retain_budgets(&self, keep: impl Fn(u64, (u64, u64)) -> bool) -> Option<Self> {
-        let stale = |(id, mark): &(u64, Mark)| match mark {
-            Mark::Budget { view, .. } => !keep(*id, *view),
-            Mark::Window(_) | Mark::Gone(_) => false,
-        };
-        if !self.budget || !self.pools.iter().any(stale) {
-            return None;
-        }
-        let pools = self
-            .pools
-            .iter()
-            .filter(|pool| !stale(pool))
-            .copied()
-            .collect();
-        Some(Self::of(pools))
-    }
-
-    /// `pool`'s window, if it is damped: a budget's mark is a window of no
-    /// length, so that the next decline after it starts at the first.
+    /// `pool`'s window, if it is damped.
     #[doc(hidden)]
     #[inline]
     pub fn window(&self, pool: u64) -> Option<Window> {
         match self.mark(pool)? {
             Mark::Window(window) => Some(window),
-            Mark::Budget { until, .. } => Some(Window {
-                until,
-                length: Duration::ZERO,
-            }),
             Mark::Gone(_) => None,
         }
     }
@@ -306,19 +243,14 @@ impl Damped {
             .iter()
             .filter_map(|(_, mark)| match mark {
                 Mark::Window(window) => Some(window.until),
-                Mark::Budget { until, .. } => Some(*until),
                 Mark::Gone(_) => None,
             })
             .max();
         let gone = pools.iter().any(|(_, mark)| matches!(mark, Mark::Gone(_)));
-        let budget = pools
-            .iter()
-            .any(|(_, mark)| matches!(mark, Mark::Budget { .. }));
         Self {
             pools,
             latest,
             gone,
-            budget,
         }
     }
 }

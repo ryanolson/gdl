@@ -315,7 +315,7 @@ A registered policy can run either of them over only the pools it keeps, with `c
 
 Under every policy, the chooser damps a pool that declined a request as full, unless the pool policy re-queued the request for that pool ([below](#a-request-re-queued-for-its-pool)). `round_robin` and `home_first` pass a damped pool over as this section says. A registered policy sees the damped pools and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] pool_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`pool_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
 
-A pool that declined over its budget ([A pool's gate](#a-pools-gate)), and whose request the policy did not re-queue, is damped for one of its summary periods, or until the chooser holds a newer summary of it, whichever comes first: the next summary is a new budget. Such a window never doubles, and the next full decline after it starts at the first window. An offer the pool accepts does not end it, since a pinned turn's acceptance says nothing of the budget. A decline that lands while another window lasts leaves it as it is.
+A pool that declined over its budget ([A pool's gate](#a-pools-gate)) is not damped: the request goes to another pool, unless the pool policy re-queues it, and the next request is offered to the pool as before. Its next summary is a new budget, and until it arrives each such offer costs a round trip ([Limitations](../operations/limitations.md#a-pool-over-its-budget-is-offered-requests-until-its-next-summary)).
 
 At most half of the otherwise eligible pools, rounded down, are damped at once. When more are, the pools whose windows end soonest are chosen as if they were not damped. So a lone pool is never damped out.
 
@@ -418,7 +418,7 @@ A child pool may decline the hand-off. The chooser then offers the request to an
 | The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the pool declines offers (a drain, or its own policy) | another pool is offered the request, or, when it declined as full and the pool policy re-queues the request, the same pool once it has room |
 | The entry answers `Overloaded` as its own decline: it cannot serve the request | the pool's next entry instance is offered the request, then another pool |
 | The entry answers `Overloaded` as not present: it does not have the property the request wants | another pool is offered the request; the pool is not damped |
-| The entry answers `Overloaded` over its budget: its gate declined the offer | another pool is offered the request, or, when the pool policy re-queues the request, the same pool at its next summary; the pool is damped until then, or for one period |
+| The entry answers `Overloaded` over its budget: its gate declined the offer | another pool is offered the request, or, when the pool policy re-queues the request, the same pool at its next summary; the pool is not damped |
 | The entry answers `Placement`: the hand-off is not of its deployment | another pool is offered the request |
 | velo refuses the send before it leaves: the instance is not registered, or its handshake fails | another pool is offered the request |
 | No answer within the setup timeout, or the send fails after velo took it | the request fails at once with `OutcomeUnknown`; no other pool is offered it |

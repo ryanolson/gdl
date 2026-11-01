@@ -259,9 +259,9 @@ impl Runtime {
                                     }
                                     Requeued::Unavailable => {}
                                 }
-                            } else if last == Some(Decline::Budget) {
-                                crossing.declined_budget(pool, envelope.payload.view());
-                            } else {
+                            } else if last == Some(Decline::Full) {
+                                // A budget's decline damps nothing: the
+                                // pool's next summary is a new budget.
                                 crossing.declined(pool, Decline::Full, None);
                             }
                         }

@@ -33,10 +33,9 @@ pub enum Decline {
     /// admitted enough since that load summary, or the view is too old.
     /// The pool's policy is asked whether to keep the request with it
     /// ([`crate::PoolPolicy::requeue`]), as for a full pool. Otherwise the
-    /// chooser passes the pool over until it holds a newer summary of it,
-    /// or for one of its summary periods, whichever comes first, and never
-    /// longer: the next summary is a new budget. A chooser of a build
-    /// before this reason reads it as [`Decline::Full`], and damps the
-    /// pool for its first window, doubling after.
+    /// request goes to another pool, and the chooser damps nothing: the
+    /// pool's next summary is a new budget. A chooser of a build before
+    /// this reason reads it as [`Decline::Full`], and damps the pool for
+    /// its first window, doubling after.
     Budget,
 }
