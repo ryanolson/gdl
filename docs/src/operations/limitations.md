@@ -708,6 +708,10 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **What:** a pool's gate that declines over its budget does not damp the pool at the chooser. Each first turn a chooser offers it until its next summary is declined, at the cost of a round trip, and goes to another pool.
 - **Lifts:** a measurement that a pass-over after a budget's decline is worth its rule.
 
+### A request re-queued over a pool's budget waits for its next summary
+- **What:** a request whose policy keeps it with a pool that declined it over its budget is offered to the pool again only once the pool shows a newer summary. If the pool's summaries stop while it still takes work, the request leaves when the policy no longer takes the pool: under `home_first`, once the summary is stale (three periods by default). Under `round_robin`, or a registered policy that takes a pool whatever its summary, it waits until its deadline.
+- **Lifts:** a wait bounded by the pool's period as well as by the request's deadline.
+
 ### A pool's budget is the node's, and each chooser's fullest fill is its own
 - **What:** gdl carries what a pool budgets first turns by (the view, the fleet's fullest fill, and the pool's own summary) and lets its gate decline an offer, but the budget itself is node code: how it counts the leases admitted since a summary, and how it splits one budget over the pool's entry instances. Two choosers can carry a different fullest fill for one summary, each from its own table, so one pool can judge two offers of one summary by two budgets.
 - **Lifts:** a budget kept by the pool's hub, or the session ledger's owner, for every entry instance.

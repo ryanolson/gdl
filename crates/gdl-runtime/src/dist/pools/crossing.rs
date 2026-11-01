@@ -442,8 +442,13 @@ impl Crossing {
     /// newer summary yet: `Some(true)` while it does not, so that an offer
     /// would be declined again, `Some(false)` once it does, and `None` once
     /// the request is to leave the pool, as [`Crossing::pick_again`]
-    /// judges it: no longer followed, or no longer taking work. One load
-    /// of the table, a search of its pools, and the clock.
+    /// judges it: no longer followed, or no longer taking work. A pool
+    /// whose summaries stop while it still takes work leaves the request
+    /// waiting as long as the policy still takes the pool: `home_first`
+    /// does not once the summary is stale, so the request leaves then;
+    /// `round_robin` reads no summary, so the request waits for a newer
+    /// one, or its deadline. One load of the table, a search of its pools,
+    /// and the clock.
     pub(crate) fn still_spent(&self, pool: u64, spent: (u64, u64)) -> Option<bool> {
         let target = &self.target;
         let table = target.table.load();
