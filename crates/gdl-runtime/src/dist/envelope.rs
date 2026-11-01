@@ -876,7 +876,9 @@ mod tests {
     /// large meta makes, takes one allocation beyond its header's failed
     /// try on the stack: the buffer it sends. A failover's change of view
     /// takes one too, the copy of the head, which the offer then writes its
-    /// header into. Neither writes its header anywhere else first.
+    /// header into, also when the header grew past the room after the
+    /// first offer sent the head's own buffer. Neither writes its header
+    /// anywhere else first.
     #[test]
     fn a_long_header_allocates_only_what_is_sent() {
         let codec = Codec::<Image>::new(Encoding::Msgpack);
@@ -917,6 +919,49 @@ mod tests {
             Forward::read(&again).expect("read").payload.view(),
             Some(VIEW)
         );
+
+        // A first offer with a short header sends the head's own buffer;
+        // the failover's selector then grows the header, and the view
+        // changes: the copy keeps room for the longer header, which the
+        // offer writes into it.
+        let image = Image {
+            url: "a".repeat(100),
+            detail: "high".into(),
+        };
+        let mut envelope = hand_off(&codec, image, &[]);
+        envelope.set_view(Some(VIEW));
+        let first = envelope.wire().expect("the first offer");
+        assert!(matches!(envelope.payload.buffer, Buffer::Sent(_)));
+        assert_eq!(first[..], with_trailer(&envelope, VIEW)[..]);
+        envelope
+            .cx
+            .add_meta(vec![("large".to_string(), large.clone())]);
+        let other = OfferView {
+            epoch: VIEW.epoch,
+            sequence: VIEW.sequence + 1,
+        };
+        let before = crate::dist::counting::counted();
+        counting(true);
+        envelope.set_view(Some(other));
+        counting(false);
+        assert_eq!(
+            crate::dist::counting::counted() - before,
+            1,
+            "the view's copy of the head"
+        );
+        let written = envelope.payload.as_ptr() as usize;
+        let again = envelope.wire().expect("the failover's offer");
+        let trailer = encode(&(other.epoch, other.sequence))
+            .expect("encode")
+            .len();
+        let head = envelope.payload.len();
+        let sent = &again[again.len() - trailer - head..];
+        assert_eq!(
+            sent.as_ptr() as usize,
+            written,
+            "the offer copied the head again, past the view's copy"
+        );
+        assert_eq!(again[..], with_trailer(&envelope, other)[..]);
     }
 
     /// The entry puts an offer's view in the request's context once it
