@@ -246,9 +246,11 @@ impl Pools {
         if let Some(slot) = self.shared.segments.get(segment) {
             slot.store(Arc::clone(&table));
         }
-        self.shared
-            .damping
-            .forget_budgets(|pool, view| table.view_of(pool).is_none_or(|now| now <= view));
+        self.shared.damping.forget_budgets(|pool, view| {
+            table
+                .view_of(pool)
+                .is_none_or(|shown| damping::budget_stays(view, shown))
+        });
     }
 
     /// Run `act` while no registration of the follower can change, with

@@ -256,26 +256,24 @@ impl Crossing {
             return;
         };
         let view = view.map_or(now, |view| (view.epoch, view.sequence));
-        // The table holds a newer summary already: a new budget.
-        if now > view {
-            return;
-        }
         // A pool with no summary period is passed over for the first window.
         let period = shown
             .load
             .map(|load| std::time::Duration::from_millis(load.summary().period_ms))
             .filter(|period| !period.is_zero())
             .unwrap_or(target.damping.first());
+        // The rule ([`super::damping`]) marks nothing when the table shows a
+        // newer summary: that is a new budget.
         target
             .damping
-            .budget(pool, view, period, tokio::time::Instant::now());
+            .budget(pool, view, Some(now), period, tokio::time::Instant::now());
         // A newer table stored since the load above forgot the marks before
         // this one was made: read it again, and forget this one if so.
         let current = target.table.load();
-        if let Some(newer) = current.view_of(pool).filter(|newer| *newer > view) {
-            target
-                .damping
-                .forget_budgets(|marked, of| marked != pool || of >= newer);
+        if let Some(newer) = current.view_of(pool) {
+            target.damping.forget_budgets(|marked, of| {
+                marked != pool || super::damping::budget_stays(of, newer)
+            });
         }
     }
 

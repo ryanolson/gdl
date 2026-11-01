@@ -36,6 +36,10 @@ use tokio::time::Instant;
 
 use crate::RuntimeConfig;
 
+mod budget;
+
+use budget::Held;
+
 /// One chooser instance's damping of the pools it sends to, by pool
 /// [`id`](super::PoolTable::id): the same in every table of a pool, so it
 /// outlives a new snapshot or generation of the pool, and apart from the
@@ -125,39 +129,25 @@ impl Damping {
     }
 
     /// The pool `pool` declined an offer of `view` over its budget at
-    /// `now`: pass it over until the chooser holds a newer summary of it
-    /// ([`Damping::forget_budgets`]), or for `period`, one of its summary
-    /// periods, whichever comes first. It never doubles a window. A full
-    /// pool's window that still lasts is left as it is, as for any decline,
-    /// and a pool gone keeps its mark. A budget mark of an older summary
-    /// gives way, one of a newer summary stays, and one of the same summary
-    /// stays while it lasts and is renewed once it has passed.
-    pub(crate) fn budget(&self, pool: u64, view: (u64, u64), period: Duration, now: Instant) {
+    /// `now`, while the chooser's table shows the summary `shown` of it:
+    /// what the rule of [`Held::budget`] makes of its damping, with a mark
+    /// for `period`, one of its summary periods. A pool gone keeps its
+    /// mark.
+    pub(crate) fn budget(
+        &self,
+        pool: u64,
+        view: (u64, u64),
+        shown: Option<(u64, u64)>,
+        period: Duration,
+        now: Instant,
+    ) {
         self.change(|damped| {
             if damped.holds_gone(pool) {
                 return None;
             }
-            match damped.budget_of(pool) {
-                // A mark of an older summary gives way: this summary's
-                // budget is spent, whatever the older one's refusal does.
-                Some(marked) if marked < view => {}
-                // A newer summary's mark stays, and the same summary's while
-                // it lasts; one that passed is renewed, as the pool still
-                // declines while its next summary lags.
-                Some(marked)
-                    if marked > view
-                        || damped.window(pool).is_some_and(|window| window.until > now) =>
-                {
-                    return None;
-                }
-                Some(_) => {}
-                // A full pool's window that lasts is left as it is.
-                None if damped.window(pool).is_some_and(|window| window.until > now) => {
-                    return None;
-                }
-                None => {}
-            }
-            Some(damped.with_budget(pool, view, now + period))
+            let before = held(damped, pool);
+            let after = before.budget(view, shown, now, now + period);
+            written(damped, pool, before, after, Duration::ZERO)
         });
     }
 
@@ -183,7 +173,13 @@ impl Damping {
     /// gone, ends; a budget's mark stays ([`Damped::accepted`]). A pool that is neither writes nothing, and costs one
     /// load and a search of an empty or short list.
     pub(crate) fn accept(&self, pool: u64) {
-        self.change(|damped| damped.accepted(pool));
+        self.change(|damped| {
+            if damped.holds_gone(pool) {
+                return damped.without(pool);
+            }
+            let before = held(damped, pool);
+            written(damped, pool, before, before.accept(), Duration::ZERO)
+        });
     }
 
     /// Replace the list with what `change` makes of it, unless it makes
@@ -209,16 +205,52 @@ impl Damping {
     fn declined(&self, damped: &Damped, pool: u64, now: Instant) -> Option<Damped> {
         let length = match damped.window(pool) {
             None => self.first,
-            Some(window) if window.until > now => return None,
             // A budget's mark has no length: the next window is the first.
             Some(window) => (window.length * 2).clamp(self.first, self.max),
         };
-        let window = Window {
-            until: now + length,
-            length,
-        };
-        Some(damped.with(pool, window))
+        let before = held(damped, pool);
+        written(damped, pool, before, before.full(now, now + length), length)
     }
+}
+
+/// What `damped` holds of `pool`, as the rule of [`Held`] sees it. A
+/// mark as gone is the caller's, apart.
+fn held(damped: &Damped, pool: u64) -> Held<Instant> {
+    match (damped.budget_of(pool), damped.window(pool)) {
+        (Some(view), Some(window)) => Held::Budget {
+            view,
+            until: window.until,
+        },
+        (_, Some(window)) => Held::Window {
+            until: window.until,
+        },
+        (_, None) => Held::Clear,
+    }
+}
+
+/// `damped` with `pool` holding `after` in place of `before`, a window
+/// of `length`, or `None` when nothing changed.
+fn written(
+    damped: &Damped,
+    pool: u64,
+    before: Held<Instant>,
+    after: Held<Instant>,
+    length: Duration,
+) -> Option<Damped> {
+    if after == before {
+        return None;
+    }
+    match after {
+        Held::Clear => damped.without(pool),
+        Held::Window { until } => Some(damped.with(pool, Window { until, length })),
+        Held::Budget { view, until } => Some(damped.with_budget(pool, view, until)),
+    }
+}
+
+/// Whether a budget's mark of `view` stays once the chooser's table shows
+/// the summary `shown`: the rule of [`Held::summary`].
+pub(crate) fn budget_stays(view: (u64, u64), shown: (u64, u64)) -> bool {
+    Held::Budget { view, until: () }.summary(shown) != Held::Clear
 }
 
 #[cfg(test)]
@@ -546,17 +578,17 @@ mod tests {
     fn a_budget_mark_lasts_until_a_newer_view_or_one_period() {
         let start = Instant::now();
         let damping = Damping::default();
-        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        damping.budget(POOL, (3, 7), None, SECOND * 10, start);
         assert_eq!(damping.view().left(POOL, start), 10_000);
         assert!(damping.view().is_damped(POOL));
         damping.forget_budgets(|_, view| view >= (3, 7));
         assert!(damping.view().is_damped(POOL), "an equal view keeps it");
         damping.forget_budgets(|_, view| view >= (3, 8));
         assert!(!damping.view().is_damped(POOL), "a newer summary ends it");
-        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        damping.budget(POOL, (3, 7), None, SECOND * 10, start);
         damping.forget_budgets(|_, view| view >= (4, 1));
         assert!(!damping.view().is_damped(POOL), "a later hub ends it");
-        damping.budget(POOL, (3, 7), SECOND * 10, start);
+        damping.budget(POOL, (3, 7), None, SECOND * 10, start);
         assert_eq!(damping.view().left(POOL, start + SECOND * 10), 0);
     }
 
@@ -568,11 +600,11 @@ mod tests {
     fn a_budget_mark_never_doubles_and_leaves_a_lasting_window() {
         let start = Instant::now();
         let damping = Damping::default();
-        damping.budget(POOL, (1, 1), SECOND * 60, start);
+        damping.budget(POOL, (1, 1), None, SECOND * 60, start);
         let passed = start + SECOND * 61;
         damping.decline(POOL, passed);
         assert_eq!(damping.view().left(POOL, passed), 1_000, "the first window");
-        damping.budget(POOL, (1, 2), SECOND * 60, passed);
+        damping.budget(POOL, (1, 2), None, SECOND * 60, passed);
         assert_eq!(
             damping.view().left(POOL, passed),
             1_000,
@@ -587,7 +619,7 @@ mod tests {
     fn an_acceptance_leaves_a_budget_mark() {
         let start = Instant::now();
         let damping = Damping::default();
-        damping.budget(POOL, (1, 1), SECOND * 10, start);
+        damping.budget(POOL, (1, 1), None, SECOND * 10, start);
         damping.accept(POOL);
         assert!(damping.view().is_damped(POOL), "a pinned turn's acceptance");
         damping.decline(POOL + 1, start);
@@ -603,8 +635,8 @@ mod tests {
     fn a_newer_budget_mark_replaces_an_older_one() {
         let start = Instant::now();
         let damping = Damping::default();
-        damping.budget(POOL, (1, 7), SECOND * 10, start);
-        damping.budget(POOL, (1, 8), SECOND * 10, start);
+        damping.budget(POOL, (1, 7), None, SECOND * 10, start);
+        damping.budget(POOL, (1, 8), None, SECOND * 10, start);
         // The older refusal finds summary 8 shown, and forgets marks before it.
         damping.forget_budgets(|_, view| view >= (1, 8));
         assert!(
@@ -612,7 +644,7 @@ mod tests {
             "summary 8's budget is spent"
         );
         // An older refusal after a newer mark leaves the newer mark.
-        damping.budget(POOL, (1, 7), SECOND * 10, start);
+        damping.budget(POOL, (1, 7), None, SECOND * 10, start);
         damping.forget_budgets(|_, view| view >= (1, 8));
         assert!(damping.view().is_damped(POOL));
     }
@@ -624,15 +656,15 @@ mod tests {
     fn a_passed_budget_mark_is_renewed_by_the_same_summary() {
         let start = Instant::now();
         let damping = Damping::default();
-        damping.budget(POOL, (1, 7), SECOND, start);
-        damping.budget(POOL, (1, 7), SECOND, start + SECOND / 2);
+        damping.budget(POOL, (1, 7), None, SECOND, start);
+        damping.budget(POOL, (1, 7), None, SECOND, start + SECOND / 2);
         assert_eq!(
             damping.view().left(POOL, start),
             1_000,
             "a lasting mark stays"
         );
         let later = start + SECOND * 2;
-        damping.budget(POOL, (1, 7), SECOND, later);
+        damping.budget(POOL, (1, 7), None, SECOND, later);
         assert_eq!(damping.view().left(POOL, later), 1_000, "renewed");
     }
 }
