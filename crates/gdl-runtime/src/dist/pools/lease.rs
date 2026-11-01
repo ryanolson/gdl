@@ -255,6 +255,10 @@ impl Drop for Wake {
 pub(crate) struct Seen {
     follow: Option<Arc<Leases>>,
     ends: u64,
+    /// Whether the offer's choice asked for the view, so that a re-offer
+    /// takes its row's ([`gdl::PoolChoice::with_view`]), even when the
+    /// offer could carry none.
+    wants_view: bool,
 }
 
 impl Seen {
@@ -263,7 +267,13 @@ impl Seen {
         Self {
             follow: lease.and_then(|lease| lease.follow.clone()),
             ends,
+            wants_view: lease.is_some_and(|lease| lease.wants_view),
         }
+    }
+
+    /// Whether the offer's choice asked for the view.
+    pub(crate) fn wants_view(&self) -> bool {
+        self.wants_view
     }
 
     /// Wait for room under `current`, the pool's follow now
@@ -297,6 +307,8 @@ impl Seen {
 pub(crate) struct PoolLease {
     follow: Option<Arc<Leases>>,
     choice: Option<ChoiceHeld>,
+    /// Whether the choice it was taken for asked for the view.
+    wants_view: bool,
 }
 
 impl PoolLease {
@@ -311,6 +323,7 @@ impl PoolLease {
         Some(Self {
             follow: Some(Arc::clone(leases)),
             choice: None,
+            wants_view: false,
         })
     }
 
@@ -319,6 +332,13 @@ impl PoolLease {
     #[inline]
     pub(crate) fn with_choice(mut self, choice: Option<ChoiceHeld>) -> Self {
         self.choice = choice;
+        self
+    }
+
+    /// The lease, for a choice that asked for the view or not.
+    #[inline]
+    pub(crate) fn with_wants_view(mut self, wants_view: bool) -> Self {
+        self.wants_view = wants_view;
         self
     }
 

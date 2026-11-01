@@ -206,3 +206,22 @@ async fn offers_at_the_entry() {
         assert!(accepted.is_ok());
     }
 }
+
+/// A pool that declines offers by its own policy, or drains, says so
+/// before its gate is asked: a gate's budget never hides that the pool is
+/// gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_gate_never_hides_that_the_pool_is_gone() {
+    let gate = OfferGate::new();
+    gate.set(|_: &Cx, _: Option<OfferView>, _: &[u8]| Some(Decline::Budget))
+        .expect("set");
+    let (segment, entries) = entry(&gate).await;
+    let rt = segment.runtime();
+    let enter = entries.forward(0, 1).expect("the entry");
+    rt.decline_offers_as(Decline::Gone);
+    let refused = tokio::time::timeout(WAIT, enter(offer(rt, "first", Some(view(1)))))
+        .await
+        .expect("answered in time")
+        .expect_err("declined");
+    assert_eq!(refused.decline, Decline::Gone, "{}", refused.error);
+}

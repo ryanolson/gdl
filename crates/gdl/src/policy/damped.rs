@@ -264,6 +264,18 @@ impl Damped {
         Some(Self::of(pools))
     }
 
+    /// The list once `pool` accepted an offer: without its window or its
+    /// mark as gone, or `None` when it has neither. A budget's mark stays:
+    /// an acceptance, as of a pinned turn, says nothing of the pool's
+    /// budget, which only a newer summary or its period ends.
+    #[doc(hidden)]
+    pub fn accepted(&self, pool: u64) -> Option<Self> {
+        match self.mark(pool)? {
+            Mark::Budget { .. } => None,
+            Mark::Window(_) | Mark::Gone(_) => self.without(pool),
+        }
+    }
+
     /// [`is_gone`](Damped::is_gone) once some pool is gone: a search of the
     /// list, out of line, so that a policy's pass over its pools inlines
     /// only the branch.

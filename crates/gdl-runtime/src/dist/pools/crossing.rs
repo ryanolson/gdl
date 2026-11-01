@@ -83,7 +83,7 @@ impl Crossing {
     ) -> Result<Result<(InstanceId, u64, PoolLease), NoPool>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let (pool, choice, chosen_view) = match self.pool(&table, cx, head, left)? {
+            let (pool, choice, wants_view, chosen_view) = match self.pool(&table, cx, head, left)? {
                 Ok(chosen) => chosen,
                 Err(no) => return Ok(Err(no)),
             };
@@ -95,7 +95,7 @@ impl Crossing {
             return Ok(Ok((
                 pool.eligible[turn(policy, sequence, pool.eligible.len(), random)],
                 pool.id,
-                lease.with_choice(choice),
+                lease.with_choice(choice).with_wants_view(wants_view),
             )));
         }
         Ok(Err(NoPool::new()))
@@ -129,10 +129,11 @@ impl Crossing {
                 // The view is the row's the policy chose from, taken
                 // before the selector's wait, under which the table can
                 // change: the offer says what the choice was made on.
-                let (pool, choice, chosen_view) = match self.pool(&table, cx, head, left)? {
-                    Ok(chosen) => chosen,
-                    Err(no) => return Ok(Err(no)),
-                };
+                let (pool, choice, wants_view, chosen_view) =
+                    match self.pool(&table, cx, head, left)? {
+                        Ok(chosen) => chosen,
+                        Err(no) => return Ok(Err(no)),
+                    };
                 let pool = Arc::clone(pool);
                 let picked = selector
                     .select(
@@ -160,7 +161,12 @@ impl Crossing {
                     .and_then(|now| PoolLease::take(&now.leases));
                 if let Some(lease) = lease {
                     *view = chosen_view;
-                    return Ok(Ok((chosen, pool.id, picked, lease.with_choice(choice))));
+                    return Ok(Ok((
+                        chosen,
+                        pool.id,
+                        picked,
+                        lease.with_choice(choice).with_wants_view(wants_view),
+                    )));
                 }
             }
             Err(Error::routing(format!(
@@ -246,19 +252,31 @@ impl Crossing {
         let Some(shown) = table.pools.iter().find(|shown| shown.id == pool) else {
             return;
         };
-        let summary = shown.load.map(|load| *load.summary());
-        let view = view.map_or_else(
-            || (shown.epoch, summary.map_or(0, |summary| summary.sequence)),
-            |view| (view.epoch, view.sequence),
-        );
+        let Some(now) = table.view_of(pool) else {
+            return;
+        };
+        let view = view.map_or(now, |view| (view.epoch, view.sequence));
+        // The table holds a newer summary already: a new budget.
+        if now > view {
+            return;
+        }
         // A pool with no summary period is passed over for the first window.
-        let period = summary
-            .map(|summary| std::time::Duration::from_millis(summary.period_ms))
+        let period = shown
+            .load
+            .map(|load| std::time::Duration::from_millis(load.summary().period_ms))
             .filter(|period| !period.is_zero())
             .unwrap_or(target.damping.first());
         target
             .damping
             .budget(pool, view, period, tokio::time::Instant::now());
+        // A newer table stored since the load above forgot the marks before
+        // this one was made: read it again, and forget this one if so.
+        let current = target.table.load();
+        if let Some(newer) = current.view_of(pool).filter(|newer| *newer > view) {
+            target
+                .damping
+                .forget_budgets(|marked, of| marked != pool || of >= newer);
+        }
     }
 
     /// The pool policy's [`NoPool`] for a request whose every pool it
@@ -359,7 +377,7 @@ impl Crossing {
         policy: Policy,
         random: &RandomState,
         choice: &mut Option<ChoiceHeld>,
-        carried: &mut Option<OfferView>,
+        carried: Option<&mut Option<OfferView>>,
     ) -> Option<(InstanceId, PoolLease)> {
         let target = &self.target;
         let table = target.table.load();
@@ -375,10 +393,14 @@ impl Crossing {
         let lease = PoolLease::take(&shown.leases)?;
         let sequence = shown.turn.fetch_add(1, Ordering::Relaxed);
         let chosen = shown.eligible[turn(policy, sequence, shown.eligible.len(), random)];
-        if carried.is_some() {
+        let wants_view = carried.is_some();
+        if let Some(carried) = carried {
             *carried = shown.offer_view(table.fill_max_ppm);
         }
-        Some((chosen, lease.with_choice(choice.take())))
+        Some((
+            chosen,
+            lease.with_choice(choice.take()).with_wants_view(wants_view),
+        ))
     }
 
     /// [`Crossing::pick_again`], asking `selector` to choose among the
@@ -398,7 +420,7 @@ impl Crossing {
         head: &[u8],
         encoding: Encoding,
         choice: &mut Option<ChoiceHeld>,
-        carried: &mut Option<OfferView>,
+        mut carried: Option<&mut Option<OfferView>>,
     ) -> Result<Again<(InstanceId, Picked, PoolLease)>> {
         let target = &self.target;
         let policy = |current: &gdl::Pool| {
@@ -425,6 +447,7 @@ impl Crossing {
                 .is_some()
                 .then(|| shown.offer_view(table.fill_max_ppm))
                 .flatten();
+            let wants_view = carried.is_some();
             let shown = Arc::clone(shown);
             let picked = selector
                 .select(
@@ -441,13 +464,13 @@ impl Crossing {
             let lease = still_eligible(&current, &shown, chosen, policy)
                 .and_then(|now| PoolLease::take(&now.leases));
             if let Some(lease) = lease {
-                if carried.is_some() {
+                if let Some(carried) = carried.as_deref_mut() {
                     *carried = shown_view;
                 }
                 return Ok(Again::Chosen((
                     chosen,
                     picked,
-                    lease.with_choice(choice.take()),
+                    lease.with_choice(choice.take()).with_wants_view(wants_view),
                 )));
             }
         }
@@ -483,6 +506,7 @@ impl Crossing {
             pool: Arc::clone(shown),
             at,
             left,
+            wants_view: false,
         })
     }
 
@@ -500,7 +524,13 @@ impl Crossing {
     ) -> Option<(InstanceId, u64, PoolLease)> {
         while let Some(chosen) = walk.next() {
             if let Some(lease) = self.lease_in(walk, chosen) {
-                return Some((chosen, walk.pool.id, lease.with_choice(choice.take())));
+                return Some((
+                    chosen,
+                    walk.pool.id,
+                    lease
+                        .with_choice(choice.take())
+                        .with_wants_view(walk.wants_view),
+                ));
             }
         }
         None
@@ -541,7 +571,9 @@ impl Crossing {
                     chosen,
                     walk.pool.id,
                     picked,
-                    lease.with_choice(choice.take()),
+                    lease
+                        .with_choice(choice.take())
+                        .with_wants_view(walk.wants_view),
                 )));
             }
         }
@@ -611,6 +643,7 @@ impl Crossing {
                 (
                     pool,
                     choice,
+                    wants_view,
                     wants_view
                         .then(|| pool.offer_view(table.fill_max_ppm))
                         .flatten(),
@@ -710,6 +743,9 @@ pub(crate) struct Walk {
     pool: Arc<PoolTable>,
     at: usize,
     left: usize,
+    /// Whether the choice of the pool asked for the view: each instance's
+    /// lease keeps it, for a re-queue after its decline.
+    pub(crate) wants_view: bool,
 }
 
 impl Walk {
@@ -752,9 +788,14 @@ impl<'a> Left<'a> {
 }
 
 /// A pool policy's choice: the chosen pool's table, the policy's lease on
-/// the choice, if it gave one, and the view to put on the offer, if it
-/// asked for one and the table has one.
-type Pooled<'t> = (&'t Arc<PoolTable>, Option<ChoiceHeld>, Option<OfferView>);
+/// the choice, if it gave one, whether it asked for the view, and the view
+/// to put on the offer, if it asked for one and the table has one.
+type Pooled<'t> = (
+    &'t Arc<PoolTable>,
+    Option<ChoiceHeld>,
+    bool,
+    Option<OfferView>,
+);
 
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's pools, the chooser's
@@ -927,28 +968,12 @@ mod tests {
         }));
         let cx = Cx::new().with_timeout(Duration::from_secs(5));
         let result = crossing
-            .choose_again(
-                id,
-                &selector,
-                &cx,
-                &[],
-                Default::default(),
-                &mut None,
-                &mut None,
-            )
+            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None, None)
             .await;
         assert!(selector.0.calls.load(Ordering::SeqCst) >= CHOICES);
         assert!(cx.check().is_ok(), "the deadline has not passed");
         let control = crossing
-            .choose_again(
-                id,
-                &selector,
-                &cx,
-                &[],
-                Default::default(),
-                &mut None,
-                &mut None,
-            )
+            .choose_again(id, &selector, &cx, &[], Default::default(), &mut None, None)
             .await
             .expect("the selector succeeds once the entries stop changing");
         assert!(
@@ -1023,7 +1048,7 @@ mod tests {
                 Policy::RoundRobin,
                 &RandomState::new(),
                 &mut None,
-                &mut None,
+                None,
             )
             .expect("the same pool still takes work under its new follow");
         drop(held);
@@ -1658,6 +1683,41 @@ mod tests {
         let view = view.expect("a numbered row's view");
         assert_eq!(view.fill_max_ppm, None);
         assert_eq!((view.epoch, view.sequence), (1, 5));
+    }
+
+    /// A refusal over budget of a view older than the summary the
+    /// chooser's table already shows marks nothing: that summary is a new
+    /// budget. One of the same summary marks the pool.
+    #[test]
+    fn a_late_budget_refusal_marks_nothing() {
+        let ids = ids(1);
+        let leases = Arc::default();
+        let viewed = crossing(
+            vec![numbered(pool("m", PoolState::Ready, &ids), 1, 8, &leases)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let id = super::super::pool_id("model_x", "m");
+        let older = gdl::OfferView {
+            epoch: 1,
+            sequence: 7,
+            fill_max_ppm: None,
+        };
+        viewed.declined_budget(id, Some(older));
+        assert!(
+            !viewed.target.damping.view().is_damped(id),
+            "a newer summary is held"
+        );
+        viewed.declined_budget(
+            id,
+            Some(gdl::OfferView {
+                sequence: 8,
+                ..older
+            }),
+        );
+        assert!(
+            viewed.target.damping.view().is_damped(id),
+            "the same summary"
+        );
     }
 
     /// A choice whose policy asks for no view puts none on the offer, and

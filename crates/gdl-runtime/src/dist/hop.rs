@@ -1132,7 +1132,12 @@ where
         // takes no permit. One load and a branch while no gate is set.
         if self.offer
             && let Some(gate) = rt.config.gate.gate()
-            && let Some(decline) = gate(&cx, envelope.payload.view(), &envelope.payload)
+            && let Some(decline) = {
+                // A pool that drains, or declines by its own policy, says
+                // so first: a budget must not hide that it is gone.
+                rt.check_offer()?;
+                gate(&cx, envelope.payload.view(), &envelope.payload)
+            }
         {
             return Err(Refusal {
                 error: Error::new(ErrorKind::Overloaded, "the pool's gate declined the offer"),

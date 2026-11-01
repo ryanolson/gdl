@@ -161,10 +161,10 @@ impl Damping {
     }
 
     /// The pool `pool` accepted an offer: its damping, or its mark as
-    /// gone, ends. A pool that is neither writes nothing, and costs one
+    /// gone, ends; a budget's mark stays ([`Damped::accepted`]). A pool that is neither writes nothing, and costs one
     /// load and a search of an empty or short list.
     pub(crate) fn accept(&self, pool: u64) {
-        self.change(|damped| damped.without(pool));
+        self.change(|damped| damped.accepted(pool));
     }
 
     /// Replace the list with what `change` makes of it, unless it makes
@@ -559,5 +559,20 @@ mod tests {
             1_000,
             "the full window lasts as it was"
         );
+    }
+
+    /// An acceptance says nothing of a pool's budget, as a pinned turn's
+    /// is not budgeted: it leaves a budget's mark, and still ends a full
+    /// pool's damping.
+    #[test]
+    fn an_acceptance_leaves_a_budget_mark() {
+        let start = Instant::now();
+        let damping = Damping::default();
+        damping.budget(POOL, (1, 1), SECOND * 10, start);
+        damping.accept(POOL);
+        assert!(damping.view().is_damped(POOL), "a pinned turn's acceptance");
+        damping.decline(POOL + 1, start);
+        damping.accept(POOL + 1);
+        assert!(!damping.view().is_damped(POOL + 1), "a full pool's ends");
     }
 }

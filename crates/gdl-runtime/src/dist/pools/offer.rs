@@ -201,7 +201,10 @@ impl Runtime {
             let mut next = None;
             if last == Some(Decline::Instance) {
                 if walk.is_none() {
-                    walk = crossing.walk(pool, instance);
+                    walk = crossing.walk(pool, instance).map(|mut walk| {
+                        walk.wants_view = seen.wants_view();
+                        walk
+                    });
                 }
                 if let Some(walk) = &mut walk {
                     next = self
@@ -380,12 +383,19 @@ impl Runtime {
                 .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
-            // Only an offer whose policy asked for the view carries one,
-            // and only such a re-offer takes its row's newer one.
-            let mut view = envelope.payload.view();
+            // A re-offer whose choice asked for the view takes its row's,
+            // even when the first offer could carry none.
+            let wants_view = seen.wants_view();
+            let mut view = None;
             let chosen = match crossing.within() {
                 Within::Policy(policy) => {
-                    match crossing.pick_again(pool, *policy, self.random(), choice, &mut view) {
+                    match crossing.pick_again(
+                        pool,
+                        *policy,
+                        self.random(),
+                        choice,
+                        wants_view.then_some(&mut view),
+                    ) {
                         Some((to, lease)) => Again::Chosen((to, Held::pool(None, lease))),
                         None => Again::Unavailable,
                     }
@@ -402,7 +412,7 @@ impl Runtime {
                             &envelope.payload,
                             *encoding,
                             choice,
-                            &mut view,
+                            wants_view.then_some(&mut view),
                         )
                         .await?;
                     match chosen {
@@ -422,7 +432,9 @@ impl Runtime {
                 Again::Stale => continue,
                 Again::Unavailable => return Ok(Requeued::Unavailable),
             };
-            envelope.set_view(view);
+            if wants_view {
+                envelope.set_view(view);
+            }
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, self::timed(timed, &held))?;
             if let Some(woken) = woken {

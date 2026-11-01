@@ -581,6 +581,32 @@ async fn a_re_queued_request_carries_its_pools_newer_view() {
     assert_eq!(fleet.offered()[1..], [0, 0], "no other pool");
 }
 
+/// A choice that asked for the view of a pool whose row had no numbered
+/// summary carries none; its re-offers still take the row's view once one
+/// arrives, so the pool takes it then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_re_queued_request_takes_a_view_its_first_offer_could_not_carry() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(0);
+    fleet.entries[0].newer_than.store(2, Ordering::SeqCst);
+    let router = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&router, &cx);
+    tokio::pin!(sending);
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
+    assert!(waited.is_err(), "taken with no view");
+    fleet.number(2);
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("taken in time");
+    sent.expect("m1 took it at summary 2");
+    assert_eq!(fleet.offered()[1..], [0, 0], "no other pool");
+}
+
 /// A pool that never takes the re-queued request keeps it until its
 /// deadline, which fails it with `DeadlineExceeded`; no other pool is
 /// offered it.
