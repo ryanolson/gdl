@@ -276,6 +276,15 @@ impl Seen {
         self.wants_view
     }
 
+    /// The same, with no view on the offers after it: a placement forced
+    /// past every pool's budget carries none, and nor does what follows.
+    pub(crate) fn without_view(self) -> Self {
+        Self {
+            wants_view: false,
+            ..self
+        }
+    }
+
     /// Wait for room under `current`, the pool's follow now
     /// ([`Leases::room`]). A follow that replaced the one the offer was
     /// made under has a generation of its own, which the one read may

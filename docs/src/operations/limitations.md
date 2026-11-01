@@ -708,9 +708,10 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **What:** a pool's gate that declines over its budget does not damp the pool at the chooser. Each first turn a chooser offers it until its next summary is declined, at the cost of a round trip, and goes to another pool.
 - **Lifts:** a measurement that a pass-over after a budget's decline is worth its rule.
 
-### A request re-queued over a pool's budget waits for its next summary
-- **What:** a request whose policy keeps it with a pool that declined it over its budget is offered to the pool again only once the pool shows a newer summary, which it looks for once a backoff (`[runtime] pool_requeue_backoff_ms`). If the pool's summaries stop while it still takes work, the request leaves when the policy no longer takes the pool: under `home_first`, once the summary is stale (three periods by default). Under `round_robin`, or a registered policy that takes a pool whatever its summary, it waits until its deadline.
-- **Lifts:** a wait bounded by the pool's period as well as by the request's deadline.
+### A request every pool declines over its budget is placed past a budget
+- **What:** when every pool the policy may choose declines a request over its budget, or the request has used its `pool_failovers` and at least one pool declined it so, the chooser offers it once more with no view to the policy's first choice among those pools, which admits it past its budget. With few `pool_failovers` and many pools, some pools were not offered the request first. A gate that declines an offer with no view over its budget fails the request.
+- **Bound:** one forced offer a request, counted under the pool (`pool_budget_forced_total`). In the simulator such turns were at most 2.1% of first turns at three times the load.
+- **Lifts:** a budget that admits a turn every pool declined by the fleet's own rule, rather than the policy's first choice.
 
 ### A pool's budget is the node's, and each chooser's fullest fill is its own
 - **What:** gdl carries what a pool budgets first turns by (the view, the fleet's fullest fill, and the pool's own summary) and lets its gate decline an offer, but the budget itself is node code: how it counts the leases admitted since a summary, and how it splits one budget over the pool's entry instances. Two choosers can carry a different fullest fill for one summary, each from its own table, so one pool can judge two offers of one summary by two budgets.

@@ -437,34 +437,6 @@ impl Crossing {
         Ok(Again::Stale)
     }
 
-    /// Whether the pool `pool`, which a re-queued request waits for after
-    /// it declined the request's view of `spent` over its budget, shows no
-    /// newer summary yet: `Some(true)` while it does not, so that an offer
-    /// would be declined again, `Some(false)` once it does, and `None` once
-    /// the request is to leave the pool, as [`Crossing::pick_again`]
-    /// judges it: no longer followed, or no longer taking work. A pool
-    /// whose summaries stop while it still takes work leaves the request
-    /// waiting as long as the policy still takes the pool: `home_first`
-    /// does not once the summary is stale, so the request leaves then;
-    /// `round_robin` reads no summary, so the request waits for a newer
-    /// one, or its deadline. One load of the table, a search of its pools,
-    /// and the clock.
-    pub(crate) fn still_spent(&self, pool: u64, spent: (u64, u64)) -> Option<bool> {
-        let target = &self.target;
-        let table = target.table.load();
-        let (shown, view) = table
-            .pools
-            .iter()
-            .zip(&table.views)
-            .find(|(shown, _)| shown.id == pool)?;
-        let now = tokio::time::Instant::now();
-        if shown.eligible.is_empty() || !target.policy.eligible(view, &target.region, now) {
-            return None;
-        }
-        let sequence = shown.load.map_or(0, |load| load.summary().sequence);
-        Some((shown.epoch, sequence) <= spent)
-    }
-
     /// The pool `pool` accepted an offer: its damping, as the chooser has
     /// it now, ends, whatever it was when the offer was chosen: another
     /// request's decline may have damped it since, or another acceptance

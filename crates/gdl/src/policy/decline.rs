@@ -31,11 +31,13 @@ pub enum Decline {
     /// The pool's own gate declined a first turn against the budget it
     /// holds for the view the offer carries ([`crate::OfferGate`]): it has
     /// admitted enough since that load summary, or the view is too old.
-    /// The pool's policy is asked whether to keep the request with it
-    /// ([`crate::PoolPolicy::requeue`]), as for a full pool. Otherwise the
-    /// request goes to another pool, and the chooser damps nothing: the
-    /// pool's next summary is a new budget. A chooser of a build before
-    /// this reason reads it as [`Decline::Full`], and damps the pool for
-    /// its first window, doubling after.
+    /// The chooser offers the request to another pool, as after
+    /// [`Decline::NotPresent`]: the policy is not asked to re-queue it, and
+    /// the pool is not damped, since its next summary is a new budget. When
+    /// every pool the policy may choose declined the request over its
+    /// budget, the chooser offers it once more, with no view, to the
+    /// policy's first choice among them. A chooser of a build before this
+    /// reason reads it as [`Decline::Full`], and damps the pool for its
+    /// first window, doubling after.
     Budget,
 }

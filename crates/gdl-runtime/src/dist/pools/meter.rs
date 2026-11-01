@@ -63,6 +63,10 @@ const REQUEUES_HELP: &str =
 pub(crate) const REQUEUE_DEADLINES: &str = "pool_requeue_deadlines_total";
 const REQUEUE_DEADLINES_HELP: &str =
     "Requests this chooser re-queued for the pool that ended at their deadline while re-queued.";
+/// The family of the placements forced on the pool past every pool's
+/// budget, and its help.
+pub(crate) const BUDGET_FORCED: &str = "pool_budget_forced_total";
+const BUDGET_FORCED_HELP: &str = "Requests this chooser offered the pool with no view after every pool declined them over its budget.";
 
 /// How an offer to a pool ended, as the chooser read its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +240,11 @@ impl PoolFigures {
         self.shard().requeue_deadlines.fetch_add(1, Relaxed);
     }
 
+    /// Count one placement forced on the pool past every pool's budget.
+    pub(crate) fn budget_forced(&self) {
+        self.shard().budget_forced.fetch_add(1, Relaxed);
+    }
+
     /// The calling thread's shard.
     #[inline]
     fn shard(&self) -> &Shard {
@@ -296,6 +305,7 @@ struct Shard {
     round_trips: [Spans; Outcome::ALL.len()],
     requeues: AtomicU64,
     requeue_deadlines: AtomicU64,
+    budget_forced: AtomicU64,
 }
 
 /// The families, summed over each pool's shards when the registry is
@@ -377,6 +387,7 @@ impl Collector for Scrape {
         let mut round_trips = Vec::with_capacity(pools.len() * Outcome::ALL.len());
         let mut requeues = Vec::with_capacity(pools.len());
         let mut deadlines = Vec::with_capacity(pools.len());
+        let mut forced = Vec::with_capacity(pools.len());
         for ((class, pool), figures) in &pools {
             let region = label(REGION, &figures.region);
             for outcome in Outcome::ALL {
@@ -404,9 +415,10 @@ impl Collector for Scrape {
                 figures.sum(|shard| &shard.requeues),
             ));
             deadlines.push(counter(
-                labels,
+                labels.clone(),
                 figures.sum(|shard| &shard.requeue_deadlines),
             ));
+            forced.push(counter(labels, figures.sum(|shard| &shard.budget_forced)));
         }
         vec![
             family(OFFERS, OFFERS_HELP, MetricType::COUNTER, offers),
@@ -423,6 +435,12 @@ impl Collector for Scrape {
                 REQUEUE_DEADLINES_HELP,
                 MetricType::COUNTER,
                 deadlines,
+            ),
+            family(
+                BUDGET_FORCED,
+                BUDGET_FORCED_HELP,
+                MetricType::COUNTER,
+                forced,
             ),
         ]
     }
@@ -614,6 +632,7 @@ pub(crate) mod tests {
                     figures.offered(Outcome::Accepted, None);
                     figures.offered(Outcome::DeclinedFull, Some(Duration::from_millis(2)));
                     figures.requeued();
+                    figures.budget_forced();
                 });
             }
         });
@@ -632,12 +651,20 @@ pub(crate) mod tests {
         let pool = [("class", "model_x"), ("pool", "m1"), (REGION, "home")];
         assert_eq!(scraped(&registry, REQUEUES, &pool), Some(4.0));
         assert_eq!(scraped(&registry, REQUEUE_DEADLINES, &pool), Some(1.0));
+        assert_eq!(scraped(&registry, BUDGET_FORCED, &pool), Some(4.0));
     }
 
     /// A node's own metric cannot take the families' names.
     #[test]
     fn every_family_is_reserved() {
-        let mut names = vec![OFFERS, FAILOVERS, ROUND_TRIPS, REQUEUES, REQUEUE_DEADLINES];
+        let mut names = vec![
+            OFFERS,
+            FAILOVERS,
+            ROUND_TRIPS,
+            REQUEUES,
+            REQUEUE_DEADLINES,
+            BUDGET_FORCED,
+        ];
         names.extend(gauges::names());
         for name in names {
             assert!(gdl_model::RUNTIME_METRICS.contains(&name), "{name}");

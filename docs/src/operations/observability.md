@@ -162,13 +162,14 @@ The four counts are on only while the runtime records its figures: in a segment 
 
 ## Reading a chooser's pool choices
 
-A chooser counts each offer to a pool of another class under the pool and how it ended: `accepted`, `declined_full`, `declined_gone`, `declined_instance`, `declined_not_present`, `unsent`, `outcome_unknown`, or `failed`. It counts each offer after a request's first as a failover too: after another pool missed it, or after another instance of the same pool declined it as its own. An offer of a request that the pool policy re-queued for its pool is not a failover.
+A chooser counts each offer to a pool of another class under the pool and how it ended: `accepted`, `declined_full`, `declined_gone`, `declined_instance`, `declined_not_present`, `declined_budget`, `unsent`, `outcome_unknown`, or `failed`. It counts each offer after a request's first as a failover too: after another pool missed it, or after another instance of the same pool declined it as its own. An offer of a request that the pool policy re-queued for its pool is not a failover.
 
 - **Where requests go:** the rate of `pool_offers_total{outcome="accepted"}` by `pool`.
 - **A full pool:** its `declined_full` rises, and `pool_failovers_total` rises on the other pools. Under a pool policy that re-queues its requests for the pool, only its `declined_full` rises, by one for each offer again, and then its `accepted`.
 - **A draining pool:** its `declined_gone` rises, then stops until the relay changes the follow.
 - **Instances that serve different requests:** a pool's `declined_instance` rises with its `pool_failovers_total`, and its other series do not change. Each such decline costs the request one round trip.
 - **A chooser's view of the pools' properties is out of date:** a pool's `declined_not_present` rises, and its other requests are still `accepted`. Each such decline costs the request one round trip and one of its `pool_failovers`.
+- **Pools over their budgets:** `declined_budget` rises, and `pool_failovers_total` on the other pools. A request that every pool declined goes to one of them past its budget, and counts in that pool's `pool_budget_forced_total`.
 - **A transport fault:** `unsent` says velo refused to send. `outcome_unknown` says the request may have run, and failed for its caller.
 - **How far a pool is:** `pool_offer_round_trip_seconds{outcome="accepted"}` by `pool` and `region`: the wire both ways and the entry's admission. Declines are timed apart, under their own `outcome`.
 - **A pool that keeps a re-queued request waiting:** `pool_requeues_total` rises with its `declined_full`, and `pool_requeue_deadlines_total` counts the requests that waited until their deadline.

@@ -155,9 +155,12 @@ impl Runtime {
     /// is asked about first: the pool policy may re-queue the request for
     /// it ([`Runtime::requeue`]), which uses none of `pool_failovers` and
     /// counts no failover; otherwise the pool is damped, and the request
-    /// leaves it. Each pool is asked once. When no pool may take it
-    /// any more, or no failover is left, the request fails with the last
-    /// refusal, or, when no pool refused it, with the last hand-off that
+    /// leaves it. Each pool is asked once. A pool that declined it over
+    /// its budget is not asked about, and not damped. When no pool may
+    /// take it any more, or no failover is left, and a pool declined it
+    /// over its budget, it is offered once more, with no view
+    /// ([`Runtime::force`]). Otherwise, or when that offer misses too, the
+    /// request fails with the last refusal, or, when no pool refused it, with the last hand-off that
     /// never left. When the chooser holds every pool it left gone and its
     /// pool policy chooses no other, it fails with `Routing`, as the
     /// requests after it do, which find those pools gone before any
@@ -194,6 +197,9 @@ impl Runtime {
         // whose other entry instances are offered the request before it
         // leaves the pool: it was left and counted when it declined first.
         let mut requeued: Option<u64> = None;
+        // Whether the request was placed past every pool's budget: once
+        // at most.
+        let mut forced = false;
         loop {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
@@ -221,13 +227,17 @@ impl Runtime {
                     } else {
                         // A policy that chooses a pool it left again is
                         // not asked about it again, and the pool counts
-                        // again, so that `pool_failovers` bounds it.
-                        let first = declines.iter().all(|(left, _)| *left != pool);
+                        // again, so that `pool_failovers` bounds it. A
+                        // budget's decline was never asked about, so the
+                        // forced offer's full decline is.
+                        let first = declines
+                            .iter()
+                            .all(|&(left, why)| left != pool || why == Decline::Budget);
                         offered.push(pool);
                         if let Some(decline) = last {
                             declines.push((pool, decline));
                         }
-                        if matches!(last, Some(Decline::Full | Decline::Budget)) {
+                        if last == Some(Decline::Full) {
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
                                 let requeueing = Requeueing::new(crossing.figures(pool), cx);
@@ -239,7 +249,6 @@ impl Runtime {
                                     pool,
                                     &mut choice,
                                     &mut seen,
-                                    last == Some(Decline::Budget),
                                 );
                                 let ended = requeued_for.await;
                                 requeueing.ended(&ended);
@@ -260,9 +269,7 @@ impl Runtime {
                                     }
                                     Requeued::Unavailable => {}
                                 }
-                            } else if last == Some(Decline::Full) {
-                                // A budget's decline damps nothing: the
-                                // pool's next summary is a new budget.
+                            } else {
                                 crossing.declined(pool, Decline::Full, None);
                             }
                         }
@@ -270,16 +277,32 @@ impl Runtime {
                     // The request leaves the pool, and the pool policy's
                     // lease on it ends before the next choice.
                     drop(choice.take());
-                    if offered.len() > self.config.pool_failovers {
-                        break;
-                    }
-                    let left = Left::new(&offered, &declines);
-                    let Ok(chosen) = self.choose_pool(crossing, cx, envelope, left).await? else {
+                    let chosen = if offered.len() > self.config.pool_failovers {
+                        None
+                    } else {
+                        let left = Left::new(&offered, &declines);
+                        self.choose_pool(crossing, cx, envelope, left).await?.ok()
+                    };
+                    let chosen = match chosen {
+                        Some(chosen) => Some(chosen),
+                        None if forced => None,
+                        None => {
+                            forced = true;
+                            self.force(crossing, cx, envelope, &offered, &declines)
+                                .await?
+                        }
+                    };
+                    let Some(chosen) = chosen else {
                         break;
                     };
                     chosen
                 }
             };
+            // A forced placement, and every offer after it, carries no
+            // view, so that no pool's budget declines it again.
+            if forced {
+                envelope.set_view(None);
+            }
             let ends = held.pool_lease().map_or(0, PoolLease::ends);
             let (offering, sent) = self.deliver(to, envelope, self::timed(timed, &held))?;
             let answer = answer(offering.await, crossing, at, &mut held, sent);
@@ -300,6 +323,9 @@ impl Runtime {
                 Answer::Missed(then) => {
                     last = reason(&then);
                     seen = Seen::of(held.pool_lease(), ends);
+                    if forced {
+                        seen = seen.without_view();
+                    }
                     choice = held.missed();
                     (pool, instance) = (at, to);
                     missed = missed.then(then);
@@ -315,6 +341,50 @@ impl Runtime {
             return Err(crossing.no_pool(no));
         }
         Err(missed.into_error())
+    }
+
+    /// Past every pool's budget: the instance, the pool, and what the offer
+    /// holds, for one placement of `envelope` with no view, chosen as the
+    /// first offer was, from the current table, with the budget's declines
+    /// cleared and every other kept, so that the policy's first choice
+    /// among those pools takes the request. `None` when no pool the request
+    /// left declined it over its budget, or the policy chooses none. Counted
+    /// under the pool. Made at most once a request, on its way to failing,
+    /// so the two lists it builds cost nothing else.
+    async fn force(
+        &self,
+        crossing: &Crossing,
+        cx: &Cx,
+        envelope: &mut Forward,
+        offered: &[u64],
+        declines: &[(u64, Decline)],
+    ) -> Result<Option<(InstanceId, u64, Held)>> {
+        let over = |pool: u64| {
+            declines
+                .iter()
+                .any(|&(at, why)| at == pool && why == Decline::Budget)
+        };
+        if !offered.iter().any(|&pool| over(pool)) {
+            return Ok(None);
+        }
+        let excluded: Vec<u64> = offered
+            .iter()
+            .copied()
+            .filter(|&pool| !over(pool))
+            .collect();
+        let kept: Vec<(u64, Decline)> = declines
+            .iter()
+            .copied()
+            .filter(|&(_, why)| why != Decline::Budget)
+            .collect();
+        let left = Left::new(&excluded, &kept);
+        let Ok(chosen) = self.choose_pool(crossing, cx, envelope, left).await? else {
+            return Ok(None);
+        };
+        if let Some(figures) = chosen.2.pool_lease().and_then(PoolLease::figures) {
+            figures.budget_forced();
+        }
+        Ok(Some(chosen))
     }
 
     /// The next instance of `walk`, chosen as the first offer's was, with
@@ -375,40 +445,9 @@ impl Runtime {
         pool: u64,
         choice: &mut Option<ChoiceHeld>,
         seen: &mut Seen,
-        over_budget: bool,
     ) -> Result<Requeued> {
         let deadline = cx.deadline().map(gdl::Deadline::instant);
-        // The summary the pool declined the request's view of over its
-        // budget, if it did: the request's own memory, which no other
-        // request shares. Until the pool's row shows a newer summary, an
-        // offer would be declined again, so none is sent.
-        let mut spent = over_budget
-            .then(|| envelope.payload.view())
-            .flatten()
-            .map(|view| (view.epoch, view.sequence));
         loop {
-            // A request waiting on a spent summary waits a backoff, and
-            // takes no lease's end: it could not use the room, and two
-            // such requests would pass one end back and forth.
-            match spent.map(|spent| crossing.still_spent(pool, spent)) {
-                Some(Some(true)) => {
-                    #[cfg(test)]
-                    SPENT_ROUNDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let after =
-                        tokio::time::Instant::now().checked_add(self.config.pool_requeue_backoff);
-                    let until = match (after, deadline) {
-                        (Some(after), Some(deadline)) => Some(after.min(deadline)),
-                        (after, deadline) => after.or(deadline),
-                    };
-                    if let Some(until) = until {
-                        tokio::time::sleep_until(until).await;
-                    }
-                    cx.check()?;
-                    continue;
-                }
-                Some(None) => return Ok(Requeued::Unavailable),
-                Some(Some(false)) | None => {}
-            }
             // Held until the request offers again: any way out of this
             // round before the offer passes the wake to the next waiter.
             let woken = crossing
@@ -482,19 +521,11 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
-                    // A decline over the budget of the view just sent:
-                    // the next offer waits for a newer summary.
-                    if matches!(then, Missed::Declined(_, Decline::Budget)) {
-                        spent = envelope
-                            .payload
-                            .view()
-                            .map(|view| (view.epoch, view.sequence));
-                    }
                     *seen = Seen::of(held.pool_lease(), ends);
                     *choice = held.missed();
-                    // A pool still full, or still over its budget, keeps
-                    // the request; any other miss ends the wait.
-                    if !matches!(then, Missed::Declined(_, Decline::Full | Decline::Budget)) {
+                    // A pool still full keeps the request; any other miss,
+                    // over its budget too, ends the wait.
+                    if !matches!(then, Missed::Declined(_, Decline::Full)) {
                         return Ok(Requeued::Missed(to, then));
                     }
                 }
@@ -502,12 +533,6 @@ impl Runtime {
         }
     }
 }
-
-/// The rounds re-queued requests waited on a spent summary without an
-/// offer, so that a test sees the wait not spin.
-#[cfg(test)]
-pub(super) static SPENT_ROUNDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
 
 /// A request re-queued for a pool, counted under the pool when the chooser
 /// records its offers: once as it is re-queued, and once more if it ends at
