@@ -1002,12 +1002,19 @@ async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
     );
     // The gate shows the pool's own summary, as its hub sent it, with the
     // node's numbers: the summary the view named, or a later one.
-    let (epoch, own) = gate.own().expect("the pool's own summary");
+    // The entry's watch of its pool is not the chooser's: wait for it to
+    // hold the summary the view named, or a later one.
+    let mut own_changes = gate.own_changes();
+    let named = (decided.epoch, decided.sequence);
+    let (epoch, own) = tokio::time::timeout(
+        WAIT,
+        own_changes.wait_for(|own| own.is_some_and(|(epoch, own)| (epoch, own.sequence) >= named)),
+    )
+    .await
+    .expect("the pool's own summary in time")
+    .expect("the gate's watch goes on")
+    .expect("a summary");
     assert_eq!(epoch, decided.epoch);
-    assert!(
-        own.sequence >= decided.sequence,
-        "{own:?} against {decided:?}"
-    );
     assert_eq!(own.kv, KV);
 
     viewing.store(false, std::sync::atomic::Ordering::SeqCst);

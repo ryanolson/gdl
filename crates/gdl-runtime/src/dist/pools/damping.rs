@@ -130,7 +130,8 @@ impl Damping {
     /// periods, whichever comes first. It never doubles a window. A full
     /// pool's window that still lasts is left as it is, as for any decline,
     /// and a pool gone keeps its mark. A budget mark of an older summary
-    /// gives way, and one of the same or a newer summary stays.
+    /// gives way, one of a newer summary stays, and one of the same summary
+    /// stays while it lasts and is renewed once it has passed.
     pub(crate) fn budget(&self, pool: u64, view: (u64, u64), period: Duration, now: Instant) {
         self.change(|damped| {
             if damped.holds_gone(pool) {
@@ -140,8 +141,16 @@ impl Damping {
                 // A mark of an older summary gives way: this summary's
                 // budget is spent, whatever the older one's refusal does.
                 Some(marked) if marked < view => {}
-                // The same summary's mark, or a newer one's, stays as it is.
-                Some(_) => return None,
+                // A newer summary's mark stays, and the same summary's while
+                // it lasts; one that passed is renewed, as the pool still
+                // declines while its next summary lags.
+                Some(marked)
+                    if marked > view
+                        || damped.window(pool).is_some_and(|window| window.until > now) =>
+                {
+                    return None;
+                }
+                Some(_) => {}
                 // A full pool's window that lasts is left as it is.
                 None if damped.window(pool).is_some_and(|window| window.until > now) => {
                     return None;
@@ -606,5 +615,24 @@ mod tests {
         damping.budget(POOL, (1, 7), SECOND * 10, start);
         damping.forget_budgets(|_, view| view >= (1, 8));
         assert!(damping.view().is_damped(POOL));
+    }
+
+    /// A refusal of the same summary after its mark has passed marks the
+    /// pool again for a period: summaries can lag, and the pool still
+    /// declines. One while the mark lasts leaves it as it is.
+    #[test]
+    fn a_passed_budget_mark_is_renewed_by_the_same_summary() {
+        let start = Instant::now();
+        let damping = Damping::default();
+        damping.budget(POOL, (1, 7), SECOND, start);
+        damping.budget(POOL, (1, 7), SECOND, start + SECOND / 2);
+        assert_eq!(
+            damping.view().left(POOL, start),
+            1_000,
+            "a lasting mark stays"
+        );
+        let later = start + SECOND * 2;
+        damping.budget(POOL, (1, 7), SECOND, later);
+        assert_eq!(damping.view().left(POOL, later), 1_000, "renewed");
     }
 }
