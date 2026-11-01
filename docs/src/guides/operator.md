@@ -202,7 +202,7 @@ Every write carries the read it was decided on. A status write carries the scale
 |---|---|
 | `fewestAdmitted` (the default) | The pod with the least load: the shortest drain. A pod whose load could not be read ranks last |
 | `newest` | The newest pod |
-| `fewestCommittedKv` | The pod with the least committed KV: the least warm cache lost. A tie goes to the pod with the fewest admitted requests, then to the newest pod |
+| `fewestCommittedKv` | The pod with the least committed KV: the least warm cache lost. A tie goes to the pod with the least load, as in `fewestAdmitted`, then to the newest pod |
 
 `fewestCommittedKv` reads each pod's `kv_committed` from its hub's instance list ([Listing the instances](../concepts/pools.md#listing-the-instances)). The hub counts a load report for up to three report periods, so the number can be that old. A pod with no number is unknown, not empty: it ranks after every pod with a number. Its instance reports none, or its hub does not list it or does not answer. When no pod has a number, as with a hub of an earlier build, the policy chooses as `fewestAdmitted` does.
 
