@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, KV numbers and a view on an offer, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -419,6 +419,28 @@ taskset -c 7 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --m
 - **The tier step out of line is the cost.** Inlined again, it brings a pick of one shard to within 3 instructions of `cf2b60d` under E, and within 91 under B. Under B, a pick over every pool then runs 133 more.
 - **With the filter first, a pick of one shard runs 273 to 277 fewer instructions than at `cf2b60d`, and about 1,160 fewer than at main.** It takes 76.8 to 78.4 ns, against 146.3 to 161.1 ns at main. Against `cf2b60d`, it is 1.6 to 4.6 ns faster under B and 2.0 to 3.2 ns slower under E.
 - **The picks over every pool run within 3 instructions of main.** In time, `round_robin` under B takes 2.5 to 2.8 ns more, and `home_first` under E 0.9 to 3.3 ns more. With the same instructions, a change of that size is within what code placement alone moves a pick ([Release profiles](benchmarking.md#release-profiles)).
+
+### KV numbers in a summary, and a view on an offer
+
+A load summary that holds five KV numbers and its number is 88 bytes, against 40 before, in every pool row a policy reads. A choice holds its view flag in the top bit of its index, so it stays two words: `PoolChoice::new` clamps the index below that bit, and `at` masks it.
+
+Measured on spark-a26e (aarch64, 20 cores, shared), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per pick are the count at 200,000 picks minus the count at 100,000, divided by 100,000, over `crates/gdl/examples/picks.rs`. Base is the commit before this change; change is the commit that added it. Three rounds each gave the same counts.
+
+```bash
+cargo build --release -p gdl --example picks
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/picks <policy> <100000|200000>
+```
+
+| Pick | Base | Change | Change, without the clamp |
+|---|---|---|---|
+| `home_first`, every pool | 1,590.8 | 1,593.8 (+3.0) | 1,591.4 |
+| `home_first`, one shard | 905.0 | 907.0 (+2.0) | |
+| `round_robin`, every pool | 355.0 | 359.0 (+4.0) | 357.0 |
+
+- **The clamp costs 2 instructions, and the mask 2.** `round_robin` reads no load, so its 4 are the flag's. The clamp keeps an index past every table from reading as a smaller one once the flag is masked off.
+- **The larger rows cost under 1 instruction per `home_first` pick.**
+- **An offer with a view allocates what one without does.** `an_accepted_first_offer_allocates_what_a_roster_hand_off_does` counts 6 allocations per accepted first offer with a policy and 11 with a selector, with a view and without. The head's encoder leaves 24 bytes after the head, so the view is written in place. An entry reads an offer with a view in the allocations it used without one, and the view's few bytes come in the head's (`reading_an_offer_allocates_what_decoding_it_did`).
+- **A head with no room after it costs one allocation for a view.** A head that is not encoded by an edge's codec, as a test's bare `Vec`, grows to take the view.
 
 ## Reading the followed pools
 
