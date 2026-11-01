@@ -351,6 +351,12 @@ impl Fleet {
     /// Store the table again with each pool's summary numbered
     /// `sequence`, of hub epoch 1.
     fn number(&self, sequence: u64) {
+        self.store_numbered(sequence, true);
+    }
+
+    /// [`Fleet::number`], with `m1` taking work or, if not `m1_works`,
+    /// with no entry instance to route to.
+    fn store_numbered(&self, sequence: u64, m1_works: bool) {
         let table = self.pools.table("d").expect("the table");
         let pools: Vec<Arc<PoolTable>> = table
             .pools
@@ -372,8 +378,16 @@ impl Fleet {
                     region: shown.region.clone(),
                     state: shown.state,
                     load,
-                    eligible: shown.eligible.clone(),
-                    offered: shown.offered.clone(),
+                    eligible: if m1_works || shown.pool != POOLS[0] {
+                        shown.eligible.clone()
+                    } else {
+                        Box::new([])
+                    },
+                    offered: if m1_works || shown.pool != POOLS[0] {
+                        shown.offered.clone()
+                    } else {
+                        Box::new([])
+                    },
                     retired: shown.retired.clone(),
                     unread: shown.unread,
                     turn: Arc::clone(&shown.turn),
@@ -498,7 +512,8 @@ async fn a_budget_decline_is_asked_about_and_re_queued_as_a_full_one_is() {
 /// A request re-queued after its pool declined it over its budget is
 /// offered again with the view of the pool's row as the re-offer's table
 /// shows it: once that table shows a newer summary, the pool takes it,
-/// before its deadline. While the summary is the same, so is the view.
+/// before its deadline. While the summary is the same, it is not offered
+/// again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_re_queued_request_carries_its_pools_newer_view() {
     let fleet = Fleet::new(backoff()).await;
@@ -515,7 +530,11 @@ async fn a_re_queued_request_carries_its_pools_newer_view() {
     // Declined at summary 1, again and again: the same view.
     let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
     assert!(waited.is_err(), "taken before a newer summary");
-    assert!(fleet.offered()[0] > 1, "re-queued: {:?}", fleet.offered());
+    assert_eq!(
+        fleet.offered()[0],
+        1,
+        "re-queued, and not offered again at the same summary"
+    );
     assert_eq!(fleet.offered()[1..], [0, 0]);
     fleet.number(2);
     let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
@@ -549,6 +568,65 @@ async fn a_re_queued_request_takes_a_view_its_first_offer_could_not_carry() {
         .expect("taken in time");
     sent.expect("m1 took it at summary 2");
     assert_eq!(fleet.offered()[1..], [0, 0], "no other pool");
+}
+
+/// A request re-queued for a pool that declined it over its budget is
+/// offered to it again only with a newer summary's view: a policy that
+/// keeps the request with the pool sends one offer per summary, not one
+/// per round of its wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_re_queued_budget_decline_offers_once_per_summary() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    let router = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&router, &cx);
+    tokio::pin!(sending);
+    // Many rounds of the wait pass at a backoff of 1 ms.
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    assert_eq!(fleet.offered()[0], 1, "one offer at summary 1");
+    fleet.number(2);
+    let waited = tokio::time::timeout(Duration::from_millis(200), &mut sending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    assert_eq!(fleet.offered()[0], 2, "one more at summary 2");
+    fleet.number(3);
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("taken in time");
+    sent.expect("m1 took it at summary 3");
+    assert_eq!(fleet.offered(), [3, 0, 0]);
+}
+
+/// A request that waits for a newer summary of a pool over its budget
+/// leaves the pool at once when the pool stops taking work, as any
+/// re-queued request does, rather than at the pool's next summary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_waiting_on_a_spent_summary_leaves_a_pool_that_stops() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.number(1);
+    fleet.entries[0].newer_than.store(3, Ordering::SeqCst);
+    let router = fleet.router(Keeping {
+        requeue: true,
+        view: true,
+        ..Keeping::default()
+    });
+    let cx = Cx::new().with_timeout(Duration::from_secs(4));
+    let sending = fleet.send(&router, &cx);
+    tokio::pin!(sending);
+    let waited = tokio::time::timeout(Duration::from_millis(100), &mut sending).await;
+    assert!(waited.is_err(), "taken over the budget");
+    fleet.store_numbered(1, false);
+    let (sent, _) = tokio::time::timeout(Duration::from_secs(3), sending)
+        .await
+        .expect("left in time");
+    sent.expect("m2 took it");
+    assert_eq!(fleet.offered(), [1, 1, 0]);
 }
 
 /// A pool that never takes the re-queued request keeps it until its

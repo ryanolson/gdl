@@ -239,6 +239,7 @@ impl Runtime {
                                     pool,
                                     &mut choice,
                                     &mut seen,
+                                    last == Some(Decline::Budget),
                                 );
                                 let ended = requeued_for.await;
                                 requeueing.ended(&ended);
@@ -374,8 +375,17 @@ impl Runtime {
         pool: u64,
         choice: &mut Option<ChoiceHeld>,
         seen: &mut Seen,
+        over_budget: bool,
     ) -> Result<Requeued> {
         let deadline = cx.deadline().map(gdl::Deadline::instant);
+        // The summary the pool declined the request's view of over its
+        // budget, if it did: the request's own memory, which no other
+        // request shares. Until the pool's row shows a newer summary, an
+        // offer would be declined again, so none is sent.
+        let mut spent = over_budget
+            .then(|| envelope.payload.view())
+            .flatten()
+            .map(|view| (view.epoch, view.sequence));
         loop {
             // Held until the request offers again: any way out of this
             // round before the offer passes the wake to the next waiter.
@@ -383,6 +393,18 @@ impl Runtime {
                 .room(pool, seen, self.config.pool_requeue_backoff, deadline)
                 .await;
             cx.check()?;
+            if let Some(spent) = spent {
+                match crossing.still_spent(pool, spent) {
+                    // Before a lease is taken, whose end would wake this
+                    // wait at once: the request waits another round.
+                    Some(true) => {
+                        drop(woken);
+                        continue;
+                    }
+                    Some(false) => {}
+                    None => return Ok(Requeued::Unavailable),
+                }
+            }
             // A re-offer whose choice asked for the view takes its row's,
             // even when the first offer could carry none.
             let wants_view = seen.wants_view();
@@ -450,6 +472,14 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
+                    // A decline over the budget of the view just sent:
+                    // the next offer waits for a newer summary.
+                    if matches!(then, Missed::Declined(_, Decline::Budget)) {
+                        spent = envelope
+                            .payload
+                            .view()
+                            .map(|view| (view.epoch, view.sequence));
+                    }
                     *seen = Seen::of(held.pool_lease(), ends);
                     *choice = held.missed();
                     // A pool still full, or still over its budget, keeps
