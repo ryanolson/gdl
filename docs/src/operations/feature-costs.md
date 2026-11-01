@@ -444,6 +444,22 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 - **A head of 745 to 768 bytes is now serialized twice.** The head's encoder keeps 24 bytes free after every head, on every crossing, so a head fits the first buffer in place up to 744 bytes, not 768. A head in between is serialized once to count it and once into a buffer of its size, as a larger head always was.
 - **A head with no room after it costs one allocation for a view.** A head that is not encoded by an edge's codec, as a test's bare `Vec`, grows to take the view.
 
+### A pool's gate
+
+With no gate set, an offer at the entry costs one atomic load and a branch more, before admission. Measured on spark-a26e (aarch64, shared), rustc 1.93.1, `cargo test --release` with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind, over the ignored test `dist::offers::gate::offers_at_the_entry`. It sends `GDL_OFFERS` offers, each with a view of two elements, through one entry. The count at 400 offers minus the count at 200, divided by 200. Base is the commit before the gate, with the same test added; change is the commit that added the gate.
+
+```bash
+cargo test --release -p gdl-runtime --all-features --lib --no-run
+GDL_OFFERS=<200|400> valgrind --tool=callgrind --callgrind-out-file=/dev/null '--toggle-collect=*accept_forward*' <test binary> --ignored --exact dist::offers::gate::offers_at_the_entry --test-threads 1
+```
+
+| Count | Base | Change |
+|---|---|---|
+| Inside `accept_forward`, per offer, three rounds | 10,310 to 10,394 | 10,358 to 10,392 |
+| The whole test, per offer, seven rounds (median) | 31,067 to 31,631 (31,543) | 31,368 to 31,881 (31,770) |
+
+The entry's path is the same within its spread. The whole test runs velo's threads, which spread a round by about 560 instructions, so it cannot show a load and a branch.
+
 ## Reading the followed pools
 
 A node reads the pools its chooser follows through `gdl::FollowedPools::read` ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by and one of the chooser's damping, then, in the bench, one pool found by name among four and one withdrawal looked up. `followed/gone` also asks whether the pool is gone, as a gate does. The bench's source has the shape of the runtime's (`gdl_runtime::Pools`). A read allocates nothing (`reading_allocates_nothing`).
