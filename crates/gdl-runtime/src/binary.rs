@@ -23,8 +23,8 @@ use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
 use gdl::{
-    Affinity, FollowedPools, HubRecords, InstanceProperties, LeastLoaded, PoolPolicies, PoolPolicy,
-    PropertyType, Selector, Selectors,
+    Affinity, FollowedPools, HubRecords, InstanceKv, InstanceProperties, LeastLoaded, PoolPolicies,
+    PoolPolicy, PropertyType, Selector, Selectors,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
@@ -171,6 +171,7 @@ pub async fn run_segment<B: SegmentBinary>(
     config.runtime.pool_policies = builder.pool_policies();
     config.runtime.followed = builder.followed.clone();
     config.runtime.properties = builder.properties.clone();
+    config.runtime.kv = builder.kv.clone();
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
     // the launch, where a chooser's follower registers the pools' figures.
@@ -254,6 +255,9 @@ pub struct Builder {
     /// What every node it builds says the instance's properties are through
     /// ([`InstanceProperties::current`]).
     properties: InstanceProperties,
+    /// What every node it builds says the instance's KV cache holds through
+    /// ([`InstanceKv::current`]).
+    kv: InstanceKv,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -279,6 +283,7 @@ impl Builder {
             followed: FollowedPools::new(),
             records,
             properties: InstanceProperties::new(),
+            kv: InstanceKv::new(),
         })
     }
 
@@ -360,11 +365,14 @@ impl Builder {
         let built = self
             .followed
             .limited(S::NEEDS, format!("selector `{name}`"))
-            .scope(self.records.scope(self.properties.scope(build_node::<S>(
-                &providers,
-                &GraphConfig::new(),
-                metrics,
-            ))))
+            .scope(
+                self.records
+                    .scope(self.properties.scope(self.kv.scope(build_node::<S>(
+                        &providers,
+                        &GraphConfig::new(),
+                        metrics,
+                    )))),
+            )
             .await
             .map_err(|e| format!("building selector {name}: {e}"))?;
         let built = Arc::new(built);
@@ -430,7 +438,7 @@ impl Builder {
             .scope(
                 self.records.scope(
                     self.properties
-                        .scope(build_node::<T>(&providers, graph, metrics)),
+                        .scope(self.kv.scope(build_node::<T>(&providers, graph, metrics))),
                 ),
             )
             .await

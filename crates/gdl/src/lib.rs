@@ -27,6 +27,7 @@ mod followed;
 mod identity;
 #[doc(hidden)]
 mod items;
+mod kv;
 #[doc(hidden)]
 mod meter;
 mod metrics;
@@ -53,9 +54,10 @@ pub use gdl_model::{
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
+pub use kv::{InstanceKv, OfferView};
 pub use metrics::{GaugeReadings, Metrics, ScrapeGaugeVec};
 pub use policy::{
-    ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, Load, LoadSummary, NoPool, Pool,
+    ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, KvLoad, Load, LoadSummary, NoPool, Pool,
     PoolChoice, PoolCondition, PoolEvidence, PoolPolicies, PoolPolicy, PoolRequest, PoolState,
     PropertyState, RoundRobin,
 };
@@ -142,7 +144,7 @@ pub use gdl_macros::Projection;
 /// request's visit records. Not a stable interface.
 #[doc(hidden)]
 pub mod __runtime {
-    pub use crate::codec::{decoder, encoder, encoder_into, encoder_sized};
+    pub use crate::codec::{TAIL_ROOM, decoder, encoder, encoder_into, encoder_sized};
     pub use crate::cx::wall_now_nanos;
     pub use crate::followed::{PoolSource, PropertyKindsNow};
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};

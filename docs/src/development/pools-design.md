@@ -344,6 +344,36 @@ The rule on `properties_version` only limits which ended runs lead to an expiry;
 
 **Rejected: one list item per `properties_version` and digest, shared by every writer.** Two writers of one pool that wrote the same list at the same version wrote the same item, and each put replaced the other's. Every guard on that overwrite (a token per put, a condition on the expiry, a second put after the record, a condition on that put) closed one interleaving and opened another: a writer's delayed expiry, or TTL, reached the item that another writer's record named.
 
+## A pool's KV numbers cover one set of instances
+
+A pool's KV numbers are node code's: gdl carries them in the load report and the summary, and sums them as it sums admission. A policy reads ratios of them, such as committed KV over capacity. So any two sizes of a summary must cover the same instances. A report with no KV number is left out, since it is of an earlier build or its nodes set none. Over the rest, a size is the sum only when every one of them reports it, and none otherwise. The eviction age is the least reported, since an instance that evicted nothing reports none. `crates/gdl-pools/tests/kv.rs` holds the rule.
+
+**Rejected: summing each number over the instances that report it.** An instance that reports capacity but not committed KV would add to one and not the other: two full instances would read as half full.
+
+**Rejected: `Option<u64>` in memory.** Every pool row a policy reads holds a summary, and five options are 80 bytes. Plain words with `u64::MAX` for none are 40, read through options.
+
+## A summary's number restarts with its hub's epoch
+
+A pool's hub numbers each summary it makes one past the last, from 1, also when nothing changed: the number says which summary a reader holds, not whether it changed. Readers compare the pair (the hub's epoch, the number). The epoch already orders the hubs of a pool, and a hub's watch begins only once its first write has settled its epoch, so the pair never goes back. `crates/gdl-hub/tests/sequence.rs` restarts a hub, and refuses a hub's first write, and checks the pair.
+
+**Rejected: one number seeded from the epoch**, such as the epoch in milliseconds over the period. A hub on a host whose clock is behind takes the last epoch plus one, not its clock, so a seeded number can start below the one before it.
+
+**Rejected: seeding from the last record's number.** The hub before can send summaries after its last stored write, so the record can be behind what readers saw.
+
+The change test in the hub ignores the number, so the record is still written only on its heartbeat.
+
+## An offer carries its view after the envelope
+
+A pool policy can put the view it chose on, the pair above, on its offer (`PoolChoice::with_view`). The runtime writes it as `[epoch, sequence]` after the seven fields of the `Forward` envelope, in the room the head's encoder leaves after the head, the way a refusal's reason follows the refusal. `rmp_serde` does not check for bytes after a value, so an entry of an earlier build reads the envelope and ignores them. The entry reads the envelope with its head borrowed, to find where the head ends, then copies the head and what follows it once, as it copied the head alone. The view travels in the head's buffer, after the head, so an offer to another instance of the pool, and a re-queued offer, keep it. `crates/gdl-runtime/src/dist/envelope.rs` tests the bytes, an entry of the earlier build, a failover's copy, and the allocations.
+
+**Rejected: an eighth field of the envelope.** An entry of an earlier build fails a seven-field struct read from eight elements with `LengthMismatch`.
+
+**Rejected: a new envelope version.** A receiver refuses every version but its own, so choosers and pools of two builds could not talk while a fleet rolls.
+
+**Rejected: a meta entry in the request's context.** Meta goes on to every later hop and to node code as the caller's, and costs a string per offer.
+
+**Rejected: a field of `Forward`.** Every hand-off's future holds the envelope twice, so a 24-byte field made `send_forward`'s future 64 bytes larger, past the bound `a_first_offer_is_no_larger_than_a_hand_off_was` holds. The head's start and length share one word instead, and the view costs the envelope nothing.
+
 ## What stays fixed
 
 A change of graph or placement changes the hashes, so the new version's pools and the old version's pools do not see each other. Such a change is a lockstep rollout of new pools of every class, region by region, blue and green. A new class changes the placement, so it is a rollout too. Builds of the same contract and placement roll per pool.

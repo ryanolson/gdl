@@ -745,6 +745,7 @@ async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
             instances: 2,
             refusals: 1,
             period_ms: 10_000,
+            ..Default::default()
         }),
         ..record(MODEL, "m1", 1, 1)
     };
@@ -1011,6 +1012,7 @@ fn whole(seq: u64) -> PoolRecord {
             instances: 2 + seq as u32,
             refusals: seq,
             period_ms: 10_000 + seq,
+            ..Default::default()
         }),
     }
 }

@@ -83,7 +83,7 @@ impl MetricKind {
 /// which it reserves. A node's own metrics may not take these names: they
 /// would collide in the registry or in the scrape, or, for the reserved
 /// one, a dashboard would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 53] = [
+pub const RUNTIME_METRICS: [&str; 58] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -115,6 +115,11 @@ pub const RUNTIME_METRICS: [&str; 53] = [
     "pool_load_limit",
     "pool_load_refusals",
     "pool_load_instances",
+    "pool_kv_capacity",
+    "pool_kv_active",
+    "pool_kv_committed",
+    "pool_kv_reserved",
+    "pool_kv_eviction_age_seconds",
     "pool_load_age_seconds",
     "pool_state",
     "pool_takes_work",

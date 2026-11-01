@@ -1,5 +1,6 @@
 //! What a chooser holds of each pool it follows, read from its tables when
-//! the registry is scraped: the pool's load summary and its age, its
+//! the registry is scraped: the pool's load summary, with each KV number it
+//! has, and its age, its
 //! state, and whether it takes work. An offer does nothing for these; the
 //! scrape loads each entry segment's table, as a choice does, and takes no
 //! lock the follower or a request takes.
@@ -47,6 +48,40 @@ const LOADS: [LoadFamily; 4] = [
         |load| f64::from(load.instances),
     ),
 ];
+/// A family of a KV number of the load summary: its name, its help, and
+/// how it reads the number, `None` when the summary has none.
+type KvFamily = (&'static str, &'static str, fn(&LoadSummary) -> Option<f64>);
+
+/// The families of the KV numbers of the load summary the chooser holds
+/// for a pool ([`gdl_pools::KvLoad`]): a pool shows each only while its
+/// summary has it.
+const KVS: [KvFamily; 5] = [
+    (
+        "pool_kv_capacity",
+        "Usable KV in tokens, summed over the pool's entry instances that report KV, in the last load summary this chooser has of the pool.",
+        |load| load.kv.capacity().map(|tokens| tokens as f64),
+    ),
+    (
+        "pool_kv_active",
+        "KV of the requests in flight in tokens, over the same instances, in that summary.",
+        |load| load.kv.active().map(|tokens| tokens as f64),
+    ),
+    (
+        "pool_kv_committed",
+        "KV of the sessions active within the pool's cache target in tokens, over the same instances, in that summary.",
+        |load| load.kv.committed().map(|tokens| tokens as f64),
+    ),
+    (
+        "pool_kv_reserved",
+        "The expected growth of the live sessions' KV in tokens, over the same instances, in that summary.",
+        |load| load.kv.reserved().map(|tokens| tokens as f64),
+    ),
+    (
+        "pool_kv_eviction_age_seconds",
+        "The least eviction age the pool's entry instances report, in seconds, in that summary.",
+        |load| load.kv.eviction_age_ms().map(|ms| ms as f64 / 1000.0),
+    ),
+];
 /// The family of the age of the summary, and its help.
 pub(crate) const LOAD_AGE: &str = "pool_load_age_seconds";
 const LOAD_AGE_HELP: &str =
@@ -71,6 +106,7 @@ const STATES: [(PoolState, &str); 4] = [
 #[cfg(test)]
 pub(crate) fn names() -> Vec<&'static str> {
     let mut names: Vec<_> = LOADS.iter().map(|(name, ..)| *name).collect();
+    names.extend(KVS.iter().map(|(name, ..)| *name));
     names.extend([LOAD_AGE, STATE, TAKES_WORK]);
     names
 }
@@ -94,8 +130,11 @@ impl PoolGauges {
             )
             .map_err(failed)
         };
-        let mut descs = Vec::with_capacity(LOADS.len() + 3);
+        let mut descs = Vec::with_capacity(LOADS.len() + KVS.len() + 3);
         for (name, help, _) in LOADS {
+            descs.push(desc(name, help, pool_labels())?);
+        }
+        for (name, help, _) in KVS {
             descs.push(desc(name, help, pool_labels())?);
         }
         descs.push(desc(LOAD_AGE, LOAD_AGE_HELP, pool_labels())?);
@@ -172,6 +211,7 @@ impl Collector for PoolGauges {
             ]
         };
         let mut loads: Vec<Vec<proto::Metric>> = vec![Vec::new(); LOADS.len()];
+        let mut kvs: Vec<Vec<proto::Metric>> = vec![Vec::new(); KVS.len()];
         let mut ages = Vec::new();
         let mut states = Vec::with_capacity(held.len() * STATES.len());
         let mut takes_work = Vec::with_capacity(held.len());
@@ -181,6 +221,11 @@ impl Collector for PoolGauges {
             if let Some((load, made)) = &shown.load {
                 for ((_, _, read), series) in LOADS.iter().zip(&mut loads) {
                     series.push(gauge(labels(key, shown), read(load)));
+                }
+                for ((_, _, read), series) in KVS.iter().zip(&mut kvs) {
+                    if let Some(value) = read(load) {
+                        series.push(gauge(labels(key, shown), value));
+                    }
                 }
                 let age = now.saturating_duration_since(*made).as_secs_f64();
                 ages.push(gauge(labels(key, shown), age));
@@ -203,6 +248,11 @@ impl Collector for PoolGauges {
             .zip(loads)
             .map(|((name, help, _), series)| family(name, help, series))
             .collect();
+        families.extend(
+            KVS.iter()
+                .zip(kvs)
+                .map(|((name, help, _), series)| family(name, help, series)),
+        );
         families.push(family(LOAD_AGE, LOAD_AGE_HELP, ages));
         families.push(family(STATE, STATE_HELP, states));
         families.push(family(TAKES_WORK, TAKES_WORK_HELP, takes_work));
@@ -304,6 +354,7 @@ mod tests {
                 instances: 2,
                 refusals: 5,
                 period_ms: 1_000,
+                ..Default::default()
             },
             Instant::now() - Duration::from_secs(2),
         );
@@ -368,5 +419,56 @@ mod tests {
         pools.store("d", EntryTable::new(Box::new([])));
         pools.store("e", EntryTable::new(Box::new([])));
         assert_eq!(value(&registry, STATE, "m1", &[]), None);
+    }
+
+    /// A pool's summary shows each KV number it has, the eviction age in
+    /// seconds, and no series for a number it does not have: a zero would
+    /// read as an empty cache.
+    #[test]
+    fn a_pool_shows_the_kv_numbers_its_summary_has() {
+        let pools = Pools::new(
+            "home",
+            [("model_x", "d")],
+            Damping::default(),
+            gdl::PropertyKinds::new(),
+        );
+        let registry = Registry::new();
+        PoolGauges::register(&registry, pools.clone()).expect("registered");
+        let kv = gdl_pools::KvLoad::NONE
+            .with_capacity(8_000)
+            .with_active(500)
+            .with_committed(3_000)
+            .with_eviction_age_ms(42_500);
+        let load = gdl::Load::new(
+            LoadSummary {
+                admitted: 1,
+                limit: 8,
+                instances: 1,
+                period_ms: 1_000,
+                kv,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        pools.store(
+            "d",
+            EntryTable::new(Box::new([pool(
+                "m1",
+                "east",
+                PoolState::Ready,
+                Some(load),
+                &[],
+            )])),
+        );
+        let east = [(REGION, "east")];
+        for (name, expected) in [
+            ("pool_kv_capacity", Some(8_000.0)),
+            ("pool_kv_active", Some(500.0)),
+            ("pool_kv_committed", Some(3_000.0)),
+            ("pool_kv_reserved", None),
+            ("pool_kv_eviction_age_seconds", Some(42.5)),
+        ] {
+            assert_eq!(value(&registry, name, "m1", &east), expected, "{name}");
+        }
     }
 }

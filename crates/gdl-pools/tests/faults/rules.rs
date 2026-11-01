@@ -310,6 +310,7 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
             instances: 1,
             refusals: 0,
             period_ms: 10_000,
+            ..Default::default()
         }),
     };
     let first = record(1);
@@ -365,6 +366,7 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
             instances: 1,
             refusals: 0,
             period_ms: 10_000,
+            ..Default::default()
         }),
     };
     let first = record(1);
@@ -485,6 +487,7 @@ async fn a_backend_that_loses_its_load_on_restart_fails() {
             instances: 2,
             refusals: 1,
             period_ms: 10_000,
+            ..Default::default()
         }),
     };
     directory

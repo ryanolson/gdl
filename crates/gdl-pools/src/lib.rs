@@ -28,6 +28,7 @@
 pub mod conformance;
 mod dir;
 mod directory;
+mod kv;
 mod memory;
 mod operator;
 mod record;
@@ -36,6 +37,7 @@ mod view;
 
 pub use dir::{DirDirectory, DirLimits, DirWatch};
 pub use directory::{DirectoryError, LastWrite, PoolDirectory, PoolEvent, ResumeToken};
+pub use kv::KvLoad;
 pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
 pub use operator::{CommandWrite, PoolCommand, last_record};
 pub use record::{

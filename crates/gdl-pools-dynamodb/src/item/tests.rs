@@ -251,6 +251,7 @@ fn a_records_item_stays_small_whatever_its_properties() {
             instances: 4,
             refusals: 0,
             period_ms: 10_000,
+            ..Default::default()
         }),
         ..pool(properties, 4_294_967_297)
     };
@@ -260,6 +261,45 @@ fn a_records_item_stays_small_whatever_its_properties() {
     assert_eq!(size(&many.item), size(&one.item), "the list is apart");
     let list = size(&many.list.expect("a list").1);
     assert!((70_000..80_000).contains(&list), "{list}");
+}
+
+/// A record's load summary reads back with its KV numbers and its number.
+/// All five numbers at their widest take the item from at most 450 bytes
+/// to 582: still one 1 KB write unit, as every heartbeat writes it.
+#[test]
+fn a_records_load_keeps_its_kv_numbers_and_number() {
+    let kv = gdl_pools::KvLoad::NONE
+        .with_capacity(1_000_000_000)
+        .with_active(10_000_000)
+        .with_committed(600_000_000)
+        .with_reserved(90_000_000)
+        .with_eviction_age_ms(3_600_000);
+    let published = PoolRecord {
+        load: Some(gdl_pools::LoadSummary {
+            admitted: 12,
+            limit: 64,
+            instances: 4,
+            refusals: 0,
+            period_ms: 10_000,
+            kv,
+            sequence: 8_640,
+        }),
+        ..pool(1, 4_294_967_297)
+    };
+    assert_eq!(read_back(&published).load, published.load);
+    let encoded = record(&published, u64::MAX).expect("encodes");
+    let size: usize = encoded
+        .item
+        .iter()
+        .map(|(name, value)| {
+            name.len()
+                + match value {
+                    AttributeValue::S(text) | AttributeValue::N(text) => text.len(),
+                    _ => 0,
+                }
+        })
+        .sum();
+    assert!(size <= 640, "{size}");
 }
 
 /// A list body does not fail as a whole for one property that does not

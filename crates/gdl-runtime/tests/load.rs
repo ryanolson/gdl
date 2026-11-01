@@ -58,7 +58,13 @@ fn summary(admitted: u64, entries: u32, refusals: u64) -> Option<LoadSummary> {
         instances: entries,
         refusals,
         period_ms: u64::try_from(SUMMARY.as_millis()).expect("a short period"),
+        ..Default::default()
     })
+}
+
+/// A summary without its number, which its pool's hub sets on each one.
+fn bare(load: Option<LoadSummary>) -> Option<LoadSummary> {
+    load.map(LoadSummary::unnumbered)
 }
 
 /// The global pool's hub and a chooser in it.
@@ -168,7 +174,7 @@ async fn pool_watch<H>(pool: &ModelPool<H>) -> PoolWatch {
     watch
 }
 
-/// Read `watch` until it sends the load `load`.
+/// Read `watch` until it sends the load `load`, whatever its number.
 async fn load(watch: &mut PoolWatch, load: Option<LoadSummary>) {
     let mut seen = Vec::new();
     let waited = tokio::time::timeout(WAIT, async {
@@ -176,7 +182,7 @@ async fn load(watch: &mut PoolWatch, load: Option<LoadSummary>) {
             if let PoolWatchEvent::Load { load: sent } =
                 watch.next().await.expect("the watch goes on")
             {
-                if sent == load {
+                if bare(sent) == load {
                     return;
                 }
                 seen.push(sent);
@@ -187,10 +193,11 @@ async fn load(watch: &mut PoolWatch, load: Option<LoadSummary>) {
     assert!(waited.is_ok(), "no load of {load:?} in time: {seen:?}");
 }
 
-/// Wait until the chooser's table of `M1` holds `load`.
+/// Wait until the chooser's table of `M1` holds `load`, whatever its
+/// number.
 async fn table_holds(pools: &Pools, load: Option<LoadSummary>) {
     until(pools, "the summary in the chooser's table", |pools| {
-        followed(pools, "f", M1).is_some_and(|m| m.load == load)
+        followed(pools, "f", M1).is_some_and(|m| bare(m.load) == load)
     })
     .await;
     let age = followed(pools, "f", M1).expect("followed").load_age;
@@ -236,7 +243,7 @@ async fn the_entry_instances_load_reaches_the_choosers_table() {
         loop {
             match records.next().await {
                 Some(Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }))
-                    if record.name == M1 && record.load == busy =>
+                    if record.name == M1 && bare(record.load) == busy =>
                 {
                     return;
                 }
@@ -251,7 +258,7 @@ async fn the_entry_instances_load_reaches_the_choosers_table() {
         loop {
             match relay.next().await.expect("the relay goes on") {
                 FollowEvent::Follow { pool, load, .. } | FollowEvent::Load { pool, load, .. }
-                    if pool == M1 && load == busy =>
+                    if pool == M1 && bare(load) == busy =>
                 {
                     return;
                 }
@@ -837,4 +844,145 @@ async fn a_property_removed_without_yielding_finishes_its_drain() {
             gdl_pools::PropertyState::Drained
         )
     );
+}
+
+/// What the model pool's entry instance says of its KV cache: every
+/// number but the reserved KV.
+const KV: gdl::KvLoad = gdl::KvLoad::NONE
+    .with_capacity(80_000)
+    .with_active(2_000)
+    .with_committed(30_000)
+    .with_eviction_age_ms(45_000);
+
+/// A pool policy that chooses the first pool that takes work, asks for
+/// the view on its offer while `viewing`, and keeps what it read of the
+/// pool's load: its KV numbers, and the view it decided on.
+struct Viewing {
+    viewing: Arc<std::sync::atomic::AtomicBool>,
+    read: Arc<std::sync::Mutex<Option<(gdl::KvLoad, gdl::OfferView)>>>,
+}
+
+impl gdl::PoolPolicy for Viewing {
+    type Head = gdl::Encoded;
+
+    fn choose(
+        &self,
+        _: gdl::PoolRequest<'_, gdl::Encoded>,
+        pools: &[gdl::Pool],
+    ) -> Result<gdl::PoolChoice, gdl::NoPool> {
+        let at = pools
+            .iter()
+            .position(gdl::Pool::takes_work)
+            .ok_or_else(gdl::NoPool::new)?;
+        let pool = &pools[at];
+        if let Some(load) = pool.load() {
+            let view = gdl::OfferView {
+                epoch: pool.epoch(),
+                sequence: load.summary().sequence,
+            };
+            *self.read.lock().expect("unpoisoned") = Some((load.summary().kv, view));
+        }
+        let choice = gdl::PoolChoice::new(at);
+        Ok(if self.viewing.load(std::sync::atomic::Ordering::SeqCst) {
+            choice.with_view()
+        } else {
+            choice
+        })
+    }
+}
+
+/// The KV numbers a node of the model pool's entry instance sets reach
+/// the chooser's pool policy through `pool.load()`, summed by the pool's
+/// hub. A policy that asks for the view puts on its offer the epoch and
+/// the summary's number of the very row it chose, and the entry's node
+/// reads them from its context; an offer whose policy did not ask carries
+/// none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kv_numbers_reach_the_policy_and_its_view_reaches_the_entry() {
+    let spec = spec_of(placement().pool_policy(
+        "model_x",
+        gdl_model::PoolPolicy {
+            policy: "viewing".into(),
+            provides: Vec::new(),
+        },
+    ));
+    let directory = Resolving::new();
+    let kv = gdl::InstanceKv::new();
+    kv.set(KV);
+    let given = kv.clone();
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        kv: given.clone(),
+        ..limited(runtime)
+    };
+    let pool = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let events = Events::new();
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        pool,
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    let (hub, _readiness) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let extra = format!("{}{RUNTIME}", global_pool());
+    let mut config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let viewing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let read = Arc::new(std::sync::Mutex::new(None));
+    config
+        .runtime
+        .pool_policies
+        .add(
+            "viewing",
+            Viewing {
+                viewing: Arc::clone(&viewing),
+                read: Arc::clone(&read),
+            },
+        )
+        .expect("registered");
+    let quiet = Events::quiet();
+    let chooser = run_graph(&config, "a", &spec, config.runtime.clone(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await
+    .expect("the chooser serves");
+    until(
+        &tables(&chooser),
+        "the KV numbers in the chooser's table",
+        |pools| followed(pools, "f", M1).is_some_and(|m| m.load.is_some_and(|load| load.kv == KV)),
+    )
+    .await;
+
+    drop(hold(&chooser, "viewed").await);
+    let (seen, decided) = read
+        .lock()
+        .expect("unpoisoned")
+        .take()
+        .expect("the policy chose");
+    assert_eq!(seen, KV, "the policy reads the node's numbers");
+    assert!(decided.sequence > 0, "{decided:?}");
+    let arrived = events.cx_of("B:viewed");
+    assert_eq!(arrived.ext::<gdl::OfferView>(), Some(&decided));
+
+    viewing.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(hold(&chooser, "plain").await);
+    let arrived = events.cx_of("B:plain");
+    assert_eq!(
+        arrived.ext::<gdl::OfferView>(),
+        None,
+        "no view was asked for"
+    );
+    drop(chooser);
+    shut([hub, m1.hub]).await;
 }

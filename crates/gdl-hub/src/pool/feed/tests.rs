@@ -380,6 +380,7 @@ async fn a_report_does_not_outlive_its_registration() {
         admitted: 3,
         limit: 8,
         refusals: 0,
+        ..Default::default()
     };
     let now = Instant::now();
     for complete in [true, false] {

@@ -31,7 +31,7 @@ mod round_robin;
 
 pub use damped::{Damped, Window};
 pub use decline::Decline;
-pub use gdl_pools::{LoadSummary, PoolCondition, PoolState, PropertyState};
+pub use gdl_pools::{KvLoad, LoadSummary, PoolCondition, PoolState, PropertyState};
 pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;
 
@@ -116,9 +116,16 @@ pub trait PoolPolicy: Send + Sync + 'static {
 /// pools it was given, and, if it asks, a lease that learns whether that
 /// pool accepted the offer.
 pub struct PoolChoice {
+    /// The index, with the view's flag in its top bit ([`VIEW`]), so that
+    /// a choice stays two words and a policy's return no larger than an
+    /// `Option` of it.
     at: usize,
     lease: Option<ChoiceHeld>,
 }
+
+/// The bit of [`PoolChoice`]'s index that asks for the view: no table holds
+/// that many pools.
+const VIEW: usize = 1 << (usize::BITS - 1);
 
 /// A choice's lease behind one thin pointer, so that a choice is two words
 /// and a choice without a lease costs the pick what an index did: a fat
@@ -147,7 +154,33 @@ impl PoolChoice {
     /// given.
     #[inline]
     pub fn new(at: usize) -> Self {
-        Self { at, lease: None }
+        Self {
+            // An index that reaches the flag is past every table, and the
+            // runtime refuses it as it refuses any index past the pools it
+            // gave.
+            at: at.min(VIEW - 1),
+            lease: None,
+        }
+    }
+
+    /// Put on the offer the view of the pool this choice decided on
+    /// ([`OfferView`](crate::OfferView)): the epoch of the chosen row's
+    /// hub and the number of the load summary the row holds, for a pool
+    /// that admits by them. The runtime sends none when the row has no
+    /// summary, or one from a hub of a build before the numbers. Ask only
+    /// for a choice the pool may decline on that ground, as a session's
+    /// first turn: a pinned turn asks for none.
+    #[inline]
+    pub fn with_view(mut self) -> Self {
+        self.at |= VIEW;
+        self
+    }
+
+    /// Whether the choice asks for the view on its offer
+    /// ([`with_view`](PoolChoice::with_view)).
+    #[inline]
+    pub fn wants_view(&self) -> bool {
+        self.at & VIEW != 0
     }
 
     /// Keep `lease` with the choice. The runtime calls its
@@ -169,21 +202,22 @@ impl PoolChoice {
     /// The index of the chosen pool.
     #[inline]
     pub fn at(&self) -> usize {
-        self.at
+        self.at & !VIEW
     }
 
     /// The index and the lease, for the runtime.
     #[doc(hidden)]
     #[inline]
     pub fn into_parts(self) -> (usize, Option<ChoiceHeld>) {
-        (self.at, self.lease)
+        (self.at(), self.lease)
     }
 }
 
 impl fmt::Debug for PoolChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PoolChoice")
-            .field("at", &self.at)
+            .field("at", &self.at())
+            .field("view", &self.wants_view())
             .field("lease", &self.lease.is_some())
             .finish()
     }
@@ -1251,7 +1285,10 @@ mod tests {
 
         let told = Arc::new(AtomicUsize::new(0));
         let choice = PoolChoice::new(3).with_lease(Told(Arc::clone(&told)));
-        assert_eq!(format!("{choice:?}"), "PoolChoice { at: 3, lease: true }");
+        assert_eq!(
+            format!("{choice:?}"),
+            "PoolChoice { at: 3, view: false, lease: true }"
+        );
         let (at, lease) = choice.into_parts();
         assert_eq!(at, 3);
         let mut lease = lease.expect("a lease");

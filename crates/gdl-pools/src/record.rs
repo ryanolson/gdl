@@ -2,7 +2,7 @@ use std::{fmt, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::DirectoryError;
+use crate::{DirectoryError, KvLoad};
 
 /// One pool's record in the pool directory, published by the pool's hub
 /// and read by every hub that may send to the pool.
@@ -325,7 +325,12 @@ pub enum PropertyState {
 /// makes no summary while it counts no report.
 ///
 /// Admission counts roots, not engine work, so a policy built on it is
-/// an admission heuristic.
+/// an admission heuristic. The KV numbers are what node code reports of
+/// its cache, summed over the same reports but only those that carry a KV
+/// number ([`KvLoad::summed`]), so during a roll they can cover fewer
+/// instances than `admitted` does. Any two sizes cover the same
+/// instances: compare them with each other (`committed` with
+/// `capacity`), not with `instances`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoadSummary {
     /// The roots the instances that reported hold admitted.
@@ -342,6 +347,28 @@ pub struct LoadSummary {
     /// no summary for a few periods knows its last one is stale, without
     /// knowing the pool's settings.
     pub period_ms: u64,
+    /// The KV numbers of the instances that reported any
+    /// ([`KvLoad::summed`]).
+    #[serde(flatten)]
+    pub kv: KvLoad,
+    /// The summary's number: the pool's hub numbers each summary it makes
+    /// one past the last, from 1. A hub that starts again numbers from 1
+    /// under a later epoch, so the pair (the hub's epoch, `sequence`),
+    /// compared in that order, never goes back: compare the pair, never
+    /// the sequence alone. 0 from a hub of an earlier build.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sequence: u64,
+}
+
+impl LoadSummary {
+    /// The summary as a load is compared for a change: without its
+    /// sequence, which every summary changes.
+    pub fn unnumbered(self) -> Self {
+        Self {
+            sequence: 0,
+            ..self
+        }
+    }
 }
 
 /// A pool's withdrawal of its record: the last write of a pool that

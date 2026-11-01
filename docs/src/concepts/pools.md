@@ -120,6 +120,28 @@ Once a period, the hub sums the latest report of each usable entry instance into
 
 There is no summary while no report counts, and none for a class that no hop enters.
 
+#### KV numbers
+
+A report can also carry five numbers about the instance's KV cache, each optional (`gdl::KvLoad`):
+
+| Field | Unit | Meaning |
+|---|---|---|
+| `kv_capacity` | tokens | usable KV |
+| `kv_active` | tokens | KV of the requests in flight |
+| `kv_committed` | tokens | KV of the sessions active within the pool's cache target, resident or evicted |
+| `kv_reserved` | tokens | the expected growth of the live sessions' KV |
+| `eviction_age_ms` | ms | how old KV is when it is evicted; none from an instance that evicted nothing |
+
+A node in an entry segment sets them through `gdl::InstanceKv`, as it sets its properties: it takes the handle in its build with `InstanceKv::current()` and calls `set` whenever its numbers change. `set` replaces every number, takes no lock, and allocates nothing, so a node may call it on every request. The runtime reads the numbers once a period, with the report. gdl carries and sums them, and checks none.
+
+The hub sums them over the same reports as `admitted`, and they go stale with the summary. A report with no KV number is left out: it is of an earlier build, or its nodes set none. Over the rest, each size is the sum only when every one of them reports it, and none otherwise, so that any two sizes of a summary cover the same instances. Compare them with each other (`kv_committed` with `kv_capacity`), not with `instances`: during a roll they cover only the instances of the new build. `eviction_age_ms` is the least of those reported. A field is left out of the JSON when it is none, so a reader of an earlier build ignores it, and a report of an earlier build reads as having none.
+
+#### The summary's number
+
+Each summary carries `sequence`: the hub numbers each summary it makes one past the last, from 1, changed or not. A hub that starts again numbers from 1 under a later epoch, so the pair (the hub's epoch, `sequence`), compared in that order, never goes back. Compare the pair, never the sequence alone. A hub raises its epoch while it runs only before its first write is stored, and its watch begins only after that write, so a reader never sees the epoch change under one hub. `sequence` is 0 from a hub of an earlier build. A chooser can put the pair it chose on on its offer ([A registered policy](pool-routing.md#a-registered-policy)).
+
+A hub of an earlier build that relays a summary drops the KV numbers and the sequence, so roll the hubs before the instances and the choosers ([Limitations](../operations/limitations.md#a-hub-of-an-earlier-build-drops-the-kv-numbers-and-the-summarys-number)).
+
 ### Listing the instances
 
 A controller outside the pool, such as one that chooses which instance to remove, reads the hub's list of its members: `GET /v1/ext/gdl-pool/instances` on the control listener (`gdl_watch::Instances`). For each member it gives:
@@ -128,7 +150,7 @@ A controller outside the pool, such as one that chooses which instance to remove
 - its velo peer, the instance id and the worker address, encoded as `/v1/ext/gdl/members` and the pool's watch carry it;
 - `addresses`, the socket addresses its velo TCP transports advertise, as `ip:port`, each once. The hub reads every entry of the worker address, whatever its transport key, and skips one that is not a TCP endpoint. Under Kubernetes the IP is the pod's ([Addresses in a container](hub.md#addresses-in-a-container)), so a controller maps a pod to its instance by it;
 - its phase, the furthest one it has announced, in this order: `joining` (registered, not yet `ready`), `ready`, `detached`, `retired`, `drained`;
-- for a usable entry instance, its latest load report: `admitted`, `limit`, `refusals`, and `age_ms`, how long ago the hub took it. It is the report the next summary would count, so it is absent for an interior instance, an entry instance that has not reported yet, one that is not usable, and a report older than three periods. It is shown only with the phase `ready`, so an instance listed in a later phase has none.
+- for a usable entry instance, its latest load report: `admitted`, `limit`, `refusals`, its KV numbers, and `age_ms`, how long ago the hub took it. It is the report the next summary would count, so it is absent for an interior instance, an entry instance that has not reported yet, one that is not usable, and a report older than three periods. It is shown only with the phase `ready`, so an instance listed in a later phase has none.
 
 The hub makes the list when it is asked, from its members, its own service directory, and the reports it holds. Nothing is kept for it, and no request pays for it. For one registration, a listed phase never goes backwards while the instance's own announcements stand. An instance whose retirement announcement went unanswered withdraws it, and is listed `ready` again, as the hub holds it. The hub reads each segment's phases one after another, in the order above, and keeps nothing between lists. This holds because, while its announcements stand, an instance withdraws only `ready`, and only after the hub has taken its `retired`. So a read of `ready` that misses it is followed by a read of `retired` that sees it, and the later phases stay until the instance leaves. A list is a snapshot: a registration that ends while the hub makes it is left out, so an instance can be missing from one list because it left. That holds even when the instance's id registers again during the list, for any segment: the hub tells registrations apart by their incarnation, not by the id alone.
 

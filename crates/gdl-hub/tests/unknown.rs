@@ -564,6 +564,7 @@ fn load_of(admitted: u64) -> String {
             instances: 1,
             refusals: 0,
             period_ms: 1000,
+            ..Default::default()
         }),
     })
     .expect("an event serializes")
@@ -709,6 +710,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
                     instances: 1,
                     refusals: 0,
                     period_ms: 1000,
+                    ..Default::default()
                 }),
             },
         ]

@@ -208,6 +208,7 @@ fn a_withheld_pool_is_unavailable_until_it_is_read_again() {
         instances: 2,
         refusals: 0,
         period_ms: 1000,
+        ..Default::default()
     };
     let mut fresh = Installed::new(
         "m".into(),

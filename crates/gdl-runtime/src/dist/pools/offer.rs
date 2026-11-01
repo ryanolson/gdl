@@ -90,7 +90,9 @@ impl Runtime {
     /// of it by the hop's router: the instance, the pool's
     /// [`id`](super::PoolTable::id), and what the offer holds while the
     /// request is held, a selector's lease and the lease on the pool's
-    /// follow, with the selector's meta added to `envelope`. [`NoPool`]
+    /// follow, with the selector's meta added to `envelope`, and the view
+    /// of the pool the choice was made on, if its policy asked for one, or
+    /// none, in place of an earlier choice's. [`NoPool`]
     /// when no such pool may take it.
     pub(crate) async fn choose_pool(
         &self,
@@ -100,17 +102,38 @@ impl Runtime {
         left: Left<'_>,
     ) -> Result<Result<(InstanceId, u64, Held), NoPool>> {
         match crossing.within() {
-            Within::Policy(policy) => Ok(crossing
-                .pick(cx, &envelope.payload, *policy, self.random(), left)?
-                .map(|(instance, pool, lease)| (instance, pool, Held::pool(None, lease)))),
+            Within::Policy(policy) => {
+                let mut view = None;
+                let picked = crossing.pick(
+                    cx,
+                    &envelope.payload,
+                    *policy,
+                    self.random(),
+                    left,
+                    &mut view,
+                )?;
+                Ok(picked.map(|(instance, pool, lease)| {
+                    envelope.payload.set_view(view);
+                    (instance, pool, Held::pool(None, lease))
+                }))
+            }
             Within::Selector {
                 selector, encoding, ..
             } => {
+                let mut view = None;
                 let chosen = crossing
-                    .choose(&**selector, cx, &envelope.payload, *encoding, left)
+                    .choose(
+                        &**selector,
+                        cx,
+                        &envelope.payload,
+                        *encoding,
+                        left,
+                        &mut view,
+                    )
                     .await?;
                 Ok(chosen.map(|(instance, pool, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
+                    envelope.payload.set_view(view);
                     (instance, pool, Held::pool(picked.lease, lease))
                 }))
             }
@@ -587,15 +610,18 @@ mod tests {
     }
 
     /// The allocations each of `routers` makes to send one hand-off that
-    /// is accepted, from the instance of `a` that `rt` is to the one
+    /// is accepted, its head encoded before the count begins, from the instance of `a` that `rt` is to the one
     /// entry instance of `d`: the fewest over a few sends, after a first
     /// that meets the peer.
     async fn allocations(rt: &Runtime, routers: &[Router]) -> Vec<u64> {
         let mut fewest = vec![u64::MAX; routers.len()];
+        let codec = crate::wire::Codec::<Vec<u8>>::new(Default::default());
         for round in 0..31 {
             for (at, router) in routers.iter().enumerate() {
                 let mut cx = Cx::new();
                 cx.insert_meta("session", "s1");
+                // Encoded as an edge encodes a head, with room after it.
+                let payload = codec.encode_head(&vec![1, 2, 3]).expect("a head");
                 let envelope = Forward {
                     version: VERSION,
                     identity: rt.identity,
@@ -603,7 +629,7 @@ mod tests {
                     pos: 1,
                     cx: WireCx::of(&cx),
                     reply: ReplyTo::test_value(7),
-                    payload: vec![1, 2, 3].into(),
+                    payload,
                 };
                 let send = Counted::new(rt.send_forward("d", router, &cx, envelope, false));
                 let (sent, made) = tokio::time::timeout(Duration::from_secs(5), send)
@@ -622,8 +648,9 @@ mod tests {
     /// routed by the roster does, with a policy and with a selector that
     /// replaces the request's own meta: nothing for a failover is made
     /// before a pool declines, and counting the offer's outcome and its
-    /// round trip allocates nothing. The hand-off is not timed for a
-    /// visit, and its round trip is still measured.
+    /// round trip allocates nothing, and nor does a view on the offer. The
+    /// hand-off is not timed for a visit, and its round trip is still
+    /// measured.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accepted_first_offer_allocates_what_a_roster_hand_off_does() {
         let layout = layout();
@@ -672,7 +699,16 @@ mod tests {
                 epoch: 0,
                 region: "home".into(),
                 state: PoolState::Ready,
-                load: super::super::tests::idle(),
+                // Numbered, so that a choice that asks for the view gets one.
+                load: super::super::tests::idle().map(|idle| {
+                    gdl::Load::new(
+                        gdl::LoadSummary {
+                            sequence: 3,
+                            ..*idle.summary()
+                        },
+                        idle.arrived(),
+                    )
+                }),
                 eligible: Box::new([id]),
                 offered: Box::new([crate::dist::roster::selector_id(id)]),
                 retired: Box::new([]),
@@ -687,18 +723,19 @@ mod tests {
                 properties_version: 0,
             })])),
         );
-        let crossing = |within: Within| {
-            let mut targets = targets(
-                &layout,
-                "a",
-                &pools,
-                &gdl::PoolPolicies::new(),
-                gdl::HomeFirstAt::DEFAULT,
-            )
-            .expect("targets");
+        let viewing = layout_under(gdl_model::PoolPolicy {
+            policy: "viewed".into(),
+            provides: Vec::new(),
+        });
+        let mut policies = gdl::PoolPolicies::new();
+        policies.add("viewed", Viewed).expect("registered");
+        let crossing_under = |layout: &gdl_model::Layout, within: Within| {
+            let mut targets = targets(layout, "a", &pools, &policies, gdl::HomeFirstAt::DEFAULT)
+                .expect("targets");
             let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
             Router::Pools(Arc::new(Crossing::new(target, within, Default::default())))
         };
+        let crossing = |within: Within| crossing_under(&layout, within);
         let policy = Within::Policy(Policy::RoundRobin);
         let selector = Within::Selector {
             name: Arc::from("replacing"),
@@ -707,14 +744,19 @@ mod tests {
         };
         let routers = [
             Router::Roster(policy.clone()),
-            crossing(policy),
+            crossing(policy.clone()),
             Router::Roster(selector.clone()),
-            crossing(selector),
+            crossing(selector.clone()),
+            crossing_under(&viewing, policy),
+            crossing_under(&viewing, selector),
         ];
         let writes = super::super::damping::WRITES.with(Cell::get);
         let made = allocations(&rt, &routers).await;
+        eprintln!("allocations per accepted first offer: {made:?}");
         assert_eq!(made[1], made[0], "with a policy: {made:?}");
         assert_eq!(made[3], made[2], "with a selector: {made:?}");
+        assert_eq!(made[4], made[1], "a view, with a policy: {made:?}");
+        assert_eq!(made[5], made[3], "a view, with a selector: {made:?}");
         assert_eq!(
             super::super::damping::WRITES.with(Cell::get),
             writes,
@@ -723,11 +765,30 @@ mod tests {
         // Each crossing sent 31 hand-offs, every one counted.
         assert_eq!(
             super::super::meter::tests::offers(&registry, "m1", "accepted"),
-            Some(62.0)
+            Some(124.0)
         );
         let round_trips = super::super::meter::tests::round_trips(&registry, "m1", "accepted")
             .expect("a histogram");
-        assert_eq!(round_trips.get_sample_count(), 62);
+        assert_eq!(round_trips.get_sample_count(), 124);
+    }
+
+    /// Chooses the first pool that takes work, and asks for the view.
+    struct Viewed;
+
+    impl gdl::PoolPolicy for Viewed {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            _: gdl::PoolRequest<'_, gdl::Encoded>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, gdl::NoPool> {
+            pools
+                .iter()
+                .position(gdl::Pool::takes_work)
+                .map(|at| gdl::PoolChoice::new(at).with_view())
+                .ok_or_else(gdl::NoPool::new)
+        }
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -1452,7 +1513,7 @@ mod tests {
         let random = std::hash::RandomState::new();
         let (lone, pools) = followed_over(&["m1"]);
         let pick = || {
-            lone.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            lone.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("a lone pool is always chosen")
                 .1
@@ -1535,7 +1596,7 @@ mod tests {
         let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("a pool")
         };
@@ -1598,13 +1659,13 @@ mod tests {
 
         let (lone, _pools) = followed_over(&["m1"]);
         let (_, pool, lease) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
             .expect("a pick")
             .expect("a lone pool");
         lone.declined(pool, Decline::Gone, Some(&lease));
         drop(lease);
         let no = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
             .expect("a pick")
             .expect_err("a lone gone pool was chosen");
         assert_eq!(no, NoPool::new());
@@ -1619,7 +1680,7 @@ mod tests {
         let (crossing, pools) = followed_over(&["m1"]);
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
         };
         let (_, pool, first) = pick().expect("the first offer");
@@ -1655,7 +1716,7 @@ mod tests {
         let m1 = pool_id("model_x", "m1");
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("a pool")
         };
@@ -1714,7 +1775,7 @@ mod tests {
         counting(true);
         for _ in 0..1000 {
             let (_, chosen, _) = crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("a pool");
             crossing.accepted(chosen);
@@ -1725,20 +1786,20 @@ mod tests {
 
         let lone = crossing_over(&["m1"]);
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
             .expect("a pick")
             .expect("a pool");
         lone.declined(chosen, Decline::Full, None);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
         // A lone pool is never damped out of the choice.
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
             .expect("a pick")
             .expect("a pool");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
         let (_, chosen, _) = lone
-            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
             .expect("a pick")
             .expect("a pool");
         lone.accepted(chosen);
@@ -1770,7 +1831,7 @@ mod tests {
                 for _ in 0..PICKS {
                     let _ = std::hint::black_box(
                         crossing
-                            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                             .expect("a pick"),
                     );
                 }
@@ -1992,6 +2053,7 @@ mod tests {
                         Policy::RoundRobin,
                         &random,
                         Left::excluding(&excluded),
+                        &mut None,
                     )
                     .expect("a pick")
                     .expect("a pool");
@@ -2017,6 +2079,7 @@ mod tests {
                     Policy::RoundRobin,
                     &random,
                     Left::excluding(&every),
+                    &mut None,
                 )
                 .expect("a pick")
                 .expect_err("no pool");
@@ -2073,7 +2136,7 @@ mod tests {
         counting(true);
         for _ in 0..1000 {
             let (_, pool, lease) = crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("a pool");
             crossing.accepted(pool);

@@ -1,6 +1,7 @@
 //! The hub's metrics, served on its public listener at
 //! `/v1/ext/gdl-pool/metrics` in Prometheus' text format: the load summary
-//! the hub last made of its pool, as its watch sends it, and, for each pool
+//! the hub last made of its pool, as its watch sends it, with each KV number
+//! it has, and, for each pool
 //! it follows, whether the follow's link is up. Each is read when the route
 //! is asked, from the state the hub already keeps, so nothing is recorded
 //! on a watch's or a report's path.
@@ -54,6 +55,38 @@ const LOADS: [LoadFamily; 4] = [
         "hub_pool_load_instances",
         "The pool's usable entry instances, in the load summary this hub last sent of its pool.",
         |load| f64::from(load.instances),
+    ),
+];
+/// The families of the KV numbers in the pool's own load summary, each
+/// shown only while the summary has its number: name, help, and how each
+/// reads the summary.
+type KvFamily = (&'static str, &'static str, fn(&LoadSummary) -> Option<f64>);
+
+const KVS: [KvFamily; 5] = [
+    (
+        "hub_pool_kv_capacity",
+        "Usable KV in tokens, summed over the pool's entry instances that report KV, in the load summary this hub last sent of its pool.",
+        |load| load.kv.capacity().map(|tokens| tokens as f64),
+    ),
+    (
+        "hub_pool_kv_active",
+        "KV of the requests in flight in tokens, over the same instances, in that summary.",
+        |load| load.kv.active().map(|tokens| tokens as f64),
+    ),
+    (
+        "hub_pool_kv_committed",
+        "KV of the sessions active within the pool's cache target in tokens, over the same instances, in that summary.",
+        |load| load.kv.committed().map(|tokens| tokens as f64),
+    ),
+    (
+        "hub_pool_kv_reserved",
+        "The expected growth of the live sessions' KV in tokens, over the same instances, in that summary.",
+        |load| load.kv.reserved().map(|tokens| tokens as f64),
+    ),
+    (
+        "hub_pool_kv_eviction_age_seconds",
+        "The least eviction age the pool's entry instances report, in seconds, in that summary.",
+        |load| load.kv.eviction_age_ms().map(|ms| ms as f64 / 1000.0),
     ),
 ];
 const FOLLOW_UP: &str = "hub_follow_up";
@@ -123,6 +156,9 @@ fn families(own: &[String; 3], load: Option<LoadSummary>, relay: &Relay) -> Vec<
         Some(load) => LOADS
             .iter()
             .map(|(name, help, read)| family(name, help, vec![gauge(own, read(&load))]))
+            .chain(KVS.iter().filter_map(|(name, help, read)| {
+                read(&load).map(|value| family(name, help, vec![gauge(own, value)]))
+            }))
             .collect(),
         None => Vec::new(),
     };

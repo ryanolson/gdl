@@ -1,13 +1,14 @@
 //! An entry instance's load reports to its own pool's hub: once a summary
 //! period, what its admission holds, through velo-hub's extension client
 //! with the instance's own credential, with the properties its nodes say it
-//! has; and at once when those change. A report reads counters the
+//! has, and the KV numbers they set; and at once when the properties
+//! change. A report reads counters the
 //! admission and the forward entries already keep, so a request's path
 //! gains nothing.
 
 use std::time::Duration;
 
-use gdl::InstanceProperties;
+use gdl::{InstanceKv, InstanceProperties};
 use gdl_watch::LoadReport;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
@@ -30,24 +31,32 @@ impl HubSession {
     /// reported at once; once the hub answers a report, which it does for
     /// one that carries a drain once a record that carries the drain is
     /// stored, `properties` hears what it carried, so that a drain it carried
-    /// can leave the list.
+    /// can leave the list. Each report carries the KV numbers the nodes
+    /// last set on `kv`.
     pub(crate) fn report_load(
         &self,
         instance: InstanceId,
         period: Duration,
         read: impl Fn() -> Option<SegmentLoad> + Send + 'static,
         properties: InstanceProperties,
+        kv: InstanceKv,
     ) -> Reporter {
         let ext = self.client.ext(gdl_watch::EXTENSION);
         let path = gdl_watch::load_path(instance);
-        let task = tokio::spawn(report(period, read, properties.clone(), move |report| {
-            let (ext, path) = (ext.clone(), path.clone());
-            async move {
-                ext.control_post::<_, ()>(&path, &report)
-                    .await
-                    .map_err(|error: ClientError| error.to_string())
-            }
-        }));
+        let task = tokio::spawn(report(
+            period,
+            read,
+            properties.clone(),
+            kv,
+            move |report| {
+                let (ext, path) = (ext.clone(), path.clone());
+                async move {
+                    ext.control_post::<_, ()>(&path, &report)
+                        .await
+                        .map_err(|error: ClientError| error.to_string())
+                }
+            },
+        ));
         Reporter { task, properties }
     }
 }
@@ -81,6 +90,7 @@ async fn report<F, Fut>(
     period: Duration,
     read: impl Fn() -> Option<SegmentLoad>,
     properties: InstanceProperties,
+    kv: InstanceKv,
     mut send: F,
 ) where
     F: FnMut(LoadReport) -> Fut,
@@ -109,6 +119,7 @@ async fn report<F, Fut>(
             admitted: wide(load.admitted),
             limit: wide(load.limit),
             refusals: wide(load.declined.saturating_sub(taken)),
+            kv: kv.get(),
         };
         // Bounded by the period, so that a hub that does not answer never
         // stacks reports.
@@ -141,7 +152,7 @@ fn wide(count: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{LoadReport, SegmentLoad, report};
-    use gdl::InstanceProperties;
+    use gdl::{InstanceKv, InstanceProperties, KvLoad};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -156,14 +167,16 @@ mod tests {
         mpsc::UnboundedReceiver<LoadReport>,
         tokio::task::JoinHandle<()>,
     ) {
-        reporting_properties(load, taken, &InstanceProperties::new())
+        reporting_with(load, taken, &InstanceProperties::new(), &InstanceKv::new())
     }
 
-    /// [`reporting`], with the properties the instance's nodes set on `properties`.
-    fn reporting_properties(
+    /// [`reporting`], with the properties the instance's nodes set on
+    /// `properties` and the KV numbers they set on `kv`.
+    fn reporting_with(
         load: SegmentLoad,
         taken: bool,
         properties: &InstanceProperties,
+        kv: &InstanceKv,
     ) -> (
         mpsc::UnboundedReceiver<LoadReport>,
         tokio::task::JoinHandle<()>,
@@ -173,6 +186,7 @@ mod tests {
             PERIOD,
             move || Some(load),
             properties.clone(),
+            kv.clone(),
             move |report| {
                 let _ = sent.send(report);
                 async move {
@@ -212,6 +226,7 @@ mod tests {
                 admitted: 1,
                 limit: 4,
                 refusals: 3,
+                ..Default::default()
             }
         );
         assert_eq!(next(&mut reports).await.refusals, 0, "taken, so not again");
@@ -232,12 +247,30 @@ mod tests {
         assert_eq!(next(&mut reports).await.refusals, 2);
         task.abort();
     }
+
+    /// Each report carries the KV numbers the instance's nodes last set,
+    /// read when it is sent; none before they set any.
+    #[tokio::test(start_paused = true)]
+    async fn a_report_carries_the_kv_numbers_the_nodes_set() {
+        let load = SegmentLoad {
+            admitted: 1,
+            limit: 4,
+            declined: 0,
+        };
+        let kv = InstanceKv::new();
+        let (mut reports, task) = reporting_with(load, true, &InstanceProperties::new(), &kv);
+        assert_eq!(next(&mut reports).await.kv, KvLoad::NONE, "none set yet");
+        let set = KvLoad::NONE.with_capacity(1_000).with_committed(250);
+        kv.set(set);
+        assert_eq!(next(&mut reports).await.kv, set);
+        task.abort();
+    }
 }
 
 #[cfg(test)]
 mod properties {
     use super::{LoadReport, Reporter, SegmentLoad, report};
-    use gdl::{EntryState, InstanceProperties, PropertyEntry};
+    use gdl::{EntryState, InstanceKv, InstanceProperties, PropertyEntry};
     use gdl_model::PropertyLists;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -275,6 +308,7 @@ mod properties {
             PERIOD,
             move || Some(load),
             properties.clone(),
+            InstanceKv::new(),
             move |report| {
                 let _ = sent.send((report, tokio::time::Instant::now()));
                 async { Ok(()) }
@@ -325,6 +359,7 @@ mod properties {
                 PERIOD,
                 move || Some(load),
                 properties.clone(),
+                InstanceKv::new(),
                 move |report: LoadReport| {
                     let n = counted.fetch_add(1, Ordering::SeqCst);
                     let draining = report

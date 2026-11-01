@@ -103,7 +103,7 @@ A chooser registers more families: what became of each offer it made to a pool o
 
 ### What a chooser holds of each pool
 
-A chooser also shows what it holds now of each pool it follows: the load summary of the pool's last report to it ([Load reports and the load summary](../concepts/pools.md#load-reports-and-the-load-summary)), the pool's state, and whether it takes work. These are gauges, read from the chooser's tables at each scrape, so an offer does nothing for them. Each has the labels `class`, `pool`, and `region`.
+A chooser also shows what it holds now of each pool it follows: the load summary of the pool's last report to it, with its KV numbers ([Load reports and the load summary](../concepts/pools.md#load-reports-and-the-load-summary)), the pool's state, and whether it takes work. These are gauges, read from the chooser's tables at each scrape, so an offer does nothing for them. Each has the labels `class`, `pool`, and `region`.
 
 | Name | Type | Extra labels | Meaning |
 |---|---|---|---|
@@ -111,11 +111,16 @@ A chooser also shows what it holds now of each pool it follows: the load summary
 | `pool_load_limit` | gauge | | The admission limit over the same entry instances, in that summary. |
 | `pool_load_refusals` | gauge | | Hand-offs the pool's entry instances declined in the summary's period, in that summary. A count for one period, not a total: it can go down. |
 | `pool_load_instances` | gauge | | The pool's usable entry instances, in that summary. |
+| `pool_kv_capacity` | gauge | | Usable KV in tokens, over the pool's entry instances that report KV, in that summary. |
+| `pool_kv_active` | gauge | | KV of the requests in flight in tokens, over the same instances, in that summary. |
+| `pool_kv_committed` | gauge | | KV of the sessions active within the pool's cache target in tokens, over the same instances, in that summary. |
+| `pool_kv_reserved` | gauge | | The expected growth of the live sessions' KV in tokens, over the same instances, in that summary. |
+| `pool_kv_eviction_age_seconds` | gauge | | The least eviction age the pool's entry instances report, in seconds, in that summary. |
 | `pool_load_age_seconds` | gauge | | Seconds since the pool's hub made that summary, on the chooser's clock, as the pool policy reads it. |
 | `pool_state` | gauge | `state` | 1 for the pool's state as its hub last sent it, 0 for each other state: `ready`, `degraded`, `unavailable`, `draining`. |
 | `pool_takes_work` | gauge | | 1 while a pool policy of the chooser sees the pool take work: `ready` or `degraded`, with an entry instance to route to (`gdl::Pool::takes_work`). |
 
-- A pool with no load summary yet has no `pool_load_*` series, rather than zeros, which would read as an idle pool.
+- A pool with no load summary yet has no `pool_load_*` series, rather than zeros, which would read as an idle pool. A summary without a KV number has no series for it, rather than a zero, which would read as an empty cache.
 - A class can have more than one entry segment, and the chooser keeps one table per entry segment. A pool shows once. Its state and load are the same in each table, since they come from its one follow. It takes work when a pool policy sees it take work in any of them.
 - These series follow the tables: a pool's series go when its follow is dropped. The counts above stay for the life of the process.
 
@@ -147,9 +152,14 @@ A pool's hub serves its own metrics on its public listener, at `GET /v1/ext/gdl-
 | `hub_pool_load_limit` | gauge | The admission limit over the same entry instances, in that summary. |
 | `hub_pool_load_refusals` | gauge | Hand-offs the pool's entry instances declined in the summary's period, in that summary. A count for one period, not a total. |
 | `hub_pool_load_instances` | gauge | The pool's usable entry instances, in that summary. |
+| `hub_pool_kv_capacity` | gauge | Usable KV in tokens, over the pool's entry instances that report KV, in that summary. |
+| `hub_pool_kv_active` | gauge | KV of the requests in flight in tokens, over the same instances, in that summary. |
+| `hub_pool_kv_committed` | gauge | KV of the sessions active within the pool's cache target in tokens, over the same instances, in that summary. |
+| `hub_pool_kv_reserved` | gauge | The expected growth of the live sessions' KV in tokens, over the same instances, in that summary. |
+| `hub_pool_kv_eviction_age_seconds` | gauge | The least eviction age the pool's entry instances report, in seconds, in that summary. |
 | `hub_follow_up` | gauge | One series for each pool the hub follows: 1 while its follow's link is up, its watch's snapshot installed and the link not ended; 0 from the link's end until a later follow of the pool is installed. A withheld pool's link is up: it reads the pool again. |
 
-- A pool with no summary, as one that no hop enters, or one with no report counted, has no `hub_pool_load_*` series. A hub that follows no pool has no `hub_follow_up` series.
+- A pool with no summary, as one that no hop enters, or one with no report counted, has no `hub_pool_load_*` or `hub_pool_kv_*` series, and a summary without a KV number has no series for it. A hub that follows no pool has no `hub_follow_up` series.
 - The pool labels of `hub_pool_load_*` are the hub's own pool's. Those of `hub_follow_up` are the followed pool's, with its region from its follow, or from its record while no follow of it is installed.
 - A pool leaves `hub_follow_up` when the hub no longer follows it, as when it withdraws its record.
 - The names carry no prefix, and the series no `dynamo_namespace`, `dynamo_component`, or `worker_id`. Those come from a segment's `[system]` settings and its instance, and a hub has neither: it is one process per pool, and its pool's labels name it.
@@ -213,7 +223,7 @@ A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node ga
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 53 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, `instance_phase`, `instance_avoided` and the 4 families of what an instance holds, the 12 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 58 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, `instance_phase`, `instance_avoided` and the 4 families of what an instance holds, the 17 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::VELO_METRICS` is `velo_`, the start of every name of [velo's own families](#velos-own-families). A node's metric that starts with it is refused when it is read, and a segment binary's build refuses a node's metric whose served name starts with it: `velo_frames_total` with no prefix. A `metrics_prefix` that serves every name there, `velo` or one that starts with `velo_`, is refused when the process makes its registry, with an error that names the first runtime name it would serve there. Both rules hold with `velo_metrics` off, so turning it on cannot break a build or change what a fleet serves. velo names its families, so the rule is the start of the name, not a list.
 

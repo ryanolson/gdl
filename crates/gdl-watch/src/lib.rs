@@ -317,6 +317,11 @@ pub struct LoadReport {
     /// serves nothing.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub properties: gdl_model::PropertyLists,
+    /// What the instance's nodes say of its KV cache
+    /// ([`gdl_pools::KvLoad`]): none from an instance whose nodes set
+    /// nothing, or of a build from before the numbers.
+    #[serde(flatten)]
+    pub kv: gdl_pools::KvLoad,
     /// The kind of each property that did not check when the report was
     /// read, and that it left out, so that the hub still takes the rest of
     /// the report. Not on the wire.
@@ -333,6 +338,8 @@ struct ReportWire {
     refusals: u64,
     #[serde(default)]
     properties: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(flatten)]
+    kv: gdl_pools::KvLoad,
 }
 
 impl From<ReportWire> for LoadReport {
@@ -352,6 +359,7 @@ impl From<ReportWire> for LoadReport {
             limit: wire.limit,
             refusals: wire.refusals,
             properties,
+            kv: wire.kv,
             dropped,
         }
     }

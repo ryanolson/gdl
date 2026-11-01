@@ -271,6 +271,7 @@ impl Operator for NodeB {
     where
         N: Next<Pre, Out>,
     {
+        self.events.publish_cx(format!("B:{}", req.text), &cx);
         self.events.record(format!("B:start:{}", req.text));
         let pre = move |attempt| Pre {
             text: req.text.clone(),

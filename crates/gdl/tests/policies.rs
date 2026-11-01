@@ -83,6 +83,7 @@ fn idle(now: Instant) -> Load {
             instances: 1,
             refusals: 0,
             period_ms: 10_000,
+            ..Default::default()
         },
         now,
     )

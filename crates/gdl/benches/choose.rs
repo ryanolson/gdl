@@ -34,6 +34,7 @@ fn pools(now: Instant) -> Vec<Pool> {
                 instances: 1,
                 refusals: 0,
                 period_ms: 3_600_000,
+                ..Default::default()
             };
             pools.push(
                 Pool::new(

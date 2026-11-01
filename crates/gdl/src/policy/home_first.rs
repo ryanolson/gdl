@@ -415,6 +415,7 @@ mod tests {
                     instances: u32::try_from(entries).expect("a few"),
                     refusals,
                     period_ms: u64::try_from(PERIOD.as_millis()).expect("short"),
+                    ..Default::default()
                 },
                 arrived,
             )),

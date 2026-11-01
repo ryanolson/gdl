@@ -531,6 +531,18 @@ pub(crate) struct PoolTable {
 }
 
 impl PoolTable {
+    /// The view an offer to the pool carries when its choice asks for one:
+    /// the epoch of the hub the follow links to, and the number of the
+    /// load summary this table holds. None while it holds no summary, or
+    /// one from a hub of a build before the numbers.
+    pub(crate) fn offer_view(&self) -> Option<gdl::OfferView> {
+        let sequence = self.load?.summary().sequence;
+        (sequence > 0).then_some(gdl::OfferView {
+            epoch: self.epoch,
+            sequence,
+        })
+    }
+
     /// The pool as a pool policy sees it.
     fn view(&self) -> gdl::Pool {
         let view = gdl::Pool::new(&*self.class, &*self.pool, &*self.region, self.state)

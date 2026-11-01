@@ -264,6 +264,7 @@ async fn a_snapshot_sends_the_summary_with_its_age() {
         instances: 1,
         refusals: 0,
         period_ms: 1000,
+        ..Default::default()
     };
     let of = |load| {
         Installed::new(

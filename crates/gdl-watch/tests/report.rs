@@ -29,6 +29,7 @@ fn report() -> LoadReport {
                 EntryState::Ready,
             )],
         )]),
+        ..Default::default()
     }
 }
 
@@ -92,4 +93,29 @@ fn a_report_drops_a_malformed_property_and_keeps_the_rest() {
         },
         report()
     );
+}
+
+/// A report's KV numbers travel flat, as the summary's do; a hub of the
+/// earlier build ignores them, and a report of the earlier build reads as
+/// having none. The report reads through its own wire shape, so a number
+/// left out of that shape would be lost here.
+#[test]
+fn a_report_carries_kv_numbers_an_earlier_hub_ignores() {
+    let kv = gdl_pools::KvLoad::NONE
+        .with_capacity(500_000)
+        .with_active(20_000)
+        .with_eviction_age_ms(30_000);
+    let with_kv = LoadReport { kv, ..report() };
+    let text = serde_json::to_string(&with_kv).expect("json");
+    assert!(text.contains(r#""kv_capacity":500000"#), "{text}");
+    assert!(text.contains(r#""eviction_age_ms":30000"#), "{text}");
+    assert!(!text.contains("kv_committed"), "{text}");
+    let read: LoadReport = serde_json::from_str(&text).expect("a report");
+    assert_eq!(read, with_kv);
+    let earlier: EarlierReport = serde_json::from_str(&text).expect("an earlier report");
+    assert_eq!(earlier.admitted, 3);
+
+    let read: LoadReport =
+        serde_json::from_str(r#"{"admitted":3,"limit":8,"refusals":1}"#).expect("a report");
+    assert_eq!(read.kv, gdl_pools::KvLoad::NONE);
 }

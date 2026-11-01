@@ -443,6 +443,7 @@ async fn a_directory_retirement_suppresses_load_before_the_feed_observes_it() {
             admitted: 3,
             limit: 8,
             refusals: 1,
+            ..Default::default()
         },
         Instant::now(),
     )

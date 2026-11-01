@@ -49,6 +49,7 @@ fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
         admitted,
         limit,
         refusals,
+        ..Default::default()
     }
 }
 
@@ -59,16 +60,23 @@ fn summary(admitted: u64, limit: u64, instances: u32, refusals: u64) -> Option<L
         instances,
         refusals,
         period_ms: 1000,
+        ..Default::default()
     })
 }
 
-/// Read `watch` until it sends a load event of `load`, within `bound`.
+/// A summary without its number, which the pool's hub sets on each one.
+fn bare(load: Option<LoadSummary>) -> Option<LoadSummary> {
+    load.map(LoadSummary::unnumbered)
+}
+
+/// Read `watch` until it sends a load event of `load`, whatever its
+/// number, within `bound`.
 async fn load(watch: &mut PoolWatch, load: Option<LoadSummary>, bound: Duration) {
     let mut seen = Vec::new();
     let waited = tokio::time::timeout(bound, async {
         loop {
             match watch.next().await.expect("the watch goes on") {
-                PoolWatchEvent::Load { load: sent } if sent == load => return,
+                PoolWatchEvent::Load { load: sent } if bare(sent) == load => return,
                 PoolWatchEvent::Load { load } => seen.push(load),
                 _ => {}
             }
@@ -154,8 +162,10 @@ async fn the_summary_sums_the_reports_of_the_entry_instances() {
     b.report(report(2, 8, 4)).await.expect("the hub takes it");
     let both = summary(5, 16, 2, 4);
     load(&mut watch, both, WAIT).await;
-    let waited =
-        tokio::time::timeout(WAIT, async { while records.next().await.load != both {} }).await;
+    let waited = tokio::time::timeout(WAIT, async {
+        while bare(records.next().await.load) != both {}
+    })
+    .await;
     assert!(waited.is_ok(), "no record carried {both:?} in time");
 
     a.report(report(1, 8, 0)).await.expect("the hub takes it");
@@ -347,7 +357,7 @@ async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
     })
     .await
     .expect("a summary of both in time");
-    assert_eq!(Some(both), summary(3, 16, 2, 0));
+    assert_eq!(bare(Some(both)), summary(3, 16, 2, 0));
 
     directory.open();
     a.report(draining)
@@ -445,7 +455,7 @@ async fn a_stored_drain_keeps_reporting_load_while_another_properties_record_cha
         "a drain already stored waited for unrelated writes"
     );
     assert_eq!(
-        summaries.last().copied().flatten(),
+        bare(summaries.last().copied().flatten()),
         summary(5, 16, 2, 0),
         "the stored drain's fresh reports lost its admission and limit: answers={answers:?}, summaries={summaries:?}"
     );
@@ -524,7 +534,7 @@ async fn a_following_hub_relays_the_summary() {
             } = follow_event(&mut follows).await
                 && pool == common::POOL
             {
-                assert_eq!(load, summary(3, 8, 1, 1), "the follow's first event");
+                assert_eq!(bare(load), summary(3, 8, 1, 1), "the follow's first event");
                 return generation;
             }
         }
@@ -544,9 +554,9 @@ async fn a_following_hub_relays_the_summary() {
                 generation: of,
                 load,
             } = follow_event(&mut follows).await
-                && load != summary(3, 8, 1, 1)
+                && bare(load) != summary(3, 8, 1, 1)
             {
-                return (class, pool, of, load);
+                return (class, pool, of, bare(load));
             }
         }
     })
@@ -570,8 +580,8 @@ async fn a_following_hub_relays_the_summary() {
 /// period, so that a reader can tell a quiet pool's summary from a stale
 /// one by its age: a pool whose one entry instance reports the same load
 /// each period sends the same summary each period, on its watch and on a
-/// following hub's relay. The instance reports once a period, as the
-/// runtime's reporter does.
+/// following hub's relay, each numbered one past the last. The instance
+/// reports once a period, as the runtime's reporter does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiet_pools_summary_is_sent_every_period() {
     let directory = Resolving::new();
@@ -605,28 +615,39 @@ async fn a_quiet_pools_summary_is_sent_every_period() {
         }
     };
     let seen = async {
-        let mut watched = 0;
-        while watched < 3 {
-            if let PoolWatchEvent::Load { load } =
+        let mut watched = Vec::new();
+        while watched.len() < 3 {
+            if let PoolWatchEvent::Load { load: Some(load) } =
                 pool_watch.next().await.expect("the watch goes on")
-                && load == quiet
+                && bare(Some(load)) == quiet
             {
-                watched += 1;
+                watched.push(load.sequence);
             }
         }
-        let mut relayed = 0;
-        while relayed < 2 {
-            if let FollowEvent::Load { load, .. } = follow_event(&mut follows).await
-                && load == quiet
+        let mut relayed = Vec::new();
+        while relayed.len() < 2 {
+            if let FollowEvent::Load {
+                load: Some(load), ..
+            } = follow_event(&mut follows).await
+                && bare(Some(load)) == quiet
             {
-                relayed += 1;
+                relayed.push(load.sequence);
             }
         }
+        (watched, relayed)
     };
     tokio::select! {
         () = reporting => {}
         waited = tokio::time::timeout(PERIOD * 8, seen) => {
-            assert!(waited.is_ok(), "the quiet summary was not sent every period");
+            let (watched, relayed) = waited.expect("the quiet summary sent every period");
+            assert!(
+                watched.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                "each summary is numbered one past the last: {watched:?}"
+            );
+            assert!(
+                relayed.windows(2).all(|pair| pair[1] > pair[0]) && relayed[0] > 0,
+                "the relay carries the numbers: {relayed:?}"
+            );
         }
     }
     for hub in [global_hub, model_hub] {

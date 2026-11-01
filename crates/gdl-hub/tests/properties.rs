@@ -51,6 +51,7 @@ fn report(list: Option<Vec<PropertyEntry>>) -> LoadReport {
         properties: list
             .map(|list| gdl_model::PropertyLists::from([("test".to_string(), list)]))
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 

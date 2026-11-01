@@ -12,7 +12,8 @@ use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
 use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
 use gdl::{
-    Cx, Damped, Error, ErrorKind, HomeFirstAt, Instances, NoPool, PoolPolicies, PoolRequest, Result,
+    Cx, Damped, Error, ErrorKind, HomeFirstAt, Instances, NoPool, OfferView, PoolPolicies,
+    PoolRequest, Result,
 };
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
@@ -78,10 +79,11 @@ impl Crossing {
         policy: Policy,
         random: &RandomState,
         left: Left<'_>,
+        view: &mut Option<OfferView>,
     ) -> Result<Result<(InstanceId, u64, PoolLease), NoPool>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let (pool, choice) = match self.pool(&table, cx, head, left)? {
+            let (pool, choice, chosen_view) = match self.pool(&table, cx, head, left)? {
                 Ok(chosen) => chosen,
                 Err(no) => return Ok(Err(no)),
             };
@@ -89,6 +91,7 @@ impl Crossing {
                 continue;
             };
             let sequence = pool.turn.fetch_add(1, Ordering::Relaxed);
+            *view = chosen_view;
             return Ok(Ok((
                 pool.eligible[turn(policy, sequence, pool.eligible.len(), random)],
                 pool.id,
@@ -99,7 +102,8 @@ impl Crossing {
     }
 
     /// Choose a pool for one attempt, then ask `selector` to choose among
-    /// that pool's eligible entry instances alone; [`NoPool`] when no pool
+    /// that pool's eligible entry instances alone, with the view to put on
+    /// the offer in `view`; [`NoPool`] when no pool
     /// but those `left` holds may take it. A selector may wait, so the choice
     /// is checked when it returns: if the instance is no
     /// longer eligible in the pool's current table, or the pool itself no
@@ -117,11 +121,15 @@ impl Crossing {
         head: &'a [u8],
         encoding: gdl_model::Encoding,
         left: Left<'a>,
+        view: &'a mut Option<OfferView>,
     ) -> BoxFuture<'a, Result<Result<Chosen, NoPool>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let (pool, choice) = match self.pool(&table, cx, head, left)? {
+                // The view is the row's the policy chose from, taken
+                // before the selector's wait, under which the table can
+                // change: the offer says what the choice was made on.
+                let (pool, choice, chosen_view) = match self.pool(&table, cx, head, left)? {
                     Ok(chosen) => chosen,
                     Err(no) => return Ok(Err(no)),
                 };
@@ -151,6 +159,7 @@ impl Crossing {
                 let lease = still_eligible(&current, &pool, chosen, policy)
                     .and_then(|now| PoolLease::take(&now.leases));
                 if let Some(lease) = lease {
+                    *view = chosen_view;
                     return Ok(Ok((chosen, pool.id, picked, lease.with_choice(choice))));
                 }
             }
@@ -540,17 +549,25 @@ impl Crossing {
             .with_turn(turn)
             .with_random(&self.random);
         let request = table.fill(request);
-        let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
-            Ok(choice) => choice.into_parts(),
+        let choice = match target.policy.choose(request, self.encoding, &table.views)? {
+            Ok(choice) => choice,
             Err(no) => return Ok(Err(no)),
         };
+        let wants_view = choice.wants_view();
+        let (at, choice) = choice.into_parts();
         // A policy names a pool by its place in the views it was given,
         // which are the table's, index for index; a place past them is
         // no pool.
         Ok(table
             .pools
             .get(at)
-            .map(|pool| (pool, choice))
+            .map(|pool| {
+                (
+                    pool,
+                    choice,
+                    wants_view.then(|| pool.offer_view()).flatten(),
+                )
+            })
             .ok_or_else(NoPool::new))
     }
 
@@ -686,9 +703,10 @@ impl<'a> Left<'a> {
     }
 }
 
-/// A pool policy's choice: the chosen pool's table, and the policy's lease
-/// on the choice, if it gave one.
-type Pooled<'t> = (&'t Arc<PoolTable>, Option<ChoiceHeld>);
+/// A pool policy's choice: the chosen pool's table, the policy's lease on
+/// the choice, if it gave one, and the view to put on the offer, if it
+/// asked for one and the table has one.
+type Pooled<'t> = (&'t Arc<PoolTable>, Option<ChoiceHeld>, Option<OfferView>);
 
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's pools, the chooser's
@@ -1050,7 +1068,7 @@ mod tests {
         let random = RandomState::new();
         let pick = || {
             crossing
-                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                 .expect("a pick")
                 .expect("one")
                 .0
@@ -1079,6 +1097,7 @@ mod tests {
                 Policy::RoundRobin,
                 &RandomState::new(),
                 Left::NONE,
+                &mut None,
             )
             .expect("a pick")
             .expect_err("no pool");
@@ -1127,12 +1146,20 @@ mod tests {
                 Policy::RoundRobin,
                 &RandomState::new(),
                 Left::NONE,
+                &mut None,
             )
             .expect("a pick")
             .expect_err("no pool");
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let Err(chosen) = crossing
-            .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+            .choose(
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                Left::NONE,
+                &mut None,
+            )
             .await
             .expect("a choice")
         else {
@@ -1201,7 +1228,7 @@ mod tests {
                 let start = Instant::now();
                 for _ in 0..PICKS {
                     let picked = crossing
-                        .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                        .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                         .expect("a pick");
                     let Err(no) = picked else { panic!("a pool") };
                     std::hint::black_box(crossing.no_pool(no));
@@ -1239,6 +1266,7 @@ mod tests {
                     Policy::RoundRobin,
                     &random,
                     Left::excluding(excluded),
+                    &mut None,
                 )
                 .expect("a pick")
                 .map(|(id, pool, _)| (id, pool))
@@ -1255,6 +1283,7 @@ mod tests {
                 &[],
                 Default::default(),
                 Left::excluding(&[m1]),
+                &mut None,
             )
             .await
             .expect("a choice")
@@ -1267,6 +1296,7 @@ mod tests {
                 &[],
                 Default::default(),
                 Left::excluding(&[m1, m2]),
+                &mut None,
             )
             .await
             .expect("no error");
@@ -1335,7 +1365,14 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+                    .choose(
+                        &selector,
+                        &cx,
+                        &[],
+                        Default::default(),
+                        Left::NONE,
+                        &mut None,
+                    )
                     .await
                     .map(|chosen| chosen.map(|(id, _, picked, _)| (id, picked.lease)))
             }
@@ -1370,6 +1407,160 @@ mod tests {
         assert_eq!(waiting.leases.load(Ordering::SeqCst), 0);
     }
 
+    /// A policy that chooses the first pool that takes work, and asks for
+    /// the view on its offer.
+    struct Viewed;
+
+    impl gdl::PoolPolicy for Viewed {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            _: PoolRequest<'_, gdl::Encoded>,
+            pools: &[gdl::Pool],
+        ) -> std::result::Result<gdl::PoolChoice, NoPool> {
+            pools
+                .iter()
+                .position(gdl::Pool::takes_work)
+                .map(|at| gdl::PoolChoice::new(at).with_view())
+                .ok_or_else(NoPool::new)
+        }
+    }
+
+    /// `pool`'s table as a follow of the hub of `epoch` shows it, holding
+    /// the summary numbered `sequence`, with the leases of `leases`.
+    fn numbered(
+        pool: Arc<PoolTable>,
+        epoch: u64,
+        sequence: u64,
+        leases: &Arc<super::super::lease::Leases>,
+    ) -> Arc<PoolTable> {
+        let mut table = Arc::try_unwrap(pool).expect("one owner");
+        table.epoch = epoch;
+        table.leases = Arc::clone(leases);
+        table.load = Some(gdl::Load::new(
+            gdl::LoadSummary {
+                limit: 16,
+                instances: 1,
+                period_ms: 60_000,
+                sequence,
+                ..Default::default()
+            },
+            tokio::time::Instant::now(),
+        ));
+        Arc::new(table)
+    }
+
+    /// The offer carries the view of the row its policy chose from, though
+    /// a newer summary, or a later hub of the pool, replaced that row while
+    /// the selector waited and the chosen instance is still eligible: the
+    /// view says what the choice was made on, not what the table holds when
+    /// the offer leaves.
+    #[tokio::test]
+    async fn the_offer_carries_the_view_its_policy_chose_from() {
+        for (epoch, sequence) in [(1, 8), (2, 1)] {
+            let ids = ids(2);
+            let waiting = Arc::new(Waiting {
+                target: ids[0],
+                calls: AtomicUsize::new(0),
+                arrived: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                leases: Arc::new(AtomicUsize::new(0)),
+            });
+            let leases = Arc::default();
+            let mut viewed = crossing(
+                vec![numbered(pool("m", PoolState::Ready, &ids), 1, 7, &leases)],
+                Within::Policy(Policy::RoundRobin),
+            );
+            viewed.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(Viewed)));
+            viewed.target.name = Arc::from("viewed");
+            let viewed = Arc::new(viewed);
+            let choosing = tokio::spawn({
+                let crossing = Arc::clone(&viewed);
+                let waiting = Arc::clone(&waiting);
+                async move {
+                    let selector = gdl::__runtime::Typed(waiting);
+                    let cx = Cx::new();
+                    let mut view = None;
+                    let chosen = crossing
+                        .choose(
+                            &selector,
+                            &cx,
+                            &[],
+                            Default::default(),
+                            Left::NONE,
+                            &mut view,
+                        )
+                        .await
+                        .expect("no error")
+                        .ok()
+                        .map(|(id, ..)| id);
+                    (chosen, view)
+                }
+            });
+            tokio::time::timeout(WAIT, waiting.arrived.notified())
+                .await
+                .expect("the selector was asked in time");
+            viewed
+                .target
+                .table
+                .store(Arc::new(EntryTable::new(Box::new([numbered(
+                    pool("m", PoolState::Ready, &ids),
+                    epoch,
+                    sequence,
+                    &leases,
+                )]))));
+            waiting.release.notify_one();
+            let (chosen, view) = tokio::time::timeout(WAIT, choosing)
+                .await
+                .expect("chose in time")
+                .expect("joined");
+            assert_eq!(chosen, Some(ids[0]), "still eligible, so not chosen again");
+            assert_eq!(
+                view,
+                Some(gdl::OfferView {
+                    epoch: 1,
+                    sequence: 7
+                }),
+                "replaced by ({epoch}, {sequence})"
+            );
+        }
+    }
+
+    /// A choice whose policy asks for no view puts none on the offer, and
+    /// one that asks for it over a row with no numbered summary puts none.
+    #[test]
+    fn an_offer_carries_a_view_only_when_asked_and_known() {
+        let ids = ids(1);
+        let cx = Cx::new();
+        let random = RandomState::new();
+        let leases = Arc::default();
+        let numbered_row = numbered(pool("m", PoolState::Ready, &ids), 3, 4, &leases);
+        let plain = crossing(
+            vec![Arc::clone(&numbered_row)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let mut view = Some(gdl::OfferView {
+            epoch: 9,
+            sequence: 9,
+        });
+        plain
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut view)
+            .expect("no error")
+            .expect("a pick");
+        assert_eq!(view, None, "home_first asks for no view");
+        let mut unnumbered = crossing(
+            vec![pool("m", PoolState::Ready, &ids)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        unnumbered.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(Viewed)));
+        unnumbered
+            .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut view)
+            .expect("no error")
+            .expect("a pick");
+        assert_eq!(view, None, "a summary of an earlier hub has no number");
+    }
+
     /// A selector that waits, over a crossing into the one pool `m`, whose
     /// first choice is held until `change` has run: what the choice comes
     /// to once it is let go.
@@ -1395,7 +1586,14 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+                    .choose(
+                        &selector,
+                        &cx,
+                        &[],
+                        Default::default(),
+                        Left::NONE,
+                        &mut None,
+                    )
                     .await
                     .map(|chosen| chosen.ok().map(|(id, pool, _, _)| (id, pool)))
             }
@@ -1471,7 +1669,14 @@ mod tests {
         let selector = gdl::__runtime::Typed(Arc::new(Cancelling(Arc::clone(&leases))));
         let cx = Cx::new();
         let error = crossing
-            .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+            .choose(
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                Left::NONE,
+                &mut None,
+            )
             .await
             .map(|chosen| chosen.map(|(id, ..)| id))
             .expect_err("a cancelled request was given an instance");
@@ -1524,6 +1729,7 @@ mod tests {
                 &head,
                 gdl_model::Encoding::Json,
                 Left::NONE,
+                &mut None,
             )
             .await
             .expect("the selector read a JSON head")
@@ -1611,6 +1817,7 @@ mod tests {
                 &head,
                 gdl_model::Encoding::Json,
                 Left::NONE,
+                &mut None,
             )
             .await
             .expect("chosen")
@@ -1744,7 +1951,7 @@ mod tests {
         let (crossing, policy) = pinned([before, drained]);
         let cx = Cx::new();
         let random = RandomState::new();
-        let pick = || crossing.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE);
+        let pick = || crossing.pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None);
         let (_, first, _) = pick().expect("a pick").expect("a pool");
         assert_eq!(
             first,
@@ -1790,7 +1997,7 @@ mod tests {
                 assert_eq!(requeued, tag % 2 == 0, "tag {tag}");
             } else {
                 let (_, chosen, _) = crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                     .expect("a pick")
                     .expect("a pool");
                 let pin = if tag % 2 == 0 { "m1" } else { "m2" };
@@ -1832,7 +2039,7 @@ mod tests {
                 crossing.requeue(&cx, &[], Left::NONE, m1).expect("asked");
             } else {
                 crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                     .expect("a pick")
                     .expect("a pool");
             }
@@ -1929,7 +2136,14 @@ mod tests {
             }));
             let cx = Cx::new();
             let (chosen, _, _, mut lease) = crossing
-                .choose(&selector, &cx, &[], Default::default(), Left::NONE)
+                .choose(
+                    &selector,
+                    &cx,
+                    &[],
+                    Default::default(),
+                    Left::NONE,
+                    &mut None,
+                )
                 .await
                 .expect("chosen")
                 .expect("a pool");
@@ -1998,7 +2212,7 @@ mod tests {
             });
             let boundary = time(&|| {
                 crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                     .expect("a pick")
                     .expect("one")
                     .0
@@ -2014,7 +2228,7 @@ mod tests {
             });
             let accepted = time(&|| {
                 let (id, pool, _) = crossing
-                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE)
+                    .pick(&cx, &[], Policy::RoundRobin, &random, Left::NONE, &mut None)
                     .expect("a pick")
                     .expect("one");
                 crossing.accepted(pool);

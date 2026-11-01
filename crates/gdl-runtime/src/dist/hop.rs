@@ -1108,7 +1108,12 @@ where
         // anything, and every wait below ends at its deadline.
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
-        let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let mut cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        // The view the chooser decided on, for the entry's nodes to read:
+        // only an offer whose pool policy asked for it carries one.
+        if let Some(view) = envelope.payload.view() {
+            cx.insert_ext(view);
+        }
         // Before admission, so that an offer the instance cannot serve
         // takes no permit and waits for none; after a drain's refusal,
         // which says more, since it holds for every request. The version

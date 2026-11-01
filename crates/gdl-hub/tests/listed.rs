@@ -404,6 +404,7 @@ fn says(property: &str, state: EntryState) -> LoadReport {
                 state,
             )],
         )]),
+        ..Default::default()
     }
 }
 

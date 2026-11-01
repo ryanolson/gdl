@@ -714,6 +714,7 @@ mod tests {
                     instances: 2,
                     refusals: 1,
                     period_ms: 1000,
+                    ..Default::default()
                 })
             })
             .expect("an event serializes"),

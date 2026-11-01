@@ -22,7 +22,9 @@ use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
 use gdl::Decline;
 use gdl::{Error, ErrorKind, Result};
-use gdl::{FollowedPools, HomeFirstAt, HubRecords, InstanceProperties, PoolPolicies, Selectors};
+use gdl::{
+    FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, PoolPolicies, Selectors,
+};
 use gdl_model::{Layout, RequestRouter};
 
 /// Runtime settings for one segment instance.
@@ -133,6 +135,11 @@ pub struct RuntimeConfig {
     /// to the nodes it builds, and an entry instance in a pool reports what
     /// they set with its load reports.
     pub properties: InstanceProperties,
+    /// The handle through which the segment's nodes say what the
+    /// instance's KV cache holds. Not a setting: a segment binary's
+    /// `Builder` gives it to the nodes it builds, and an entry instance in
+    /// a pool reports what they set with its load reports.
+    pub kv: InstanceKv,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -225,6 +232,7 @@ impl Default for RuntimeConfig {
             followed: FollowedPools::new(),
             records: HubRecords::new(),
             properties: InstanceProperties::new(),
+            kv: InstanceKv::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -316,6 +324,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             followed: FollowedPools::new(),
             records: HubRecords::new(),
             properties: InstanceProperties::new(),
+            kv: InstanceKv::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

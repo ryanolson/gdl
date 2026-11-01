@@ -43,6 +43,7 @@ fn loaded(pool: &str, generation: u64) -> FollowEvent {
             instances: 1,
             refusals: 0,
             period_ms: 60_000,
+            ..Default::default()
         }),
     }
 }

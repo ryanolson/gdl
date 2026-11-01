@@ -12,7 +12,7 @@ use common::{Instance, Resolving, WAIT, get, global_default, model, serve_pool, 
 use futures::StreamExt;
 use gdl_hub::PoolWatch;
 use gdl_model::{PoolSettings, SegmentPhase};
-use gdl_pools::LoadSummary;
+use gdl_pools::{KvLoad, LoadSummary};
 use gdl_watch::{FollowEvent, LoadReport, PoolWatchEvent};
 
 const ROUTE: &str = "/v1/ext/gdl-pool/metrics";
@@ -49,13 +49,21 @@ async fn scrape(hub: &velo_hub::Hub) -> String {
     body
 }
 
-/// A watch of the pool, read until it sends `load`.
+/// What the model pool's entry instance says of its KV cache: every
+/// number but the reserved KV.
+const KV: KvLoad = KvLoad::NONE
+    .with_capacity(4_000)
+    .with_active(300)
+    .with_committed(1_000)
+    .with_eviction_age_ms(12_500);
+
+/// A watch of the pool, read until it sends `load`, whatever its number.
 async fn loaded(watch: &mut PoolWatch, load: LoadSummary) {
     let waited = tokio::time::timeout(WAIT, async {
         loop {
             if let PoolWatchEvent::Load { load: Some(sent) } =
                 watch.next().await.expect("the watch goes on")
-                && sent == load
+                && sent.unnumbered() == load
             {
                 return;
             }
@@ -66,7 +74,9 @@ async fn loaded(watch: &mut PoolWatch, load: LoadSummary) {
 }
 
 /// The model pool's hub shows the summary it made of its pool, as its
-/// watch sends it, labelled with the pool's class, name and region. The
+/// watch sends it, labelled with the pool's class, name and region, with a
+/// gauge for each KV number its instances report and none for one they do
+/// not. The
 /// global pool's hub, which follows it, shows the follow's link up, and
 /// down once the model pool's hub stops. The global pool, which no hop
 /// enters, has no summary to show.
@@ -91,6 +101,7 @@ async fn a_hub_shows_its_pools_summary_and_its_follows_links() {
             admitted: 3,
             limit: 8,
             refusals: 2,
+            kv: KV,
         })
         .await
         .expect("the hub takes it");
@@ -100,6 +111,8 @@ async fn a_hub_shows_its_pools_summary_and_its_follows_links() {
         instances: 1,
         refusals: 2,
         period_ms: 1000,
+        kv: KV,
+        ..Default::default()
     };
     loaded(&mut watch, sent).await;
     let text = scrape(&model_hub).await;
@@ -113,9 +126,17 @@ async fn a_hub_shows_its_pools_summary_and_its_follows_links() {
         ("hub_pool_load_limit", 8.0),
         ("hub_pool_load_instances", 1.0),
         ("hub_pool_load_refusals", 2.0),
+        ("hub_pool_kv_capacity", 4_000.0),
+        ("hub_pool_kv_active", 300.0),
+        ("hub_pool_kv_committed", 1_000.0),
+        ("hub_pool_kv_eviction_age_seconds", 12.5),
     ] {
         assert_eq!(value(&text, name, &own), Some(expected), "{name}: {text}");
     }
+    assert!(
+        !text.contains("hub_pool_kv_reserved"),
+        "a KV number no instance reports is shown: {text}"
+    );
     assert!(
         !text.contains("hub_follow_up{"),
         "the model pool follows none: {text}"

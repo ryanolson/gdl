@@ -159,6 +159,22 @@ fn requeue(&self, request: PoolRequest<'_, Projected<Hinted>>, pool: &Pool) -> b
 - When the pool declines the request for another reason, such as `Decline::NotPresent`, or no longer takes work as `eligible` sees it, as when it drains, the runtime calls `choose` again, and does not ask `requeue` about that pool again. `request.declined(pool)` then gives the pool's last reason: `Decline::NotPresent` after such a decline, and still `Decline::Full` for a pool that stopped taking work.
 - `requeue` reads the head as `choose` does, and runs only on a full decline's path.
 
+### Read the KV numbers, and carry the view
+
+A pool's summary can carry five numbers about its KV cache, which its entry instances' nodes report ([KV numbers](../concepts/pools.md#kv-numbers)). Each is an option: a pool whose instances report none has none.
+
+```rust
+// In `choose`: the share of a pool's KV that its live sessions hold.
+let committed = |pool: &Pool| {
+    let kv = pool.load()?.summary().kv;
+    Some(kv.committed()? as f64 / kv.capacity()? as f64)
+};
+```
+
+Compare the sizes with each other, not with `instances`: they cover the same instances, which during a roll are only those of the new build.
+
+A choice can carry the view it was made on to the pool: `PoolChoice::new(at).with_view()`. The pool's entry reads it as `cx.ext::<gdl::OfferView>()`: the epoch of the pool's hub and the number of the summary the policy read. Ask for it only on a choice the pool may decline on that ground, such as a session's first turn (`request.head().hint.first_turn`), not on a pinned turn. A choice with a view is the same size as one without, and the view adds about 19 bytes to the offer.
+
 ## 3. Test it without a runtime
 
 Every input is a plain value that a test can build:
@@ -180,7 +196,7 @@ let request = PoolRequest::new(&cx, &head, "us-east-1", now);
 assert_eq!(ByShard.choose(request, &pools).map(|choice| choice.at()), Ok(1));
 ```
 
-Both versions of `ByShard` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_declines`, `with_damped` (a `gdl::Damped`), `with_turn`, `with_properties`, and `with_evidence` (each pool's name and `gdl::PoolEvidence`, sorted by name) set the rest. `Pool::with_epoch` sets a row's epoch. `crates/gdl/tests/policies.rs` has more.
+Both versions of `ByShard` choose `qwen-1` here. The `home_first` version takes no pool whose summary is missing, or has no period (`LoadSummary::default()` has none). A summary with KV numbers sets `kv: KvLoad::NONE.with_capacity(..).with_committed(..)`, and its number sets `sequence`. `with_excluded`, `with_declines`, `with_damped` (a `gdl::Damped`), `with_turn`, `with_properties`, and `with_evidence` (each pool's name and `gdl::PoolEvidence`, sorted by name) set the rest. `Pool::with_epoch` sets a row's epoch. `crates/gdl/tests/policies.rs` has more.
 
 ## 4. Bind it in the spec
 

@@ -840,6 +840,7 @@ pub(super) fn idle() -> Option<gdl::Load> {
             instances: 1,
             refusals: 0,
             period_ms: 60_000,
+            ..Default::default()
         },
         Instant::now(),
     ))
@@ -852,6 +853,7 @@ fn summary(admitted: u64) -> LoadSummary {
         instances: 2,
         refusals: 0,
         period_ms: 1000,
+        ..Default::default()
     }
 }
 

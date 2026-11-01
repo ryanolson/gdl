@@ -43,6 +43,7 @@ fn record() -> PoolRecord {
             instances: 2,
             refusals: 1,
             period_ms: 10_000,
+            ..Default::default()
         }),
         presence: Presence::Serving,
         properties: vec![

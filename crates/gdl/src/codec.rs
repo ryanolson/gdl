@@ -24,12 +24,13 @@ pub fn encoder_into<T: Serialize>(encoding: Encoding) -> fn(&T, &mut Vec<u8>) ->
 }
 
 /// [`encoder_into`] that writes the value into the buffer's spare room when
-/// it fits, so a value that fits is serialized once. A value that does not
-/// fit is serialized to count its length, and then into a buffer grown by
-/// exactly that length: the buffer never grows past the value, and the
-/// value is not moved after it is written. A `Serialize` that gives another
-/// length on its next call only makes the buffer grow, as [`encoder_into`]
-/// does.
+/// it fits with [`TAIL_ROOM`] to spare, so a value that fits is serialized
+/// once. A value that does not fit is serialized to count its length, and
+/// then into a buffer grown by exactly that length and [`TAIL_ROOM`]: the
+/// buffer never grows past them, and the value is not moved after it is
+/// written, nor when what follows it is written into the room. A
+/// `Serialize` that gives another length on its next call only makes the
+/// buffer grow, as [`encoder_into`] does.
 pub fn encoder_sized<T: Serialize>(encoding: Encoding) -> fn(&T, &mut Vec<u8>) -> Result<()> {
     match encoding {
         Encoding::Msgpack => |value, bytes| write_sized(Encoding::Msgpack, value, bytes),
@@ -89,10 +90,15 @@ fn write_to<T: Serialize>(
     }
 }
 
+/// The room [`encoder_sized`] leaves after a value: an offer writes the
+/// view of the pool it was chosen on there, after the request's head.
+pub const TAIL_ROOM: usize = 24;
+
 fn write_sized<T: Serialize>(encoding: Encoding, value: &T, bytes: &mut Vec<u8>) -> Result<()> {
     let start = bytes.len();
     let mut within = Within {
         bytes,
+        spare: TAIL_ROOM,
         overflowed: false,
     };
     match write_to(encoding, &mut within, value) {
@@ -104,20 +110,21 @@ fn write_sized<T: Serialize>(encoding: Encoding, value: &T, bytes: &mut Vec<u8>)
     bytes.truncate(start);
     let mut counter = Counter(0);
     write_to(encoding, &mut counter, value)?;
-    bytes.reserve_exact(counter.0);
+    bytes.reserve_exact(counter.0 + TAIL_ROOM);
     write_to(encoding, bytes, value)
 }
 
-/// Appends to a buffer without growing it, and fails when the buffer is
-/// full.
+/// Appends to a buffer without growing it, and fails when the buffer would
+/// keep less than `spare` free.
 struct Within<'a> {
     bytes: &'a mut Vec<u8>,
+    spare: usize,
     overflowed: bool,
 }
 
 impl std::io::Write for Within<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.capacity() - self.bytes.len() < bytes.len() {
+        if self.bytes.capacity() - self.bytes.len() < bytes.len() + self.spare {
             self.overflowed = true;
             return Err(std::io::ErrorKind::WriteZero.into());
         }
@@ -204,10 +211,11 @@ mod tests {
         }
     }
 
-    /// A value that fits the buffer's spare room is serialized once, into
-    /// it. One a byte over is serialized to count it, then into a buffer
-    /// grown by exactly its length. Either way the bytes are the owned
-    /// encoding's, after what the buffer held, in every encoding.
+    /// A value that fits the buffer's spare room with [`TAIL_ROOM`] to
+    /// spare is serialized once, into it. One a byte over is serialized to
+    /// count it, then into a buffer grown by exactly its length and the
+    /// tail room. Either way the bytes are the owned encoding's, after what
+    /// the buffer held, in every encoding.
     #[test]
     fn a_sized_encode_fits_the_spare_room_or_grows_by_exactly_the_value() {
         let walks = std::cell::Cell::new(0);
@@ -219,7 +227,8 @@ mod tests {
                     logprob: Some(-0.5),
                 };
                 let owned = encoder::<Token>(encoding)(&token).expect("encode");
-                for spare in [owned.len() - 1, owned.len(), owned.len() + 1] {
+                let fits = owned.len() + TAIL_ROOM;
+                for spare in [fits - 1, fits, fits + 1] {
                     let mut buffer = Vec::with_capacity(6 + spare);
                     buffer.extend_from_slice(b"header");
                     walks.set(0);
@@ -228,9 +237,13 @@ mod tests {
                     let case = format!("{encoding:?}, {} B in {spare} B", owned.len());
                     assert_eq!(&buffer[..6], b"header", "{case}");
                     assert_eq!(buffer[6..], owned, "{case}");
-                    if spare < owned.len() {
+                    if spare < fits {
                         assert_eq!(walks.get(), 3, "{case}: a partial write, a count, a write");
-                        assert_eq!(buffer.capacity(), buffer.len(), "{case}: spare room");
+                        assert_eq!(
+                            buffer.capacity(),
+                            buffer.len() + TAIL_ROOM,
+                            "{case}: room past the value and its tail"
+                        );
                     } else {
                         assert_eq!(walks.get(), 1, "{case}: serialized again");
                         assert_eq!(buffer.capacity(), 6 + spare, "{case}: the buffer grew");

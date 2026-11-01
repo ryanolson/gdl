@@ -549,6 +549,7 @@ impl Feed {
                     limit: report.limit,
                     refusals: report.refusals,
                     age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+                    kv: report.kv,
                 };
                 Some((*id, load))
             })

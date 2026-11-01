@@ -647,6 +647,8 @@ impl<H> ProcessConfig<H> {
             #[cfg(feature = "hub")]
             properties: self.runtime.properties.clone(),
             #[cfg(feature = "hub")]
+            kv: self.runtime.kv.clone(),
+            #[cfg(feature = "hub")]
             pool_drain,
             #[cfg(feature = "hub")]
             detached: false,
@@ -726,6 +728,10 @@ pub struct Launch {
     /// load reports carry.
     #[cfg(feature = "hub")]
     properties: gdl::InstanceProperties,
+    /// What the segment's nodes say of the instance's KV cache, which its
+    /// load reports carry.
+    #[cfg(feature = "hub")]
+    kv: gdl::InstanceKv,
     /// For an instance in a pool under a hub, its part in its pool's
     /// drain.
     #[cfg(feature = "hub")]
@@ -1017,7 +1023,8 @@ impl Launch {
                         let read = move || segment.load();
                         let me = self.node.instance_id();
                         let properties = self.properties.clone();
-                        Some(session.report_load(me, period, read, properties))
+                        let kv = self.kv.clone();
+                        Some(session.report_load(me, period, read, properties, kv))
                     }
                     _ => None,
                 };

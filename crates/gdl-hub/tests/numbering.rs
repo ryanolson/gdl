@@ -40,6 +40,7 @@ fn says(state: EntryState) -> LoadReport {
             "test".to_string(),
             vec![gdl_model::PropertyEntry::new(key(MODEL), state)],
         )]),
+        ..Default::default()
     }
 }
 

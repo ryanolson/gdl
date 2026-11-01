@@ -85,4 +85,9 @@ pub struct InstanceLoad {
     pub refusals: u64,
     /// How long ago the hub took the report, in milliseconds.
     pub age_ms: u64,
+    /// What its nodes said of its KV cache ([`gdl_pools::KvLoad`]): none
+    /// from an instance whose nodes set nothing, or from a hub of a build
+    /// from before the numbers.
+    #[serde(flatten)]
+    pub kv: gdl_pools::KvLoad,
 }

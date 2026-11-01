@@ -26,6 +26,11 @@ fn the_hubs_list_reads_into_the_mirror() {
         limit: 8,
         refusals: 1,
         age_ms: 40,
+        // The operator's mirror reads none of them, and is not refused for
+        // them.
+        kv: gdl_pools::KvLoad::NONE
+            .with_capacity(80_000)
+            .with_eviction_age_ms(9_000),
     };
     let phases = [
         (InstancePhase::Joining, "joining"),

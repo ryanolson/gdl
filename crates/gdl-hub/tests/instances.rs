@@ -26,6 +26,7 @@ fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
         admitted,
         limit,
         refusals,
+        ..Default::default()
     }
 }
 
@@ -94,7 +95,8 @@ fn figures(load: Option<InstanceLoad>) -> Option<(u64, u64, u64)> {
 /// without the report it made before; one that has not announced `ready`
 /// is `joining`; one that announced `drained` after `retired` is
 /// `drained`, and one of a draining pool that detached is `detached`; an
-/// interior instance is listed without a load; and each with its segment,
+/// interior instance is listed without a load; an instance's KV numbers
+/// are listed as it reported them; and each with its segment,
 /// the peer it registered with, and the address its velo node listens on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hub_lists_its_members_with_their_phase_and_latest_load() {
@@ -126,7 +128,16 @@ async fn the_hub_lists_its_members_with_their_phase_and_latest_load() {
     detached.announce(SegmentPhase::Detached).await;
 
     a.report(report(3, 8, 1)).await.expect("the hub takes it");
-    b.report(report(1, 8, 0)).await.expect("the hub takes it");
+    let kv = gdl_pools::KvLoad::NONE
+        .with_capacity(4_000)
+        .with_committed(1_000)
+        .with_eviction_age_ms(12_000);
+    b.report(LoadReport {
+        kv,
+        ..report(1, 8, 0)
+    })
+    .await
+    .expect("the hub takes it");
     c.report(report(5, 8, 0)).await.expect("the hub takes it");
     c.announce(SegmentPhase::Retired).await;
     let mut drained = Instance::join(&hub, "f").await;
@@ -145,6 +156,9 @@ async fn the_hub_lists_its_members_with_their_phase_and_latest_load() {
     let entry = |instance: &Instance| &listed[&instance.id()];
     assert_eq!(figures(entry(&a).load), Some((3, 8, 1)));
     assert_eq!(figures(entry(&b).load), Some((1, 8, 0)));
+    let kv_of = |instance: &Instance| entry(instance).load.map(|load| load.kv);
+    assert_eq!(kv_of(&b), Some(kv), "b's KV numbers, as it reported them");
+    assert_eq!(kv_of(&a), Some(gdl_pools::KvLoad::NONE), "a reported none");
     let age = entry(&a).load.expect("a's report").age_ms;
     assert!(
         u128::from(age) <= WAIT.as_millis(),

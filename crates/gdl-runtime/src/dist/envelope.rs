@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::fabric::ReplyTo;
-use gdl::{Cx, Deadline, RequestId};
+use gdl::{Cx, Deadline, OfferView, RequestId};
 use gdl::{Error, ErrorKind, Result};
 
 /// The envelope format. A receiver rejects any other version. Version 4
@@ -24,9 +24,10 @@ pub(crate) const VERSION: u8 = 4;
 /// envelope with no meta in its context needs about 100 bytes.
 pub(crate) const HEADER_ROOM: usize = 256;
 
-/// The buffer a request's head is first written into, with its room: a
-/// head of up to 768 bytes is serialized once. A larger one is serialized
-/// to count it, then into a buffer of exactly its size.
+/// The buffer a request's head is first written into, with its room in
+/// front and [`TAIL_ROOM`] after it: a head of up to 744 bytes is
+/// serialized once. A larger one is serialized to count it, then into a
+/// buffer of exactly its size and its room.
 const FIRST_BUFFER: usize = 1024;
 
 /// Refuse an envelope of a version other than [`VERSION`].
@@ -106,6 +107,9 @@ pub(crate) struct Forward {
     pub(crate) pos: u16,
     pub(crate) cx: WireCx,
     pub(crate) reply: ReplyTo,
+    /// The request's head, and after it the view of the pool the chooser
+    /// decided on, when its pool policy asked to put it on the offer
+    /// ([`Head::set_view`]).
     pub(crate) payload: Head,
 }
 
@@ -113,18 +117,38 @@ pub(crate) struct Forward {
 /// its seven fields.
 const FIELDS: u8 = 0x97;
 
+/// The room an encoder leaves after a request's head, for the view an offer
+/// writes after it: `[epoch, sequence]` takes at most 19 bytes.
+#[cfg_attr(not(feature = "hub"), allow(dead_code))]
+pub(crate) const TAIL_ROOM: usize = gdl::__runtime::TAIL_ROOM;
+
+/// A [`Forward`] as it arrives, its head borrowed from the bytes, so that
+/// where the head ends, and the view after it begins, is known.
+#[derive(Deserialize)]
+struct Arrived<'a> {
+    version: u8,
+    identity: Identity,
+    hop: u16,
+    pos: u16,
+    cx: WireCx,
+    reply: ReplyTo,
+    #[serde(borrow)]
+    payload: &'a [u8],
+}
+
 impl Forward {
     /// The envelope's bytes, as an offer sends them, which [`encode`]
-    /// gives too. The first offer writes the envelope's other fields into
-    /// the room in front of the head, so the bytes are the head's own
-    /// buffer. A later one, as a failover makes, or one whose fields do not
-    /// fit the room, copies the head after them.
+    /// gives too, then the head's view, if it has one. The first offer
+    /// writes the envelope's other fields into the room in front of the
+    /// head, so the bytes are the head's own buffer, the view after it
+    /// included. A later one, as a failover makes, or one whose fields do
+    /// not fit the room, copies the head and its view after them.
     pub(crate) fn wire(&mut self) -> Result<Bytes> {
         let mut header = [0u8; HEADER_ROOM];
         let mut free = &mut header[..];
         let fits = self.write_header(&mut free).is_ok();
         let len = HEADER_ROOM - free.len();
-        let at = self.payload.at;
+        let at = self.payload.at();
         if let (true, Buffer::Room(buffer)) = (fits && len <= at, &mut self.payload.buffer) {
             let start = at - len;
             buffer[start..at].copy_from_slice(&header[..len]);
@@ -132,10 +156,30 @@ impl Forward {
             self.payload.buffer = Buffer::Sent(bytes.clone());
             return Ok(bytes.slice(start..));
         }
-        let mut bytes = Vec::with_capacity(2 * HEADER_ROOM + self.payload.len());
+        let carried = self.payload.carried();
+        let mut bytes = Vec::with_capacity(2 * HEADER_ROOM + carried.len());
         self.write_header(&mut bytes)?;
-        bytes.extend_from_slice(&self.payload);
+        bytes.extend_from_slice(carried);
         Ok(Bytes::from(bytes))
+    }
+
+    /// The envelope an offer sent, `bytes`, with the view after it, if one
+    /// is there ([`Head::view`]). The head is borrowed to find where it
+    /// ends, then copied once with what follows it, as [`decode`] copies
+    /// the head alone.
+    pub(crate) fn read(bytes: &[u8]) -> Result<Self> {
+        let arrived: Arrived<'_> = rmp_serde::from_slice(bytes).map_err(codec)?;
+        // The head is a slice of `bytes`, so what follows it is the rest.
+        let start = arrived.payload.as_ptr() as usize - bytes.as_ptr() as usize;
+        Ok(Self {
+            version: arrived.version,
+            identity: arrived.identity,
+            hop: arrived.hop,
+            pos: arrived.pos,
+            cx: arrived.cx,
+            reply: arrived.reply,
+            payload: Head::carrying(bytes[start..].to_vec(), arrived.payload.len()),
+        })
     }
 
     /// Everything [`encode`] writes before the head's bytes: the array,
@@ -173,8 +217,12 @@ impl Forward {
 #[doc(hidden)]
 pub struct Head {
     buffer: Buffer,
-    /// Where the head starts in `buffer`.
-    at: usize,
+    /// Where the head starts in `buffer`, and how long it is, in one word,
+    /// so that an envelope, which every hand-off's future holds, is no
+    /// larger for them: a head is at most msgpack's 4 GiB. What follows the
+    /// head in `buffer` is its view ([`Head::view`]).
+    at: u32,
+    len: u32,
 }
 
 enum Buffer {
@@ -196,31 +244,101 @@ impl Head {
         let mut buffer = Vec::with_capacity(FIRST_BUFFER);
         buffer.resize(HEADER_ROOM, 0);
         encode(value, &mut buffer)?;
+        let len = u32::try_from(buffer.len() - HEADER_ROOM).map_err(|_| too_large(buffer.len()))?;
         Ok(Self {
             buffer: Buffer::Room(buffer),
-            at: HEADER_ROOM,
+            at: HEADER_ROOM as u32,
+            len,
         })
     }
+
+    /// `carried`, a head of `len` bytes and whatever followed it as it
+    /// arrived.
+    fn carrying(carried: Vec<u8>, len: usize) -> Self {
+        Self {
+            // A head that arrived is at most msgpack's 4 GiB.
+            len: u32::try_from(len).unwrap_or(u32::MAX),
+            buffer: Buffer::Room(carried),
+            at: 0,
+        }
+    }
+
+    fn at(&self) -> usize {
+        self.at as usize
+    }
+
+    /// The head and what follows it in its buffer.
+    fn carried(&self) -> &[u8] {
+        match &self.buffer {
+            Buffer::Room(buffer) => &buffer[self.at()..],
+            Buffer::Sent(bytes) => &bytes[self.at()..],
+        }
+    }
+
+    /// The view of the pool a chooser decided on, which an offer carries
+    /// after the head as `[epoch, sequence]`: an entry of an earlier
+    /// build, which decodes the envelope's seven fields and stops, ignores
+    /// it. None when no view follows the head, or what follows is not one.
+    pub(crate) fn view(&self) -> Option<OfferView> {
+        let after = &self.carried()[self.len as usize..];
+        if after.is_empty() {
+            return None;
+        }
+        let (epoch, sequence) = rmp_serde::from_slice::<(u64, u64)>(after).ok()?;
+        Some(OfferView { epoch, sequence })
+    }
+
+    /// Carry `view` after the head, in place of any view before. Before the
+    /// first offer it is written into the room the head's encoder left
+    /// after it; after, the buffer is shared with that offer's send, so a
+    /// different view takes a copy of the head, as the next offer's copy
+    /// would.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    pub(crate) fn set_view(&mut self, view: Option<OfferView>) {
+        if self.view() == view {
+            return;
+        }
+        let end = self.at() + self.len as usize;
+        let mut buffer = match std::mem::replace(&mut self.buffer, Buffer::Room(Vec::new())) {
+            Buffer::Room(mut buffer) => {
+                buffer.truncate(end);
+                buffer
+            }
+            Buffer::Sent(bytes) => {
+                let mut buffer = Vec::with_capacity(self.len as usize + TAIL_ROOM);
+                buffer.extend_from_slice(&bytes[self.at()..end]);
+                self.at = 0;
+                buffer
+            }
+        };
+        if let Some(view) = view {
+            // A `Vec`'s writer does not fail.
+            let _ = write(&mut buffer, &(view.epoch, view.sequence));
+        }
+        self.buffer = Buffer::Room(buffer);
+    }
+}
+
+fn too_large(len: usize) -> Error {
+    Error::new(
+        ErrorKind::Codec,
+        format!("a request head of {len} bytes is over msgpack's 4 GiB"),
+    )
 }
 
 impl std::ops::Deref for Head {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        match &self.buffer {
-            Buffer::Room(buffer) => &buffer[self.at..],
-            Buffer::Sent(bytes) => &bytes[self.at..],
-        }
+        &self.carried()[..self.len as usize]
     }
 }
 
 /// A head with no room in front of it, as an envelope that arrived holds.
 impl From<Vec<u8>> for Head {
     fn from(head: Vec<u8>) -> Self {
-        Self {
-            buffer: Buffer::Room(head),
-            at: 0,
-        }
+        let len = head.len();
+        Self::carrying(head, len)
     }
 }
 
@@ -439,6 +557,204 @@ mod tests {
                     let back: Forward = decode(&bytes).expect("decode");
                     assert_eq!(back.payload[..], envelope.payload[..]);
                 }
+            }
+        }
+    }
+
+    /// The bytes an offer with a view sends: the envelope's own encoding,
+    /// then the view as `[epoch, sequence]`.
+    fn with_trailer(envelope: &Forward, view: OfferView) -> Vec<u8> {
+        let mut expected = encode(envelope).expect("encode");
+        expected.extend(encode(&(view.epoch, view.sequence)).expect("encode"));
+        expected
+    }
+
+    const VIEW: OfferView = OfferView {
+        epoch: 1_793_000_000_123,
+        sequence: 7,
+    };
+
+    /// An offer carries its view after the envelope, for heads on each side
+    /// of msgpack's length bounds and of the first buffer, and in JSON. A
+    /// second offer, as a failover makes, carries its own view, or none, and
+    /// never the first one's inside its head.
+    #[test]
+    fn an_offer_carries_its_view_after_the_envelope() {
+        let first = FIRST_BUFFER - HEADER_ROOM;
+        let other = OfferView {
+            epoch: VIEW.epoch + 1,
+            sequence: 1,
+        };
+        for encoding in [Encoding::Msgpack, Encoding::Json] {
+            let codec = Codec::<serde_bytes::ByteBuf>::new(encoding);
+            for len in [0, 1, 250, first - 30, first - 4, first - 3, first, 65_536] {
+                let head = serde_bytes::ByteBuf::from(vec![9; len]);
+                let mut envelope = hand_off(&codec, head, &[]);
+                let payload = envelope.payload.to_vec();
+                for (offer, view) in [(0, Some(VIEW)), (1, Some(other)), (2, None)] {
+                    envelope.payload.set_view(view);
+                    let bytes = envelope.wire().expect("wire");
+                    let expected = match view {
+                        Some(view) => with_trailer(&envelope, view),
+                        None => encode(&envelope).expect("encode"),
+                    };
+                    assert!(
+                        bytes[..] == expected[..],
+                        "{encoding:?}, a head of {len} B, offer {offer}"
+                    );
+                    let back = Forward::read(&bytes).expect("read");
+                    assert_eq!(
+                        back.payload.view(),
+                        view,
+                        "{encoding:?}, {len} B, offer {offer}"
+                    );
+                    assert_eq!(
+                        back.payload[..],
+                        payload[..],
+                        "{encoding:?}, {len} B, offer {offer}"
+                    );
+                    let head: serde_bytes::ByteBuf =
+                        codec.decode(&back.payload).expect("the head decodes alone");
+                    assert_eq!(head.len(), len);
+                }
+            }
+        }
+    }
+
+    /// An entry of the build before views decodes an envelope with a view
+    /// as the envelope it was, with the decoder it calls, and leaves the
+    /// view: builds roll one at a time.
+    #[test]
+    fn an_earlier_entry_reads_an_offer_with_a_view() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let image = Image {
+            url: "a".repeat(100),
+            detail: "high".into(),
+        };
+        let mut envelope = hand_off(&codec, image, &[("model", "x")]);
+        envelope.payload.set_view(Some(VIEW));
+        let bytes = envelope.wire().expect("wire");
+        let earlier: Forward = decode(&bytes).expect("an earlier entry reads it");
+        assert_eq!(earlier.payload[..], envelope.payload[..]);
+        assert_eq!(earlier.payload.view(), None);
+        assert_eq!(earlier.cx.root(), envelope.cx.root());
+    }
+
+    /// An offer without a view reads as having none, and bytes after the
+    /// envelope that are not a view are ignored, as an earlier entry
+    /// ignores them.
+    #[test]
+    fn an_offer_reads_a_view_only_where_one_is() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let image = Image {
+            url: "a".into(),
+            detail: "low".into(),
+        };
+        let mut envelope = hand_off(&codec, image, &[]);
+        let bytes = envelope.wire().expect("wire");
+        assert_eq!(Forward::read(&bytes).expect("read").payload.view(), None);
+        for after in [&[0xc0][..], &[0x92, 0x01][..], &[0x91, 0x01][..], b"junk"] {
+            let mut odd = bytes.to_vec();
+            odd.extend_from_slice(after);
+            let back = Forward::read(&odd).expect("read");
+            assert_eq!(back.payload.view(), None, "{after:?}");
+            assert_eq!(back.payload[..], envelope.payload[..]);
+        }
+    }
+
+    /// A head with a view crosses where its encoder wrote it, small or
+    /// large: the encoder leaves room after the head for the view.
+    #[test]
+    fn a_head_with_a_view_crosses_where_its_encoder_wrote_it() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        for len in [16, 700, 64 * 1024] {
+            let image = Image {
+                url: "a".repeat(len),
+                detail: "high".into(),
+            };
+            let mut envelope = hand_off(&codec, image, &[]);
+            envelope.payload.set_view(Some(VIEW));
+            let written = envelope.payload.as_ptr() as usize;
+            let head = envelope.payload.len();
+            let bytes = envelope.wire().expect("wire");
+            let trailer = encode(&(VIEW.epoch, VIEW.sequence)).expect("encode").len();
+            let sent = &bytes[bytes.len() - trailer - head..];
+            assert_eq!(
+                sent.as_ptr() as usize,
+                written,
+                "a head of {len} B was copied"
+            );
+        }
+    }
+
+    /// A 4 MiB head with a view still takes one buffer, sized before the
+    /// head is written.
+    #[test]
+    fn a_4_mib_head_with_a_view_takes_one_buffer() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let image = Image {
+            url: "a".repeat(4 * 1024 * 1024),
+            detail: "high".into(),
+        };
+        take_sizes();
+        counting(true);
+        let mut envelope = hand_off(&codec, image, &[]);
+        envelope.payload.set_view(Some(VIEW));
+        let bytes = envelope.wire().expect("wire");
+        counting(false);
+        let sizes = take_sizes();
+        let bound = bytes.len() + HEADER_ROOM;
+        assert!(
+            sizes.largest <= bound,
+            "a buffer of {} B for an envelope of {} B",
+            sizes.largest,
+            bytes.len()
+        );
+        assert!(
+            sizes.bytes <= bound + 4096,
+            "{} B allocated for an envelope of {} B",
+            sizes.bytes,
+            bytes.len()
+        );
+    }
+
+    /// Reading an offer at the entry allocates what decoding it did before
+    /// views, with a view or without: the head is copied once, out of the
+    /// bytes that arrived, with the view's few bytes after it.
+    #[test]
+    fn reading_an_offer_allocates_what_decoding_it_did() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        for len in [100, 64 * 1024] {
+            for view in [None, Some(VIEW)] {
+                let image = Image {
+                    url: "a".repeat(len),
+                    detail: "high".into(),
+                };
+                let mut envelope = hand_off(&codec, image, &[("model", "x")]);
+                envelope.payload.set_view(view);
+                let bytes = envelope.wire().expect("wire");
+                take_sizes();
+                counting(true);
+                let decoded: Forward = decode(&bytes).expect("decode");
+                counting(false);
+                let before = take_sizes();
+                counting(true);
+                let read = Forward::read(&bytes).expect("read");
+                counting(false);
+                let after = take_sizes();
+                assert_eq!(read.payload.view(), view);
+                // The view comes with the head, in the same allocation.
+                let view_bytes = read.payload.carried().len() - read.payload.len();
+                assert_eq!(
+                    after.bytes,
+                    before.bytes + view_bytes,
+                    "a head of {len} B, view {view:?}"
+                );
+                assert!(
+                    after.largest <= before.largest + view_bytes,
+                    "a head of {len} B, view {view:?}"
+                );
+                drop((decoded, read));
             }
         }
     }

@@ -1212,6 +1212,7 @@ async fn a_restarted_child_reads_its_last_record_from_its_parent() {
                 gdl_model::EntryState::Ready,
             )],
         )]),
+        ..Default::default()
     };
     entry[0].report(report).await.expect("the hub takes it");
     let state = |records: &BTreeMap<String, PoolRecord>| {

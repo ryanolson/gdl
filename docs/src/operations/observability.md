@@ -173,13 +173,14 @@ A chooser counts each offer to a pool of another class under the pool and how it
 - **How far a pool is:** `pool_offer_round_trip_seconds{outcome="accepted"}` by `pool` and `region`: the wire both ways and the entry's admission. Declines are timed apart, under their own `outcome`.
 - **A pool that keeps a re-queued request waiting:** `pool_requeues_total` rises with its `declined_full`, and `pool_requeue_deadlines_total` counts the requests that waited until their deadline.
 
-A chooser also shows what it holds of each pool now, as gauges: the last load summary it has (`pool_load_admitted`, `pool_load_limit`, `pool_load_refusals`, `pool_load_instances`) and its age (`pool_load_age_seconds`), the pool's state (`pool_state`, one series per state), and whether a pool policy sees it take work (`pool_takes_work`). These are what a pool policy reads when it chooses, so a policy can be tried against them before it is written.
+A chooser also shows what it holds of each pool now, as gauges: the last load summary it has (`pool_load_admitted`, `pool_load_limit`, `pool_load_refusals`, `pool_load_instances`), the KV numbers in it (`pool_kv_capacity`, `pool_kv_active`, `pool_kv_committed`, `pool_kv_reserved`, `pool_kv_eviction_age_seconds`), and its age (`pool_load_age_seconds`), the pool's state (`pool_state`, one series per state), and whether a pool policy sees it take work (`pool_takes_work`). These are what a pool policy reads when it chooses, so a policy can be tried against them before it is written.
 
 - **A pool near its limit:** `pool_load_admitted` over `pool_load_limit`.
+- **A pool short of warm KV:** `pool_kv_committed` over `pool_kv_capacity` near 1, or `pool_kv_eviction_age_seconds` under the gap between a session's turns.
 - **A stale view:** `pool_load_age_seconds` past a few of the pool's summary periods. `home_first` passes over a pool whose summary is stale.
 - **A pool that stopped taking work:** `pool_takes_work` at 0, with `pool_state` saying why.
 
-A pool's hub shows the same summary as it sends it (`hub_pool_load_*`), and whether each pool it follows has its link up (`hub_follow_up`), at `GET /v1/ext/gdl-pool/metrics` on its public listener ([A pool hub's metrics](../appendix/metrics.md#a-pool-hubs-metrics)). A chooser's `pool_load_age_seconds` that grows while its hub's `hub_follow_up` for the pool is 0 says the link is down, not the pool.
+A pool's hub shows the same summary as it sends it (`hub_pool_load_*`, `hub_pool_kv_*`), and whether each pool it follows has its link up (`hub_follow_up`), at `GET /v1/ext/gdl-pool/metrics` on its public listener ([A pool hub's metrics](../appendix/metrics.md#a-pool-hubs-metrics)). A chooser's `pool_load_age_seconds` that grows while its hub's `hub_follow_up` for the pool is 0 says the link is down, not the pool.
 
 The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, and two more for its round trip, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)). The gauges are read from the chooser's tables at each scrape and cost an offer nothing.
 
