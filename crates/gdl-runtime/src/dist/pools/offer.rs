@@ -192,6 +192,8 @@ impl Runtime {
         // Beside `offered`, not in it: a pool whose hand-off never left
         // said nothing, and the policy reads only the pools that declined.
         let mut declines = Vec::new();
+        // The pools the policy was asked to re-queue the request for.
+        let mut asked = Vec::new();
         let mut walk: Option<Walk> = None;
         // The pool a re-queue just left for an instance's own decline,
         // whose other entry instances are offered the request before it
@@ -226,13 +228,9 @@ impl Runtime {
                         set_reason(&mut declines, pool, last);
                     } else {
                         // A policy that chooses a pool it left again is
-                        // not asked about it again, and the pool counts
-                        // again, so that `pool_failovers` bounds it. A
-                        // budget's decline was never asked about, so the
-                        // forced offer's full decline is.
-                        let first = declines
-                            .iter()
-                            .all(|&(left, why)| left != pool || why == Decline::Budget);
+                        // not asked about it again, whatever the pool's
+                        // reasons between, and the pool counts again, so
+                        // that `pool_failovers` bounds it.
                         offered.push(pool);
                         // The pool's latest reason is the one the policy
                         // reads: a forced offer's full decline replaces
@@ -243,6 +241,10 @@ impl Runtime {
                             declines.push((pool, decline));
                         }
                         if last == Some(Decline::Full) {
+                            let first = !asked.contains(&pool);
+                            if first {
+                                asked.push(pool);
+                            }
                             let left = Left::new(&offered, &declines);
                             if first && crossing.requeue(cx, &envelope.payload, left, pool)? {
                                 let requeueing = Requeueing::new(crossing.figures(pool), cx);

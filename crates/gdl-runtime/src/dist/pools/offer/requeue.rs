@@ -49,6 +49,8 @@ struct Keeping {
     stubborn: bool,
     told: Option<Arc<AtomicUsize>>,
     seen: Arc<std::sync::Mutex<Vec<Option<Decline>>>>,
+    /// How many times it was asked whether to re-queue.
+    asked: Arc<AtomicUsize>,
 }
 
 impl PoolPolicy for Keeping {
@@ -81,6 +83,7 @@ impl PoolPolicy for Keeping {
     }
 
     fn requeue(&self, request: PoolRequest<'_, Encoded>, pool: &Pool) -> bool {
+        self.asked.fetch_add(1, Ordering::SeqCst);
         let declined = request.declined(pool);
         self.requeue
             && (declined == Some(Decline::Full)
@@ -111,6 +114,8 @@ struct Fleet {
 
 /// How one pool's entry answers, and the offers it got.
 struct Entry {
+    /// The declines it answers first, one an offer, before any other rule.
+    script: Arc<Mutex<std::collections::VecDeque<Decline>>>,
     /// The offers it declines as full before any other answer.
     full: Arc<AtomicUsize>,
     /// Whether it declines the offers after those as not present.
@@ -170,6 +175,7 @@ impl Fleet {
         let mut tables = Vec::new();
         for (node, name) in nodes.iter().zip(POOLS) {
             let entry = Entry {
+                script: Arc::default(),
                 full: Arc::new(AtomicUsize::new(0)),
                 absent: Arc::new(AtomicBool::new(false)),
                 budget: Arc::new(AtomicBool::new(false)),
@@ -189,6 +195,7 @@ impl Fleet {
                 Arc::clone(&entry.offered),
                 Arc::clone(&entry.metas),
             );
+            let script = Arc::clone(&entry.script);
             entries.push(entry);
             let (replies_budget, replies_full) = (over_budget.clone(), full.clone());
             let replies = [
@@ -200,6 +207,15 @@ impl Fleet {
             Fabric::new(node.clone(), None, None, Duration::from_secs(30))
                 .register(&rt.names().forward, move |message| {
                     offered.fetch_add(1, Ordering::SeqCst);
+                    if let Some(decline) = script.lock().expect("not poisoned").pop_front() {
+                        let reply = match decline {
+                            Decline::Full => replies[0].clone(),
+                            Decline::NotPresent => replies[1].clone(),
+                            Decline::Budget => replies[3].clone(),
+                            other => panic!("not scripted: {other:?}"),
+                        };
+                        return Box::pin(async move { reply });
+                    }
                     let forward = Forward::read(&message).expect("a forward hand-off");
                     let stale = newer_than.load(Ordering::SeqCst);
                     let view = forward.payload.view();
@@ -621,6 +637,36 @@ async fn a_forced_offer_declined_as_full_takes_the_ordinary_path() {
             assert!(m1.damped.is_some(), "a full decline damps: {m1:?}");
         }
     }
+}
+
+/// A policy is asked once whether to re-queue a request for a pool, also
+/// when it chooses the pool again and the pool's reason changes between
+/// its declines: a budget's decline between two full ones does not make
+/// the second full decline a first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pool_whose_reason_changes_is_asked_about_once() {
+    let fleet = Fleet::new(backoff()).await;
+    fleet.entries[0]
+        .script
+        .lock()
+        .expect("not poisoned")
+        .extend([
+            Decline::Budget,
+            Decline::Full,
+            Decline::Budget,
+            Decline::Full,
+        ]);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let router = fleet.router(Keeping {
+        stubborn: true,
+        asked: Arc::clone(&asked),
+        ..Keeping::default()
+    });
+    let (sent, _) = fleet.send(&router, &Cx::new()).await;
+    sent.expect_err("m1 never took it");
+    assert_eq!(fleet.offered(), [4, 0, 0], "the last a forced offer");
+    assert_eq!(fleet.forced(), [1.0, 0.0, 0.0]);
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "asked about m1 once");
 }
 
 /// A re-queued request is offered again with the view of the pool's row
