@@ -12,8 +12,7 @@ use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
 use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
 use gdl::{
-    Cx, Damped, Error, ErrorKind, HomeFirstAt, Instances, NoPool, OfferView, PoolPolicies,
-    PoolRequest, Result,
+    Cx, Damped, Error, ErrorKind, HomeFirstAt, NoPool, OfferView, PoolPolicies, PoolRequest, Result,
 };
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
@@ -23,7 +22,7 @@ use super::lease::{PoolLease, Seen, Wake};
 use super::meter::PoolFigures;
 use super::policy;
 use super::{EntryTable, PoolTable, Pools};
-use crate::dist::roster::{CHOICES, Policy, turn};
+use crate::dist::roster::{CHOICES, Policy, selector_id, turn};
 use crate::dist::runtime::Within;
 use gdl::Decline;
 
@@ -143,7 +142,7 @@ impl Crossing {
                         // The pools failover chooses another pool, so no
                         // instance of this one has declined the request.
                         &[],
-                        Instances::new(&self.target.segment, &pool.offered),
+                        pool.instances(&self.target.segment),
                     )
                     .await?;
                 // A request that ended while its selector chose gets no
@@ -410,13 +409,7 @@ impl Crossing {
             let wants_view = carried.is_some();
             let shown = Arc::clone(shown);
             let picked = selector
-                .select(
-                    cx,
-                    head,
-                    encoding,
-                    &[],
-                    Instances::new(&target.segment, &shown.offered),
-                )
+                .select(cx, head, encoding, &[], shown.instances(&target.segment))
                 .await?;
             cx.check()?;
             let chosen = shown.eligible[picked.index];
@@ -447,13 +440,12 @@ impl Crossing {
     }
 
     /// The walk over the other entry instances of the pool `pool`, after
-    /// `declined`, one of them, declined a request as its own: from the
-    /// instance after it, in the order of the pool's current table, to
-    /// the one before it. Every instance of that table when `declined` is
-    /// no longer in it. `None` when the chooser no longer follows the
-    /// pool. Made only once an instance declined: one load of the table,
-    /// a search of its pools and of the pool's instances, and a clone of
-    /// an `Arc`.
+    /// `declined`, one of them, declined a request as its own: each of
+    /// them once, from the pool's current table, chosen by the crossing's
+    /// router. Every instance of that table when `declined` is no longer
+    /// in it. `None` when the chooser no longer follows the pool. Made
+    /// only once an instance declined: one load of the table, a search of
+    /// its pools and of the pool's instances, and a clone of an `Arc`.
     pub(crate) fn walk(&self, pool: u64, declined: InstanceId) -> Option<Walk> {
         let table = self.target.table.load();
         let shown = table.pools.iter().find(|shown| shown.id == pool)?;
@@ -466,6 +458,8 @@ impl Crossing {
             pool: Arc::clone(shown),
             at,
             left,
+            first: declined,
+            declined: Vec::new(),
             wants_view: false,
         })
     }
@@ -496,12 +490,18 @@ impl Crossing {
         None
     }
 
-    /// [`Crossing::pick_in`], asking `selector` for each instance, with
-    /// that instance alone to choose from, so that it holds its lease and
-    /// gives its meta for the instance the request is offered to. A
-    /// selector may wait, so the instance is checked again when it
-    /// returns. A request that ended while its selector chose is not
-    /// handed on.
+    /// [`Crossing::pick_in`], asking `selector` to choose among every
+    /// instance of the walk's table, told which instances declined the
+    /// request: the one whose decline began the walk, and each the walk
+    /// offered it to since, or found gone from the pool's current table.
+    /// So a selector ranks the whole pool on each choice, as within a
+    /// class. Each
+    /// choice uses one of the walk's offers, whichever instance it names,
+    /// so the walk ends after as many offers as the pool has other
+    /// instances. The list of declines is the walk's one allocation, made
+    /// at its first choice. A selector may wait, so the instance is
+    /// checked again when it returns. A request that ended while its
+    /// selector chose is not handed on.
     pub(crate) async fn choose_in(
         &self,
         walk: &mut Walk,
@@ -511,21 +511,46 @@ impl Crossing {
         encoding: gdl_model::Encoding,
         choice: &mut Option<ChoiceHeld>,
     ) -> Result<Option<Chosen>> {
-        while let Some(chosen) = walk.next() {
-            if self.lease_in(walk, chosen).is_none() {
-                continue;
-            }
-            let alone = &walk.pool.offered[walk.at..=walk.at];
-            let picked = selector
+        if walk.declined.is_empty() {
+            walk.declined.reserve_exact(walk.left + 1);
+            walk.declined.push(selector_id(walk.first));
+        }
+        let segment = &self.target.segment;
+        while let Some(left) = walk.left.checked_sub(1) {
+            walk.left = left;
+            let mut picked = selector
                 .select(
                     cx,
                     head,
                     encoding,
-                    &[],
-                    Instances::new(&self.target.segment, alone),
+                    &walk.declined,
+                    walk.pool.instances(segment),
                 )
                 .await?;
+            let mut at = picked.index;
+            if walk.declined.contains(&walk.pool.offered[at]) {
+                // A selector that does not read the declines named one
+                // again: the walk offers the next instance in the table's
+                // order that it has not, asking about it alone, so that
+                // each instance is still offered the request once.
+                drop(picked);
+                let Some(next) = walk.unoffered() else {
+                    break;
+                };
+                at = next;
+                picked = selector
+                    .select(
+                        cx,
+                        head,
+                        encoding,
+                        &walk.declined,
+                        walk.pool.instance(segment, at),
+                    )
+                    .await?;
+            }
             cx.check()?;
+            let chosen = walk.pool.eligible[at];
+            walk.declined.push(walk.pool.offered[at]);
             if let Some(lease) = self.lease_in(walk, chosen) {
                 return Ok(Some((
                     chosen,
@@ -694,15 +719,22 @@ pub(crate) type Chosen = (InstanceId, u64, Picked, PoolLease);
 /// The entry instances of one pool that a request is offered to in turn
 /// after one of them declined it as its own ([`Decline::Instance`]): the
 /// pool's table when the decline landed, the place in its instances of
-/// the last one offered, and how many are left. A counter over the
-/// table's order rather than a set of the instances tried: it is three
-/// words for a pool of any size, it offers each instance of the table at
-/// most once, and it allocates nothing. An instance that joined the pool
-/// after the decline is not offered the request.
+/// the last one offered, and how many offers are left. Under a pool
+/// policy, a counter over the table's order rather than a set of the
+/// instances tried: it offers each instance of the table at most once,
+/// and allocates nothing. Under a selector, the instances that declined,
+/// for the selector to rank the pool by ([`Crossing::choose_in`]). An
+/// instance that joined the pool after the decline is not offered the
+/// request.
 pub(crate) struct Walk {
     pool: Arc<PoolTable>,
     at: usize,
     left: usize,
+    /// The instance whose decline began the walk.
+    first: InstanceId,
+    /// Under a selector, `first` and each instance offered the request
+    /// since, as the selector reads them: empty under a pool policy.
+    declined: Vec<gdl::InstanceId>,
     /// Whether the choice of the pool asked for the view: each instance's
     /// lease keeps it, for a re-queue after its decline.
     pub(crate) wants_view: bool,
@@ -714,6 +746,19 @@ impl Walk {
         self.left = self.left.checked_sub(1)?;
         self.at = (self.at + 1) % self.pool.eligible.len();
         Some(self.pool.eligible[self.at])
+    }
+
+    /// Under a selector, the place of the next instance in the table's
+    /// order that the walk has not offered the request to, which becomes
+    /// the place of the last one offered; `None` once it offered every
+    /// one.
+    fn unoffered(&mut self) -> Option<usize> {
+        let count = self.pool.offered.len();
+        let next = (1..=count)
+            .map(|step| (self.at + step) % count)
+            .find(|&at| !self.declined.contains(&self.pool.offered[at]))?;
+        self.at = next;
+        Some(next)
     }
 }
 
@@ -824,6 +869,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
+    use gdl::Instances;
     use gdl_pools::PoolState;
 
     use super::*;

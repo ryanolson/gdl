@@ -561,6 +561,16 @@ impl PoolTable {
         })
     }
 
+    /// The pool's entry instances of `segment` as a selector sees them.
+    pub(crate) fn instances<'t>(&'t self, segment: &'t str) -> gdl::Instances<'t> {
+        gdl::Instances::new(segment, &self.offered)
+    }
+
+    /// The entry instance at `at` alone.
+    pub(crate) fn instance<'t>(&'t self, segment: &'t str, at: usize) -> gdl::Instances<'t> {
+        gdl::Instances::new(segment, &self.offered[at..=at])
+    }
+
     /// The pool as a pool policy sees it.
     fn view(&self) -> gdl::Pool {
         let view = gdl::Pool::new(&*self.class, &*self.pool, &*self.region, self.state)

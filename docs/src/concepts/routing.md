@@ -97,4 +97,4 @@ Any other answer is the request's own and is never offered again. No answer with
 
 The first offer costs what a hand-off costs: the failover's state is made only after a miss.
 
-A chooser's hand-off into another class is the exception. It offers the request to another pool, at most `[runtime] pool_failovers` times, and its selector sees nothing declined. An entry instance that declines as its own leaves the request in its pool: the pool's other entry instances are offered it first, one at a time. [Following and choosing pools](pool-routing.md) covers it.
+A chooser's hand-off into another class is the exception. It offers the request to another pool, at most `[runtime] pool_failovers` times, and its selector sees nothing declined. An entry instance that declines as its own leaves the request in its pool: the pool's other entry instances are offered it first, one at a time, and the selector chooses each from the whole pool, told which instances declined. [Following and choosing pools](pool-routing.md) covers it.

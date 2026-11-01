@@ -374,7 +374,8 @@ fn withins() -> [(Within, Option<Arc<AtomicUsize>>); 2] {
 /// and B serves it, in the same pool. The pool is not damped, and the
 /// other pool gets nothing. Under `round_robin` the next request, for A's
 /// key, is offered to B first; a selector that takes the first instance
-/// offers it to A, which takes it.
+/// offers it to A, which takes it. That selector reads no declines, so
+/// after A's it names A again, and the walk asks it about B alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_pool() {
     for (within, chosen) in withins() {
@@ -396,7 +397,10 @@ async fn a_request_one_instance_cannot_serve_goes_to_another_of_its_pool() {
         );
         assert_eq!(fleet.damped("m1"), (false, false), "selector {selector}");
         if let Some(chosen) = &chosen {
-            assert_eq!(chosen.load(Ordering::SeqCst), 2, "a choice per offer");
+            // The first offer's choice, then the walk's: the selector,
+            // which does not read the declines, named A again among every
+            // instance, so it was asked about B alone.
+            assert_eq!(chosen.load(Ordering::SeqCst), 3, "a choice per offer");
         }
         // A new crossing, so that the pool policy's turn is m1's again.
         let router = fleet.router(

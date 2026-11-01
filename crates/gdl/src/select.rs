@@ -18,8 +18,10 @@
 //! declines, another pool is chosen, at most `[runtime] pool_failovers`
 //! times, and the selector chooses within that pool with nothing
 //! declined. When an entry instance of the pool declines as its own, the
-//! selector is asked about each other instance of the pool in turn, with
-//! that instance alone to choose from.
+//! selector is asked again for each other instance the request is offered
+//! to, with every instance of the pool and the ones that declined, so it
+//! ranks those that are left; one it names again is passed over for the
+//! next in the table's order, asked about alone.
 
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
@@ -59,7 +61,7 @@ pub use least::LeastLoaded;
 /// `[runtime] instance_failovers` more times (a hand-off into another
 /// class is offered to other pools, up to `pool_failovers`, and to each
 /// other instance of the pool, one at a time, after an instance declines
-/// it as its own). Each
+/// it as its own, each chosen by the selector with the declines). Each
 /// choice's lease is its own, and a choice that is not sent to drops its
 /// lease before the next. Nothing else runs for it.
 pub trait Selector: Send + Sync + 'static {
@@ -292,8 +294,10 @@ impl<'a, H> Request<'a, H> {
     /// declines a hand-off it has no room for, or that reaches it after it
     /// stopped taking work; a hand-off that never left this instance is
     /// not a decline. Nothing is excluded from [`Instances`] for it.
-    /// Always empty for a chooser's hand-off into another class, which
-    /// offers the request to another pool instead.
+    /// Empty for a chooser's hand-off into another class, which offers the
+    /// request to another pool instead, until an entry instance declines
+    /// it as its own: then it names that instance, and each the request
+    /// was offered to in the same pool since, or found gone from it.
     pub fn declined(&self) -> &'a [InstanceId] {
         self.declined
     }

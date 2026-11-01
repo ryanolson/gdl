@@ -275,7 +275,7 @@ An accepted pool offer runs about 166 more instructions where its answer is read
 
 ### An instance's own decline
 
-An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
+An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count. Under `round_robin` or `random` it allocates nothing. Under a selector it allocates the list of declines once, at its first choice, sized for the pool. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
 
