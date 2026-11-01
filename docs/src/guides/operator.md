@@ -169,7 +169,7 @@ sequenceDiagram
     O->>O: check: no rollout, no pod terminating, every pod ready
     O->>H: GET /v1/ext/gdl-pool/instances
     O->>V: GET /metrics on each pod
-    O->>O: victim: the lowest rank of the policy, ties to the newest pod
+    O->>O: victim: the lowest rank of the policy, then its tie rank, then the newest pod
     opt the segment has an entry Service
         O->>K: label V gdl.dev/routable=false
         K-->>O: the EndpointSlices no longer list V
