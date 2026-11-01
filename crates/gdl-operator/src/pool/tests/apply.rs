@@ -417,3 +417,58 @@ async fn an_earlier_hub_receives_serving_before_its_scalers_resume() {
         fake.log(),
     );
 }
+
+/// A pool's rollover ConfigMap, `<pool>-rollover`, is written by the
+/// rollover's controller and never the pool's: the pool's segments mount
+/// it, and the pool does not render it. So the operator neither refuses
+/// the pool for it nor changes or prunes it, labelled with the pool's
+/// labels or not.
+#[tokio::test]
+async fn the_rollover_map_the_pool_did_not_make_is_not_refused() {
+    for labelled in [false, true] {
+        let fake = Fake::with(pool(false));
+        let planted = Live {
+            kind: Kind::ConfigMap,
+            name: "p-rollover".into(),
+            uid: "theirs".into(),
+            version: "1".into(),
+            controller: None,
+            template: None,
+            replica_owners: Vec::new(),
+            suspended: false,
+            replicas: None,
+            image: None,
+            config: None,
+            deleting: false,
+            created: false,
+            selector: None,
+        };
+        fake.state().objects.insert(
+            (Kind::ConfigMap, "p-rollover".into()),
+            Obj {
+                live: planted,
+                labelled,
+            },
+        );
+        fake.reconcile(0).await.expect("a reconcile");
+        fake.reconcile(1_000).await.expect("a reconcile");
+        assert_eq!(
+            condition(&fake, "NotOwned"),
+            Some(("False".into(), "AllThePools".into())),
+            "labelled {labelled}"
+        );
+        let log = fake.log();
+        assert!(
+            log.iter().any(|e| e == "create Deployment/p-engine"),
+            "{log:?}"
+        );
+        assert!(log.iter().all(|e| !e.contains("p-rollover")), "{log:?}");
+        assert_eq!(
+            fake.state()
+                .objects
+                .get(&(Kind::ConfigMap, "p-rollover".into()))
+                .map(|o| o.live.uid.clone()),
+            Some("theirs".into())
+        );
+    }
+}

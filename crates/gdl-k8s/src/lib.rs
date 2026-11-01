@@ -18,6 +18,6 @@ pub use pool::{
 };
 pub use render::{
     BINARY, HUB_METRICS, POD_IP, PUBLIC, ROUTABLE, SEGMENT_METRICS, SYSTEM, Scaling, children,
-    hub_address, object_name, place, pod_hub, pool_object, resources, state_claim,
+    hub_address, object_name, place, pod_hub, pool_object, resources, rollover, state_claim,
 };
 pub use settings::{Settings, drain_bound, stop_grace};

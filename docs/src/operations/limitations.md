@@ -565,6 +565,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a `GdlPool` whose rendered objects exist without the pool's controller reference, such as the plain objects of an earlier deploy, gets the `NotOwned` condition and an event, and nothing of it is applied.
 - **Workaround:** take the pool down, or delete the objects, and apply the `GdlPool` again.
 
+### A rollover ConfigMap's change reaches a pod late, and its first mount replaces the segments' pods
+- **What:** a segment's pod sees a change to its pool's rollover ConfigMap, `<pool>-rollover`, only after the kubelet's sync and its cache, often a minute or more. The first deploy of a gdl that mounts it replaces every segment's pods once, in every pool.
+- **Why:** the kubelet refreshes a ConfigMap volume on its own period, and a pod template that gains a volume is a new template. The ConfigMap is outside `gdl.dev/config`, so later changes to it replace no pod.
+- **Workaround:** read the file again on a period rather than once. Deploy the gdl that adds the mount with an image change, before the first rollover, and outside load.
+- **Lifts:** a rollover read from the pool's hub or the API server rather than from a file. See [What a pool gets](../guides/kubernetes.md#what-a-pool-gets).
+
 ### A scale-down waits for a rollout, and for every pod to be ready
 - **What:** the operator chooses a victim only while no rollout of the target is in progress and every other pod runs and is ready, since only then does the deletion cost decide the ReplicaSet's choice. A pod that never becomes ready blocks the scale-down (`Blocked: PodNotReady`).
 - **Workaround:** fix or delete the pod that is not ready.

@@ -370,6 +370,11 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/etc/gdl/rollover",
+                "name": "rollover",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/run/secrets",
                 "name": "secrets",
                 "readOnly": true
@@ -390,6 +395,13 @@
               "name": "global-eu"
             },
             "name": "config"
+          },
+          {
+            "configMap": {
+              "name": "global-eu-rollover",
+              "optional": true
+            },
+            "name": "rollover"
           },
           {
             "name": "secrets",

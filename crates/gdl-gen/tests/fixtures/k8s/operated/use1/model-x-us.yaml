@@ -340,6 +340,11 @@
                 "mountPath": "/etc/gdl/fleet",
                 "name": "config",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/etc/gdl/rollover",
+                "name": "rollover",
+                "readOnly": true
               }
             ]
           }
@@ -357,6 +362,13 @@
               "name": "model-x-us"
             },
             "name": "config"
+          },
+          {
+            "configMap": {
+              "name": "model-x-us-rollover",
+              "optional": true
+            },
+            "name": "rollover"
           }
         ]
       }

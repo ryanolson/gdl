@@ -384,6 +384,11 @@
                 "mountPath": "/etc/gdl/fleet",
                 "name": "config",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/etc/gdl/rollover",
+                "name": "rollover",
+                "readOnly": true
               }
             ]
           }
@@ -409,6 +414,13 @@
               "name": "model-x-shared"
             },
             "name": "config"
+          },
+          {
+            "configMap": {
+              "name": "model-x-shared-rollover",
+              "optional": true
+            },
+            "name": "rollover"
           }
         ]
       }

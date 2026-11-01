@@ -1,7 +1,7 @@
 //! A pool's objects, rendered from the pool alone.
 
 use gdl_k8s::{Env, Hub, Pool, Port, Protocol, Scaling, Segment, children};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A pool of two segments, one with an entry port.
 fn pool() -> Pool {
@@ -132,5 +132,108 @@ fn a_pool_monitor_selects_the_pools_pods() {
         .expect("labels")
     {
         assert_eq!(&hub["metadata"]["labels"][key], value, "{key}");
+    }
+}
+
+/// The volume and the mount of the rollover ConfigMap in the pod template
+/// `template`, if it has them.
+fn rollover(template: &Value) -> (Option<&Value>, Option<&Value>) {
+    let volume = template["spec"]["volumes"]
+        .as_array()
+        .expect("volumes")
+        .iter()
+        .find(|v| v["name"] == "rollover");
+    let mount = template["spec"]["containers"][0]["volumeMounts"]
+        .as_array()
+        .expect("mounts")
+        .iter()
+        .find(|m| m["name"] == "rollover");
+    (volume, mount)
+}
+
+/// Every segment's pods mount the pool's rollover ConfigMap, optional, so
+/// that a pod starts without it, as a whole directory, since a `subPath`
+/// mount never sees the map change. The hub's pods do not: a change to
+/// the hub's template restarts the pool, and the operator holds it
+/// without `allowPoolRestart`. The same for `cargo gdl k8s` and the
+/// operator.
+#[test]
+fn every_segment_mounts_the_rollover_map_and_the_hub_does_not() {
+    for scaling in [Scaling::Fixed, Scaling::Operator] {
+        let objects = children("p", "ns", &pool(), scaling).expect("objects");
+        for name in ["p-engine", "p-front"] {
+            let (volume, mount) = rollover(template(&objects, name));
+            assert_eq!(
+                volume,
+                Some(
+                    &json!({"name": "rollover", "configMap": {"name": "p-rollover", "optional": true}})
+                ),
+                "{name} {scaling:?}"
+            );
+            assert_eq!(
+                mount,
+                Some(
+                    &json!({"name": "rollover", "mountPath": "/etc/gdl/rollover", "readOnly": true})
+                ),
+                "{name} {scaling:?}"
+            );
+        }
+        assert_eq!(
+            rollover(template(&objects, "p")),
+            (None, None),
+            "{scaling:?}"
+        );
+    }
+}
+
+/// The rollover ConfigMap is named from the name the pool's own ConfigMap
+/// takes, so the two are named alike whatever that name is.
+#[test]
+fn the_rollover_map_is_named_from_the_pools_config_map() {
+    let name = "a-pool-of-a-long-name";
+    let objects = children(name, "ns", &pool(), Scaling::Operator).expect("objects");
+    let config = objects
+        .iter()
+        .find(|o| o["kind"] == "ConfigMap")
+        .expect("the ConfigMap");
+    let engine = template(&objects, &format!("{name}-engine"));
+    let (volume, _) = rollover(engine);
+    assert_eq!(
+        volume.expect("the volume")["configMap"]["name"],
+        format!(
+            "{}-rollover",
+            config["metadata"]["name"].as_str().expect("a name")
+        )
+    );
+    assert_eq!(gdl_k8s::rollover(name), format!("{name}-rollover"));
+}
+
+/// The rollover ConfigMap is outside every checksum: no rendered object
+/// is it, so it is never the pool's to write, and a segment's
+/// `gdl.dev/config` covers only the pool's own ConfigMap. Its pod
+/// template names it and holds nothing of it, so writing it changes no
+/// pod template and replaces no pod.
+#[test]
+fn the_rollover_map_is_outside_every_checksum() {
+    for scaling in [Scaling::Fixed, Scaling::Operator] {
+        let objects = children("p", "ns", &pool(), scaling).expect("objects");
+        assert!(
+            objects
+                .iter()
+                .all(|o| o["metadata"]["name"] != "p-rollover"),
+            "{scaling:?}"
+        );
+        let config = objects
+            .iter()
+            .find(|o| o["kind"] == "ConfigMap")
+            .expect("the ConfigMap");
+        let sum = gdl_k8s::checksum(config);
+        for name in ["p-engine", "p-front"] {
+            assert_eq!(
+                template(&objects, name)["metadata"]["annotations"]["gdl.dev/config"],
+                sum,
+                "{name} {scaling:?}"
+            );
+        }
     }
 }

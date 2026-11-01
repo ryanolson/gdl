@@ -23,6 +23,11 @@ pub const POD_IP: &str = "GDL_POD_IP";
 /// Where a pod mounts its pool's ConfigMap.
 const CONFIG_DIR: &str = "/etc/gdl/fleet";
 
+/// Where a segment's pod mounts its pool's rollover ConfigMap
+/// ([`rollover`]): a whole directory, since a `subPath` mount never sees
+/// the map change.
+const ROLLOVER_DIR: &str = "/etc/gdl/rollover";
+
 /// Where a pod mounts its segment's secrets, each a file named for the
 /// spec's secret, as Compose mounts them.
 const SECRETS_DIR: &str = "/run/secrets";
@@ -142,6 +147,13 @@ pub fn object_name(pool: &str, segment: &str) -> String {
 /// The name of pool `pool`'s hub's claim.
 pub fn state_claim(pool: &str) -> String {
     format!("{pool}-state")
+}
+
+/// The name of pool `pool`'s rollover ConfigMap, which its segments' pods
+/// mount and the pool never writes: built from the name its own ConfigMap
+/// takes, so that the two are named alike.
+pub fn rollover(pool: &str) -> String {
+    format!("{pool}-rollover")
 }
 
 /// The address at which a pool's hub records itself: its pod's IP, which
@@ -353,8 +365,18 @@ impl Render<'_> {
         };
         let mut ports = vec![json!({"name": SYSTEM, "containerPort": settings.port})];
         ports.extend(segment.ports.iter().map(container_port));
-        let mut mounts = vec![config_mount()];
-        let mut volumes = vec![self.config_volume()];
+        // The rollover ConfigMap is optional, so a pod starts without it,
+        // and outside `gdl.dev/config`, so writing it replaces no pod. The
+        // hub never mounts it: a change to the hub's template restarts the
+        // pool.
+        let mut mounts = vec![
+            config_mount(),
+            json!({"name": "rollover", "mountPath": ROLLOVER_DIR, "readOnly": true}),
+        ];
+        let mut volumes = vec![
+            self.config_volume(),
+            json!({"name": "rollover", "configMap": {"name": rollover(self.name), "optional": true}}),
+        ];
         if !segment.secrets.is_empty() {
             mounts.push(json!({"name": "secrets", "mountPath": SECRETS_DIR, "readOnly": true}));
             let sources: Vec<Value> = segment
