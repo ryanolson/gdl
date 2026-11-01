@@ -789,6 +789,35 @@ fn two_objects_of_one_name_are_refused() {
     }
 }
 
+/// A pool's rollover ConfigMap, `<pool>-rollover`, is not rendered, yet
+/// its segments mount it, so no other pool's ConfigMap may take its name:
+/// pool `global`'s segments would mount pool `global-rollover`'s
+/// settings. Refused, with or without the operator.
+#[test]
+fn a_pool_named_for_another_pools_rollover_map_is_refused() {
+    let mirror = Mirror::new();
+    let spec = placed(&mirror, SPLIT);
+    for operator in ["", "operator = true\n"] {
+        let fleet = format!(
+            "[fleet]\nname = \"api\"\n\
+            [cluster.use1]\ncontext = \"kind-use1\"\nnamespace = \"gdl-api\"\nregion = \"us-east-1\"\n\
+            registry = \"registry.example/gdl\"\nplatform = \"linux/amd64\"\n{operator}\
+            [pool.global]\nclass = \"global\"\ncluster = \"use1\"\n\
+            [pool.global-rollover]\nclass = \"global\"\ncluster = \"use1\"\n\
+            [pool.model-a]\nclass = \"model_x\"\ncluster = \"use1\"\nhome = \"global\"\n\
+            [pool.model-b]\nclass = \"model_x\"\ncluster = \"use1\"\nhome = \"global-rollover\"\n"
+        );
+        let refusal = refused(&mirror, &spec, &fleet);
+        for name in [
+            "ConfigMap `global-rollover`",
+            "`global`",
+            "[pool.global-rollover]",
+        ] {
+            assert!(refusal.contains(name), "{name} in {refusal} ({operator})");
+        }
+    }
+}
+
 /// A source that reads its requests on stdin has none in a pod: refused,
 /// naming the source.
 #[test]

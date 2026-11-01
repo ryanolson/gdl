@@ -534,9 +534,17 @@ impl Render<'_> {
             true => written,
             false => objects.clone(),
         };
+        // The pool's segments mount its rollover ConfigMap, which nothing
+        // here renders: its name is claimed too, so that no other pool's
+        // ConfigMap takes it.
+        let rollover = serde_json::json!({
+            "kind": "ConfigMap",
+            "metadata": {"name": gdl_k8s::rollover(&pool.name)},
+        });
         for object in objects
             .iter()
             .chain(written.iter().filter(|o| o["kind"] == "GdlPool"))
+            .chain([&rollover])
         {
             if let Err(message) = self.names.claim(cluster_name, &pool.name, object) {
                 self.problems.push(Problem::at(
