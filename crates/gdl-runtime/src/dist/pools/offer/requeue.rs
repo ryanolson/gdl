@@ -34,12 +34,16 @@ use crate::dist::runtime::{Router, Runtime, RuntimeConfig, Within};
 /// Chooses the first pool, by name, that the request has not left, or,
 /// if `stubborn`, the first pool, whether the request left it or not;
 /// re-queues the request for a pool that declined it as full, if
-/// `requeue`, and would for one over its budget, were it asked. Gives a lease with each choice when `told` is set, which
+/// `requeue`, and would for one over its budget, were it asked, unless
+/// `only_full`. Gives a lease with each choice when `told` is set, which
 /// counts each acceptance it is told of. Records why the first pool
 /// declined the request, as each choice reads it, in `seen`.
 #[derive(Default)]
 struct Keeping {
     requeue: bool,
+    /// Whether it re-queues only for a full decline, as a policy that
+    /// reads the reason does.
+    only_full: bool,
     /// Whether its choices put the view on their offers.
     view: bool,
     stubborn: bool,
@@ -77,11 +81,10 @@ impl PoolPolicy for Keeping {
     }
 
     fn requeue(&self, request: PoolRequest<'_, Encoded>, pool: &Pool) -> bool {
+        let declined = request.declined(pool);
         self.requeue
-            && matches!(
-                request.declined(pool),
-                Some(Decline::Full | Decline::Budget)
-            )
+            && (declined == Some(Decline::Full)
+                || !self.only_full && declined == Some(Decline::Budget))
     }
 }
 
@@ -582,7 +585,9 @@ async fn a_forced_offer_keeps_the_other_declines() {
 }
 
 /// A forced offer that its pool declines as full takes the ordinary path:
-/// a policy that re-queues keeps the request with the pool, whose
+/// a policy that re-queues on a full decline reads the pool's reason as
+/// full, not as the budget's decline before, and keeps the request with
+/// the pool, whose
 /// re-offers carry no view either, so that no budget declines them. A
 /// policy that does not re-queue leaves the pool, and the request fails
 /// with no second forced offer.
@@ -598,6 +603,7 @@ async fn a_forced_offer_declined_as_full_takes_the_ordinary_path() {
         fleet.decline([1, 0, 0]);
         let router = fleet.router(Keeping {
             requeue,
+            only_full: true,
             view: true,
             ..Keeping::default()
         });

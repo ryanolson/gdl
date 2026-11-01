@@ -234,7 +234,12 @@ impl Runtime {
                             .iter()
                             .all(|&(left, why)| left != pool || why == Decline::Budget);
                         offered.push(pool);
-                        if let Some(decline) = last {
+                        // The pool's latest reason is the one the policy
+                        // reads: a forced offer's full decline replaces
+                        // the budget's before it.
+                        if declines.iter().any(|&(left, _)| left == pool) {
+                            set_reason(&mut declines, pool, last);
+                        } else if let Some(decline) = last {
                             declines.push((pool, decline));
                         }
                         if last == Some(Decline::Full) {
