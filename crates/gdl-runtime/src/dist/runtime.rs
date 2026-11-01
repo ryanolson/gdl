@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::hash::RandomState;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -1258,10 +1258,43 @@ pub(crate) struct Served {
     /// own policy: what a load report counts as refusals. An instance's
     /// own decline is not counted. Only a refusal touches it.
     pub(crate) declined: AtomicUsize,
+    /// Offers declined, by reason, in the order of [`DECLINES`]: every
+    /// decline, whether or not a load report counts it, so that a decline
+    /// over a pool's budget shows apart from a full pool's.
+    pub(crate) declines: [AtomicU64; DECLINES.len()],
     /// Forward hand-offs that arrived, refused ones too: what a test
     /// counts to see where a request was offered.
     #[cfg(feature = "fault-injection")]
     pub(crate) offered: AtomicUsize,
+}
+
+/// Every reason an offer is declined for, with its `reason` label, in the
+/// order of [`Served::declines`].
+pub(crate) const DECLINES: [(Decline, &str); 5] = [
+    (Decline::Full, "full"),
+    (Decline::Gone, "gone"),
+    (Decline::Instance, "instance"),
+    (Decline::NotPresent, "not_present"),
+    (Decline::Budget, "budget"),
+];
+
+impl Served {
+    /// Count an offer declined for `decline`.
+    pub(crate) fn decline(&self, decline: Decline) {
+        let at = DECLINES
+            .iter()
+            .position(|(reason, _)| *reason == decline)
+            .unwrap_or(0);
+        self.declines[at].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The offers declined for `decline`.
+    pub(crate) fn declined_as(&self, decline: Decline) -> u64 {
+        DECLINES
+            .iter()
+            .position(|(reason, _)| *reason == decline)
+            .map_or(0, |at| self.declines[at].load(Ordering::Relaxed))
+    }
 }
 
 #[cfg(test)]

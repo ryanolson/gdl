@@ -116,6 +116,36 @@ async fn an_entry_declines_an_offer_its_gate_declines_before_admission() {
         refused.error
     );
     assert_eq!(segment.admitted(), 0, "a decline admitted the request");
+    assert_eq!(
+        rt.served.declined_as(Decline::Budget),
+        1,
+        "counted under its own reason"
+    );
+    assert_eq!(
+        rt.served
+            .declined
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "not a refusal of the load report: admission was not full"
+    );
+    let registry = prometheus::Registry::new();
+    crate::dist::held::Held::register(&registry, Arc::downgrade(rt)).expect("registered");
+    let declined = |reason: &str| {
+        registry
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "offers_declined_total")
+            .flat_map(|family| family.get_metric().to_vec())
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "reason" && pair.value() == reason)
+            })
+            .map(|metric| metric.get_counter().value())
+    };
+    assert_eq!(declined("budget"), Some(1.0), "shown on its own");
+    assert_eq!(declined("full"), Some(0.0));
     assert!(answer(offer(rt, "first", Some(view(2)))).await.is_ok());
     assert!(answer(offer(rt, "pinned", None)).await.is_ok());
     let seen = seen.lock().expect("unpoisoned").clone();

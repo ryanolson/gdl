@@ -17,7 +17,7 @@ use prometheus::Registry;
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::{self, MetricFamily, MetricType};
 
-use super::runtime::Runtime;
+use super::runtime::{DECLINES, Runtime};
 
 /// A family of what the instance holds: its name, its help, and how it
 /// reads the runtime.
@@ -49,10 +49,17 @@ const FAMILIES: [Family; 4] = [
     ),
 ];
 
+/// The family of the offers the instance declined, by reason, and its
+/// help.
+const DECLINED: &str = "offers_declined_total";
+const DECLINED_HELP: &str = "Offers from another pool this instance declined, by reason: full (no room, or retired), gone, instance, not_present, and budget (its pool's gate, over its budget). A load report counts only full and gone as refusals.";
+
 /// The names of every family here.
 #[cfg(test)]
 pub(crate) fn names() -> Vec<&'static str> {
-    FAMILIES.iter().map(|(name, ..)| *name).collect()
+    let mut names: Vec<_> = FAMILIES.iter().map(|(name, ..)| *name).collect();
+    names.push(DECLINED);
+    names
 }
 
 /// What one instance holds, read from its runtime at each scrape. It holds
@@ -67,7 +74,7 @@ pub(crate) struct Held {
 impl Held {
     /// Register what the instance of `rt` holds in `registry`.
     pub(crate) fn register(registry: &Registry, rt: Weak<Runtime>) -> Result<()> {
-        let descs = FAMILIES
+        let mut descs: Vec<Desc> = FAMILIES
             .iter()
             .map(|(name, help, _)| {
                 Desc::new(
@@ -79,6 +86,15 @@ impl Held {
             })
             .collect::<std::result::Result<_, _>>()
             .map_err(failed)?;
+        descs.push(
+            Desc::new(
+                DECLINED.to_string(),
+                DECLINED_HELP.to_string(),
+                vec!["reason".to_string()],
+                Default::default(),
+            )
+            .map_err(failed)?,
+        );
         registry
             .register(Box::new(Self { rt, descs }))
             .map_err(failed)
@@ -94,7 +110,7 @@ impl Collector for Held {
         let Some(rt) = self.rt.upgrade() else {
             return Vec::new();
         };
-        FAMILIES
+        let mut families: Vec<MetricFamily> = FAMILIES
             .iter()
             .map(|(name, help, read)| {
                 let mut gauge = proto::Gauge::default();
@@ -108,7 +124,27 @@ impl Collector for Held {
                 family.set_metric(vec![metric]);
                 family
             })
-            .collect()
+            .collect();
+        let declined = DECLINES
+            .iter()
+            .map(|(decline, reason)| {
+                let mut counter = proto::Counter::default();
+                counter.set_value(rt.served.declined_as(*decline) as f64);
+                let mut label = proto::LabelPair::default();
+                label.set_name("reason".to_string());
+                label.set_value((*reason).to_string());
+                let mut metric = proto::Metric::from_label(vec![label]);
+                metric.set_counter(counter);
+                metric
+            })
+            .collect();
+        let mut family = MetricFamily::default();
+        family.set_name(DECLINED.to_string());
+        family.set_help(DECLINED_HELP.to_string());
+        family.set_field_type(MetricType::COUNTER);
+        family.set_metric(declined);
+        families.push(family);
+        families
     }
 }
 
