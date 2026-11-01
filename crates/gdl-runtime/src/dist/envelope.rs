@@ -145,33 +145,65 @@ impl Forward {
     pub(crate) fn wire(&mut self) -> Result<Bytes> {
         let mut room = [0u8; HEADER_ROOM];
         let mut free = &mut room[..];
+        let on_stack = self.write_header(&mut free).is_ok();
         // A header past the room on the stack, as large meta makes, is
-        // written to the heap: a failover's copy of the head can still have
-        // room in front for it (`Forward::set_view`).
-        let spilled;
-        let header = if self.write_header(&mut free).is_ok() {
-            let len = HEADER_ROOM - free.len();
-            &room[..len]
+        // counted, then written where it is sent: into the room in front of
+        // the head when a failover's copy left enough (`Forward::set_view`),
+        // or at the start of the copy.
+        let len = if on_stack {
+            HEADER_ROOM - free.len()
         } else {
-            let mut written = Vec::new();
-            self.write_header(&mut written)?;
-            spilled = written;
-            &spilled[..]
+            self.header_len()?
         };
-        let len = header.len();
         let at = self.payload.at();
-        if let (true, Buffer::Room(buffer)) = (len <= at, &mut self.payload.buffer) {
+        let head = self.payload.len();
+        let Self {
+            version,
+            identity,
+            hop,
+            pos,
+            cx,
+            reply,
+            payload,
+        } = self;
+        if let (true, Buffer::Room(buffer)) = (len <= at, &mut payload.buffer) {
             let start = at - len;
-            buffer[start..at].copy_from_slice(header);
+            if on_stack {
+                buffer[start..at].copy_from_slice(&room[..len]);
+            } else {
+                let header = Header {
+                    version: *version,
+                    identity,
+                    hop: *hop,
+                    pos: *pos,
+                    cx,
+                    reply,
+                    len: head,
+                };
+                let mut front = &mut buffer[start..at];
+                header.write(&mut front)?;
+            }
             let bytes = Bytes::from(std::mem::take(buffer));
-            self.payload.buffer = Buffer::Sent(bytes.clone());
+            payload.buffer = Buffer::Sent(bytes.clone());
             return Ok(bytes.slice(start..));
         }
         let carried = self.payload.carried();
         let mut bytes = Vec::with_capacity(len + carried.len());
-        bytes.extend_from_slice(header);
+        if on_stack {
+            bytes.extend_from_slice(&room[..len]);
+        } else {
+            self.write_header(&mut bytes)?;
+        }
         bytes.extend_from_slice(carried);
         Ok(Bytes::from(bytes))
+    }
+
+    /// How many bytes [`Forward::write_header`] writes, counted without
+    /// writing them anywhere.
+    fn header_len(&self) -> Result<usize> {
+        let mut counter = Counter(0);
+        self.write_header(&mut counter)?;
+        Ok(counter.0)
     }
 
     /// Carry `view` after the head, in place of any view before
@@ -185,13 +217,7 @@ impl Forward {
         }
         let room = match self.payload.buffer {
             Buffer::Room(_) => HEADER_ROOM,
-            Buffer::Sent(_) => {
-                let mut header = Vec::new();
-                match self.write_header(&mut header) {
-                    Ok(()) => header.len().max(HEADER_ROOM),
-                    Err(_) => HEADER_ROOM,
-                }
-            }
+            Buffer::Sent(_) => self.header_len().unwrap_or(0).max(HEADER_ROOM),
         };
         self.payload.set_view_with_room(view, room);
     }
@@ -224,14 +250,43 @@ impl Forward {
     /// Everything [`encode`] writes before the head's bytes: the array,
     /// the other fields, and the head's binary length.
     fn write_header(&self, out: &mut impl std::io::Write) -> Result<()> {
+        Header {
+            version: self.version,
+            identity: &self.identity,
+            hop: self.hop,
+            pos: self.pos,
+            cx: &self.cx,
+            reply: &self.reply,
+            len: self.payload.len(),
+        }
+        .write(out)
+    }
+}
+
+/// Everything [`encode`] writes of a [`Forward`] before its head's bytes,
+/// borrowed apart from the head's buffer, so that it can be written into
+/// that buffer.
+struct Header<'a> {
+    version: u8,
+    identity: &'a Identity,
+    hop: u16,
+    pos: u16,
+    cx: &'a WireCx,
+    reply: &'a ReplyTo,
+    /// The head's length.
+    len: usize,
+}
+
+impl Header<'_> {
+    fn write(&self, out: &mut impl std::io::Write) -> Result<()> {
         out.write_all(&[FIELDS]).map_err(codec)?;
         write(out, &self.version)?;
-        write(out, &self.identity)?;
+        write(out, self.identity)?;
         write(out, &self.hop)?;
         write(out, &self.pos)?;
-        write(out, &self.cx)?;
-        write(out, &self.reply)?;
-        let len = self.payload.len();
+        write(out, self.cx)?;
+        write(out, self.reply)?;
+        let len = self.len;
         let marker = if let Ok(len) = u8::try_from(len) {
             out.write_all(&[0xc4, len])
         } else if let Ok(len) = u16::try_from(len) {
@@ -347,6 +402,20 @@ impl Head {
             let _ = write(&mut buffer, &(view.epoch, view.sequence));
         }
         self.buffer = Buffer::Room(buffer);
+    }
+}
+
+/// A writer that only counts the bytes written to it.
+struct Counter(usize);
+
+impl std::io::Write for Counter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -801,6 +870,53 @@ mod tests {
                 drop((decoded, read));
             }
         }
+    }
+
+    /// An offer whose header is past the room in front of its head, as
+    /// large meta makes, takes one allocation beyond its header's failed
+    /// try on the stack: the buffer it sends. A failover's change of view
+    /// takes one too, the copy of the head, which the offer then writes its
+    /// header into. Neither writes its header anywhere else first.
+    #[test]
+    fn a_long_header_allocates_only_what_is_sent() {
+        let codec = Codec::<Image>::new(Encoding::Msgpack);
+        let large = "m".repeat(300);
+        let image = Image {
+            url: "a".repeat(100),
+            detail: "high".into(),
+        };
+        let mut envelope = hand_off(&codec, image, &[("large", large.as_str())]);
+        // What the header's first try on the stack costs as it fails, as
+        // it did before views: its error's message.
+        let before = crate::dist::counting::counted();
+        counting(true);
+        let mut room = [0u8; HEADER_ROOM];
+        assert!(envelope.write_header(&mut &mut room[..]).is_err());
+        counting(false);
+        let tried = crate::dist::counting::counted() - before;
+        let before = crate::dist::counting::counted();
+        counting(true);
+        let first = envelope.wire().expect("the first offer");
+        counting(false);
+        let made = crate::dist::counting::counted() - before;
+        assert_eq!(made, tried + 1, "the first offer");
+        assert_eq!(first[..], encode(&envelope).expect("encode")[..]);
+        envelope.wire().expect("sent once");
+        let before = crate::dist::counting::counted();
+        counting(true);
+        envelope.set_view(Some(VIEW));
+        let again = envelope.wire().expect("the failover's offer");
+        counting(false);
+        let made = crate::dist::counting::counted() - before;
+        assert_eq!(
+            made,
+            tried + 1,
+            "the failover: the head's copy, and no more"
+        );
+        assert_eq!(
+            Forward::read(&again).expect("read").payload.view(),
+            Some(VIEW)
+        );
     }
 
     /// The entry puts an offer's view in the request's context once it
