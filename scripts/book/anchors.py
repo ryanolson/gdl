@@ -1,11 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.8"
+# dependencies = []
+# ///
 """Fail on a link in the built book whose `#heading` names no id in its page.
 
 mdbook-linkcheck checks that a linked page exists, but not the part after
 `#`, so a renamed heading would leave its links stale. This reads the HTML
 that mdBook wrote, where every heading's id is final.
 
-    python3 scripts/book/anchors.py docs/book/html
+    uv run --script scripts/book/anchors.py docs/book/html
 """
 
 from html.parser import HTMLParser

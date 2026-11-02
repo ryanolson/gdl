@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.8"
+# dependencies = []
+# ///
 """Instructions per crossing item, and a profile of the item path, on Linux.
 
 `count` builds the `requests` bench at each ref, one after the other in one
