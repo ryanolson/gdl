@@ -178,15 +178,16 @@ A hook gets a `gdl::Leave`:
 
 | It reads | When |
 |---|---|
-| `Confirmed` | every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once; an entry instance of a draining pool that its hub says no pool follows, once the senders in its own pool detached; an interior instance of a draining pool whose senders detached |
+| `Confirmed` | the instance retired, its hub confirmed that it withdrew `ready` and `loaded`, every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once |
 | `SourcesDone` | (B) holds |
 | `Unconfirmed(ParentTimeout)` | an entry instance's following pools did not answer within their bound, or its pool's drain reached its bound with another pool still following. A chooser with a stale view can still offer, and the entry declines |
 | `Unconfirmed(LeaseLost)` | the lease was lost, at any point in the stop |
-| `Unconfirmed(Bound)` | none of these came by the fallback time: the last instance of a segment, a last interior instance reached from another class, or a retirement the hub did not take |
+| `Unconfirmed(NotWithdrawn)` | none of these came by the fallback time, and the hub did not confirm the withdrawals: later rosters may still hold the instance |
+| `Unconfirmed(Bound)` | none of these came by the fallback time: the last instance of a segment, a last interior instance reached from another class, or an entry instance that its pool's drain stopped |
 
 The fallback time is the earlier of `leave_after_ms` after the retirement and half of `drain_ms` after the stop. So a late retirement cannot push it past the drain's bound.
 
-`Confirmed` says that peers will not pick the instance. It does not say that the instance is quiet. A hand-off sent before a peer's promise can still arrive. `external` is apart from `routing()`, because a sender's promise says nothing of a Service, a load balancer, or an open connection. A segment can read `Confirmed` with `external` true. A hook must do nothing destructive until `routing()` reads `Confirmed` or `SourcesDone` with `external` false, or until `drained()` resolves.
+`Confirmed` says that no sender will pick the instance, now or later. Only a confirmed withdrawal fences a sender that has yet to join, so nothing else can confirm. An entry instance that its pool's drain stops does not retire, so it never reads `Confirmed`. It reads `SourcesDone` or `Unconfirmed`. That its senders detached ends an interior instance's wait, and does not confirm it. `Confirmed` does not say that the instance is quiet. A hand-off sent before a peer's promise can still arrive. `external` is apart from `routing()`, because a sender's promise says nothing of a Service, a load balancer, or an open connection. A segment can read `Confirmed` with `external` true. A hook must do nothing destructive until `routing()` reads `Confirmed` or `SourcesDone` with `external` false, or until `drained()` resolves.
 
 A hook's deadline is `leave_ms` after the stop, and at most the drain's bound. At the deadline, the runtime cancels `cx()`, records `timed_out`, and goes on without waiting for the hook. A second stop ends everything at once, as it does the drain. A crash skips the hooks, so a hook is never relied on. Each hook runs once per process.
 

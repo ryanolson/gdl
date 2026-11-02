@@ -21,7 +21,7 @@ use gdl::Unconfirmed;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::leave::route;
+use super::leave::{Retirement, route};
 use super::{DRAIN_POLL, Launch, Peers};
 use crate::dist::announced;
 #[cfg(feature = "hub")]
@@ -112,10 +112,9 @@ pub(super) struct Observer {
     peers: Asked,
     /// What a hook reads of the answers.
     routes: watch::Sender<Routing>,
-    /// Whether a hook reads them, so that a stop with none asks nothing
-    /// only a hook would use. Read only when the hub feature is on.
-    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
-    hooked: bool,
+    /// What the stop's retirement came to, set before this asks: the
+    /// senders' promises confirm only a retirement the hub took.
+    retirement: watch::Receiver<Option<(Instant, Retirement)>>,
 }
 
 enum Asked {
@@ -147,7 +146,7 @@ impl Launch {
         &self,
         deadline: Instant,
         routes: watch::Sender<Routing>,
-        hooked: bool,
+        retirement: watch::Receiver<Option<(Instant, Retirement)>>,
     ) -> (Observing, BoxFuture<'static, Infallible>) {
         let me = self.node.instance_id();
         let peers = match &self.peers {
@@ -184,7 +183,7 @@ impl Launch {
             deadline,
             peers,
             routes,
-            hooked,
+            retirement,
         };
         let (phase, phases) = watch::channel(Phase::Idle);
         let (publish, answers) = watch::channel(Answers::default());
@@ -243,7 +242,7 @@ impl Observer {
                     let drained = done("drained", sources);
                     if avoided.is_none() && done(avoiding, sending) {
                         avoided = Some(Instant::now());
-                        route(&self.routes, Routing::Confirmed);
+                        self.avoided(Routing::Confirmed);
                     }
                     if drained {
                         route(&self.routes, Routing::SourcesDone);
@@ -262,11 +261,16 @@ impl Observer {
                 reaching,
                 pool,
             } => {
-                let pool = pool.as_deref();
-                tokio::join!(
-                    self.ask_hub(asker, *me, senders, reaching, pool, phase, publish),
-                    self.ask_detached(asker, pool, phase),
-                );
+                self.ask_hub(
+                    asker,
+                    *me,
+                    senders,
+                    reaching,
+                    pool.as_deref(),
+                    phase,
+                    publish,
+                )
+                .await;
             }
         }
     }
@@ -351,16 +355,12 @@ impl Observer {
             if avoided.is_none() && avoiding {
                 avoided = Some(Instant::now());
                 // Read again: the bound may have passed since the question.
-                let routing = parent.as_ref().map_or(Routing::Confirmed, Parent::routing);
-                if !pool.is_some_and(PoolDrain::unretired_entry) {
-                    route(&self.routes, routing);
-                }
+                self.avoided(parent.as_ref().map_or(Routing::Confirmed, Parent::routing));
             }
-            match unreached {
-                Some(Unreached::Detached) => route(&self.routes, Routing::Confirmed),
-                Some(Unreached::Drained) => route(&self.routes, Routing::SourcesDone),
-                None if done => route(&self.routes, Routing::SourcesDone),
-                None => {}
+            // That its senders detached ends the drain's wait. It fences no
+            // sender that joins later, so it says nothing to a hook.
+            if done || unreached == Some(Unreached::Drained) {
+                route(&self.routes, Routing::SourcesDone);
             }
             let drained = done || unreached.is_some();
             say(publish, drained && asked_in == *phase.borrow(), avoided);
@@ -370,35 +370,15 @@ impl Observer {
         }
     }
 
-    /// For a hook, ask whether the senders in an unfollowed entry's own pool
-    /// have detached, until routing moves, as (B) moves it. This runs apart
-    /// from (A) and (B), with a bound of its own, because only a hook reads
-    /// it: it must not delay them, and its failure must not take them.
-    #[cfg(feature = "hub")]
-    async fn ask_detached(
-        &self,
-        asker: &HubAsker,
-        pool: Option<&PoolDrain>,
-        phase: &watch::Receiver<Phase>,
-    ) {
-        let Some(pool) = pool.filter(|pool| self.hooked && pool.unretired_entry()) else {
-            return;
-        };
-        while *phase.borrow() != Phase::Over
-            && *self.routes.borrow() == Routing::Pending
-            && !asker.is_lost()
-        {
-            if pool.unfollowed() {
-                let bound = (Instant::now() + HubSession::poll() * 10).min(self.deadline);
-                let asked = tokio::time::timeout_at(bound, pool.senders_detached(asker));
-                if matches!(asked.await, Ok(Ok(true))) {
-                    route(&self.routes, Routing::Confirmed);
-                    return;
-                }
-            }
-            if !self.pause(HubSession::poll()).await {
-                return;
-            }
+    /// (A) holds, and `routing` says what the parent makes of it. A sender
+    /// yet to join promises nothing and is on no question of (A), and only
+    /// a retirement the hub took keeps it from finding this instance. So
+    /// with anything less, (A) still serves the drain, and `Confirmed` is
+    /// not read.
+    fn avoided(&self, routing: Routing) {
+        let withdrawn = matches!(*self.retirement.borrow(), Some((_, Retirement::Withdrawn)));
+        if routing != Routing::Confirmed || withdrawn {
+            route(&self.routes, routing);
         }
     }
 

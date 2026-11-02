@@ -38,26 +38,20 @@ impl Launch {
         false
     }
 
-    /// Why routing gives up when its fallback time comes, read then: an
-    /// entry instance's parent bound, which by default passes as the
-    /// fallback comes, is the better reason, and the observer may not have
-    /// looked since. What it reads is taken now, so that it borrows nothing
-    /// of the launch.
-    pub(super) fn pool_given_up(
-        &self,
-    ) -> impl Fn() -> gdl::Unconfirmed + Send + Sync + 'static + use<> {
+    /// Whether an entry instance's parent bound has passed unanswered, read
+    /// as routing's fallback comes: by default the two pass together, the
+    /// bound is the better reason, and the observer may not have looked
+    /// since. What it reads is taken now, so that it borrows nothing of the
+    /// launch.
+    pub(super) fn pool_parent_gave_up(&self) -> impl Fn() -> bool + Send + Sync + 'static + use<> {
         #[cfg(feature = "hub")]
         let pool = self.pool_drain.clone();
         move || {
             #[cfg(feature = "hub")]
-            if pool
-                .as_ref()
-                .and_then(|pool| pool.parent())
-                .is_some_and(|parent| parent.timed_out())
-            {
-                return gdl::Unconfirmed::ParentTimeout;
+            if let Some(parent) = pool.as_ref().and_then(|pool| pool.parent()) {
+                return parent.timed_out();
             }
-            gdl::Unconfirmed::Bound
+            false
         }
     }
 

@@ -69,6 +69,20 @@ impl StopTimes {
     }
 }
 
+/// What a stop's retirement came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Retirement {
+    /// The hub confirmed the withdrawals and took `retired`, or a roster
+    /// directory has the file. No later roster holds the instance, so it
+    /// is the one thing that fences a sender yet to join.
+    Withdrawn,
+    /// The instance tried, and that did not happen.
+    NotWithdrawn,
+    /// The stop does not retire: an entry instance its pool's drain
+    /// stopped, or a lost lease.
+    NotRetired,
+}
+
 /// Set `routing`, which moves once: the first answer stands.
 pub(super) fn route(routes: &watch::Sender<Routing>, to: Routing) {
     routes.send_if_modified(|routing| {
@@ -85,8 +99,9 @@ pub(super) struct Stopping {
     times: StopTimes,
     hooked: bool,
     observing: Observing,
-    /// When the retirement ended, which the fallback counts from.
-    retired: watch::Sender<Option<Instant>>,
+    /// When the retirement ended, which the fallback counts from, and what
+    /// it came to.
+    retired: watch::Sender<Option<(Instant, Retirement)>>,
     /// Whether the instance has closed and holds no request.
     drained: watch::Sender<bool>,
     /// Whether every hook has ended.
@@ -104,12 +119,13 @@ impl Stopping {
         &self.observing
     }
 
-    /// The retirement has ended, whether or not its peers heard, or the
-    /// stop does not retire. With hooks the observer asks from here, since
-    /// a hook waits on its answers; without them it waits for the drain,
-    /// so that a stop asks the hub nothing more than it would.
-    pub(super) fn retired(&self) {
-        self.retired.send_replace(Some(Instant::now()));
+    /// The retirement has ended as `retirement` says, or the stop does not
+    /// retire. With hooks the observer asks from here, since a hook waits
+    /// on its answers; without them it waits for the drain, so that a stop
+    /// asks the hub nothing more than it would.
+    pub(super) fn retired(&self, retirement: Retirement) {
+        self.retired
+            .send_replace(Some((Instant::now(), retirement)));
         if self.hooked {
             self.observing.begin();
         }
@@ -328,7 +344,7 @@ impl Drop for Cancelling {
 async fn fallback(
     times: StopTimes,
     after: Duration,
-    mut retired: watch::Receiver<Option<Instant>>,
+    mut retired: watch::Receiver<Option<(Instant, Retirement)>>,
 ) {
     let ended = async {
         let ended = retired
@@ -337,7 +353,7 @@ async fn fallback(
             .ok()
             .and_then(|at| *at);
         match ended {
-            Some(at) => tokio::time::sleep_until(times.fallback(at, after)).await,
+            Some((at, _)) => tokio::time::sleep_until(times.fallback(at, after)).await,
             None => std::future::pending().await,
         }
     };
@@ -366,11 +382,10 @@ impl Launch {
         let (retired, retirement) = watch::channel(None);
         let (finishes, finished) = watch::channel(hooks.is_empty());
         let hooked = !hooks.is_empty();
-        let (observing, asking) = self.observer(times.drain, routes.clone(), hooked);
+        let (observing, asking) = self.observer(times.drain, routes.clone(), retirement.clone());
         // Its stop began once its drain's bound passed, or no pool follows
         // its pool: an entry instance that its pool's drain stops does not
-        // retire, so no parent answers later. The second case confirms only
-        // the pool's boundary, and the observer asks for the rest.
+        // retire, so no parent answers later.
         if cause == LeaveCause::PoolDrain && !self.pool_drain_retires() && !self.pool_unfollowed() {
             route(&routes, Routing::Unconfirmed(Unconfirmed::ParentTimeout));
         }
@@ -412,14 +427,23 @@ impl Launch {
             // queued drops all of this unpolled.
             let cancelling = Cancelling(cx.clone());
             let lost = self.lease_lost();
-            let given_up = self.pool_given_up();
+            let parent_gave_up = self.pool_parent_gave_up();
             let (after, watching) = (self.leave_after, routes.clone());
+            let ended = retirement.clone();
             Box::pin(async move {
                 let _cancelling = cancelling;
                 let moving = async {
                     tokio::select! {
                         () = fallback(times, after, retirement) => {
-                            route(&watching, Routing::Unconfirmed(given_up()));
+                            let withdrawal = ended.borrow().map(|(_, retirement)| retirement);
+                            route(
+                                &watching,
+                                Routing::Unconfirmed(match withdrawal {
+                                    _ if parent_gave_up() => Unconfirmed::ParentTimeout,
+                                    Some(Retirement::NotWithdrawn) => Unconfirmed::NotWithdrawn,
+                                    _ => Unconfirmed::Bound,
+                                }),
+                            );
                         }
                         () = lost => {
                             route(&watching, Routing::Unconfirmed(Unconfirmed::LeaseLost));

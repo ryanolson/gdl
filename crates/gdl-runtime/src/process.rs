@@ -1032,10 +1032,9 @@ impl Launch {
                 tokio::select! {
                     biased;
                     () = process.stops(2) => return Err(second()),
-                    () = self.retire(deadline) => {}
+                    retirement = self.retire(deadline) => stopping.retired(retirement),
                     never = leaving.as_mut() => match never {},
                 }
-                stopping.retired();
                 let cutoff = Box::pin(self.pool_cutoff(deadline, false).fuse());
                 (Err(stopped), Ok(()), stopping, leaving, cutoff)
             }
@@ -1137,10 +1136,11 @@ impl Launch {
                         let bound = tokio::time::Instant::now() + period * 2;
                         reporter.finish(bound.min(deadline)).await;
                     }
-                    if stop.is_ok() && retires {
-                        self.retire(deadline).await;
-                    }
-                    stopping.retired();
+                    let retirement = match stop.is_ok() && retires {
+                        true => self.retire(deadline).await,
+                        false => leave::Retirement::NotRetired,
+                    };
+                    stopping.retired(retirement);
                 };
                 let (result, (), ()) = tokio::select! {
                     biased;
@@ -1180,8 +1180,10 @@ impl Launch {
     /// in a roster directory, a file in `retired/`. Bounded by
     /// `deadline`, and by [`retirement_bound`] from now, so that a hub that
     /// does not answer leaves the drain the rest of its bound; what does
-    /// not get through leaves the drain to (B) or its bound.
-    async fn retire(&mut self, deadline: tokio::time::Instant) {
+    /// not get through leaves the drain to (B) or its bound. Says whether
+    /// it all got through: only then is no later roster sure to leave the
+    /// instance out.
+    async fn retire(&mut self, deadline: tokio::time::Instant) -> leave::Retirement {
         self.pool_retires();
         let retired = match &mut self.peers {
             Peers::Files(dir) => announce(dir, "retired", self.segment, &self.node),
@@ -1191,14 +1193,18 @@ impl Launch {
                 session.retire(deadline.min(bound)).await
             }
         };
-        if let Err(error) = retired {
-            eprintln!(
-                "{}: could not announce the retirement, so peers may keep routing here: {error}",
-                self.segment
-            );
-        }
         #[cfg(not(feature = "hub"))]
         let _ = deadline;
+        match retired {
+            Ok(()) => leave::Retirement::Withdrawn,
+            Err(error) => {
+                eprintln!(
+                    "{}: could not announce the retirement, so peers may keep routing here: {error}",
+                    self.segment
+                );
+                leave::Retirement::NotWithdrawn
+            }
+        }
     }
 
     /// The drain after the serving body has returned. A

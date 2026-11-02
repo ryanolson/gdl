@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::{StopTimes, fallback};
+use super::{Retirement, StopTimes, fallback};
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -55,7 +55,7 @@ async fn a_late_retirement_cannot_delay_the_fallback() {
     let (retired, retirement) = watch::channel(None);
     tokio::spawn(async move {
         tokio::time::sleep(SECOND * 9).await;
-        retired.send_replace(Some(Instant::now()));
+        retired.send_replace(Some((Instant::now(), Retirement::Withdrawn)));
         // Held open: a closed channel is no retirement.
         std::future::pending::<()>().await;
     });
@@ -70,7 +70,7 @@ async fn the_fallback_counts_from_a_timely_retirement() {
     let at = Instant::now();
     let times = StopTimes::new(at, SECOND * 20, None);
     let (retired, retirement) = watch::channel(None);
-    retired.send_replace(Some(at + SECOND));
+    retired.send_replace(Some((at + SECOND, Retirement::Withdrawn)));
     fallback(times, SECOND * 2, retirement).await;
     assert_eq!(Instant::now(), at + SECOND * 3);
 }

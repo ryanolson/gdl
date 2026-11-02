@@ -278,17 +278,20 @@ pub enum LeaveCause {
     LeaseLost,
 }
 
-/// How sure the runtime is that an instance is out of routing. This says no
-/// new routing decision picks the instance. It does not say the instance
-/// is quiet: a hand-off sent before the peers' promise can still arrive, so
-/// a hook that destroys state waits for [`Leave::drained`].
+/// How sure the runtime is that an instance is out of routing. A sender that
+/// has yet to join is fenced only by a confirmed withdrawal from its hub,
+/// so only that can confirm. This does not say the instance is quiet: a
+/// hand-off sent before the peers' promise can still arrive, so a hook that
+/// destroys state waits for [`Leave::drained`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routing {
     /// Nothing is known yet.
     Pending,
-    /// Every instance that sends here has promised to avoid it, and an
-    /// entry instance's following pools have too. Also when no gdl segment
-    /// sends here, which says nothing of [`Leave::external`] clients.
+    /// The instance retired, its hub confirmed that it withdrew its `ready`
+    /// and `loaded`, every instance that sends here has promised to avoid
+    /// it, and an entry instance's following pools have too. Also when no
+    /// gdl segment sends here, which says nothing of [`Leave::external`]
+    /// clients.
     Confirmed,
     /// Every source whose requests can reach the instance has drained.
     SourcesDone,
@@ -306,8 +309,11 @@ pub enum Unconfirmed {
     /// The lease with the hub is lost, so no peer can answer.
     LeaseLost,
     /// The time the runtime gives its peers passed: the last instance of a
-    /// segment, which no peer avoids, or a retirement the hub did not take.
+    /// segment, which no peer avoids, or an instance that did not retire.
     Bound,
+    /// That time passed, and the hub did not confirm the withdrawal of the
+    /// instance's `ready` and `loaded`: later rosters may still hold it.
+    NotWithdrawn,
 }
 
 /// What a leave hook did.

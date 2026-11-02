@@ -1259,3 +1259,76 @@ async fn the_grace_begins_after_a_sources_announcement() {
     left(other_served).await.expect("drained");
     left(side_served).await.expect("drained");
 }
+
+/// A withdrawal the hub refused leaves the instance on every later roster,
+/// so nothing fences a sender still loading: it is on no question of (A),
+/// and it will find the instance and route here. Here (A) holds, as the
+/// only sender left has promised nothing, and it is not `Confirmed`. The
+/// fallback names why, half the drain's bound after the stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_withdrawal_is_never_confirmed() {
+    let placement = two();
+    let hub = hub(&placement).await;
+    let proxy = Proxy::new(hub.control_addr()).await;
+    let timing = "drain_ms = 4000\nsetup_timeout_ms = 300\n";
+    let config = settings(&hub, "", timing);
+    let leaving = settings_through(&hub, proxy.port, "", timing);
+    let mut hook = Hook::on(&leaving.runtime.lifecycle);
+    let ((front_process, front), (engine_process, engine)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&leaving, "engine", &placement),
+    );
+    let (release, released) = oneshot::channel::<()>();
+    let (running, runs) = oneshot::channel();
+    let engine_served = tokio::spawn(engine.serve(Idle, |_, shutdown| async move {
+        let _ = running.send(());
+        shutdown.cancelled().await;
+        let _ = released.await;
+        Ok(())
+    }));
+    let front_served = serve(front).await;
+    runs.await.expect("the body ran");
+
+    // A sender registered, and still loading.
+    let spec = DeploymentSpec::new(reference_manifest(|_| true), placement.clone())
+        .expect("valid test fixture");
+    let loading_config = settings(&hub, "", timing);
+    let loading = Process::start(&loading_config).await.expect("process");
+    let (loads, load) = oneshot::channel::<()>();
+    let launching = tokio::spawn({
+        let loading = loading.clone();
+        async move {
+            loading_config
+                .launch(&loading, "front", &["front", "engine"], &spec, async {
+                    let _ = load.await;
+                    Ok(())
+                })
+                .await
+                .map(drop)
+        }
+    });
+    let deadline = Instant::now() + WAIT;
+    while hub.store().get(loading.instance_id()).is_none() {
+        assert!(Instant::now() < deadline, "the sender never registered");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    front_process.stop();
+    left(front_served).await.expect("drained");
+
+    proxy.refuse(b"DELETE ");
+    engine_process.stop();
+    let leave = hook.leave().await;
+    assert_eq!(
+        routed(&leave, WAIT).await,
+        Routing::Unconfirmed(Unconfirmed::NotWithdrawn),
+        "the hub still lists it"
+    );
+
+    proxy.stop_refusing();
+    hook.finish(Handoff::Done);
+    let _ = release.send(());
+    loading.stop();
+    let _ = tokio::time::timeout(WAIT, launching).await;
+    drop(loads);
+    left(engine_served).await.expect("drained");
+}

@@ -3,8 +3,8 @@
 
 use super::*;
 use common::boundary::{
-    Model, Running, ask, model_configured, model_proxied_configured, model_summarized, placement,
-    run_graph, spec_of,
+    Model, Running, ask, instance_of, model_configured, model_proxied_configured, model_summarized,
+    placement, run_graph, spec_of,
 };
 use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
 use common::proxy::Mode;
@@ -232,11 +232,11 @@ async fn a_draining_entry_past_its_bound_reads_parent_timeout_and_declines() {
     first.stop().await;
 }
 
-/// A pool's drain whose followers let go stops an entry early, and that is
-/// a confirmation: no pool follows it. The hook hears the drain as its
-/// cause.
+/// A pool's drain whose followers let go stops an entry early. It did not
+/// retire, so it never reads `Confirmed`: it reads `SourcesDone` once it
+/// has drained. The hook hears the drain as its cause.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_draining_entry_nobody_follows_is_confirmed() {
+async fn a_draining_entry_nobody_follows_reads_sources_done() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
@@ -258,7 +258,7 @@ async fn a_draining_entry_nobody_follows_is_confirmed() {
     m1.readiness.drain().await.expect("the pool drains");
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
-    assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
+    assert_eq!(routed(&leave, WAIT).await, Routing::SourcesDone);
     hook.finish(Handoff::Done);
     for entry in m1.entries {
         entry.ended(WAIT).await.expect("the entry drained");
@@ -267,9 +267,11 @@ async fn a_draining_entry_nobody_follows_is_confirmed() {
 }
 
 /// An interior instance of a draining pool stops once its senders have
-/// detached, and that confirms it: nothing in the pool sends to it again.
+/// detached, which ends its drain's wait and confirms nothing: a sender can
+/// join a draining pool after that. Its peer does not promise to avoid the
+/// last instance of a segment, so the bound tells it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_draining_interior_instance_is_confirmed_when_its_senders_detach() {
+async fn a_draining_interior_instance_reads_the_bound_when_its_senders_detach() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::new();
@@ -309,7 +311,10 @@ async fn a_draining_interior_instance_is_confirmed_when_its_senders_detach() {
     m1.readiness.drain().await.expect("the pool drains");
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
-    assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
+    assert_eq!(
+        routed(&leave, WAIT).await,
+        Routing::Unconfirmed(Unconfirmed::Bound)
+    );
     hook.finish(Handoff::Done);
     held.request_stop();
     let _ = tokio::time::timeout(WAIT, answer).await;
@@ -685,13 +690,12 @@ fn graph_with_source_in_pool(
     Ok((reference_graph(deployment, events)?, source))
 }
 
-/// `unfollowed` confirms the pool's boundary, not its inside. `d` hosts a
-/// source that hands work to the entry `f`, in their own pool, so nothing
-/// holds a chooser's offer. With a request held in the entry, the drain
-/// stops the entry as `unfollowed`, and it stays `Pending`: `d` has not
-/// detached, and can still pick it.
+/// `unfollowed` confirms nothing of the pool's inside. `d` hosts a source
+/// that hands work to the entry `f`, in their own pool, so nothing holds a
+/// chooser's offer. With a request held in the entry, the drain stops the
+/// entry as `unfollowed`, and it stays `Pending` until it has drained.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
+async fn an_unfollowed_entry_reads_sources_done_once_it_has_drained() {
     use gdl::Next as _;
     use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
 
@@ -751,11 +755,7 @@ async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
     stays_pending(&leave, "a sender in its pool can still pick it").await;
 
     held.request_stop();
-    let settled = routed(&leave, WAIT).await;
-    assert!(
-        matches!(settled, Routing::Confirmed | Routing::SourcesDone),
-        "{settled:?}"
-    );
+    assert_eq!(routed(&leave, WAIT).await, Routing::SourcesDone);
     let _ = tokio::time::timeout(WAIT, answer).await;
     hook.finish(Handoff::Done);
     for entry in m1.entries {
@@ -765,10 +765,10 @@ async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
     first.stop().await;
 }
 
-/// A sender that is still loading has promised nothing and is on no roster
+/// A sender that is still loading has promised nothing and is on no
 /// question of (A), and it will route to an entry that did not retire once
-/// it loads. Here the only sender left in the pool is one such, and the
-/// entry's body holds on, so that (B) does not hold either. The fallback
+/// it loads. Here the only sender left in the pool is one such, so (A)
+/// holds, and the entry's body holds on, so that (B) does not. The bound
 /// is what tells the hook, not (A).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sender_still_loading_keeps_an_unretired_entry_pending() {
@@ -836,6 +836,10 @@ async fn a_sender_still_loading_keeps_an_unretired_entry_pending() {
         .expect("the hook ran");
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
     stays_pending(&leave, "a sender still loading has promised nothing").await;
+    assert_eq!(
+        routed(&leave, BOUND + WAIT).await,
+        Routing::Unconfirmed(Unconfirmed::Bound)
+    );
 
     process.stop();
     let _ = tokio::time::timeout(WAIT, launching).await;
@@ -848,10 +852,9 @@ async fn a_sender_still_loading_keeps_an_unretired_entry_pending() {
     first.stop().await;
 }
 
-/// The question whether an unfollowed entry's senders detached is one only
-/// a hook reads. Stalled, it holds neither (A) nor (B): with its entry
-/// drained, an instance with a hook closes as one without does, the
-/// control, which leaves at once. Only the reads of who detached are held.
+/// A hook never slows the drain. With reads of who detached stalled, and
+/// a sender in its pool that keeps those questions going, an entry with a
+/// hook closes as one without does, the control, which leaves at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stalled_detach_question_holds_nothing_of_the_drain() {
     use common::boundary::model_fronted_configured;
@@ -905,4 +908,102 @@ async fn a_stalled_detach_question_holds_nothing_of_the_drain() {
         m1.sink.ended(WAIT * 2).await.expect("the interior drained");
         first.stop().await;
     }
+}
+
+/// A draining pool still takes registrations, and an entry its drain
+/// stopped did not retire: no hub read can fence the sender that joins
+/// after it. So such an entry reads the bound, and here is why: a new `d`
+/// joins afterward, and the entry serves its request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_a_pool_drain_stopped_is_never_confirmed() {
+    use gdl::Next as _;
+    use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
+
+    let spec = spec_with_source_in_pool();
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let hooked = HookOnce::default();
+    let assemble = |deployment: &Deployment| {
+        let source = deployment.hop(
+            2,
+            FwdEnd::new(wire_codec!(common::Pre)),
+            DSink::new(Arc::new(common::NodeD {
+                events: Arc::clone(&events),
+            })),
+            BwdEnd::new(wire_codec!(common::Raw)),
+        )?;
+        Ok((reference_graph(deployment, &events)?, source))
+    };
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        pool(M1, "m1-hub:1337", 1),
+        RUNTIME,
+        &|runtime| hooked.configure(runtime),
+        &assemble,
+    )
+    .await;
+    following(&tables(&first), M1, 1).await;
+    let mut hook = hooked.take();
+    let common::boundary::ModelPool {
+        hub: model_hub,
+        readiness,
+        entries,
+        sink,
+    } = m1;
+    sink.process.stop();
+    sink.ended(WAIT).await.expect("the sender left");
+    let entry = &entries[0];
+    entry.body.send_replace(true);
+
+    readiness.drain().await.expect("the pool drains");
+    let leave = tokio::time::timeout(BOUND + WAIT, hook.started.recv())
+        .await
+        .expect("the hook started in time")
+        .expect("the hook ran");
+    assert_eq!(leave.cause(), LeaveCause::PoolDrain);
+    assert_eq!(
+        routed(&leave, BOUND + WAIT).await,
+        Routing::Unconfirmed(Unconfirmed::Bound),
+        "a sender can still join"
+    );
+
+    let joined = instance_of(
+        &spec,
+        &model_hub,
+        pool(M1, "m1-hub:1337", 1),
+        "d",
+        &assemble,
+    )
+    .await;
+    let source = joined.segment.client(|roots| roots.1.clone());
+    let request = common::Pre {
+        text: "late".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 1,
+            ..Plan::default()
+        },
+    };
+    let answer = source
+        .generate(Cx::new(), request)
+        .await
+        .expect("the entry took the sender's work");
+    let answer = tokio::time::timeout(WAIT, collect(answer))
+        .await
+        .expect("answered in time");
+    assert!(answer.iter().all(Result::is_ok), "{answer:?}");
+    assert!(!answer.is_empty());
+
+    drop(source);
+    entry.body.send_replace(false);
+    hook.finish(Handoff::Done);
+    joined.process.stop();
+    for entry in entries {
+        let _ = entry.ended(WAIT * 2).await;
+    }
+    let _ = joined.ended(WAIT * 2).await;
+    first.stop().await;
 }

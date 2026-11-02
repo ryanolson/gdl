@@ -61,7 +61,7 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `clock_skew_ms` | 50 | the assumed largest clock difference between segments |
 | `drain_ms` | `default_deadline_ms` | the bound on a stopped instance's drain |
 | `leave_ms` | `drain_ms` | how long a leave hook may run from the stop, within the drain's bound |
-| `leave_after_ms` | `setup_timeout_ms` + 2 × `summary_ms` | how long after its retirement an instance waits for its peers before its hooks read `Unconfirmed(Bound)`. Half of `drain_ms` from the stop ends that wait in any case. Without a `[pool]`, `summary_ms` is its default, 10 s |
+| `leave_after_ms` | `setup_timeout_ms` + 2 × `summary_ms` | how long after its retirement an instance waits for its peers before its hooks read `Unconfirmed`. Half of `drain_ms` from the stop ends that wait in any case. Without a `[pool]`, `summary_ms` is its default, 10 s |
 | `instance_failovers` | 2 | how many more times a router chooses after a declined hand-off. 0 makes each refusal final |
 | `pool_failovers` | 2 | how many other pools a chooser offers a request to after the first declines; an instance's own decline, which goes to the pool's other instances, uses none |
 | `pool_damping_first_ms` | 1000 | how long a chooser passes over a pool after its first decline. At least 1 |
