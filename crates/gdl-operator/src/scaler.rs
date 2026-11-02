@@ -529,7 +529,8 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             )));
         }
         let registration = |pod: &PodView| {
-            instance_of(instances.as_ref(), pod).and_then(crate::probe::Instance::registration)
+            live_of(instances.as_ref(), pod, &spec.segment)
+                .and_then(crate::probe::Instance::registration)
         };
         let ranked: Vec<Candidate> = staying
             .iter()
@@ -549,7 +550,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             return Ok(Some((
                 "InstanceNotListed",
                 format!(
-                    "the hub of pool `{}` lists no instance of a pod that can go",
+                    "the hub of pool `{}` lists no one live registration at a pod that can go",
                     spec.pool
                 ),
             )));
@@ -995,6 +996,16 @@ fn cancellable(victim: &Retiring) -> bool {
 /// The pod of `uid` among `pods`, while it is alive and not being deleted.
 fn alive<'p>(pods: &'p [PodView], uid: &str) -> Option<&'p PodView> {
     pods.iter().find(|p| p.uid == uid && !p.terminating)
+}
+
+/// The one live registration of `segment` that `instances` lists at
+/// `pod`'s IP ([`Instances::live_at`]): what a retire request names.
+fn live_of<'i>(
+    instances: Option<&'i Instances>,
+    pod: &PodView,
+    segment: &str,
+) -> Option<&'i crate::probe::Instance> {
+    instances?.live_at(pod.ip.as_deref()?, segment)
 }
 
 /// The instance `instances` lists at `pod`'s IP.

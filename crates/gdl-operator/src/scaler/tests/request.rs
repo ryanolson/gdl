@@ -816,3 +816,57 @@ async fn a_restart_ends_the_hold_in_request_mode_without_a_bound() {
     );
     assert!(fake.take_writes().is_empty());
 }
+
+/// F1 of the fifth review: the victim's container restarted before it
+/// was chosen, and its predecessor's registration is still listed,
+/// `drained`, at the pod's IP, before the replacement. The pod is mapped
+/// only to the one registration there still live, the replacement, and
+/// that one is asked; the predecessor's `drained` is never its drain.
+#[tokio::test]
+async fn a_pod_is_asked_by_its_one_live_registration() {
+    let fake = three();
+    fake.state().pods[1].view.restarts = 1;
+    fake.state().pods[1].view.containers = vec!["containerd://again".into()];
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-2", 2, 2, "drained"),
+            ("i-9", 2, 9, "ready"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(fake.state().replicas, 3);
+    let writes = fake.take_writes();
+    assert!(!writes.iter().any(|w| w.contains("i-2")), "{writes:?}");
+    assert_eq!(victim(&fake).instance_id.as_deref(), Some("i-9"));
+}
+
+/// Two live registrations at one pod's IP cannot tell which one is the
+/// pod's: that pod is not chosen this round, and another is.
+#[tokio::test]
+async fn a_pod_with_two_live_registrations_is_not_chosen() {
+    let fake = three();
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-2", 2, 2, "ready"),
+            ("i-9", 2, 9, "ready"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_ne!(victim(&fake).pod, "pod-2");
+    let writes = fake.take_writes();
+    assert!(
+        !writes
+            .iter()
+            .any(|w| w.contains("i-2") || w.contains("i-9")),
+        "{writes:?}"
+    );
+}

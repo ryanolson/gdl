@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use super::{Run, Stop, instance_of, millis, millis_of, rfc3339};
+use super::{Run, Stop, live_of, millis, millis_of, rfc3339};
 use crate::cluster::{Cluster, PodView};
 use crate::probe::{Asked, Probe};
 use crate::{Handoff, Outcome, Retiring, RetiringPhase};
@@ -46,7 +46,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let instance = listed
             .as_ref()
             .ok()
-            .and_then(|list| instance_of(Some(list), pod));
+            .and_then(|list| live_of(Some(list), pod, &self.spec.segment));
         let registration = instance.and_then(crate::probe::Instance::registration);
         if kept[at].phase == RetiringPhase::Unrouting {
             // Not yet asked: it can still be given back.
@@ -55,7 +55,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     Err(error) => ("HubUnavailable", error.clone()),
                     Ok(_) => (
                         "InstanceNotListed",
-                        format!("the hub of pool `{pool}` does not list pod `{}`", pod.name),
+                        format!(
+                            "the hub of pool `{pool}` lists no one live registration at pod `{}`",
+                            pod.name
+                        ),
                     ),
                 };
                 return Ok(Some(why));

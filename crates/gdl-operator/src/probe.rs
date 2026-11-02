@@ -98,6 +98,25 @@ impl Instances {
         })
     }
 
+    /// The one registration of `segment` at `ip` still live, neither
+    /// `retired` nor `drained`: the pod's process, which a retire request
+    /// names. `None` when there is none, or more than one. A container
+    /// that restarted leaves its predecessor listed until its lease
+    /// lapses, and which of two live ones is the pod's process cannot be
+    /// told, so the pod is asked only once one is left.
+    pub fn live_at(&self, ip: &str, segment: &str) -> Option<&Instance> {
+        let mut live = self.instances.iter().filter(|instance| {
+            instance.segment == segment
+                && !matches!(instance.phase.as_str(), "retired" | "drained")
+                && instance
+                    .addresses
+                    .iter()
+                    .any(|address| address.ip().to_string() == ip)
+        });
+        let one = live.next()?;
+        live.next().is_none().then_some(one)
+    }
+
     /// The member whose velo address has `ip`: a pod's instance.
     pub fn at(&self, ip: &str) -> Option<&Instance> {
         self.instances.iter().find(|instance| {
