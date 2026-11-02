@@ -703,7 +703,10 @@ fn holds(members: &[Member], me: InstanceId, epoch: Option<u128>) -> bool {
     members.iter().any(|member| {
         member.peer.instance_id() == me
             && epoch.is_some()
-            && member.epoch.map(|held| held.as_uuid().as_u128()) == epoch
+            && member
+                .registration_epoch
+                .map(|held| held.as_uuid().as_u128())
+                == epoch
     })
 }
 
@@ -1120,8 +1123,9 @@ fn failure(error: impl std::fmt::Display) -> Error {
 struct Member {
     registration: SegmentRegistration,
     peer: PeerInfo,
-    /// The registration's epoch. `None` from a hub that does not say.
-    epoch: Option<RegistrationEpoch>,
+    /// The registration's epoch. `None` from a hub of an earlier build,
+    /// which then holds no registration that routing can read answers from.
+    registration_epoch: Option<RegistrationEpoch>,
 }
 
 /// Bind this instance's velo node under the hub at `host`: at `listen`,

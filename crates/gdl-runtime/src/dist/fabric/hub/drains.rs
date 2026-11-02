@@ -199,7 +199,7 @@ async fn a_registration_is_held_only_under_its_own_epoch() {
     let member = |epoch| super::Member {
         registration: spec().registration("sink").expect("valid test fixture"),
         peer: node.peer_info(),
-        epoch,
+        registration_epoch: epoch,
     };
     assert!(super::holds(&[member(Some(mine))], id, held));
     assert!(!super::holds(&[], id, held), "a hub that restarted");
@@ -209,7 +209,7 @@ async fn a_registration_is_held_only_under_its_own_epoch() {
     );
     assert!(
         !super::holds(&[member(None)], id, held),
-        "a hub that does not say"
+        "a hub of an earlier build"
     );
     assert!(
         !super::holds(&[member(Some(mine))], id, None),

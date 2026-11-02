@@ -92,8 +92,9 @@ struct Member {
     registration: SegmentRegistration,
     peer: PeerInfo,
     /// The registration's epoch, by which an instance tells that this hub
-    /// still holds the registration it made.
-    epoch: RegistrationEpoch,
+    /// still holds the registration it made. Bare `epoch` on this wire is
+    /// the pool hub's.
+    registration_epoch: RegistrationEpoch,
 }
 
 impl GraphAdmission {
@@ -162,7 +163,7 @@ impl Extension for GraphAdmission {
                 Member {
                     registration,
                     peer: committed.peer.clone(),
-                    epoch: committed.epoch,
+                    registration_epoch: committed.epoch,
                 },
             ),
         );

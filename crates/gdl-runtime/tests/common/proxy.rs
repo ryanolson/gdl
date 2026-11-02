@@ -21,6 +21,9 @@ pub enum Mode {
     /// hub whose watch says nothing of the pool's drain to the hub that
     /// follows it through the proxy, while its other events still come.
     Undrained,
+    /// Forward, but give back `registration_epoch` under another key: the
+    /// answers of a hub of an earlier build, which omits the field.
+    Unstamped,
 }
 
 /// What [`Mode::Undrained`] replaces in what a hub sends, and with what:
@@ -28,6 +31,11 @@ pub enum Mode {
 /// spaces after the string.
 const DRAINING: &[u8] = b"\"draining\"";
 const UNDRAINED: &[u8] = b"\"ready\"   ";
+
+/// What [`Mode::Unstamped`] replaces in what a hub sends, and with what: as
+/// long, so that the response's framing holds, and a key no one reads.
+const STAMPED: &[u8] = b"\"registration_epoch\"";
+const UNSTAMPED: &[u8] = b"\"registration_xpoch\"";
 
 /// A TCP proxy in front of one of a hub's ports, so that a test can make
 /// the hub fall silent or go away for a while under running instances.
@@ -197,7 +205,7 @@ async fn relay(
                     return;
                 }
             }
-            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained => break,
+            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained | Mode::Unstamped => break,
         }
     }
     let Ok(mut server) = tokio::net::TcpStream::connect(target).await else {
@@ -229,7 +237,7 @@ async fn relay(
                 }
                 continue;
             }
-            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained => {}
+            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained | Mode::Unstamped => {}
         }
         // Biased, the mode first: a test changes the mode before it makes
         // the hub send what the new mode treats, so bytes ready at the same
@@ -314,7 +322,10 @@ async fn relay(
                     let mut out = std::mem::take(&mut held_down);
                     out.extend_from_slice(&down[..n]);
                     if now == Mode::Undrained {
-                        held_down = undrain(&mut out);
+                        held_down = replace_each(&mut out, DRAINING, UNDRAINED);
+                    }
+                    if now == Mode::Unstamped {
+                        held_down = replace_each(&mut out, STAMPED, UNSTAMPED);
                     }
                     let rewrite = held.tamper.rewrite.lock().expect("lock").clone();
                     if let Some((from, to)) = rewrite {
@@ -357,22 +368,21 @@ fn refusal() -> Vec<u8> {
     answer
 }
 
-/// Replace each [`DRAINING`] in `out` with [`UNDRAINED`], and take off the
-/// end of it, to be sent with what comes next, a part that may be the
-/// start of one.
-fn undrain(out: &mut Vec<u8>) -> Vec<u8> {
+/// Replace each `from` in `out` with `to`, as long, and take off the end of
+/// it, to be sent with what comes next, a part that may be the start of one.
+fn replace_each(out: &mut Vec<u8>, from: &[u8], to: &[u8]) -> Vec<u8> {
     let mut at = 0;
     while let Some(found) = out[at..]
-        .windows(DRAINING.len())
-        .position(|window| window == DRAINING)
+        .windows(from.len())
+        .position(|window| window == from)
     {
         let start = at + found;
-        out[start..start + DRAINING.len()].copy_from_slice(UNDRAINED);
-        at = start + DRAINING.len();
+        out[start..start + from.len()].copy_from_slice(to);
+        at = start + from.len();
     }
-    let partial = (1..DRAINING.len())
+    let partial = (1..from.len())
         .rev()
-        .find(|len| out.len() >= *len && out.ends_with(&DRAINING[..*len]))
+        .find(|len| out.len() >= *len && out.ends_with(&from[..*len]))
         .unwrap_or(0);
     out.split_off(out.len() - partial)
 }

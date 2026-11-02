@@ -1407,3 +1407,69 @@ fn settings_beating(public: u16, control: u16, runtime: &str) -> ProcessConfig<N
     );
     ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
 }
+
+/// A hub of an earlier build omits `registration_epoch`, so it never shows
+/// that it holds this registration. The drain does not need it: (A) closes
+/// the instance one case and (B) the other, while routing stays `Pending`,
+/// and then reads the bound. The fallback, 2 s here, sets how long this
+/// takes, and must outlast each close on a busy host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_that_omits_the_epoch_leaves_the_drain_and_routing_reads_the_bound() {
+    for promised in [true, false] {
+        let placement = two();
+        let hub = hub(&placement).await;
+        let proxy = Proxy::new(hub.public_addr()).await;
+        proxy.set(common::proxy::Mode::Unstamped);
+        let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\nleave_after_ms = 2000\n";
+        let replicas = match promised {
+            true => "[min_replicas]\nengine = 2\n",
+            false => "",
+        };
+        let config = settings(&hub, replicas, timing);
+        let leaving = settings_at(proxy.port, hub.control_addr().port(), replicas, timing);
+        let mut hook = Hook::on(&leaving.runtime.lifecycle);
+        let other = async {
+            match promised {
+                true => Some(launch(&config, "engine", &placement).await),
+                false => None,
+            }
+        };
+        let ((front_process, front), (engine_process, engine), other) = tokio::join!(
+            launch(&config, "front", &placement),
+            launch(&leaving, "engine", &placement),
+            other,
+        );
+        let served = other.map(|(process, launch)| (process, serve(launch)));
+        let other_served = match served {
+            Some((process, serving)) => Some((process, serving.await)),
+            None => None,
+        };
+        let (front_served, engine_served) = tokio::join!(serve(front), serve(engine));
+
+        engine_process.stop();
+        let leave = hook.leave().await;
+        // (B), as the source drains. With a peer, (A) has come first.
+        if !promised {
+            front_process.stop();
+        }
+        tokio::time::timeout(WAIT, leave.drained())
+            .await
+            .expect("the drain went on without routing");
+        assert_eq!(*leave.routing().borrow(), Routing::Pending);
+        assert_eq!(
+            routed(&leave, WAIT).await,
+            Routing::Unconfirmed(Unconfirmed::Bound)
+        );
+
+        hook.finish(Handoff::Done);
+        left(engine_served).await.expect("drained");
+        if promised {
+            front_process.stop();
+        }
+        left(front_served).await.expect("drained");
+        if let Some((process, served)) = other_served {
+            process.stop();
+            left(served).await.expect("drained");
+        }
+    }
+}

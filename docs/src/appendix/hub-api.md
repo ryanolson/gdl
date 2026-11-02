@@ -35,7 +35,7 @@ A pool's hub serves the `gdl-pool` extension's routes under `/v1/ext/gdl-pool`. 
 - `report` carries no credential either. The parent writes only what it verifies: a record of the right shape whose `home` is the parent's pool (never a shared pool's, which names `parents`), whose contract and placement hashes are the parent's, and that is newer than what it holds. A withdrawal is written only over a record the parent holds. Any other withdrawal is answered 200 and writes nothing.
 - A watch that names no follower counts for nothing in the drain and retirement waits. A watch that closes without a release still counts. Once the pool's lease has passed since it closed, it no longer shows as a follower, but it never counts as a release.
 - A watch that arrives before the hub first stores the pool's record waits up to 5 s, then gets 503. Every watch ends when the hub stops, or once a drained pool's record is withdrawn. A watch after that gets 503.
-- `GraphAdmission` serves `GET /v1/ext/gdl/members`, whose `PeerInfo` values the watch events carry.
+- `GraphAdmission` serves `GET /v1/ext/gdl/members`, whose `PeerInfo` values the watch events carry. Each member also carries `registration_epoch`, the epoch of its registration. Bare `epoch` on this wire is the pool hub's. An instance reads the field to tell that a hub still holds its registration. An absent field means a hub of an earlier build: leave hooks never take routing evidence from it, `Leave::routing` reads `Unconfirmed` at the fallback, and the drain is unaffected.
 
 ### Keyed records
 
