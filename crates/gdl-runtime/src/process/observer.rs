@@ -262,16 +262,11 @@ impl Observer {
                 reaching,
                 pool,
             } => {
-                self.ask_hub(
-                    asker,
-                    *me,
-                    senders,
-                    reaching,
-                    pool.as_deref(),
-                    phase,
-                    publish,
-                )
-                .await;
+                let pool = pool.as_deref();
+                tokio::join!(
+                    self.ask_hub(asker, *me, senders, reaching, pool, phase, publish),
+                    self.ask_detached(asker, pool, phase),
+                );
             }
         }
     }
@@ -339,13 +334,7 @@ impl Observer {
                 let avoiding = avoided.is_some()
                     || (parent.as_ref().is_none_or(Parent::avoids)
                         && asker.all_avoid(me, &senders).await?);
-                let inside = match pool {
-                    Some(pool) if self.hooked && pool.unretired_entry() && pool.unfollowed() => {
-                        pool.senders_detached(asker).await?
-                    }
-                    _ => false,
-                };
-                Ok::<_, Error>((done, unreached, avoiding, inside))
+                Ok::<_, Error>((done, unreached, avoiding))
             };
             let asked = tokio::select! {
                 biased;
@@ -355,13 +344,10 @@ impl Observer {
                 }
                 asked = tokio::time::timeout_at(self.deadline, ask) => asked,
             };
-            let (done, unreached, avoiding, inside) = match asked {
+            let (done, unreached, avoiding) = match asked {
                 Ok(Ok(answer)) => answer,
-                _ => (false, None, false, false),
+                _ => (false, None, false),
             };
-            if inside {
-                route(&self.routes, Routing::Confirmed);
-            }
             if avoided.is_none() && avoiding {
                 avoided = Some(Instant::now());
                 // Read again: the bound may have passed since the question.
@@ -378,6 +364,38 @@ impl Observer {
             }
             let drained = done || unreached.is_some();
             say(publish, drained && asked_in == *phase.borrow(), avoided);
+            if !self.pause(HubSession::poll()).await {
+                return;
+            }
+        }
+    }
+
+    /// For a hook, ask whether the senders in an unfollowed entry's own pool
+    /// have detached, until routing moves, as (B) moves it. This runs apart
+    /// from (A) and (B), with a bound of its own, because only a hook reads
+    /// it: it must not delay them, and its failure must not take them.
+    #[cfg(feature = "hub")]
+    async fn ask_detached(
+        &self,
+        asker: &HubAsker,
+        pool: Option<&PoolDrain>,
+        phase: &watch::Receiver<Phase>,
+    ) {
+        let Some(pool) = pool.filter(|pool| self.hooked && pool.unretired_entry()) else {
+            return;
+        };
+        while *phase.borrow() != Phase::Over
+            && *self.routes.borrow() == Routing::Pending
+            && !asker.is_lost()
+        {
+            if pool.unfollowed() {
+                let bound = (Instant::now() + HubSession::poll() * 10).min(self.deadline);
+                let asked = tokio::time::timeout_at(bound, pool.senders_detached(asker));
+                if matches!(asked.await, Ok(Ok(true))) {
+                    route(&self.routes, Routing::Confirmed);
+                    return;
+                }
+            }
             if !self.pause(HubSession::poll()).await {
                 return;
             }

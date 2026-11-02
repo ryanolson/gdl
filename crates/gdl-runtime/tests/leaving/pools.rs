@@ -847,3 +847,62 @@ async fn a_sender_still_loading_keeps_an_unretired_entry_pending() {
     }
     first.stop().await;
 }
+
+/// The question whether an unfollowed entry's senders detached is one only
+/// a hook reads. Stalled, it holds neither (A) nor (B): with its entry
+/// drained, an instance with a hook closes as one without does, the
+/// control, which leaves at once. Only the reads of who detached are held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_detach_question_holds_nothing_of_the_drain() {
+    use common::boundary::model_fronted_configured;
+
+    for hooked in [false, true] {
+        let spec = spec_with_source_in_pool();
+        let directory = Resolving::new();
+        let events = Events::quiet();
+        let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+        let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+        let hooks = HookOnce::default();
+        let (m1, proxy) = model_fronted_configured(
+            &spec,
+            &directory,
+            pool(M1, "m1-hub:1337", 1),
+            "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
+            &|segment, runtime| match segment {
+                "f" if hooked => hooks.configure(runtime),
+                _ => runtime,
+            },
+            &|deployment| graph_with_source_in_pool(deployment, &events),
+        )
+        .await;
+        following(&tables(&first), M1, 1).await;
+
+        proxy.hold(b"gdl-detach-");
+        m1.readiness.drain().await.expect("the pool drains");
+        // The entry's own bound, then what it holds up, which is nothing.
+        // A stalled question must not stand between them and its close.
+        let closed = tokio::time::timeout(BOUND + WAIT, async {
+            while !m1.entries[0].segment.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+
+        proxy.release();
+        if hooked {
+            hooks.take().finish(Handoff::Done);
+        }
+        // A second stop releases a failed test from its 30 s bound.
+        if !closed {
+            m1.entries[0].process.stop();
+            m1.entries[0].process.stop();
+        }
+        assert!(closed, "held past (B), with a hook registered: {hooked}");
+        for entry in m1.entries {
+            entry.ended(WAIT).await.expect("the entry drained");
+        }
+        m1.sink.ended(WAIT * 2).await.expect("the interior drained");
+        first.stop().await;
+    }
+}
