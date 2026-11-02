@@ -535,3 +535,38 @@ async fn a_new_registration_in_the_pod_while_draining_is_asked_before_the_pod_go
     once(&fake, &spec, 3_000).await;
     assert_eq!(fake.state().replicas, 2, "the new registration drained");
 }
+
+/// F2: the Deployment is made again under its name and keeps its pods
+/// (an orphan delete, then adoption) after the victim retired. The victim
+/// cannot serve again: it is never given back its Service or its cost,
+/// and its pod is deleted, without the old Deployment's count.
+#[tokio::test]
+async fn a_retired_victim_of_a_deployment_made_again_is_deleted_not_given_back() {
+    let fake = Fake::with(&[9, 0, 9]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
+    let mut spec = request(2);
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    fake.state().deployment = "deployment-b".into();
+    fake.take_writes();
+    spec.replicas = Some(3);
+    once(&fake, &spec, 3_000).await;
+    let writes = fake.take_writes();
+    assert_eq!(writes, ["delete pod-2"]);
+    assert_eq!(victim(&fake).phase, RetiringPhase::Deleting);
+    assert_eq!(
+        status(&fake).last.expect("ended").outcome,
+        Outcome::Abandoned
+    );
+    assert_eq!(fake.state().replicas, 3);
+    fake.settle(false);
+    fake.exit();
+    once(&fake, &spec, 4_000).await;
+    assert!(status(&fake).retiring.is_empty());
+    assert!(fake.take_writes().iter().all(|w| !w.starts_with("pod-2")));
+}

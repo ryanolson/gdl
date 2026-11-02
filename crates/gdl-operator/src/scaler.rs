@@ -235,11 +235,24 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
 
         // A victim of a Deployment since made again under the same name is
         // abandoned: what the scaler changed on its pod is put back.
-        // What is put back is stored first, as every step is.
+        // What is put back is stored first, as every step is. One asked to
+        // retire cannot serve again: its pod is deleted instead, whatever
+        // count the earlier Deployment had.
         let mut undo = Vec::new();
         let mut current = Vec::new();
-        for victim in retiring {
+        for mut victim in retiring {
             if victim.deployment == fence.uid {
+                current.push(victim);
+                continue;
+            }
+            if victim.asked.is_some() {
+                if victim.phase != RetiringPhase::Deleting {
+                    let reason = "its Deployment was made again under the same name; it had retired, so its pod is deleted".to_string();
+                    let chosen = victim.uid.clone();
+                    self.finish(victim.clone(), Outcome::Abandoned, chosen, reason);
+                }
+                victim.phase = RetiringPhase::Deleting;
+                victim.deployment = fence.uid.clone();
                 current.push(victim);
                 continue;
             }
