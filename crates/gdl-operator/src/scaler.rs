@@ -279,8 +279,15 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         }
         // A victim asked to retire is waited for at most the bound, also
         // once the spec has left request mode; one whose pod has gone
-        // ended above, and needs none.
-        if bound.is_none() && kept.iter().any(|v| v.asked.is_some() && uncommitted(v)) {
+        // ended above, and one whose container restarted goes on its
+        // SIGTERM at once, so neither needs one.
+        for victim in kept.iter_mut().filter(|v| uncommitted(v)) {
+            if let Some(pod) = alive(&pods, &victim.uid) {
+                self.restarted(victim, pod).await;
+            }
+        }
+        let held = |v: &Retiring| v.asked.is_some() && uncommitted(v) && !v.restarted;
+        if bound.is_none() && kept.iter().any(held) {
             self.status.retiring = kept;
             return Err(unbounded());
         }

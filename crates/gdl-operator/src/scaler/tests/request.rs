@@ -683,6 +683,22 @@ async fn request_mode_takes_one_victim_until_its_pod_is_gone() {
     );
 }
 
+/// F4 of the third review: a victim asked before the spec left request
+/// mode without a bound, whose container then restarted, ends its hold
+/// at once: a restart needs no bound.
+#[tokio::test]
+async fn a_restart_after_the_mode_changed_ends_the_hold_without_a_bound() {
+    let fake = three();
+    let mut spec = request(2);
+    once(&fake, &spec, 0).await;
+    spec.retire = Some(Retire::Signal);
+    spec.drain_bound = None;
+    fake.state().pods[1].view.restarts = 1;
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    assert!(victim(&fake).restarted);
+}
+
 /// F2: the Deployment is made again under its name and keeps its pods
 /// (an orphan delete, then adoption) after the victim retired. The victim
 /// cannot serve again: it is never given back its Service or its cost,
