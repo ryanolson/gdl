@@ -145,6 +145,16 @@ impl Parent {
         !self.answered() && self.passed()
     }
 
+    /// What [`Parent::avoids`] says of routing, read as it holds: an
+    /// answer confirms, and a bound that passed does not.
+    pub(crate) fn routing(&self) -> gdl::Routing {
+        if self.answered() {
+            gdl::Routing::Confirmed
+        } else {
+            gdl::Routing::Unconfirmed(gdl::Unconfirmed::ParentTimeout)
+        }
+    }
+
     fn answered(&self) -> bool {
         let learned = *self.learned.borrow();
         learned.acknowledged || learned.unfollowed

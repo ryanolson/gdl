@@ -176,6 +176,11 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         parent.avoids(),
         "the retirement's bound passed and was not seen"
     );
+    assert_eq!(
+        parent.routing(),
+        gdl::Routing::Unconfirmed(gdl::Unconfirmed::ParentTimeout),
+        "a bound that passed is no confirmation"
+    );
     let again = server.next().await;
     assert!(
         again.at - retired >= REWATCH_CAP / 2,

@@ -346,7 +346,9 @@ impl Observer {
             };
             if avoided.is_none() && avoiding {
                 avoided = Some(Instant::now());
-                route(&self.routes, Routing::Confirmed);
+                // Read again: the bound may have passed since the question.
+                let routing = parent.as_ref().map_or(Routing::Confirmed, Parent::routing);
+                route(&self.routes, routing);
             }
             match unreached {
                 Some(Unreached::Detached) => route(&self.routes, Routing::Confirmed),
