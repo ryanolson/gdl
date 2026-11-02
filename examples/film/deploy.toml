@@ -1,11 +1,13 @@
+# The gdl-demo commit is on that repository's `gdl-a88cdaff` branch, not its main. Its crates depend on
+# gdl at this file's `[gdl] rev`, so the two move together: a segment links one copy of gdl.
 [graph]
 path = "film.gdl"
 
 [messages]
-crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "7e5406c34e0460c7233f43a947349a07729a6def" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "7e5406c34e0460c7233f43a947349a07729a6def" }]
+crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "ef3e0e9de7d18e877769e37f18e728a3567bcb17" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "ef3e0e9de7d18e877769e37f18e728a3567bcb17" }]
 
 [nodes]
-crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "7e5406c34e0460c7233f43a947349a07729a6def" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "7e5406c34e0460c7233f43a947349a07729a6def" }]
+crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "ef3e0e9de7d18e877769e37f18e728a3567bcb17" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "ef3e0e9de7d18e877769e37f18e728a3567bcb17" }]
 pin = { Http = "gdl_demo_nodes::HttpFrontend", Engine = "gdl_demo_nodes::MockEngine", UsageTap = "acme_gdl_nodes::UsageTap" }
 
 [config.Engine]
@@ -18,7 +20,7 @@ enabled = true
 
 [gdl]
 git = "https://github.com/ryanolson/gdl"
-rev = "b224c6c1203c63e7156ac015448af7c981d92816"
+rev = "a88cdaff4cb896892989ab0b2826984f1bc90915"
 
 [segment.front]
 nodes = ["Http"]
