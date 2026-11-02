@@ -21,6 +21,7 @@ This book is the documentation of dynamo-gdl. The source is in `docs/src/`.
 - **Keep only what lasts.** Write how it works, why, the numbers with their setup, and the results that did not work. Do not copy plans, milestone labels, ruling numbers, PR numbers, or handoff notes. History is in git. The test `crates/gdl-gen/tests/references.rs` fails on a reference to `agent-docs/`, a ruling, a milestone, a review, or a PR number in the code or the book.
 - **Write in simple English.** Use the `simple-english` skill for the book, README files, and comments.
 - **Keep comments short.** A comment says why, or which fault the code avoids. It does not repeat the code, and it does not point to a plan.
+- **Name a machine by its hardware, not its host name.** A measurement says "a shared 20-core aarch64 host", with its load, not the machine's name. Host names are internal, and the book is published.
 - **Update the book in the same change.** Each change to behavior updates the chapters that describe it, the top-level `README.md`, and the known limitations.
 
 ## Build the book locally

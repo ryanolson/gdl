@@ -46,7 +46,7 @@ Still to measure: the scaling at higher core counts, where a shared counter woul
 
 `[system] velo_metrics` gives each node a `VeloMetrics`, which velo updates per frame and per handler call ([velo's own metrics](observability.md#velos-own-metrics)). It costs every request, so it is off by default. The drain gauges (`admission_admitted`, `egress_in_use`, `active_anchors`, `instance_phase`, `instance_avoided`) are read at the scrape and cost a request nothing.
 
-Measured on spark-a26e (aarch64, 20 cores, shared, load average 8 to 12), rustc 1.93.1, bench profile B, valgrind 3.22 callgrind, as [Callgrind Ir](benchmarking.md#callgrind-ir) does. Instructions per request are the count at 400 requests minus the count at 200, divided by 200. Seven rounds, eight runs at once. Base is `4d0fa5e1`, the commit before the drain gauges. Change is the commit that added `velo_metrics`. The `-velo` setups are the `-metrics` setups with a `VeloMetrics` on every node.
+Measured on a shared 20-core aarch64 host (load average 8 to 12), rustc 1.93.1, bench profile B, valgrind 3.22 callgrind, as [Callgrind Ir](benchmarking.md#callgrind-ir) does. Instructions per request are the count at 400 requests minus the count at 200, divided by 200. Seven rounds, eight runs at once. Base is `4d0fa5e1`, the commit before the drain gauges. Change is the commit that added `velo_metrics`. The `-velo` setups are the `-metrics` setups with a `VeloMetrics` on every node.
 
 ```bash
 RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench requests --no-run   # copy the binary aside, once per commit
@@ -297,7 +297,7 @@ A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` 
 
 `affinity` with `through` ranks a session only among the instances that joined at or before its cutoff ([A session keeps its instance while instances join](../concepts/pool-routing.md#a-session-keeps-its-instance-while-instances-join)). A pool row owns its join stamps and its hub's epoch (`gdl::JoinStamps`), and a selection borrows them through one optional reference, so `Instances` grew from 32 to 40 bytes, and the erased `affinity` future from 184 to 200 (`crates/gdl/tests/selection.rs`). A view that held the stamps' slice and the epoch itself was 56 bytes, with a future of 232. The stamps keep where the row's instances are, so a selection from one instance alone, as a walk can ask, reads that instance's own stamp. That costs a cutoff 16 instructions more (727 against 711); read from the code and not profiled, a comparison and a division. Each pool row keeps the stamps, one `u64` per entry instance, and the lowest and highest a policy reads: `PoolTable` grew from 312 to 352 bytes and `gdl::Pool` from 248 to 264, made once per table change, not per request.
 
-Measured on spark-a26e (aarch64, 20 cores, shared), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per selection are the count at 200,000 selections minus the count at 100,000, divided by 100,000, through the erased selector the runtime calls, over `crates/gdl/examples/selects.rs`. Base is `762b1c21` with the example added. Three rounds of each agreed within 1 instruction.
+Measured on a shared 20-core aarch64 host, rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per selection are the count at 200,000 selections minus the count at 100,000, divided by 100,000, through the erased selector the runtime calls, over `crates/gdl/examples/selects.rs`. Base is `762b1c21` with the example added. Three rounds of each agreed within 1 instruction.
 
 ```bash
 cargo build --release -p gdl --example selects
@@ -451,7 +451,7 @@ taskset -c 7 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --m
 
 A load summary that holds five KV numbers and its number is 88 bytes, against 40 before, in every pool row a policy reads. A choice holds its view flag in the top bit of its index, so it stays two words: `PoolChoice::new` clamps the index below that bit, and `at` masks it.
 
-Measured on spark-a26e (aarch64, 20 cores, shared), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per pick are the count at 200,000 picks minus the count at 100,000, divided by 100,000, over `crates/gdl/examples/picks.rs`. Base is the commit before this change; change is the commit that added it. Three rounds each gave the same counts.
+Measured on a shared 20-core aarch64 host, rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per pick are the count at 200,000 picks minus the count at 100,000, divided by 100,000, over `crates/gdl/examples/picks.rs`. Base is the commit before this change; change is the commit that added it. Three rounds each gave the same counts.
 
 ```bash
 cargo build --release -p gdl --example picks
@@ -473,7 +473,7 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 
 ### A pool's gate
 
-With no gate set, an offer at the entry costs one atomic load and a branch more, before admission. Measured on spark-a26e (aarch64, shared), rustc 1.93.1, `cargo test --release` with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind, over the ignored test `dist::offers::gate::offers_at_the_entry`. It sends `GDL_OFFERS` offers, each with a view of two elements, through one entry. The count at 400 offers minus the count at 200, divided by 200. Base is the commit before the gate, with the same test added; change is the commit that added the gate.
+With no gate set, an offer at the entry costs one atomic load and a branch more, before admission. Measured on a shared aarch64 host, rustc 1.93.1, `cargo test --release` with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind, over the ignored test `dist::offers::gate::offers_at_the_entry`. It sends `GDL_OFFERS` offers, each with a view of two elements, through one entry. The count at 400 offers minus the count at 200, divided by 200. Base is the commit before the gate, with the same test added; change is the commit that added the gate.
 
 ```bash
 cargo test --release -p gdl-runtime --all-features --lib --no-run
