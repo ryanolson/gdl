@@ -768,14 +768,19 @@ async fn a_hook_that_ignores_its_context_is_timed_out_and_does_not_hold_the_exit
         .expect("the hook started")
         .expect("the hook ran");
     assert!(leave.deadline() <= stopped + Duration::from_millis(700));
-    tokio::time::timeout(WAIT, leave.cx().cancelled())
-        .await
-        .expect("cancelled at the deadline");
-    left(engine_served).await.expect("drained");
+    let deadline = Instant::now() + WAIT;
+    while outcomes(&registry, "stuck").len() < 2 {
+        assert!(Instant::now() < deadline, "the outcome never showed");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The token, which no clock moves: the stop's end has not dropped it
+    // yet, since the last engine drains until half of its bound and past.
     assert!(
-        leave.cx().is_cancelled(),
+        leave.cx().cancel_token().is_cancelled(),
         "a hook past its deadline is told, and not by the clock alone"
     );
+    assert!(!engine_served.is_finished());
+    left(engine_served).await.expect("drained");
     let took = stopped.elapsed();
     assert!(
         took >= Duration::from_millis(590),
