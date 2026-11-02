@@ -627,16 +627,11 @@ async fn a_late_retirement_cannot_push_the_fallback_past_the_bound() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// `unfollowed` confirms the pool's boundary, not its inside. `d` hosts a
-/// source that hands work to the entry `f`, in their own pool, so nothing
-/// holds a chooser's offer. With a request held in the entry, the drain
-/// stops the entry as `unfollowed`, and it stays `Pending`: `d` has not
-/// detached, and can still pick it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
-    use gdl::Next as _;
+/// The reference graph, with `d` hosting a source that hands work to the
+/// entry `f`, in their own pool: `d` is a sender no chooser's offer holds
+/// up.
+fn spec_with_source_in_pool() -> DeploymentSpec {
     use gdl_model::{HopInfo, NodeInfo, Role, TypeInfo};
-    use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
 
     let mut graph = reference_manifest(|_| true);
     graph.nodes.extend([
@@ -669,6 +664,38 @@ async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("the layout");
     assert!(layout.entry_segments("model_x").contains("f"));
     assert!(layout.sends_to("d").contains("f"), "a sender in the pool");
+    spec
+}
+
+/// The graph of [`spec_with_source_in_pool`] on `deployment`.
+fn graph_with_source_in_pool(
+    deployment: &Deployment,
+    events: &Arc<Events>,
+) -> gdl::Result<impl Register + Send + Sync + 'static + use<>> {
+    use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
+
+    let source = deployment.hop(
+        2,
+        FwdEnd::new(wire_codec!(common::Pre)),
+        DSink::new(Arc::new(common::NodeD {
+            events: Arc::clone(events),
+        })),
+        BwdEnd::new(wire_codec!(common::Raw)),
+    )?;
+    Ok((reference_graph(deployment, events)?, source))
+}
+
+/// `unfollowed` confirms the pool's boundary, not its inside. `d` hosts a
+/// source that hands work to the entry `f`, in their own pool, so nothing
+/// holds a chooser's offer. With a request held in the entry, the drain
+/// stops the entry as `unfollowed`, and it stays `Pending`: `d` has not
+/// detached, and can still pick it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
+    use gdl::Next as _;
+    use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
+
+    let spec = spec_with_source_in_pool();
     let directory = Resolving::new();
     let events = Events::new();
     let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
@@ -735,5 +762,88 @@ async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
         entry.ended(WAIT * 2).await.expect("the entry drained");
     }
     m1.sink.ended(WAIT).await.expect("the interior drained");
+    first.stop().await;
+}
+
+/// A sender that is still loading has promised nothing and is on no roster
+/// question of (A), and it will route to an entry that did not retire once
+/// it loads. Here the only sender left in the pool is one such, and the
+/// entry's body holds on, so that (B) does not hold either. The fallback
+/// is what tells the hook, not (A).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sender_still_loading_keeps_an_unretired_entry_pending() {
+    use common::boundary::ModelPool;
+    use common::pools::{SEGMENTS, model_pool};
+
+    let spec = spec_with_source_in_pool();
+    let directory = Resolving::new();
+    let events = Events::quiet();
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let hooked = HookOnce::default();
+    let ModelPool {
+        hub: model_hub,
+        readiness,
+        entries,
+        sink,
+    } = model_summarized(
+        &spec,
+        &directory,
+        pool(M1, "m1-hub:1337", 1),
+        RUNTIME,
+        &|runtime| hooked.configure(runtime),
+        &|deployment| graph_with_source_in_pool(deployment, &events),
+    )
+    .await;
+    following(&tables(&first), M1, 1).await;
+    let mut hook = hooked.take();
+
+    // Registered, and not ready to be `loaded`.
+    let config = settings(
+        model_hub.public_addr().port(),
+        model_hub.control_addr().port(),
+        5_000,
+        &format!("{}summary_ms = 1000\n{RUNTIME}", model_pool(M1)),
+    );
+    let process = Process::start(&config).await.expect("process");
+    let (loads, loading) = oneshot::channel::<()>();
+    let launching = tokio::spawn({
+        let (process, spec) = (process.clone(), spec.clone());
+        async move {
+            config
+                .launch(&process, "d", SEGMENTS, &spec, async {
+                    let _ = loading.await;
+                    Ok(())
+                })
+                .await
+                .map(drop)
+        }
+    });
+    let deadline = Instant::now() + WAIT;
+    while model_hub.store().get(process.instance_id()).is_none() {
+        assert!(Instant::now() < deadline, "the sender never registered");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    sink.process.stop();
+    sink.ended(WAIT).await.expect("the other sender left");
+    let entry = &entries[0];
+    entry.body.send_replace(true);
+    readiness.drain().await.expect("the pool drains");
+    let leave = tokio::time::timeout(BOUND + WAIT, hook.started.recv())
+        .await
+        .expect("the hook started in time")
+        .expect("the hook ran");
+    assert_eq!(leave.cause(), LeaveCause::PoolDrain);
+    stays_pending(&leave, "a sender still loading has promised nothing").await;
+
+    process.stop();
+    let _ = tokio::time::timeout(WAIT, launching).await;
+    drop(loads);
+    entry.body.send_replace(false);
+    hook.finish(Handoff::Done);
+    for entry in entries {
+        entry.ended(WAIT * 2).await.expect("the entry drained");
+    }
     first.stop().await;
 }

@@ -340,7 +340,7 @@ impl Observer {
                     || (parent.as_ref().is_none_or(Parent::avoids)
                         && asker.all_avoid(me, &senders).await?);
                 let inside = match pool {
-                    Some(pool) if self.hooked && pool.unfollowed_entry() => {
+                    Some(pool) if self.hooked && pool.unretired_entry() && pool.unfollowed() => {
                         pool.senders_detached(asker).await?
                     }
                     _ => false,
@@ -366,7 +366,9 @@ impl Observer {
                 avoided = Some(Instant::now());
                 // Read again: the bound may have passed since the question.
                 let routing = parent.as_ref().map_or(Routing::Confirmed, Parent::routing);
-                route(&self.routes, routing);
+                if !pool.is_some_and(PoolDrain::unretired_entry) {
+                    route(&self.routes, routing);
+                }
             }
             match unreached {
                 Some(Unreached::Detached) => route(&self.routes, Routing::Confirmed),

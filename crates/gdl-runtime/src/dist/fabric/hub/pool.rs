@@ -307,11 +307,13 @@ impl PoolDrain {
         self.learned.borrow().unfollowed
     }
 
-    /// Whether this is an entry instance that no pool follows and that did
-    /// not retire, so that no sender in its own pool has been told to avoid
-    /// it: what is left to confirm is that they detached.
-    pub(crate) fn unfollowed_entry(&self) -> bool {
-        matches!(self.role, Role::Entry { .. }) && self.retired.get().is_none() && self.unfollowed()
+    /// Whether this is an entry instance that did not retire, as one that
+    /// its pool's drain stopped does not. No sender was told to avoid it,
+    /// so (A) says nothing of it: a sender still loading is left out of
+    /// (A), and will route here. Only that no pool follows it, and that
+    /// the senders in its own pool detached, confirm it.
+    pub(crate) fn unretired_entry(&self) -> bool {
+        matches!(self.role, Role::Entry { .. }) && self.retired.get().is_none()
     }
 
     /// The instance retired now, if it had not already.
