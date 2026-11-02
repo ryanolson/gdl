@@ -236,6 +236,15 @@ pub struct Retiring {
     /// Its leave hooks' worst outcome, as its `/metrics` last said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<Handoff>,
+    /// Its pod's container restarts, summed, when the scaler stored its
+    /// retire step: a count that has changed since is a new process,
+    /// which was never asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarts: Option<i64>,
+    /// Its container restarted after it was asked, which ended its hold:
+    /// it goes on its SIGTERM, as in signal mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restarted: bool,
 }
 
 /// Where a victim's removal is. The scaler stores each phase before the

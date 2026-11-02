@@ -408,6 +408,7 @@ impl Pools for Fake {
                     terminating: false,
                     routable: None,
                     system_port: None,
+                    restarts: 0,
                 });
             }
         }

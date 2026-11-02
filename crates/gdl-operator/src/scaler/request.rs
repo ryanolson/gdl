@@ -23,6 +23,10 @@ use crate::{Handoff, Outcome, Retiring, RetiringPhase};
 /// hub has not taken a retire request `drainBound` after it was stored.
 pub(super) const RETIRE_REFUSED: &str = "RetireRefused";
 
+/// The reason of the event, and the word in `status.last`'s reason, when
+/// a victim's container restarted during its hold.
+pub(super) const RESTARTED_DURING_HOLD: &str = "RestartedDuringHold";
+
 impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     /// Ask the hub of `kept[at]`'s pool, whose pod is `pod`, to retire its
     /// instance, waiting for it to take the request at most `bound`. A victim leaving its Service first reads its instance's
@@ -61,6 +65,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             victim.instance_id = Some(id);
             victim.incarnation = Some(incarnation);
             victim.asked = Some(rfc3339(self.now_ms));
+            victim.restarts = Some(pod.restarts);
             self.ahead(kept).await?;
         } else if let Some((id, incarnation)) = registration.clone()
             && (Some(&id), Some(incarnation))
@@ -136,46 +141,25 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     }
 
     /// Whether `victim`, whose hub took its retire request, whose pod is
-    /// `pod`, is done: its hub lists the instance it asked `drained`, or
-    /// lists no instance in the pod, and its pod's `/metrics` shows no
-    /// leave hook still pending; or `bound` has passed since the hub took
-    /// the request. What its `/metrics` says is kept in `victim`.
-    ///
-    /// Another registration in the pod, such as a container that
-    /// restarted, is an instance that was never asked: the victim goes
-    /// back to `retiring` with it, so that it is asked before the pod
-    /// goes, and its bound starts again from its acceptance.
+    /// `pod`, is done: its hub lists the registration it asked, by its id
+    /// and incarnation, `drained`, or no longer lists it, and its pod's
+    /// `/metrics` shows no leave hook still pending; or `bound` has passed
+    /// since the hub took the request. What its `/metrics` says is kept in
+    /// `victim`. A registration that left while the pod did not restart
+    /// has drained: an instance leaves only after its drain. One whose pod
+    /// restarted never reaches here ([`Run::restarted`]).
     pub(super) async fn hold(
         &mut self,
         victim: &mut Retiring,
         pod: &PodView,
         bound: Duration,
     ) -> bool {
-        let listed = self.cx.probe.instances(&self.spec.pool).await;
-        let drained = match listed.as_ref().map(|list| instance_of(Some(list), pod)) {
-            Err(_) => false,
-            Ok(None) => true,
-            Ok(Some(instance)) => {
-                let asked = victim.instance_id.clone().zip(victim.incarnation);
-                match instance.registration() {
-                    Some(registration) if Some(&registration) != asked.as_ref() => {
-                        tracing::info!(
-                            pod = %victim.pod,
-                            instance = %registration.0,
-                            incarnation = registration.1,
-                            "another registration in the victim's pod; it is asked again"
-                        );
-                        victim.phase = RetiringPhase::Retiring;
-                        victim.instance_id = Some(registration.0);
-                        victim.incarnation = Some(registration.1);
-                        victim.asked = Some(rfc3339(self.now_ms));
-                        victim.retired = None;
-                        victim.handoff = None;
-                        return false;
-                    }
-                    _ => instance.phase == "drained",
-                }
-            }
+        let asked = victim.instance_id.clone().zip(victim.incarnation);
+        let drained = match (self.cx.probe.instances(&self.spec.pool).await, asked) {
+            (Ok(list), Some((id, incarnation))) => list
+                .by_registration(&id, incarnation)
+                .is_none_or(|instance| instance.phase == "drained"),
+            _ => false,
         };
         let read = match (pod.ip.as_deref(), pod.system_port) {
             (Some(ip), Some(port)) => self.cx.probe.metrics(ip, port).await.ok(),
@@ -214,6 +198,32 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             reported,
             "the victim's drain bound passed; its removal goes on"
         );
+        true
+    }
+
+    /// Whether `victim`, asked to retire, whose pod is `pod`, has a
+    /// container that restarted since: a new process, which was never
+    /// asked. A restart ends the hold, and the victim goes on its SIGTERM,
+    /// as in signal mode, which retires and drains the new process; it
+    /// loses only the hold. The first time, its hooks' outcome is
+    /// `unreported`, and an event says so.
+    pub(super) async fn restarted(&mut self, victim: &mut Retiring, pod: &PodView) -> bool {
+        if victim.asked.is_none() || victim.restarts.is_none_or(|at| at == pod.restarts) {
+            return false;
+        }
+        if !victim.restarted {
+            victim.restarted = true;
+            victim.handoff = Some(Handoff::Unreported);
+            let note = format!(
+                "victim `{}` restarted during its hold; it goes on its SIGTERM, as in signal mode",
+                victim.pod
+            );
+            tracing::info!(pod = %victim.pod, "{note}");
+            self.cx
+                .cluster
+                .warn(self.scaler, RESTARTED_DURING_HOLD, &note)
+                .await;
+        }
         true
     }
 

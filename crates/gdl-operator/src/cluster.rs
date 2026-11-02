@@ -125,6 +125,9 @@ pub struct PodView {
     /// The port of its container port named `system`, where it serves
     /// `/metrics`.
     pub system_port: Option<u16>,
+    /// Its containers' restart counts, summed: a restart starts a new
+    /// process in the same pod.
+    pub restarts: i64,
 }
 
 impl PodView {
@@ -163,6 +166,12 @@ impl PodView {
                 .and_then(|labels| labels.get(ROUTABLE))
                 .map(|value| value == "true"),
             system_port,
+            restarts: status
+                .container_statuses
+                .iter()
+                .flatten()
+                .map(|container| i64::from(container.restart_count))
+                .sum(),
         })
     }
 }

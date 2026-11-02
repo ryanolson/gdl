@@ -87,13 +87,14 @@ pub struct InstanceLoad {
 }
 
 impl Instances {
-    /// The member whose instance id is `id`.
-    pub fn by_id(&self, id: &str) -> Option<&Instance> {
+    /// The member whose current registration is `id` in `incarnation`.
+    pub fn by_registration(&self, id: &str, incarnation: u64) -> Option<&Instance> {
         self.instances.iter().find(|instance| {
-            instance
-                .peer
-                .as_ref()
-                .is_some_and(|peer| peer.instance_id == id)
+            instance.incarnation == Some(incarnation)
+                && instance
+                    .peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.instance_id == id)
         })
     }
 

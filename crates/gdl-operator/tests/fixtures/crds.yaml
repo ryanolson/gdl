@@ -369,6 +369,16 @@
                           "description": "Its pod's name.",
                           "type": "string"
                         },
+                        "restarted": {
+                          "description": "Its container restarted after it was asked, which ended its hold:\nit goes on its SIGTERM, as in signal mode.",
+                          "type": "boolean"
+                        },
+                        "restarts": {
+                          "description": "Its pod's container restarts, summed, when the scaler stored its\nretire step: a count that has changed since is a new process,\nwhich was never asked.",
+                          "format": "int64",
+                          "nullable": true,
+                          "type": "integer"
+                        },
                         "retired": {
                           "description": "When its hub took the retire request, RFC 3339: the drain bound\ncounts from here.",
                           "nullable": true,

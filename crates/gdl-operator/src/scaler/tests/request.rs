@@ -494,46 +494,154 @@ async fn the_drain_bound_counts_from_the_hubs_acceptance() {
     assert_eq!(fake.state().replicas, 2, "at the bound");
 }
 
-/// F1: after the hub took the request, the victim's container restarts in
-/// the same pod and registers as a new instance, which was never asked.
-/// The earlier instance's absence is not a drain: the new registration is
-/// recorded and asked before the pod goes.
+/// The fake's hub listing `entries`: each one's instance id, the pod
+/// number whose IP it is at, its incarnation, and its phase, in order.
+fn list_at(fake: &Fake, entries: &[(&str, u32, u64, &str)]) {
+    let instances = entries
+        .iter()
+        .map(|(id, n, incarnation, phase)| {
+            serde_json::json!({
+                "segment": "front", "peer": {"instance_id": id, "worker_address": []},
+                "addresses": [format!("10.0.0.{n}:7000")], "phase": phase,
+                "incarnation": incarnation,
+            })
+        })
+        .collect::<Vec<_>>();
+    *fake.instances.lock().expect("instances") = Some(
+        serde_json::from_value(serde_json::json!({ "instances": instances })).expect("a list"),
+    );
+}
+
+/// The victim's container restarts during the hold: a new process, which
+/// was never asked, while the earlier registration is still listed at
+/// the pod's IP and says `drained`. A restart ends the hold. The victim
+/// goes on its SIGTERM at once, as in signal mode, and says why; nothing
+/// the earlier registration or the new process shows counts as its
+/// drain or its hooks' outcome.
 #[tokio::test]
-async fn a_new_registration_in_the_pod_while_draining_is_asked_before_the_pod_goes() {
+async fn a_restart_during_the_hold_ends_it() {
     let fake = three();
+    hooks(&fake, 2, &[("kv", "pending")]);
     let spec = request(2);
     once(&fake, &spec, 0).await;
     assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
-    {
-        let mut instances = fake.instances.lock().expect("instances");
-        let listed = &mut instances.as_mut().expect("a list").instances[1];
-        listed.peer = serde_json::from_value(serde_json::json!({"instance_id": "i-9"})).ok();
-        listed.incarnation = Some(9);
-        listed.phase = "ready".into();
-        listed.retire_requested = false;
-    }
+    assert_eq!(victim(&fake).restarts, Some(0));
+    fake.state().pods[1].view.restarts = 1;
+    fake.leave.lock().expect("leave").clear();
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-2", 2, 2, "drained"),
+            ("i-9", 2, 9, "ready"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
     fake.take_writes();
     once(&fake, &spec, 1_000).await;
-    let replicas = fake.state().replicas;
-    assert_eq!(replicas, 3, "{:?}", fake.take_writes());
-    let recorded = victim(&fake);
     assert_eq!(
-        (recorded.instance_id.as_deref(), recorded.incarnation),
-        (Some("i-9"), Some(9))
+        fake.take_writes(),
+        ["pod-2 cost Some(-2147483648)", "replicas 2"],
+        "at once, and never asked"
     );
-    assert_eq!(recorded.phase, RetiringPhase::Retiring);
+    let gone = victim(&fake);
+    assert!(gone.restarted);
+    assert_eq!(gone.handoff, Some(Handoff::Unreported));
+    assert_eq!(
+        *fake.warned.lock().expect("warned"),
+        ["RestartedDuringHold"]
+    );
+    fake.settle(false);
+    fake.exit();
+    list(&fake, &[(1, "ready"), (3, "ready")]);
     once(&fake, &spec, 2_000).await;
-    assert_eq!(fake.take_writes(), ["retire i-9 9"]);
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(last.outcome, Outcome::Removed);
+    assert!(
+        last.reason.contains("restartedDuringHold"),
+        "{}",
+        last.reason
+    );
+    assert_eq!(last.handoff, Some(Handoff::Unreported));
+}
+
+/// A commit stored and not written, then a restart before it is taken
+/// again: the restart is said, and the commit goes on, as in signal mode.
+#[tokio::test]
+async fn a_restart_before_a_stored_commit_is_taken_again_is_said() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    // The commit was stored, and its cost and count never written.
+    fake.state().status.as_mut().expect("a status").retiring[0].phase = RetiringPhase::Committing;
+    fake.state().pods[1].view.restarts = 2;
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-9", 2, 9, "ready"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    fake.take_writes();
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(
+        fake.take_writes(),
+        ["pod-2 cost Some(-2147483648)", "replicas 2"]
+    );
+    assert!(victim(&fake).restarted);
+    assert_eq!(
+        *fake.warned.lock().expect("warned"),
+        ["RestartedDuringHold"]
+    );
+}
+
+/// The hold reads only the registration it asked, by its id and
+/// incarnation: another at the pod's IP that says `drained` is not its
+/// drain, and is not asked.
+#[tokio::test]
+async fn the_hold_reads_only_the_registration_it_asked() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-0", 2, 1, "drained"),
+            ("i-2", 2, 2, "retired"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    fake.take_writes();
+    once(&fake, &spec, 1_000).await;
+    assert!(fake.take_writes().is_empty());
     assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
-    fake.instances
-        .lock()
-        .expect("instances")
-        .as_mut()
-        .expect("a list")
-        .instances[1]
-        .phase = "drained".into();
-    once(&fake, &spec, 3_000).await;
-    assert_eq!(fake.state().replicas, 2, "the new registration drained");
+    assert_eq!(victim(&fake).instance_id.as_deref(), Some("i-2"));
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-0", 2, 1, "drained"),
+            ("i-2", 2, 2, "drained"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(fake.state().replicas, 2);
+}
+
+/// The registration it asked has left the hub and the pod did not
+/// restart: the instance exits only after its drain, so it has drained.
+#[tokio::test]
+async fn a_registration_that_left_without_a_restart_has_drained() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    list(&fake, &[(1, "ready"), (3, "ready")]);
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    assert!(!victim(&fake).restarted);
 }
 
 /// F2: the Deployment is made again under its name and keeps its pods

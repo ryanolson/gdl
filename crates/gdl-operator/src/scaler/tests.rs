@@ -185,6 +185,7 @@ impl State {
                 terminating: false,
                 routable: Some(true),
                 system_port: Some(9090),
+                restarts: 0,
             },
             cost: None,
             routable: true,

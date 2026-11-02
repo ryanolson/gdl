@@ -392,7 +392,9 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 }
             }
             let bound = bound.unwrap_or_default();
-            if commit && self.request && kept[at].phase == RetiringPhase::Unrouting {
+            if self.restarted(&mut kept[at], pod).await {
+                commit = true;
+            } else if commit && self.request && kept[at].phase == RetiringPhase::Unrouting {
                 commit = false;
                 held = self.ask(&mut kept, at, pod, bound).await?;
             } else if kept[at].phase == RetiringPhase::Retiring {
@@ -589,6 +591,8 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 incarnation,
                 retired: None,
                 handoff: None,
+                restarts: asked_at_once.then_some(pod.restarts),
+                restarted: false,
             });
             tracing::info!(
                 pod = %pod.name,
@@ -893,7 +897,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         Ok(())
     }
 
-    fn finish(&mut self, victim: Retiring, outcome: Outcome, deleted: String, reason: String) {
+    fn finish(&mut self, victim: Retiring, outcome: Outcome, deleted: String, mut reason: String) {
+        if victim.restarted {
+            reason.push_str("; restartedDuringHold: its container restarted during the hold, so it went on its SIGTERM, as in signal mode");
+        }
         let since = millis(&victim.since).unwrap_or(self.now_ms);
         tracing::info!(pod = %victim.pod, ?outcome, %reason, handoff = ?victim.handoff, "a removal ended");
         self.status.last = Some(Last {
