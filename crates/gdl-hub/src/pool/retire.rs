@@ -75,6 +75,18 @@ impl Requests {
 
     /// Ask `id`, in its registration `incarnation`, to retire, unless the
     /// pool `draining`: the request to send, when it is new.
+    ///
+    /// The incarnation fences a registration only within this hub
+    /// process: the in-memory store numbers them again from the start
+    /// after a restart. That is enough because an id never registers
+    /// again under a restarted hub. velo gives each process a new id,
+    /// a process registers only at its start, and a lost lease stops it
+    /// (`docs/src/concepts/lifecycle.md`, "A lost lease";
+    /// `a_replaced_hub_ends_the_lease_at_once` in gdl-runtime's
+    /// `tests/hub.rs`). So a request decided before a restart names an
+    /// id the restarted hub does not hold, and is refused 404. A durable
+    /// store that kept registrations across a restart would need the
+    /// hub's epoch in the fence as well.
     pub(super) fn request(
         &mut self,
         id: InstanceId,
