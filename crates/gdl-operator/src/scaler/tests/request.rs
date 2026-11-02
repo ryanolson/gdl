@@ -787,3 +787,32 @@ async fn a_victim_gone_after_the_mode_changed_no_longer_needs_a_bound() {
     once(&fake, &spec, 3_000).await;
     assert_eq!(fake.take_writes(), ["replicas 4"]);
 }
+
+/// F2 of the fourth review: in request mode, with the bound removed, a
+/// victim whose container was made again still ends its hold at once: a
+/// restart needs no bound. A new victim is not asked without one.
+#[tokio::test]
+async fn a_restart_ends_the_hold_in_request_mode_without_a_bound() {
+    let fake = three();
+    let mut spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    spec.drain_bound = None;
+    fake.state().pods[1].view.containers = vec!["containerd://again".into()];
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    assert!(victim(&fake).restarted);
+    assert_eq!(victim(&fake).handoff, Some(Handoff::Unreported));
+    // The victim is gone; no other is asked without a bound.
+    fake.settle(false);
+    fake.exit();
+    list(&fake, &[(1, "ready"), (3, "ready")]);
+    spec.replicas = Some(1);
+    fake.take_writes();
+    assert_eq!(once(&fake, &spec, 2_000).await, BLOCKED);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("True".into(), "DrainBoundRequired".into())
+    );
+    assert!(fake.take_writes().is_empty());
+}

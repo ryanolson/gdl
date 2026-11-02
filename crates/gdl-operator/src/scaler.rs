@@ -207,16 +207,12 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let bound = spec
             .drain_bound()
             .map_err(|e| Stop::Blocked("BadDuration", format!("drainBound: {e}")))?;
-        let unbounded = || {
-            Stop::Blocked(
-                "DrainBoundRequired",
-                "`retire: request` waits for a victim at most `drainBound`, which is not set"
-                    .to_string(),
-            )
-        };
-        if self.request && bound.is_none() {
-            return Err(unbounded());
-        }
+        let why = "`retire: request` waits for a victim at most `drainBound`, which is not set";
+        let unbounded = || Stop::Blocked("DrainBoundRequired", why.to_string());
+        // Request mode without a bound asks no victim. A victim already
+        // asked is followed first: one that has gone, or whose container
+        // restarted, needs no bound.
+        let unasked = self.request && bound.is_none();
         let target = self
             .cx
             .cluster
@@ -403,7 +399,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 commit = true;
             } else if commit && self.request && kept[at].phase == RetiringPhase::Unrouting {
                 commit = false;
-                held = self.ask(&mut kept, at, pod, bound).await?;
+                held = match unasked {
+                    true => Some(("DrainBoundRequired", why.to_string())),
+                    false => self.ask(&mut kept, at, pod, bound).await?,
+                };
             } else if kept[at].phase == RetiringPhase::Retiring {
                 held = self.ask(&mut kept, at, pod, bound).await?;
             } else if kept[at].phase == RetiringPhase::Draining {
@@ -437,6 +436,8 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             let room = drains.saturating_sub(kept.len());
             if excess == 0 || room == 0 {
                 // Nothing to remove, or the drains in progress pace it.
+            } else if unasked {
+                blocked = Some(("DrainBoundRequired", why.to_string()));
             } else if target.rolling {
                 blocked = Some((
                     "RolloutInProgress",
