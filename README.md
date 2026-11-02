@@ -97,6 +97,8 @@ A graph that is not cut costs no encoding. A cut costs one encode and one decode
 
 ## Build and test
 
+The Python scripts (the book's heading check and the benchmark runners) run with [uv](https://docs.astral.sh/uv/getting-started/installation/), which reads each script's header and picks the interpreter. Install uv once; no other Python setup is needed.
+
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -106,7 +108,7 @@ cargo nextest run --workspace --no-run              # build first: the timeout t
 timeout 300 cargo nextest run --workspace
 timeout 60 cargo test --workspace --doc             # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
-bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, python3
+bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, uv
 bash scripts/dynamodb-local.sh                      # the DynamoDB directory and the hub on it against DynamoDB Local; needs Docker
 bash scripts/kubeconform.sh                         # the pinned Kubernetes objects against pinned schemas; INSTALL_TOOLS=1 fetches them
 ```

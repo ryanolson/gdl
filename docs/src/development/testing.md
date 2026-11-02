@@ -14,6 +14,8 @@ timeout <limit> cargo test --workspace --doc        # doctests: nextest does not
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page, outside cargo
 (cd examples/http && timeout <limit> cargo nextest run)   # the example workspaces are outside the root workspace
 (cd examples/api && timeout <limit> cargo nextest run)
+timeout 60 uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/book/tests    # the book's heading check
+timeout 60 uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/bench/tests   # the benchmark runner (needs gcc)
 bash scripts/kubeconform.sh                          # the pinned Kubernetes objects, outside cargo
 bash scripts/images-local.sh                         # a fleet's images, pushed to a local registry (Docker, network)
 bash scripts/kind-fleet.sh                           # deploy and down on a kind cluster (Docker, network, kubectl, kind)

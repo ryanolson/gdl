@@ -713,4 +713,4 @@ cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/re
 - **A request with one chunk takes 9% less.** A streamed request takes 8% less: its items also no longer copy through `UntilError`, and `items/gdl-streamed` takes 4% less.
 - **`items/gdl` does not change** beyond its spread. Its request is a `u64`.
 - **The runtime's segment rows do not change** beyond their spread. `requests sizes 0` prints 11,504 B for the front's call future at both commits.
-- **The crossing does not change.** `python3 scripts/bench/items.py count` (cores 16 to 23, five rounds) gives 8,937 and 9,117 user instructions per item at 16 B, and 10,334 and 10,182 at 1 KiB, inside the band of [crossing-item-send](hot-paths.md#crossing-item-send).
+- **The crossing does not change.** `uv run --script scripts/bench/items.py count` (cores 16 to 23, five rounds) gives 8,937 and 9,117 user instructions per item at 16 B, and 10,334 and 10,182 at 1 KiB, inside the band of [crossing-item-send](hot-paths.md#crossing-item-send).

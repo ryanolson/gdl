@@ -145,7 +145,7 @@ The two builds are the `WireItem` frame at `523afc0` and the byte path at `cadd2
 **Reproduce.** On Linux with `perf` allowed (`perf_event_paranoid` 1 or lower):
 
 ```bash
-python3 scripts/bench/items.py count --ref main=<base commit> --ref bytepath=<change commit> --out <new directory> --cpus 16-23 --rounds 7
+uv run --script scripts/bench/items.py count --ref main=<base commit> --ref bytepath=<change commit> --out <new directory> --cpus 16-23 --rounds 7
 ```
 
 Each ref must contain the item shapes of `crates/gdl-runtime/benches/requests.rs`. The script builds each ref in a temporary worktree under `target/`, prints the table above, and writes each round to `rounds.json`.
@@ -184,7 +184,7 @@ The builds are the ones the instruction counts used: main is `d1fa15a`, and in p
 **Reproduce.**
 
 ```bash
-python3 scripts/bench/items.py profile --ref main=<commit> --out <new directory> --shape lean-16 --count 100000 --period 250000 --stack 8192 --cpus 16-23
+uv run --script scripts/bench/items.py profile --ref main=<commit> --out <new directory> --shape lean-16 --count 100000 --period 250000 --stack 8192 --cpus 16-23
 ```
 
 The script prints the step table, the leaf functions, and the project functions by inclusive share, and writes them to `steps.txt`.
@@ -247,7 +247,7 @@ timeout 120 cargo nextest run -p gdl-runtime --test item_allocs --no-capture
 ```bash
 CARGO_TARGET_DIR=/path/to/base-target cargo bench --locked --manifest-path /path/to/base/Cargo.toml -p gdl-runtime --bench codecs --no-run
 CARGO_TARGET_DIR=/path/to/change-target cargo bench --locked -p gdl-runtime --bench codecs --no-run
-python3 scripts/bench/codecs.py --base /path/to/base-binary --change /path/to/change-binary --out /path/to/new-results --cpu 5 --rounds 10
+uv run --script scripts/bench/codecs.py --base /path/to/base-binary --change /path/to/change-binary --out /path/to/new-results --cpu 5 --rounds 10
 timeout 60 cargo nextest run -p gdl-runtime --test allocs --test wire
 ```
 

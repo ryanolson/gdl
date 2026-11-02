@@ -8,7 +8,7 @@ Without care the cost grew with the product of two lengths in a source file, not
 
 ```bash
 cargo build --release -p gdl-gen
-python3 gen.py <dir> <shape> <a> <b>   # GDL_REPO is the checkout whose gdl-message the crates use
+uv run --script gen.py <dir> <shape> <a> <b>   # GDL_REPO is the checkout whose gdl-message the crates use
 /usr/bin/time -l target/release/cargo-gdl gdl extract <dir>/<shape>-<a>-<b> --target-dir <scratch>
 ```
 
@@ -23,6 +23,10 @@ python3 gen.py <dir> <shape> <a> <b>   # GDL_REPO is the checkout whose gdl-mess
 The shapes: `attr a b` is one `use` group of `b` names with a doc attribute of `a` bytes. `prefix a b` is one group of `b` names under a prefix of `a` segments. `msgs a b` is `a` messages with a hand-written `Deserialize`, as generated serde code writes it, and `b` plain impls. `derived a 0` is the control: messages that derive both serde traits, which the wire check never walks impls for.
 
 ```python
+# /// script
+# requires-python = ">=3.8"
+# dependencies = []
+# ///
 import os, sys
 repo = os.environ["GDL_REPO"]
 root, shape, a, b = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])

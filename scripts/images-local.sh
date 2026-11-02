@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a fleet's images with `cargo gdl images`, push them to a local registry, and check them, outside the
-# default suite. It needs Docker with buildx, and network access for the image builds (crates.io, GitHub, and
+# default suite. It needs Docker with buildx, uv, and network access for the image builds (crates.io, GitHub, and
 # Debian's packages).
 #
 # It starts a `registry:2` on a free loopback port and writes the api example's spec in two classes, and a fleet
@@ -32,6 +32,8 @@ fail() {
   echo "images-local.sh: $*" >&2
   exit 1
 }
+
+command -v uv >/dev/null || fail "uv is not on the PATH; install it from https://docs.astral.sh/uv/getting-started/installation/"
 
 case "${PLATFORM}" in
   linux/amd64) machine="3e00" arch=amd64 ;;   # ELF e_machine, little-endian: EM_X86_64
@@ -135,7 +137,7 @@ for image in "${pushed[@]}"; do
     "http://${registry}/v2/${repository}/manifests/${tag}" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')"
   [[ "${served}" == "${digest}" ]] || fail "${reference}: printed ${digest}, the registry serves ${served}"
   architecture="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["architecture"])')"
+    | uv run -q --no-project --python '>=3.8' python -I -c 'import json, sys; print(json.load(sys.stdin)["architecture"])')"
   [[ "${architecture}" == "${arch}" ]] || fail "${reference}: architecture ${architecture}, not ${arch}"
   # The binary itself: its ELF machine, and, for a segment, mimalloc. A container that is created and never
   # started runs nothing, whatever its platform.

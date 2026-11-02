@@ -20,12 +20,20 @@ jobs:
     name: Book
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Run the scripts on uv's own Python, never the runner's.
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 #v6.0.1
       with:
         persist-credentials: false
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: "0.11.14"
+        enable-cache: false
     - name: Test the heading check
-      run: timeout 60 python3 -m unittest discover -s scripts/book/tests
+      run: timeout 120 uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/book/tests
     - name: Build book and check links
       env:
         INSTALL_TOOLS: "1"

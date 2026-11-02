@@ -12,6 +12,8 @@ MDBOOK_LINKCHECK_VERSION="0.7.7"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+command -v uv >/dev/null || { echo "build-book.sh: uv is not on the PATH; install it from https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+
 if [[ "${INSTALL_TOOLS:-0}" == "1" && "$(uname -m)" != "x86_64" ]]; then
   # mdbook-linkcheck publishes no release binary for other architectures, so build all three.
   for tool in "mdbook@${MDBOOK_VERSION}" "mdbook-mermaid@${MDBOOK_MERMAID_VERSION}" "mdbook-linkcheck@${MDBOOK_LINKCHECK_VERSION}"; do
@@ -45,4 +47,4 @@ mdbook build "${root}/docs"
 test -f "${root}/docs/book/html/index.html"
 
 # mdbook-linkcheck does not check the heading after `#`; this does.
-python3 "${root}/scripts/book/anchors.py" "${root}/docs/book/html"
+uv run -q --script "${root}/scripts/book/anchors.py" "${root}/docs/book/html"
