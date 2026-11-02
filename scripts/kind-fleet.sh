@@ -32,7 +32,7 @@
 # succeeds, that every pool is healthy, which needs the global pool to find and follow both model pools through the
 # tables, and that a request is answered; then that `down` leaves no object with the fleet's label. The hub's image
 # is then built with the hub's `dynamodb` feature, from a gdl that has it: with LOCAL=1, the working tree; else
-# GDL_REV names a commit of the spec's `[gdl] git` that does (examples/api/deploy.toml pins an older one). The case
+# GDL_REV names a commit of the spec's `[gdl] git` that does. The case
 # then removes a model pool, which the next deploy drains and deletes once its own hub says that its record is
 # withdrawn, and takes the fleet down. kind runs one cluster, so the case covers only
 # the hubs of the Local's own cluster, which reach it at its Service, not the pod-IP address of other clusters.

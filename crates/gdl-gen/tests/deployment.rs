@@ -608,19 +608,18 @@ fn waits_for_its_hub(rev: &str) -> bool {
 /// Kubernetes starts a pool's hub and segments together, so a segment of a
 /// pin without the wait exits at its first failed request, restarts on
 /// every first deploy, and fails the restart check of `scripts/kind-fleet.sh`.
+/// `examples/film/deploy.toml` is not held to this: its pin must be the gdl
+/// that its demo crates depend on (`docs/src/operations/limitations.md`).
 #[test]
-#[ignore = "the pin predates the hub wait: the mirror has no commit with it"]
-fn the_deployment_pins_carry_the_hub_wait() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for path in ["examples/api/deploy.toml", "examples/film/deploy.toml"] {
-        let text = std::fs::read_to_string(root.join(path)).expect("deploy spec");
-        let spec: toml::Table = toml::from_str(&text).expect("deploy spec");
-        let rev = spec["gdl"]["rev"].as_str().expect("[gdl] rev");
-        assert!(waits_for_its_hub(rev), "{path} pins {rev}");
-    }
+fn the_deployment_pin_carries_the_hub_wait() {
+    let rev = pinned_rev();
+    assert!(
+        waits_for_its_hub(&rev),
+        "examples/api/deploy.toml pins {rev}"
+    );
 }
 
-/// The control of [`the_deployment_pins_carry_the_hub_wait`]: this tree has
+/// The control of [`the_deployment_pin_carries_the_hub_wait`]: this tree has
 /// the wait, so a rename of the setting cannot pass for an old pin.
 #[test]
 fn the_hub_wait_is_found_in_this_tree() {
