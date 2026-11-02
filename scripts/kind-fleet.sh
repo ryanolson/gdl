@@ -62,7 +62,8 @@
 # TOOLS_DIR holds kind (default: .k8s-tools at the repository's root, which git ignores). TIMEOUT bounds each
 # `cargo gdl` run in seconds (default 1800: the first deploy builds three release binaries with fat LTO). The images
 # are built for the host's platform, which the kind node runs. On exit it stops the port-forward, deletes the
-# cluster and the registry, and removes the scratch directory. It never reads or changes ~/.kube/config: the
+# cluster and the registry, and removes the scratch directory; with KEEP_ON_FAIL=1 a failed run leaves all three, and
+# names them, so that its pods can be read. It never reads or changes ~/.kube/config: the
 # cluster's kubeconfig is in the scratch directory.
 set -euo pipefail
 
@@ -143,8 +144,13 @@ name="gdl-kind-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 registry_container=""
 forward=""
 cleanup() {
+  local status=$?
   if [[ -n "${forward}" ]]; then
     kill "${forward}" 2>/dev/null || true
+  fi
+  if [[ "${status}" -ne 0 && "${KEEP_ON_FAIL:-0}" == "1" ]]; then
+    echo "kind-fleet.sh: kept for inspection: KUBECONFIG=${scratch}/kubeconfig kubectl --context kind-${name} ...; remove with: ${kind} delete cluster --name ${name}; docker rm -f ${name}-registry; rm -rf ${scratch}" >&2
+    return
   fi
   "${kind}" delete cluster --name "${name}" --kubeconfig "${scratch}/kubeconfig" >/dev/null 2>&1 || true
   if [[ -n "${registry_container}" ]]; then
