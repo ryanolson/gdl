@@ -113,7 +113,8 @@ pub(super) struct Observer {
     /// What a hook reads of the answers.
     routes: watch::Sender<Routing>,
     /// Whether a hook reads them, so that a stop with none asks nothing
-    /// only a hook would use.
+    /// only a hook would use. Read only when the hub feature is on.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
     hooked: bool,
 }
 
