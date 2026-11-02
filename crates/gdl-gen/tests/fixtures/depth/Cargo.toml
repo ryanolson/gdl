@@ -1,0 +1,5 @@
+# A node whose build is deep, in a segment of its own: read and built by
+# `tests/depth.rs`, never by the repository's workspace.
+[workspace]
+members = ["messages", "nodes"]
+resolver = "3"

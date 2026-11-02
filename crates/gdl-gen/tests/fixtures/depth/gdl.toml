@@ -1,0 +1,16 @@
+# One segment hosts the source and `Deep`, so that the segment's build
+# awaits `Deep`'s.
+[graph]
+path = "depth.gdl"
+
+[messages]
+crates = ["messages"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.all]
+nodes = ["Front", "Deep"]

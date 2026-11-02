@@ -8,6 +8,15 @@ Every segment binary repeats one lifecycle: the arguments and `--healthcheck`, t
 
 **Why:** code in a runtime function is compiled and tested once. Emitted code is checked only when a generated crate builds. Before this, the service segment's emitted `main` named `Arc` without importing it, and no test built that crate. Anything the runtime later hands a node at construction, such as its metrics, enters through `gdl_runtime::Builder`, so the generated crates do not change again for it.
 
+## A node's build is boxed
+
+`build_node` boxes the future of each node's `Build::build` before it awaits it, so the generated `build()` holds a pointer to it, not the future.
+
+**Why:** rustc lays out an `async fn` together with every future it holds, and stops past a query depth of 128 (`queries overflow the depth limit`). The `Builder` awaits each node's build inside its scopes: the followed pools, the records, the properties, the KV, the offer gate, and the leave hooks. With the future held inline, each scope's depth added to the depth of every node's own build. A node whose build compiled in its own crate failed in its segment, and adding the leave hooks' scope pushed the global router example's front over the limit (124 levels, then 129). Boxed, the segment's depth no longer depends on any node's build: `crates/gdl-gen/tests/depth.rs` builds a segment whose node is about as deep as its own crate allows. The cost is one allocation per node, selector, and pool policy, once at start.
+
+- **Rejected: a higher `recursion_limit` in each generated crate.** It moves the limit and leaves the sum in place. The next scope, or a deeper node, fails again.
+- **Rejected: one scope for all the build's handles.** It removes a few levels and keeps the node's depth in the sum.
+
 ## Signals before anything is built
 
 `Process::start` registers the SIGINT and SIGTERM handlers, then binds the system listener, then binds the velo node. All three happen before any node is built.

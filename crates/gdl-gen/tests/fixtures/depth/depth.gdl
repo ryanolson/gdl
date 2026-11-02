@@ -1,0 +1,5 @@
+// The front sends each request to a model whose build nests deeply.
+name = "depth", schema = 1;
+source Front: Ask -> stream Answer;
+sink   Deep: Ask -> stream Answer;
+topology: Front => Deep;

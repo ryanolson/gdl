@@ -54,6 +54,7 @@ impl Build for Engine {
 }
 ```
 
+- A `build` that compiles in its own crate compiles in any segment that hosts the node, however deeply its future nests. The segment boxes it.
 - Return from `build` quickly. The segment registers with its deployment once every node is built, so the deployment knows that the process is live while the nodes load.
 - Do slow work in `ready`. The segment announces that it is loaded, and takes requests, only after every node it hosts is ready. The default `ready` returns at once.
 - A node without metrics writes `type Metrics = ();` and takes `(): ()`. A node with metrics names the type in the derive, `#[gdl(metrics = EngineMetrics)]`. [Define node metrics](node-metrics.md) covers that type. [Segment lifecycle](../concepts/lifecycle.md) describes the launch phases.
