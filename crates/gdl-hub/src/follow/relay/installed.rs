@@ -232,11 +232,18 @@ impl Installed {
     ) {
         let (class, pool) = (self.class.clone(), self.pool.clone());
         match event {
-            // That the draining pool has no follower left is for the
+            // That the draining pool has no follower left, or that its hub
+            // holds a retire request for one of its members, is for the
             // pool's own instances, and changes nothing a chooser sees.
             PoolWatchEvent::State {
                 state,
                 unfollowed: true,
+                ..
+            } if state == self.state => {}
+            PoolWatchEvent::State {
+                state,
+                retire: Some(_),
+                ..
             } if state == self.state => {}
             PoolWatchEvent::State { state, .. } => {
                 let hidden = !self.exposes();

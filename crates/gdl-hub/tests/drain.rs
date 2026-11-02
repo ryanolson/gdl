@@ -64,6 +64,7 @@ async fn a_drained_pool_is_draining_at_once_whatever_its_quorum() {
         Some(Some(PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: false,
+            retire: None,
         })),
         "the watch did not say draining by the time the drain was answered"
     );
@@ -73,6 +74,7 @@ async fn a_drained_pool_is_draining_at_once_whatever_its_quorum() {
         Some(Some(PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: true,
+            retire: None,
         }))
     );
     let (record, _) = records.until(PoolState::Draining).await;

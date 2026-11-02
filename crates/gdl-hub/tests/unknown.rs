@@ -378,6 +378,7 @@ async fn a_followed_pool_is_withheld_for_an_unknown_event_until_it_is_read_again
             &serde_json::to_string(&PoolWatchEvent::State {
                 state: PoolState::Degraded,
                 unfollowed: false,
+                retire: None,
             })
             .expect("an event serializes"),
         )
@@ -432,6 +433,7 @@ async fn a_followed_pool_is_withheld_for_an_unknown_event_until_it_is_read_again
         .send(&PoolWatchEvent::State {
             state: PoolState::Degraded,
             unfollowed: false,
+            retire: None,
         })
         .await;
     assert_eq!(
@@ -544,6 +546,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_pool_withheld() {
         .send(&PoolWatchEvent::State {
             state: PoolState::Degraded,
             unfollowed: false,
+            retire: None,
         })
         .await;
     assert_eq!(
@@ -682,6 +685,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
     let degraded = serde_json::to_string(&PoolWatchEvent::State {
         state: PoolState::Degraded,
         unfollowed: false,
+        retire: None,
     })
     .expect("an event serializes");
     let ready = serde_json::to_string(&PoolWatchEvent::Ready {

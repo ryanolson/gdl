@@ -603,6 +603,7 @@ impl Heard {
             PoolWatchEvent::State {
                 state: PoolState::Draining,
                 unfollowed,
+                ..
             } => Self {
                 draining: true,
                 unfollowed,

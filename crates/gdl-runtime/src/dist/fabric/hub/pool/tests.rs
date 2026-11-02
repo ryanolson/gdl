@@ -61,6 +61,7 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
         PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: true,
+            retire: None,
         },
     ];
 

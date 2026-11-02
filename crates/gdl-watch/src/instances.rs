@@ -1,6 +1,7 @@
 //! The list of a pool hub's members, for a controller outside the pool
 //! that chooses which instance to remove: each one's segment, address,
-//! phase, and, for an entry instance, its latest load report.
+//! phase, registration, whether it is asked to retire, and, for an entry
+//! instance, its latest load report.
 
 use std::net::SocketAddr;
 
@@ -48,6 +49,15 @@ pub struct PoolInstance {
     /// that has not reported, or is not usable.
     #[serde(default)]
     pub load: Option<InstanceLoad>,
+    /// The incarnation of its current registration, which the hub tells
+    /// its registrations apart by: a retire request names it
+    /// ([`crate::RETIRE_ROUTE`]). `None` from a hub of an earlier build.
+    #[serde(default)]
+    pub incarnation: Option<u64>,
+    /// Whether the hub holds a retire request for its current
+    /// registration. False from a hub of an earlier build.
+    #[serde(default)]
+    pub retire_requested: bool,
 }
 
 /// The furthest phase a member has announced to its hub, as a service

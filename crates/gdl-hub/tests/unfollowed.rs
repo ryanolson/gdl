@@ -59,6 +59,7 @@ fn unfollowed() -> PoolWatchEvent {
     PoolWatchEvent::State {
         state: PoolState::Draining,
         unfollowed: true,
+        retire: None,
     }
 }
 
@@ -149,6 +150,7 @@ async fn a_draining_pool_says_so_once_its_last_follower_lets_go() {
             == PoolWatchEvent::State {
                 state: PoolState::Draining,
                 unfollowed: false,
+                retire: None,
             }
     })
     .await;
@@ -177,6 +179,7 @@ async fn a_draining_pool_says_so_once_its_last_follower_lets_go() {
                 PoolWatchEvent::State {
                     state: PoolState::Draining,
                     unfollowed: true,
+                    retire: None,
                 }
             ]
         ),
@@ -213,6 +216,7 @@ async fn a_pool_no_one_follows_says_so_as_it_drains() {
         drained.contains(&PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: false,
+            retire: None,
         }),
         "{drained:?}"
     );
@@ -437,6 +441,7 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
             == PoolWatchEvent::State {
                 state: PoolState::Draining,
                 unfollowed: false,
+                retire: None,
             }
     })
     .await;
@@ -508,6 +513,7 @@ async fn a_released_watch_no_longer_counts() {
             == PoolWatchEvent::State {
                 state: PoolState::Draining,
                 unfollowed: false,
+                retire: None,
             }
     })
     .await;
@@ -567,6 +573,7 @@ async fn a_lost_watch_is_never_taken_as_a_release() {
                 == PoolWatchEvent::State {
                     state: PoolState::Draining,
                     unfollowed: false,
+                    retire: None,
                 }
         })
         .await;

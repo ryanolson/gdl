@@ -17,6 +17,7 @@ use velo_hub::axum::{
 };
 use velo_hub::protocol::ErrorCode;
 use velo_hub::store::Removal;
+use velo_hub::velo::InstanceId;
 use velo_hub::{
     AttachContext, Authorized, Committed, Extension, HubError, HubJson, RegistrationView,
     Rejection, StartContext, Txn,
@@ -45,6 +46,7 @@ mod load;
 mod meter;
 mod properties;
 mod publish;
+mod retire;
 mod retiring;
 mod timing;
 
@@ -535,6 +537,30 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// Not capped, as the route is ([`gdl_model::WatchCaps`]).
     pub fn follows(&self) -> FollowsWatch {
         self.relay.watch(None)
+    }
+
+    /// Ask the member `instance`, in its registration `incarnation`, to
+    /// retire ([`gdl_watch::RETIRE_ROUTE`]).
+    fn retire(&self, instance: InstanceId, incarnation: u64) -> Result<(), HubError> {
+        let draining = *self.drain.started().borrow();
+        self.feed
+            .retire(instance, incarnation, draining)
+            .map_err(|refused| match refused {
+                retire::Refused::Unknown => HubError::new(
+                    ErrorCode::NotFound,
+                    format!("instance {instance} is no member of the pool's class"),
+                ),
+                retire::Refused::Stale => HubError::new(
+                    ErrorCode::Conflict,
+                    format!(
+                        "incarnation {incarnation} is not the current registration of instance {instance}"
+                    ),
+                ),
+                retire::Refused::Draining => HubError::new(
+                    ErrorCode::Conflict,
+                    "the pool drains, which already stops every instance",
+                ),
+            })
     }
 
     /// Start the pool's drain, as `POST drain` on the control listener
@@ -1171,6 +1197,7 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
         let lifting = Arc::clone(&self);
         let withdrawing = Arc::clone(&self);
         let zeroing = Arc::clone(&self);
+        let retiring = Arc::clone(&self);
         let relay = Arc::clone(&self.relay);
         let declared = Arc::clone(&self.relay);
         let avoiding = Arc::clone(&self.relay);
@@ -1224,6 +1251,17 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
                             // Not 401 or 404: velo-hub's client drops its
                             // registration on those.
                             .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                    },
+                ),
+            )
+            .route(
+                gdl_watch::RETIRE_ROUTE,
+                post(
+                    move |Path(instance): Path<InstanceId>,
+                          HubJson(retire): HubJson<gdl_watch::Retire>| async move {
+                        retiring
+                            .retire(instance, retire.incarnation)
+                            .map(|()| StatusCode::ACCEPTED)
                     },
                 ),
             )

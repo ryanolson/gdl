@@ -108,6 +108,7 @@ fn state(state: PoolState) -> PoolWatchEvent {
     PoolWatchEvent::State {
         state,
         unfollowed: false,
+        retire: None,
     }
 }
 

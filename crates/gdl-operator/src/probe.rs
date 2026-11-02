@@ -29,6 +29,9 @@ pub struct Instances {
 pub struct Instance {
     /// Its segment.
     pub segment: String,
+    /// Its velo peer, of which the operator reads only the instance id.
+    #[serde(default)]
+    pub peer: Option<Peer>,
     /// The socket addresses its velo TCP transports advertise: under
     /// Kubernetes, its pod's IP.
     #[serde(default)]
@@ -40,6 +43,30 @@ pub struct Instance {
     /// An entry instance's latest load report, while it is ready.
     #[serde(default)]
     pub load: Option<InstanceLoad>,
+    /// The incarnation of its current registration, which a retire
+    /// request names. `None` from a hub of a build from before the retire
+    /// route.
+    #[serde(default)]
+    pub incarnation: Option<u64>,
+    /// Whether its hub holds a retire request for its current
+    /// registration.
+    #[serde(default)]
+    pub retire_requested: bool,
+}
+
+/// A member's velo peer, as the operator reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Peer {
+    /// Its instance id, as text.
+    pub instance_id: String,
+}
+
+impl Instance {
+    /// Its instance id and the incarnation of its registration: what a
+    /// retire request names. `None` from a hub that lists neither.
+    pub fn registration(&self) -> Option<(String, u64)> {
+        Some((self.peer.as_ref()?.instance_id.clone(), self.incarnation?))
+    }
 }
 
 /// An entry instance's latest load report.
@@ -298,7 +325,7 @@ process_cpu_seconds_total 1.5
     fn a_pod_is_its_instance_by_ip() {
         let instances: Instances = serde_json::from_value(serde_json::json!({
             "instances": [
-                {"segment": "engine", "peer": {"ignored": true}, "addresses": ["10.0.0.7:4000"], "phase": "ready",
+                {"segment": "engine", "peer": {"instance_id": "i-7", "worker_address": []}, "addresses": ["10.0.0.7:4000"], "phase": "ready",
                  "load": {"admitted": 2, "limit": 8, "refusals": 0, "age_ms": 10, "kv_committed": 640}},
                 {"segment": "engine", "addresses": ["10.0.0.8:4000"], "phase": "retired"},
                 {"segment": "engine", "addresses": [], "phase": "someLaterPhase"},

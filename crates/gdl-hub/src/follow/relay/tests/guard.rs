@@ -217,6 +217,7 @@ fn run(seed: u64, steps: usize) -> Result<(), (Vec<String>, String)> {
                         PoolWatchEvent::State {
                             state: PoolState::Draining,
                             unfollowed: false,
+                            retire: None,
                         },
                     );
                     truth.drained.insert(of);

@@ -74,6 +74,7 @@ fn unfollowed() -> PoolWatchEvent {
     PoolWatchEvent::State {
         state: PoolState::Draining,
         unfollowed: true,
+        retire: None,
     }
 }
 
@@ -275,6 +276,7 @@ async fn a_drain_of_a_shared_pool_waits_until_every_parent_lets_go() {
             == PoolWatchEvent::State {
                 state: PoolState::Draining,
                 unfollowed: false,
+                retire: None,
             }
     })
     .await;

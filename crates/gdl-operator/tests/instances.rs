@@ -16,6 +16,8 @@ fn instance(phase: InstancePhase, address: &str, load: Option<InstanceLoad>) -> 
         addresses: vec![address.parse().expect("an address")],
         phase,
         load,
+        incarnation: Some(7),
+        retire_requested: phase == InstancePhase::Retired,
     }
 }
 
@@ -53,8 +55,20 @@ fn the_hubs_list_reads_into_the_mirror() {
     let text = serde_json::to_string(&hub).expect("the hub's list encodes");
     let mirror: gdl_operator::Instances = serde_json::from_str(&text).expect("the mirror reads it");
     assert_eq!(mirror.instances.len(), phases.len());
-    for (n, (read, (_, phase))) in mirror.instances.iter().zip(phases).enumerate() {
+    for (n, ((read, listed), (_, phase))) in mirror
+        .instances
+        .iter()
+        .zip(&hub.instances)
+        .zip(phases)
+        .enumerate()
+    {
         assert_eq!(read.segment, "engine");
+        assert_eq!(
+            read.registration(),
+            Some((listed.peer.instance_id.to_string(), 7)),
+            "a retire request names what the hub lists"
+        );
+        assert_eq!(read.retire_requested, phase == "retired");
         assert_eq!(read.phase, phase);
         assert_eq!(
             read.addresses,
@@ -71,6 +85,21 @@ fn the_hubs_list_reads_into_the_mirror() {
         mirror.at("10.0.0.1").map(|i| i.phase.as_str()),
         Some("ready")
     );
+}
+
+/// A hub of a build from before the retire route lists neither the
+/// incarnation nor the request: the mirror reads no registration, and no
+/// request.
+#[test]
+fn a_list_without_registrations_reads_as_none() {
+    let text = serde_json::json!({"instances": [
+        {"segment": "engine", "peer": {"instance_id": InstanceId::new_v4(), "worker_address": []},
+         "addresses": ["10.0.0.1:7000"], "phase": "ready"},
+    ]})
+    .to_string();
+    let mirror: gdl_operator::Instances = serde_json::from_str(&text).expect("the mirror reads it");
+    assert_eq!(mirror.instances[0].registration(), None);
+    assert!(!mirror.instances[0].retire_requested);
 }
 
 #[test]

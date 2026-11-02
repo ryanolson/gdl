@@ -185,6 +185,7 @@ mod tests {
             PoolWatchEvent::State {
                 state: PoolState::Ready,
                 unfollowed: false,
+                retire: None,
             },
             PoolWatchEvent::Load { load: None },
             PoolWatchEvent::Ready {
@@ -334,6 +335,7 @@ mod tests {
         let unfollowed = serde_json::to_string(&PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: true,
+            retire: None,
         })
         .expect("an event serializes");
         assert_eq!(
@@ -345,11 +347,63 @@ mod tests {
         let state = serde_json::to_value(PoolWatchEvent::State {
             state: PoolState::Draining,
             unfollowed: false,
+            retire: None,
         })
         .expect("an event serializes");
         assert_eq!(
             state,
             serde_json::json!({ "event": "state", "state": "draining" })
+        );
+    }
+
+    /// A reader of the build before the retire route reads a retire
+    /// request as the pool's state alone, a known kind, so that nothing
+    /// withholds the pool while the request stands. A hub of that build
+    /// sends a state without the field, which reads as no request.
+    #[test]
+    fn an_earlier_reader_reads_a_retire_request_as_the_state_alone() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            State {
+                state: PoolState,
+                #[serde(default)]
+                unfollowed: bool,
+            },
+        }
+        let instance = InstanceId::new_v4();
+        let request = PoolWatchEvent::State {
+            state: PoolState::Ready,
+            unfollowed: false,
+            retire: Some(crate::RetireRequest {
+                instance,
+                incarnation: 7,
+            }),
+        };
+        let wire = serde_json::to_string(&request).expect("an event serializes");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&wire).expect("JSON"),
+            serde_json::json!({
+                "event": "state", "state": "ready",
+                "retire": {"instance": instance, "incarnation": 7},
+            })
+        );
+        assert_eq!(
+            serde_json::from_str::<Earlier>(&wire).expect("an earlier reader reads it"),
+            Earlier::State {
+                state: PoolState::Ready,
+                unfollowed: false,
+            }
+        );
+        assert!(PoolWatchEvent::unknown(&wire).is_none(), "a known kind");
+        let earlier = r#"{"event":"state","state":"ready"}"#;
+        assert_eq!(
+            serde_json::from_str::<PoolWatchEvent>(earlier).expect("this build reads it"),
+            PoolWatchEvent::State {
+                state: PoolState::Ready,
+                unfollowed: false,
+                retire: None,
+            }
         );
     }
 

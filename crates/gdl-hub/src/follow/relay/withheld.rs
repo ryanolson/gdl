@@ -171,6 +171,7 @@ fn a_withheld_pool_is_unavailable_until_it_is_read_again() {
         PoolWatchEvent::State {
             state: PoolState::Degraded,
             unfollowed: false,
+            retire: None,
         },
     );
     assert_eq!(pending(&mut watch), []);
@@ -274,6 +275,7 @@ fn a_withheld_pool_is_unavailable_until_it_is_read_again() {
         PoolWatchEvent::State {
             state: PoolState::Degraded,
             unfollowed: false,
+            retire: None,
         },
     );
     assert_eq!(pending(&mut watch), [state("m", m, PoolState::Degraded)]);
@@ -352,6 +354,7 @@ fn a_watch_of_one_follow_receives_its_changes_alone() {
                 PoolWatchEvent::State {
                     state: PoolState::Degraded,
                     unfollowed: false,
+                    retire: None,
                 },
             );
         }

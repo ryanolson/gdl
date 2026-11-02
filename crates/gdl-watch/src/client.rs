@@ -702,6 +702,7 @@ mod tests {
             serde_json::to_value(PoolWatchEvent::State {
                 state: PoolState::Degraded,
                 unfollowed: false,
+                retire: None,
             })
             .expect("an event serializes"),
             serde_json::json!({ "event": "state", "state": "degraded" }),

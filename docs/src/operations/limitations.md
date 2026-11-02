@@ -101,6 +101,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** when every instance of a segment stops, or the only one does, its peers keep routing to it, since nothing else serves. It drains once the sources that can reach it have drained, or at the drain's bound.
 - **Workaround:** start a new instance first. Once it is ready, the peers avoid the retired one, which then leaves.
 
+### An instance does not act on a retire request yet
+- **What:** a pool's hub holds a retire request and sends it on the pool's watch ([Retiring an instance on request](../concepts/pools.md#retiring-an-instance-on-request)), but the runtime does not read it. An instance retires only at its stop.
+- **Workaround:** stop the instance, as a pod's delete does with its SIGTERM.
+
 ### A hand-off that reaches a retired instance late costs an offer
 - **What:** a hand-off sent before its sender heard of the retirement, and arriving after the instance stopped taking work, is declined with `Overloaded`. The sender's router chooses again, which costs one round trip.
 - **Limits:** inside a class, the request fails when every offer misses: after `[runtime] instance_failovers` more offers (2 by default), or at once when it is 0. It then fails with the last refusal (`Overloaded`, or `Placement` from an instance of another deployment). Into another class, the offer goes to another pool, at most `[runtime] pool_failovers` times.

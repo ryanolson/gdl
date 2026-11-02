@@ -260,6 +260,45 @@ pub fn avoids_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/avoids")
 }
 
+/// The retire route, under the extension's, on the hub's control
+/// listener: `POST` with a [`Retire`], with no credential, asks the member
+/// the path names to retire, as a first stop does, and to hold once it has
+/// drained. A controller outside the pool, such as the operator, uses it
+/// before it deletes the instance's pod. Answered `202 Accepted` once the
+/// hub holds the request with the registration, and again, changing
+/// nothing, for a request it holds already or for an instance that has
+/// retired; `404 Not Found` for an instance that is no member of the
+/// pool's class; `409 Conflict` for an incarnation that is not the
+/// member's current one, so that a stale request never retires a later
+/// registration, and for a pool that drains, since the drain already
+/// stops every instance. The hub sends the request on the pool's watch
+/// ([`PoolWatchEvent::State`]'s `retire`), and again in every snapshot
+/// while the registration lives.
+pub const RETIRE_ROUTE: &str = "/instances/{instance_id}/retire";
+
+/// [`RETIRE_ROUTE`]'s path for `instance`.
+pub fn retire_path(instance: InstanceId) -> String {
+    format!("/instances/{instance}/retire")
+}
+
+/// The body of [`RETIRE_ROUTE`]: the registration to retire, as the
+/// instance list names it ([`PoolInstance::incarnation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Retire {
+    /// The incarnation of the member's registration.
+    pub incarnation: u64,
+}
+
+/// A retire request the pool's hub holds, as its watch carries it: the
+/// member, and the incarnation of its registration the request is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RetireRequest {
+    /// The member.
+    pub instance: InstanceId,
+    /// The incarnation of its registration.
+    pub incarnation: u64,
+}
+
 /// What a chooser tells its own hub once its tables hold a followed
 /// pool's entry instance as retired, so that it never picks it again: the
 /// follow, by the pool's class and name and its generation, and the
@@ -419,9 +458,10 @@ impl From<ListWire> for PropertyList {
 ///
 /// A watch begins with a snapshot: [`PoolWatchEvent::Pool`], then, if the
 /// draining pool has been told that no pool follows it, its
-/// [`PoolWatchEvent::State`] again with `unfollowed`, then the retired
-/// entry instances, then the ready ones that have not retired, then
-/// [`PoolWatchEvent::Synced`]. After it, each change as it happens.
+/// [`PoolWatchEvent::State`] again with `unfollowed`, then the state
+/// again with `retire` for each retire request the hub holds, then the
+/// retired entry instances, then the ready ones that have not retired,
+/// then [`PoolWatchEvent::Synced`]. After it, each change as it happens.
 /// The retired instances come first, so that a follower never makes an
 /// instance routable that has already retired.
 ///
@@ -485,7 +525,8 @@ pub enum PoolWatchEvent {
     /// as the watch began.
     Synced,
     /// The pool's state changed; or, sent again with `unfollowed`, the
-    /// pool drains and no pool follows it any more.
+    /// pool drains and no pool follows it any more; or, sent again with
+    /// `retire`, the hub holds a retire request for one of its members.
     State {
         /// The state it changed to.
         state: PoolState,
@@ -503,6 +544,21 @@ pub enum PoolWatchEvent {
         /// state, keeps its bound.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         unfollowed: bool,
+        /// Sent again, with the state unchanged, for a retire request the
+        /// hub holds ([`RETIRE_ROUTE`]): once when it takes it, and in
+        /// every snapshot while the registration lives. The member it
+        /// names, in that registration, retires; every other reader
+        /// changes nothing.
+        ///
+        /// A field of a known event, not a kind of its own, for the reason
+        /// `unfollowed` is: it is for one of the pool's own instances, and
+        /// a reader of an earlier build that does not know it reads the
+        /// pool's state again, unchanged, where a kind it did not know
+        /// would have made it fail closed for the pool, and read it again
+        /// from a snapshot that repeats the request, for as long as the
+        /// request stands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retire: Option<RetireRequest>,
     },
     /// The pool's load summary: sent once a summary period while the pool
     /// has one, changed or not, so that a watcher can tell a quiet pool

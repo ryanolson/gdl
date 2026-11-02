@@ -104,6 +104,7 @@ fn state(state: PoolState) -> PoolWatchEvent {
     PoolWatchEvent::State {
         state,
         unfollowed: false,
+        retire: None,
     }
 }
 
@@ -794,4 +795,53 @@ fn a_watch_of_one_follow_says_a_drain_after_its_snapshot() {
         }),
         "the drain, after the snapshot"
     );
+}
+
+/// A retire request rides on the pool's state again, unchanged. The relay
+/// of this build sends nothing for it. One of an earlier build, which
+/// does not know the field, reads the same state again: it sends that
+/// state, unchanged, and nothing else. It sends no new generation and no
+/// offering, and it hides and exposes no instance, so its choosers'
+/// marks stay (`a_pool_stays_gone_until_the_relay_changes_its_follow`).
+#[test]
+fn a_retire_request_changes_nothing_a_chooser_sees() {
+    let relay = held();
+    let mut watch = relay.watch(None);
+    let (generation, _) = relay.begin("model_x", "m", 1);
+    relay.install(generation, installed_pool("m", PoolState::Ready));
+    relay.apply("model_x", "m", generation, ready(&peer()));
+    let before = pending(&mut watch);
+    assert!(!before.is_empty(), "the control: the follow is sent");
+    let shown = pending(&mut relay.watch(None));
+
+    let request = PoolWatchEvent::State {
+        state: PoolState::Ready,
+        unfollowed: false,
+        retire: Some(gdl_watch::RetireRequest {
+            instance: InstanceId::new_v4(),
+            incarnation: 7,
+        }),
+    };
+    relay.apply("model_x", "m", generation, request.clone());
+    assert_eq!(pending(&mut watch), [], "this build");
+    // An earlier build reads the event without the field it does not know.
+    let wire = serde_json::to_string(&request).expect("encodes");
+    let earlier: serde_json::Value = serde_json::from_str(&wire).expect("decodes");
+    let mut earlier = earlier.as_object().expect("an object").clone();
+    earlier.remove("retire");
+    let earlier: PoolWatchEvent =
+        serde_json::from_value(earlier.into()).expect("an earlier reader reads it");
+    assert_eq!(earlier, state(PoolState::Ready));
+    relay.apply("model_x", "m", generation, earlier);
+    assert_eq!(
+        pending(&mut watch),
+        [FollowEvent::State {
+            class: "model_x".into(),
+            pool: "m".into(),
+            generation,
+            state: PoolState::Ready,
+        }],
+        "an earlier build: the same state again, and nothing else"
+    );
+    assert_eq!(pending(&mut relay.watch(None)), shown, "the same snapshot");
 }

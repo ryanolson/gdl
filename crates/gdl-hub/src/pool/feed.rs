@@ -19,6 +19,8 @@
 //! the pool drains and none does any more, under the same lock. And it
 //! tells them once every pool that followed the pool when an entry
 //! instance retired avoids it ([`super::retiring`]), under the same lock.
+//! So too the retire requests a controller made of its members, entry or
+//! interior ([`super::retire`]), each with the registration it names.
 //!
 //! The feed also keeps the entry instances' load reports
 //! ([`super::load`]), under the same lock, so that a report is taken only
@@ -58,6 +60,7 @@ use super::count::Watched;
 use super::followers::{Followers, Following, Key, WatchKey};
 use super::load::Reports;
 use super::properties::{Offer, Properties, PropertyList};
+use super::retire::{Refused, Requests};
 use super::retiring::Retiring;
 use crate::fanout::Watchers;
 use gdl_watch::{PoolWatchError, PoolWatchEvent};
@@ -104,6 +107,7 @@ impl Feed {
                 linked: PropertyList::default(),
                 followers: Followers::new(lease),
                 retiring: Retiring::default(),
+                requests: Requests::default(),
                 events: broadcast::channel(buffer).0,
                 #[cfg(test)]
                 work: Default::default(),
@@ -322,6 +326,7 @@ impl Feed {
             shared.send(PoolWatchEvent::State {
                 state,
                 unfollowed: false,
+                retire: None,
             });
             if shared.followers.settle(state) {
                 shared.send(unfollowed());
@@ -342,10 +347,13 @@ impl Feed {
         peer: PeerInfo,
     ) {
         let mut shared = self.lock();
+        let id = peer.instance_id();
+        if shared.segments.iter().any(|(name, _)| name == segment) {
+            shared.requests.joined(id, incarnation);
+        }
         let Some(index) = shared.entry_index(segment) else {
             return;
         };
-        let id = peer.instance_id();
         let held = match shared.unresolved.remove(&id) {
             Some((at, held)) if at == index => held,
             _ => Held::default(),
@@ -393,6 +401,7 @@ impl Feed {
     /// is sent once the loopback shows it in no service.
     pub(super) fn removed(&self, removal: Removal) {
         let mut shared = self.lock();
+        shared.requests.removed(&removal);
         let Some(entry) = shared.entries.get_mut(&removal.id) else {
             return;
         };
@@ -401,6 +410,34 @@ impl Feed {
         }
         entry.departed = true;
         shared.leave_if_gone(removal.id);
+    }
+
+    /// Ask the member `id`, in its registration `incarnation`, to retire,
+    /// unless the pool is `draining`. A request the hub did not hold yet
+    /// is sent to the watchers as the pool's state again, with `retire`.
+    pub(super) fn retire(
+        &self,
+        id: InstanceId,
+        incarnation: u64,
+        draining: bool,
+    ) -> Result<(), Refused> {
+        let mut shared = self.lock();
+        if let Some(request) = shared.requests.request(id, incarnation, draining)? {
+            let state = shared.state;
+            shared.send(retire(state, request));
+        }
+        Ok(())
+    }
+
+    /// Each member the hub holds a retire request for, with the
+    /// incarnation of the registration it names.
+    pub(super) fn retire_requests(&self) -> HashSet<(InstanceId, u64)> {
+        self.lock()
+            .requests
+            .held()
+            .into_iter()
+            .map(|request| (request.instance, request.incarnation))
+            .collect()
     }
 
     /// `owner`, holding `lease`, reported `load` at `now`: taken only from
@@ -586,6 +623,9 @@ struct Shared {
     followers: Followers,
     /// The retirements those pools have yet to acknowledge.
     retiring: Retiring,
+    /// The class's members by their registration, and the retire requests
+    /// held for them.
+    requests: Requests,
     /// Instances the loopback shows in an entry segment's services that the
     /// hub's members do not hold, with their segment: one whose services
     /// were committed before its admission, or one whose loopback events
@@ -881,9 +921,10 @@ impl Shared {
     }
 
     /// The pool, then whether no pool follows the draining pool, then
-    /// every retired entry instance, then every ready one, then the
-    /// marker: retirements first, so that a follower that applies the
-    /// events in order never makes a retired instance routable.
+    /// each retire request held, then every retired entry instance, then
+    /// every ready one, then the marker: retirements first, so that a
+    /// follower that applies the events in order never makes a retired
+    /// instance routable.
     fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<PoolWatchEvent> {
         #[cfg(test)]
         self.work.snapshot();
@@ -910,6 +951,13 @@ impl Shared {
         if self.followers.unfollowed() {
             events.push(unfollowed());
         }
+        let state = self.state;
+        events.extend(
+            self.requests
+                .held()
+                .into_iter()
+                .map(|request| retire(state, request)),
+        );
         events.extend(
             retired.into_iter().map(
                 |(segment, instance, acknowledged)| PoolWatchEvent::Retired {
@@ -939,6 +987,17 @@ pub(super) fn unfollowed() -> PoolWatchEvent {
     PoolWatchEvent::State {
         state: PoolState::Draining,
         unfollowed: true,
+        retire: None,
+    }
+}
+
+/// What the pool's watch says of a retire request it holds: its state
+/// again, with `retire`, a field an earlier reader ignores.
+fn retire(state: PoolState, request: gdl_watch::RetireRequest) -> PoolWatchEvent {
+    PoolWatchEvent::State {
+        state,
+        unfollowed: false,
+        retire: Some(request),
     }
 }
 

@@ -1,8 +1,9 @@
 //! The list of the hub's members, for a controller outside the pool
 //! ([`gdl_watch::INSTANCES_ROUTE`]): each member's segment and peer from
 //! admission, its furthest phase from the hub's own service directory,
-//! read over loopback as the counting reads it, and an entry instance's
-//! latest load report from the feed. The list is made when it is asked
+//! read over loopback as the counting reads it, the incarnation of its
+//! registration and whether a retire request is held for it, and an entry
+//! instance's latest load report from the feed. The list is made when it is asked
 //! for, from what the hub already holds, and nothing is kept for it: it
 //! costs the hub nothing between requests, and nothing on a request's
 //! path.
@@ -93,10 +94,11 @@ pub(super) async fn list(
         .map(|(incarnation, _, peer)| (peer.instance_id, incarnation))
         .collect();
     let mut loads = feed.loads(Instant::now());
+    let requested = feed.retire_requests();
     let instances = members
         .into_iter()
         .filter(|(incarnation, _, peer)| staying.contains(&(peer.instance_id, *incarnation)))
-        .map(|(_, segment, peer)| {
+        .map(|(incarnation, segment, peer)| {
             let phase = phases
                 .get(&peer.instance_id)
                 .copied()
@@ -107,9 +109,12 @@ pub(super) async fn list(
             let load = loads
                 .remove(&peer.instance_id)
                 .filter(|_| phase == InstancePhase::Ready);
+            let incarnation = incarnation.as_u64();
             PoolInstance {
                 phase,
                 load,
+                incarnation: Some(incarnation),
+                retire_requested: requested.contains(&(peer.instance_id, incarnation)),
                 addresses: addresses(&peer),
                 segment,
                 peer,
