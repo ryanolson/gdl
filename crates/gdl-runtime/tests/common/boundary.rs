@@ -571,6 +571,19 @@ pub async fn model_fronted<H: Register + Send + Sync + 'static>(
     runtime: &str,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> (ModelPool<H>, Proxy) {
+    model_fronted_configured(spec, directory, pool, runtime, &|_, r| r, assemble).await
+}
+
+/// [`model_fronted`], each instance's runtime settings changed by
+/// `configure`, given the instance's segment.
+pub async fn model_fronted_configured<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    pool: Model<'_>,
+    runtime: &str,
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (ModelPool<H>, Proxy) {
     let (settings_of_hub, timing, extra) = summarized(pool, runtime);
     let hub = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
     let proxy = Proxy::new(hub.0.public_addr()).await;
@@ -580,7 +593,7 @@ pub async fn model_fronted<H: Register + Send + Sync + 'static>(
         Some(proxy.port),
         pool,
         &extra,
-        &|_, r| r,
+        configure,
         assemble,
     )
     .await;

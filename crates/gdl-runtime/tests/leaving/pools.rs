@@ -289,17 +289,106 @@ async fn a_draining_interior_instance_is_confirmed_when_its_senders_detach() {
     .await;
     following(&tables(&first), M1, 1).await;
     let mut hook = hooked.take();
+    // Held at the sink's end: the entry can send it no more, and holds it,
+    // so it detaches and does not drain.
+    let held = Cx::new();
+    let answer = tokio::spawn({
+        let (segment, held) = (Arc::clone(&first.segment), held.clone());
+        let plan = Plan {
+            tokens: 1,
+            hold_at_end: true,
+            ..Plan::default()
+        };
+        async move {
+            let out = segment.call(held, prompt("held", plan)).await?;
+            Ok::<_, gdl::Error>(collect(out).await)
+        }
+    });
+    quiet.wait_for("D:held:c(held)#0", WAIT).await;
 
     m1.readiness.drain().await.expect("the pool drains");
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
     assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
     hook.finish(Handoff::Done);
+    held.request_stop();
+    let _ = tokio::time::timeout(WAIT, answer).await;
     m1.sink.ended(WAIT).await.expect("the interior drained");
     for entry in m1.entries {
         entry.ended(WAIT).await.expect("the entry drained");
     }
     first.stop().await;
+}
+
+/// With (B) answered, a stalled question about detachment holds nothing:
+/// the instance closes, with no hook registered, as it always did. The
+/// entry's hook keeps it a member that has drained, and the proxy holds
+/// only the interior's reads of who detached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_detach_question_does_not_hide_the_sources_drain() {
+    use common::boundary::model_fronted_configured;
+    use gdl_model::{SegmentPhase, segment_service};
+
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let hooked = HookOnce::default();
+    let (m1, proxy) = model_fronted_configured(
+        &spec,
+        &directory,
+        pool(M1, "m1-hub:1337", 1),
+        "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
+        &|segment, runtime| match segment {
+            "f" => hooked.configure(runtime),
+            _ => runtime,
+        },
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    following(&tables(&first), M1, 1).await;
+    let mut hook = hooked.take();
+
+    proxy.hold(b"gdl-detach-");
+    m1.readiness.drain().await.expect("the pool drains");
+    let leave = tokio::time::timeout(BOUND + WAIT, hook.started.recv())
+        .await
+        .expect("the hook started in time")
+        .expect("the hook ran");
+    tokio::time::timeout(WAIT, leave.drained())
+        .await
+        .expect("the entry drained, and stays for its hook");
+    let client = client(&m1.hub);
+    let entry = m1.entries[0].node.instance_id();
+    let deadline = Instant::now() + WAIT;
+    while !client
+        .services()
+        .get_instances(&segment_service("f", SegmentPhase::Drained))
+        .await
+        .unwrap_or_default()
+        .contains(&entry)
+    {
+        assert!(Instant::now() < deadline, "the entry never said `drained`");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    m1.sink.process.stop();
+    let closed = tokio::time::timeout(WAIT, async {
+        while !m1.sink.segment.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    proxy.release();
+    hook.finish(Handoff::Done);
+    for entry in m1.entries {
+        entry.ended(WAIT * 2).await.expect("the entry drained");
+    }
+    m1.sink.ended(WAIT).await.expect("the interior drained");
+    first.stop().await;
+    assert!(closed, "a stalled question held the interior past (B)");
 }
 
 /// The last interior instance of a pool, reached from another class, is

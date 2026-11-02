@@ -327,10 +327,11 @@ impl Observer {
             let ask = async {
                 let done = !blind && (reaching.is_empty() || asker.all_drained(&reaching).await?);
                 // A blind instance asks too, for a drain of its pool that
-                // it learns of while it waits.
+                // it learns of while it waits. An answer to (B) must not
+                // wait on this one.
                 let unreached = match pool {
-                    Some(pool) => pool.unreached(asker).await?,
-                    None => None,
+                    Some(pool) if !done => pool.unreached(asker).await?,
+                    _ => None,
                 };
                 let avoiding = avoided.is_some()
                     || (parent.as_ref().is_none_or(Parent::avoids)
