@@ -1245,7 +1245,6 @@ impl Launch {
         let deadline = stopping.deadline();
         let observing = stopping.observing();
         self.pool_drain_settles(segment, deadline, hub).await;
-        let from = tokio::time::Instant::now();
         let declining = self.pool_declining(segment);
         #[cfg(feature = "hub")]
         let (source_drains_early, declines) = (self.source_drains_early(), self.pool_declines());
@@ -1258,7 +1257,7 @@ impl Launch {
         };
         // With no sender, nothing routes here, and (A) holds at once.
         let (setup, unsent) = (self.setup, self.senders.is_empty());
-        let settled = move |avoided: Option<tokio::time::Instant>| {
+        let settled = move |avoided: Option<tokio::time::Instant>, from| {
             unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at.max(from) + setup)
         };
         let waiting = async {
@@ -1267,11 +1266,11 @@ impl Launch {
                     if self.source {
                         let _ = announce(dir, "drained", self.segment, &self.node);
                     }
-                    observing.begin_drain();
+                    let from = observing.begin_drain();
                     loop {
                         let answers = observing.answers();
                         if answers.drained
-                            || settled(answers.avoided)
+                            || settled(answers.avoided, from)
                             || !observing.changed_within(pause(DRAIN_POLL)).await
                         {
                             break;
@@ -1283,10 +1282,10 @@ impl Launch {
                     if source_drains_early {
                         let _ = session.drained(deadline).await;
                     }
-                    observing.begin_drain();
+                    let from = observing.begin_drain();
                     loop {
                         let answers = observing.answers();
-                        if answers.lost || settled(answers.avoided) {
+                        if answers.lost || settled(answers.avoided, from) {
                             break;
                         }
                         // Declined first, so that no offer is taken after

@@ -132,7 +132,7 @@ An observer asks the hub or the roster directory for (A) and (B), and publishes 
 
 The observer is a future polled beside each stage of the stop, not a task. With hooks it asks from the end of the retirement. With no hook it asks only once the drain's wait begins, so that a long serving body costs the hub no extra questions.
 
-A hook must not change the drain. The observer can therefore read a promise long before the drain's wait begins, and the drain counts its `setup_timeout` from whichever is later. The sources that (B) counts are fixed as the wait begins, and an answer read before then does not stand: a pool's drain learned in between changes them.
+A hook must not change the drain. The observer can therefore read a promise long before the drain's wait begins, and the drain counts its `setup_timeout` from whichever is later. The wait begins after a source's `drained` announcement, however long a hub takes to answer that. The sources that (B) counts are fixed as the wait begins, and an answer read before then does not stand: a pool's drain learned in between changes them.
 
 Every time derives from the stop's one instant. The fallback runs from the stop, not from the retirement, because a retirement can come late: an entry instance first waits for its hub to answer a drain report, for up to two report periods. When the fallback comes, it reads an entry's parent bound again: by default the two pass together, and the bound is the better reason.
 

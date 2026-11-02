@@ -72,11 +72,13 @@ impl Observing {
         });
     }
 
-    /// The drain's wait begins. What (B) said before does not stand: the
-    /// sources that count were not settled until now.
-    pub(super) fn begin_drain(&self) {
+    /// The drain's wait begins, now: a promise read earlier counts from
+    /// this instant. What (B) said before does not stand: the sources that
+    /// count were not settled until now.
+    pub(super) fn begin_drain(&self) -> Instant {
         self.phase.send_replace(Phase::Draining);
         self.publish.send_modify(|answers| answers.drained = false);
+        Instant::now()
     }
 
     /// The drain's wait has ended.
@@ -417,4 +419,34 @@ fn drain_sources(pool: Option<&PoolDrain>, reaching: &[String]) -> Option<Vec<St
         }
     }
     Some(reaching.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observing() -> Observing {
+        let (phase, _phases) = watch::channel(Phase::Idle);
+        let (publish, answers) = watch::channel(Answers::default());
+        Observing {
+            phase,
+            publish: Arc::new(publish),
+            answers,
+        }
+    }
+
+    /// (B) read before the drain's wait counted sources that were not
+    /// settled, so it does not stand once the wait begins. A promise does:
+    /// who promised does not change.
+    #[tokio::test]
+    async fn the_drains_wait_drops_an_early_b_and_keeps_an_early_a() {
+        let observing = observing();
+        let promised = Instant::now();
+        say(&observing.publish, true, Some(promised));
+        assert!(observing.answers().drained);
+
+        observing.begin_drain();
+        assert!(!observing.answers().drained);
+        assert_eq!(observing.answers().avoided, Some(promised));
+    }
 }

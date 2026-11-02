@@ -1192,3 +1192,73 @@ fn the_runtime_settings_read_the_leave_times() {
     assert_eq!(read.leave, Some(Duration::from_millis(1500)));
     assert_eq!(read.leave_after, Some(Duration::from_millis(2500)));
 }
+
+/// A source's segment that others send to: the front sends to the side,
+/// and the side back to the front.
+fn returning() -> Placement {
+    Placement::new()
+        .segment("front", ["A", "B", "D", "F", "E", "G"])
+        .segment("side", ["C"])
+}
+
+/// The grace of a promise read early begins once the drain's wait does,
+/// after a source's own `drained` announcement, however long a hub takes
+/// to answer that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_grace_begins_after_a_sources_announcement() {
+    const SETUP: Duration = Duration::from_millis(300);
+    let placement = returning();
+    let hub = hub(&placement).await;
+    let proxy = Proxy::new(hub.control_addr()).await;
+    let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\n";
+    let replicas = "[min_replicas]\nfront = 2\n";
+    let config = settings(&hub, replicas, timing);
+    let leaving = settings_through(&hub, proxy.port, replicas, timing);
+    let mut hook = Hook::on(&leaving.runtime.lifecycle);
+    let ((front_process, front), (other_process, other), (side_process, side)) = tokio::join!(
+        launch(&leaving, "front", &placement),
+        launch(&config, "front", &placement),
+        launch(&config, "side", &placement),
+    );
+    let (running, runs) = oneshot::channel();
+    let (seen, closing) = oneshot::channel();
+    let front_served = tokio::spawn(front.serve(
+        Closing::default(),
+        |segment, shutdown| async move {
+            let _ = running.send(());
+            let _ = seen.send(segment);
+            shutdown.cancelled().await;
+            Ok(())
+        },
+    ));
+    let (other_served, side_served) = tokio::join!(serve(other), serve(side));
+    runs.await.expect("the body ran");
+    let closing = closing.await.expect("the body ran");
+
+    proxy.hold(b"gdl-drained");
+    front_process.stop();
+    let leave = hook.leave().await;
+    assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
+    tokio::time::timeout(WAIT, proxy.holding())
+        .await
+        .expect("the source's announcement reached the proxy");
+    // Longer than the setup timeout since the promise.
+    tokio::time::sleep(SETUP + POLLS).await;
+    let released = Instant::now();
+    proxy.release();
+    tokio::time::timeout(WAIT, leave.drained())
+        .await
+        .expect("the instance drained");
+    hook.finish(Handoff::Done);
+    left(front_served).await.expect("drained");
+    let closed = closing.0.lock().expect("lock").expect("it closed");
+    assert!(
+        closed >= released + SETUP,
+        "closed {:?} after its announcement, within the setup timeout",
+        closed.saturating_duration_since(released)
+    );
+    other_process.stop();
+    side_process.stop();
+    left(other_served).await.expect("drained");
+    left(side_served).await.expect("drained");
+}
