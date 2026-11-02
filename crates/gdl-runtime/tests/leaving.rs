@@ -144,9 +144,13 @@ fn settings_through(
     extra: &str,
     runtime: &str,
 ) -> ProcessConfig<Nothing> {
+    settings_at(hub.public_addr().port(), control, extra, runtime)
+}
+
+/// Settings for an instance that reaches its hub on `public` and `control`.
+fn settings_at(public: u16, control: u16, extra: &str, runtime: &str) -> ProcessConfig<Nothing> {
     let text = format!(
-        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{extra}\n[runtime]\n{runtime}\n",
-        hub.public_addr().port(),
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {public}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{extra}\n[runtime]\n{runtime}\n"
     );
     ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
 }
@@ -482,7 +486,10 @@ async fn a_body_held_on_its_hook_does_not_hold_the_hook_or_routing() {
 
 /// A stop while the instance waits at its barrier starts the hooks too, and
 /// routing moves by the same rule. The tail never serves, so the mid
-/// never passes its barrier, and the front has said it serves.
+/// never passes its barrier. The test stops it once it asks whether the
+/// tail serves: a stop while its own `serving` is on the way to the hub
+/// cancels that announcement, its peers read it as gone, and none promises
+/// to avoid it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_at_the_barrier_starts_the_hooks_the_same_way() {
     let placement = line();
@@ -490,7 +497,8 @@ async fn a_stop_at_the_barrier_starts_the_hooks_the_same_way() {
     let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\n";
     let replicas = "[min_replicas]\nmid = 2\n";
     let config = settings(&hub, replicas, timing);
-    let leaving = settings(&hub, replicas, timing);
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let leaving = settings_at(proxy.port, hub.control_addr().port(), replicas, timing);
     let mut hook = Hook::on(&leaving.runtime.lifecycle);
     let (
         (front_process, front),
@@ -504,6 +512,10 @@ async fn a_stop_at_the_barrier_starts_the_hooks_the_same_way() {
         launch(&config, "tail", &placement),
     );
     let (mid_id, front_id) = (mid.node().instance_id(), front.node().instance_id());
+    // A read of who serves, not the follower's watch of the same name: the
+    // barrier reads it only once its own announcement has been answered.
+    let serving = gdl_model::segment_service("tail", gdl_model::SegmentPhase::Serving);
+    proxy.hold(format!("{serving} HTTP").as_bytes());
     let front_served = tokio::spawn(front.serve(Idle, |_, shutdown| async move {
         shutdown.cancelled().await;
         Ok(())
@@ -517,24 +529,16 @@ async fn a_stop_at_the_barrier_starts_the_hooks_the_same_way() {
         shutdown.cancelled().await;
         Ok(())
     }));
-    let services = client(&hub).services();
-    let serving = format!("gdl-serving-{}", hex("mid"));
-    let deadline = Instant::now() + WAIT;
-    while !services
-        .get_instances(&serving)
+    tokio::time::timeout(WAIT, proxy.holding())
         .await
-        .unwrap_or_default()
-        .contains(&mid_id)
-    {
-        assert!(Instant::now() < deadline, "the mid never said it serves");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        .expect("the mid reached its barrier");
 
     mid_process.stop();
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::Stop);
     assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
     avoided(&hub, mid_id, &[front_id]).await;
+    proxy.release();
     tokio::time::timeout(WAIT, leave.drained())
         .await
         .expect("the instance drained");
@@ -547,11 +551,6 @@ async fn a_stop_at_the_barrier_starts_the_hooks_the_same_way() {
     }
     let _ = left(front_served).await;
     let _ = left(other_served).await;
-}
-
-/// A segment's name in a hub service's name.
-fn hex(segment: &str) -> String {
-    segment.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The last instance of a segment is avoided by nobody, so it reads
@@ -983,8 +982,9 @@ async fn a_second_stop_ends_the_hooks_at_once() {
 
 /// With no hook the observer waits for the drain, so a long serving body
 /// costs the hub nothing it did not cost before. With one it asks at
-/// once, since a hook waits on the answer. The hub's members are read only
-/// by those questions here, through a proxy that holds them.
+/// once, since a hook waits on the answer. Only its question reads who
+/// avoids this instance, and a proxy sees it. The hub's members would not
+/// do: the follower reads those too, as the front turns ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_a_hook_makes_the_observer_ask_before_the_body_ends() {
     for hooked in [false, true] {
@@ -993,14 +993,7 @@ async fn only_a_hook_makes_the_observer_ask_before_the_body_ends() {
         let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\n";
         let config = settings(&hub, "", timing);
         let proxy = Proxy::new(hub.public_addr()).await;
-        let text = format!(
-            "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\n{timing}\n",
-            proxy.port,
-            hub.control_addr().port(),
-        );
-        let leaving: ProcessConfig<Nothing> =
-            ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text)))
-                .expect("settings");
+        let leaving = settings_at(proxy.port, hub.control_addr().port(), "", timing);
         let hook = hooked.then(|| Hook::on(&leaving.runtime.lifecycle));
         let ((front_process, front), (engine_process, engine)) = tokio::join!(
             launch(&config, "front", &placement),
@@ -1017,7 +1010,7 @@ async fn only_a_hook_makes_the_observer_ask_before_the_body_ends() {
         let front_served = serve(front).await;
         runs.await.expect("the body ran");
 
-        proxy.hold(b"/v1/ext/gdl/members");
+        proxy.hold(b"gdl-avoids-");
         engine_process.stop();
         let asked = tokio::time::timeout(POLLS, proxy.holding()).await.is_ok();
         assert_eq!(asked, hooked, "asked before the body ended");
