@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::api::{ListParams, Patch, PatchParams};
-use kube::{Api, Client};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions};
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
+use kube::{Api, Client, Resource};
 use serde_json::json;
 
 use crate::{DELETION_COST, GdlScaler, GdlScalerStatus, ROUTABLE, SCALER_MANAGER};
@@ -209,6 +210,19 @@ pub trait Cluster {
         cost: Option<i32>,
     ) -> impl Future<Output = Result<String, Refused>> + Send;
 
+    /// Delete `pod`, only the pod of its uid and only if it is still at
+    /// `version`. Request mode only: a retired victim the scale-down no
+    /// longer removes.
+    fn delete(
+        &self,
+        pod: &PodView,
+        version: &str,
+    ) -> impl Future<Output = Result<(), Refused>> + Send;
+
+    /// Record a warning event on `scaler`, best effort.
+    fn warn(&self, scaler: &GdlScaler, reason: &str, note: &str)
+    -> impl Future<Output = ()> + Send;
+
     /// Write the status of the scaler `name`, only if it is still at
     /// `version` when one is given: its resourceVersion after, when the
     /// answer has one.
@@ -227,6 +241,7 @@ pub struct KubeCluster {
     pods: Api<Pod>,
     slices: Api<EndpointSlice>,
     scalers: Api<GdlScaler>,
+    recorder: Recorder,
 }
 
 impl KubeCluster {
@@ -236,7 +251,14 @@ impl KubeCluster {
             deployments: Api::namespaced(client.clone(), namespace),
             pods: Api::namespaced(client.clone(), namespace),
             slices: Api::namespaced(client.clone(), namespace),
-            scalers: Api::namespaced(client, namespace),
+            scalers: Api::namespaced(client.clone(), namespace),
+            recorder: Recorder::new(
+                client,
+                Reporter {
+                    controller: crate::NAME.into(),
+                    instance: std::env::var("HOSTNAME").ok(),
+                },
+            ),
         }
     }
 
@@ -351,6 +373,36 @@ impl Cluster for KubeCluster {
         let value = cost.map(|cost| cost.to_string());
         let annotations = json!({"annotations": {DELETION_COST: value}});
         self.patch_pod(pod, version, annotations).await
+    }
+
+    async fn delete(&self, pod: &PodView, version: &str) -> Result<(), Refused> {
+        // Its uid and resourceVersion make it a delete of what the
+        // decision read: a pod made again, or changed since, refuses it.
+        let params = DeleteParams {
+            preconditions: Some(Preconditions {
+                uid: Some(pod.uid.clone()),
+                resource_version: Some(version.to_string()),
+            }),
+            ..DeleteParams::default()
+        };
+        self.pods
+            .delete(&pod.name, &params)
+            .await
+            .map(|_| ())
+            .map_err(|e| Refused::of(&format!("pod `{}`", pod.name), e))
+    }
+
+    async fn warn(&self, scaler: &GdlScaler, reason: &str, note: &str) {
+        let event = Event {
+            type_: EventType::Warning,
+            reason: reason.into(),
+            note: Some(note.into()),
+            action: "Reconcile".into(),
+            secondary: None,
+        };
+        if let Err(error) = self.recorder.publish(&event, &scaler.object_ref(&())).await {
+            tracing::warn!(%reason, %error, "an event was not recorded");
+        }
     }
 
     async fn status(

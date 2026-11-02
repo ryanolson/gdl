@@ -81,6 +81,10 @@ impl Probe for PausedProbe<'_> {
         }
         self.fake.metrics(ip, port).await
     }
+
+    async fn retire(&self, pool: &str, instance: &str, incarnation: u64) -> Result<Asked, String> {
+        self.fake.retire(pool, instance, incarnation).await
+    }
 }
 
 #[tokio::test]

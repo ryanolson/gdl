@@ -20,8 +20,8 @@ mod scaler;
 mod victim;
 
 pub use crd::{
-    DELETION_COST, GROUP, GdlScaler, GdlScalerSpec, GdlScalerStatus, Last, Outcome, ROUTABLE,
-    Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
+    DELETION_COST, GROUP, GdlScaler, GdlScalerSpec, GdlScalerStatus, Handoff, Last, Outcome,
+    ROUTABLE, Retire, Retiring, RetiringPhase, SCALER_MANAGER, Suspend, TargetRef, VERSION,
 };
 pub use manifests::{NAME, crds, namespaced, stream};
 pub use pool::{

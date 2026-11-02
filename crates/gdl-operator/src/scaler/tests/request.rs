@@ -1,0 +1,395 @@
+//! `retire: request` against the fake cluster, a fake hub that lists the
+//! pods' instances and takes retire requests, and fake `/metrics` that
+//! show each pod's leave hooks.
+
+use super::*;
+use crate::{Handoff, Retire};
+
+/// The pod at `10.0.0.n` is instance `i-n`, registered in incarnation `n`.
+fn id(n: u32) -> String {
+    format!("i-{n}")
+}
+
+/// The fake's hub listing each of `pods`, by number, in `phase`.
+fn list(fake: &Fake, pods: &[(u32, &str)]) {
+    let instances = pods
+        .iter()
+        .map(|(n, phase)| {
+            serde_json::json!({
+                "segment": "front", "peer": {"instance_id": id(*n), "worker_address": []},
+                "addresses": [format!("10.0.0.{n}:7000")], "phase": phase, "incarnation": n,
+            })
+        })
+        .collect::<Vec<_>>();
+    *fake.instances.lock().expect("instances") = Some(
+        serde_json::from_value(serde_json::json!({ "instances": instances })).expect("a list"),
+    );
+}
+
+/// The phase the fake's hub lists pod `n`'s instance in, from now.
+fn phase(fake: &Fake, n: u32, phase: &str) {
+    let mut instances = fake.instances.lock().expect("instances");
+    let listed = instances
+        .as_mut()
+        .expect("a list")
+        .instances
+        .iter_mut()
+        .find(|i| i.registration().is_some_and(|(at, _)| at == id(n)))
+        .expect("listed");
+    listed.phase = phase.into();
+}
+
+/// Pod `n`'s leave hooks, as its `/metrics` shows them: each hook's
+/// outcome, `pending` for one that has not ended.
+fn hooks(fake: &Fake, n: u32, hooks: &[(&str, &str)]) {
+    let text: String = hooks
+        .iter()
+        .flat_map(|(hook, outcome)| {
+            let pending = u8::from(*outcome == "pending");
+            let mut lines = vec![format!(
+                "dynamo_component_leave_outcome{{hook=\"{hook}\",outcome=\"pending\"}} {pending}\n"
+            )];
+            if *outcome != "pending" {
+                lines.push(format!(
+                    "dynamo_component_leave_outcome{{hook=\"{hook}\",outcome=\"{outcome}\"}} 1\n"
+                ));
+            }
+            lines
+        })
+        .collect();
+    fake.leave
+        .lock()
+        .expect("leave")
+        .insert(format!("10.0.0.{n}"), text);
+}
+
+fn request(replicas: i32) -> GdlScalerSpec {
+    let mut spec = spec(Some(replicas));
+    spec.retire = Some(Retire::Request);
+    spec.drain_bound = Some("20s".into());
+    spec
+}
+
+fn victim(fake: &Fake) -> Retiring {
+    status(fake).retiring[0].clone()
+}
+
+/// Three pods listed `ready`, the middle one the fewest admitted.
+fn three() -> Fake {
+    let fake = Fake::with(&[5, 0, 5]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
+    fake
+}
+
+/// The victim's hub takes the retire request, and the scaler writes
+/// nothing to the pod or the count until the hub lists it `drained` and
+/// its `/metrics` shows every hook's outcome. It asks once, and stores
+/// each step before it takes it: the retire before the request, the
+/// commit before the cost.
+#[tokio::test]
+async fn a_victim_is_deleted_only_once_it_has_drained_and_its_hooks_have_reported() {
+    let fake = three();
+    hooks(&fake, 2, &[("kv", "pending"), ("flush", "pending")]);
+    let spec = request(2);
+    assert_eq!(once(&fake, &spec, 0).await, BUSY);
+    assert_eq!(
+        events(&fake),
+        [
+            "status [retiring uid-2]",
+            "retire i-2 2",
+            "status [draining uid-2]"
+        ]
+    );
+    let chosen = victim(&fake);
+    assert_eq!(
+        (chosen.instance_id.as_deref(), chosen.incarnation),
+        (Some("i-2"), Some(2))
+    );
+    assert!(chosen.asked.is_some() && chosen.retired.is_some());
+
+    phase(&fake, 2, "retired");
+    once(&fake, &spec, 1_000).await;
+    phase(&fake, 2, "drained");
+    once(&fake, &spec, 2_000).await;
+    hooks(&fake, 2, &[("kv", "done"), ("flush", "pending")]);
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.take_writes(), ["retire i-2 2"], "nothing before both");
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    assert_eq!(victim(&fake).handoff, Some(Handoff::Done));
+
+    hooks(&fake, 2, &[("kv", "done"), ("flush", "partial")]);
+    events(&fake);
+    once(&fake, &spec, 4_000).await;
+    assert_eq!(
+        events(&fake),
+        [
+            "status [committing uid-2]",
+            "pod-2 cost Some(-2147483648)",
+            "replicas 2",
+            "status [removing uid-2]"
+        ]
+    );
+    fake.settle(false);
+    assert!(fake.pod("pod-2").view.terminating);
+    fake.exit();
+    list(&fake, &[(1, "ready"), (3, "ready")]);
+    once(&fake, &spec, 5_000).await;
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(
+        (last.outcome, last.chosen.as_str(), last.handoff),
+        (Outcome::Removed, "uid-2", Some(Handoff::Partial))
+    );
+    assert!(
+        !fake.take_writes().iter().any(|w| w.starts_with("retire")),
+        "asked once"
+    );
+}
+
+/// An instance with no hook, or of a build without hooks, shows no series:
+/// its drain alone is waited for.
+#[tokio::test]
+async fn without_hooks_the_drain_alone_is_waited_for() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(fake.state().replicas, 3, "not drained yet");
+    phase(&fake, 2, "drained");
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(fake.state().replicas, 2);
+    assert_eq!(victim(&fake).handoff, None);
+}
+
+/// A victim that has not drained, or whose hook has not reported, is
+/// deleted once `drainBound` has passed since its hub took the request,
+/// never before, and its outcome says it did not report.
+#[tokio::test]
+async fn a_victim_that_does_not_drain_is_deleted_at_the_bound() {
+    for drains in [false, true] {
+        let fake = three();
+        hooks(&fake, 2, &[("kv", "pending")]);
+        let spec = request(2);
+        once(&fake, &spec, 1_000).await;
+        if drains {
+            phase(&fake, 2, "drained");
+        }
+        once(&fake, &spec, 20_999).await;
+        assert_eq!(fake.state().replicas, 3, "before the bound ({drains})");
+        once(&fake, &spec, 21_000).await;
+        assert_eq!(fake.state().replicas, 2, "at the bound ({drains})");
+        assert_eq!(victim(&fake).handoff, Some(Handoff::Unreported));
+    }
+    // Drained and reported, but the pod's `/metrics` no longer answers at
+    // the bound: unreported as well.
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    fake.silent
+        .lock()
+        .expect("silent")
+        .insert("10.0.0.2".into());
+    phase(&fake, 2, "drained");
+    once(&fake, &spec, 10_000).await;
+    assert_eq!(fake.state().replicas, 3);
+    once(&fake, &spec, 20_000).await;
+    assert_eq!(victim(&fake).handoff, Some(Handoff::Unreported));
+}
+
+/// The ReplicaSet deletes another pod, one gone unready, after the
+/// victim retired and its count was lowered. The victim cannot serve
+/// again, so the scaler deletes its pod itself, never gives back its
+/// Service or its cost, and records `kubernetesChoseAnother`; the
+/// ReplicaSet replaces it, and the segment gets back to its count.
+#[tokio::test]
+async fn a_retired_victim_passed_over_for_a_pod_gone_unready_is_deleted() {
+    let fake = Fake::with(&[9, 0, 9]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
+    let mut spec = request(2);
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    phase(&fake, 2, "drained");
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Removing);
+    fake.state().pods[0].view.ready = false;
+    fake.settle(false);
+    assert!(fake.pod("pod-1").view.terminating);
+    assert!(!fake.pod("pod-2").view.terminating);
+    fake.take_writes();
+    events(&fake);
+    once(&fake, &spec, 4_000).await;
+    assert_eq!(
+        events(&fake)[..2],
+        ["status [deleting uid-2]", "delete pod-2"]
+    );
+    assert_eq!(fake.take_writes(), ["delete pod-2"]);
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(last.outcome, Outcome::KubernetesChoseAnother);
+    assert_eq!(
+        (last.chosen.as_str(), last.deleted.as_str()),
+        ("uid-2", "uid-1")
+    );
+    assert_eq!(victim(&fake).phase, RetiringPhase::Deleting);
+    fake.exit();
+    fake.settle(false);
+    once(&fake, &spec, 5_000).await;
+    assert!(status(&fake).retiring.is_empty());
+    let live = fake
+        .state()
+        .pods
+        .iter()
+        .filter(|p| !p.view.terminating)
+        .count();
+    assert_eq!((live, fake.state().replicas), (2, 2), "back to its count");
+    assert!(
+        !fake.take_writes().iter().any(|w| w.starts_with("pod-2")),
+        "the victim never serves again"
+    );
+}
+
+/// A scale-up after the retire request undoes nothing: the victim is not
+/// given back its Service or its cost. Its pod is deleted, the count
+/// stays, and the ReplicaSet makes a new pod.
+#[tokio::test]
+async fn a_scale_up_after_the_retire_deletes_the_victim() {
+    let fake = Fake::with(&[9, 0, 9]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
+    let mut spec = request(2);
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    fake.take_writes();
+    spec.replicas = Some(3);
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.take_writes(), ["delete pod-2"]);
+    assert_eq!(fake.state().replicas, 3);
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(
+        (last.outcome, last.chosen.as_str()),
+        (Outcome::Replaced, "uid-2")
+    );
+    fake.settle(false);
+    fake.exit();
+    once(&fake, &spec, 4_000).await;
+    assert!(status(&fake).retiring.is_empty());
+    assert_eq!(fake.state().pods.len(), 3);
+    assert!(fake.take_writes().iter().all(|w| !w.starts_with("pod-2")));
+}
+
+/// Before the retire step is stored, a scale-up still gives the victim
+/// back: a hub that does not list its instance holds it in `unrouting`,
+/// and says why.
+#[tokio::test]
+async fn a_victim_not_yet_asked_is_given_back() {
+    let fake = Fake::with(&[9, 0, 9]);
+    let mut spec = request(2);
+    spec.service = Some(SERVICE.into());
+    spec.routing_grace = Some("0s".into());
+    once(&fake, &spec, 0).await;
+    fake.unlist();
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(once(&fake, &spec, 2_000).await, BLOCKED);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("True".into(), "HubUnavailable".into())
+    );
+    assert_eq!(victim(&fake).phase, RetiringPhase::Unrouting);
+    fake.take_writes();
+    spec.replicas = Some(3);
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.take_writes(), ["pod-2 routable true"]);
+    assert_eq!(
+        status(&fake).last.expect("ended").outcome,
+        Outcome::Cancelled
+    );
+}
+
+/// A hub that refuses the request keeps the victim asked, with no pod
+/// deleted and no count lowered: until `drainBound` it waits; from then
+/// the scale-down is blocked, and one event says so.
+#[tokio::test]
+async fn a_refused_request_blocks_at_the_bound_and_says_so_once() {
+    let fake = three();
+    *fake.refuse.lock().expect("refuse") = Some(Asked::Refused("the pool drains".into()));
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Retiring);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("False".into(), "NotBlocked".into())
+    );
+    assert_eq!(once(&fake, &spec, 20_000).await, BLOCKED);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("True".into(), "RetireRefused".into())
+    );
+    once(&fake, &spec, 25_000).await;
+    assert_eq!(*fake.warned.lock().expect("warned"), ["RetireRefused"]);
+    let writes = fake.take_writes();
+    assert_eq!(writes.len(), 3, "{writes:?}");
+    assert!(writes.iter().all(|w| w == "retire i-2 2"), "{writes:?}");
+    // The hub takes it at last.
+    *fake.refuse.lock().expect("refuse") = None;
+    once(&fake, &spec, 26_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("False".into(), "NotBlocked".into())
+    );
+}
+
+/// The victim's instance registered again: the new registration is a
+/// new instance, recorded before it is asked, never asked under the
+/// earlier one's name.
+#[tokio::test]
+async fn a_new_registration_is_recorded_before_it_is_asked() {
+    let fake = three();
+    *fake.refuse.lock().expect("refuse") = Some(Asked::Unknown);
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    *fake.refuse.lock().expect("refuse") = None;
+    {
+        let mut instances = fake.instances.lock().expect("instances");
+        let listed = &mut instances.as_mut().expect("a list").instances[1];
+        listed.peer = serde_json::from_value(serde_json::json!({"instance_id": "i-9"})).ok();
+        listed.incarnation = Some(9);
+    }
+    fake.take_writes();
+    events(&fake);
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(
+        fake.take_writes(),
+        Vec::<String>::new(),
+        "recorded, not asked"
+    );
+    let recorded = victim(&fake);
+    assert_eq!(
+        (recorded.instance_id.as_deref(), recorded.incarnation),
+        (Some("i-9"), Some(9))
+    );
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(fake.take_writes(), ["retire i-9 9"]);
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+}
+
+/// Request mode needs a bound to wait for a victim.
+#[tokio::test]
+async fn request_mode_needs_a_drain_bound() {
+    let fake = three();
+    let mut spec = request(2);
+    spec.drain_bound = None;
+    assert_eq!(once(&fake, &spec, 0).await, BLOCKED);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("True".into(), "DrainBoundRequired".into())
+    );
+    assert!(fake.take_writes().is_empty());
+}

@@ -78,13 +78,16 @@ pub struct GdlScalerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub victim: Option<String>,
     /// How the victim is retired: `signal`, by the SIGTERM of its pod's
-    /// delete.
+    /// delete, or `request`, through its pool's hub before its pod is
+    /// deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retire: Option<Retire>,
     /// How long a victim's drain may take, as `<n>ms`, `<n>s`, `<n>m` or
-    /// `<n>h`: the segment's `drain_ms`. Kubernetes enforces it in signal
-    /// mode, at the pod's grace; the scaler reports a drain that ran past
-    /// it.
+    /// `<n>h`: the segment's `drain_ms`. In signal mode Kubernetes
+    /// enforces it, at the pod's grace, and the scaler reports a drain
+    /// that ran past it. In request mode the scaler deletes the victim's
+    /// pod once it has passed since the hub took the retire request, at
+    /// the latest; request mode needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(regex(pattern = r"^[0-9]+(ms|s|m|h)$"))]
     pub drain_bound: Option<String>,
@@ -132,6 +135,11 @@ pub enum Retire {
     /// and exits itself, bounded by the pod's grace.
     #[default]
     Signal,
+    /// Through its pool's hub: the scaler asks the instance to retire,
+    /// waits until its hub lists it `drained` and its pod's `/metrics`
+    /// shows every leave hook's outcome, or until `drainBound`, and only
+    /// then deletes its pod. Its SIGTERM ends the hold.
+    Request,
 }
 
 /// What the scaler observed and did.
@@ -207,6 +215,27 @@ pub struct Retiring {
     /// Its open anchors, read as `admitted` is.
     #[serde(default)]
     pub anchors: u64,
+    /// In request mode, its instance's id, as its hub lists it: what the
+    /// retire request names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// In request mode, the incarnation of its instance's registration
+    /// that the retire request names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
+    /// When the scaler stored its retire step, RFC 3339. From then the
+    /// instance may be retired, so the scale-down is never undone; a hub
+    /// that has not taken the request `drainBound` after it blocks the
+    /// scale-down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<String>,
+    /// When its hub took the retire request, RFC 3339: the drain bound
+    /// counts from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<String>,
+    /// Its leave hooks' worst outcome, as its `/metrics` last said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
 }
 
 /// Where a victim's removal is. The scaler stores each phase before the
@@ -226,6 +255,39 @@ pub enum RetiringPhase {
     /// Committed: the ReplicaSet deletes it, and it drains on its SIGTERM.
     /// It stays out of its Service until its pod is gone.
     Removing,
+    /// Request mode: its retire request is being sent to its hub. From
+    /// here the scale-down is never undone.
+    Retiring,
+    /// Request mode: its hub took the retire request. The scaler waits
+    /// until the hub lists it `drained` and its leave hooks have reported,
+    /// or until `drainBound`, then commits its removal.
+    Draining,
+    /// Request mode: the scaler deletes its pod itself, for the
+    /// ReplicaSet to replace. The instance retired, so it cannot serve
+    /// again, and the scale-down that chose it no longer removes it: the
+    /// ReplicaSet deleted another pod, or a scale-up undid it.
+    Deleting,
+}
+
+/// The worst outcome of a victim's leave hooks, from best to worst.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum Handoff {
+    /// The hook had nothing to hand off.
+    Nothing,
+    /// The hook handed off everything.
+    Done,
+    /// The hook handed off a part.
+    Partial,
+    /// The hook failed.
+    Failed,
+    /// The runtime ended the hook at its deadline.
+    TimedOut,
+    /// A hook had not reported when `drainBound` passed, or the pod's
+    /// `/metrics` did not answer.
+    Unreported,
 }
 
 /// How the last removal ended.
@@ -244,6 +306,10 @@ pub struct Last {
     pub duration_ms: u64,
     /// How it ended.
     pub outcome: Outcome,
+    /// In request mode, its leave hooks' worst outcome; none when it had
+    /// no hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
 }
 
 /// How a removal ended.
@@ -255,8 +321,13 @@ pub enum Outcome {
     /// The chosen pod went, after its drain bound.
     Overran,
     /// The ReplicaSet deleted another pod. In signal mode the victim was
-    /// never retired, so nothing was lost.
+    /// never retired, so nothing was lost, and it serves again. In request
+    /// mode it retired: the scaler deleted its pod too, for the ReplicaSet
+    /// to replace.
     KubernetesChoseAnother,
+    /// Request mode: a scale-up undid the scale-down after the victim
+    /// retired. The scaler deleted its pod, for the ReplicaSet to replace.
+    Replaced,
     /// The scale-down was undone before it was committed.
     Cancelled,
     /// Its pod went before its removal was committed.

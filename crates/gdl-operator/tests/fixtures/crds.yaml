@@ -52,7 +52,7 @@
                 "description": "What a `GdlScaler` asks for: how many instances of one segment of one\npool run, and how one is removed.",
                 "properties": {
                   "drainBound": {
-                    "description": "How long a victim's drain may take, as `<n>ms`, `<n>s`, `<n>m` or\n`<n>h`: the segment's `drain_ms`. Kubernetes enforces it in signal\nmode, at the pod's grace; the scaler reports a drain that ran past\nit.",
+                    "description": "How long a victim's drain may take, as `<n>ms`, `<n>s`, `<n>m` or\n`<n>h`: the segment's `drain_ms`. In signal mode Kubernetes\nenforces it, at the pod's grace, and the scaler reports a drain\nthat ran past it. In request mode the scaler deletes the victim's\npod once it has passed since the hub took the retire request, at\nthe latest; request mode needs it.",
                     "nullable": true,
                     "pattern": "^[0-9]+(ms|s|m|h)$",
                     "type": "string"
@@ -90,7 +90,8 @@
                   "retire": {
                     "description": "How a victim is retired.",
                     "enum": [
-                      "signal"
+                      "signal",
+                      "request"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -219,12 +220,26 @@
                         "minimum": 0.0,
                         "type": "integer"
                       },
+                      "handoff": {
+                        "description": "The worst outcome of a victim's leave hooks, from best to worst.",
+                        "enum": [
+                          "nothing",
+                          "done",
+                          "partial",
+                          "failed",
+                          "timedOut",
+                          "unreported"
+                        ],
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "outcome": {
                         "description": "How it ended.",
                         "enum": [
                           "removed",
                           "overran",
                           "kubernetesChoseAnother",
+                          "replaced",
                           "cancelled",
                           "lost",
                           "abandoned"
@@ -287,6 +302,11 @@
                           "minimum": 0.0,
                           "type": "integer"
                         },
+                        "asked": {
+                          "description": "When the scaler stored its retire step, RFC 3339. From then the\ninstance may be retired, so the scale-down is never undone; a hub\nthat has not taken the request `drainBound` after it blocks the\nscale-down.",
+                          "nullable": true,
+                          "type": "string"
+                        },
                         "deployment": {
                           "description": "The uid of the Deployment it was chosen from. A Deployment made\nagain under the same name has another, and the scaler abandons the\nremoval.",
                           "type": "string"
@@ -303,8 +323,33 @@
                           "nullable": true,
                           "type": "string"
                         },
+                        "handoff": {
+                          "description": "The worst outcome of a victim's leave hooks, from best to worst.",
+                          "enum": [
+                            "nothing",
+                            "done",
+                            "partial",
+                            "failed",
+                            "timedOut",
+                            "unreported"
+                          ],
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "incarnation": {
+                          "description": "In request mode, the incarnation of its instance's registration\nthat the retire request names.",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
                         "instance": {
                           "description": "Its instance's velo address, `ip:port`, when the hub listed it.",
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "instanceId": {
+                          "description": "In request mode, its instance's id, as its hub lists it: what the\nretire request names.",
                           "nullable": true,
                           "type": "string"
                         },
@@ -313,12 +358,20 @@
                           "enum": [
                             "unrouting",
                             "committing",
-                            "removing"
+                            "removing",
+                            "retiring",
+                            "draining",
+                            "deleting"
                           ],
                           "type": "string"
                         },
                         "pod": {
                           "description": "Its pod's name.",
+                          "type": "string"
+                        },
+                        "retired": {
+                          "description": "When its hub took the retire request, RFC 3339: the drain bound\ncounts from here.",
+                          "nullable": true,
                           "type": "string"
                         },
                         "scaled": {

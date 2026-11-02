@@ -32,13 +32,13 @@ The Role grants only what the operator uses, in its namespace:
 | `gdl.dev` `gdlscalers/status` | get, update, patch | Report what it observed and did |
 | `apps` `deployments` | get, list, watch, create, update, patch, delete | A pool's Deployments, and each one's `replicas` |
 | core `services`, `configmaps`, `persistentvolumeclaims` | get, list, watch, create, update, patch, delete | A pool's other objects |
-| core `pods` | get, list, watch, patch | Read the pods, and label and annotate the victim |
+| core `pods` | get, list, watch, patch, delete | Read the pods, and label and annotate the victim. Delete only in `retire: request` mode, a victim that retired and that the count no longer removes ([Retire on request](#retire-on-request)) |
 | `apps` `replicasets` | get, list, watch | Find a pool's pods by what its Deployments own, at its stop |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
 | `monitoring.coreos.com` `podmonitors` | get, list, watch, create, update, patch, delete | A pool's PodMonitor, where the cluster runs the Prometheus operator |
 | `events.k8s.io` `events` | create, patch | Say what it held, refused, or could not prove |
 
-It deletes only a pool's own objects, and never a pod. It has nothing on Secrets, ServiceAccounts, Namespaces, or Leases. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
+It deletes only a pool's own objects, and a pod only in `retire: request` mode, and only a victim it retired. It has nothing on Secrets, ServiceAccounts, Namespaces, or Leases. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
 
 The operator runs as a StatefulSet of one replica. A StatefulSet never runs two pods of one identity: it starts the replacement of its pod only once the old one is confirmed gone. So at most one operator acts at a time, through a rollout, a restart, or a node failure. While the operator's node does not answer, its pod is not confirmed gone, and no replacement starts: scaling pauses, the safe way, until the node answers again or Kubernetes removes it. Scaling pauses, and nothing else does: the segments serve on, and a pod that leaves meanwhile drains on its own SIGTERM.
 
@@ -75,18 +75,18 @@ Group `gdl.dev`, version `v1alpha1`, namespaced. One scaler per segment of a poo
 | `spec.suspend` | `zero` holds the target at 0, whatever `replicas` and `minReplicas` say |
 | `spec.maxConcurrentDrains` | How many victims drain at once: 1 by default |
 | `spec.victim` | The victim policy: `fewestAdmitted` by default, `newest`, or `fewestCommittedKv` |
-| `spec.retire` | `signal`: the victim retires on its pod's SIGTERM. The only mode |
-| `spec.drainBound` | The segment's drain bound, such as `20s`. The scaler reports a removal that took longer |
+| `spec.retire` | `signal`, the default: the victim retires on its pod's SIGTERM. `request`: the scaler asks the victim's hub to retire it, and deletes its pod only once it has drained and its leave hooks have reported, or at `drainBound` ([Retire on request](#retire-on-request)) |
+| `spec.drainBound` | The segment's drain bound, such as `20s`. In signal mode, the scaler reports a removal that took longer. In request mode, the longest it waits for a victim, which request mode needs |
 | `spec.routingGrace` | How long after a victim leaves its entry Service's endpoints the scaler waits before the pod goes: `10s` by default |
 | `spec.service` | The segment's entry Service, when it publishes ports |
 | `spec.metricsPrefix` | The segment's `[system] metrics_prefix`: `dynamo_component` by default |
 | `status.replicas`, `status.selector` | The target's count and its pods' selector, which `/scale` reports to an HPA |
 | `status.readyReplicas` | Its ready pods |
-| `status.retiring` | The victims chosen and not gone yet: each one's pod and its uid, its Deployment's uid, the count it is removed at (`target`), and its phase: `unrouting`, `committing`, or `removing` |
-| `status.last` | The last removal: the name of the pod chosen (`pod`), the uids of the pod chosen and the pod deleted (`chosen`, `deleted`), why, how long it took, and how it ended |
+| `status.retiring` | The victims chosen and not gone yet: each one's pod and its uid, its Deployment's uid, the count it is removed at (`target`), and its phase: `unrouting`, `committing`, or `removing`; in request mode also `retiring`, `draining`, and `deleting`, with its instance's id and incarnation, when it was asked (`asked`) and when its hub took the request (`retired`), and its leave hooks' worst outcome (`handoff`) |
+| `status.last` | The last removal: the name of the pod chosen (`pod`), the uids of the pod chosen and the pod deleted (`chosen`, `deleted`), why, how long it took, how it ended, and in request mode its leave hooks' worst outcome (`handoff`) |
 | `status.conditions` | `Scaling`, `Blocked`, and `Suspended` |
 
-A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses any other, a `retire` other than `signal`, and a `minReplicas` below 1.
+A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses any other, a `retire` other than `signal` or `request`, and a `minReplicas` below 1.
 
 ## The `GdlPool` resource
 
@@ -196,6 +196,44 @@ Each victim is in `status.retiring` from its choice until its pod is gone, with 
 
 Every write carries the read it was decided on. A status write carries the scaler's resourceVersion, a write of the count the Deployment's uid and resourceVersion, and a write to a pod the pod's uid and resourceVersion. The API server refuses a write whose read is out of date, a write that changes nothing included, and the reconcile stops; the next one reads again and decides again. A step that puts a pod back is stored before it is taken, as every step is, and each reconcile stores its status, conditionally, before its first write to a pod: a reconcile whose read of the scaler predates another's stored step writes no pod. This keeps a stale decision from overwriting a newer one in most cases. It does not make two operators at once safe: two at once on one scaler, which only a forced deletion of the operator's pod makes possible, can still lose a scale-up, delete the wrong pod, or leave a deletion cost behind, until one of them stops ([Known limitations](../operations/limitations.md)). So a reconcile that waited on a scrape cannot undo a newer scale, and a Deployment made again under the same name is not changed by a decision about the old one. A victim of the old one is abandoned: its pod gets its Service and its cost back, and `status.last` says `abandoned`. Each reconcile reads the scaler from the API, not from its watch's cache.
 
+### Retire on request
+
+In `retire: request` mode the scaler does not leave the victim's retirement to its SIGTERM. It asks the victim's pool hub to retire it, holds the pod until the instance has drained and its nodes' leave hooks have reported, and only then deletes it. The hooks then never race the pod's grace, and the scaler reads their outcome before the pod goes. The steps after the routing grace (step 3) replace step 4:
+
+```mermaid
+sequenceDiagram
+    participant O as gdl operator
+    participant H as Pool hub
+    participant V as Victim instance
+    participant K as Kubernetes
+    O->>O: store retiring: V's instance id and incarnation
+    O->>H: POST /instances/{id}/retire {"incarnation": n}
+    H-->>O: 202
+    H-->>V: retire (pool watch)
+    O->>O: store draining
+    loop until drained and every hook reported, or drainBound
+        O->>H: GET /instances: V drained?
+        O->>V: GET /metrics: leave_outcome pending?
+    end
+    O->>K: annotate V pod-deletion-cost, replicas 3 to 2
+    K->>V: SIGTERM ends the hold
+    O->>O: status.last: outcome and handoff
+```
+
+1. **Store the retire step.** The scaler reads the victim's instance id and the incarnation of its registration from the hub's list ([Listing the instances](../concepts/pools.md#listing-the-instances)), and stores the victim as `retiring` with both, and the time (`asked`). From here the instance may have retired, so the scale-down is never undone.
+2. **Ask.** After a status write of the same reconcile, as for a pod's write, the scaler posts the retire request ([Retiring an instance on request](../concepts/pools.md#retiring-an-instance-on-request)). It does not post again while the hub lists the request. Once the hub has taken it (202), the victim is `draining` and the time is in `retired`. A hub that lists another registration at the pod's IP has another instance there: the scaler stores it, and asks it in the next reconcile. A hub that refuses, or does not answer, is asked again each reconcile. Once `drainBound` has passed since `asked`, the scale-down is blocked (`Blocked`, `RetireRefused`), and one warning event says why. No pod is deleted and the count stays: the scaler never falls back to signal mode by itself.
+3. **Wait.** Each second the scaler reads the hub's list and the pod's `/metrics`. It waits until the hub lists the instance `drained`, or no longer lists it, and no leave hook is pending: `<metricsPrefix>_leave_outcome{hook, outcome}` reads 1 at `outcome="pending"` for a hook that has not ended, and 1 at its outcome once it has. A pod that shows no such series has no hook, and only its drain is waited for. Once `drainBound` has passed since `retired`, the scaler goes on whatever it read, and a hook still pending, or `/metrics` that do not answer, read as `unreported`.
+4. **Delete exactly that pod,** as step 4 above: the cost, then the count. The SIGTERM ends the instance's hold, and it exits.
+
+`handoff` in `status.retiring` and `status.last` is the hooks' worst outcome, from best to worst: `nothing`, `done`, `partial`, `failed`, `timedOut`, `unreported`.
+
+A victim that may have retired cannot serve again, which changes two rules of signal mode:
+
+- **A scale-up deletes it.** A scale-up gives back only a victim not yet asked, still `unrouting`. One that was asked is `deleting`: the scaler deletes its pod itself, at its uid and resourceVersion, leaves the count, and records `replaced`. The ReplicaSet makes a new pod. The instance's SIGTERM ends its hold, and it drains inside its grace.
+- **A wrong victim is deleted too.** When the ReplicaSet deletes another pod ([Why a deletion cost](#why-a-deletion-cost)), the retired victim does not get its Service and cost back. The scaler deletes its pod, records `kubernetesChoseAnother`, and the ReplicaSet replaces it: the segment runs one short until the new pod is ready.
+
+Request mode drains one victim at a time, whatever `maxConcurrentDrains` says ([Known limitations](../operations/limitations.md#the-operator-retires-on-request-one-victim-at-a-time)). It needs `drainBound` (`Blocked`, `DrainBoundRequired`). The instance's side of the request, the retirement and the hold, is in the runtime, which does not act on it yet ([Known limitations](../operations/limitations.md#an-instance-does-not-act-on-a-retire-request-yet)). Until it does, each victim waits until `drainBound`, then goes on its SIGTERM as in signal mode. Two operators at once, after a forced deletion of the operator's pod, are as unsafe in this mode as in signal mode.
+
 ### Victim policies
 
 | Policy | Removes first |
@@ -214,7 +252,7 @@ A policy is registered by name, as pool policies are: `Victims::add(name, policy
 
 A ReplicaSet deletes, in order: unscheduled pods, then Pending, Unknown, and Running pods, then pods that are not ready, then pods of a lower `controller.kubernetes.io/pod-deletion-cost`. Only after those does it look at nodes, readiness time, restarts, and age. The scaler acts only while every other pod runs and is ready, so the victim's cost decides. The rejected alternatives: a StatefulSet always removes the highest ordinal, so it cannot choose; and pods the operator owns directly would mean writing a ReplicaSet again, with adoption, template hashes, and rollout pacing.
 
-The cost is a hint: the ReplicaSet reads pods from its own cache, and a pod that fails at that moment comes first. If it deletes another pod, nothing is lost. The victim never retired, since only its SIGTERM retires it. The pod that went drains on its own SIGTERM. The scaler sees that the ReplicaSet has nothing left to delete: the victim still runs, the count is at or below its target, and no more pods live than the count. It clears the victim's cost, sets its `gdl.dev/routable` back to `true`, and records `kubernetesChoseAnother` with the pod that went. A victim left out of its Service for good would stay counted in the replicas and take no connection. Any other committed victim stays out of its Service until its pod is gone: a ReplicaSet that has not acted yet still deletes it. A scale-up takes back a victim not yet committed the same way, before any new pod. A committed one cannot be taken back, so the scale-up raises the count only once its pod is being deleted: raised before, the count would leave the ReplicaSet nothing to delete, and the victim out of its Service for good.
+The cost is a hint: the ReplicaSet reads pods from its own cache, and a pod that fails at that moment comes first. If it deletes another pod, nothing is lost. In signal mode the victim never retired, since only its SIGTERM retires it; request mode deletes the victim instead ([Retire on request](#retire-on-request)). The pod that went drains on its own SIGTERM. The scaler sees that the ReplicaSet has nothing left to delete: the victim still runs, the count is at or below its target, and no more pods live than the count. It clears the victim's cost, sets its `gdl.dev/routable` back to `true`, and records `kubernetesChoseAnother` with the pod that went. A victim left out of its Service for good would stay counted in the replicas and take no connection. Any other committed victim stays out of its Service until its pod is gone: a ReplicaSet that has not acted yet still deletes it. A scale-up takes back a victim not yet committed the same way, before any new pod. A committed one cannot be taken back, so the scale-up raises the count only once its pod is being deleted: raised before, the count would leave the ReplicaSet nothing to delete, and the victim out of its Service for good.
 
 ### Frontends
 

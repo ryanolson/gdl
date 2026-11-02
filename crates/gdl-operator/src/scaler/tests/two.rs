@@ -236,6 +236,14 @@ impl Cluster for PausedWrite<'_> {
         self.fake.cost(pod, version, cost).await
     }
 
+    async fn delete(&self, pod: &PodView, version: &str) -> Result<(), Refused> {
+        self.fake.delete(pod, version).await
+    }
+
+    async fn warn(&self, scaler: &GdlScaler, reason: &str, note: &str) {
+        self.fake.warn(scaler, reason, note).await;
+    }
+
     async fn status(
         &self,
         name: &str,

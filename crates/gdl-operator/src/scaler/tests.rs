@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::cluster::{Fence, Refused, Target};
+use crate::probe::Asked;
 use crate::{GdlScalerSpec, Suspend, TargetRef};
 
 const SERVICE: &str = "global-front";
@@ -16,6 +17,9 @@ mod review;
 
 #[path = "tests/two.rs"]
 mod two;
+
+#[path = "tests/request.rs"]
+mod request;
 
 #[derive(Debug, Clone)]
 struct FakePod {
@@ -53,6 +57,12 @@ struct Fake {
     instances: Mutex<Option<Instances>>,
     /// Pods whose `/metrics` does not answer, by IP.
     silent: Mutex<BTreeSet<String>>,
+    /// What each pod's `/metrics` says of its leave hooks, by IP.
+    leave: Mutex<BTreeMap<String, String>>,
+    /// The hub's answer to a retire request, when not 202.
+    refuse: Mutex<Option<Asked>>,
+    /// The reasons of the warning events recorded.
+    warned: Mutex<Vec<String>>,
     /// Held by each read of the pods, so that two reconciles both read
     /// before either writes.
     barrier: Option<tokio::sync::Barrier>,
@@ -293,6 +303,27 @@ impl Cluster for Fake {
         )
     }
 
+    async fn delete(&self, pod: &PodView, version: &str) -> Result<(), Refused> {
+        let mut state = self.state();
+        let fake = state
+            .pods
+            .iter_mut()
+            .find(|p| p.view.uid == pod.uid)
+            .ok_or(Refused::Stale("no pod".into()))?;
+        if fake.view.resource_version != version {
+            return Err(Refused::Stale(format!("{} changed", pod.name)));
+        }
+        fake.view.terminating = true;
+        let write = format!("delete {}", pod.name);
+        state.writes.push(write.clone());
+        state.events.push(write);
+        Ok(())
+    }
+
+    async fn warn(&self, _: &GdlScaler, reason: &str, _: &str) {
+        self.warned.lock().expect("warned").push(reason.to_string());
+    }
+
     async fn status(
         &self,
         _: &str,
@@ -341,10 +372,38 @@ impl Probe for Fake {
             .iter()
             .find(|p| p.view.ip.as_deref() == Some(ip))
             .ok_or("no pod")?;
+        let leave = self.leave.lock().expect("leave");
         Ok(format!(
-            "dynamo_component_admission_admitted {}\ndynamo_component_egress_in_use 1\n",
-            pod.load
+            "dynamo_component_admission_admitted {}\ndynamo_component_egress_in_use 1\n{}",
+            pod.load,
+            leave.get(ip).map_or("", String::as_str)
         ))
+    }
+
+    async fn retire(&self, _: &str, instance: &str, incarnation: u64) -> Result<Asked, String> {
+        let write = format!("retire {instance} {incarnation}");
+        {
+            let mut state = self.state();
+            state.writes.push(write.clone());
+            state.events.push(write);
+        }
+        if let Some(answer) = self.refuse.lock().expect("refuse").clone() {
+            return Ok(answer);
+        }
+        let mut instances = self.instances.lock().expect("instances");
+        let list = instances.as_mut().ok_or("the hub does not answer")?;
+        let Some(listed) = list.instances.iter_mut().find(|i| {
+            i.peer
+                .as_ref()
+                .is_some_and(|peer| peer.instance_id == instance)
+        }) else {
+            return Ok(Asked::Unknown);
+        };
+        if listed.incarnation != Some(incarnation) {
+            return Ok(Asked::Refused("not its current incarnation".into()));
+        }
+        listed.retire_requested = true;
+        Ok(Asked::Accepted)
     }
 }
 

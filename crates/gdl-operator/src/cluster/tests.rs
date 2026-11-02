@@ -7,7 +7,7 @@ use serde_json::Value;
 use tower::service_fn;
 
 use super::*;
-use crate::probe::{Instances, Probe};
+use crate::probe::{Asked, Instances, Probe};
 use crate::scaler::{Context, reconcile};
 use crate::{GdlScalerSpec, TargetRef, Victims};
 
@@ -37,6 +37,10 @@ impl Probe for Quiet {
 
     async fn metrics(&self, _: &str, _: u16) -> Result<String, String> {
         Ok("dynamo_component_admission_admitted 0\n".into())
+    }
+
+    async fn retire(&self, _: &str, _: &str, _: u64) -> Result<Asked, String> {
+        Err("no hub needed".into())
     }
 }
 
@@ -260,4 +264,48 @@ async fn a_pod_patch_refuses_a_stale_version_and_a_recreated_uid() {
         state.lock().expect("pod state")["metadata"]["labels"][ROUTABLE],
         "false"
     );
+}
+
+/// A pod's delete carries the uid and resourceVersion it was decided on,
+/// as preconditions, so that a pod made again under its name, or changed
+/// since, refuses it: the API server's 409 reads as stale.
+#[tokio::test]
+async fn a_pod_delete_is_fenced_by_its_uid_and_version() {
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let bodies = Arc::clone(&seen);
+    let service = service_fn(move |request: Request<Body>| {
+        let bodies = Arc::clone(&bodies);
+        async move {
+            assert_eq!(request.method(), http::Method::DELETE);
+            assert!(request.uri().path().ends_with("/pods/pod-3"));
+            let bytes = request.into_body().collect_bytes().await.expect("body");
+            let body: Value = serde_json::from_slice(&bytes).expect("delete options");
+            let current = body["preconditions"]["resourceVersion"] == "10";
+            bodies.lock().expect("bodies").push(body);
+            let (code, reply) = if current {
+                (StatusCode::OK, pod(3))
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Conflict", "message": "Precondition failed", "code": 409}),
+                )
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(code)
+                    .body(Body::from(reply.to_string().into_bytes()))
+                    .expect("response"),
+            )
+        }
+    });
+    let cluster = KubeCluster::new(Client::new(service, "test"), "test");
+    let read = PodView::of(&serde_json::from_value(pod(3)).expect("a pod")).expect("a view");
+    cluster.delete(&read, "10").await.expect("deleted");
+    assert!(matches!(
+        cluster.delete(&read, "9").await,
+        Err(Refused::Stale(_))
+    ));
+    let seen = seen.lock().expect("bodies");
+    assert_eq!(seen[0]["preconditions"]["uid"], "uid-3");
+    assert_eq!(seen[1]["preconditions"]["resourceVersion"], "9");
 }

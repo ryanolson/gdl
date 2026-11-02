@@ -63,7 +63,9 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("gdl.dev", &["gdlscalers/status"], &["get", "update", "patch"]),
             rule("apps", &["deployments"], &write),
             rule("", &["services", "configmaps", "persistentvolumeclaims"], &write),
-            rule("", &["pods"], &["get", "list", "watch", "patch"]),
+            // `delete` for `retire: request` alone: a retired victim that
+            // the count no longer removes cannot serve again.
+            rule("", &["pods"], &["get", "list", "watch", "patch", "delete"]),
             rule("apps", &["replicasets"], &read),
             rule("discovery.k8s.io", &["endpointslices"], &read),
             rule("monitoring.coreos.com", &["podmonitors"], &write),

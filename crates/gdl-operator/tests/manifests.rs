@@ -47,13 +47,16 @@ fn the_crd_serves_scale_for_an_hpa() {
 }
 
 /// The schema refuses what the scaler cannot do: a retire mode other than
-/// `signal`, a suspend other than `zero`, a minimum below 1, and a
+/// `signal` and `request`, a suspend other than `zero`, a minimum below 1, and a
 /// duration it does not read.
 #[test]
 fn the_schema_refuses_what_the_scaler_cannot_do() {
     let crds = gdl_operator::crds();
     let spec = &crds[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"];
-    assert_eq!(spec["retire"]["enum"], serde_json::json!(["signal"]));
+    assert_eq!(
+        spec["retire"]["enum"],
+        serde_json::json!(["signal", "request"])
+    );
     assert_eq!(spec["suspend"]["enum"], serde_json::json!(["zero"]));
     assert_eq!(spec["minReplicas"]["minimum"], 1.0);
     assert_eq!(spec["maxConcurrentDrains"]["minimum"], 1.0);
@@ -72,8 +75,9 @@ fn the_schema_refuses_what_the_scaler_cannot_do() {
 }
 
 /// The Role grants only what the operator uses, in its namespace: a
-/// pool's objects, which it makes and deletes; pods, which it reads and
-/// labels but never deletes; and events. Nothing on Secrets or
+/// pool's objects, which it makes and deletes; pods, which it reads,
+/// labels, and in `retire: request` mode deletes when a retired victim
+/// can no longer be removed by the count; and events. Nothing on Secrets or
 /// ServiceAccounts, no Lease, and no service proxy.
 #[test]
 fn the_role_grants_only_what_the_operator_uses() {
@@ -139,7 +143,7 @@ fn the_role_grants_only_what_the_operator_uses() {
             ("/services", write),
             ("/configmaps", write),
             ("/persistentvolumeclaims", write),
-            ("/pods", "get,list,watch,patch"),
+            ("/pods", "get,list,watch,patch,delete"),
             ("apps/replicasets", "get,list,watch"),
             ("discovery.k8s.io/endpointslices", "get,list,watch"),
             ("monitoring.coreos.com/podmonitors", write),

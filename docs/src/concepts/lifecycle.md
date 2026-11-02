@@ -89,6 +89,8 @@ The follower also acknowledges retirements, as the next section describes. [Rout
 
 The first stop retires the instance. A stop is SIGINT, SIGTERM, or `Process::stop`. A second stop ends the drain at once.
 
+A controller can also ask an instance's pool hub to retire it before it deletes the instance's pod, as the operator's `retire: request` mode does ([Retiring an instance on request](pools.md#retiring-an-instance-on-request)). The hub sends the request on the pool's watch. The runtime does not act on it yet ([Limitations](../operations/limitations.md#an-instance-does-not-act-on-a-retire-request-yet)), so the instance retires at its SIGTERM.
+
 ```mermaid
 sequenceDiagram
     participant X as Retiring instance X

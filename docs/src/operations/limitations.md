@@ -103,7 +103,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### An instance does not act on a retire request yet
 - **What:** a pool's hub holds a retire request and sends it on the pool's watch ([Retiring an instance on request](../concepts/pools.md#retiring-an-instance-on-request)), but the runtime does not read it. An instance retires only at its stop.
-- **Workaround:** stop the instance, as a pod's delete does with its SIGTERM.
+- **Workaround:** none needed for correctness. The operator's `retire: request` mode then waits for each victim until its `drainBound`, deletes its pod, and the instance drains on its SIGTERM, as in signal mode. `retire: signal`, the default, removes a victim sooner.
 
 ### A hand-off that reaches a retired instance late costs an offer
 - **What:** a hand-off sent before its sender heard of the retirement, and arriving after the instance stopped taking work, is declined with `Overloaded`. The sender's router chooses again, which costs one round trip.
@@ -544,9 +544,13 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the operator takes a frontend's victim out of its Service's endpoints before its pod goes, so no new connection reaches it through kube-proxy. A keep-alive connection that is already open stays, and the frontend learns that it retires only at its SIGTERM, so a request on it can race the close. A load balancer in front of the Service reports no withdrawal, so the operator waits `routingGrace` for it.
 - **Workaround:** close keep-alive connections while the frontend drains, in its own drain policy. Behind the AWS load balancer controller, use IP targets, and set `routingGrace` to its reconcile time plus the target group's deregistration delay.
 
-### The operator scales only Deployments, in signal mode
-- **What:** a `GdlScaler` targets an `apps/v1` Deployment, and retires its victim only by its pod's SIGTERM: it cannot hold a drained instance for a later step.
+### The operator scales only Deployments
+- **What:** a `GdlScaler` targets an `apps/v1` Deployment.
 - **Workaround:** none.
+
+### The operator retires on request one victim at a time
+- **What:** in `retire: request` mode a victim drains before its removal is committed, and the scaler takes one victim at a time to its commit. So one victim drains at a time, whatever `maxConcurrentDrains` says.
+- **Workaround:** `retire: signal`, whose victims drain together after their commit.
 
 ### At most one operator acts only while nobody force-deletes its pod
 - **What:** the operator is a StatefulSet of one replica, and Kubernetes starts its replacement only once the old pod is confirmed gone. A person who force-deletes the pod (`--force --grace-period=0`), or removes its node by hand while the pod still runs, tells Kubernetes otherwise, and a second operator can start beside the first. The per-object fences keep a stale decision from overwriting a newer one in most cases, but two operators at once can still lose a scale-up, delete the wrong pod, or leave a deletion cost behind, until one of them stops. The ignored tests in `crates/gdl-operator/src/scaler/tests/two.rs` show each. While the operator's node does not answer, no replacement starts, and scaling pauses until the node answers or Kubernetes removes it.
