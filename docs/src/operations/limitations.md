@@ -735,6 +735,19 @@ These entries concern the pool plane. See [Classes and pools](../concepts/pools.
 - **Cost:** each offer reads the head once for each want, which costs what decoding it costs.
 - **Lifts:** an entry that reads its pool's record, or a decline as the instance's own when the pool lists the key.
 
+### A session's instance is kept only from the first turn that reads its cutoff
+- **What:** `affinity` with `through` keeps a session on its instance while instances join only on a turn whose context carries the session's cutoff. A turn that reads no cutoff ranks every instance, and an instance that joined can take the session. That is a turn whose pin read passed its budget, and a second turn that comes before the first turn's pin write lands, or after that write was dropped.
+- **Unknown join order:** a pool whose hub, or a hub between it and the chooser, is of an earlier build sends no stamp. The row then gives no cutoff (`Pool::joined_through()` is `None`), and every turn ranks every instance, as before.
+- **Lifts:** a pin write that a turn waits for.
+
+### An instance offered after a session's first turn can take the session once
+- **What:** an instance that registered before a session's first turn, but was not offered then, as one not yet ready, has a stamp at or below the session's cutoff. When it is offered, it is ranked with the others, and takes the sessions that score highest on it. Each such session moves once.
+- **Lifts:** a stamp taken when an instance is first offered, which the pool's hub does not know.
+
+### A rolling replacement keeps old sessions on the old instances that remain
+- **What:** while a pool replaces its instances one at a time, a session with a cutoff ranks only the old instances still offered. The last old instances carry every old session, and the new ones take only new sessions. An old instance that is full declines for its whole pool (`Decline::Full`): the turn leaves the pool, or waits for it if the pool policy re-queues it, and is not offered to another old instance. Only an instance's own decline (`Decline::Instance`) sends the turn to the next instance inside the cutoff, and then outside it, for that turn only. Once every old instance has left, the cutoff moves up to the new ones.
+- **Lifts:** a cutoff that moves up when the instances inside it fall below a share of the pool's instances.
+
 ### A property that is starting turns away the pool's other properties
 - **What:** an entry declines an offer whose wanted property it lists as `starting` as full. The refusal counts in the instance's load report, so `home_first` reads the pool as saturated for a period. Under a pool policy that does not re-queue the request, the chooser also damps the whole pool. In a pool that serves several models, one model whose engine restarts turns away the requests for the others: until the next summary shows no refusal, and, without a re-queue, until the damping window ends.
 - **Why:** an engine restart must not move a session's pin. A decline as not present would make a policy that keeps sessions with one pool move every session of that engine. A full decline keeps them with the pool, and a policy that re-queues them waits for the pool ([A request re-queued for its pool](../concepts/pool-routing.md#a-request-re-queued-for-its-pool)).

@@ -1463,7 +1463,10 @@ impl Follow {
             .map(|(id, _)| *id)
             .collect();
         retired.sort_by_key(InstanceId::as_u128);
-        let offered = eligible.iter().copied().map(selector_id).collect();
+        let offered: Box<[gdl::InstanceId]> = eligible.iter().copied().map(selector_id).collect();
+        // The stamps keep where the instances are, on the heap, which
+        // moving the box into the table does not change.
+        let stamps = gdl::JoinStamps::new(&offered, joined.into_boxed_slice(), self.epoch);
         PoolTable {
             class: key.0.clone(),
             pool: key.1.clone(),
@@ -1475,7 +1478,7 @@ impl Follow {
             load: self.load,
             eligible: eligible.into_boxed_slice(),
             offered,
-            stamps: gdl::JoinStamps::new(joined.into_boxed_slice(), self.epoch),
+            stamps,
             retired: retired.into_boxed_slice(),
             unread: self.unread,
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),

@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors, registered pool policies, KV numbers and a view on an offer, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors and a session's cutoff, registered pool policies, KV numbers and a view on an offer, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -275,7 +275,7 @@ An accepted pool offer runs about 166 more instructions where its answer is read
 
 ### An instance's own decline
 
-An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count. Under `round_robin` or `random` it allocates nothing. Under a selector it allocates the list of declines once, at its first choice, sized for the pool. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
+An entry instance that declines as its own leaves the request in its pool, and the chooser offers it to the pool's other entry instances ([An instance that cannot serve the request](../concepts/pool-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count. Under `round_robin` or `random` it allocates nothing. Under a selector it allocates the list of declines once, at its first choice, sized for the pool ([A session's cutoff](#a-sessions-cutoff)). The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
 
 **gb300 history.** On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
 
@@ -292,6 +292,33 @@ cargo test --release -p gdl-runtime --lib dist::pools::offer::tests::cost_of_a_p
 | accepted first offer over loopback, roster | 28.1 to 31.3 us | 25.6 to 29.7 us |
 
 A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the pools', so they show no change.
+
+### A session's cutoff
+
+`affinity` with `through` ranks a session only among the instances that joined at or before its cutoff ([A session keeps its instance while instances join](../concepts/pool-routing.md#a-session-keeps-its-instance-while-instances-join)). A pool row owns its join stamps and its hub's epoch (`gdl::JoinStamps`), and a selection borrows them through one optional reference, so `Instances` grew from 32 to 40 bytes, and the erased `affinity` future from 184 to 200 (`crates/gdl/tests/selection.rs`). A view that held the stamps' slice and the epoch itself was 56 bytes, with a future of 232. The stamps keep where the row's instances are, so a selection from one instance alone, as a walk can ask, reads that instance's own stamp. That costs a cutoff 16 instructions more (727 against 711); read from the code and not profiled, a comparison and a division. Each pool row keeps the stamps, one `u64` per entry instance, and the lowest and highest a policy reads: `PoolTable` grew from 312 to 336 bytes and `gdl::Pool` from 248 to 264, made once per table change, not per request.
+
+Measured on spark-a26e (aarch64, 20 cores, shared), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.22 callgrind. Instructions per selection are the count at 200,000 selections minus the count at 100,000, divided by 100,000, through the erased selector the runtime calls, over `crates/gdl/examples/selects.rs`. Base is `762b1c21` with the example added. Three rounds of each agreed within 1 instruction.
+
+```bash
+cargo build --release -p gdl --example selects
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/selects <case> <100000|200000>
+```
+
+| Selection | Base | Change |
+|---|---|---|
+| 5 instances (`five`) | 546 | 563 |
+| 5 instances with stamps, `through` not set (`stamped`) | | 563 |
+| 5 instances, `through`, no cutoff (`uncut`) | | 567 |
+| 5 instances, `through`, a cutoff that keeps 4 (`cutoff`) | | 727 |
+| 1 instance of 25, one declined (`alone`) | 424 | 441 |
+| 25 instances, one declined (`full`) | 1,215 | 1,232 |
+| 25 instances, one declined, a cutoff that keeps 20 (`full-cut`) | | 1,397 |
+
+- **Every selection costs about 18 instructions more, whatever its size.** The one-instance row pays the same as the five. With the cutoff's code taken out of `affinity`, `five` counted 551: about 5 for the larger view, and about 12 for the branch on `through`, which changes how the rest of the selection compiles. Callgrind attributes the 12 to the lines of the score, which do the same work. Three other forms cost the same or more: the stamp looked up only when asked for (562 to 566), and the cutoff's pass kept out of line (563), with or without `#[cold]`, which cost a cutoff 75 instructions more.
+- **A cutoff costs about 165 instructions on 5 instances.** Read from the code and not profiled, that is the lookup of the context's extension, the place of the selection's instances among the row's, and the pass over the instances inside it.
+- **A walk after an instance's own decline ranks the whole pool.** Under a selector, each offer of the walk costs a selection over the pool's instances, 1,232 instructions for 25, against 441 for one instance alone. It runs only after such a decline, and allocates the list of declines once.
+- **A selection allocates what it did:** one allocation, the erased selector's boxed future, with a cutoff, without one, and after a decline (`a_cutoff_costs_an_affinity_selection_no_allocation` in `crates/gdl/tests/allocations.rs`).
+- **The wire.** Each `ready` and `exposed` carries the stamp: a snapshot of 64 entry instances grew from 15,533 to 16,320 bytes on a pool's watch and from 19,819 to 20,606 bytes on the relay (`crates/gdl-hub/tests/snapshot.rs`).
 
 ### Re-queue for the same pool
 

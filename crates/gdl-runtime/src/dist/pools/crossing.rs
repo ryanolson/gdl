@@ -495,7 +495,8 @@ impl Crossing {
     /// request: the one whose decline began the walk, and each the walk
     /// offered it to since, or found gone from the pool's current table.
     /// So a selector ranks the whole pool on each choice, as within a
-    /// class. Each
+    /// class, and `affinity` with a session's cutoff offers the request
+    /// inside the cutoff before outside it ([`gdl::Affinity`]). Each
     /// choice uses one of the walk's offers, whichever instance it names,
     /// so the walk ends after as many offers as the pool has other
     /// instances. The list of declines is the walk's one allocation, made
@@ -960,6 +961,159 @@ mod tests {
             }
             Ok(gdl::Choice::new(chosen))
         }
+    }
+
+    /// A pool `m` of the instances `eligible`, in this order, with the
+    /// join stamps `joined`, of its hub of `epoch`.
+    fn stamped(eligible: &[InstanceId], joined: &[u64], epoch: u64) -> Arc<PoolTable> {
+        let mut table = pool("m", PoolState::Ready, eligible);
+        let held = Arc::get_mut(&mut table).expect("one owner");
+        held.stamps = gdl::JoinStamps::new(&held.offered, joined.into(), epoch);
+        held.epoch = epoch;
+        table
+    }
+
+    /// After an entry instance declines a request as its own, the walk
+    /// over the pool's other instances asks the selector with every one of
+    /// them and the instances that declined, so that `affinity` with a
+    /// session's cutoff offers the request to the other instance inside
+    /// the cutoff before one that joined after it, though the later one
+    /// comes first in the table's order. Only then is it offered outside,
+    /// and the walk ends once each instance was offered it.
+    #[tokio::test]
+    async fn an_instances_decline_goes_to_the_next_instance_inside_the_cutoff() {
+        const EPOCH: u64 = 7;
+        let mut ids = ids(3);
+        ids.sort_by_key(|id| id.as_u128());
+        // In table order: the first, joined at 10; one that joined after
+        // the cutoff, at 30; and one at 20, inside it.
+        let (first, later, inside) = (ids[0], ids[1], ids[2]);
+        let crossing = crossing(
+            vec![stamped(&ids, &[10, 30, 20], EPOCH)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let affinity = gdl::Affinity::new(gdl::AffinityConfig {
+            key: Some("session".into()),
+            through: true,
+        });
+        let selector = gdl::__runtime::Typed(Arc::new(affinity));
+        let id = super::super::pool_id("model_x", "m");
+        // A session whose first choice is the first instance.
+        let mut found = None;
+        for key in 0..256 {
+            let mut cx = Cx::new().with_timeout(Duration::from_secs(5));
+            cx.insert_meta("session", format!("s-{key}"));
+            cx.insert_ext(gdl::JoinedThrough {
+                epoch: EPOCH,
+                joined: 20,
+            });
+            let chosen = crossing
+                .choose(
+                    &selector,
+                    &cx,
+                    &[],
+                    Default::default(),
+                    Left::default(),
+                    &mut None,
+                )
+                .await
+                .expect("a choice")
+                .expect("a pool");
+            if chosen.0 == first {
+                found = Some(cx);
+                break;
+            }
+        }
+        let cx = found.expect("a session on the first instance");
+        let mut walk = crossing.walk(id, first).expect("followed");
+        let mut offered = Vec::new();
+        while let Some((to, ..)) = crossing
+            .choose_in(
+                &mut walk,
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                &mut None,
+            )
+            .await
+            .expect("a choice")
+        {
+            offered.push(to);
+        }
+        assert_eq!(offered, [inside, later]);
+    }
+
+    /// A singleton retry still describes a known member of the same pool.
+    /// A selector can require that evidence before it uses a cutoff.
+    #[tokio::test]
+    async fn a_walk_keeps_join_order_when_a_selector_repeats_an_instance() {
+        struct Cutoff;
+
+        impl gdl::Selector for Cutoff {
+            type Head = gdl::Encoded;
+
+            async fn select<'a>(
+                &'a self,
+                request: gdl::Request<'a, gdl::Encoded>,
+                instances: gdl::Instances<'a>,
+            ) -> Result<gdl::Choice<'a>> {
+                let cut = request.cx().ext::<gdl::JoinedThrough>().expect("a cutoff");
+                if instances.epoch() != cut.epoch
+                    || instances.iter().any(|instance| instance.joined().is_none())
+                {
+                    return Err(Error::routing(
+                        "the offered pool member lost its known join order",
+                    ));
+                }
+                let chosen = instances
+                    .iter()
+                    .find(|instance| instance.joined().is_some_and(|joined| joined <= cut.joined))
+                    .ok_or_else(|| Error::routing("no instance inside the cutoff"))?;
+                Ok(gdl::Choice::new(chosen))
+            }
+        }
+
+        let ids = ids(3);
+        let crossing = crossing(
+            vec![stamped(&ids, &[10, 20, 30], 7)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        let mut cx = Cx::new();
+        cx.insert_ext(gdl::JoinedThrough {
+            epoch: 7,
+            joined: 20,
+        });
+        let selector = gdl::__runtime::Typed(Arc::new(Cutoff));
+        let pool = super::super::pool_id("model_x", "m");
+        let first = crossing
+            .choose(
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                Left::NONE,
+                &mut None,
+            )
+            .await
+            .expect("the full table has known join order")
+            .expect("a usable cohort");
+        assert_eq!(first.0, ids[0]);
+        drop(first);
+        let mut walk = crossing.walk(pool, ids[0]).expect("the pool is followed");
+        let selected = crossing
+            .choose_in(
+                &mut walk,
+                &selector,
+                &cx,
+                &[],
+                Default::default(),
+                &mut None,
+            )
+            .await
+            .expect("the singleton keeps its pool's epoch and join stamp")
+            .expect("the second member is inside the cutoff and usable");
+        assert_eq!(selected.0, ids[1]);
     }
 
     #[tokio::test]

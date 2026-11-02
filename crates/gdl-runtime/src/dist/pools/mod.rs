@@ -561,14 +561,15 @@ impl PoolTable {
         })
     }
 
-    /// The pool's entry instances of `segment` as a selector sees them.
+    /// The pool's entry instances of `segment` as a selector sees them:
+    /// with their join stamps, and the epoch of the hub those are of.
     pub(crate) fn instances<'t>(&'t self, segment: &'t str) -> gdl::Instances<'t> {
-        gdl::Instances::new(segment, &self.offered)
+        gdl::Instances::with_joined(segment, &self.offered, &self.stamps)
     }
 
-    /// The entry instance at `at` alone.
+    /// The entry instance at `at` alone, with its join stamp.
     pub(crate) fn instance<'t>(&'t self, segment: &'t str, at: usize) -> gdl::Instances<'t> {
-        gdl::Instances::new(segment, &self.offered[at..=at])
+        gdl::Instances::with_joined(segment, &self.offered[at..=at], &self.stamps)
     }
 
     /// The pool as a pool policy sees it.

@@ -98,3 +98,74 @@ async fn a_hop_allocates_two_contexts_and_two_boundaries() {
     let own = allocations(&hop).await - allocations(&direct).await;
     assert!(own <= 8, "a hop allocated {own} times");
 }
+
+/// What one `affinity` selection allocates, through the erased selector
+/// the runtime calls, for a context `cx` and `instances`.
+fn selection_allocations(
+    selector: &gdl::__runtime::Typed<gdl::Affinity>,
+    cx: &Cx,
+    instances: gdl::Instances<'_>,
+    declined: &[gdl::InstanceId],
+) -> u64 {
+    use gdl::__runtime::Erased;
+    use std::task::{Context, Poll, Waker};
+    COUNTED.with(|counted| counted.set(0));
+    COUNTING.with(|counting| counting.set(true));
+    let mut chosen = selector.select(cx, b"head", Default::default(), declined, instances);
+    let ready = chosen
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    drop(chosen);
+    COUNTING.with(|counting| counting.set(false));
+    assert!(matches!(ready, Poll::Ready(Ok(_))));
+    COUNTED.with(Cell::get)
+}
+
+/// A selection by `affinity` with a session's cutoff, and after a decline,
+/// allocates what one without a cutoff does: the cutoff is read from the
+/// context and ranked in place.
+#[test]
+fn a_cutoff_costs_an_affinity_selection_no_allocation() {
+    let selector = |through| {
+        gdl::__runtime::Typed(Arc::new(gdl::Affinity::new(gdl::AffinityConfig {
+            key: Some("session".into()),
+            through,
+        })))
+    };
+    let ids: Vec<gdl::InstanceId> = (1..=25u128)
+        .map(|n| gdl::InstanceId::from_u128(n << 70 | n))
+        .collect();
+    let joined: Vec<u64> = (1..=25).collect();
+    let mut cx = Cx::new();
+    cx.insert_meta("session", "s-1");
+    let plain = selection_allocations(&selector(false), &cx, gdl::Instances::new("f", &ids), &[]);
+    let mut cut = cx.clone();
+    cut.insert_ext(gdl::JoinedThrough {
+        epoch: 3,
+        joined: 20,
+    });
+    let stamps = gdl::JoinStamps::new(&ids, joined.into(), 3);
+    let stamped = gdl::Instances::with_joined("f", &ids, &stamps);
+    let declined = &ids[..2];
+    for (case, count) in [
+        (
+            "cutoff",
+            selection_allocations(&selector(true), &cut, stamped, &[]),
+        ),
+        (
+            "no cutoff",
+            selection_allocations(&selector(true), &cx, stamped, &[]),
+        ),
+        (
+            "declined",
+            selection_allocations(&selector(true), &cut, stamped, declined),
+        ),
+        (
+            "off",
+            selection_allocations(&selector(false), &cut, stamped, &[]),
+        ),
+    ] {
+        assert_eq!(count, plain, "{case}");
+    }
+    assert_eq!(plain, 1, "the erased selector's boxed future");
+}

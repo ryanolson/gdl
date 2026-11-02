@@ -459,6 +459,30 @@ pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
     (pool, proxy)
 }
 
+/// One more instance of `segment` in the model pool `pool`, whose hub is
+/// `hub`, set up as [`model_of`] sets up the pool's first ones, serving
+/// the graph `assemble` builds.
+#[allow(dead_code, reason = "not every test binary adds an instance")]
+pub async fn instance_of<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    hub: &Hub,
+    pool: Model<'_>,
+    segment: &'static str,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> Running<H> {
+    let (_, _, extra) = summarized(pool, RUNTIME);
+    let config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let runtime = config.runtime.clone();
+    run_graph(&config, segment, spec, runtime, assemble)
+        .await
+        .expect("a model instance serves")
+}
+
 /// The settings of [`model_summarized`]'s hub, its timing, and what it
 /// adds to every instance's settings.
 fn summarized(pool: Model<'_>, runtime: &str) -> (PoolSettings, PoolTiming, String) {

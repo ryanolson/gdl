@@ -77,8 +77,8 @@ pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 #[doc(hidden)]
 pub use select::JoinStamps;
 pub use select::{
-    Affinity, AffinityConfig, Choice, Encoded, Head, Instance, InstanceId, Instances, LeastLoaded,
-    Projected, Projection, Request, Selector, Selectors,
+    Affinity, AffinityConfig, Choice, Encoded, Head, Instance, InstanceId, Instances,
+    JoinedThrough, LeastLoaded, Projected, Projection, Request, Selector, Selectors,
 };
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;

@@ -309,6 +309,10 @@ impl<'a, H> Request<'a, H> {
 pub struct Instances<'a> {
     segment: &'a str,
     ids: &'a [InstanceId],
+    /// The pool row's join stamps, which the row owns, for `ids`, a run
+    /// of the row's instances: one reference, so that a selection without
+    /// them carries only that.
+    stamps: Option<&'a JoinStamps>,
 }
 
 impl<'a> Instances<'a> {
@@ -318,7 +322,38 @@ impl<'a> Instances<'a> {
             !ids.is_empty(),
             "a selector is never asked to choose from nothing"
         );
-        Self { segment, ids }
+        Self {
+            segment,
+            ids,
+            stamps: None,
+        }
+    }
+
+    /// Entry instances of a pool, `ids` a run of the row's whose join
+    /// stamps are `stamps`: all of them, or one alone.
+    #[doc(hidden)]
+    pub fn with_joined(segment: &'a str, ids: &'a [InstanceId], stamps: &'a JoinStamps) -> Self {
+        debug_assert!(
+            stamps.joined.is_empty() || stamps.of(ids).len() == ids.len(),
+            "a run of the row's instances"
+        );
+        Self {
+            stamps: Some(stamps),
+            ..Self::new(segment, ids)
+        }
+    }
+
+    /// Each instance's join stamp, index for index, or none.
+    fn joined(&self) -> &'a [u64] {
+        self.stamps.map_or(&[], |stamps| stamps.of(self.ids))
+    }
+
+    /// The epoch of the hub of the pool the instances are the entry
+    /// instances of, which their join stamps ([`Instance::joined`]) are
+    /// of: 0 when they are not a pool's, or the hub is of an earlier
+    /// build.
+    pub fn epoch(&self) -> u64 {
+        self.stamps.map_or(0, |stamps| stamps.epoch)
     }
 
     /// The segment the request goes to.
@@ -342,17 +377,23 @@ impl<'a> Instances<'a> {
         self.ids.get(index).map(|&id| Instance {
             index,
             id,
+            joined: self.joined().get(index).copied().unwrap_or(0),
             view: PhantomData,
         })
     }
 
     /// Every instance, in order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Instance<'a>> + 'a {
-        self.ids.iter().enumerate().map(|(index, &id)| Instance {
-            index,
-            id,
-            view: PhantomData,
-        })
+        let joined = self.joined();
+        self.ids
+            .iter()
+            .enumerate()
+            .map(move |(index, &id)| Instance {
+                index,
+                id,
+                joined: joined.get(index).copied().unwrap_or(0),
+                view: PhantomData,
+            })
     }
 }
 
@@ -361,6 +402,7 @@ impl fmt::Debug for Instances<'_> {
         f.debug_struct("Instances")
             .field("segment", &self.segment)
             .field("len", &self.ids.len())
+            .field("epoch", &self.epoch())
             .finish()
     }
 }
@@ -370,6 +412,7 @@ impl fmt::Debug for Instances<'_> {
 pub struct Instance<'a> {
     index: usize,
     id: InstanceId,
+    joined: u64,
     view: PhantomData<&'a ()>,
 }
 
@@ -377,6 +420,14 @@ impl Instance<'_> {
     /// The instance's id, the same from every sending instance.
     pub fn id(&self) -> InstanceId {
         self.id
+    }
+
+    /// The instance's join stamp: its first registration in its pool's hub
+    /// of [`Instances::epoch`], in the order that hub registered its
+    /// instances. A re-registration keeps it. `None` when the instance is
+    /// not a pool's, or its hub, or a hub between, is of an earlier build.
+    pub fn joined(&self) -> Option<u64> {
+        (self.joined > 0).then_some(self.joined)
     }
 
     /// Where it is in its [`Instances`].
@@ -387,18 +438,45 @@ impl Instance<'_> {
 
 /// A pool row's join stamps, index for index with its entry instances,
 /// and the epoch of the hub they are of, which the row owns and each
-/// selection from it borrows.
+/// selection from it borrows ([`Instances::with_joined`]). It keeps where
+/// the row's instances are, so that a selection from any run of them, one
+/// instance alone included, reads their own stamps, with no allocation
+/// and nothing more in [`Instances`].
 #[doc(hidden)]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct JoinStamps {
     joined: Box<[u64]>,
     epoch: u64,
+    /// The addresses of the row's instances, which the row owns and never
+    /// moves while it holds these stamps.
+    row: std::ops::Range<usize>,
 }
 
 impl JoinStamps {
-    /// The stamps `joined` of the hub of `epoch`.
-    pub fn new(joined: Box<[u64]>, epoch: u64) -> Self {
-        Self { joined, epoch }
+    /// The stamps `joined` of the instances `ids`, index for index, of the
+    /// hub of `epoch`.
+    pub fn new(ids: &[InstanceId], joined: Box<[u64]>, epoch: u64) -> Self {
+        debug_assert!(
+            joined.is_empty() || joined.len() == ids.len(),
+            "a join stamp for each instance, or none"
+        );
+        let row = ids.as_ptr_range();
+        Self {
+            joined,
+            epoch,
+            row: row.start as usize..row.end as usize,
+        }
+    }
+
+    /// The stamps of `ids`, a run of the row's instances: none for a slice
+    /// that is not one.
+    fn of(&self, ids: &[InstanceId]) -> &[u64] {
+        let start = ids.as_ptr() as usize;
+        if !self.row.contains(&start) {
+            return &[];
+        }
+        let at = (start - self.row.start) / std::mem::size_of::<InstanceId>();
+        self.joined.get(at..at + ids.len()).unwrap_or_default()
     }
 
     /// Each instance's stamp, 0 where unknown.
@@ -410,6 +488,22 @@ impl JoinStamps {
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
+}
+
+/// A session's cutoff: the highest join stamp ([`Instance::joined`]) among
+/// the entry instances its pool offered when the session first chose it,
+/// in the pool's hub of `epoch` ([`crate::Pool::joined_through`]). A node
+/// that keeps it puts it in the request's context
+/// ([`Cx::insert_ext`]) for a selector of the same segment to read:
+/// `affinity` with `through` set ranks only the instances that joined at
+/// or before it, so an instance that joins later takes no session that
+/// has one. It is an extension, so it never crosses to another segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JoinedThrough {
+    /// The epoch of the pool's hub the stamp is of.
+    pub epoch: u64,
+    /// The highest join stamp the session may be ranked on.
+    pub joined: u64,
 }
 
 /// An instance's id: the runtime's instance id, as 128 bits. Shown as 32

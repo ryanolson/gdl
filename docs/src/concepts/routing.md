@@ -62,7 +62,7 @@ Errors from routing:
 
 Two selectors come with gdl. A crossing can name them with nothing registered.
 
-- `affinity` sends requests with the same key to the same instance, from every sender. The key is the value of the metadata entry that `[selector.affinity] key` names, when the request carries it, and the head's bytes otherwise. It uses rendezvous hashing over the eligible instances, so a join or a retirement moves only the keys of the instance that came or went.
+- `affinity` sends requests with the same key to the same instance, from every sender. The key is the value of the metadata entry that `[selector.affinity] key` names, when the request carries it, and the head's bytes otherwise. It uses rendezvous hashing over the eligible instances, so a join or a retirement moves only the keys of the instance that came or went. With `through = true`, a request that carries a session's cutoff is ranked only among the pool's instances that joined at or before it, so a join moves none of those keys ([A session keeps its instance while instances join](pool-routing.md#a-session-keeps-its-instance-while-instances-join)).
 - `least_loaded` sends each request to the instance where this sender holds the fewest leases. Equal counts take turns. It sees only its own sender's requests. Where the lease ends at the acknowledgement, the counts stay near zero, and it takes turns as `round_robin` does.
 
 After instances decline a request, each one chooses among those that have not declined it: `affinity` the key's next instance, the same from every sender, and `least_loaded` the least loaded one. When every instance has declined, each chooses from all of them again.
