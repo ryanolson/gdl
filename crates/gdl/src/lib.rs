@@ -29,6 +29,7 @@ mod identity;
 #[doc(hidden)]
 mod items;
 mod kv;
+mod lifecycle;
 #[doc(hidden)]
 mod meter;
 mod metrics;
@@ -57,6 +58,7 @@ pub use gdl_model::{
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use kv::{InstanceKv, OfferView};
+pub use lifecycle::{Fence, Handoff, Leave, LeaveCause, Lifecycle, Routing, Unconfirmed};
 pub use metrics::{GaugeReadings, Metrics, ScrapeGaugeVec};
 pub use policy::{
     ChoiceLease, Damped, Decline, HomeFirst, HomeFirstAt, KvLoad, Load, LoadSummary, NoPool, Pool,
@@ -152,6 +154,7 @@ pub mod __runtime {
     pub use crate::cx::wall_now_nanos;
     pub use crate::followed::{PoolSource, PropertyKindsNow};
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
+    pub use crate::lifecycle::{LeaveHook, LeaveParts};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Spans, Visit, ended,
         histogram, note,
