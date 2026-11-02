@@ -136,22 +136,46 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     }
 
     /// Whether `victim`, whose hub took its retire request, whose pod is
-    /// `pod`, is done: its hub lists its instance `drained`, or no longer
-    /// lists it, and its pod's `/metrics` shows no leave hook still
-    /// pending; or `bound` has passed since the hub took the request. What
-    /// its `/metrics` says is kept in `victim`.
+    /// `pod`, is done: its hub lists the instance it asked `drained`, or
+    /// lists no instance in the pod, and its pod's `/metrics` shows no
+    /// leave hook still pending; or `bound` has passed since the hub took
+    /// the request. What its `/metrics` says is kept in `victim`.
+    ///
+    /// Another registration in the pod, such as a container that
+    /// restarted, is an instance that was never asked: the victim goes
+    /// back to `retiring` with it, so that it is asked before the pod
+    /// goes, and its bound starts again from its acceptance.
     pub(super) async fn hold(
         &mut self,
         victim: &mut Retiring,
         pod: &PodView,
         bound: Duration,
     ) -> bool {
-        let drained = match (
-            self.cx.probe.instances(&self.spec.pool).await,
-            victim.instance_id.as_deref(),
-        ) {
-            (Ok(list), Some(id)) => list.by_id(id).is_none_or(|i| i.phase == "drained"),
-            _ => false,
+        let listed = self.cx.probe.instances(&self.spec.pool).await;
+        let drained = match listed.as_ref().map(|list| instance_of(Some(list), pod)) {
+            Err(_) => false,
+            Ok(None) => true,
+            Ok(Some(instance)) => {
+                let asked = victim.instance_id.clone().zip(victim.incarnation);
+                match instance.registration() {
+                    Some(registration) if Some(&registration) != asked.as_ref() => {
+                        tracing::info!(
+                            pod = %victim.pod,
+                            instance = %registration.0,
+                            incarnation = registration.1,
+                            "another registration in the victim's pod; it is asked again"
+                        );
+                        victim.phase = RetiringPhase::Retiring;
+                        victim.instance_id = Some(registration.0);
+                        victim.incarnation = Some(registration.1);
+                        victim.asked = Some(rfc3339(self.now_ms));
+                        victim.retired = None;
+                        victim.handoff = None;
+                        return false;
+                    }
+                    _ => instance.phase == "drained",
+                }
+            }
         };
         let read = match (pod.ip.as_deref(), pod.system_port) {
             (Some(ip), Some(port)) => self.cx.probe.metrics(ip, port).await.ok(),

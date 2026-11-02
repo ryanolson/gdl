@@ -493,3 +493,45 @@ async fn the_drain_bound_counts_from_the_hubs_acceptance() {
     reconcile_at(4_000).await;
     assert_eq!(fake.state().replicas, 2, "at the bound");
 }
+
+/// F1: after the hub took the request, the victim's container restarts in
+/// the same pod and registers as a new instance, which was never asked.
+/// The earlier instance's absence is not a drain: the new registration is
+/// recorded and asked before the pod goes.
+#[tokio::test]
+async fn a_new_registration_in_the_pod_while_draining_is_asked_before_the_pod_goes() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    {
+        let mut instances = fake.instances.lock().expect("instances");
+        let listed = &mut instances.as_mut().expect("a list").instances[1];
+        listed.peer = serde_json::from_value(serde_json::json!({"instance_id": "i-9"})).ok();
+        listed.incarnation = Some(9);
+        listed.phase = "ready".into();
+        listed.retire_requested = false;
+    }
+    fake.take_writes();
+    once(&fake, &spec, 1_000).await;
+    let replicas = fake.state().replicas;
+    assert_eq!(replicas, 3, "{:?}", fake.take_writes());
+    let recorded = victim(&fake);
+    assert_eq!(
+        (recorded.instance_id.as_deref(), recorded.incarnation),
+        (Some("i-9"), Some(9))
+    );
+    assert_eq!(recorded.phase, RetiringPhase::Retiring);
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(fake.take_writes(), ["retire i-9 9"]);
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    fake.instances
+        .lock()
+        .expect("instances")
+        .as_mut()
+        .expect("a list")
+        .instances[1]
+        .phase = "drained".into();
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.state().replicas, 2, "the new registration drained");
+}
