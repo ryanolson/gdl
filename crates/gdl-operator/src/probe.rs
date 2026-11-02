@@ -163,6 +163,12 @@ pub fn held(text: &str, spec: &GdlScalerSpec) -> Held {
 /// registered reads 1 at `outcome="pending"` until it ends, then 1 at the
 /// one outcome it ended with. No series at all is no hook, which is also
 /// what an instance of a build without hooks shows.
+///
+/// A starting instance shows no series either: the runtime exposes a
+/// hook's series once serving starts, not when the hook registers. So
+/// reading no series as no hooks is sound only for a victim chosen while
+/// every pod of its segment is ready, as the scaler requires before it
+/// chooses one (`PodNotReady`); keep that guard.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Leave {
     /// The hooks it shows.
