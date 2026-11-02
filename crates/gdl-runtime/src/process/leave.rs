@@ -382,7 +382,8 @@ impl Launch {
         let (retired, retirement) = watch::channel(None);
         let (finishes, finished) = watch::channel(hooks.is_empty());
         let hooked = !hooks.is_empty();
-        let (observing, asking) = self.observer(times.drain, routes.clone(), retirement.clone());
+        let (observing, asking) =
+            self.observer(times.drain, routes.clone(), retirement.clone(), hooked);
         // Its stop began once its drain's bound passed, or no pool follows
         // its pool: an entry instance that its pool's drain stops does not
         // retire, so no parent answers later.

@@ -69,6 +69,7 @@ pub use setup::{
 };
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
+use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};
 
 use std::{
@@ -90,6 +91,9 @@ pub struct GraphAdmission {
 struct Member {
     registration: SegmentRegistration,
     peer: PeerInfo,
+    /// The registration's epoch, by which an instance tells that this hub
+    /// still holds the registration it made.
+    epoch: RegistrationEpoch,
 }
 
 impl GraphAdmission {
@@ -158,6 +162,7 @@ impl Extension for GraphAdmission {
                 Member {
                     registration,
                     peer: committed.peer.clone(),
+                    epoch: committed.epoch,
                 },
             ),
         );

@@ -1332,3 +1332,78 @@ async fn a_refused_withdrawal_is_never_confirmed() {
     drop(loads);
     left(engine_served).await.expect("drained");
 }
+
+/// A hub that restarted holds no members, so (A) and (B) both hold over
+/// nobody, before the next heartbeat says that the lease is gone. Those
+/// answers say nothing of this instance's peers, and the source here still
+/// holds a roster with it. Routing waits for the lease's word. The heartbeat
+/// sets how long the test takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replaced_hub_answers_nothing_for_routing() {
+    let placement = two();
+    let first = hub(&placement).await;
+    let (public, control) = (first.public_addr().port(), first.control_addr().port());
+    let source = Proxy::new(first.public_addr()).await;
+    let sink = Proxy::new(first.public_addr()).await;
+    let timing = "drain_ms = 30000\nsetup_timeout_ms = 300\nleave_after_ms = 10000\n";
+    let front = settings_beating(source.port, control, timing);
+    let leaving = settings_beating(sink.port, control, timing);
+    let mut hook = Hook::on(&leaving.runtime.lifecycle);
+    let ((front_process, front), (engine_process, engine)) = tokio::join!(
+        launch(&front, "front", &placement),
+        launch(&leaving, "engine", &placement),
+    );
+    let (release, released) = oneshot::channel::<()>();
+    let (running, runs) = oneshot::channel();
+    let engine_served = tokio::spawn(engine.serve(Idle, |_, shutdown| async move {
+        let _ = running.send(());
+        shutdown.cancelled().await;
+        let _ = released.await;
+        Ok(())
+    }));
+    let front_served = serve(front).await;
+    runs.await.expect("the body ran");
+
+    sink.hold(b"gdl-avoids-");
+    engine_process.stop();
+    let leave = hook.leave().await;
+    tokio::time::timeout(WAIT, sink.holding())
+        .await
+        .expect("the instance retired, and asked who avoids it");
+    assert_eq!(*leave.routing().borrow(), Routing::Pending);
+
+    source.set(common::proxy::Mode::Refuse);
+    first.shutdown().await.expect("the hub stopped");
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = public;
+    config.server.control_port = control;
+    let spec = DeploymentSpec::new(reference_manifest(|_| true), placement.clone())
+        .expect("valid test fixture");
+    let second = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec))
+        .serve()
+        .await
+        .expect("the ports are free again");
+    sink.release();
+
+    assert_eq!(
+        routed(&leave, WAIT).await,
+        Routing::Unconfirmed(Unconfirmed::LeaseLost),
+        "an empty hub is no peer's answer"
+    );
+    hook.finish(Handoff::Nothing);
+    let _ = release.send(());
+    let _ = left(engine_served).await;
+    front_process.stop();
+    let _ = left(front_served).await;
+    second.shutdown().await.expect("valid test fixture");
+}
+
+/// Settings for an instance that reaches its hub on `public` and `control`,
+/// and heartbeats seldom.
+fn settings_beating(public: u16, control: u16, runtime: &str) -> ProcessConfig<Nothing> {
+    let text = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {public}, control_port = {control}, heartbeat_ms = 2000 }}\nrendezvous_ms = 5000\n[runtime]\n{runtime}\n"
+    );
+    ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
+}

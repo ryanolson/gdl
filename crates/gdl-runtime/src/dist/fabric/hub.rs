@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use velo::discovery::{ServiceDiscovery, ServiceEvent};
 use velo::{InstanceId, PeerInfo, Velo};
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
-use velo_hub::protocol::ErrorCode;
+use velo_hub::protocol::{ErrorCode, RegistrationEpoch};
 
 /// A segment's hub registration, kept alive from the moment it is made,
 /// and the phases it announces: `loaded`, once its nodes are ready to work;
@@ -456,6 +456,7 @@ impl HubSession {
         HubAsker {
             client: self.client.clone(),
             registration: self.registration.clone(),
+            epoch: self.epoch,
             lost: self.lost.clone(),
         }
     }
@@ -581,6 +582,7 @@ impl Drop for HubSession {
 pub(crate) struct HubAsker {
     client: HubClient,
     registration: SegmentRegistration,
+    epoch: Option<u128>,
     lost: watch::Receiver<Option<String>>,
 }
 
@@ -597,6 +599,15 @@ impl HubAsker {
             // The lease task is gone only with the session.
             std::future::pending::<()>().await;
         }
+    }
+
+    /// Whether the hub that answers still holds this session's registration
+    /// of `me`. One that restarted holds no members, so that every question
+    /// about them holds over nobody, until the next heartbeat says that the
+    /// lease is gone.
+    pub(crate) async fn holds(&self, me: InstanceId) -> Result<bool> {
+        let members = members(&self.client, &self.registration).await?;
+        Ok(holds(&members, me, self.epoch))
     }
 
     /// Whether every member of `senders` that announced `loaded`,
@@ -684,6 +695,16 @@ async fn instances(
         .map_err(failure)?
         .into_iter()
         .collect())
+}
+
+/// Whether `members` hold `me`, under the registration whose epoch is
+/// `epoch`.
+fn holds(members: &[Member], me: InstanceId, epoch: Option<u128>) -> bool {
+    members.iter().any(|member| {
+        member.peer.instance_id() == me
+            && epoch.is_some()
+            && member.epoch.map(|held| held.as_uuid().as_u128()) == epoch
+    })
 }
 
 /// The members of the deployment `registration` belongs to, from the hub.
@@ -1099,6 +1120,8 @@ fn failure(error: impl std::fmt::Display) -> Error {
 struct Member {
     registration: SegmentRegistration,
     peer: PeerInfo,
+    /// The registration's epoch. `None` from a hub that does not say.
+    epoch: Option<RegistrationEpoch>,
 }
 
 /// Bind this instance's velo node under the hub at `host`: at `listen`,

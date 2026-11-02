@@ -184,3 +184,35 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     drop(session);
     hub.shutdown().await.expect("valid test fixture");
 }
+
+/// A hub holds an instance only under the registration the instance made:
+/// the same id under another epoch is another registration, and an answer
+/// from such a hub says nothing of this one's peers.
+#[tokio::test]
+async fn a_registration_is_held_only_under_its_own_epoch() {
+    use velo_hub::protocol::RegistrationEpoch;
+
+    let node = answering().await;
+    let id = node.instance_id();
+    let (mine, another) = (RegistrationEpoch::new(), RegistrationEpoch::new());
+    let held = Some(mine.as_uuid().as_u128());
+    let member = |epoch| super::Member {
+        registration: spec().registration("sink").expect("valid test fixture"),
+        peer: node.peer_info(),
+        epoch,
+    };
+    assert!(super::holds(&[member(Some(mine))], id, held));
+    assert!(!super::holds(&[], id, held), "a hub that restarted");
+    assert!(
+        !super::holds(&[member(Some(another))], id, held),
+        "another registration of this id"
+    );
+    assert!(
+        !super::holds(&[member(None)], id, held),
+        "a hub that does not say"
+    );
+    assert!(
+        !super::holds(&[member(Some(mine))], id, None),
+        "no registration of its own"
+    );
+}

@@ -112,6 +112,13 @@ pub(super) struct Observer {
     peers: Asked,
     /// What a hook reads of the answers.
     routes: watch::Sender<Routing>,
+    /// Whether a hook reads them. Read only when the hub feature is on.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    hooked: bool,
+    /// The first answer that would confirm routing or say that the sources
+    /// drained, until its hub has shown that it holds this registration.
+    #[cfg_attr(not(feature = "hub"), allow(dead_code))]
+    claim: watch::Sender<Option<Routing>>,
     /// What the stop's retirement came to, set before this asks: the
     /// senders' promises confirm only a retirement the hub took.
     retirement: watch::Receiver<Option<(Instant, Retirement)>>,
@@ -147,6 +154,7 @@ impl Launch {
         deadline: Instant,
         routes: watch::Sender<Routing>,
         retirement: watch::Receiver<Option<(Instant, Retirement)>>,
+        hooked: bool,
     ) -> (Observing, BoxFuture<'static, Infallible>) {
         let me = self.node.instance_id();
         let peers = match &self.peers {
@@ -183,6 +191,8 @@ impl Launch {
             deadline,
             peers,
             routes,
+            hooked,
+            claim: watch::Sender::new(None),
             retirement,
         };
         let (phase, phases) = watch::channel(Phase::Idle);
@@ -245,7 +255,7 @@ impl Observer {
                         self.avoided(Routing::Confirmed);
                     }
                     if drained {
-                        route(&self.routes, Routing::SourcesDone);
+                        self.claim(Routing::SourcesDone);
                     }
                     say(publish, drained && asked_in == *phase.borrow(), avoided);
                     if !self.pause(DRAIN_POLL).await {
@@ -261,16 +271,11 @@ impl Observer {
                 reaching,
                 pool,
             } => {
-                self.ask_hub(
-                    asker,
-                    *me,
-                    senders,
-                    reaching,
-                    pool.as_deref(),
-                    phase,
-                    publish,
-                )
-                .await;
+                let pool = pool.as_deref();
+                tokio::join!(
+                    self.ask_hub(asker, *me, senders, reaching, pool, phase, publish),
+                    self.vouch(asker, *me),
+                );
             }
         }
     }
@@ -360,7 +365,7 @@ impl Observer {
             // That its senders detached ends the drain's wait. It fences no
             // sender that joins later, so it says nothing to a hook.
             if done || unreached == Some(Unreached::Drained) {
-                route(&self.routes, Routing::SourcesDone);
+                self.claim(Routing::SourcesDone);
             }
             let drained = done || unreached.is_some();
             say(publish, drained && asked_in == *phase.borrow(), avoided);
@@ -377,8 +382,62 @@ impl Observer {
     /// not read.
     fn avoided(&self, routing: Routing) {
         let withdrawn = matches!(*self.retirement.borrow(), Some((_, Retirement::Withdrawn)));
-        if routing != Routing::Confirmed || withdrawn {
+        if routing != Routing::Confirmed {
             route(&self.routes, routing);
+        } else if withdrawn {
+            self.claim(routing);
+        }
+    }
+
+    /// What an answer says of routing. A roster directory's stands. A hub's
+    /// must wait for [`Observer::vouch`], and the first such answer stands.
+    fn claim(&self, routing: Routing) {
+        #[cfg(feature = "hub")]
+        if matches!(self.peers, Asked::Hub { .. }) {
+            self.claim.send_if_modified(|claim| {
+                let first = claim.is_none();
+                if first {
+                    *claim = Some(routing);
+                }
+                first
+            });
+            return;
+        }
+        route(&self.routes, routing);
+    }
+
+    /// For a hook, move routing as a hub's answers claim, once that hub has
+    /// shown that it holds this registration: one that restarted answers
+    /// for nobody, and only the lease or the fallback says what then. This
+    /// runs apart from (A) and (B), with a bound of its own, since the
+    /// drain reads those and must not wait for it.
+    #[cfg(feature = "hub")]
+    async fn vouch(&self, asker: &HubAsker, me: velo::InstanceId) {
+        if !self.hooked {
+            return;
+        }
+        let mut claims = self.claim.subscribe();
+        let mut routing = self.routes.subscribe();
+        let claim = tokio::select! {
+            claim = async {
+                claims.wait_for(Option::is_some).await.ok().and_then(|claim| *claim)
+            } => claim,
+            _ = routing.wait_for(|routing| *routing != Routing::Pending) => None,
+            () = asker.lost() => None,
+        };
+        let Some(claim) = claim else {
+            return;
+        };
+        while *self.routes.borrow() == Routing::Pending && !asker.is_lost() {
+            let bound = (Instant::now() + HubSession::poll() * 10).min(self.deadline);
+            let held = tokio::time::timeout_at(bound, asker.holds(me));
+            if matches!(held.await, Ok(Ok(true))) {
+                route(&self.routes, claim);
+                return;
+            }
+            if !self.pause(HubSession::poll()).await {
+                return;
+            }
         }
     }
 
