@@ -1135,6 +1135,54 @@ async fn a_hook_does_not_shorten_the_drain() {
     left(other_served).await.expect("drained");
 }
 
+/// Two stops queued before the instance looks: the second ends everything
+/// before anything polls the stop's tracks, and the hook still does not
+/// outlive `serve`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_queued_stops_leave_no_hook_running() {
+    let placement = two();
+    let hub = hub(&placement).await;
+    let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\n";
+    let config = settings(&hub, "", timing);
+    let leaving = settings(&hub, "", timing);
+    let held = Arc::new(());
+    let holding = Arc::clone(&held);
+    leaving
+        .runtime
+        .lifecycle
+        .on_leave("stuck", move |_| async move {
+            let _holding = holding;
+            std::future::pending().await
+        })
+        .expect("registered");
+    let ((front_process, front), (engine_process, engine)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&leaving, "engine", &placement),
+    );
+    let front_served = tokio::spawn(front.serve(Idle, |_, shutdown| async move {
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+
+    engine_process.stop();
+    engine_process.stop();
+    let ended = tokio::time::timeout(WAIT, engine.serve(Idle, |_, _| async { Ok(()) }))
+        .await
+        .expect("a second stop ends everything")
+        .expect_err("a second stop");
+    assert!(ended.to_string().contains("second"), "{ended}");
+    let deadline = Instant::now() + WAIT;
+    while Arc::strong_count(&held) > 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the hook outlived the instance's serve"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    front_process.stop();
+    let _ = left(front_served).await;
+}
+
 #[test]
 fn the_runtime_settings_read_the_leave_times() {
     let config = RuntimeConfig::default();

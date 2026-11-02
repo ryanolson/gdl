@@ -188,9 +188,9 @@ struct HookRun {
 
 impl HookRun {
     /// Wait for `task`, the hook `name`, until its time ends, then record
-    /// how it ended. Dropped first, by a forced stop, it ends the hook.
-    async fn run(self, name: String, mut task: JoinHandle<Handoff>) {
-        let _ending = Ending(task.abort_handle());
+    /// how it ended. Dropped first, by a forced stop, `ending` ends the
+    /// hook, even if nothing ever polled this.
+    async fn run(self, name: String, mut task: JoinHandle<Handoff>, _ending: Ending) {
         let started = Instant::now();
         let handoff = tokio::select! {
             biased;
@@ -320,14 +320,18 @@ impl Launch {
                     let name = hook.name().to_string();
                     let leave = leave.clone();
                     let task = tokio::spawn(async move { hook.start(leave).await });
-                    run.clone().run(name, task)
+                    let ending = Ending(task.abort_handle());
+                    run.clone().run(name, task, ending)
                 })
                 .collect();
+            // Made here, not when first polled: a second stop already
+            // queued drops all of this unpolled.
+            let cancelling = Cancelling(cx.clone());
             let lost = self.lease_lost();
             let given_up = self.pool_given_up();
             let (after, watching) = (self.leave_after, routes.clone());
             Box::pin(async move {
-                let _cancelling = Cancelling(cx);
+                let _cancelling = cancelling;
                 let moving = async {
                     tokio::select! {
                         () = fallback(times, after, retirement) => {

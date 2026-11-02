@@ -167,3 +167,29 @@ async fn only_a_hook_adds_a_task() {
     let (_stopping, _leaving) = launch.begin_stop(hooks, gdl::LeaveCause::Stop);
     assert_eq!(tasks(), before + 1, "the hook's own task, and no other");
 }
+
+/// A second stop already queued returns before anything polls the stop's
+/// tracks. Dropping them unpolled must still end the hook, which then
+/// never runs: nothing would hold it to its deadline.
+#[tokio::test]
+async fn a_stop_dropped_unpolled_ends_its_hooks() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let running = Arc::clone(&ran);
+    let (_dir, _process, launch) = launched::alone(move |lifecycle| {
+        lifecycle
+            .on_leave("flush", move |_| {
+                running.store(true, Ordering::SeqCst);
+                async { gdl::Handoff::Nothing }
+            })
+            .expect("registered");
+    })
+    .await;
+    let hooks = launch.lifecycle.close();
+    let (stopping, leaving) = launch.begin_stop(hooks, gdl::LeaveCause::Stop);
+    drop(leaving);
+    drop(stopping);
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!ran.load(Ordering::SeqCst), "the hook ran past the stop");
+}
