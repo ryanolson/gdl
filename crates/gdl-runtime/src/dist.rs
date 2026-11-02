@@ -26,7 +26,7 @@ pub use fabric::bind_node;
 #[cfg(feature = "hub")]
 pub(crate) use fabric::bind_under_hub;
 #[cfg(feature = "hub")]
-pub(crate) use fabric::{HubAsker, Parent, PoolDrain, Unreached};
+pub(crate) use fabric::{HubAsker, Parent, PoolDrain, Unreached, heed_requests};
 pub(crate) use fabric::{build_node, shut_down};
 pub use hop::{DHop, Register};
 pub(crate) use launch::{announce, announced, follow as follow_directory};

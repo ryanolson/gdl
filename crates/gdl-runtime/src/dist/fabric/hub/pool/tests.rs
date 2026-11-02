@@ -10,11 +10,20 @@ use gdl_watch::{PoolWatchEvent, PoolWatcher, WatchLimits};
 use tokio::sync::watch;
 use velo::InstanceId;
 
-use super::{Learned, run};
+use super::{Heard, Learned, Reader, run, stands};
 use crate::dist::pools::served::Server;
 use crate::dist::pools::{REWATCH, REWATCH_CAP};
 
 const WITHIN: Duration = Duration::from_millis(300);
+
+/// An entry instance's reader of the watch.
+fn entry(me: InstanceId) -> Reader {
+    Reader {
+        me,
+        entry: true,
+        drains: true,
+    }
+}
 
 fn pool(state: PoolState) -> PoolWatchEvent {
     PoolWatchEvent::Pool {
@@ -47,7 +56,7 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     let task = tokio::spawn(run(
         watcher,
         server.address.clone(),
-        Some(me),
+        entry(me),
         learns,
         gdl::OfferGate::new(),
     ));
@@ -130,7 +139,7 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         watch: tokio::spawn(run(
             watcher,
             server.address.clone(),
-            Some(me),
+            entry(me),
             learns,
             gdl::OfferGate::new(),
         )),
@@ -190,4 +199,115 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     // Use the deadlines because this task can resume after the retry.
     let due = drained.max(retired) + BOUND;
     assert!(due < again.at, "the bounds did not precede the next watch");
+}
+
+fn asked(instance: InstanceId, incarnation: u64, state: PoolState) -> PoolWatchEvent {
+    PoolWatchEvent::State {
+        state,
+        unfollowed: false,
+        retire: Some(gdl_watch::RetireRequest {
+            instance,
+            incarnation,
+        }),
+    }
+}
+
+/// A request is for the instance it names, whatever the pool's state: a
+/// snapshot repeats one held from before a drain.
+#[test]
+fn a_request_is_heard_only_by_the_instance_it_names() {
+    let me = InstanceId::new_v4();
+    let reader = Reader {
+        me,
+        entry: false,
+        drains: true,
+    };
+    let of = |event: &PoolWatchEvent| Heard::of(event, reader);
+    assert_eq!(of(&asked(me, 7, PoolState::Ready)).retire, Some(7));
+    assert_eq!(
+        of(&asked(InstanceId::new_v4(), 7, PoolState::Ready)).retire,
+        None
+    );
+    let draining = of(&asked(me, 7, PoolState::Draining));
+    assert_eq!(draining.retire, Some(7));
+    assert!(draining.draining);
+}
+
+/// An instance of a pool no hop enters reads a request from the same
+/// event, and no drain: such a pool is not drained as a pool.
+#[test]
+fn a_reader_that_takes_no_part_in_a_drain_hears_only_its_request() {
+    let me = InstanceId::new_v4();
+    let reader = Reader {
+        me,
+        entry: false,
+        drains: false,
+    };
+    let heard = Heard::of(&asked(me, 7, PoolState::Draining), reader);
+    assert_eq!(heard.retire, Some(7));
+    assert!(!heard.draining);
+    let heard = Heard::of(
+        &PoolWatchEvent::State {
+            state: PoolState::Draining,
+            unfollowed: true,
+            retire: None,
+        },
+        reader,
+    );
+    assert!(!heard.draining && !heard.unfollowed);
+    assert!(!Heard::of(&pool(PoolState::Draining), reader).draining);
+}
+
+/// The fence: this process's registration, or a later one of the same id,
+/// which is this same process. A hub that lists it lower, or not at all,
+/// does not hold this registration.
+#[test]
+fn a_request_stands_for_this_registration_or_a_later_one_of_this_process() {
+    assert!(stands(7, Some(7)));
+    assert!(stands(7, Some(9)), "the process registered again");
+    assert!(!stands(7, Some(6)), "another hub's numbers");
+    assert!(!stands(7, None), "not listed");
+}
+
+/// A request in a snapshot is learned once the snapshot is complete, as
+/// the rest of it is, and a later one replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_is_learned_from_a_complete_snapshot_and_after_it() {
+    let mut server = Server::new().await;
+    let me = InstanceId::new_v4();
+    let (learns, mut learned) = watch::channel(Learned::default());
+    let reader = Reader {
+        me,
+        entry: false,
+        drains: true,
+    };
+    let task = tokio::spawn(run(
+        PoolWatcher::new().expect("a client"),
+        server.address.clone(),
+        reader,
+        learns,
+        gdl::OfferGate::new(),
+    ));
+    let mut watch = server.next().await;
+    watch.answer().await;
+    watch.send(&pool(PoolState::Ready)).await;
+    watch.send(&asked(me, 7, PoolState::Ready)).await;
+    assert_eq!(learned.borrow().retire, None, "from a partial snapshot");
+    watch.send(&PoolWatchEvent::Synced).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        learned.wait_for(|l| l.retire == Some(7)),
+    )
+    .await
+    .expect("learned in time")
+    .expect("the watch runs");
+    watch.send(&asked(me, 9, PoolState::Ready)).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        learned.wait_for(|l| l.retire == Some(9)),
+    )
+    .await
+    .expect("learned in time")
+    .expect("the watch runs");
+    task.abort();
 }

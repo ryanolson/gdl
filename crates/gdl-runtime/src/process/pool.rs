@@ -6,8 +6,8 @@
 //! either, and every answer here is the one its stop has without a pool.
 
 #[cfg(feature = "hub")]
-use super::{DRAIN_POLL, Peers};
-use super::{Drains, Launch};
+use super::DRAIN_POLL;
+use super::{Drains, Launch, Peers, announce};
 
 impl Launch {
     /// Resolves when the pool's drain begins this instance's stop; never
@@ -224,38 +224,57 @@ impl Launch {
     /// "this entry holds no request", and a pool drain that begins later
     /// would close an interior instance that a request it holds still
     /// needs. It says it at the end of its drain instead
-    /// ([`Launch::pool_entry_drained`]).
+    /// ([`Launch::announce_drained`]).
     #[cfg(feature = "hub")]
     pub(super) fn source_drains_early(&self) -> bool {
         self.source && self.pool_drain.as_ref().is_none_or(|pool| pool.interior())
     }
 
-    /// For an entry instance of a pool that hosts a source and was stopped
-    /// outside its pool's drain: announce that it has drained, retried
-    /// until `deadline`, once it holds no request. One that still holds a
-    /// request at its bound, or whose lease is lost (`hub` false), says
-    /// nothing; its leaving says as much.
-    pub(super) async fn pool_entry_drained(
-        &mut self,
-        segment: &dyn Drains,
-        deadline: tokio::time::Instant,
-        hub: bool,
-    ) {
-        #[cfg(feature = "hub")]
-        if self.source
-            && !self.source_drains_early()
-            && hub
-            && segment.admitted() == 0
-            && let Peers::Hub(session) = &mut self.peers
-            && let Err(error) = session.drained(deadline).await
-        {
-            eprintln!(
-                "{}: could not announce that it drained, so the pool's other instances wait for it to leave: {error}",
-                self.segment
-            );
-        }
+    /// This instance has closed and holds no request: announce so, by
+    /// `until`. A source's own `drained` said as much of its serving body
+    /// long ago, and an entry instance that hosts a source says it here
+    /// rather than then ([`Launch::source_drains_early`]). Any other
+    /// instance says `detached` first: a reader of its `drained` takes it
+    /// to hold nothing and to send nothing on, so it is said in that order
+    /// or not at all. That is what the hold and the hub's list read. (B)
+    /// and the wait for senders to detach count only the segments they
+    /// count of a pool's drain, whatever this says. See
+    /// docs/src/development/lifecycle-design.md.
+    pub(super) async fn announce_drained(&mut self, until: tokio::time::Instant) {
         #[cfg(not(feature = "hub"))]
-        let _ = (segment, deadline, hub);
+        let _ = until;
+        let source = self.source;
+        match &mut self.peers {
+            Peers::Files(dir) => {
+                if !source {
+                    let _ = announce(dir, "drained", self.segment, &self.node);
+                }
+            }
+            #[cfg(feature = "hub")]
+            Peers::Hub(session) => {
+                let withheld = self
+                    .pool_drain
+                    .as_ref()
+                    .is_some_and(|pool| pool.withholds_detached());
+                if !source && withheld {
+                    return;
+                }
+                let detached = match source {
+                    true => Ok(()),
+                    false => session.detached(until).await,
+                };
+                let announced = match detached {
+                    Ok(()) => session.drained(until).await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = announced {
+                    eprintln!(
+                        "{}: could not announce that it drained, so its peers wait for it to leave: {error}",
+                        self.segment
+                    );
+                }
+            }
+        }
     }
 
     /// For an instance of a draining pool that takes no more work, from
@@ -321,5 +340,20 @@ impl Launch {
         }
         #[cfg(not(feature = "hub"))]
         let _ = (segment, hub, closed);
+    }
+
+    /// Resolves when this instance's pool begins to drain; never for an
+    /// instance that takes no part in one.
+    pub(super) fn pool_draining(&self) -> impl Future<Output = ()> + Send + use<> {
+        #[cfg(feature = "hub")]
+        let pool = self.pool_drain.clone();
+        async move {
+            #[cfg(feature = "hub")]
+            if let Some(pool) = pool {
+                pool.learned().await;
+                return;
+            }
+            std::future::pending().await
+        }
     }
 }

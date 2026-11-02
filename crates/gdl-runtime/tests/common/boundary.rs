@@ -98,6 +98,12 @@ impl<H> Running<H> {
         self.segment.offered()
     }
 
+    /// Whether the instance has not ended yet.
+    #[allow(dead_code, reason = "not every test binary asks")]
+    pub fn running(&self) -> bool {
+        !self.serving.is_finished()
+    }
+
     /// Stop the instance and wait until it has left.
     pub async fn stop(self) {
         self.process.stop();
@@ -672,16 +678,61 @@ pub async fn model_spread<H: Register + Send + Sync + 'static>(
 ) -> Spread<H> {
     let (settings_of_hub, timing, extra) = summarized(pool, runtime);
     let (hub, readiness) = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let control = hub.control_addr().port();
+    let all = (segments, interior, pool.entries);
+    spread_on(
+        spec,
+        (hub, readiness),
+        control,
+        all,
+        &extra,
+        process,
+        assemble,
+    )
+    .await
+}
+
+/// [`model_spread`], whose instances reach their hub's control listener
+/// through a proxy, which a test can hold a request at.
+#[allow(dead_code, reason = "not every test binary holds a request")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the deployment, the pool, and how each instance differs"
+)]
+pub async fn model_spread_proxied<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    pool: Model<'_>,
+    segments: &'static [&'static str],
+    interior: &[&'static str],
+    runtime: &str,
+    process: &(dyn Fn(&str, &mut ProcessConfig<Nothing>) + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (Spread<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(pool, runtime);
+    let (hub, readiness) = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let proxy = Proxy::new(hub.control_addr()).await;
+    let all = (segments, interior, pool.entries);
+    let hub = (hub, readiness);
+    let spread = spread_on(spec, hub, proxy.port, all, &extra, process, assemble).await;
+    (spread, proxy)
+}
+
+/// The instances of [`model_spread`] on `hub`, reached on `control`.
+async fn spread_on<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    (hub, readiness): (Hub, Arc<PoolReadiness<Resolving>>),
+    control: u16,
+    (segments, interior, entries): (&'static [&'static str], &[&'static str], usize),
+    extra: &str,
+    process: &(dyn Fn(&str, &mut ProcessConfig<Nothing>) + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> Spread<H> {
     let mut all = interior.to_vec();
-    all.extend(std::iter::repeat_n("f", pool.entries));
+    all.extend(std::iter::repeat_n("f", entries));
     // Each instance's launch waits for the others of its class.
     let mut running = join_all(all.into_iter().map(|segment| {
-        let mut config = settings(
-            hub.public_addr().port(),
-            hub.control_addr().port(),
-            5_000,
-            &extra,
-        );
+        let mut config = settings(hub.public_addr().port(), control, 5_000, extra);
         process(segment, &mut config);
         async move {
             let runtime = config.runtime.clone();

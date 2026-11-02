@@ -272,6 +272,59 @@ async fn routing_is_confirmed_only_once_every_sender_has_acknowledged() {
     left(other_served).await.expect("drained");
 }
 
+/// Under a hub with no pool too, an instance that hosts no source says
+/// `detached`, then `drained`, once its stop has closed it and its ledger
+/// is empty; its hook keeps it there for the test to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_under_any_hub_says_detached_and_drained_at_the_end() {
+    use gdl_model::{SegmentPhase, segment_service};
+    let placement = two();
+    let hub = hub(&placement).await;
+    let replicas = "[min_replicas]\nengine = 2\n";
+    let timing = "drain_ms = 20000\nsetup_timeout_ms = 300\n";
+    let config = settings(&hub, replicas, timing);
+    let leaving = settings(&hub, replicas, timing);
+    let mut hook = Hook::on(&leaving.runtime.lifecycle);
+    let ((front_process, front), (engine_process, engine), (other_process, other)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&leaving, "engine", &placement),
+        launch(&config, "engine", &placement),
+    );
+    let engine_id = engine.node().instance_id();
+    let (front_served, engine_served, other_served) =
+        tokio::join!(serve(front), serve(engine), serve(other));
+
+    engine_process.stop();
+    let leave = hook.leave().await;
+    tokio::time::timeout(WAIT, leave.drained())
+        .await
+        .expect("the instance drained");
+    let services = client(&hub);
+    let holds = async |phase| {
+        let name = segment_service("engine", phase);
+        let instances = services.services().get_instances(&name).await;
+        instances.expect("the hub answers").contains(&engine_id)
+    };
+    tokio::time::timeout(WAIT, async {
+        while !holds(SegmentPhase::Drained).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("`drained` in time");
+    assert!(
+        holds(SegmentPhase::Detached).await,
+        "`detached` comes first"
+    );
+
+    hook.finish(Handoff::Done);
+    left(engine_served).await.expect("drained");
+    front_process.stop();
+    other_process.stop();
+    left(front_served).await.expect("drained");
+    left(other_served).await.expect("drained");
+}
+
 /// `Confirmed` does not mean quiet. A hand-off sent before the front's
 /// promise and held on its way lands after it and is served, and
 /// `drained()` waits for the instance to close and hold nothing. The

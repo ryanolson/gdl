@@ -111,9 +111,13 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** when every instance of a segment stops, or the only one does, its peers keep routing to it, since nothing else serves. It drains once the sources that can reach it have drained, or at the drain's bound.
 - **Workaround:** start a new instance first. Once it is ready, the peers avoid the retired one, which then leaves.
 
-### An instance does not act on a retire request yet
-- **What:** a pool's hub holds a retire request and sends it on the pool's watch ([Retiring an instance on request](../concepts/pools.md#retiring-an-instance-on-request)), but the runtime does not read it. An instance retires only at its stop.
-- **Workaround:** none needed for correctness. The operator's `retire: request` mode then waits for each victim until its `drainBound`, deletes its pod, and the instance drains on its SIGTERM, as in signal mode. `retire: signal`, the default, removes a victim sooner.
+### A source's `drained` does not cover its ledger
+- **What:** an instance that hosts a source says `drained` when its serving body ends, so that source segments that route to each other do not wait for each other. Its ledger may still hold requests from its peers. In the operator's `retire: request` mode, a frontend's pod is then deleted before the instance has closed.
+- **Workaround:** none needed. The SIGTERM only ends the hold, and the instance drains inside its grace.
+
+### A hold past its bound restarts a pod's container
+- **What:** an instance held longer than `[runtime] hold_ms` exits, and Kubernetes starts its container again. The new process serves until the operator reads `restartedDuringHold`.
+- **Workaround:** keep `hold_ms` above the scaler's `drainBound`. The default does, for a `drainBound` that the render set.
 
 ### A hand-off that reaches a retired instance late costs an offer
 - **What:** a hand-off sent before its sender heard of the retirement, and arriving after the instance stopped taking work, is declined with `Overloaded`. The sender's router chooses again, which costs one round trip.

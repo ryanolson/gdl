@@ -18,9 +18,9 @@ use velo_hub::protocol::{ErrorCode, RegistrationEpoch};
 /// A segment's hub registration, kept alive from the moment it is made,
 /// and the phases it announces: `loaded`, once its nodes are ready to work;
 /// `serving`, once its handlers are installed; `ready`, once it routes;
-/// `drained`, once a source has finished its requests; `retired`, once it
-/// has been stopped; and `detach`, once an instance of a draining pool will
-/// send no more work into it. Peers take loaded instances into their rosters,
+/// `retired`, once it has been stopped; `detach`, once it will send no more
+/// work into its pool; and `drained`, once a source has finished its
+/// requests, or any other instance has closed and holds none. Peers take loaded instances into their rosters,
 /// send only once those are serving, add a joiner when it is ready, and
 /// stop routing to one that retired.
 pub struct HubSession {
@@ -409,8 +409,8 @@ impl HubSession {
         }
     }
 
-    /// Announce that this instance, a source's, has drained the requests it
-    /// held, retried until `deadline`.
+    /// Announce that this instance has drained the requests it held,
+    /// retried until `deadline`.
     pub(crate) async fn drained(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.drained.is_none() {
             self.drained = Some(self.persist(SegmentPhase::Drained, deadline).await?);
@@ -441,8 +441,8 @@ impl HubSession {
         }
     }
 
-    /// Announce that this instance, of a draining pool, will send no more
-    /// work into its pool, retried until `deadline`.
+    /// Announce that this instance will send no more work into its pool,
+    /// retried until `deadline`.
     pub(crate) async fn detached(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.detached.is_none() {
             self.detached = Some(self.persist(SegmentPhase::Detached, deadline).await?);
@@ -592,6 +592,11 @@ impl HubAsker {
         self.lost.borrow().is_some()
     }
 
+    /// Why the lease was lost, as [`HubSession::maintain`] says it.
+    pub(crate) fn lost_error(&self) -> Error {
+        failure(self.lost.borrow().as_deref().unwrap_or("lease lost"))
+    }
+
     /// Resolves when the lease is lost.
     pub(crate) async fn lost(&self) {
         let mut lost = self.lost.clone();
@@ -608,6 +613,23 @@ impl HubAsker {
     pub(crate) async fn holds(&self, me: InstanceId) -> Result<bool> {
         let members = members(&self.client, &self.registration).await?;
         Ok(holds(&members, me, self.epoch))
+    }
+
+    /// The incarnation of `me`'s registration, as its pool's hub lists it.
+    /// `None` when the hub does not list it. Read only as a retire request
+    /// names `me`: the list is the hub's whole membership.
+    pub(crate) async fn incarnation(&self, me: InstanceId) -> Result<Option<u64>> {
+        let listed: gdl_watch::Instances = self
+            .client
+            .ext(gdl_watch::EXTENSION)
+            .control_get(gdl_watch::INSTANCES_ROUTE)
+            .await
+            .map_err(failure)?;
+        Ok(listed
+            .instances
+            .iter()
+            .find(|instance| instance.peer.instance_id() == me)
+            .and_then(|instance| instance.incarnation))
     }
 
     /// Whether every member of `senders` that announced `loaded`,
@@ -1533,4 +1555,4 @@ mod records;
 mod unanswered;
 
 pub(crate) use chooser::ChooserHub;
-pub(crate) use pool::{Parent, PoolDrain, Unreached};
+pub(crate) use pool::{Parent, PoolDrain, Unreached, heed_requests};

@@ -41,6 +41,8 @@ const PENDING: &str = "pending";
 /// Every time of one stop, from the instant it began.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StopTimes {
+    /// When the stop began.
+    began: Instant,
     /// The stop's bound, which ends every wait of the stop.
     pub(super) drain: Instant,
     /// When the hooks' time ends: at most the stop's bound.
@@ -56,6 +58,7 @@ impl StopTimes {
     pub(super) fn new(at: Instant, drain: Duration, leave: Option<Duration>) -> Self {
         let bound = at + drain;
         Self {
+            began: at,
             drain: bound,
             hooks: leave.map_or(bound, |leave| bound.min(at + leave)),
             pending_until: at + drain / 2,
@@ -112,6 +115,11 @@ impl Stopping {
     /// The stop's bound.
     pub(super) fn deadline(&self) -> Instant {
         self.times.drain
+    }
+
+    /// When the stop began.
+    pub(super) fn began(&self) -> Instant {
+        self.times.began
     }
 
     /// The observer, for the drain to read.
@@ -446,7 +454,7 @@ impl Launch {
                                 }),
                             );
                         }
-                        () = lost => {
+                        _ = lost => {
                             route(&watching, Routing::Unconfirmed(Unconfirmed::LeaseLost));
                         }
                     }
@@ -475,12 +483,16 @@ impl Launch {
         (stopping, leaving)
     }
 
-    /// Resolves when the lease is lost; never for an instance with none.
-    fn lease_lost(&self) -> BoxFuture<'static, ()> {
+    /// Resolves when the lease is lost, with why; never for an instance
+    /// with none.
+    pub(super) fn lease_lost(&self) -> BoxFuture<'static, gdl::Error> {
         #[cfg(feature = "hub")]
         if let Peers::Hub(session) = &self.peers {
             let asker = session.asker();
-            return Box::pin(async move { asker.lost().await });
+            return Box::pin(async move {
+                asker.lost().await;
+                asker.lost_error()
+            });
         }
         Box::pin(std::future::pending())
     }

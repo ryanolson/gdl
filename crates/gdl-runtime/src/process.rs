@@ -5,6 +5,7 @@
 //! and tested here rather than in each generated crate.
 
 mod barrier;
+mod hold;
 mod leave;
 mod observer;
 mod origins;
@@ -476,6 +477,9 @@ impl<H> ProcessConfig<H> {
         // Under a hub, an instance in a pool watches for its pool's drain.
         #[cfg(feature = "hub")]
         let mut pool_drain = None;
+        // An instance of a pool no hop enters watches it for a request.
+        #[cfg(feature = "hub")]
+        let mut requests = None;
         let (node, roster, peers, follower) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
@@ -572,6 +576,7 @@ impl<H> ProcessConfig<H> {
                     if let Some((pools, _)) = &chooser {
                         self.runtime.followed.bind(Arc::new(pools.clone()));
                     }
+                    let asker = session.asker();
                     pool_drain = crate::dist::PoolDrain::watch(
                         &layout,
                         pool,
@@ -581,10 +586,25 @@ impl<H> ProcessConfig<H> {
                         host,
                         *public_port,
                         &self.runtime,
+                        &asker,
+                        &process.retire,
                     )?
                     .map(Arc::new);
-                    if let Some(drain) = &pool_drain {
-                        process.health.avoided_by(drain.avoided());
+                    match &pool_drain {
+                        Some(drain) => {
+                            process.health.avoided_by(drain.avoided());
+                        }
+                        None => {
+                            let listening = crate::dist::heed_requests(
+                                node.instance_id(),
+                                host,
+                                *public_port,
+                                &self.runtime,
+                                &asker,
+                                &process.retire,
+                            )?;
+                            requests = Some(Abort(listening));
+                        }
                     }
                 }
                 // The membership leaves to the chooser what its tables hold.
@@ -659,6 +679,7 @@ impl<H> ProcessConfig<H> {
                         * 2,
             ),
             leave_metrics,
+            hold: self.runtime.hold.unwrap_or(drain + hold::MARGIN),
             process: process.clone(),
             _follower: follower,
             #[cfg(feature = "hub")]
@@ -671,6 +692,8 @@ impl<H> ProcessConfig<H> {
             kv: self.runtime.kv.clone(),
             #[cfg(feature = "hub")]
             pool_drain,
+            #[cfg(feature = "hub")]
+            _requests: requests,
             #[cfg(feature = "hub")]
             detached: false,
             _leaving: leaving,
@@ -741,6 +764,8 @@ pub struct Launch {
     leave_after: Duration,
     /// Where the hooks' outcomes go, for a segment that serves metrics.
     leave_metrics: Option<leave::LeaveMetrics>,
+    /// How long after its stop an instance asked to retire may stay.
+    hold: Duration,
     process: Process,
     /// The roster directory's membership follower; the hub session owns
     /// its own.
@@ -765,6 +790,10 @@ pub struct Launch {
     /// drain.
     #[cfg(feature = "hub")]
     pool_drain: Option<Arc<crate::dist::PoolDrain>>,
+    /// For an instance of a pool no hop enters, what watches it for a
+    /// retire request.
+    #[cfg(feature = "hub")]
+    _requests: Option<Abort>,
     /// Whether the instance has said that it detached from its draining
     /// pool.
     #[cfg(feature = "hub")]
@@ -940,8 +969,9 @@ impl Launch {
     /// of its pool that it learns of while it waits makes it decline
     /// offers, while it waits. Then it refuses
     /// what arrives, waits until it holds no request (a stream holds its
-    /// request until velo has handed its output on), stops velo, and
-    /// leaves. A peer avoids a retired instance only while its segment has
+    /// request until velo has handed its output on), announces, if it hosts
+    /// no source, that it detached and then that it has drained, stops
+    /// velo, and leaves. A peer avoids a retired instance only while its segment has
     /// another, so stopping every instance drains as one deployment-wide
     /// stop. The drain is bounded by the runtime's `drain` (by default the
     /// request deadline), and a second stop ends it at once.
@@ -952,6 +982,13 @@ impl Launch {
     /// hook gets what [`gdl::Leave`] says, and the instance leaves only
     /// once each hook has ended or run out of time. With none registered,
     /// no task is added.
+    ///
+    /// A retire request heard on the instance's pool's watch stops it as a
+    /// first stop does, and is not a stop: a signal after it is the first.
+    /// Once such an instance has drained and its hooks have ended, it
+    /// holds, a member of its hub with its velo node up and taking no
+    /// work, until a stop, its pool's drain, a lost lease, or the hold's
+    /// bound. A request after any other stop does nothing.
     ///
     /// A lost hub lease stops the instance the same way, skips the wait,
     /// since the hub that would answer it is gone, and gives the lease's
@@ -1026,6 +1063,7 @@ impl Launch {
             // any stop, without running the body.
             None => {
                 process.health.set(Phase::Draining);
+                let holds = process.asked_to_retire();
                 let stopped = Error::new(ErrorKind::Cancelled, "stopped while starting");
                 let (stopping, mut leaving) = self.begin_stop(hooks, gdl::LeaveCause::Stop);
                 let deadline = stopping.deadline();
@@ -1036,7 +1074,7 @@ impl Launch {
                     never = leaving.as_mut() => match never {},
                 }
                 let cutoff = Box::pin(self.pool_cutoff(deadline, false).fuse());
-                (Err(stopped), Ok(()), stopping, leaving, cutoff)
+                (Err(stopped), Ok(()), stopping, leaving, cutoff, holds)
             }
             Some(Ok(())) => {
                 self.roster.release();
@@ -1098,6 +1136,9 @@ impl Launch {
                     (Ok(()), true) => gdl::LeaveCause::PoolDrain,
                     (Ok(()), false) => gdl::LeaveCause::Stop,
                 };
+                // A request after any other stop does nothing.
+                let holds =
+                    ended.is_none() && stop.is_ok() && !by_pool && process.asked_to_retire();
                 let (stopping, mut leaving) = self.begin_stop(hooks, cause);
                 let deadline = stopping.deadline();
                 let mut cutoff = Box::pin(self.pool_cutoff(deadline, by_pool).fuse());
@@ -1148,10 +1189,10 @@ impl Launch {
                     all = async { tokio::join!(finished, retiring, closing) } => all,
                     never = leaving.as_mut() => match never {},
                 };
-                (result, stop, stopping, leaving, cutoff)
+                (result, stop, stopping, leaving, cutoff, holds)
             }
         };
-        let (result, stop, stopping, mut leaving, mut cutoff) = stopped;
+        let (result, stop, stopping, mut leaving, mut cutoff, holds) = stopped;
         let deadline = stopping.deadline();
         // A lost lease takes the hub's answers, not this instance's own
         // requests: those are still waited for. The hooks are a track of
@@ -1164,6 +1205,10 @@ impl Launch {
             never = leaving.as_mut() => match never {},
             () = process.stops(2) => return Err(second()),
         }
+        let held = match holds {
+            true => self.hold(segment.as_ref(), &stopping).await,
+            false => Ok(()),
+        };
         let left = deadline
             .saturating_duration_since(tokio::time::Instant::now())
             .max(Duration::from_secs(1));
@@ -1172,7 +1217,7 @@ impl Launch {
         if let Peers::Hub(session) = &self.peers {
             session.leave().await;
         }
-        stop.and(result)
+        stop.and(held).and(result)
     }
 
     /// Say that this instance has retired, so that its peers stop routing
@@ -1235,7 +1280,9 @@ impl Launch {
     /// reads it, and something beside the drain polls the observer. A
     /// promise read before the drain's wait began counts from the wait, so
     /// that a hook that has the observer ask early changes nothing here.
-    /// `stopping` hears when the instance has closed and holds no request.
+    /// `stopping` hears when the instance has closed and holds no request,
+    /// and any instance that did not say so sooner says so then
+    /// ([`Launch::announce_drained`]), unless it has no hub left to tell.
     /// Polls; nothing is added to a request's path.
     async fn drain(
         &mut self,
@@ -1338,8 +1385,24 @@ impl Launch {
         }
         if segment.admitted() == 0 {
             stopping.drained();
+            if hub {
+                self.announce_drained(self.drained_by(deadline)).await;
+            }
         }
-        self.pool_entry_drained(segment, deadline, hub).await;
+    }
+
+    /// When a stop stops trying to say that it drained, which ends at
+    /// `deadline`: a hub that does not answer must not hold up an exit it
+    /// would not otherwise see, so only an entry instance that hosts a
+    /// source, whose `drained` its pool's other instances wait for, tries
+    /// to the end.
+    fn drained_by(&self, deadline: tokio::time::Instant) -> tokio::time::Instant {
+        #[cfg(feature = "hub")]
+        if !self.source || self.source_drains_early() {
+            let bound = tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10;
+            return bound.min(deadline);
+        }
+        deadline
     }
 }
 
@@ -1369,6 +1432,10 @@ pub struct Process {
     /// How many stop signals have come.
     stops: tokio::sync::watch::Receiver<u32>,
     count: Arc<tokio::sync::watch::Sender<u32>>,
+    /// Whether the instance's pool hub has asked it to retire. A stop to
+    /// [`asked_to_stop`](Self::asked_to_stop), and never counted in
+    /// `stops`, which [`stops(2)`](Self::stops) reads as real signals.
+    retire: Arc<tokio::sync::watch::Sender<bool>>,
     health: Arc<Health>,
     system: Option<SocketAddr>,
     /// Bound at the start, so that the instance id, which every metric
@@ -1425,6 +1492,7 @@ impl Process {
         Ok(Self {
             stops,
             count,
+            retire: Arc::new(tokio::sync::watch::Sender::new(false)),
             health,
             system,
             instance: node.instance_id(),
@@ -1605,11 +1673,22 @@ impl Process {
         }
     }
 
-    /// Resolves once something has asked this process to stop: the one
-    /// thing a stop waits on, so that what else may ask joins here. It
-    /// says nothing of a second stop, which counts signals.
+    /// Resolves once something has asked this process to stop, a signal or
+    /// a retire request: the one thing a stop waits on. It says nothing
+    /// of a second stop, which counts signals.
     async fn asked_to_stop(&self) {
-        self.stops(1).await;
+        let mut asked = self.retire.subscribe();
+        tokio::select! {
+            () = self.stops(1) => {}
+            // `self` holds the sender.
+            _ = asked.wait_for(|asked| *asked) => {}
+        }
+    }
+
+    /// Whether a retire request has come and no signal has: the instance
+    /// holds once it has drained.
+    fn asked_to_retire(&self) -> bool {
+        *self.retire.borrow() && *self.stops.borrow() == 0
     }
 
     /// Resolves once `n` stop signals have come.

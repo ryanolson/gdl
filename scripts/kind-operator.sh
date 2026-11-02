@@ -20,7 +20,11 @@
 #   - the same for the frontend, scaled 3 to 2: its victim leaves the Service's EndpointSlices before its pod is
 #     deleted, and no request failed, a new connection included;
 #   - an HPA on the engine's GdlScaler, with no metrics server, scales it up to its minimum and down to its maximum
-#     through /scale, and the scaler removes the victim it chose.
+#     through /scale, and the scaler removes the victim it chose;
+#   - with `retire: request`, the same 3 to 2 for the engine and for the frontend, under the same load: the scaler asks
+#     the victim through its hub, the victim drains, its hook reports, its hub lists it `drained`, and only then is its
+#     pod deleted. It prints the time from the ask to `drained`, from `drained` to the delete, and from the delete to
+#     the pod's end, and no request failed.
 #
 #   INSTALL_TOOLS=1 bash scripts/kind-operator.sh   # first downloads the pinned kind into TOOLS_DIR
 #   bash scripts/kind-operator.sh
@@ -451,6 +455,88 @@ until_true 120 "the scaler recorded no removal for the HPA" sh -c \
   "kubectl --context '${context}' -n '${ns}' get gdlscaler model-a-engine -o json | jq -e --arg before '${before}' '.status.last.chosen != \$before and .status.last.chosen == .status.last.deleted and .status.last.outcome == \"removed\"' >/dev/null"
 until_true 120 "the engine did not settle at 2 under the HPA" scaled_to model-a engine 2
 say "the HPA scaled the engine down to 2, and the scaler removed the pod it chose"
+
+# The request-mode line of `instance` from its hub's list: `<retire_requested> <phase>`, by the pod's IP, of the
+# registration that one pod holds.
+listed_by_ip() {
+  control "$1" /v1/ext/gdl-pool/instances 2>/dev/null \
+    | jq -r --arg s "$2" --arg ip "$3:" '[.instances[] | select(.segment == $s and any(.addresses[]; startswith($ip)))][0]
+        | if . == null then "gone gone" else "\(.retire_requested) \(.phase)" end'
+}
+
+# Scale `pool`'s `segment` from 3 to 2 in `retire: request` mode and prove the order: the hub holds the request, the
+# hub lists the victim `drained`, its hook reports, and only then is its pod deleted. Each sample is a line in
+# `${scratch}/request-<segment>.samples`.
+request_down() {
+  local pool="$1" segment="$2" scaler="$1-$2" load_before victim uid ip
+  k patch gdlscaler "${scaler}" --type=merge --patch '{"spec":{"retire":"request"}}' >/dev/null
+  k scale gdlscaler "${scaler}" --replicas=3 >/dev/null
+  until_true 300 "${pool}'s ${segment} did not run 3 ready instances" scaled_to "${pool}" "${segment}" 3
+  load_before="$(load_counts)"
+  k scale gdlscaler "${scaler}" --replicas=2 >/dev/null
+  until_true 60 "the scaler chose no victim" sh -c \
+    "kubectl --context '${context}' -n '${ns}' get gdlscaler '${scaler}' -o json | jq -e '.status.retiring | length == 1' >/dev/null"
+  victim="$(k get gdlscaler "${scaler}" --output jsonpath='{.status.retiring[0].pod}')"
+  uid="$(k get gdlscaler "${scaler}" --output jsonpath='{.status.retiring[0].uid}')"
+  ip="$(k get pod "${victim}" --output jsonpath='{.status.podIP}')"
+  say "${scaler}: retire request: the scaler chose ${victim}"
+  local samples="${scratch}/request-${segment}.samples"
+  : >"${samples}"
+  local deadline=$((SECONDS + (DRAIN_MS + EXIT_MARGIN_MS) / 1000 + 60))
+  while k get pod "${victim}" >/dev/null 2>&1; do
+    ((SECONDS < deadline)) || fail "${victim} was not gone in time"
+    local now asked phase deleting hook=""
+    now="$(date +%s%3N)"
+    read -r asked phase <<<"$(listed_by_ip "${pool}" "${segment}" "${ip}")"
+    deleting="$(k get pod "${victim}" --output jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+    [[ "${segment}" == "engine" ]] && hook="$(metrics "${victim}" 2>/dev/null | hook_outcome || true)"
+    echo "${now} asked=${asked:-?} phase=${phase:-?} hook=${hook:-?} deleting=${deleting:+yes}" >>"${samples}"
+    sleep 0.2
+  done
+  local gone
+  gone="$(date +%s%3N)"
+  until_true 60 "the scaler did not record the removal" sh -c \
+    "kubectl --context '${context}' -n '${ns}' get gdlscaler '${scaler}' -o json | jq -e --arg uid '${uid}' '.status.last.chosen == \$uid and (.status.retiring // [] | length) == 0' >/dev/null"
+  local last
+  last="$(k get gdlscaler "${scaler}" --output json | jq -c '.status.last')"
+  say "${scaler}: status.last ${last}"
+  [[ "$(jq -r '.deleted' <<<"${last}")" == "${uid}" ]] || fail "${scaler}: the pod deleted is not the one chosen: ${last}"
+  [[ "$(jq -r '.outcome' <<<"${last}")" == "removed" ]] || fail "${scaler}: the removal did not end inside its bound: ${last}"
+  # A sample's fields, and the time of the first sample that reads `$1`.
+  first() { awk -v want="$1" '$0 ~ want {print $1; exit}' "${samples}"; }
+  local asked_at drained_at deleted_at
+  asked_at="$(first 'asked=true')"
+  drained_at="$(first 'phase=drained')"
+  deleted_at="$(first 'deleting=yes')"
+  [[ -n "${asked_at}" ]] || fail "${scaler}: the hub never held the request:
+$(cat "${samples}")"
+  [[ -n "${drained_at}" ]] || fail "${scaler}: the hub never listed the victim drained:
+$(cat "${samples}")"
+  [[ -n "${deleted_at}" ]] || deleted_at="${gone}"
+  ((asked_at <= drained_at && drained_at < deleted_at)) \
+    || fail "${scaler}: out of order: asked ${asked_at}, drained ${drained_at}, deleted ${deleted_at}:
+$(cat "${samples}")"
+  awk '/deleting=yes/ && !/phase=(drained|gone)/ { bad = 1 } END { exit bad }' "${samples}" \
+    || fail "${scaler}: its pod was deleted before its hub listed it drained:
+$(cat "${samples}")"
+  if [[ "${segment}" == "engine" ]]; then
+    [[ "$(jq -r '.handoff' <<<"${last}")" == "done" ]] || fail "${scaler}: the hook's outcome: ${last}"
+    awk '/deleting=yes/ { seen = 1 } !seen && /hook=done/ { ok = 1 } END { exit !ok }' "${samples}" \
+      || fail "${scaler}: its hook did not report before its pod was deleted:
+$(cat "${samples}")"
+  fi
+  say "${scaler}: request to drained $((drained_at - asked_at)) ms, drained to delete $((deleted_at - drained_at)) ms, delete to gone $((gone - deleted_at)) ms"
+  until_true 120 "${pool}'s ${segment} did not settle at 2" scaled_to "${pool}" "${segment}" 2
+  local load_after
+  load_after="$(load_counts)"
+  [[ "${load_after#* }" == "0" ]] || fail "requests failed: $(k logs load | grep '^fail' | head -n 5)"
+  ((${load_after% *} > ${load_before% *})) || fail "no request was answered while ${segment} scaled down"
+  say "${scaler}: retire request: no request failed (${load_before% *} answered before, ${load_after% *} after)"
+}
+
+k delete hpa model-a-engine >/dev/null
+request_down model-a engine
+request_down global front
 
 counts="$(load_counts)"
 # Stop the load, then count: each worker finishes the request it is sending, and the pod prints `done` once all

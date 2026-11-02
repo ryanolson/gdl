@@ -142,6 +142,38 @@ A hook must not change the drain. The observer can therefore read a promise long
 
 Every time derives from the stop's one instant. The fallback runs from the stop, not from the retirement, because a retirement can come late: an entry instance first waits for its hub to answer a drain report, for up to two report periods. When the fallback comes, it reads an entry's parent bound again: by default the two pass together, and the bound is the better reason.
 
+## `drained` from every instance
+
+An instance that hosts no source announces `detached`, then `drained`, only with its entries closed and its ledger empty. The controller's hold and the hub's list read this. So a reader never sees `drained` from an instance that still holds a request or can still send one on, also under a stop that arrives mid-request (`crates/gdl-runtime/tests/holding.rs`).
+
+`detached` is announced on any stop under a hub, in a pool or not. Every reader of it is in a pool's drain, so outside one nobody reads it, and it is true: the instance is closed and empty.
+
+(B) and the pool drain's detach wait count what they counted before. (B) names the source segments, or a draining pool's entry segments, and `all_drained` filters to the segments it is asked of. `all_detached` counts `drained` only for entry segments. A peer of an earlier build asks the same questions, so an interior `drained` means nothing to it.
+
+**Rejected: counting interior segments in (B).** Two interior segments that send to each other would each wait for the other's `drained`, and both would run to the bound. `crates/gdl-runtime/tests/mutual.rs` holds that case. Both ways out take what they took before this announcement existed: 1.03 s by the senders and 0.12 s by the pool's drain (`cargo nextest run -p gdl-runtime --test mutual --no-capture`).
+
+## A retire request is not a stop
+
+The request joins a signal at `Process::asked_to_stop`, the one thing a stop waits on, but it does not touch the count of signals. So the second stop stays what it was: a real signal that ends the drain. A request that counted would make the first SIGTERM after it a forced stop, and the operator's delete would cut the requests the instance holds.
+
+**Rejected: a new `LeaveCause`.** A hook does the same work whichever asked. The cause stays `Stop`.
+
+## The hold
+
+An operator must read the outcome before the pod goes. Before the hold, the only point between "drained" and "exit" was the pod's grace, which the hooks also spend. So an instance retired on request stays, as a member with its velo node up, until something ends the hold.
+
+The hold ends at its own bound, `hold_ms` from the stop, and every time of a stop derives from that one instant. By default the bound is `drain_ms` and 30 s, the margin the render adds to a pod's grace. The render sets the operator's `drainBound` to `drain_ms`, and the operator counts it from before the stop. So the default outlasts `drainBound` by the 30 s that a reconcile, a ReplicaSet and a kubelet take. A hold that ends by itself exits the process, the kubelet starts the container again, and the operator records `restartedDuringHold`. That is safe, but the new process serves for a while, so the bound is for an operator that went away.
+
+A pool's drain ends the hold, because the hub's drain ends only once no member is left. A held instance holds no work, so nothing is lost.
+
+A drain cut at its bound holds too. **Rejected: exit as after a signal.** The exit restarts the container, the new process takes traffic, and the operator then removes that process instead.
+
+## The fence on a request
+
+The hub refuses a request for an incarnation that is not current, so the instance's own check only guards against a hub that does not hold it. The instance acts when the request's incarnation is at or below the one its hub lists. A re-registration raises the incarnation without a new process, and a velo id is drawn per process, so an earlier incarnation of its own id is still this process. **Rejected: strict equality.** A process that registered again would ignore a request meant for it, and the operator would wait until its bound.
+
+**Rejected: the incarnation in `/members`.** That is a change to the hub for one read. The list holds it, and is read only when a request names the instance.
+
 ## The tail of a stream
 
 A stream holds its request's admission share and egress permit until velo's `StreamSender::retired()` resolves. An empty ledger then means that the instance's output has left the node.
@@ -174,6 +206,7 @@ The lifecycle spawns no task, and arms no timer, per request or per stream. A ta
 - The closed check runs in the handler that already admits the request.
 - The drain polls the ledger every 50 ms. Nothing is added to the release path.
 - Each instance runs one follower task. It keeps delayed velo unregistrations itself, with no task per peer.
+- Each instance in a `[pool]` runs one watch of its pool. A retire request reads the hub's list once, and costs nothing else.
 - Each leave hook runs in one task, from the stop. A hook in a task of its own can be timed out even if it blocks its thread, and its panic is its own outcome. An instance with no hook has no such task.
 
 velo's own discovery path spawns a task per message sent to a worker it has not resolved yet. The follower registers joiners as they become ready, so that happens only in the moment before it has.

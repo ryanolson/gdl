@@ -1490,6 +1490,12 @@ async fn over_a_roster_directory_one_of_two_engines_retires() {
         "the front left no promise at {}",
         promise.display()
     );
+    let drained = dir.path().join("drained").join(format!("engine.{a_id}"));
+    assert!(
+        drained.exists(),
+        "an instance with no source left no file at {}",
+        drained.display()
+    );
     traffic.more(20).await;
     assert_eq!(traffic.stop().await, 0, "a request failed");
 

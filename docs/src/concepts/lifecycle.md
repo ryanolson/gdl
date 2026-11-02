@@ -16,8 +16,9 @@ An instance passes through these phases. Each phase is a fact that the instance 
 | ready | the barrier passed and the instance routes | `gdl-ready-<segment>` | none |
 | retired | the instance was stopped | `gdl-retired-<segment>` | `retired/<segment>.<id>` |
 | leaving | the instance's leave hooks run, from the stop | none | none |
-| drained | a source instance has finished its requests | `gdl-drained-<segment>` | `drained/<segment>.<id>` |
-| detached | an instance of a draining pool will send no more work into the pool | `gdl-detach-<segment>` | none |
+| drained | a source instance has finished its requests, or any other instance has closed and holds no request | `gdl-drained-<segment>` | `drained/<segment>.<id>` |
+| detached | an instance will send no more work into its pool | `gdl-detach-<segment>` | none |
+| held | an instance retired on request has drained and stays until something ends the hold | none | none |
 | left | the instance has gone | unregistration | `left/<segment>.<id>` |
 
 `<segment>` in a hub service name is the segment's name in hex. A roster directory has no `ready` phase, because nothing joins a roster directory. It has no `detached` phase either, because only a pool under a hub drains.
@@ -90,7 +91,7 @@ The follower also acknowledges retirements, as the next section describes. [Rout
 
 The first stop retires the instance. A stop is SIGINT, SIGTERM, or `Process::stop`. A second stop ends the drain at once.
 
-A controller can also ask an instance's pool hub to retire it before it deletes the instance's pod, as the operator's `retire: request` mode does ([Retiring an instance on request](pools.md#retiring-an-instance-on-request)). The hub sends the request on the pool's watch. The runtime does not act on it yet ([Limitations](../operations/limitations.md#an-instance-does-not-act-on-a-retire-request-yet)), so the instance retires at its SIGTERM.
+A controller can also ask an instance's pool hub to retire it, as the operator's `retire: request` mode does. That retires the instance as a first stop does, and the instance then holds ([Retired on request](#retired-on-request)).
 
 ```mermaid
 sequenceDiagram
@@ -106,6 +107,7 @@ sequenceDiagram
     X->>H: (source) announce drained
     X->>X: wait for A or B
     X->>X: close entries, wait for an empty ledger
+    X->>H: (no source) announce detached, then drained
     X->>X: velo begin_drain, graceful_shutdown
     X->>H: leave
     H-->>P: X left: drop X, unregister from velo after drain_ms
@@ -116,13 +118,14 @@ The steps, in order:
 1. **Retire.** The health phase becomes `draining`, and the serving body's context is cancelled. Meanwhile, the instance withdraws `ready` and `loaded`, and announces `retired` once the hub has confirmed both. A roster read after the withdrawals leaves it out. If the hub does not confirm them in time, the instance prints a line and does not announce `retired`.
 2. **Peers avoid it.** A peer that sees the retirement stops routing to the instance, but only while the segment has another instance that is not retired. Then the peer acknowledges. The acknowledgement is a promise: the peer never routes to that instance again.
 3. **The body ends.** A frontend drains the requests it holds. A JSON-lines source stops reading lines, and finishes the answer it is writing.
-4. **Drained.** A source instance announces `drained` before it waits further. So source segments that route to each other never wait for each other. An entry instance of a pool is the exception: it announces `drained` only once it holds no request ([An interior instance's stop](pool-routing.md#an-interior-instances-stop)).
+4. **A source says `drained`.** A source instance announces `drained` before it waits further. So source segments that route to each other never wait for each other. An entry instance of a pool is the exception: it announces `drained` only once it holds no request ([An interior instance's stop](pool-routing.md#an-interior-instances-stop)).
 5. **Wait for A or B.** The instance waits for whichever holds first:
    - **(A)** every instance of the segments that send to it has acknowledged or left, and then `setup_timeout` has passed. A hand-off sent just before the promise may still be on its way. A segment that nothing sends to has (A) at once, with no wait.
    - **(B)** every instance of the source segments whose requests can reach it has drained or left.
 6. **Close.** The instance refuses new hand-offs and run openings with `Overloaded` ("the instance has retired and takes no new work"). The sender's router treats that as a declined offer and chooses again ([Routing, selectors, and offers](routing.md)).
-7. **Empty ledger.** The instance waits until it holds no request. A stream holds its request's admission share until velo reports that its output has left the node ([Admission and egress](admission.md)). `/metrics` shows the wait's progress from outside: `instance_phase` at `draining`, and the ledger's roots and the egress permits falling to 0. Only the exit says that the drain is complete ([Reading a drain](../operations/observability.md#reading-a-drain)).
-8. **Leave.** The instance stops velo with `begin_drain` and `graceful_shutdown`, unregisters from the hub or writes `left/`, and exits.
+7. **Empty ledger.** The instance waits until it holds no request. A stream holds its request's admission share until velo reports that its output has left the node ([Admission and egress](admission.md)). `/metrics` shows the wait's progress from outside: `instance_phase` at `draining`, and the ledger's roots and the egress permits falling to 0. Only the exit, or the `drained` of an instance that hosts no source, says that the drain is complete ([Reading a drain](../operations/observability.md#reading-a-drain)).
+8. **Any other instance says `drained`.** An instance that hosts no source announces `detached`, then `drained`, and only with its entries closed and its ledger empty. So a reader of its `drained` knows that it holds nothing and will send nothing on. A drain cut at its bound with a request left says neither. Each announcement is tried for at most 1 s, since a hub that does not answer must not hold up the exit. A roster directory has no `detached`, so the instance only writes `drained/`.
+9. **Leave.** The instance stops velo with `begin_drain` and `graceful_shutdown`, unregisters from the hub or writes `left/`, and exits.
 
 Every exit after a successful launch announces `left`. A launch that fails at its roster wait leaves no `left/` file, and under a hub its registration lapses with its lease. An instance that crashes leaves nothing. Under a hub its lease lapses, after about 30 s. In a roster directory nothing marks it, and a drain that waits for it runs to its bound.
 
@@ -195,10 +198,43 @@ Each hook's outcome is on `/metrics` as `leave_outcome{hook,outcome}`, and in on
 
 An instance with no hook starts no task for this, and its stop runs as this chapter describes without it.
 
+### Retired on request
+
+A controller retires an instance through its pool's hub, so that it can read the instance's `drained` and its hooks' outcomes before it removes the instance ([Retiring an instance on request](pools.md#retiring-an-instance-on-request)). The instance hears the request on its pool's watch. Every instance in a `[pool]` follows that watch.
+
+The request retires the instance exactly as a first stop does, and runs its leave hooks with the cause `Stop`. It is not a stop: it does not count toward the second stop that ends a drain. A repeated request does nothing, and neither does a request after a stop. A request heard before the instance serves stops it as a stop at the barrier does.
+
+Once it has drained and its hooks have ended, the instance holds. It keeps its lease and its velo node, and its follower still acknowledges retirements, so its peers' drains do not wait for it. It takes no work: its entries are closed. A hub lists it `drained`, and `/health` answers as it does in a drain.
+
+```mermaid
+stateDiagram-v2
+    Serving --> Draining: retire request
+    Draining --> Held: drained, hooks ended
+    Draining --> Leaving: first stop, then drained
+    Held --> Leaving: first stop, pool's drain, lost lease, or hold_ms
+    Draining --> Forced: second stop
+```
+
+These end a hold:
+
+| What | What happens |
+|---|---|
+| A stop, while the instance drains | The instance does not hold. It exits once it has drained. Only the next stop ends the drain |
+| A stop, while it holds | It exits at once. An idle velo node stops at once, and velo gets at least 1 s |
+| Its pool's drain | It exits at once. The hub's drain ends only once no member is left |
+| A lost lease | It exits with the lease's error |
+| `[runtime] hold_ms` after the request | It exits ([Segment settings](../operations/configuration.md)) |
+
+A drain cut at its bound with a request left does not exit. The instance holds without `drained`, and announces `detached` and `drained` if its ledger empties later. On Kubernetes, an exit only restarts the container, and the new process would serve until the controller noticed.
+
+Under a hub, an instance that hosts a source says `drained` when its serving body ends, as at any stop, before its ledger is empty. A controller that reads it may remove the instance then. Its stop then only ends the hold: the instance still drains, inside its grace.
+
+The request names an incarnation of the instance's registration. The instance reads its own from the hub's list once a request names it, and acts when the request's is at or below its own. A later incarnation of an id is the same process, because each process draws a new velo id.
+
 ### Pools
 
 Under a hub, an instance in a pool also stops when its pool drains, once no more work can reach it. An entry instance of a pool also waits until the pools that follow its pool avoid it, before its `setup_timeout`. Outside its pool's drain, an instance that a source of another class reaches never counts (B), because that source's instances are members of another hub. So the last interior instance of a segment, stopped alone, waits for its drain's bound. [Following and choosing pools](pool-routing.md) describes all three.
 
 ## Limits
 
-[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a request the hub does not answer holds back the instance's later requests to it, and a hub that does not confirm the withdrawals is not told of the retirement, the last instance of a segment is not avoided, a leave hook does not run on a crash, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.
+[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a request the hub does not answer holds back the instance's later requests to it, and a hub that does not confirm the withdrawals is not told of the retirement, the last instance of a segment is not avoided, a leave hook does not run on a crash, a held instance's `drained` does not cover a source's ledger, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.

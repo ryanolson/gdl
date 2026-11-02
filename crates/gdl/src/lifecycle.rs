@@ -269,8 +269,8 @@ impl fmt::Debug for Leave {
 /// What stopped an instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaveCause {
-    /// A stop: a signal, a stop asked of the process, or the end of the
-    /// serving body.
+    /// A stop: a signal, a stop asked of the process, a retire request
+    /// through the instance's pool hub, or the end of the serving body.
     Stop,
     /// The drain of the instance's pool.
     PoolDrain,

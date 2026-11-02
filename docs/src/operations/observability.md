@@ -138,7 +138,7 @@ dynamo's `request_duration_seconds` spans the whole handler, its stream included
 
 ## Reading a drain
 
-A stopped instance drains: it takes no new work and finishes what it holds ([Segment lifecycle](../concepts/lifecycle.md)). The drain is complete only when the instance's own drain completes: when its process exits. `/metrics` shows the drain's progress, not its end. Each series is read from what the instance already counts, so a request does no work for them:
+A stopped instance drains: it takes no new work and finishes what it holds ([Segment lifecycle](../concepts/lifecycle.md)). The drain is complete only when the instance's own drain completes: when its process exits, or when an instance that hosts no source says `drained` at its hub. `/metrics` shows the drain's progress, not its end. Each series is read from what the instance already counts, so a request does no work for them:
 
 | Series | What it shows |
 |---|---|

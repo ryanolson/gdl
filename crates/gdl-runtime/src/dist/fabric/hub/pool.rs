@@ -3,7 +3,9 @@
 //! drain from its own hub's pool watch, which carries the pool's state,
 //! and, once no other pool follows the draining pool, says so; an entry
 //! instance learns there too that the pools that follow its pool avoid it
-//! once it retired. Nothing about either is on a request's path.
+//! once it retired. Every instance of a pool, wherever it sits in it,
+//! learns on that watch too that a controller asked its hub to retire it.
+//! Nothing about any of this is on a request's path.
 //!
 //! The pool's entry instances are the drain sources of its interior ones
 //! (see docs/src/development/pools-design.md): a chooser in another class reaches
@@ -17,7 +19,7 @@
 //! for a stop: an instance that a source of another class reaches never
 //! counts that source as drained, and waits for its senders to avoid it.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -74,6 +76,8 @@ struct Learned {
     /// Whether it learned, as an entry instance that retired, that every
     /// pool that followed its pool then avoids it.
     acknowledged: bool,
+    /// The incarnation of the latest retire request that named it.
+    retire: Option<u64>,
 }
 
 /// Why no more work can reach an interior instance of a draining pool.
@@ -219,9 +223,11 @@ impl PoolDrain {
     /// Watch the pool of `pool` for its drain, for the instance `me` of
     /// `segment`, which the source segments `reaching` reach, at the hub
     /// whose public listener is `host`'s `public_port`, and for an entry
-    /// instance, for its retirement's acknowledgement. `None`, and nothing
-    /// watched, when no hop enters the pool's class: such a pool is not
-    /// drained as a pool, and has no entry instance.
+    /// instance, for its retirement's acknowledgement. `asks` hears a retire
+    /// request for this instance. `None`, and no drain watched, when no hop
+    /// enters the pool's class: such a pool is not drained as a pool, and
+    /// has no entry instance. Its instance still heeds a request
+    /// ([`heed_requests`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "the instance, its pool, and its hub, as the launch holds them"
@@ -235,6 +241,8 @@ impl PoolDrain {
         host: &str,
         public_port: u16,
         runtime: &crate::RuntimeConfig,
+        asker: &HubAsker,
+        asks: &Arc<watch::Sender<bool>>,
     ) -> Result<Option<Self>> {
         let setup = runtime.setup_timeout;
         let entries = layout.entry_segments(&pool.class);
@@ -268,12 +276,15 @@ impl PoolDrain {
         let detaches = !runtime.faults.withhold_detached;
         #[cfg(not(feature = "fault-injection"))]
         let detaches = true;
-        let watcher =
-            PoolWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        let address = crate::dist::pools::hub_address(host, public_port);
         let (learns, learned) = watch::channel(Learned::default());
-        let retiree = matches!(role, Role::Entry { .. }).then_some(me);
-        let watch = tokio::spawn(run(watcher, address, retiree, learns, runtime.gate.clone()));
+        let reader = Reader {
+            me,
+            entry: matches!(role, Role::Entry { .. }),
+            drains: true,
+        };
+        let address = crate::dist::pools::hub_address(host, public_port);
+        let gate = runtime.gate.clone();
+        let watch = listen(reader, address, learns, gate, asker.clone(), asks)?;
         Ok(Some(Self {
             learned,
             role,
@@ -426,6 +437,12 @@ impl PoolDrain {
         self.detaches && self.learned.borrow().drain.is_some()
     }
 
+    /// Whether a test has this instance stand in for a build from before
+    /// it could announce that it detached.
+    pub(crate) fn withholds_detached(&self) -> bool {
+        !self.detaches
+    }
+
     /// Whether a test stalls the announcement that it detached.
     pub(crate) fn stalls(&self) -> bool {
         #[cfg(feature = "fault-injection")]
@@ -505,7 +522,7 @@ impl PoolDrain {
     }
 
     /// When the instance learned of the drain, once it has.
-    async fn learned(&self) -> Instant {
+    pub(crate) async fn learned(&self) -> Instant {
         let mut learned = self.learned.clone();
         let at = learned
             .wait_for(|learned| learned.drain.is_some())
@@ -526,10 +543,113 @@ impl Drop for PoolDrain {
     }
 }
 
+/// For an instance of a pool no hop enters, watch the pool at the hub at
+/// `public_port` of `host` only for a retire request, until the task is
+/// aborted: nothing else on the watch is for it, and it follows no drain.
+pub(crate) fn heed_requests(
+    me: InstanceId,
+    host: &str,
+    public_port: u16,
+    runtime: &crate::RuntimeConfig,
+    asker: &HubAsker,
+    asks: &Arc<watch::Sender<bool>>,
+) -> Result<JoinHandle<()>> {
+    let (learns, _) = watch::channel(Learned::default());
+    let reader = Reader {
+        me,
+        entry: false,
+        drains: false,
+    };
+    let address = crate::dist::pools::hub_address(host, public_port);
+    let gate = runtime.gate.clone();
+    listen(reader, address, learns, gate, asker.clone(), asks)
+}
+
+/// The one task that reads the pool's watch for an instance, and heeds a
+/// request it hears there.
+fn listen(
+    reader: Reader,
+    address: String,
+    learns: watch::Sender<Learned>,
+    gate: gdl::OfferGate,
+    asker: HubAsker,
+    asks: &Arc<watch::Sender<bool>>,
+) -> Result<JoinHandle<()>> {
+    let watcher =
+        PoolWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+    let learned = learns.subscribe();
+    let asks = Arc::clone(asks);
+    Ok(tokio::spawn(async move {
+        tokio::join!(
+            run(watcher, address, reader, learns, gate),
+            heed(learned, asker, reader.me, asks),
+        );
+    }))
+}
+
+/// Tell `asks` of the first retire request that stands, read from `learned`.
+/// The watch names the request's incarnation, and only the hub's list
+/// says this instance's own: its registration's answer carries none. So
+/// the list is read once a request names this instance, and never
+/// otherwise. Asked again while the hub does not answer.
+async fn heed(
+    mut learned: watch::Receiver<Learned>,
+    asker: HubAsker,
+    me: InstanceId,
+    asks: Arc<watch::Sender<bool>>,
+) {
+    loop {
+        let request = match learned.wait_for(|learned| learned.retire.is_some()).await {
+            Ok(learned) => learned.retire,
+            Err(_) => None,
+        };
+        let Some(request) = request else {
+            return;
+        };
+        let current = loop {
+            if asker.is_lost() {
+                return;
+            }
+            let asked = tokio::time::timeout(HubSession::poll() * 10, asker.incarnation(me));
+            if let Ok(Ok(current)) = asked.await {
+                break current;
+            }
+            tokio::time::sleep(HubSession::poll()).await;
+        };
+        if stands(request, current) {
+            asks.send_replace(true);
+            return;
+        }
+        if learned.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Whether a retire request for the incarnation `request` stands, with the
+/// hub listing this instance at `current`. A later incarnation of this id
+/// is this same process, which registered again, and a velo id is drawn
+/// per process: the request was meant for it. No row, or a lower number,
+/// comes from a hub that does not hold this registration.
+fn stands(request: u64, current: Option<u64>) -> bool {
+    current.is_some_and(|current| request <= current)
+}
+
+/// Who reads the pool's watch.
+#[derive(Debug, Clone, Copy)]
+struct Reader {
+    me: InstanceId,
+    /// An entry instance, whose retirement a following pool acknowledges.
+    entry: bool,
+    /// An instance of a pool that drains as a pool.
+    drains: bool,
+}
+
 /// Watch the pool at the hub at `address` until it says it is
 /// `draining`, then say when on `learns`, and go on until it says that no
-/// other pool follows it, and say so too. For the entry instance
-/// `retiree`, say too once its retirement is acknowledged. A watch that
+/// other pool follows it, and say so too. For an entry instance, say too
+/// once its retirement is acknowledged, and for any `reader`, that a
+/// request to retire names it. A watch that
 /// ends or is refused is asked for again, after a wait that grows to
 /// [`REWATCH_CAP`] while watches fail, as from a hub without the pool's
 /// extension, which refuses every one; a refusal is logged once, until a
@@ -540,7 +660,7 @@ impl Drop for PoolDrain {
 async fn run(
     watcher: PoolWatcher,
     address: String,
-    retiree: Option<InstanceId>,
+    reader: Reader,
     learns: watch::Sender<Learned>,
     gate: gdl::OfferGate,
 ) {
@@ -594,7 +714,7 @@ async fn run(
                         }
                         _ => {}
                     }
-                    let heard = Heard::of(&event, retiree);
+                    let heard = Heard::of(&event, reader);
                     let done = match (snapshot.as_mut(), event) {
                         (Some(filling), PoolWatchEvent::Synced) => {
                             let complete = filling.with(heard);
@@ -636,25 +756,33 @@ struct Heard {
     unfollowed: bool,
     /// The retiree's retirement is acknowledged.
     acknowledged: bool,
+    /// A request to retire names the reader, in this incarnation.
+    retire: Option<u64>,
 }
 
 impl Heard {
-    /// What `event` says, for the entry instance `retiree`.
-    fn of(event: &PoolWatchEvent, retiree: Option<InstanceId>) -> Self {
+    /// What `event` says to `reader`.
+    fn of(event: &PoolWatchEvent, reader: Reader) -> Self {
         match *event {
             PoolWatchEvent::State {
-                state: PoolState::Draining,
+                state,
                 unfollowed,
-                ..
-            } => Self {
-                draining: true,
-                unfollowed,
-                acknowledged: false,
-            },
+                retire,
+            } => {
+                let draining = reader.drains && state == PoolState::Draining;
+                Self {
+                    draining,
+                    unfollowed: draining && unfollowed,
+                    acknowledged: false,
+                    retire: retire
+                        .filter(|request| request.instance == reader.me)
+                        .map(|request| request.incarnation),
+                }
+            }
             PoolWatchEvent::Pool {
                 state: PoolState::Draining,
                 ..
-            } => Self {
+            } if reader.drains => Self {
                 draining: true,
                 ..Self::default()
             },
@@ -662,7 +790,7 @@ impl Heard {
                 instance,
                 acknowledged: true,
                 ..
-            } if Some(instance) == retiree => Self {
+            } if reader.entry && instance == reader.me => Self {
                 acknowledged: true,
                 ..Self::default()
             },
@@ -676,12 +804,20 @@ impl Heard {
             draining: self.draining || other.draining,
             unfollowed: self.unfollowed || other.unfollowed,
             acknowledged: self.acknowledged || other.acknowledged,
+            retire: other.retire.or(self.retire),
         }
     }
 
     /// Say on `learns` what was heard: whether the watch is done, as it is
     /// once no other pool follows the draining pool.
     fn learn(self, learns: &watch::Sender<Learned>) -> bool {
+        if self.retire.is_some() {
+            learns.send_if_modified(|learned| {
+                let changed = learned.retire != self.retire;
+                learned.retire = self.retire;
+                changed
+            });
+        }
         if self.acknowledged {
             learns.send_if_modified(|learned| !std::mem::replace(&mut learned.acknowledged, true));
         }

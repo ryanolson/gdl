@@ -108,6 +108,12 @@ pub struct RuntimeConfig {
     /// out of routing. At most half of `drain` counts from the stop.
     /// `None` is the setup timeout and twice the pool's `summary_ms`.
     pub leave_after: Option<Duration>,
+    /// How long after its stop an instance its pool's hub asked to retire
+    /// may stay, once drained, if nothing ends its hold first. `None`
+    /// means the drain's bound and 30 s, which outlasts an
+    /// operator's `drainBound`: a hold that ends by itself exits a
+    /// container, which its pod then starts again.
+    pub hold: Option<Duration>,
     /// Where the runtime records what each request does in this segment:
     /// its request path, the response streams it sends on, and, at the
     /// source, the request end to end; `None` records nothing. Not a
@@ -246,6 +252,7 @@ impl Default for RuntimeConfig {
             drain: None,
             leave: None,
             leave_after: None,
+            hold: None,
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),
@@ -286,6 +293,7 @@ struct Settings {
     drain_ms: Option<u64>,
     leave_ms: Option<u64>,
     leave_after_ms: Option<u64>,
+    hold_ms: Option<u64>,
 }
 
 impl Default for Settings {
@@ -314,6 +322,7 @@ impl Default for Settings {
             drain_ms: config.drain.map(ms),
             leave_ms: config.leave.map(ms),
             leave_after_ms: config.leave_after.map(ms),
+            hold_ms: config.hold.map(ms),
         }
     }
 }
@@ -346,6 +355,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             drain: s.drain_ms.map(Duration::from_millis),
             leave: s.leave_ms.map(Duration::from_millis),
             leave_after: s.leave_after_ms.map(Duration::from_millis),
+            hold: s.hold_ms.map(Duration::from_millis),
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),

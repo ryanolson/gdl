@@ -74,12 +74,13 @@ pub enum InstancePhase {
     Joining,
     /// It routes, and takes work.
     Ready,
-    /// An instance of a draining pool: it takes no more work from outside
-    /// the pool, and sends no more into it.
+    /// It takes no more work from outside its pool, and sends no more
+    /// into it.
     Detached,
     /// It has been stopped, and drains what it holds.
     Retired,
-    /// A source instance that has finished its requests.
+    /// A source instance that has finished its requests, or any other
+    /// instance that has closed and holds none.
     Drained,
 }
 

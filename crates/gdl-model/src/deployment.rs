@@ -24,9 +24,9 @@ pub const SEGMENT_NAME_LIMIT: usize = 58;
 /// A phase of a segment's instance that it announces to its hub, as a
 /// service named by [`segment_service`]: `loaded`, once its nodes are ready
 /// to work; `serving`, once its handlers are installed; `ready`, once it
-/// routes; `drained`, once a source has finished its requests; `retired`,
-/// once it has been stopped; and `detach`, once an instance of a draining
-/// pool will send no more work into the pool.
+/// routes; `retired`, once it has been stopped; `detach`, once it will send
+/// no more work into its pool; and `drained`, once a source has finished
+/// its requests, or any other instance has closed and holds none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentPhase {
     /// The instance's nodes are ready to work.
