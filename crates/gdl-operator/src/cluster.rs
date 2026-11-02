@@ -128,6 +128,10 @@ pub struct PodView {
     /// Its containers' restart counts, summed: a restart starts a new
     /// process in the same pod.
     pub restarts: i64,
+    /// Its containers' ids, sorted, of those that have one: a container
+    /// made again has another, even where its restart count starts over
+    /// at 0, as after its node restarts.
+    pub containers: Vec<String>,
 }
 
 impl PodView {
@@ -172,6 +176,17 @@ impl PodView {
                 .flatten()
                 .map(|container| i64::from(container.restart_count))
                 .sum(),
+            containers: {
+                let mut ids: Vec<String> = status
+                    .container_statuses
+                    .iter()
+                    .flatten()
+                    .filter_map(|container| container.container_id.clone())
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                ids.sort();
+                ids
+            },
         })
     }
 }

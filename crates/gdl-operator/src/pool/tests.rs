@@ -409,6 +409,7 @@ impl Pools for Fake {
                     routable: None,
                     system_port: None,
                     restarts: 0,
+                    containers: Vec::new(),
                 });
             }
         }

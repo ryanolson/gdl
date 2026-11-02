@@ -603,6 +603,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 retired: None,
                 handoff: None,
                 restarts: asked_at_once.then_some(pod.restarts),
+                containers: match asked_at_once {
+                    true => pod.containers.clone(),
+                    false => Vec::new(),
+                },
                 restarted: false,
             });
             tracing::info!(

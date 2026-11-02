@@ -66,6 +66,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             victim.incarnation = Some(incarnation);
             victim.asked = Some(rfc3339(self.now_ms));
             victim.restarts = Some(pod.restarts);
+            victim.containers = pod.containers.clone();
             self.ahead(kept).await?;
         } else if let Some((id, incarnation)) = registration.clone()
             && (Some(&id), Some(incarnation))
@@ -203,13 +204,15 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     }
 
     /// Whether `victim`, asked to retire, whose pod is `pod`, has a
-    /// container that restarted since: a new process, which was never
-    /// asked. A restart ends the hold, and the victim goes on its SIGTERM,
+    /// container that restarted since, by its restart count or its
+    /// container ids: a new process, which was never asked. A restart ends the hold, and the victim goes on its SIGTERM,
     /// as in signal mode, which retires and drains the new process; it
     /// loses only the hold. The first time, its hooks' outcome is
     /// `unreported`, and an event says so.
     pub(super) async fn restarted(&mut self, victim: &mut Retiring, pod: &PodView) -> bool {
-        if victim.asked.is_none() || victim.restarts.is_none_or(|at| at == pod.restarts) {
+        let counted = victim.restarts.is_some_and(|at| at != pod.restarts);
+        let replaced = !victim.containers.is_empty() && victim.containers != pod.containers;
+        if victim.asked.is_none() || !(counted || replaced || victim.restarted) {
             return false;
         }
         if !victim.restarted {

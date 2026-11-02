@@ -307,6 +307,13 @@
                           "nullable": true,
                           "type": "string"
                         },
+                        "containers": {
+                          "description": "Its pod's container ids when the scaler stored its retire step: a\ncontainer made again has another id, even where its restart count\nstarts over.",
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
                         "deployment": {
                           "description": "The uid of the Deployment it was chosen from. A Deployment made\nagain under the same name has another, and the scaler abandons the\nremoval.",
                           "type": "string"

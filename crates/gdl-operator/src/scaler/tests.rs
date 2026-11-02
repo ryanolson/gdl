@@ -186,6 +186,7 @@ impl State {
                 routable: Some(true),
                 system_port: Some(9090),
                 restarts: 0,
+                containers: vec![format!("containerd://pod-{n}")],
             },
             cost: None,
             routable: true,

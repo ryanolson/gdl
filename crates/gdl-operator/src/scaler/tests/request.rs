@@ -651,6 +651,35 @@ async fn an_absent_registration_is_not_a_drain() {
     assert!(!victim(&fake).restarted);
 }
 
+/// F2 of the third review: the victim's container is made again, as
+/// after its node restarts, and its restart count starts over at the
+/// count stored. Another container is another process: the hold ends.
+#[tokio::test]
+async fn a_new_container_at_the_same_restart_count_ends_the_hold() {
+    let fake = three();
+    let spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_eq!(victim(&fake).restarts, Some(0));
+    fake.state().pods[1].view.containers = vec!["containerd://again".into()];
+    list_at(
+        &fake,
+        &[
+            ("i-1", 1, 1, "ready"),
+            ("i-9", 2, 9, "ready"),
+            ("i-3", 3, 3, "ready"),
+        ],
+    );
+    hooks(&fake, 2, &[("kv", "pending")]);
+    fake.take_writes();
+    once(&fake, &spec, 1_000).await;
+    assert_eq!(
+        fake.take_writes(),
+        ["pod-2 cost Some(-2147483648)", "replicas 2"]
+    );
+    assert!(victim(&fake).restarted);
+    assert_eq!(victim(&fake).handoff, Some(Handoff::Unreported));
+}
+
 /// F3 of the third review: one victim at a time in request mode, its
 /// removal included: a victim committed at its bound, whose pod is not
 /// gone yet, still holds work, and no other is asked beside it.

@@ -241,6 +241,11 @@ pub struct Retiring {
     /// which was never asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restarts: Option<i64>,
+    /// Its pod's container ids when the scaler stored its retire step: a
+    /// container made again has another id, even where its restart count
+    /// starts over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub containers: Vec<String>,
     /// Its container restarted after it was asked, which ended its hold:
     /// it goes on its SIGTERM, as in signal mode.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
