@@ -61,7 +61,7 @@ curl -N http://127.0.0.1:8082/v1/messages -H 'Content-Type: application/json' -d
 
 Generated binaries accept multiple TOML files. Later files override earlier files. `GDL_` environment variables override files; `__` separates nested keys. For example, `GDL_FRONTEND__LISTEN=127.0.0.1:8083` changes the listener. An endpoint flag that conflicts with the generated graph fails before service startup.
 
-Runtime-only entry settings use instance names, such as `[adapter.Http_chat_f0]` and `[adapter.Http_responses_op]`. The names append `_fN`, `_bN`, or `_op` to the source and entry name. Nested arms append `_next` before their node suffix. Shared pipeline settings go under `[node.Engine]`. The demonstration adapters need no settings. Echo takes an optional `pace_ms`, a string of milliseconds it waits before each chunk, so that a response streams for a while.
+Runtime-only entry settings use instance names, such as `[adapter.Http_chat_f0]` and `[adapter.Http_responses_op]`. The names append `_fN`, `_bN`, or `_op` to the source and entry name. Nested arms append `_next` before their node suffix. Shared pipeline settings go under `[node.Engine]`. The demonstration adapters need no settings. Echo takes an optional `pace_ms`, a string of milliseconds it waits before each chunk, so that a response streams for a while. It also takes an optional `leave_hook`, the name of a leave hook that reports `done` once its instance is out of routing.
 
 ## Validation
 

@@ -288,6 +288,7 @@ Set the HPA's `minReplicas` to at least the segment's quorum. The scaler drains 
 - the pod the scaler chose is the pod deleted, and the others stay;
 - no request fails, a new connection to the frontend included;
 - no offer reaches the engine's victim after its acknowledgement: its `requests_total` does not rise once its `instance_avoided` reads 1;
+- the engine's victim runs a leave hook: its `leave_outcome` reads `pending`, then `done`, on `/metrics` before its pod is gone;
 - the frontend's victim leaves its Service's EndpointSlices before its pod is deleted;
 - the removal ends inside the drain bound and the runtime's exit margin.
 

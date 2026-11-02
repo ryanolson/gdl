@@ -14,8 +14,9 @@
 #   - scaled to 3 engines, under a load of streamed requests from a pod in the cluster, each on a new connection to
 #     the entry Service's ClusterIP, and then to 2: the pod the scaler chose (status.retiring) is the pod deleted,
 #     and the others stay; the victim's `requests_total` does not rise once its `instance_avoided` reads 1, so no
-#     offer reached it after its parent's acknowledgement; its removal ends inside its drain bound and the exit
-#     margin (status.last.outcome is `removed`); and no request failed;
+#     offer reached it after its parent's acknowledgement; its leave hook reads `pending`, then `done`, on /metrics
+#     before its pod is gone; its removal ends inside its drain bound and the exit margin (status.last.outcome is
+#     `removed`); and no request failed;
 #   - the same for the frontend, scaled 3 to 2: its victim leaves the Service's EndpointSlices before its pod is
 #     deleted, and no request failed, a new connection included;
 #   - an HPA on the engine's GdlScaler, with no metrics server, scales it up to its minimum and down to its maximum
@@ -199,6 +200,7 @@ drain_ms = ${DRAIN_MS}
 drain_ms = ${DRAIN_MS}
 [deployment.segment.engine.config.node.Engine]
 pace_ms = "${PACE_MS}"
+leave_hook = "flush"
 EOF
 cat >"${scratch}/fleet.toml" <<EOF
 [fleet]
@@ -321,7 +323,7 @@ load_counts() {
 
 # Scale `pool`'s `segment` from 3 to 2 and prove the removal: the victim the scaler chose is the pod deleted, the
 # others stay, it ends inside the bound, and no request failed. While it runs, it samples the victim's metrics (an
-# engine's `instance_avoided` and `requests_total`), and for a frontend the Service's EndpointSlices and the victim's
+# engine's `instance_avoided`, `requests_total`, and leave hook), and for a frontend the Service's EndpointSlices and the victim's
 # deletion: each sample a line in `${scratch}/<segment>.samples`.
 scale_down() {
   local pool="$1" segment="$2" scaler="$1-$2" before victim uid chosen_at started
@@ -340,7 +342,7 @@ scale_down() {
   local deadline=$((SECONDS + (DRAIN_MS + EXIT_MARGIN_MS) / 1000 + 60))
   while k get pod "${victim}" >/dev/null 2>&1; do
     ((SECONDS < deadline)) || fail "${victim} was not gone in time"
-    local now text avoided requests deleting listed
+    local now text avoided requests hook deleting listed
     now="$(date +%s%3N)"
     deleting="$(k get pod "${victim}" --output jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
     if [[ "${segment}" == "engine" ]]; then
@@ -348,7 +350,10 @@ scale_down() {
       # Every series carries the segment's identity labels.
       avoided="$(awk '$1 ~ /^dynamo_component_instance_avoided(\{|$)/ {print $2}' <<<"${text}")"
       requests="$(awk '$1 ~ /^dynamo_component_requests_total(\{|$)/ {sum += $2} END {print sum + 0}' <<<"${text}")"
-      [[ -n "${text}" ]] && echo "${now} avoided=${avoided:-?} requests=${requests} deleting=${deleting:+yes}" \
+      # The outcome that reads 1.
+      hook="$(awk '$1 ~ /^dynamo_component_leave_outcome\{/ && $1 ~ /hook="flush"/ && $2 == 1 {
+        sub(/.*outcome="/, "", $1); sub(/".*/, "", $1); print $1 }' <<<"${text}")"
+      [[ -n "${text}" ]] && echo "${now} avoided=${avoided:-?} requests=${requests} hook=${hook:-?} deleting=${deleting:+yes}" \
         >>"${scratch}/${segment}.samples"
     else
       listed="$(k get endpointslices --selector "kubernetes.io/service-name=${scaler}" --output json \
@@ -392,6 +397,12 @@ awk '/avoided=1/ { split($3, r, "="); if (seen == "") seen = r[2]; else if (r[2]
   END { exit bad }' "${samples}" || fail "an offer reached the victim after its acknowledgement:
 $(cat "${samples}")"
 say "model-a-engine: the victim's requests_total held at $(awk '/avoided=1/ {split($3, r, "="); print r[2]; exit}' "${samples}") from its acknowledgement on"
+# Its leave hook started at the stop, and said how it ended while the pod still answered.
+grep -q 'hook=pending' "${samples}" || fail "the victim's hook never read pending:
+$(cat "${samples}")"
+grep -q 'hook=done' "${samples}" || fail "the victim's hook never read done before its pod went:
+$(cat "${samples}")"
+say "model-a-engine: the victim's leave hook read done, $(grep -c 'hook=done' "${samples}") samples before its pod went"
 
 scale_down global front
 # The frontend's victim left the Service's EndpointSlices before its pod was deleted.

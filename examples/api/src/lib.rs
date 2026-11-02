@@ -303,6 +303,8 @@ impl gdl::Operator for AnthropicAdapter {
 /// Shared pipeline sink: one chunk per input word. With `pace_ms` in its
 /// settings (`[node.Engine] pace_ms = "50"`), it waits that long before
 /// each chunk, so that a response streams for a while, as a model's does.
+/// With `leave_hook` (`leave_hook = "flush"`), it registers a leave hook of
+/// that name, which reports `done` once its instance is out of routing.
 #[derive(gdl::Node, Default)]
 pub struct Echo {
     pace: Option<std::time::Duration>,
@@ -319,6 +321,12 @@ impl Build for Echo {
                 ))
             })?)),
         };
+        if let Some(name) = config.get("leave_hook") {
+            gdl::Lifecycle::current().on_leave(name.clone(), |leave: gdl::Leave| async move {
+                leave.routed().await;
+                gdl::Handoff::Done
+            })?;
+        }
         Ok(Self { pace })
     }
 }
