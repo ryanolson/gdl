@@ -321,6 +321,12 @@ load_counts() {
   k logs load | awk '$1 == "ok" {ok++} $1 == "fail" {bad++} END {print ok + 0, bad + 0}'
 }
 
+# The outcome of the engine's leave hook that reads 1, from a pod's metrics on stdin.
+hook_outcome() {
+  awk '$1 ~ /^dynamo_component_leave_outcome\{/ && $1 ~ /hook="flush"/ && $2 == 1 {
+    sub(/.*outcome="/, "", $1); sub(/".*/, "", $1); print $1 }'
+}
+
 # Scale `pool`'s `segment` from 3 to 2 and prove the removal: the victim the scaler chose is the pod deleted, the
 # others stay, it ends inside the bound, and no request failed. While it runs, it samples the victim's metrics (an
 # engine's `instance_avoided`, `requests_total`, and leave hook), and for a frontend the Service's EndpointSlices and the victim's
@@ -328,6 +334,13 @@ load_counts() {
 scale_down() {
   local pool="$1" segment="$2" scaler="$1-$2" before victim uid chosen_at started
   before="$(live_pods "${pool}" "${segment}")"
+  # Every engine's hook reads pending until its stop: once the stop comes it can end before the first sample.
+  if [[ "${segment}" == "engine" ]]; then
+    local serving
+    while read -r serving _; do
+      [[ "$(metrics "${serving}" | hook_outcome)" == "pending" ]] || fail "${serving}'s hook does not read pending"
+    done <<<"${before}"
+  fi
   local load_before
   load_before="$(load_counts)"
   started="$(date +%s%3N)"
@@ -350,9 +363,7 @@ scale_down() {
       # Every series carries the segment's identity labels.
       avoided="$(awk '$1 ~ /^dynamo_component_instance_avoided(\{|$)/ {print $2}' <<<"${text}")"
       requests="$(awk '$1 ~ /^dynamo_component_requests_total(\{|$)/ {sum += $2} END {print sum + 0}' <<<"${text}")"
-      # The outcome that reads 1.
-      hook="$(awk '$1 ~ /^dynamo_component_leave_outcome\{/ && $1 ~ /hook="flush"/ && $2 == 1 {
-        sub(/.*outcome="/, "", $1); sub(/".*/, "", $1); print $1 }' <<<"${text}")"
+      hook="$(hook_outcome <<<"${text}")"
       [[ -n "${text}" ]] && echo "${now} avoided=${avoided:-?} requests=${requests} hook=${hook:-?} deleting=${deleting:+yes}" \
         >>"${scratch}/${segment}.samples"
     else
@@ -397,9 +408,7 @@ awk '/avoided=1/ { split($3, r, "="); if (seen == "") seen = r[2]; else if (r[2]
   END { exit bad }' "${samples}" || fail "an offer reached the victim after its acknowledgement:
 $(cat "${samples}")"
 say "model-a-engine: the victim's requests_total held at $(awk '/avoided=1/ {split($3, r, "="); print r[2]; exit}' "${samples}") from its acknowledgement on"
-# Its leave hook started at the stop, and said how it ended while the pod still answered.
-grep -q 'hook=pending' "${samples}" || fail "the victim's hook never read pending:
-$(cat "${samples}")"
+# Its leave hook said how it ended while the pod still answered.
 grep -q 'hook=done' "${samples}" || fail "the victim's hook never read done before its pod went:
 $(cat "${samples}")"
 say "model-a-engine: the victim's leave hook read done, $(grep -c 'hook=done' "${samples}") samples before its pod went"
