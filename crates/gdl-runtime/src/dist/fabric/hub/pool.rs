@@ -307,6 +307,13 @@ impl PoolDrain {
         self.learned.borrow().unfollowed
     }
 
+    /// Whether this is an entry instance that no pool follows and that did
+    /// not retire, so that no sender in its own pool has been told to avoid
+    /// it: what is left to confirm is that they detached.
+    pub(crate) fn unfollowed_entry(&self) -> bool {
+        matches!(self.role, Role::Entry { .. }) && self.retired.get().is_none() && self.unfollowed()
+    }
+
     /// The instance retired now, if it had not already.
     pub(crate) fn retire(&self) {
         self.retired.get_or_init(Instant::now);

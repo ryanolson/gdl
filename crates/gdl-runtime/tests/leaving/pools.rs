@@ -258,7 +258,7 @@ async fn a_draining_entry_nobody_follows_is_confirmed() {
     m1.readiness.drain().await.expect("the pool drains");
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::PoolDrain);
-    assert_eq!(*leave.routing().borrow(), Routing::Confirmed);
+    assert_eq!(routed(&leave, WAIT).await, Routing::Confirmed);
     hook.finish(Handoff::Done);
     for entry in m1.entries {
         entry.ended(WAIT).await.expect("the entry drained");
@@ -272,7 +272,7 @@ async fn a_draining_entry_nobody_follows_is_confirmed() {
 async fn a_draining_interior_instance_is_confirmed_when_its_senders_detach() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
-    let quiet = Events::quiet();
+    let quiet = Events::new();
     let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
     let hooked = HookOnce::default();
@@ -536,4 +536,115 @@ async fn a_late_retirement_cannot_push_the_fallback_past_the_bound() {
     );
     control.set(Mode::Refuse);
     hub.shutdown().await.expect("the hub stops");
+}
+
+/// `unfollowed` confirms the pool's boundary, not its inside. `d` hosts a
+/// source that hands work to the entry `f`, in their own pool, so nothing
+/// holds a chooser's offer. With a request held in the entry, the drain
+/// stops the entry as `unfollowed`, and it stays `Pending`: `d` has not
+/// detached, and can still pick it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unfollowed_entry_is_not_confirmed_past_a_sender_in_its_pool() {
+    use gdl::Next as _;
+    use gdl_model::{HopInfo, NodeInfo, Role, TypeInfo};
+    use gdl_runtime::{BwdEnd, DSink, FwdEnd, wire_codec};
+
+    let mut graph = reference_manifest(|_| true);
+    graph.nodes.extend([
+        NodeInfo {
+            name: "X".into(),
+            role: Role::Source,
+            binding: None,
+        },
+        NodeInfo {
+            name: "Y".into(),
+            role: Role::Sink,
+            binding: Some("y".into()),
+        },
+    ]);
+    graph.hops.push(HopInfo {
+        outer: "X".into(),
+        inner: "Y".into(),
+        forward: Vec::new(),
+        backward: Vec::new(),
+        forward_types: vec![TypeInfo::new("Pre", true, Default::default())],
+        backward_types: vec![TypeInfo::new("Raw", true, Default::default())],
+    });
+    let placement = gdl_runtime::Placement::new()
+        .segment("a", ["A", "G"])
+        .segment("f", ["B", "C", "D", "E", "F", "Y"])
+        .segment("d", ["X"])
+        .class("global", ["a"])
+        .class("model_x", ["f", "d"]);
+    let spec = DeploymentSpec::new(graph, placement).expect("valid test fixture");
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("the layout");
+    assert!(layout.entry_segments("model_x").contains("f"));
+    assert!(layout.sends_to("d").contains("f"), "a sender in the pool");
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _) = pool_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let hooked = HookOnce::default();
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        pool(M1, "m1-hub:1337", 1),
+        "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
+        &|runtime| hooked.configure(runtime),
+        &|deployment| {
+            let source = deployment.hop(
+                2,
+                FwdEnd::new(wire_codec!(common::Pre)),
+                DSink::new(Arc::new(common::NodeD {
+                    events: Arc::clone(&events),
+                })),
+                BwdEnd::new(wire_codec!(common::Raw)),
+            )?;
+            Ok((reference_graph(deployment, &events)?, source))
+        },
+    )
+    .await;
+    following(&tables(&first), M1, 1).await;
+    let mut hook = hooked.take();
+    let source = m1.sink.segment.client(|roots| roots.1.clone());
+    let held = Cx::new();
+    let request = common::Pre {
+        text: "inside".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 1,
+            hold_at_end: true,
+            ..Plan::default()
+        },
+    };
+    let answer = tokio::spawn({
+        let held = held.clone();
+        async move {
+            let out = source.generate(held, request).await?;
+            Ok::<_, gdl::Error>(collect(out).await)
+        }
+    });
+    events.wait_for("D:held:inside#0", WAIT).await;
+
+    m1.readiness.drain().await.expect("the pool drains");
+    let leave = tokio::time::timeout(BOUND + WAIT, hook.started.recv())
+        .await
+        .expect("the hook started in time")
+        .expect("the hook ran");
+    assert_eq!(leave.cause(), LeaveCause::PoolDrain);
+    stays_pending(&leave, "a sender in its pool can still pick it").await;
+
+    held.request_stop();
+    let settled = routed(&leave, WAIT).await;
+    assert!(
+        matches!(settled, Routing::Confirmed | Routing::SourcesDone),
+        "{settled:?}"
+    );
+    let _ = tokio::time::timeout(WAIT, answer).await;
+    hook.finish(Handoff::Done);
+    for entry in m1.entries {
+        entry.ended(WAIT * 2).await.expect("the entry drained");
+    }
+    m1.sink.ended(WAIT).await.expect("the interior drained");
+    first.stop().await;
 }

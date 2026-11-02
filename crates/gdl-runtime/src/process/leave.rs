@@ -283,12 +283,13 @@ impl Launch {
         let (retired, retirement) = watch::channel(None);
         let (finishes, finished) = watch::channel(hooks.is_empty());
         let hooked = !hooks.is_empty();
-        let (observing, asking) = self.observer(times.drain, routes.clone());
+        let (observing, asking) = self.observer(times.drain, routes.clone(), hooked);
         // Its stop began once its drain's bound passed, or no pool follows
         // its pool: an entry instance that its pool's drain stops does not
-        // retire, so nothing later says so.
-        if cause == LeaveCause::PoolDrain && !self.pool_drain_retires() {
-            route(&routes, self.pool_drain_routing());
+        // retire, so no parent answers later. The second case confirms only
+        // the pool's boundary, and the observer asks for the rest.
+        if cause == LeaveCause::PoolDrain && !self.pool_drain_retires() && !self.pool_unfollowed() {
+            route(&routes, Routing::Unconfirmed(Unconfirmed::ParentTimeout));
         }
         if cause == LeaveCause::LeaseLost {
             route(&routes, Routing::Unconfirmed(Unconfirmed::LeaseLost));

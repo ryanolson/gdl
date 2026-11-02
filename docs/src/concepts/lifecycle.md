@@ -178,7 +178,7 @@ A hook gets a `gdl::Leave`:
 
 | It reads | When |
 |---|---|
-| `Confirmed` | every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once; a pool's entry instance that its hub says no pool follows; an interior instance of a draining pool whose senders detached |
+| `Confirmed` | every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once; an entry instance of a draining pool that its hub says no pool follows, once the senders in its own pool detached; an interior instance of a draining pool whose senders detached |
 | `SourcesDone` | (B) holds |
 | `Unconfirmed(ParentTimeout)` | an entry instance's following pools did not answer within their bound, or its pool's drain reached its bound with another pool still following. A chooser with a stale view can still offer, and the entry declines |
 | `Unconfirmed(LeaseLost)` | the lease was lost, at any point in the stop |
@@ -186,7 +186,7 @@ A hook gets a `gdl::Leave`:
 
 The fallback time is the earlier of `leave_after_ms` after the retirement and half of `drain_ms` after the stop. So a late retirement cannot push it past the drain's bound.
 
-`Confirmed` says that peers will not pick the instance. It does not say that the instance is quiet. A hand-off sent before a peer's promise can still arrive, and a pool's entry instance still takes hand-offs from inside its pool. `external` is apart from `routing()`, because a sender's promise says nothing of a Service, a load balancer, or an open connection. A segment can read `Confirmed` with `external` true. A hook must do nothing destructive until `routing()` reads `Confirmed` or `SourcesDone` with `external` false, or until `drained()` resolves.
+`Confirmed` says that peers will not pick the instance. It does not say that the instance is quiet. A hand-off sent before a peer's promise can still arrive. `external` is apart from `routing()`, because a sender's promise says nothing of a Service, a load balancer, or an open connection. A segment can read `Confirmed` with `external` true. A hook must do nothing destructive until `routing()` reads `Confirmed` or `SourcesDone` with `external` false, or until `drained()` resolves.
 
 A hook's deadline is `leave_ms` after the stop, and at most the drain's bound. At the deadline, the runtime cancels `cx()`, records `timed_out`, and goes on without waiting for the hook. A second stop ends everything at once, as it does the drain. A crash skips the hooks, so a hook is never relied on. Each hook runs once per process.
 

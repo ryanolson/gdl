@@ -29,20 +29,13 @@ impl Launch {
         true
     }
 
-    /// What routing reads for an entry instance that its pool's drain
-    /// stopped, which it stopped once no pool follows the pool, or its
-    /// bound had passed. The first is a confirmation; after the second a
-    /// chooser with a stale view may still offer, and is declined.
-    pub(super) fn pool_drain_routing(&self) -> gdl::Routing {
+    /// Whether its hub has said that no pool follows its draining pool.
+    pub(super) fn pool_unfollowed(&self) -> bool {
         #[cfg(feature = "hub")]
-        if self
-            .pool_drain
-            .as_ref()
-            .is_some_and(|pool| pool.unfollowed())
-        {
-            return gdl::Routing::Confirmed;
+        if let Some(pool) = &self.pool_drain {
+            return pool.unfollowed();
         }
-        gdl::Routing::Unconfirmed(gdl::Unconfirmed::ParentTimeout)
+        false
     }
 
     /// Why routing gives up when its fallback time comes, read then: an

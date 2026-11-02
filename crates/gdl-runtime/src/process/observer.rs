@@ -110,6 +110,9 @@ pub(super) struct Observer {
     peers: Asked,
     /// What a hook reads of the answers.
     routes: watch::Sender<Routing>,
+    /// Whether a hook reads them, so that a stop with none asks nothing
+    /// only a hook would use.
+    hooked: bool,
 }
 
 enum Asked {
@@ -141,6 +144,7 @@ impl Launch {
         &self,
         deadline: Instant,
         routes: watch::Sender<Routing>,
+        hooked: bool,
     ) -> (Observing, BoxFuture<'static, Infallible>) {
         let me = self.node.instance_id();
         let peers = match &self.peers {
@@ -177,6 +181,7 @@ impl Launch {
             deadline,
             peers,
             routes,
+            hooked,
         };
         let (phase, phases) = watch::channel(Phase::Idle);
         let (publish, answers) = watch::channel(Answers::default());
@@ -330,7 +335,13 @@ impl Observer {
                 let avoiding = avoided.is_some()
                     || (parent.as_ref().is_none_or(Parent::avoids)
                         && asker.all_avoid(me, &senders).await?);
-                Ok::<_, Error>((done, unreached, avoiding))
+                let inside = match pool {
+                    Some(pool) if self.hooked && pool.unfollowed_entry() => {
+                        pool.senders_detached(asker).await?
+                    }
+                    _ => false,
+                };
+                Ok::<_, Error>((done, unreached, avoiding, inside))
             };
             let asked = tokio::select! {
                 biased;
@@ -340,10 +351,13 @@ impl Observer {
                 }
                 asked = tokio::time::timeout_at(self.deadline, ask) => asked,
             };
-            let (done, unreached, avoiding) = match asked {
+            let (done, unreached, avoiding, inside) = match asked {
                 Ok(Ok(answer)) => answer,
-                _ => (false, None, false),
+                _ => (false, None, false, false),
             };
+            if inside {
+                route(&self.routes, Routing::Confirmed);
+            }
             if avoided.is_none() && avoiding {
                 avoided = Some(Instant::now());
                 // Read again: the bound may have passed since the question.
