@@ -237,26 +237,26 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         true
     }
 
-    /// Whether `pod` is still as this reconcile read it: the same uid, at
-    /// the resourceVersion read or the one this reconcile wrote. A retire
-    /// step stores the pod's container ids and restarts beside the
-    /// registration the hub listed after that read. A pod that changed
-    /// between the two reads may have restarted between them, and would
-    /// pair a replacement's registration with its predecessor's
-    /// containers, so the step is stored only from an unchanged pod, and
-    /// the pod is asked next round otherwise.
+    /// Whether `pod` still runs the process this reconcile read: the same
+    /// uid, IP, container ids and restart count. A retire step stores the
+    /// pod's container ids and restarts beside the registration the hub
+    /// listed after that read. A pod whose process changed between the two
+    /// reads would pair a replacement's registration with its
+    /// predecessor's containers, so the step is stored only while the
+    /// process is the same, and the pod is asked next round otherwise. Its
+    /// resourceVersion is not compared: another controller's write to the
+    /// pod, such as an annotation of its own, changes no process, and
+    /// would hold the scale-down for as long as it writes.
     pub(super) async fn unchanged(&self, pod: &PodView) -> Result<bool, Stop> {
-        let read = self
-            .versions
-            .get(&pod.uid)
-            .cloned()
-            .unwrap_or_else(|| pod.resource_version.clone());
         let pods = self.cx.cluster.pods(&self.status.selector).await?;
-        let same = pods
-            .iter()
-            .any(|now| now.uid == pod.uid && now.resource_version == read);
+        let same = pods.iter().any(|now| {
+            now.uid == pod.uid
+                && now.ip == pod.ip
+                && now.containers == pod.containers
+                && now.restarts == pod.restarts
+        });
         if !same {
-            tracing::info!(pod = %pod.name, "the pod changed while its hub was read; it is asked next round");
+            tracing::info!(pod = %pod.name, "the pod's process changed while its hub was read; it is asked next round");
         }
         Ok(same)
     }

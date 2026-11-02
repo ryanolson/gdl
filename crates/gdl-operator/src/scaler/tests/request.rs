@@ -954,3 +954,36 @@ async fn a_pod_that_changed_while_its_hub_was_read_is_asked_next_round() {
         (Some("i-9"), Some(1))
     );
 }
+
+/// A controller that writes the chosen pod again and again, an
+/// annotation of its own, moves only its resourceVersion: its process is
+/// the same, so the scaler still asks it.
+#[tokio::test]
+async fn a_pod_written_by_another_controller_is_still_asked() {
+    let fake = three();
+    let spec = request(2);
+    let probe = Between {
+        fake: &fake,
+        action: std::sync::Mutex::new(None),
+    };
+    let victims = Victims::default();
+    for (round, at) in [0, 1_000, 2_000].into_iter().enumerate() {
+        *probe.action.lock().expect("action") = Some(Box::new(move |fake: &Fake| {
+            fake.state().pods[1].view.resource_version = format!("{}", 10 + round);
+        }));
+        let mut scaler = GdlScaler::new("global-front", spec.clone());
+        scaler.metadata.generation = Some(1);
+        scaler.status = fake.state().status.clone();
+        scaler.metadata.resource_version = Some(fake.state().scaler_version.to_string());
+        let cx = Context {
+            cluster: &fake,
+            probe: &probe,
+            victims: &victims,
+            clock: &move || at,
+        };
+        reconcile(&cx, &scaler, at).await.expect("reconciles");
+    }
+    let writes = fake.take_writes();
+    assert!(writes.iter().any(|w| w == "retire i-2 2"), "{writes:?}");
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+}
