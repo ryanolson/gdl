@@ -150,7 +150,7 @@ An instance that hosts no source announces `detached`, then `drained`, only with
 
 (B) and the pool drain's detach wait count what they counted before. (B) names the source segments, or a draining pool's entry segments, and `all_drained` filters to the segments it is asked of. `all_detached` counts `drained` only for entry segments. A peer of an earlier build asks the same questions, so an interior `drained` means nothing to it.
 
-**Rejected: counting interior segments in (B).** Two interior segments that send to each other would each wait for the other's `drained`, and both would run to the bound. `crates/gdl-runtime/tests/mutual.rs` holds that case. Both ways out take what they took before this announcement existed: 1.03 s by the senders and 0.12 s by the pool's drain (`cargo nextest run -p gdl-runtime --test mutual --no-capture`).
+**Rejected: counting interior segments in (B).** Two interior segments that send to each other would each wait for the other's `drained`, and both would run to the bound. `crates/gdl-runtime/tests/mutual.rs` holds that case: with no other instance, (B) alone ends those drains. Over 40 runs, those three drains take 52 ms on average, and took 62 ms before this announcement existed (`cargo nextest run -p gdl-runtime --test mutual --no-capture`). Each run takes about 15 ms, or about 115 ms when the first question misses the source's `drained` and waits one 100 ms poll.
 
 ## A retire request is not a stop
 

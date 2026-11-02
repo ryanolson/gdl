@@ -1,8 +1,13 @@
-//! Two interior segments of a pool that send to each other, stopped
-//! together: (B) counts sources only, so neither waits for the other's
-//! `drained`, and each drain ends by what it ended by before an interior
-//! instance said `drained`. Had (B) or the pool drain's detach wait counted
-//! interior segments, each would wait for the other, to the bound.
+//! Two segments that send to each other and host no source, stopped
+//! together: their `drained`, which says that each has closed and holds
+//! nothing, is no input to either's wait, or each would wait for the other
+//! to the bound.
+//!
+//! [`with_no_other_instance_two_segments_end_by_their_source`] guards (B):
+//! with no other instance (A) cannot hold, so (B) alone ends the drains.
+//! The two tests in a pool hold what those ways out take: under a pool,
+//! (B) is never what ends such a wait, since a source of another class
+//! cannot be seen, and an end of the entries' drain ends it too.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
 //! sharing one directory.
@@ -66,6 +71,16 @@ fn mutual() -> Placement {
 }
 
 const SEGMENTS: &[&str] = &["a", "f", "x", "d"];
+
+/// The same two segments, with no pool, and the source in front of them.
+fn plain() -> Placement {
+    Placement::new()
+        .segment("front", ["A", "G", "B", "E", "F"])
+        .segment("x", ["C", "Q"])
+        .segment("d", ["P", "D"])
+}
+
+const PLAIN: &[&str] = &["front", "x", "d"];
 
 fn spec() -> DeploymentSpec {
     DeploymentSpec::new(manifest(), mutual()).expect("valid test fixture")
@@ -206,6 +221,49 @@ async fn ended<H>(instances: Vec<Running<H>>, from: Instant) -> Duration {
         longest = longest.max(from.elapsed());
     }
     longest
+}
+
+/// One instance of each segment under a hub with no pool, all stopped
+/// together. No peer avoids the last instance of a segment, so (A) never
+/// holds, and each drain ends once the source has drained. Were `drained`
+/// from `x` or `d` to count, each would wait for the other, to the bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_no_other_instance_two_segments_end_by_their_source() {
+    let spec = DeploymentSpec::new(manifest(), plain()).expect("valid test fixture");
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec.clone()))
+        .serve()
+        .await
+        .expect("valid test fixture");
+    let config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        5_000,
+        LONG,
+    );
+    let events = Events::new();
+    let serves = |segment| {
+        let (config, spec, events) = (&config, &spec, &events);
+        async move {
+            let runtime = config.runtime.clone();
+            run_graph_in(config, segment, PLAIN, spec, runtime, &|deployment| {
+                graph(deployment, events)
+            })
+            .await
+            .expect("the instance serves")
+        }
+    };
+    let (front, x, d) = tokio::join!(serves("front"), serves("x"), serves("d"));
+    let began = Instant::now();
+    for process in [&front.process, &x.process, &d.process] {
+        process.stop();
+    }
+    let took = ended(vec![front, x, d], began).await;
+    eprintln!("mutual: by their source in {took:?}");
+    hub.shutdown().await.expect("valid test fixture");
 }
 
 /// One instance of each, of two each, stopped together: each is avoided
