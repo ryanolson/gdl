@@ -631,16 +631,23 @@ async fn the_hold_reads_only_the_registration_it_asked() {
     assert_eq!(fake.state().replicas, 2);
 }
 
-/// The registration it asked has left the hub and the pod did not
-/// restart: the instance exits only after its drain, so it has drained.
+/// F1 of the third review: the hub restarted after it took the request,
+/// and lists nobody, while the victim still holds work. Absence is not
+/// evidence of a drain: the victim is held until its bound.
 #[tokio::test]
-async fn a_registration_that_left_without_a_restart_has_drained() {
-    let fake = three();
+async fn an_absent_registration_is_not_a_drain() {
+    let fake = Fake::with(&[9, 4, 9]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
     let spec = request(2);
     once(&fake, &spec, 0).await;
-    list(&fake, &[(1, "ready"), (3, "ready")]);
+    assert_eq!(victim(&fake).pod, "pod-2");
+    list(&fake, &[]);
     once(&fake, &spec, 1_000).await;
-    assert_eq!(fake.state().replicas, 2);
+    assert_eq!(fake.state().replicas, 3, "the hub lists nobody");
+    once(&fake, &spec, 19_999).await;
+    assert_eq!(fake.state().replicas, 3);
+    once(&fake, &spec, 20_000).await;
+    assert_eq!(fake.state().replicas, 2, "at the bound");
     assert!(!victim(&fake).restarted);
 }
 

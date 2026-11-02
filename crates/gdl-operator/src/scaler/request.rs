@@ -142,12 +142,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
 
     /// Whether `victim`, whose hub took its retire request, whose pod is
     /// `pod`, is done: its hub lists the registration it asked, by its id
-    /// and incarnation, `drained`, or no longer lists it, and its pod's
-    /// `/metrics` shows no leave hook still pending; or `bound` has passed
-    /// since the hub took the request. What its `/metrics` says is kept in
-    /// `victim`. A registration that left while the pod did not restart
-    /// has drained: an instance leaves only after its drain. One whose pod
-    /// restarted never reaches here ([`Run::restarted`]).
+    /// and incarnation, `drained`, and its pod's `/metrics` shows no leave
+    /// hook still pending; or `bound` has passed since the hub took the
+    /// request. What its `/metrics` says is kept in `victim`. Only that
+    /// evidence ends the hold early: a hub that restarted lists nobody
+    /// while the victim still holds work, so a registration it does not
+    /// list is unknown, and the bound decides. One whose pod restarted
+    /// never reaches here ([`Run::restarted`]).
     pub(super) async fn hold(
         &mut self,
         victim: &mut Retiring,
@@ -158,7 +159,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let drained = match (self.cx.probe.instances(&self.spec.pool).await, asked) {
             (Ok(list), Some((id, incarnation))) => list
                 .by_registration(&id, incarnation)
-                .is_none_or(|instance| instance.phase == "drained"),
+                .is_some_and(|instance| instance.phase == "drained"),
             _ => false,
         };
         let read = match (pod.ip.as_deref(), pod.system_port) {
