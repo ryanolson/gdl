@@ -575,6 +575,9 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 break;
             }
             let held = held.get(&pod.uid).copied().unwrap_or_default();
+            if asked_at_once && !self.unchanged(pod).await? {
+                return Ok(None);
+            }
             let (instance_id, incarnation) = match registration(pod) {
                 Some((id, incarnation)) if asked_at_once => (Some(id), Some(incarnation)),
                 _ => (None, None),

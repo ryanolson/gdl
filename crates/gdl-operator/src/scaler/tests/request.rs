@@ -870,3 +870,87 @@ async fn a_pod_with_two_live_registrations_is_not_chosen() {
         "{writes:?}"
     );
 }
+
+/// What [`Between`] does to the fake once.
+type Change<'a> = Box<dyn FnOnce(&Fake) + Send + 'a>;
+
+/// A probe that runs `action` on the fake once, as its first hub read
+/// begins: what changes between the scaler's read of the pods and its
+/// read of the hub.
+struct Between<'a> {
+    fake: &'a Fake,
+    action: std::sync::Mutex<Option<Change<'a>>>,
+}
+
+impl Probe for Between<'_> {
+    async fn instances(&self, pool: &str) -> Result<Instances, String> {
+        let action = self.action.lock().expect("action").take();
+        if let Some(action) = action {
+            action(self.fake);
+        }
+        self.fake.instances(pool).await
+    }
+
+    async fn metrics(&self, ip: &str, port: u16) -> Result<String, String> {
+        self.fake.metrics(ip, port).await
+    }
+
+    async fn retire(&self, pool: &str, instance: &str, incarnation: u64) -> Result<Asked, String> {
+        self.fake.retire(pool, instance, incarnation).await
+    }
+}
+
+/// F1 of the sixth review: the victim's container restarts after the
+/// scaler read its pod and before it read the hub, so the one live
+/// registration is the replacement's, and the container read is the
+/// predecessor's. The step is not stored from that mixed read: the pod
+/// is read again, found changed, and asked next round, by what it is
+/// then. The replacement is held, not taken as restarted.
+#[tokio::test]
+async fn a_pod_that_changed_while_its_hub_was_read_is_asked_next_round() {
+    let fake = three();
+    hooks(&fake, 2, &[("kv", "pending")]);
+    let spec = request(2);
+    let probe = Between {
+        fake: &fake,
+        action: std::sync::Mutex::new(Some(Box::new(|fake: &Fake| {
+            {
+                let mut state = fake.state();
+                let pod = &mut state.pods[1].view;
+                pod.containers = vec!["containerd://again".into()];
+                pod.restarts = 1;
+                pod.resource_version = "2".into();
+            }
+            list_at(
+                fake,
+                &[
+                    ("i-1", 1, 1, "ready"),
+                    ("i-9", 2, 9, "ready"),
+                    ("i-3", 3, 3, "ready"),
+                ],
+            );
+        }))),
+    };
+    let victims = Victims::default();
+    for at in [0, 1_000, 2_000] {
+        let mut scaler = GdlScaler::new("global-front", spec.clone());
+        scaler.metadata.generation = Some(1);
+        scaler.status = fake.state().status.clone();
+        scaler.metadata.resource_version = Some(fake.state().scaler_version.to_string());
+        let cx = Context {
+            cluster: &fake,
+            probe: &probe,
+            victims: &victims,
+            clock: &move || at,
+        };
+        reconcile(&cx, &scaler, at).await.expect("reconciles");
+    }
+    assert_eq!(fake.state().replicas, 3);
+    let held = victim(&fake);
+    assert!(!held.restarted);
+    assert_eq!(held.phase, RetiringPhase::Draining);
+    assert_eq!(
+        (held.instance_id.as_deref(), held.restarts),
+        (Some("i-9"), Some(1))
+    );
+}

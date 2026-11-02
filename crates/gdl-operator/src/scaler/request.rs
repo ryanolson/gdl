@@ -63,6 +63,9 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 };
                 return Ok(Some(why));
             };
+            if !self.unchanged(pod).await? {
+                return Ok(None);
+            }
             let victim = &mut kept[at];
             victim.phase = RetiringPhase::Retiring;
             victim.instance_id = Some(id);
@@ -232,6 +235,30 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                 .await;
         }
         true
+    }
+
+    /// Whether `pod` is still as this reconcile read it: the same uid, at
+    /// the resourceVersion read or the one this reconcile wrote. A retire
+    /// step stores the pod's container ids and restarts beside the
+    /// registration the hub listed after that read. A pod that changed
+    /// between the two reads may have restarted between them, and would
+    /// pair a replacement's registration with its predecessor's
+    /// containers, so the step is stored only from an unchanged pod, and
+    /// the pod is asked next round otherwise.
+    pub(super) async fn unchanged(&self, pod: &PodView) -> Result<bool, Stop> {
+        let read = self
+            .versions
+            .get(&pod.uid)
+            .cloned()
+            .unwrap_or_else(|| pod.resource_version.clone());
+        let pods = self.cx.cluster.pods(&self.status.selector).await?;
+        let same = pods
+            .iter()
+            .any(|now| now.uid == pod.uid && now.resource_version == read);
+        if !same {
+            tracing::info!(pod = %pod.name, "the pod changed while its hub was read; it is asked next round");
+        }
+        Ok(same)
     }
 
     /// A scale-up undid the scale-down of `kept[at]`, which may have
