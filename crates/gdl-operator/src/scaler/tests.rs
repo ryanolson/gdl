@@ -441,6 +441,7 @@ async fn once(fake: &Fake, spec: &GdlScalerSpec, now_ms: i64) -> Duration {
         cluster: fake,
         probe: fake,
         victims: &victims,
+        clock: &|| now_ms,
     };
     reconcile(&cx, &scaler, now_ms).await.expect("reconciles")
 }

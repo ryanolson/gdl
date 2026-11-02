@@ -136,6 +136,7 @@ async fn reconcile_across_recreation(recreate: bool) -> Value {
         cluster: &cluster,
         probe: &Quiet,
         victims: &victims,
+        clock: &|| 0,
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),

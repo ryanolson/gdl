@@ -92,9 +92,12 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let refused = match answer {
             Ok(Asked::Accepted) => {
                 tracing::info!(pod = %victim.pod, instance = %id, incarnation, "its hub took the retire request");
+                // The bound counts from the hub's acceptance, not from the
+                // start of the reconcile, whose reads and writes came first.
+                let accepted = (self.cx.clock)();
                 let victim = &mut kept[at];
                 victim.phase = RetiringPhase::Draining;
-                victim.retired = Some(rfc3339(self.now_ms));
+                victim.retired = Some(rfc3339(accepted));
                 return Ok(None);
             }
             Ok(Asked::Unknown) => format!("the hub of pool `{pool}` has no member {id}"),

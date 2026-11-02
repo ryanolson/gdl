@@ -100,6 +100,7 @@ async fn concurrent_operators_preserve_a_newer_scale() {
         cluster: &fake,
         probe: &probe,
         victims: &victims,
+        clock: &|| 0,
     };
     let stale = GdlScaler::new("global-front", spec(Some(3)));
     tokio::time::timeout(Duration::from_secs(3), async {

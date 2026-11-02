@@ -32,6 +32,7 @@ async fn both(fake: &Fake, first: &GdlScaler, second: &GdlScaler) {
         cluster: fake,
         probe: fake,
         victims: &victims,
+        clock: &|| 0,
     };
     let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(reconcile(&cx, first, 0), reconcile(&cx, second, 0))
@@ -93,6 +94,7 @@ async fn a_stale_operator_leaves_a_victim_out_of_its_service() {
         cluster: &fake,
         probe: &fake,
         victims: &victims,
+        clock: &|| 0,
     };
     reconcile(&cx, &stale, 1_000).await.expect("reconciles");
     assert!(fake.take_writes().is_empty());
@@ -262,6 +264,7 @@ async fn count_across_cancellation(desired: i32) -> Fake {
         cluster: &paused,
         probe: &fake,
         victims: &victims,
+        clock: &|| 0,
     };
     let read = snapshot(&fake, &spec(Some(2)));
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -326,6 +329,7 @@ async fn cancel_across_sweep(sweep: bool) -> Fake {
             cluster: &paused,
             probe: &fake,
             victims: &victims,
+            clock: &|| 0,
         };
         let read = snapshot(&fake, &down);
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -349,6 +353,7 @@ async fn cancel_across_sweep(sweep: bool) -> Fake {
         cluster: &paused,
         probe: &fake,
         victims: &victims,
+        clock: &|| 0,
     };
     let read = snapshot(&fake, &up);
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -433,6 +438,7 @@ async fn cost_across_cancellation(initial: Option<i32>) -> Fake {
         cluster: &paused,
         probe: &fake,
         victims: &victims,
+        clock: &|| 0,
     };
     let read = snapshot(&fake, &spec(Some(2)));
     tokio::time::timeout(Duration::from_secs(3), async {

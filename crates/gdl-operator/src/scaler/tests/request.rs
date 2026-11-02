@@ -416,3 +416,80 @@ async fn a_victim_asked_before_the_mode_changed_still_needs_its_bound() {
     assert_eq!(victim(&fake).phase, RetiringPhase::Removing);
     assert_eq!(fake.state().replicas, 2);
 }
+
+/// A probe whose retire request waits until the test lets it go, so that
+/// time passes between the reconcile's start and the hub's acceptance.
+struct SlowRetire<'a> {
+    fake: &'a Fake,
+    arrived: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl Probe for SlowRetire<'_> {
+    async fn instances(&self, pool: &str) -> Result<Instances, String> {
+        self.fake.instances(pool).await
+    }
+
+    async fn metrics(&self, ip: &str, port: u16) -> Result<String, String> {
+        self.fake.metrics(ip, port).await
+    }
+
+    async fn retire(&self, pool: &str, instance: &str, incarnation: u64) -> Result<Asked, String> {
+        self.arrived.notify_one();
+        self.resume.notified().await;
+        self.fake.retire(pool, instance, incarnation).await
+    }
+}
+
+/// F3: the drain bound counts from the hub's acceptance, not from the
+/// start of the reconcile that asked. A request accepted 2 s into its
+/// reconcile, with a bound of 2 s, holds the victim until 4 s.
+#[tokio::test]
+async fn the_drain_bound_counts_from_the_hubs_acceptance() {
+    let fake = three();
+    hooks(&fake, 2, &[("kv", "pending")]);
+    let mut spec = request(2);
+    spec.drain_bound = Some("2s".into());
+    let probe = SlowRetire {
+        fake: &fake,
+        arrived: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    };
+    let now = std::sync::atomic::AtomicI64::new(0);
+    let clock = || now.load(std::sync::atomic::Ordering::SeqCst);
+    let victims = Victims::default();
+    let cx = Context {
+        cluster: &fake,
+        probe: &probe,
+        victims: &victims,
+        clock: &clock,
+    };
+    let reconcile_at = |at: i64| {
+        now.store(at, std::sync::atomic::Ordering::SeqCst);
+        let mut scaler = GdlScaler::new("global-front", spec.clone());
+        scaler.metadata.generation = Some(1);
+        scaler.status = fake.state().status.clone();
+        scaler.metadata.resource_version = Some(fake.state().scaler_version.to_string());
+        let cx = &cx;
+        async move { reconcile(cx, &scaler, at).await.expect("reconciles") }
+    };
+    let accepted_late = async {
+        probe.arrived.notified().await;
+        now.store(2_000, std::sync::atomic::Ordering::SeqCst);
+        probe.resume.notify_one();
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(reconcile_at(0), accepted_late)
+    })
+    .await
+    .expect("the request is let go");
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    reconcile_at(3_000).await;
+    assert_eq!(
+        fake.state().replicas,
+        3,
+        "2 s after the hub took it, not 3 s"
+    );
+    reconcile_at(4_000).await;
+    assert_eq!(fake.state().replicas, 2, "at the bound");
+}

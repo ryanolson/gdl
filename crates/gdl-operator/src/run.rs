@@ -145,12 +145,14 @@ async fn reconcile(scaler: Arc<GdlScaler>, shared: Arc<Shared>) -> Result<Action
     else {
         return Ok(Action::await_change());
     };
+    let clock = || k8s_openapi::jiff::Timestamp::now().as_millisecond();
     let cx = Context {
         cluster: &shared.cluster,
         probe: &shared.probe,
         victims: &shared.victims,
+        clock: &clock,
     };
-    let now = k8s_openapi::jiff::Timestamp::now().as_millisecond();
+    let now = clock();
     let requeue = crate::scaler::reconcile(&cx, &scaler, now)
         .await
         .map_err(Failed)?;

@@ -75,6 +75,9 @@ pub struct Context<'a, C, P> {
     pub probe: &'a P,
     /// The registered victim policies.
     pub victims: &'a Victims,
+    /// The time now, in milliseconds since the Unix epoch, for a moment
+    /// the reconcile records after it has waited on a read or a write.
+    pub clock: &'a (dyn Fn() -> i64 + Sync),
 }
 
 /// Reconcile `scaler` at `now_ms`, milliseconds since the Unix epoch:
