@@ -651,6 +651,38 @@ async fn an_absent_registration_is_not_a_drain() {
     assert!(!victim(&fake).restarted);
 }
 
+/// F3 of the third review: one victim at a time in request mode, its
+/// removal included: a victim committed at its bound, whose pod is not
+/// gone yet, still holds work, and no other is asked beside it.
+#[tokio::test]
+async fn request_mode_takes_one_victim_until_its_pod_is_gone() {
+    let fake = Fake::with(&[9, 0, 1, 9]);
+    list(
+        &fake,
+        &[(1, "ready"), (2, "ready"), (3, "ready"), (4, "ready")],
+    );
+    hooks(&fake, 2, &[("kv", "pending")]);
+    let mut spec = request(2);
+    spec.max_concurrent_drains = Some(4);
+    once(&fake, &spec, 0).await;
+    once(&fake, &spec, 20_000).await;
+    let writes = fake.take_writes();
+    assert_eq!(status(&fake).retiring.len(), 1, "{writes:?}");
+    assert!(
+        writes.iter().filter(|w| w.starts_with("retire")).count() == 1,
+        "{writes:?}"
+    );
+    fake.settle(false);
+    fake.exit();
+    list(&fake, &[(1, "ready"), (3, "ready"), (4, "ready")]);
+    once(&fake, &spec, 21_000).await;
+    assert_eq!(
+        victim(&fake).pod,
+        "pod-3",
+        "the next, once the first is gone"
+    );
+}
+
 /// F2: the Deployment is made again under its name and keeps its pods
 /// (an orphan delete, then adoption) after the victim retired. The victim
 /// cannot serve again: it is never given back its Service or its cost,

@@ -421,9 +421,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             let excess =
                 usize::try_from(i32::try_from(staying.len()).unwrap_or(i32::MAX) - desired)
                     .unwrap_or(0);
-            let room = usize::try_from(spec.max_concurrent_drains())
-                .unwrap_or(1)
-                .saturating_sub(kept.len());
+            // In request mode a victim drains before its commit, and still
+            // holds work after it until its pod is gone: one at a time.
+            let drains = match self.request {
+                true => 1,
+                false => usize::try_from(spec.max_concurrent_drains()).unwrap_or(1),
+            };
+            let room = drains.saturating_sub(kept.len());
             if excess == 0 || room == 0 {
                 // Nothing to remove, or the drains in progress pace it.
             } else if target.rolling {
