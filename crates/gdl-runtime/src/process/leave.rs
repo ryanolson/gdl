@@ -10,12 +10,15 @@
 //! nothing until the drain's wait begins, as it would without hooks.
 
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::{BoxFuture, join_all};
 use gdl::__runtime::{LeaveHook, LeaveParts};
 use gdl::{Cx, Deadline, Fence, Handoff, Leave, LeaveCause, Routing, Unconfirmed};
-use prometheus::{GaugeVec, IntGaugeVec, Opts, Registry};
+use prometheus::Registry;
+use prometheus::core::{Collector, Desc};
+use prometheus::proto::{self, MetricFamily, MetricType};
 use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
@@ -30,6 +33,8 @@ mod tests;
 const OUTCOME: &str = "leave_outcome";
 /// The family of how long each hook ran.
 const SECONDS: &str = "leave_seconds";
+const OUTCOME_HELP: &str = "1 for how each leave hook ended, or for `pending` until it does.";
+const SECONDS_HELP: &str = "How long each leave hook ran, once it ended.";
 /// What `leave_outcome` reads for a hook that has not ended.
 const PENDING: &str = "pending";
 
@@ -124,46 +129,124 @@ impl Stopping {
 
 /// `leave_outcome` and `leave_seconds`, registered at the launch: a
 /// family registered later would contend with a scrape for the registry's
-/// lock.
+/// lock. Each hook has one state, and a scrape reads all of them at once,
+/// so that it sees a hook pending or ended, and never between the two: an
+/// operator reads this before it deletes a pod.
 #[derive(Clone)]
 pub(super) struct LeaveMetrics {
-    outcome: IntGaugeVec,
-    seconds: GaugeVec,
+    hooks: Arc<Mutex<Vec<HookState>>>,
+}
+
+/// One hook, as `/metrics` shows it.
+struct HookState {
+    name: String,
+    /// How it ended, and how long it ran.
+    ended: Option<(&'static str, f64)>,
 }
 
 impl LeaveMetrics {
     pub(super) fn register(registry: &Registry) -> prometheus::Result<Self> {
-        let outcome = IntGaugeVec::new(
-            Opts::new(
-                OUTCOME,
-                "1 for how each leave hook ended, or for `pending` until it does.",
-            ),
-            &["hook", "outcome"],
-        )?;
-        let seconds = GaugeVec::new(
-            Opts::new(SECONDS, "How long each leave hook ran, once it ended."),
-            &["hook"],
-        )?;
-        registry.register(Box::new(outcome.clone()))?;
-        registry.register(Box::new(seconds.clone()))?;
-        Ok(Self { outcome, seconds })
+        let hooks: Arc<Mutex<Vec<HookState>>> = Arc::default();
+        registry.register(Box::new(LeaveFamilies {
+            hooks: Arc::clone(&hooks),
+            outcome: Desc::new(
+                OUTCOME.into(),
+                OUTCOME_HELP.into(),
+                vec!["hook".into(), "outcome".into()],
+                Default::default(),
+            )?,
+            seconds: Desc::new(
+                SECONDS.into(),
+                SECONDS_HELP.into(),
+                vec!["hook".into()],
+                Default::default(),
+            )?,
+        }))?;
+        Ok(Self { hooks })
     }
 
     /// `hooks` are registered: each reads `pending` until it ends, so that
     /// a reader can tell a hook still running from no hook at all.
     pub(super) fn pending(&self, hooks: &[LeaveHook]) {
-        for hook in hooks {
-            self.outcome
-                .with_label_values(&[hook.name(), PENDING])
-                .set(1);
-        }
+        let mut states = self.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        states.extend(hooks.iter().map(|hook| HookState {
+            name: hook.name().to_string(),
+            ended: None,
+        }));
     }
 
-    fn ended(&self, hook: &str, outcome: &str, seconds: f64) {
-        self.outcome.with_label_values(&[hook, PENDING]).set(0);
-        self.outcome.with_label_values(&[hook, outcome]).set(1);
-        self.seconds.with_label_values(&[hook]).set(seconds);
+    fn ended(&self, hook: &str, outcome: &'static str, seconds: f64) {
+        let mut states = self.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = states.iter_mut().find(|state| state.name == hook) {
+            state.ended = Some((outcome, seconds));
+        }
     }
+}
+
+/// The two families, built from one read of the hooks' states.
+struct LeaveFamilies {
+    hooks: Arc<Mutex<Vec<HookState>>>,
+    outcome: Desc,
+    seconds: Desc,
+}
+
+impl Collector for LeaveFamilies {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.outcome, &self.seconds]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let states = self.hooks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut outcomes = Vec::new();
+        let mut seconds = Vec::new();
+        for state in states.iter() {
+            let hook = ("hook", state.name.as_str());
+            let pending = state.ended.is_none();
+            outcomes.push(sample(
+                &[hook, ("outcome", PENDING)],
+                f64::from(u8::from(pending)),
+            ));
+            if let Some((outcome, ran)) = state.ended {
+                outcomes.push(sample(&[hook, ("outcome", outcome)], 1.0));
+                seconds.push(sample(&[hook], ran));
+            }
+        }
+        drop(states);
+        let family = |name: &str, help: &str, samples: Vec<proto::Metric>| {
+            let mut family = MetricFamily::default();
+            family.set_name(name.into());
+            family.set_help(help.into());
+            family.set_field_type(MetricType::GAUGE);
+            family.set_metric(samples);
+            family
+        };
+        [
+            (OUTCOME, OUTCOME_HELP, outcomes),
+            (SECONDS, SECONDS_HELP, seconds),
+        ]
+        .into_iter()
+        .filter(|(_, _, samples)| !samples.is_empty())
+        .map(|(name, help, samples)| family(name, help, samples))
+        .collect()
+    }
+}
+
+/// One gauge's series.
+fn sample(labels: &[(&str, &str)], value: f64) -> proto::Metric {
+    let labels = labels
+        .iter()
+        .map(|(name, value)| {
+            let mut label = proto::LabelPair::default();
+            label.set_name((*name).into());
+            label.set_value((*value).into());
+            label
+        })
+        .collect();
+    let mut gauge = proto::Gauge::default();
+    gauge.set_value(value);
+    let mut metric = proto::Metric::from_label(labels);
+    metric.set_gauge(gauge);
+    metric
 }
 
 /// How a hook ended, by the name `leave_outcome` reports.

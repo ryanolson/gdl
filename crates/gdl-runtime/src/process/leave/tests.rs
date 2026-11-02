@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -71,6 +73,59 @@ async fn the_fallback_counts_from_a_timely_retirement() {
     retired.send_replace(Some(at + SECOND));
     fallback(times, SECOND * 2, retirement).await;
     assert_eq!(Instant::now(), at + SECOND * 3);
+}
+
+/// A scrape sees each hook as `pending` or as its one outcome, and never as
+/// neither or both, however it falls between a hook's end. A scrape reads
+/// the hooks' series in turn, so with this many it spans many ends.
+#[test]
+fn a_scrape_sees_exactly_one_state_of_each_hook() {
+    use super::LeaveMetrics;
+
+    const HOOKS: usize = 512;
+    let registry = prometheus::Registry::new();
+    let metrics = LeaveMetrics::register(&registry).expect("registered");
+    let lifecycle = gdl::Lifecycle::new();
+    for hook in 0..HOOKS {
+        lifecycle
+            .on_leave(format!("h{hook}"), |_| async { gdl::Handoff::Nothing })
+            .expect("registered");
+    }
+    let hooks = lifecycle.close();
+    metrics.pending(&hooks);
+    let names: Vec<String> = hooks.iter().map(|hook| hook.name().to_string()).collect();
+
+    let ending = std::thread::spawn(move || {
+        for name in &names {
+            metrics.ended(name, "done", 0.0);
+        }
+    });
+    let mut scrapes = 0;
+    while !ending.is_finished() || scrapes == 0 {
+        scrapes += 1;
+        let mut reading = std::collections::BTreeMap::<String, f64>::new();
+        for family in registry.gather() {
+            if family.name() != "leave_outcome" {
+                continue;
+            }
+            for metric in family.get_metric() {
+                let hook = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "hook")
+                    .expect("a hook's label");
+                *reading.entry(hook.value().to_string()).or_default() += metric.get_gauge().value();
+            }
+        }
+        assert_eq!(reading.len(), HOOKS, "a hook has no series");
+        for (hook, states) in reading {
+            assert_eq!(
+                states, 1.0,
+                "scrape {scrapes} read {hook} in {states} states"
+            );
+        }
+    }
+    ending.join().expect("the hooks ended");
 }
 
 /// One instance alone in a roster directory, and what it hosts.
