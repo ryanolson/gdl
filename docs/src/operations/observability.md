@@ -59,6 +59,7 @@ The registry holds:
 - `uptime_seconds`, read at each scrape;
 - `instance_phase`, the phase the probes report, one series for each phase, read at each scrape;
 - `instance_avoided`, whether a retired entry instance's hub has said that the pools that follow its pool avoid it, read at each scrape;
+- `leave_outcome` and `leave_seconds`, for each leave hook its nodes registered, how it ended and how long it ran;
 - what the instance holds now: the roots in its admission ledger, its admission limit, its egress permits in use, and its open anchors, read at each scrape ([Reading a drain](#reading-a-drain));
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
 - the runtime's figures for each segment a request passes through;
@@ -143,6 +144,7 @@ A stopped instance drains: it takes no new work and finishes what it holds ([Seg
 |---|---|
 | `instance_phase{phase="draining"}` | 1: the instance was stopped and takes no new work. Draining is final |
 | `instance_avoided` | 1: for a retired entry instance of a pool, its hub has said that the pools that follow its pool avoid it, so no chooser of theirs offers it work from here on. An offer that reaches it after this reads 1 broke that promise |
+| `leave_outcome{outcome="pending"}` | 0 for a hook: it ended, and the series of its outcome reads 1 |
 | `admission_admitted` | Root requests that entered through a crossing and are still held, each until velo has handed on every stream the instance sent for it |
 | `egress_in_use` | Streams the instance produces, each until velo holds none of its output |
 | `active_anchors` | Streams still to arrive here |

@@ -459,6 +459,32 @@ pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
     (pool, proxy)
 }
 
+/// [`model_proxied`], each instance's runtime settings changed by
+/// `configure`, given the instance's segment.
+#[allow(dead_code, reason = "not every test binary configures its instances")]
+pub async fn model_proxied_configured<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    pool: Model<'_>,
+    runtime: &str,
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (ModelPool<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(pool, runtime);
+    let (hub, readiness, proxy) = pool_hub_proxied(spec, settings_of_hub, directory, timing).await;
+    let pool = instances(
+        spec,
+        (hub, readiness),
+        None,
+        pool,
+        &extra,
+        configure,
+        assemble,
+    )
+    .await;
+    (pool, proxy)
+}
+
 /// One more instance of `segment` in the model pool `pool`, whose hub is
 /// `hub`, set up as [`model_of`] sets up the pool's first ones, serving
 /// the graph `assemble` builds.

@@ -76,6 +76,15 @@ struct Learned {
     acknowledged: bool,
 }
 
+/// Why no more work can reach an interior instance of a draining pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreached {
+    /// Its senders detached: they promised to send no more.
+    Detached,
+    /// The pool's entry instances have drained.
+    Drained,
+}
+
 /// What the instance is in its pool.
 enum Role {
     /// An instance of an entry segment, which takes new work for `bound`
@@ -127,12 +136,28 @@ impl Parent {
     /// itself as an answer would close the instance a setup timeout after
     /// the drain began.
     pub(crate) fn avoids(&self) -> bool {
+        self.answered() || self.passed()
+    }
+
+    /// Whether the bound of [`Parent::avoids`] passed with no answer: a
+    /// chooser with a stale view may still offer here.
+    pub(crate) fn timed_out(&self) -> bool {
+        !self.answered() && self.passed()
+    }
+
+    fn answered(&self) -> bool {
         let learned = *self.learned.borrow();
-        let until = learned
+        learned.acknowledged || learned.unfollowed
+    }
+
+    fn passed(&self) -> bool {
+        let until = self
+            .learned
+            .borrow()
             .drain
             .map_or(self.retired, |drain| drain.max(self.retired))
             + self.bound;
-        learned.acknowledged || learned.unfollowed || Instant::now() >= until
+        Instant::now() >= until
     }
 
     /// Whether the instance declines offers from other pools now: once its
@@ -267,6 +292,11 @@ impl PoolDrain {
         }
     }
 
+    /// Whether its hub has said that no pool follows its draining pool.
+    pub(crate) fn unfollowed(&self) -> bool {
+        self.learned.borrow().unfollowed
+    }
+
     /// The instance retired now, if it had not already.
     pub(crate) fn retire(&self) {
         self.retired.get_or_init(Instant::now);
@@ -313,7 +343,7 @@ impl PoolDrain {
                 // A hub can stop answering without closing its
                 // connections; the lease's own end stops the instance.
                 let asked = tokio::time::timeout(HubSession::poll() * 10, self.unreached(asker));
-                if matches!(asked.await, Ok(Ok(true))) {
+                if matches!(asked.await, Ok(Ok(Some(_)))) {
                     return;
                 }
                 tokio::time::sleep(HubSession::poll()).await;
@@ -322,11 +352,11 @@ impl PoolDrain {
     }
 
     /// For an interior instance of a draining pool: whether no more work
-    /// can reach it, asked of `asker`'s hub. Every entry instance and
-    /// every instance of the segments of its class that send to it has
+    /// can reach it, asked of `asker`'s hub, and why. Every entry instance
+    /// and every instance of the segments of its class that send to it has
     /// detached, or left; or, as before an instance could detach, every
     /// entry instance has drained or left, which holds also when an entry
-    /// built before then never says that it detached. `false` for an entry
+    /// built before then never says that it detached. `None` for an entry
     /// instance, and while the pool does not drain.
     ///
     /// The entry instances are asked too because a sender that leaves the
@@ -334,9 +364,9 @@ impl PoolDrain {
     /// attempt into the pool returns only once its whole forward path has
     /// taken the request, so an entry that detached holds no request still
     /// on its way.
-    pub(crate) async fn unreached(&self, asker: &HubAsker) -> Result<bool> {
+    pub(crate) async fn unreached(&self, asker: &HubAsker) -> Result<Option<Unreached>> {
         if !matches!(self.role, Role::Interior) || self.learned.borrow().drain.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
         if !self.senders.is_empty() {
@@ -348,10 +378,11 @@ impl PoolDrain {
                     .filter(|sender| !entries.contains(sender)),
             );
             if asker.all_detached(&quiet, &entries).await? {
-                return Ok(true);
+                return Ok(Some(Unreached::Detached));
             }
         }
-        asker.all_drained(&entries).await
+        let drained = asker.all_drained(&entries).await?;
+        Ok(drained.then_some(Unreached::Drained))
     }
 
     /// For an entry instance of a draining pool: whether the segments of

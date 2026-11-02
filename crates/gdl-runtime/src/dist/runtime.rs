@@ -23,7 +23,7 @@ use gdl::Cx;
 use gdl::Decline;
 use gdl::{Error, ErrorKind, Result};
 use gdl::{
-    FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, OfferGate,
+    FollowedPools, HomeFirstAt, HubRecords, InstanceKv, InstanceProperties, Lifecycle, OfferGate,
     PoolPolicies, Selectors,
 };
 use gdl_model::{Layout, RequestRouter};
@@ -100,6 +100,14 @@ pub struct RuntimeConfig {
     /// request. `None` is `default_deadline`, since no request admitted
     /// before the stop outlives it unless it set a longer deadline itself.
     pub drain: Option<Duration>,
+    /// How long a leave hook may run from the stop. `None`, or anything
+    /// past `drain`, ends it with the drain's bound.
+    pub leave: Option<Duration>,
+    /// How long after its retirement an instance waits for its peers
+    /// before it tells its leave hooks that nothing confirmed that it is
+    /// out of routing. At most half of `drain` counts from the stop.
+    /// `None` is the setup timeout and twice the pool's `summary_ms`.
+    pub leave_after: Option<Duration>,
     /// Where the runtime records what each request does in this segment:
     /// its request path, the response streams it sends on, and, at the
     /// source, the request end to end; `None` records nothing. Not a
@@ -146,6 +154,10 @@ pub struct RuntimeConfig {
     /// summary. Not a setting: a segment binary's `Builder` gives it to the
     /// nodes it builds.
     pub gate: OfferGate,
+    /// The handle through which the segment's nodes register their leave
+    /// hooks. Not a setting: a segment binary's `Builder` gives it to the
+    /// nodes it builds, and the launch runs what they registered.
+    pub lifecycle: Lifecycle,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -232,6 +244,8 @@ impl Default for RuntimeConfig {
             egress_limit: 1024,
             heartbeat_interval: None,
             drain: None,
+            leave: None,
+            leave_after: None,
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),
@@ -240,6 +254,7 @@ impl Default for RuntimeConfig {
             properties: InstanceProperties::new(),
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
+            lifecycle: Lifecycle::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -269,6 +284,8 @@ struct Settings {
     egress_limit: usize,
     heartbeat_interval_ms: Option<u64>,
     drain_ms: Option<u64>,
+    leave_ms: Option<u64>,
+    leave_after_ms: Option<u64>,
 }
 
 impl Default for Settings {
@@ -295,6 +312,8 @@ impl Default for Settings {
             egress_limit: config.egress_limit,
             heartbeat_interval_ms: config.heartbeat_interval.map(ms),
             drain_ms: config.drain.map(ms),
+            leave_ms: config.leave.map(ms),
+            leave_after_ms: config.leave_after.map(ms),
         }
     }
 }
@@ -325,6 +344,8 @@ impl TryFrom<Settings> for RuntimeConfig {
             egress_limit: s.egress_limit,
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             drain: s.drain_ms.map(Duration::from_millis),
+            leave: s.leave_ms.map(Duration::from_millis),
+            leave_after: s.leave_after_ms.map(Duration::from_millis),
             metrics: None,
             selectors: Selectors::new(),
             pool_policies: PoolPolicies::new(),
@@ -333,6 +354,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             properties: InstanceProperties::new(),
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
+            lifecycle: Lifecycle::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

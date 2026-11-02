@@ -58,6 +58,44 @@ impl Build for Engine {
 - Do slow work in `ready`. The segment announces that it is loaded, and takes requests, only after every node it hosts is ready. The default `ready` returns at once.
 - A node without metrics writes `type Metrics = ();` and takes `(): ()`. A node with metrics names the type in the derive, `#[gdl(metrics = EngineMetrics)]`. [Define node metrics](node-metrics.md) covers that type. [Segment lifecycle](../concepts/lifecycle.md) describes the launch phases.
 
+## Run code when the instance leaves
+
+Take `gdl::Lifecycle::current()` in `Build::build`, and register a hook to hand off state or flush it:
+
+```rust
+impl gdl::Build for Engine {
+    type Config = EngineConfig;
+    type Metrics = ();
+
+    async fn build(config: EngineConfig, (): ()) -> gdl::Result<Self> {
+        let store = Store::open(&config)?;
+        let held = store.clone();
+        gdl::Lifecycle::current().on_leave("kv", move |leave: gdl::Leave| async move {
+            // Other instances stop picking this one first.
+            match leave.routed().await {
+                gdl::Routing::Confirmed | gdl::Routing::SourcesDone if !leave.external() => {}
+                _ => return gdl::Handoff::Nothing,
+            }
+            tokio::select! {
+                moved = held.hand_off(leave.fence()) => moved,
+                _ = leave.cx().cancelled() => gdl::Handoff::Failed("out of time".into()),
+            }
+        })?;
+        Ok(Self { store })
+    }
+}
+```
+
+- Give each hook its own name. The name is the label of its metrics. A second hook of the same name is an error.
+- Register before the instance serves. A later `on_leave` is an error.
+- Several hooks can register. They run at the same time, under one deadline, each with its own outcome.
+- Return `Done`, `Partial { moved, left }`, `Failed(reason)`, or `Nothing`. A hook that passes its deadline is recorded `timed_out`.
+- Wait for `leave.drained()` before you destroy state. A hand-off sent before a peer's promise can still arrive after `routing()` moves.
+- Do not make a request wait on work that a hook does after `leave.drained()`. That wait lasts until the drain's cutoff.
+- Stop at `leave.cx()`. The runtime does not wait for a hook past its deadline.
+
+[Leaving](../concepts/lifecycle.md#leaving) says when each signal moves. `[runtime] leave_ms` sets the deadline ([Segment settings](../operations/configuration.md)).
+
 ## Expose settings to the composer
 
 By default, a node's `Config` is a plain `Deserialize` type, and the composer shows none of it. To show some fields in the composer and fix them in the graph, derive `gdl::Config`:

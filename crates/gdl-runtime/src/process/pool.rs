@@ -29,6 +29,45 @@ impl Launch {
         true
     }
 
+    /// What routing reads for an entry instance that its pool's drain
+    /// stopped, which it stopped once no pool follows the pool, or its
+    /// bound had passed. The first is a confirmation; after the second a
+    /// chooser with a stale view may still offer, and is declined.
+    pub(super) fn pool_drain_routing(&self) -> gdl::Routing {
+        #[cfg(feature = "hub")]
+        if self
+            .pool_drain
+            .as_ref()
+            .is_some_and(|pool| pool.unfollowed())
+        {
+            return gdl::Routing::Confirmed;
+        }
+        gdl::Routing::Unconfirmed(gdl::Unconfirmed::ParentTimeout)
+    }
+
+    /// Why routing gives up when its fallback time comes, read then: an
+    /// entry instance's parent bound, which by default passes as the
+    /// fallback comes, is the better reason, and the observer may not have
+    /// looked since. What it reads is taken now, so that it borrows nothing
+    /// of the launch.
+    pub(super) fn pool_given_up(
+        &self,
+    ) -> impl Fn() -> gdl::Unconfirmed + Send + Sync + 'static + use<> {
+        #[cfg(feature = "hub")]
+        let pool = self.pool_drain.clone();
+        move || {
+            #[cfg(feature = "hub")]
+            if pool
+                .as_ref()
+                .and_then(|pool| pool.parent())
+                .is_some_and(|parent| parent.timed_out())
+            {
+                return gdl::Unconfirmed::ParentTimeout;
+            }
+            gdl::Unconfirmed::Bound
+        }
+    }
+
     /// The instance retires now: from here an entry instance in a pool
     /// counts its wait for the pools that follow its pool.
     pub(super) fn pool_retires(&self) {

@@ -23,8 +23,8 @@ use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
 use gdl::{
-    Affinity, FollowedPools, HubRecords, InstanceKv, InstanceProperties, LeastLoaded, OfferGate,
-    PoolPolicies, PoolPolicy, PropertyType, Selector, Selectors,
+    Affinity, FollowedPools, HubRecords, InstanceKv, InstanceProperties, LeastLoaded, Lifecycle,
+    OfferGate, PoolPolicies, PoolPolicy, PropertyType, Selector, Selectors,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
@@ -173,6 +173,7 @@ pub async fn run_segment<B: SegmentBinary>(
     config.runtime.properties = builder.properties.clone();
     config.runtime.kv = builder.kv.clone();
     config.runtime.gate = builder.gate.clone();
+    config.runtime.lifecycle = builder.lifecycle.clone();
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
     // the launch, where a chooser's follower registers the pools' figures.
@@ -262,6 +263,9 @@ pub struct Builder {
     /// The gate every node it builds may decide offers by
     /// ([`OfferGate::current`]).
     gate: OfferGate,
+    /// Where every node it builds registers its leave hooks
+    /// ([`Lifecycle::current`]).
+    lifecycle: Lifecycle,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -289,6 +293,7 @@ impl Builder {
             properties: InstanceProperties::new(),
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
+            lifecycle: Lifecycle::new(),
         })
     }
 
@@ -367,18 +372,18 @@ impl Builder {
         // Held to its `NEEDS`, as a pool policy is, not to its segment's
         // nodes' needs: what `cargo gdl check` holds its crossings' class
         // to is what it reads.
-        let built =
-            self.followed
-                .limited(S::NEEDS, format!("selector `{name}`"))
-                .scope(self.records.scope(self.properties.scope(
-                    self.kv.scope(self.gate.scope(build_node::<S>(
-                        &providers,
-                        &GraphConfig::new(),
-                        metrics,
-                    ))),
-                )))
-                .await
-                .map_err(|e| format!("building selector {name}: {e}"))?;
+        let built = self
+            .followed
+            .limited(S::NEEDS, format!("selector `{name}`"))
+            .scope(self.records.scope(self.properties.scope(self.kv.scope(
+                self.gate.scope(self.lifecycle.scope(build_node::<S>(
+                    &providers,
+                    &GraphConfig::new(),
+                    metrics,
+                ))),
+            ))))
+            .await
+            .map_err(|e| format!("building selector {name}: {e}"))?;
         let built = Arc::new(built);
         self.selectors
             .lock()
@@ -442,8 +447,12 @@ impl Builder {
             .scope(
                 self.records.scope(
                     self.properties.scope(
-                        self.kv
-                            .scope(self.gate.scope(build_node::<T>(&providers, graph, metrics))),
+                        self.kv.scope(
+                            self.gate.scope(
+                                self.lifecycle
+                                    .scope(build_node::<T>(&providers, graph, metrics)),
+                            ),
+                        ),
                     ),
                 ),
             )

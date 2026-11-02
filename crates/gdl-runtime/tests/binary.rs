@@ -196,6 +196,13 @@ impl gdl::Build for Add {
     type Config = AddConfig;
     type Metrics = AddMetrics;
     async fn build(config: AddConfig, metrics: AddMetrics) -> gdl::Result<Self> {
+        gdl::Lifecycle::current().on_leave("add", |leave: gdl::Leave| async move {
+            // `only` is the source's segment, and nothing sends to it.
+            assert!(leave.external());
+            assert_eq!(leave.routed().await, gdl::Routing::Confirmed);
+            LEFT.store(true, Ordering::SeqCst);
+            gdl::Handoff::Nothing
+        })?;
         Ok(Self {
             by: config.amount + config.offset,
             metrics,
@@ -937,7 +944,11 @@ async fn a_built_segment_serves_and_drains() {
     let (_dir, file) = settings("[node.Add]\namount = 5\n");
     run::<Adder>(&[file]).await.expect("served");
     assert!(READY.load(Ordering::SeqCst));
+    assert!(LEFT.load(Ordering::SeqCst), "its node's leave hook ran");
 }
+
+/// Set by `Add`'s leave hook, which it registers in its build.
+static LEFT: AtomicBool = AtomicBool::new(false);
 
 /// Set by `Tagged::ready`; the binary's `start` checks that it ran.
 static TAGGED_READY: AtomicBool = AtomicBool::new(false);

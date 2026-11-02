@@ -5,6 +5,7 @@
 //! and tested here rather than in each generated crate.
 
 mod barrier;
+mod leave;
 mod observer;
 mod origins;
 mod pool;
@@ -619,6 +620,13 @@ impl<H> ProcessConfig<H> {
         // Held until the barrier: a request that reaches this instance
         // first waits, rather than leaving for a peer that is not serving.
         roster.hold();
+        let leave_metrics = match &self.runtime.metrics {
+            Some(registry) => Some(
+                leave::LeaveMetrics::register(registry)
+                    .map_err(|e| placement(format!("registering the leave metrics: {e}")))?,
+            ),
+            None => None,
+        };
         let leaving = Leaving {
             dir: match &peers {
                 Peers::Files(dir) => Some(dir.clone()),
@@ -640,6 +648,17 @@ impl<H> ProcessConfig<H> {
             wait,
             drain,
             setup: self.runtime.setup_timeout,
+            lifecycle: self.runtime.lifecycle.clone(),
+            leave: self.runtime.leave,
+            leave_after: self.runtime.leave_after.unwrap_or(
+                self.runtime.setup_timeout
+                    + self
+                        .pool
+                        .as_ref()
+                        .map_or(PoolSettings::DEFAULT_SUMMARY, |pool| pool.summary)
+                        * 2,
+            ),
+            leave_metrics,
             process: process.clone(),
             _follower: follower,
             #[cfg(feature = "hub")]
@@ -714,6 +733,14 @@ pub struct Launch {
     /// The longest a hand-off sent before a peer stopped routing here may
     /// take to arrive.
     setup: Duration,
+    /// Where the segment's nodes registered their leave hooks.
+    lifecycle: gdl::Lifecycle,
+    /// How long those hooks may run, within the drain's bound.
+    leave: Option<Duration>,
+    /// How long after the retirement routing gives up on the peers.
+    leave_after: Duration,
+    /// Where the hooks' outcomes go, for a segment that serves metrics.
+    leave_metrics: Option<leave::LeaveMetrics>,
     process: Process,
     /// The roster directory's membership follower; the hub session owns
     /// its own.
@@ -919,6 +946,13 @@ impl Launch {
     /// stop. The drain is bounded by the runtime's `drain` (by default the
     /// request deadline), and a second stop ends it at once.
     ///
+    /// Every leave hook the segment's nodes registered
+    /// ([`gdl::Lifecycle`]) starts at the stop, on every way to it, and
+    /// runs beside all of this: registration closes as this is called, a
+    /// hook gets what [`gdl::Leave`] says, and the instance leaves only
+    /// once each hook has ended or run out of time. With none registered,
+    /// no task is added.
+    ///
     /// A lost hub lease stops the instance the same way, skips the wait,
     /// since the hub that would answer it is gone, and gives the lease's
     /// error: the process is invisible to new peers and will be probed as
@@ -950,6 +984,10 @@ impl Launch {
     {
         let process = self.process.clone();
         let segment = Arc::new(segment);
+        let hooks = self.lifecycle.close();
+        if let Some(metrics) = &self.leave_metrics {
+            metrics.pending(&hooks);
+        }
         let inner: Vec<&str> = self.inner.iter().map(String::as_str).collect();
         let barrier = async {
             match &mut self.peers {
@@ -970,7 +1008,7 @@ impl Launch {
         };
         let passed = tokio::select! {
             biased;
-            () = process.stops(1) => None,
+            () = process.asked_to_stop() => None,
             passed = barrier => Some(passed),
         };
         let second = || {
@@ -980,6 +1018,8 @@ impl Launch {
             )
         };
         let stopped = match passed {
+            // A launch that fails is no stop: it never served, and exits
+            // as a crash does.
             Some(Err(error)) => return Err(error),
             // A stop during the barrier comes after this instance said it
             // serves, so peers may already route here: it drains as after
@@ -987,15 +1027,17 @@ impl Launch {
             None => {
                 process.health.set(Phase::Draining);
                 let stopped = Error::new(ErrorKind::Cancelled, "stopped while starting");
-                let deadline = tokio::time::Instant::now() + self.drain;
+                let (stopping, mut leaving) = self.begin_stop(hooks, gdl::LeaveCause::Stop);
+                let deadline = stopping.deadline();
                 tokio::select! {
                     biased;
                     () = process.stops(2) => return Err(second()),
                     () = self.retire(deadline) => {}
+                    never = leaving.as_mut() => match never {},
                 }
+                stopping.retired();
                 let cutoff = Box::pin(self.pool_cutoff(deadline, false).fuse());
-                let observer = self.observer(deadline);
-                (Err(stopped), Ok(()), deadline, cutoff, observer)
+                (Err(stopped), Ok(()), stopping, leaving, cutoff)
             }
             Some(Ok(())) => {
                 self.roster.release();
@@ -1007,7 +1049,7 @@ impl Launch {
                     // a lost lease ends the announcement itself.
                     let announced = tokio::select! {
                         biased;
-                        () = process.stops(1) => Ok(()),
+                        () = process.asked_to_stop() => Ok(()),
                         announced = session.announce_ready(deadline) => announced,
                     };
                     if let Err(error) = announced {
@@ -1046,13 +1088,19 @@ impl Launch {
                 // The pool's drain stops the instance in its own time.
                 let (ended, stop, retires, by_pool) = tokio::select! {
                     result = &mut body => (Some(result), Ok(()), true, false),
-                    () = process.stops(1) => (None, Ok(()), true, false),
+                    () = process.asked_to_stop() => (None, Ok(()), true, false),
                     result = lease => (None, result, true, false),
                     () = self.pool_drain_stops() => {
                         (None, Ok(()), self.pool_drain_retires(), true)
                     }
                 };
-                let deadline = tokio::time::Instant::now() + self.drain;
+                let cause = match (&stop, by_pool) {
+                    (Err(_), _) => gdl::LeaveCause::LeaseLost,
+                    (Ok(()), true) => gdl::LeaveCause::PoolDrain,
+                    (Ok(()), false) => gdl::LeaveCause::Stop,
+                };
+                let (stopping, mut leaving) = self.begin_stop(hooks, cause);
+                let deadline = stopping.deadline();
                 let mut cutoff = Box::pin(self.pool_cutoff(deadline, by_pool).fuse());
                 process.health.set(Phase::Draining);
                 shutdown.cancel();
@@ -1092,22 +1140,28 @@ impl Launch {
                     if stop.is_ok() && retires {
                         self.retire(deadline).await;
                     }
+                    stopping.retired();
                 };
                 let (result, (), ()) = tokio::select! {
                     biased;
                     () = process.stops(2) => return Err(second()),
                     all = async { tokio::join!(finished, retiring, closing) } => all,
+                    never = leaving.as_mut() => match never {},
                 };
-                let observer = self.observer(deadline);
-                (result, stop, deadline, cutoff, observer)
+                (result, stop, stopping, leaving, cutoff)
             }
         };
-        let (result, stop, deadline, mut cutoff, (observing, mut asking)) = stopped;
+        let (result, stop, stopping, mut leaving, mut cutoff) = stopped;
+        let deadline = stopping.deadline();
         // A lost lease takes the hub's answers, not this instance's own
-        // requests: those are still waited for.
+        // requests: those are still waited for. The hooks are a track of
+        // their own, which started at the stop: it blocks the exit too.
         tokio::select! {
-            () = self.drain(segment.as_ref(), &observing, deadline, stop.is_ok(), cutoff.as_mut()) => {}
-            never = asking.as_mut() => match never {},
+            () = async {
+                self.drain(segment.as_ref(), &stopping, stop.is_ok(), cutoff.as_mut()).await;
+                stopping.finished().await;
+            } => {}
+            never = leaving.as_mut() => match never {},
             () = process.stops(2) => return Err(second()),
         }
         let left = deadline
@@ -1171,14 +1225,16 @@ impl Launch {
     /// pool's entry instances, so that an entry instance too takes the
     /// hand-offs inside the pool until no entry instance holds a request
     /// that may make one. With `hub` false (its lease is lost), the hub is
-    /// not asked. `observing` says what (A) and (B) are: the drain only
-    /// reads it, and something beside the drain polls the observer. Polls;
-    /// nothing is added to a request's path.
+    /// not asked. `stopping` says what (A) and (B) are: the drain only
+    /// reads it, and something beside the drain polls the observer. A
+    /// promise read before the drain's wait began counts from the wait, so
+    /// that a hook that has the observer ask early changes nothing here.
+    /// `stopping` hears when the instance has closed and holds no request.
+    /// Polls; nothing is added to a request's path.
     async fn drain(
         &mut self,
         segment: &dyn Drains,
-        observing: &observer::Observing,
-        deadline: tokio::time::Instant,
+        stopping: &leave::Stopping,
         // Only a hub is asked; a roster directory has no lease to lose.
         hub: bool,
         // When the stop's bound has passed: at `deadline`, or later for an
@@ -1186,7 +1242,10 @@ impl Launch {
         // ([`Launch::pool_cutoff`]).
         mut cutoff: std::pin::Pin<&mut futures::future::Fuse<impl Future<Output = ()>>>,
     ) {
+        let deadline = stopping.deadline();
+        let observing = stopping.observing();
         self.pool_drain_settles(segment, deadline, hub).await;
+        let from = tokio::time::Instant::now();
         let declining = self.pool_declining(segment);
         #[cfg(feature = "hub")]
         let (source_drains_early, declines) = (self.source_drains_early(), self.pool_declines());
@@ -1200,7 +1259,7 @@ impl Launch {
         // With no sender, nothing routes here, and (A) holds at once.
         let (setup, unsent) = (self.setup, self.senders.is_empty());
         let settled = move |avoided: Option<tokio::time::Instant>| {
-            unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at + setup)
+            unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at.max(from) + setup)
         };
         let waiting = async {
             match &mut self.peers {
@@ -1271,6 +1330,9 @@ impl Launch {
                 () = cutoff.as_mut() => break,
                 () = tokio::time::sleep(DRAIN_POLL) => {}
             }
+        }
+        if segment.admitted() == 0 {
+            stopping.drained();
         }
         self.pool_entry_drained(segment, deadline, hub).await;
     }
@@ -1536,6 +1598,13 @@ impl Process {
             () = self.stops(1) => Err(Error::new(ErrorKind::Cancelled, "stopped while starting").into()),
             result = start => result,
         }
+    }
+
+    /// Resolves once something has asked this process to stop: the one
+    /// thing a stop waits on, so that what else may ask joins here. It
+    /// says nothing of a second stop, which counts signals.
+    async fn asked_to_stop(&self) {
+        self.stops(1).await;
     }
 
     /// Resolves once `n` stop signals have come.

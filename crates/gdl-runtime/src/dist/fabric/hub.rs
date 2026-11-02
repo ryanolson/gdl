@@ -453,6 +453,13 @@ impl HubSession {
         }
     }
 
+    /// This registration's epoch: a registration after a hub's recovery
+    /// has another. `None` once the instance holds none.
+    pub(crate) fn epoch(&self) -> Option<u128> {
+        let registered = self.client.registration()?;
+        Some(registered.epoch.as_uuid().as_u128())
+    }
+
     /// Leave the hub at once, rather than when the lease runs out, so that
     /// no peer's drain waits for this instance.
     pub(crate) async fn leave(&self) {
@@ -1493,4 +1500,4 @@ mod records;
 mod unanswered;
 
 pub(crate) use chooser::ChooserHub;
-pub(crate) use pool::{Parent, PoolDrain};
+pub(crate) use pool::{Parent, PoolDrain, Unreached};

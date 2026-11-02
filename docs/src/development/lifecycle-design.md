@@ -110,6 +110,32 @@ Once the grace has passed, or (B) holds, X closes its entries before it waits fo
 
 **Rejected: velo's `begin_drain` as the close.** It refuses every new inbound request, including the attaches that the instance's own requests still need.
 
+## Leave hooks start at the stop
+
+Every hook starts at the stop, beside the serving body's shutdown, and `Leave::routing` is a watch it awaits. A request that needs a hook to start therefore never waits on routing, and a hook never starts late or at the wrong time. A hook that hands off state waits for routing. A hook that only flushes need not.
+
+Handoff and drain are two tracks. The drain finishes the requests the instance holds. A hook moves state. Neither blocks the other's start, and both block the exit. A hook's outcome changes efficiency, never correctness: state a hook did not move is found missing later, by the path that exists for a crash.
+
+**Rejected: hooks after the drain.** A long request delays the hand-off, and the two share one bound.
+
+**Rejected: hooks fired at the routing event, by a watcher.** Each design of this kind had a case where the hook fired at the wrong time or late: a stop during the barrier, an entry that does not retire, a retirement delayed by its report. Starting every hook at the stop removes that class of case.
+
+**Rejected: hooks fired inside `drain()`.** `drain()` starts only once the serving body returns, so a frontend's hooks would wait behind its own requests.
+
+**Rejected: preStop as the signal.** It spends the pod's grace twice: the countdown starts before preStop, and SIGTERM comes only after it.
+
+**Rejected: a `Build::leave` method.** The hosts move into `start`, and the runtime holds no typed node. A handle follows `OfferGate`, `InstanceProperties`, and `InstanceKv`.
+
+## One observer of (A) and (B)
+
+An observer asks the hub or the roster directory for (A) and (B), and publishes each answer. The drain reads the answers instead of asking, and a hook reads them as `routing()`. So the hub is asked once, and nothing waits on the serving body.
+
+The observer is a future polled beside each stage of the stop, not a task. With hooks it asks from the end of the retirement. With no hook it asks only once the drain's wait begins, so that a long serving body costs the hub no extra questions.
+
+A hook must not change the drain. The observer can therefore read a promise long before the drain's wait begins, and the drain counts its `setup_timeout` from whichever is later. The sources that (B) counts are fixed as the wait begins, and an answer read before then does not stand: a pool's drain learned in between changes them.
+
+Every time derives from the stop's one instant. The fallback runs from the stop, not from the retirement, because a retirement can come late: an entry instance first waits for its hub to answer a drain report, for up to two report periods. When the fallback comes, it reads an entry's parent bound again: by default the two pass together, and the bound is the better reason.
+
 ## The tail of a stream
 
 A stream holds its request's admission share and egress permit until velo's `StreamSender::retired()` resolves. An empty ledger then means that the instance's output has left the node.
@@ -142,6 +168,7 @@ The lifecycle spawns no task, and arms no timer, per request or per stream. A ta
 - The closed check runs in the handler that already admits the request.
 - The drain polls the ledger every 50 ms. Nothing is added to the release path.
 - Each instance runs one follower task. It keeps delayed velo unregistrations itself, with no task per peer.
+- Each leave hook runs in one task, from the stop. A hook in a task of its own can be timed out even if it blocks its thread, and its panic is its own outcome. An instance with no hook has no such task.
 
 velo's own discovery path spawns a task per message sent to a worker it has not resolved yet. The follower registers joiners as they become ready, so that happens only in the moment before it has.
 

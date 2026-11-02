@@ -97,6 +97,16 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** a hand-off a peer sent just before its promise may still be on its way. The setup timeout is the longest it may take.
 - **Workaround:** a shorter `setup_timeout_ms`. It also bounds every other setup step.
 
+### A leave hook is not guaranteed to run
+- **What:** a crash, a SIGKILL, or a second stop ends a hook. A stop before the instance serves, while its nodes load or its instances meet, starts none. A barrier that fails starts none either.
+- **Why:** a hook is an optimization. State it did not move is found missing later, as after a crash.
+- **Workaround:** keep correctness on the path a crash takes. See [Leaving](../concepts/lifecycle.md#leaving).
+
+### A hook's move does not steer the next request
+- **What:** from the stop, the next request for a session can route elsewhere before a hook's move lands, so it finds nothing there.
+- **When:** a hook that hands off state such as a KV cache. A hook that flushes or cleans up is not affected.
+- **Workaround:** accept the cold request, or have the hook choose the destination and make the router follow it.
+
 ### The last instance of a segment is not avoided
 - **What:** when every instance of a segment stops, or the only one does, its peers keep routing to it, since nothing else serves. It drains once the sources that can reach it have drained, or at the drain's bound.
 - **Workaround:** start a new instance first. Once it is ready, the peers avoid the retired one, which then leaves.

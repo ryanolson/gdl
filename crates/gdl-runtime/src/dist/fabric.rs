@@ -13,7 +13,7 @@ pub use hub::HubSession;
 #[cfg(feature = "hub")]
 pub(crate) use hub::bind_under_hub;
 #[cfg(feature = "hub")]
-pub(crate) use hub::{ChooserHub, HubAsker, Parent, PoolDrain};
+pub(crate) use hub::{ChooserHub, HubAsker, Parent, PoolDrain, Unreached};
 #[cfg(test)]
 pub(crate) use refusing::Refusing;
 

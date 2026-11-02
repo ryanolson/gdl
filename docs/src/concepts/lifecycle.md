@@ -15,6 +15,7 @@ An instance passes through these phases. Each phase is a fact that the instance 
 | serving | the instance's handlers are installed | `gdl-serving-<segment>` | `serving/<segment>.<id>` |
 | ready | the barrier passed and the instance routes | `gdl-ready-<segment>` | none |
 | retired | the instance was stopped | `gdl-retired-<segment>` | `retired/<segment>.<id>` |
+| leaving | the instance's leave hooks run, from the stop | none | none |
 | drained | a source instance has finished its requests | `gdl-drained-<segment>` | `drained/<segment>.<id>` |
 | detached | an instance of a draining pool will send no more work into the pool | `gdl-detach-<segment>` | none |
 | left | the instance has gone | unregistration | `left/<segment>.<id>` |
@@ -133,11 +134,65 @@ A deployment-wide stop, such as `docker compose down`, takes the same path. Once
 
 The drain bound is `[runtime] drain_ms`, which defaults to the runtime's `default_deadline` (600 s). It bounds every wait: the serving body, the wait for (A) and its `setup_timeout`, (B), and the ledger. The retirement waits for its hub for at most a quarter of the bound, and at most 5 s, so a hub that does not answer leaves the drain the rest. A request whose own deadline is longer than the bound is cut at the bound. The exit can pass the bound by up to about 8.5 s. velo's shutdown gets what is left of the bound, but at least 1 s, to finish its requests. Then velo closes its TCP connections: up to 1.5 s to write what is already queued, and up to 1 s to close its listener. Leaving a hub that does not answer takes up to 5 s. An idle node whose hub answers stops at once.
 
-A stop during the barrier retires the instance too, without running the serving body. The instance has already said that it serves, so peers may route to it.
+A stop during the barrier retires the instance too, without running the serving body. The instance has already said that it serves, so peers may route to it. Its leave hooks start as at any other stop.
 
 ### A lost lease
 
 Under a hub, a lost lease stops the instance as a stop does. It skips (A) and (B), because the hub that would answer them is gone. It still waits for its own ledger. The process exits with the lease's error, and the deployment must start it again. [Discovery: rosters and the hub](hub.md) describes the lease.
+
+### Leaving
+
+A node can register a leave hook ([Write nodes](../guides/write-nodes.md#run-code-when-the-instance-leaves)). Every hook starts at the stop, on every way to it, and runs beside the serving body's shutdown, the retirement, and the drain. The process exits only when the hooks and the drain are done or out of time. The first `Launch::serve` call closes registration. A stop before that, while the nodes load or the instances meet, starts no hook: the instance has served nothing. A barrier that fails is not a stop, and exits as a crash does.
+
+```mermaid
+sequenceDiagram
+    participant S as The stop
+    participant X as Runtime
+    participant N as Node's hook
+    participant P as Peers
+    S->>X: first stop
+    X->>N: start (cause, external, deadline, cx)
+    X->>P: retire
+    P-->>X: acknowledge
+    X-->>N: routing: Confirmed
+    N->>N: hand off state
+    X->>X: wait for A or B, close, empty ledger
+    X-->>N: drained()
+    N-->>X: Handoff
+    X->>X: leave
+```
+
+A hook gets a `gdl::Leave`:
+
+| Part | Meaning |
+|---|---|
+| `cause()` | what stopped the instance: `Stop`, `PoolDrain`, or `LeaseLost` |
+| `external()` | whether the segment hosts a source: a frontend, a service entry, or a JSON-lines source |
+| `routing()` | a watch: `Pending`, then one other value, once |
+| `deadline()` | when the hook's time ends |
+| `cx()` | a context, cancelled at the deadline or on a forced stop |
+| `drained()` | resolves when the instance has closed and holds no request |
+| `fence()` | the instance's id and its registration's epoch, which effects outside the process carry |
+
+`routing()` says how sure the runtime is that no new routing decision picks this instance:
+
+| It reads | When |
+|---|---|
+| `Confirmed` | every sender has acknowledged, and an entry instance's following pools said that they avoid it. Also: nothing in gdl sends here, at once; a pool's entry instance that its hub says no pool follows; an interior instance of a draining pool whose senders detached |
+| `SourcesDone` | (B) holds |
+| `Unconfirmed(ParentTimeout)` | an entry instance's following pools did not answer within their bound, or its pool's drain reached its bound with another pool still following. A chooser with a stale view can still offer, and the entry declines |
+| `Unconfirmed(LeaseLost)` | the lease was lost, at any point in the stop |
+| `Unconfirmed(Bound)` | none of these came by the fallback time: the last instance of a segment, a last interior instance reached from another class, or a retirement the hub did not take |
+
+The fallback time is the earlier of `leave_after_ms` after the retirement and half of `drain_ms` after the stop. So a late retirement cannot push it past the drain's bound.
+
+`Confirmed` says that peers will not pick the instance. It does not say that the instance is quiet. A hand-off sent before a peer's promise can still arrive, and a pool's entry instance still takes hand-offs from inside its pool. `external` is apart from `routing()`, because a sender's promise says nothing of a Service, a load balancer, or an open connection. A segment can read `Confirmed` with `external` true. A hook must do nothing destructive until `routing()` reads `Confirmed` or `SourcesDone` with `external` false, or until `drained()` resolves.
+
+A hook's deadline is `leave_ms` after the stop, and at most the drain's bound. At the deadline, the runtime cancels `cx()`, records `timed_out`, and goes on without waiting for the hook. A second stop ends everything at once, as it does the drain. A crash skips the hooks, so a hook is never relied on. Each hook runs once per process.
+
+Each hook's outcome is on `/metrics` as `leave_outcome{hook,outcome}`, and in one log line ([Reading a drain](../operations/observability.md#reading-a-drain)).
+
+An instance with no hook starts no task for this, and its stop runs as this chapter describes without it.
 
 ### Pools
 
@@ -145,4 +200,4 @@ Under a hub, an instance in a pool also stops when its pool drains, once no more
 
 ## Limits
 
-[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a request the hub does not answer holds back the instance's later requests to it, and a hub that does not confirm the withdrawals is not told of the retirement, the last instance of a segment is not avoided, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.
+[Known limitations](../operations/limitations.md) lists the limits of this lifecycle: only a hub lets an instance join, a retirement takes at least `setup_timeout`, a request the hub does not answer holds back the instance's later requests to it, and a hub that does not confirm the withdrawals is not told of the retirement, the last instance of a segment is not avoided, a leave hook does not run on a crash, a crashed instance holds a roster-directory drain until its bound, and a drain cut short can lose output that velo still holds.
