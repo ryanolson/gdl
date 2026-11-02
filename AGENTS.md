@@ -31,6 +31,8 @@ timeout <limit> cargo nextest run --workspace     # full suite
 timeout <limit> cargo nextest run -p <crate> --test <t>   # one target
 timeout <limit> cargo test --workspace --doc      # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside cargo
+timeout <limit> uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/book/tests    # the heading check
+timeout <limit> uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/bench/tests   # the bench runner (needs gcc)
 (cd examples/http && timeout <limit> cargo nextest run)  # the example workspaces are outside the root workspace
 (cd examples/api && timeout <limit> cargo nextest run)
 bash scripts/build-book.sh                         # the book, with its link and heading checks (INSTALL_TOOLS=1 fetches or builds the tools)
@@ -70,6 +72,7 @@ The suite runs on every change, so its speed is part of its correctness.
 - Every velo call lives in the runtime's velo module. `gdl` never depends on velo: a node crate must build without the transport (`crates/gdl/tests/dependencies.rs`). Generated code and node implementations never call velo directly.
 - The operator (`gdl-operator`) talks only to the Kubernetes API and to a pool hub's HTTP routes. It never links velo or `gdl-watch` (`crates/gdl-operator/tests/dependencies.rs`).
 - Responses are never correlated through a map or a request id. They reach their consumer through a minted stream anchor or a return value.
+- Python runs through uv. Each script has a PEP 723 header (`requires-python`, `dependencies`) and runs as `uv run --script <path>`; its tests run as `uv run -q --no-project --python '>=3.8' python -m unittest discover -s <dir>`. No command, doc, or CI step calls `python3` or `python` directly. A snippet that reads a download or an example keeps `-I`: `uv run -q --no-project --python '>=3.8' python -I -c '...'`. CI installs uv with the pinned `astral-sh/setup-uv` and sets `UV_PYTHON_PREFERENCE=only-managed`, so it never falls back to the runner's Python. A shell script that needs uv checks for it first and stops with one line that names uv and its install page.
 - Performance is a correctness property: no global locks on the hot path; per-request bookkeeping (the admission ledger) is sharded and touched only at segment entry and retirement; measure before claiming a speedup.
 
 ## Commits
