@@ -5,6 +5,7 @@
 //! and tested here rather than in each generated crate.
 
 mod barrier;
+mod observer;
 mod origins;
 mod pool;
 mod reserved;
@@ -27,7 +28,7 @@ use serde::de::DeserializeOwned;
 use velo::Velo;
 
 use crate::dist::{
-    Roster, RuntimeConfig, Segment, SegmentLoad, announce, announced, follow_directory, shut_down,
+    Roster, RuntimeConfig, Segment, SegmentLoad, announce, follow_directory, shut_down,
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
@@ -579,7 +580,8 @@ impl<H> ProcessConfig<H> {
                         host,
                         *public_port,
                         &self.runtime,
-                    )?;
+                    )?
+                    .map(Arc::new);
                     if let Some(drain) = &pool_drain {
                         process.health.avoided_by(drain.avoided());
                     }
@@ -735,7 +737,7 @@ pub struct Launch {
     /// For an instance in a pool under a hub, its part in its pool's
     /// drain.
     #[cfg(feature = "hub")]
-    pool_drain: Option<crate::dist::PoolDrain>,
+    pool_drain: Option<Arc<crate::dist::PoolDrain>>,
     /// Whether the instance has said that it detached from its draining
     /// pool.
     #[cfg(feature = "hub")]
@@ -992,7 +994,8 @@ impl Launch {
                     () = self.retire(deadline) => {}
                 }
                 let cutoff = Box::pin(self.pool_cutoff(deadline, false).fuse());
-                (Err(stopped), Ok(()), deadline, cutoff)
+                let observer = self.observer(deadline);
+                (Err(stopped), Ok(()), deadline, cutoff, observer)
             }
             Some(Ok(())) => {
                 self.roster.release();
@@ -1095,14 +1098,16 @@ impl Launch {
                     () = process.stops(2) => return Err(second()),
                     all = async { tokio::join!(finished, retiring, closing) } => all,
                 };
-                (result, stop, deadline, cutoff)
+                let observer = self.observer(deadline);
+                (result, stop, deadline, cutoff, observer)
             }
         };
-        let (result, stop, deadline, mut cutoff) = stopped;
+        let (result, stop, deadline, mut cutoff, (observing, mut asking)) = stopped;
         // A lost lease takes the hub's answers, not this instance's own
         // requests: those are still waited for.
         tokio::select! {
-            () = self.drain(segment.as_ref(), deadline, stop.is_ok(), cutoff.as_mut()) => {}
+            () = self.drain(segment.as_ref(), &observing, deadline, stop.is_ok(), cutoff.as_mut()) => {}
+            never = asking.as_mut() => match never {},
             () = process.stops(2) => return Err(second()),
         }
         let left = deadline
@@ -1166,10 +1171,13 @@ impl Launch {
     /// pool's entry instances, so that an entry instance too takes the
     /// hand-offs inside the pool until no entry instance holds a request
     /// that may make one. With `hub` false (its lease is lost), the hub is
-    /// not asked. Polls; nothing is added to a request's path.
+    /// not asked. `observing` says what (A) and (B) are: the drain only
+    /// reads it, and something beside the drain polls the observer. Polls;
+    /// nothing is added to a request's path.
     async fn drain(
         &mut self,
         segment: &dyn Drains,
+        observing: &observer::Observing,
         deadline: tokio::time::Instant,
         // Only a hub is asked; a roster directory has no lease to lose.
         hub: bool,
@@ -1179,16 +1187,9 @@ impl Launch {
         mut cutoff: std::pin::Pin<&mut futures::future::Fuse<impl Future<Output = ()>>>,
     ) {
         self.pool_drain_settles(segment, deadline, hub).await;
-        let sources = self.drain_sources();
-        let blind = sources.is_none();
-        let reaching: Vec<&str> = sources.iter().flatten().map(String::as_str).collect();
-        #[cfg(feature = "hub")]
-        let parent = self.pool_parent();
         let declining = self.pool_declining(segment);
         #[cfg(feature = "hub")]
         let (source_drains_early, declines) = (self.source_drains_early(), self.pool_declines());
-        let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
-        let me = self.node.instance_id();
         let pause = |every: Duration| async move {
             if tokio::time::Instant::now() + every > deadline {
                 return false;
@@ -1196,10 +1197,8 @@ impl Launch {
             tokio::time::sleep(every).await;
             true
         };
-        // When (A) first held. With no sender, nothing routes here, and
-        // (A) holds at once.
-        let mut avoided: Option<tokio::time::Instant> = None;
-        let (setup, unsent) = (self.setup, senders.is_empty());
+        // With no sender, nothing routes here, and (A) holds at once.
+        let (setup, unsent) = (self.setup, self.senders.is_empty());
         let settled = move |avoided: Option<tokio::time::Instant>| {
             unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at + setup)
         };
@@ -1209,34 +1208,13 @@ impl Launch {
                     if self.source {
                         let _ = announce(dir, "drained", self.segment, &self.node);
                     }
-                    // A roster directory's rosters are the same everywhere, so
-                    // this one names every instance to wait for. Reading a
-                    // local directory every 50 ms blocks the runtime for
-                    // microseconds; a roster directory is for local runs.
-                    let ids = |segments: &[&str]| -> std::collections::BTreeSet<String> {
-                        self.roster
-                            .segments()
-                            .filter(|(segment, _)| segments.contains(segment))
-                            .flat_map(|(_, peers)| peers)
-                            .map(|peer| peer.instance_id().to_string())
-                            .filter(|id| *id != me.to_string())
-                            .collect()
-                    };
-                    let (sources, sending) = (ids(&reaching), ids(&senders));
-                    let avoiding = format!("avoids/{me}");
+                    observing.begin_drain();
                     loop {
-                        let left = announced(dir, "left").unwrap_or_default();
-                        let done = |phase: &str, want: &std::collections::BTreeSet<String>| {
-                            announced(dir, phase).is_ok_and(|mut done| {
-                                done.extend(left.iter().cloned());
-                                want.is_subset(&done)
-                            })
-                        };
-                        let drained = !blind && done("drained", &sources);
-                        if avoided.is_none() && done(&avoiding, &sending) {
-                            avoided = Some(tokio::time::Instant::now());
-                        }
-                        if drained || settled(avoided) || !pause(DRAIN_POLL).await {
+                        let answers = observing.answers();
+                        if answers.drained
+                            || settled(answers.avoided)
+                            || !observing.changed_within(pause(DRAIN_POLL)).await
+                        {
                             break;
                         }
                     }
@@ -1246,15 +1224,10 @@ impl Launch {
                     if source_drains_early {
                         let _ = session.drained(deadline).await;
                     }
-                    // Rosters differ under a hub, so the hub's members are
-                    // asked, not this instance's roster: one that joined later
-                    // may route here too. Each question is bounded by the
-                    // deadline, since a hub can stop answering without closing
-                    // its connections; a lease lost meanwhile ends the wait.
+                    observing.begin_drain();
                     loop {
-                        // A lost lease is looked at first, and ends a question
-                        // in flight: the hub that would answer it is gone.
-                        if session.is_lost() || settled(avoided) {
+                        let answers = observing.answers();
+                        if answers.lost || settled(answers.avoided) {
                             break;
                         }
                         // Declined first, so that no offer is taken after
@@ -1268,33 +1241,8 @@ impl Launch {
                                 let _ = session.drained(bound).await;
                             }
                         }
-                        let ask = async {
-                            // A blind instance asks too, for a drain of its
-                            // pool that it learns of while it waits.
-                            let drained = (!blind
-                                && (reaching.is_empty() || session.all_drained(&reaching).await?))
-                                || match &self.pool_drain {
-                                    Some(pool) => pool.unreached(session).await?,
-                                    None => false,
-                                };
-                            let avoiding = avoided.is_some()
-                                || (parent() && session.all_avoid(me, &senders).await?);
-                            Ok::<_, Error>((drained, avoiding))
-                        };
-                        let asked = tokio::select! {
-                            biased;
-                            _ = session.maintain() => break,
-                            asked = tokio::time::timeout_at(deadline, ask) => asked,
-                        };
-                        let (drained, avoiding) = match asked {
-                            Ok(Ok(answer)) => answer,
-                            _ => (false, false),
-                        };
-                        if avoided.is_none() && avoiding {
-                            avoided = Some(tokio::time::Instant::now());
-                        }
-                        let done = drained || settled(avoided);
-                        if done || !pause(crate::dist::HubSession::poll()).await {
+                        let poll = crate::dist::HubSession::poll();
+                        if answers.drained || !observing.changed_within(pause(poll)).await {
                             break;
                         }
                     }
@@ -1302,6 +1250,7 @@ impl Launch {
                 #[cfg(feature = "hub")]
                 Peers::Hub(_) => {}
             }
+            observing.over();
         };
         // The cutoff runs beside the waiting, whose questions to the hub
         // may stall up to the deadline; it never ends.

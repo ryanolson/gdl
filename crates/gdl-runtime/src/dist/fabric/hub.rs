@@ -353,41 +353,6 @@ impl HubSession {
         Ok(())
     }
 
-    /// Whether every member of `senders` that announced `loaded`,
-    /// `serving`, or `retired` avoids `me`: it has promised never to route
-    /// to it again. A member that left is no longer one. `serving` holds a
-    /// sender that is retiring itself, between the withdrawal of its
-    /// `loaded` and its `retired`. A member that announced none of them
-    /// reads its roster, and follows membership, only after this
-    /// instance's retirement, so it never routes here.
-    pub(crate) async fn all_avoid(&self, me: InstanceId, senders: &[&str]) -> Result<bool> {
-        let members = self.members().await?;
-        let mut routing = HashSet::new();
-        for segment in senders {
-            for phase in [
-                SegmentPhase::Loaded,
-                SegmentPhase::Serving,
-                SegmentPhase::Retired,
-            ] {
-                routing.extend(self.instances(segment, phase).await?);
-            }
-        }
-        let avoiding: HashSet<InstanceId> = self
-            .client
-            .services()
-            .get_instances(&avoids(me))
-            .await
-            .map_err(failure)?
-            .into_iter()
-            .collect();
-        Ok(members
-            .iter()
-            .filter(|m| senders.contains(&m.registration.segment.as_str()))
-            .map(|m| m.peer.instance_id())
-            .filter(|id| *id != me && routing.contains(id))
-            .all(|id| avoiding.contains(&id)))
-    }
-
     /// Follow membership into `live`, the state of the roster this instance
     /// routes with, until the session ends: one task for the instance, not
     /// one per request or per peer. `segments` are every
@@ -478,34 +443,6 @@ impl HubSession {
         Ok(())
     }
 
-    /// Whether every current member of `segments` has announced that it
-    /// detached: it sends no more work into its draining pool. A member of
-    /// one of `entries` may have announced that it drained instead, which
-    /// an entry of a draining pool does only once it holds no request; a
-    /// source elsewhere drains once its serving body ends, while its
-    /// segment may still hand work on. A member that left is no longer
-    /// one, so it is not waited for.
-    pub(crate) async fn all_detached(&self, segments: &[&str], entries: &[&str]) -> Result<bool> {
-        let members = self.members().await?;
-        let mut detached = HashSet::new();
-        for segment in segments {
-            detached.extend(self.instances(segment, SegmentPhase::Detached).await?);
-            if entries.contains(segment) {
-                detached.extend(self.instances(segment, SegmentPhase::Drained).await?);
-            }
-        }
-        Ok(members
-            .iter()
-            .filter(|m| segments.contains(&m.registration.segment.as_str()))
-            .all(|m| detached.contains(&m.peer.instance_id())))
-    }
-
-    /// Whether every current member of `segments` has announced `drained`.
-    /// A member that left is no longer one, so it is not waited for.
-    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
-        all_drained(&self.client, &self.registration, segments).await
-    }
-
     /// What a wait beside the drain asks the hub, apart from the session,
     /// so that the wait borrows none of it.
     pub(crate) fn asker(&self) -> HubAsker {
@@ -520,11 +457,6 @@ impl HubSession {
     /// no peer's drain waits for this instance.
     pub(crate) async fn leave(&self) {
         let _ = tokio::time::timeout(POLL * 50, self.client.unregister()).await;
-    }
-
-    /// Whether the lease is lost.
-    pub(crate) fn is_lost(&self) -> bool {
-        self.lost().is_err()
     }
 
     /// How long to wait between two questions to the hub.
@@ -572,14 +504,7 @@ impl HubSession {
 
     /// The instances of `segment` in `phase`.
     async fn instances(&self, segment: &str, phase: SegmentPhase) -> Result<HashSet<InstanceId>> {
-        Ok(self
-            .client
-            .services()
-            .get_instances(&segment_service(segment, phase))
-            .await
-            .map_err(failure)?
-            .into_iter()
-            .collect())
+        instances(&self.client, segment, phase).await
     }
 
     /// The members that have announced `loaded` and not `retired`, as a
@@ -637,9 +562,9 @@ impl Drop for HubSession {
     }
 }
 
-/// The members of the deployment `registration` belongs to, from the hub.
 /// The questions a wait beside an instance's drain asks its hub, held
 /// apart from its [`HubSession`].
+#[derive(Clone)]
 pub(crate) struct HubAsker {
     client: HubClient,
     registration: SegmentRegistration,
@@ -652,36 +577,103 @@ impl HubAsker {
         self.lost.borrow().is_some()
     }
 
-    /// [`HubSession::all_drained`].
-    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
-        all_drained(&self.client, &self.registration, segments).await
+    /// Resolves when the lease is lost.
+    pub(crate) async fn lost(&self) {
+        let mut lost = self.lost.clone();
+        if lost.wait_for(|lost| lost.is_some()).await.is_err() {
+            // The lease task is gone only with the session.
+            std::future::pending::<()>().await;
+        }
     }
-}
 
-/// Whether every current member of `segments` has announced `drained`. A
-/// member that left is no longer one, so it is not waited for.
-async fn all_drained(
-    client: &HubClient,
-    registration: &SegmentRegistration,
-    segments: &[&str],
-) -> Result<bool> {
-    let members = members(client, registration).await?;
-    let mut drained = HashSet::new();
-    for segment in segments {
-        let name = segment_service(segment, SegmentPhase::Drained);
-        let instances = client
+    /// Whether every member of `senders` that announced `loaded`,
+    /// `serving`, or `retired` avoids `me`: it has promised never to route
+    /// to it again. A member that left is no longer one. `serving` holds a
+    /// sender that is retiring itself, between the withdrawal of its
+    /// `loaded` and its `retired`. A member that announced none of them
+    /// reads its roster, and follows membership, only after this
+    /// instance's retirement, so it never routes here.
+    pub(crate) async fn all_avoid(&self, me: InstanceId, senders: &[&str]) -> Result<bool> {
+        let members = members(&self.client, &self.registration).await?;
+        let mut routing = HashSet::new();
+        for segment in senders {
+            for phase in [
+                SegmentPhase::Loaded,
+                SegmentPhase::Serving,
+                SegmentPhase::Retired,
+            ] {
+                routing.extend(instances(&self.client, segment, phase).await?);
+            }
+        }
+        let avoiding: HashSet<InstanceId> = self
+            .client
             .services()
-            .get_instances(&name)
+            .get_instances(&avoids(me))
             .await
-            .map_err(failure)?;
-        drained.extend(instances);
+            .map_err(failure)?
+            .into_iter()
+            .collect();
+        Ok(members
+            .iter()
+            .filter(|m| senders.contains(&m.registration.segment.as_str()))
+            .map(|m| m.peer.instance_id())
+            .filter(|id| *id != me && routing.contains(id))
+            .all(|id| avoiding.contains(&id)))
     }
-    Ok(members
-        .iter()
-        .filter(|m| segments.contains(&m.registration.segment.as_str()))
-        .all(|m| drained.contains(&m.peer.instance_id())))
+
+    /// Whether every current member of `segments` has announced that it
+    /// detached: it sends no more work into its draining pool. A member of
+    /// one of `entries` may have announced that it drained instead, which
+    /// an entry of a draining pool does only once it holds no request; a
+    /// source elsewhere drains once its serving body ends, while its
+    /// segment may still hand work on. A member that left is no longer
+    /// one, so it is not waited for.
+    pub(crate) async fn all_detached(&self, segments: &[&str], entries: &[&str]) -> Result<bool> {
+        let members = members(&self.client, &self.registration).await?;
+        let mut detached = HashSet::new();
+        for segment in segments {
+            detached.extend(instances(&self.client, segment, SegmentPhase::Detached).await?);
+            if entries.contains(segment) {
+                detached.extend(instances(&self.client, segment, SegmentPhase::Drained).await?);
+            }
+        }
+        Ok(members
+            .iter()
+            .filter(|m| segments.contains(&m.registration.segment.as_str()))
+            .all(|m| detached.contains(&m.peer.instance_id())))
+    }
+
+    /// Whether every current member of `segments` has announced `drained`.
+    /// A member that left is no longer one, so it is not waited for.
+    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
+        let members = members(&self.client, &self.registration).await?;
+        let mut drained = HashSet::new();
+        for segment in segments {
+            drained.extend(instances(&self.client, segment, SegmentPhase::Drained).await?);
+        }
+        Ok(members
+            .iter()
+            .filter(|m| segments.contains(&m.registration.segment.as_str()))
+            .all(|m| drained.contains(&m.peer.instance_id())))
+    }
 }
 
+/// The instances of `segment` in `phase`.
+async fn instances(
+    client: &HubClient,
+    segment: &str,
+    phase: SegmentPhase,
+) -> Result<HashSet<InstanceId>> {
+    Ok(client
+        .services()
+        .get_instances(&segment_service(segment, phase))
+        .await
+        .map_err(failure)?
+        .into_iter()
+        .collect())
+}
+
+/// The members of the deployment `registration` belongs to, from the hub.
 async fn members(client: &HubClient, registration: &SegmentRegistration) -> Result<Vec<Member>> {
     let members: Vec<Member> = client.ext("gdl").get("/members").await.map_err(failure)?;
     for member in &members {

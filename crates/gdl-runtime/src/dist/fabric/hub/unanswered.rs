@@ -255,7 +255,7 @@ async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
             .expect("serving"),
     );
     let me = sink_node.instance_id();
-    assert!(!sink.all_avoid(me, &["front"]).await.expect("asked"));
+    assert!(!sink.asker().all_avoid(me, &["front"]).await.expect("asked"));
 
     // The front withdraws `loaded`, as a retirement does first, and has
     // not announced `retired` yet.
@@ -269,7 +269,7 @@ async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
         .expect("the hub answers");
     assert!(!loaded.contains(&node.instance_id()));
     assert!(
-        !sink.all_avoid(me, &["front"]).await.expect("asked"),
+        !sink.asker().all_avoid(me, &["front"]).await.expect("asked"),
         "the sink took a sender that still routes to it for one that avoids it"
     );
 
@@ -279,7 +279,7 @@ async fn a_sender_between_its_withdrawal_and_its_retirement_is_waited_for() {
         .register_service(&super::avoids(me))
         .await
         .expect("promised");
-    assert!(sink.all_avoid(me, &["front"]).await.expect("asked"));
+    assert!(sink.asker().all_avoid(me, &["front"]).await.expect("asked"));
     hub.shutdown().await.expect("the hub stopped");
 }
 

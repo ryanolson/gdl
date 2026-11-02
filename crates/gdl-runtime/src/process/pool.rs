@@ -15,7 +15,7 @@ impl Launch {
     pub(super) async fn pool_drain_stops(&self) {
         #[cfg(feature = "hub")]
         if let (Peers::Hub(session), Some(pool)) = (&self.peers, &self.pool_drain) {
-            return pool.stops(session).await;
+            return pool.stops(&session.asker()).await;
         }
         std::future::pending().await
     }
@@ -29,45 +29,13 @@ impl Launch {
         true
     }
 
-    /// The segments whose instances are this one's drain sources: while
-    /// its pool drains, the pool's entry segments, for an entry instance
-    /// too; otherwise those hosting a source that can reach it. `None` when
-    /// their drain cannot be seen from here, for an instance that a source
-    /// of another class reaches: the drain of the sources' requests (B)
-    /// then never holds, and the instance waits for its senders, and an
-    /// entry instance for its parent too (A).
-    pub(super) fn drain_sources(&self) -> Option<Vec<String>> {
-        #[cfg(feature = "hub")]
-        if let Some(pool) = &self.pool_drain {
-            if let Some(sources) = pool.sources() {
-                return Some(sources.to_vec());
-            }
-            if pool.blind() {
-                return None;
-            }
-        }
-        Some(self.reaching.clone())
-    }
-
     /// The instance retires now: from here an entry instance in a pool
     /// counts its wait for the pools that follow its pool.
-    pub(super) fn pool_retires(&mut self) {
+    pub(super) fn pool_retires(&self) {
         #[cfg(feature = "hub")]
-        if let Some(pool) = &mut self.pool_drain {
+        if let Some(pool) = &self.pool_drain {
             pool.retire();
         }
-    }
-
-    /// Whether the pools that follow this instance's pool may be taken to
-    /// avoid it, asked by (A) at each poll: for an entry instance that
-    /// retired, once its hub says they do, or, while its pool drains, that
-    /// none follows it, or the bound has passed since it retired and since
-    /// it learned of a drain; for any other, always. What it reads
-    /// is taken now, so that the question borrows nothing of the launch.
-    #[cfg(feature = "hub")]
-    pub(super) fn pool_parent(&self) -> impl Fn() -> bool + use<> {
-        let parent = self.pool_drain.as_ref().and_then(|pool| pool.parent());
-        move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
     }
 
     /// Whether this instance, a retired entry instance, now declines
@@ -288,9 +256,10 @@ impl Launch {
                 if segment.senders() > 0 {
                     return;
                 }
+                let asker = session.asker();
                 let asked = tokio::time::timeout(
                     crate::dist::HubSession::poll() * 10,
-                    pool.senders_detached(session),
+                    pool.senders_detached(&asker),
                 );
                 if !matches!(asked.await, Ok(Ok(true))) {
                     return;

@@ -117,7 +117,7 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     let me = InstanceId::new_v4();
     let (learns, learned) = watch::channel(Learned::default());
     let watcher = PoolWatcher::new().expect("a client");
-    let mut drain = super::PoolDrain {
+    let drain = super::PoolDrain {
         learned,
         role: super::Role::Entry { bound: BOUND },
         entries: vec!["f".into()],
@@ -126,7 +126,7 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         #[cfg(feature = "fault-injection")]
         stalls: false,
         foreign: false,
-        retired: None,
+        retired: Default::default(),
         watch: tokio::spawn(run(
             watcher,
             server.address.clone(),
@@ -155,7 +155,7 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     .drain
     .expect("a drain");
     drain.retire();
-    let retired = drain.retired.expect("retired");
+    let retired = *drain.retired.get().expect("retired");
     drop(first);
 
     let declining = drain

@@ -17,6 +17,7 @@
 //! for a stop: an instance that a source of another class reaches never
 //! counts that source as drained, and waits for its senders to avoid it.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -29,7 +30,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use velo::InstanceId;
 
-use super::HubSession;
+use super::{HubAsker, HubSession};
 use crate::dist::pools::{REWATCH, REWATCH_CAP};
 
 #[cfg(test)]
@@ -58,7 +59,7 @@ pub(crate) struct PoolDrain {
     /// another class, so that its instances are on another hub.
     foreign: bool,
     /// When the instance retired, once it has.
-    retired: Option<Instant>,
+    retired: OnceLock<Instant>,
     watch: JoinHandle<()>,
 }
 
@@ -247,7 +248,7 @@ impl PoolDrain {
             #[cfg(feature = "fault-injection")]
             stalls: runtime.faults.stall_detached,
             foreign,
-            retired: None,
+            retired: OnceLock::new(),
             watch,
         }))
     }
@@ -267,20 +268,20 @@ impl PoolDrain {
     }
 
     /// The instance retired now, if it had not already.
-    pub(crate) fn retire(&mut self) {
-        self.retired.get_or_insert_with(Instant::now);
+    pub(crate) fn retire(&self) {
+        self.retired.get_or_init(Instant::now);
     }
 
     /// For an entry instance that retired: what its drain waits for before
     /// the pools that follow its pool can be taken to avoid it. `None` for
     /// any other instance, which waits for no pool outside its own.
     pub(crate) fn parent(&self) -> Option<Parent> {
-        let (Role::Entry { bound }, Some(retired)) = (&self.role, self.retired) else {
+        let (Role::Entry { bound }, Some(retired)) = (&self.role, self.retired.get()) else {
             return None;
         };
         Some(Parent {
             learned: self.learned.clone(),
-            retired,
+            retired: *retired,
             bound: *bound,
         })
     }
@@ -298,9 +299,9 @@ impl PoolDrain {
     /// Resolves when the pool's drain begins this instance's stop: an entry
     /// instance's once it declines offers ([`PoolDrain::declining`]), an
     /// interior instance's once no more work can reach it
-    /// ([`PoolDrain::unreached`]), which it asks `session`'s hub every
+    /// ([`PoolDrain::unreached`]), which it asks `asker`'s hub every
     /// [`HubSession::poll`] while the pool drains.
-    pub(crate) async fn stops(&self, session: &HubSession) {
+    pub(crate) async fn stops(&self, asker: &HubAsker) {
         self.learned().await;
         match &self.role {
             Role::Entry { .. } => {
@@ -311,7 +312,7 @@ impl PoolDrain {
             Role::Interior => loop {
                 // A hub can stop answering without closing its
                 // connections; the lease's own end stops the instance.
-                let asked = tokio::time::timeout(HubSession::poll() * 10, self.unreached(session));
+                let asked = tokio::time::timeout(HubSession::poll() * 10, self.unreached(asker));
                 if matches!(asked.await, Ok(Ok(true))) {
                     return;
                 }
@@ -321,7 +322,7 @@ impl PoolDrain {
     }
 
     /// For an interior instance of a draining pool: whether no more work
-    /// can reach it, asked of `session`'s hub. Every entry instance and
+    /// can reach it, asked of `asker`'s hub. Every entry instance and
     /// every instance of the segments of its class that send to it has
     /// detached, or left; or, as before an instance could detach, every
     /// entry instance has drained or left, which holds also when an entry
@@ -333,7 +334,7 @@ impl PoolDrain {
     /// attempt into the pool returns only once its whole forward path has
     /// taken the request, so an entry that detached holds no request still
     /// on its way.
-    pub(crate) async fn unreached(&self, session: &HubSession) -> Result<bool> {
+    pub(crate) async fn unreached(&self, asker: &HubAsker) -> Result<bool> {
         if !matches!(self.role, Role::Interior) || self.learned.borrow().drain.is_none() {
             return Ok(false);
         }
@@ -346,26 +347,26 @@ impl PoolDrain {
                     .map(String::as_str)
                     .filter(|sender| !entries.contains(sender)),
             );
-            if session.all_detached(&quiet, &entries).await? {
+            if asker.all_detached(&quiet, &entries).await? {
                 return Ok(true);
             }
         }
-        session.all_drained(&entries).await
+        asker.all_drained(&entries).await
     }
 
     /// For an entry instance of a draining pool: whether the segments of
-    /// its class that send to it have all detached, asked of `session`'s
+    /// its class that send to it have all detached, asked of `asker`'s
     /// hub, so that the hand-offs inside the pool bring it no more work;
     /// at once when none sends to it. A path that leaves the entry and
     /// comes back makes two segments wait for each other here, and the
     /// entry then never detaches, as one built before it could.
-    pub(crate) async fn senders_detached(&self, session: &HubSession) -> Result<bool> {
+    pub(crate) async fn senders_detached(&self, asker: &HubAsker) -> Result<bool> {
         if self.senders.is_empty() {
             return Ok(true);
         }
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
-        session.all_detached(&senders, &entries).await
+        asker.all_detached(&senders, &entries).await
     }
 
     /// Whether the instance is an interior one.
