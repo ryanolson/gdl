@@ -590,6 +590,43 @@ fn the_deployment_pin_carries_the_runtime() {
     assert!(show.success(), "{rev} has no crates/gdl-runtime");
 }
 
+/// Whether the `gdl-runtime` of commit `rev` has the start's wait for a hub
+/// that is not up yet (`docs/src/concepts/lifecycle.md`).
+fn waits_for_its_hub(rev: &str) -> bool {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let show = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["show", &format!("{rev}:crates/gdl-runtime/src/process.rs")])
+        .output()
+        .expect("git");
+    assert!(show.status.success(), "{rev} has no gdl-runtime process.rs");
+    String::from_utf8_lossy(&show.stdout).contains("hub_wait_ms")
+}
+
+/// A deployment's segments run the pinned `gdl-runtime`, not this tree's.
+/// Kubernetes starts a pool's hub and segments together, so a segment of a
+/// pin without the wait exits at its first failed request, restarts on
+/// every first deploy, and fails the restart check of `scripts/kind-fleet.sh`.
+#[test]
+#[ignore = "the pin predates the hub wait: the mirror has no commit with it"]
+fn the_deployment_pins_carry_the_hub_wait() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for path in ["examples/api/deploy.toml", "examples/film/deploy.toml"] {
+        let text = std::fs::read_to_string(root.join(path)).expect("deploy spec");
+        let spec: toml::Table = toml::from_str(&text).expect("deploy spec");
+        let rev = spec["gdl"]["rev"].as_str().expect("[gdl] rev");
+        assert!(waits_for_its_hub(rev), "{path} pins {rev}");
+    }
+}
+
+/// The control of [`the_deployment_pins_carry_the_hub_wait`]: this tree has
+/// the wait, so a rename of the setting cannot pass for an old pin.
+#[test]
+fn the_hub_wait_is_found_in_this_tree() {
+    assert!(waits_for_its_hub("HEAD"));
+}
+
 /// The pin is on the public mirror that `examples/api/deploy.toml` names,
 /// which every other test here replaces with [`Mirror`]: the example
 /// package and `gdl-runtime`, which the generated segments take from it,
