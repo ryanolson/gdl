@@ -549,7 +549,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** none.
 
 ### The operator retires on request one victim at a time
-- **What:** in `retire: request` mode a victim drains before its removal is committed, and the scaler takes one victim at a time to its commit. So one victim drains at a time, whatever `maxConcurrentDrains` says.
+- **What:** in `retire: request` mode a victim drains before its removal is committed, and still holds work after its commit until its pod is gone. So the scaler takes one victim at a time, from its choice until its pod is gone, whatever `maxConcurrentDrains` says.
 - **Workaround:** `retire: signal`, whose victims drain together after their commit.
 
 ### At most one operator acts only while nobody force-deletes its pod
