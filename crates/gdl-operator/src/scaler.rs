@@ -207,15 +207,15 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let bound = spec
             .drain_bound()
             .map_err(|e| Stop::Blocked("BadDuration", format!("drainBound: {e}")))?;
-        // A victim asked to retire is waited for at most the bound, also
-        // once the spec has left request mode.
-        let asked = |v: &Retiring| v.asked.is_some() && uncommitted(v);
-        if bound.is_none() && (self.request || retiring.iter().any(asked)) {
-            return Err(Stop::Blocked(
+        let unbounded = || {
+            Stop::Blocked(
                 "DrainBoundRequired",
                 "`retire: request` waits for a victim at most `drainBound`, which is not set"
                     .to_string(),
-            ));
+            )
+        };
+        if self.request && bound.is_none() {
+            return Err(unbounded());
         }
         let target = self
             .cx
@@ -276,6 +276,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     self.delete(pod).await?;
                 }
             }
+        }
+        // A victim asked to retire is waited for at most the bound, also
+        // once the spec has left request mode; one whose pod has gone
+        // ended above, and needs none.
+        if bound.is_none() && kept.iter().any(|v| v.asked.is_some() && uncommitted(v)) {
+            self.status.retiring = kept;
+            return Err(unbounded());
         }
         self.sweep(&pods, &kept).await?;
 

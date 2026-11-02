@@ -570,3 +570,28 @@ async fn a_retired_victim_of_a_deployment_made_again_is_deleted_not_given_back()
     assert!(status(&fake).retiring.is_empty());
     assert!(fake.take_writes().iter().all(|w| !w.starts_with("pod-2")));
 }
+
+/// F4: once the victim asked before the mode changed has gone, its entry
+/// ends, and a scaler in signal mode without a bound scales again.
+#[tokio::test]
+async fn a_victim_gone_after_the_mode_changed_no_longer_needs_a_bound() {
+    let fake = three();
+    let mut spec = request(2);
+    once(&fake, &spec, 0).await;
+    spec.retire = Some(Retire::Signal);
+    spec.drain_bound = None;
+    assert_eq!(once(&fake, &spec, 1_000).await, BLOCKED);
+    fake.state().pods.retain(|p| p.view.name != "pod-2");
+    list(&fake, &[(1, "ready"), (3, "ready")]);
+    once(&fake, &spec, 2_000).await;
+    assert!(status(&fake).retiring.is_empty());
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("False".into(), "NotBlocked".into())
+    );
+    assert_eq!(status(&fake).last.expect("ended").outcome, Outcome::Lost);
+    fake.take_writes();
+    spec.replicas = Some(4);
+    once(&fake, &spec, 3_000).await;
+    assert_eq!(fake.take_writes(), ["replicas 4"]);
+}
