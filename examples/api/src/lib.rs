@@ -305,6 +305,9 @@ impl gdl::Operator for AnthropicAdapter {
 /// each chunk, so that a response streams for a while, as a model's does.
 /// With `leave_hook` (`leave_hook = "flush"`), it registers a leave hook of
 /// that name, which reports `done` once its instance is out of routing.
+/// With `settle_hook` and `settle_ms`, it registers one more, which reports
+/// `done` that long after its instance has drained, so that a controller
+/// that waits for the hooks can be seen to.
 #[derive(gdl::Node, Default)]
 pub struct Echo {
     pace: Option<std::time::Duration>,
@@ -315,17 +318,34 @@ impl Build for Echo {
     async fn build(config: Self::Config, (): ()) -> gdl::Result<Self> {
         let pace = match config.get("pace_ms") {
             None => None,
-            Some(ms) => Some(std::time::Duration::from_millis(ms.parse().map_err(|_| {
-                gdl::Error::node(format!(
-                    "Echo: pace_ms `{ms}` is not a whole number of milliseconds"
-                ))
-            })?)),
+            Some(ms) => Some(std::time::Duration::from_millis(ms.parse().map_err(
+                |_| {
+                    gdl::Error::node(format!(
+                        "Echo: pace_ms `{ms}` is not a whole number of milliseconds"
+                    ))
+                },
+            )?)),
         };
         if let Some(name) = config.get("leave_hook") {
             gdl::Lifecycle::current().on_leave(name.clone(), |leave: gdl::Leave| async move {
                 leave.routed().await;
                 gdl::Handoff::Done
             })?;
+        }
+        if let Some(name) = config.get("settle_hook") {
+            let settle = config
+                .get("settle_ms")
+                .map_or(Ok(0), |ms| ms.parse())
+                .map_err(|_| gdl::Error::node("Echo: `settle_ms` is not a whole number"))?;
+            let settle = std::time::Duration::from_millis(settle);
+            gdl::Lifecycle::current().on_leave(
+                name.clone(),
+                move |leave: gdl::Leave| async move {
+                    leave.drained().await;
+                    tokio::time::sleep(settle).await;
+                    gdl::Handoff::Done
+                },
+            )?;
         }
         Ok(Self { pace })
     }

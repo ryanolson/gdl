@@ -22,8 +22,8 @@
 #   - an HPA on the engine's GdlScaler, with no metrics server, scales it up to its minimum and down to its maximum
 #     through /scale, and the scaler removes the victim it chose;
 #   - with `retire: request`, the same 3 to 2 for the engine and for the frontend, under the same load: the scaler asks
-#     the victim through its hub, the victim drains, its hook reports, its hub lists it `drained`, and only then is its
-#     pod deleted. It prints the time from the ask to `drained`, from `drained` to the delete, and from the delete to
+#     the victim through its hub, the victim drains, its hub lists it `drained`, its hook reports, and only then is
+#     its pod deleted. It prints the time from the ask to `drained`, from `drained` to the delete, and from the delete to
 #     the pod's end, and no request failed.
 #
 #   INSTALL_TOOLS=1 bash scripts/kind-operator.sh   # first downloads the pinned kind into TOOLS_DIR
@@ -49,6 +49,9 @@ EXIT_MARGIN_MS=10000
 # Each request's words, and the engine's pace between them: a response streams for about 2 s.
 WORDS=20
 PACE_MS=100
+# How long after its drain the engine's second leave hook reports: request mode's victim stays that long, listed
+# `drained`, so that the samples see the order and not one instant.
+SETTLE_MS=3000
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${root}"
@@ -152,9 +155,10 @@ k() {
 control() {
   k get --raw "/api/v1/namespaces/${ns}/services/http:$1:control/proxy$2"
 }
-# A pod's /metrics on its system port, through the API server's pod proxy.
+# A pod's /metrics on its system port, through the API server's pod proxy, bounded: the proxy waits about 30 s on a
+# pod whose process has exited, and a sample must not.
 metrics() {
-  k get --raw "/api/v1/namespaces/${ns}/pods/$1:9090/proxy/metrics"
+  k get --raw "/api/v1/namespaces/${ns}/pods/$1:9090/proxy/metrics" --request-timeout=2s
 }
 # Wait, bounded by $1 seconds, until the command after it succeeds; name $2 on a timeout.
 until_true() {
@@ -205,6 +209,8 @@ drain_ms = ${DRAIN_MS}
 [deployment.segment.engine.config.node.Engine]
 pace_ms = "${PACE_MS}"
 leave_hook = "flush"
+settle_hook = "settle"
+settle_ms = "${SETTLE_MS}"
 EOF
 cat >"${scratch}/fleet.toml" <<EOF
 [fleet]
@@ -325,9 +331,9 @@ load_counts() {
   k logs load | awk '$1 == "ok" {ok++} $1 == "fail" {bad++} END {print ok + 0, bad + 0}'
 }
 
-# The outcome of the engine's leave hook that reads 1, from a pod's metrics on stdin.
+# The outcome that reads 1 of the engine's leave hook $1, by default `flush`, from a pod's metrics on stdin.
 hook_outcome() {
-  awk '$1 ~ /^dynamo_component_leave_outcome\{/ && $1 ~ /hook="flush"/ && $2 == 1 {
+  awk -v hook="hook=\"${1:-flush}\"" '$1 ~ /^dynamo_component_leave_outcome\{/ && index($1, hook) && $2 == 1 {
     sub(/.*outcome="/, "", $1); sub(/".*/, "", $1); print $1 }'
 }
 
@@ -473,6 +479,11 @@ request_down() {
   k scale gdlscaler "${scaler}" --replicas=3 >/dev/null
   until_true 300 "${pool}'s ${segment} did not run 3 ready instances" scaled_to "${pool}" "${segment}" 3
   load_before="$(load_counts)"
+  # Every status the scaler writes: a frontend can go from asked to gone between two samples.
+  local writes="${scratch}/request-${segment}.writes"
+  timeout 300 kubectl --context "${context}" --namespace "${ns}" get gdlscaler "${scaler}" --watch --output json \
+    >"${writes}" 2>/dev/null &
+  local watching=$!
   k scale gdlscaler "${scaler}" --replicas=2 >/dev/null
   until_true 60 "the scaler chose no victim" sh -c \
     "kubectl --context '${context}' -n '${ns}' get gdlscaler '${scaler}' -o json | jq -e '.status.retiring | length == 1' >/dev/null"
@@ -487,9 +498,10 @@ request_down() {
     ((SECONDS < deadline)) || fail "${victim} was not gone in time"
     local now asked phase deleting hook=""
     now="$(date +%s%3N)"
-    read -r asked phase <<<"$(listed_by_ip "${pool}" "${segment}" "${ip}")"
+    # The delete is read first: a sample that reads no delete and `drained` proves which came first.
     deleting="$(k get pod "${victim}" --output jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
-    [[ "${segment}" == "engine" ]] && hook="$(metrics "${victim}" 2>/dev/null | hook_outcome || true)"
+    read -r asked phase <<<"$(listed_by_ip "${pool}" "${segment}" "${ip}")"
+    [[ "${segment}" == "engine" ]] && hook="$(metrics "${victim}" 2>/dev/null | hook_outcome settle || true)"
     echo "${now} asked=${asked:-?} phase=${phase:-?} hook=${hook:-?} deleting=${deleting:+yes}" >>"${samples}"
     sleep 0.2
   done
@@ -497,32 +509,48 @@ request_down() {
   gone="$(date +%s%3N)"
   until_true 60 "the scaler did not record the removal" sh -c \
     "kubectl --context '${context}' -n '${ns}' get gdlscaler '${scaler}' -o json | jq -e --arg uid '${uid}' '.status.last.chosen == \$uid and (.status.retiring // [] | length) == 0' >/dev/null"
+  kill "${watching}" 2>/dev/null || true
+  wait "${watching}" 2>/dev/null || true
   local last
   last="$(k get gdlscaler "${scaler}" --output json | jq -c '.status.last')"
   say "${scaler}: status.last ${last}"
   [[ "$(jq -r '.deleted' <<<"${last}")" == "${uid}" ]] || fail "${scaler}: the pod deleted is not the one chosen: ${last}"
   [[ "$(jq -r '.outcome' <<<"${last}")" == "removed" ]] || fail "${scaler}: the removal did not end inside its bound: ${last}"
+  [[ "${last}" != *restartedDuringHold* ]] || fail "${scaler}: the victim restarted during its hold: ${last}"
   # A sample's fields, and the time of the first sample that reads `$1`.
   first() { awk -v want="$1" '$0 ~ want {print $1; exit}' "${samples}"; }
-  local asked_at drained_at deleted_at
-  asked_at="$(first 'asked=true')"
+  local retired asked_at drained_at deleted_at
+  retired="$(jq -r --arg uid "${uid}" '.status.retiring[]? | select(.uid == $uid) | .retired // empty' "${writes}" | head -n 1)"
+  [[ -n "${retired}" ]] || fail "${scaler}: the scaler never recorded that its hub took the request:
+$(jq -c '.status.retiring' "${writes}")"
+  asked_at="$(date -d "${retired}" +%s%3N)"
   drained_at="$(first 'phase=drained')"
   deleted_at="$(first 'deleting=yes')"
-  [[ -n "${asked_at}" ]] || fail "${scaler}: the hub never held the request:
-$(cat "${samples}")"
-  [[ -n "${drained_at}" ]] || fail "${scaler}: the hub never listed the victim drained:
-$(cat "${samples}")"
   [[ -n "${deleted_at}" ]] || deleted_at="${gone}"
-  ((asked_at <= drained_at && drained_at < deleted_at)) \
-    || fail "${scaler}: out of order: asked ${asked_at}, drained ${drained_at}, deleted ${deleted_at}:
+  # Only `drained` ends the scaler's hold before `drainBound`, so a delete well inside it says that the hub listed the
+  # victim drained, whether or not a sample saw it.
+  ((deleted_at - asked_at < DRAIN_MS)) || fail "${scaler}: its pod went at its bound, not on drained:
 $(cat "${samples}")"
+  if [[ -n "${drained_at}" ]]; then
+    ((drained_at <= deleted_at)) || fail "${scaler}: its pod was deleted before its hub listed it drained:
+$(cat "${samples}")"
+  else
+    [[ "${segment}" != "engine" ]] || fail "${scaler}: the hub never listed the victim drained:
+$(cat "${samples}")"
+    drained_at="${deleted_at}"
+  fi
   awk '/deleting=yes/ && !/phase=(drained|gone)/ { bad = 1 } END { exit bad }' "${samples}" \
     || fail "${scaler}: its pod was deleted before its hub listed it drained:
 $(cat "${samples}")"
+  # The engine's victim stays for the settle hook, so the samples show the order. A frontend says `drained` at its
+  # body's end, and the scaler's next read deletes it, which may fall between two samples.
   if [[ "${segment}" == "engine" ]]; then
-    [[ "$(jq -r '.handoff' <<<"${last}")" == "done" ]] || fail "${scaler}: the hook's outcome: ${last}"
-    awk '/deleting=yes/ { seen = 1 } !seen && /hook=done/ { ok = 1 } END { exit !ok }' "${samples}" \
-      || fail "${scaler}: its hook did not report before its pod was deleted:
+    [[ "$(jq -r '.handoff' <<<"${last}")" == "done" ]] || fail "${scaler}: the hooks' outcome: ${last}"
+    grep -q 'phase=drained hook=pending deleting=$' "${samples}" \
+      || fail "${scaler}: never listed drained, undeleted, with its hook still pending:
+$(cat "${samples}")"
+    awk '/deleting=yes/ && /hook=pending/ { bad = 1 } END { exit bad }' "${samples}" \
+      || fail "${scaler}: its pod was deleted with its hook still pending:
 $(cat "${samples}")"
   fi
   say "${scaler}: request to drained $((drained_at - asked_at)) ms, drained to delete $((deleted_at - drained_at)) ms, delete to gone $((gone - deleted_at)) ms"
