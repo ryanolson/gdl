@@ -36,6 +36,24 @@ const DRAIN: Duration = Duration::from_secs(10);
 const M1: &str = "m1";
 const M2: &str = "m2";
 
+#[test]
+fn the_documented_pool_row_size_matches_its_layout() {
+    let costs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/src/operations/feature-costs.md"
+    ));
+    let documented: usize = costs
+        .split_once("`PoolTable` grew from 312 to ")
+        .expect("the documented row size")
+        .1
+        .split_whitespace()
+        .next()
+        .expect("a byte count")
+        .parse()
+        .expect("the byte count is numeric");
+    assert_eq!(std::mem::size_of::<super::PoolTable>(), documented);
+}
+
 /// What the follower asked velo for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Call {
