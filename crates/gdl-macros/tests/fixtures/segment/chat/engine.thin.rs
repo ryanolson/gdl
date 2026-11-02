@@ -1,4 +1,9 @@
 
+// Async request paths nest deeply, and rustc lays out each future with those
+// it holds. The limit costs compile time, never run time. See
+// docs/src/development/generation-design.md in gdl.
+#![recursion_limit = "256"]
+
 //! Segment `engine` of graph `chat`, hosting `Engine`.
 //!
 //! [`start`] deploys it inside a program; the `chat-engine` binary deploys it on

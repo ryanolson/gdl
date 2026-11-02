@@ -3,7 +3,7 @@
 
 use depth_messages::{Answer, Ask};
 use futures::stream;
-use gdl::{Build, Cx, Items, Result, Sink, items};
+use gdl::{Build, Cx, Frontend, Items, Next, Operator, Result, Sink, items};
 use serde::Deserialize;
 
 /// An `async` block that awaits the one inside it, once per token: each
@@ -44,6 +44,63 @@ impl Build for Deep {
     type Metrics = ();
     async fn build(_: NoSettings, (): ()) -> Result<Self> {
         nested!(x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x).await;
+        Ok(Self)
+    }
+}
+
+/// Hands each request to the next stage, and its answers back. `chain.gdl`
+/// places it at every level of the chain.
+#[derive(gdl::Node)]
+pub struct Pass;
+
+impl Operator for Pass {
+    type UpReq = Ask;
+    type UpItem = Answer;
+    type DownReq = Ask;
+    type DownItem = Answer;
+
+    async fn generate<N>(&self, cx: Cx, req: Ask, next: N) -> Result<Items<Answer>>
+    where
+        N: Next<Ask, Answer>,
+    {
+        next.generate(cx, req).await
+    }
+}
+
+impl Build for Pass {
+    type Config = NoSettings;
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// A frontend that serves nothing, so that the depth of `chain.gdl` is the
+/// request path's, as behind a frontend whose handlers are boxed.
+#[derive(gdl::Node)]
+pub struct Door;
+
+impl Frontend for Door {
+    type Req = Ask;
+    type Item = Answer;
+
+    async fn serve<N>(
+        self,
+        _next: N,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()>
+    where
+        N: Next<Ask, Answer>,
+    {
+        shutdown.await;
+        Ok(())
+    }
+}
+
+impl Build for Door {
+    type Config = NoSettings;
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }

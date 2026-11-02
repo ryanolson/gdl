@@ -1,0 +1,19 @@
+// A chain of operators over one sink: each stage nests the type of the
+// request path one layer deeper, about 17 query levels on the pinned
+// toolchain. Ten stages need a limit of 194, near midway between the default and
+// the 256 of the generated crates, so a few levels either way keep the
+// test's meaning.
+name = "chain", schema = 1;
+source   Front: Ask -> stream Answer;
+operator Pass1: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass2: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass3: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass4: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass5: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass6: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass7: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass8: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass9: (Ask -> stream Answer) over (Ask -> stream Answer);
+operator Pass10: (Ask -> stream Answer) over (Ask -> stream Answer);
+sink     Deep: Ask -> stream Answer;
+topology: Front => Pass1 { Pass2 { Pass3 { Pass4 { Pass5 { Pass6 { Pass7 { Pass8 { Pass9 { Pass10 { Deep } } } } } } } } } };

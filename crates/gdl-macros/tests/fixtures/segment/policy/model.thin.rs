@@ -1,4 +1,9 @@
 
+// Async request paths nest deeply, and rustc lays out each future with those
+// it holds. The limit costs compile time, never run time. See
+// docs/src/development/generation-design.md in gdl.
+#![recursion_limit = "256"]
+
 //! Segment `model` of graph `policy`, hosting `Model`.
 //!
 //! [`start`] deploys it inside a program; the `policy-model` binary deploys it on

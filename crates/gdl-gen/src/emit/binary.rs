@@ -12,7 +12,7 @@ use std::fmt::Write;
 
 use gdl_model::Role;
 
-use super::{Hosted, MARKER, Unit};
+use super::{Hosted, MARKER, RECURSION_LIMIT, Unit};
 use crate::service::{EntryHop, ServiceBinding};
 use crate::spec::Bind;
 
@@ -24,6 +24,8 @@ impl Unit<'_> {
         let mut text = String::new();
         let _ = writeln!(text, "// {MARKER}.");
         let _ = writeln!(text, "// Regenerate with: {}", self.regenerate);
+        let _ = writeln!(text);
+        text.push_str(RECURSION_LIMIT);
         let _ = writeln!(text);
         text.push_str(&self.settings_doc(&hosted, frontend, service, self.serves()));
         let _ = writeln!(text);

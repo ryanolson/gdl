@@ -48,6 +48,13 @@ A segment crate's `lib.rs` is one `gdl_runtime::segment!` call, and a proc macro
 - **In `gdl-macros`.** A crate of its own, which only `gdl-runtime` depends on, would keep the segment code out of what node crates build through `gdl`. `graph!` is a runtime-side macro in `gdl-macros` too, and the cost to a node crate is a module of a proc-macro crate it already builds, with no new dependency.
 - **One revision.** The call is an interface between the generator and the runtime of one revision of gdl, with no version field. A spec's `[gdl]` must name a revision that has the macro, as it already had to have every runtime function the generated code called.
 
+## The recursion limit
+
+Each generated crate root, the library and the binary, sets `#![recursion_limit = "256"]`. rustc lays out an `async` function with every future it holds, and by default it stops past a query depth of 128 (`queries overflow the depth limit`). The handler of a hop for an arriving request, `HopCore::accept_forward`, holds the stages below it, so the depth of a request path grows with its stages: about 17 levels for each operator in `crates/gdl-gen/tests/depth.rs`. The depth also moves with rustc. The global router's front segment in dynamo-http-endpoints needs a limit of 105 on rustc 1.93.1, 135 on 1.96.1, and 136 on 1.97.1. The limit costs compile time, never run time.
+
+- **In the generated crates.** The overflow happens in the crate that names the concrete stages, and an attribute applies only to the crate that sets it. No crate of gdl's own overflows, so none sets a limit.
+- **Rejected: boxing the hop's future.** It removes the depth and costs one allocation per request on the request path.
+
 ## Crates, not Cargo features
 
 Native link requirements apply whenever a crate is a dependency, and Cargo unifies features across packages built together. A segment that should not link an implementation's native library cannot be protected by a feature. Separate implementation crates, one set per segment crate, are the only reliable isolation. A sentinel crate stands in for a heavy native dependency of the engine in `examples/chat`, and a test checks that only the engine segment's dependency tree contains it.

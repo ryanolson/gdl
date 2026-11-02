@@ -14,7 +14,7 @@ Every segment binary repeats one lifecycle: the arguments and `--healthcheck`, t
 
 **Why:** rustc lays out an `async fn` together with every future it holds, and stops past a query depth of 128 (`queries overflow the depth limit`). The `Builder` awaits each node's build inside its scopes: the followed pools, the records, the properties, the KV, the offer gate, and the leave hooks. With the future held inline, each scope's depth added to the depth of every node's own build. A node whose build compiled in its own crate failed in its segment, and adding the leave hooks' scope pushed the global router example's front over the limit (124 levels, then 129). Boxed, the segment's depth no longer depends on any node's build: `crates/gdl-gen/tests/depth.rs` builds a segment whose node is about as deep as its own crate allows. The cost is one allocation per node, selector, and pool policy, once at start.
 
-- **Rejected: a higher `recursion_limit` in each generated crate.** It moves the limit and leaves the sum in place. The next scope, or a deeper node, fails again.
+- **Rejected: a higher `recursion_limit` instead of the box.** Generated crates set one for the request path ([The recursion limit](generation-design.md#the-recursion-limit)), but alone it leaves the sum in place. The next scope, or a deeper node, fails again.
 - **Rejected: one scope for all the build's handles.** It removes a few levels and keeps the node's depth in the sum.
 
 ## Signals before anything is built

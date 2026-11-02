@@ -1,0 +1,21 @@
+# The front hosts the chain and the pool its sink, as in the global router:
+# the handler of a hop for a request that arrives lays out the path below it.
+# `tests/depth.rs` builds the front.
+[graph]
+path = "chain.gdl"
+
+[messages]
+crates = ["messages"]
+
+[nodes]
+crates = ["nodes"]
+pin = { Front = "depth_nodes::Door", Pass1 = "depth_nodes::Pass", Pass2 = "depth_nodes::Pass", Pass3 = "depth_nodes::Pass", Pass4 = "depth_nodes::Pass", Pass5 = "depth_nodes::Pass", Pass6 = "depth_nodes::Pass", Pass7 = "depth_nodes::Pass", Pass8 = "depth_nodes::Pass", Pass9 = "depth_nodes::Pass", Pass10 = "depth_nodes::Pass", Deep = "depth_nodes::Deep" }
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Pass1", "Pass2", "Pass3", "Pass4", "Pass5", "Pass6", "Pass7", "Pass8", "Pass9", "Pass10"]
+
+[segment.pool]
+nodes = ["Deep"]
