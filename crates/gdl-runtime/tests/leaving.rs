@@ -683,6 +683,10 @@ async fn a_lost_lease_starts_the_hooks_with_its_cause() {
     lose_lease(&hub, engine_id).await;
     let leave = hook.leave().await;
     assert_eq!(leave.cause(), LeaveCause::LeaseLost);
+    assert!(
+        leave.fence().incarnation().is_some(),
+        "a hook started by a lost lease carries the registration it lost"
+    );
     assert_eq!(
         *leave.routing().borrow(),
         Routing::Unconfirmed(Unconfirmed::LeaseLost)

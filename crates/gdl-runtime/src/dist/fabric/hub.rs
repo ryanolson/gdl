@@ -26,6 +26,9 @@ use velo_hub::protocol::ErrorCode;
 pub struct HubSession {
     client: HubClient,
     registration: SegmentRegistration,
+    /// The registration's epoch, as it was made: the client forgets it as
+    /// its lease is lost, and an effect of that registration still names it.
+    epoch: Option<u128>,
     loaded: Option<HubServiceRegistration>,
     serving: Option<HubServiceRegistration>,
     ready: Option<HubServiceRegistration>,
@@ -161,10 +164,14 @@ impl HubSession {
     /// lease kept from now by a heartbeat every `heartbeat`.
     fn kept(client: HubClient, registration: SegmentRegistration, heartbeat: Duration) -> Self {
         let (report, lost) = watch::channel(None);
+        let epoch = client
+            .registration()
+            .map(|registered| registered.epoch.as_uuid().as_u128());
         let lease = tokio::spawn(keep_lease(client.clone(), heartbeat, report));
         Self {
             client,
             registration,
+            epoch,
             loaded: None,
             serving: None,
             ready: None,
@@ -453,11 +460,10 @@ impl HubSession {
         }
     }
 
-    /// This registration's epoch: a registration after a hub's recovery
-    /// has another. `None` once the instance holds none.
+    /// This registration's epoch, which a later registration of the same
+    /// instance does not share.
     pub(crate) fn epoch(&self) -> Option<u128> {
-        let registered = self.client.registration()?;
-        Some(registered.epoch.as_uuid().as_u128())
+        self.epoch
     }
 
     /// Leave the hub at once, rather than when the lease runs out, so that
