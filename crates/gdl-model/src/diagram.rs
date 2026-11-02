@@ -23,15 +23,35 @@ use crate::placement::{Layout, PlacementErrors, check_manifest};
 /// The color of an edge that crosses segments.
 const CROSSING: &str = "#d62728";
 
+/// The way a diagram's ranks run. Only the one line that names the direction
+/// differs between the two; the nodes, edges, and clusters are the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Ranks run from left to right.
+    LeftToRight,
+    /// Ranks run from top to bottom.
+    TopToBottom,
+}
+
+impl Direction {
+    /// DOT's `rankdir` value, which is also Mermaid's flowchart direction.
+    fn rank(self) -> &'static str {
+        match self {
+            Direction::LeftToRight => "LR",
+            Direction::TopToBottom => "TB",
+        }
+    }
+}
+
 impl Manifest {
     /// The graph in Graphviz DOT. With `layout`, each segment is a cluster
-    /// and edges that cross segments are drawn thick and red. Fails if
-    /// `layout` was checked against another contract.
-    pub fn to_dot(&self, layout: Option<&Layout>) -> Result<String, Error> {
+    /// and edges that cross segments are drawn thick and red. Ranks run in
+    /// `direction`. Fails if `layout` was checked against another contract.
+    pub fn to_dot(&self, layout: Option<&Layout>, direction: Direction) -> Result<String, Error> {
         self.check(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "digraph {} {{", dot_string(&self.name));
-        let _ = writeln!(out, "    rankdir=LR;");
+        let _ = writeln!(out, "    rankdir={};", direction.rank());
         if !self.properties.is_empty() {
             let _ = writeln!(
                 out,
@@ -98,9 +118,14 @@ impl Manifest {
     }
 
     /// The graph as a Mermaid flowchart. With `layout`, each segment is a
-    /// subgraph and edges that cross segments are drawn thick and red. Fails
-    /// if `layout` was checked against another contract.
-    pub fn to_mermaid(&self, layout: Option<&Layout>) -> Result<String, Error> {
+    /// subgraph and edges that cross segments are drawn thick and red. Ranks
+    /// run in `direction`. Fails if `layout` was checked against another
+    /// contract.
+    pub fn to_mermaid(
+        &self,
+        layout: Option<&Layout>,
+        direction: Direction,
+    ) -> Result<String, Error> {
         self.check(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "---");
@@ -113,7 +138,7 @@ impl Manifest {
         }
         let _ = writeln!(out, "title: {}", yaml_string(&title));
         let _ = writeln!(out, "---");
-        let _ = writeln!(out, "flowchart LR");
+        let _ = writeln!(out, "flowchart {}", direction.rank());
         let node = |out: &mut String, indent: &str, index: usize| {
             let info = &self.nodes[index];
             let mut label = format!("\"{}<br/>{}", mermaid_text(&info.name), info.role.name());

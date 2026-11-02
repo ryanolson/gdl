@@ -4,7 +4,7 @@
 mod common;
 
 use common::reference_manifest;
-use gdl_runtime::{HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo, layout};
+use gdl_runtime::{Direction, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo, layout};
 
 fn three_segments() -> gdl_runtime::Layout {
     let placement = Placement::new()
@@ -37,7 +37,9 @@ flowchart LR
     n4 -.->|"Out"| n1
 "#;
     assert_eq!(
-        reference_manifest(|_| true).to_mermaid(None).expect("draw"),
+        reference_manifest(|_| true)
+            .to_mermaid(None, Direction::LeftToRight)
+            .expect("draw"),
         want
     );
 }
@@ -73,7 +75,9 @@ flowchart LR
 "#;
     let manifest = reference_manifest(|_| true);
     assert_eq!(
-        manifest.to_mermaid(Some(&three_segments())).expect("draw"),
+        manifest
+            .to_mermaid(Some(&three_segments()), Direction::LeftToRight)
+            .expect("draw"),
         want
     );
 }
@@ -100,7 +104,9 @@ fn the_reference_graph_as_dot() {
 }
 "#;
     assert_eq!(
-        reference_manifest(|_| true).to_dot(None).expect("draw"),
+        reference_manifest(|_| true)
+            .to_dot(None, Direction::LeftToRight)
+            .expect("draw"),
         want
     );
 }
@@ -137,9 +143,48 @@ fn the_placed_reference_graph_as_dot() {
 "##;
     let manifest = reference_manifest(|_| true);
     assert_eq!(
-        manifest.to_dot(Some(&three_segments())).expect("draw"),
+        manifest
+            .to_dot(Some(&three_segments()), Direction::LeftToRight)
+            .expect("draw"),
         want
     );
+}
+
+/// Top to bottom changes the one line that names the direction, in a
+/// placed and an unplaced graph alike.
+#[test]
+fn top_to_bottom_changes_only_the_mermaid_direction_line() {
+    let manifest = reference_manifest(|_| true);
+    let layout = three_segments();
+    for layout in [None, Some(&layout)] {
+        let across = manifest
+            .to_mermaid(layout, Direction::LeftToRight)
+            .expect("draw");
+        let down = manifest
+            .to_mermaid(layout, Direction::TopToBottom)
+            .expect("draw");
+        assert!(down.contains("\nflowchart TB\n"), "{down}");
+        assert_eq!(down, across.replace("\nflowchart LR\n", "\nflowchart TB\n"));
+    }
+}
+
+#[test]
+fn top_to_bottom_changes_only_the_dot_rankdir_line() {
+    let manifest = reference_manifest(|_| true);
+    let layout = three_segments();
+    for layout in [None, Some(&layout)] {
+        let across = manifest
+            .to_dot(layout, Direction::LeftToRight)
+            .expect("draw");
+        let down = manifest
+            .to_dot(layout, Direction::TopToBottom)
+            .expect("draw");
+        assert!(down.contains("\n    rankdir=TB;\n"), "{down}");
+        assert_eq!(
+            down,
+            across.replace("\n    rankdir=LR;\n", "\n    rankdir=TB;\n")
+        );
+    }
 }
 
 /// An edge without a codec says so, since a placement cannot cut it.
@@ -148,13 +193,13 @@ fn an_edge_without_a_codec_is_marked() {
     let manifest = reference_manifest(|name| name != "Tok");
     assert!(
         manifest
-            .to_mermaid(None)
+            .to_mermaid(None, Direction::LeftToRight)
             .expect("draw")
             .contains(r#"n5 -.->|"Tok (no codec)"| n4"#)
     );
     assert!(
         manifest
-            .to_dot(None)
+            .to_dot(None, Direction::LeftToRight)
             .expect("draw")
             .contains(r#"n5 -> n4 [label="Tok (no codec)", style=dashed];"#)
     );
@@ -201,7 +246,9 @@ fn names_and_types_are_escaped() {
     let placement = Placement::new().segment("my \"seg\"", ["start", "end"]);
     let layout = layout(&manifest, &placement).expect("layout");
 
-    let mermaid = manifest.to_mermaid(Some(&layout)).expect("draw");
+    let mermaid = manifest
+        .to_mermaid(Some(&layout), Direction::LeftToRight)
+        .expect("draw");
     // The title is YAML front matter, not a label: quoted as YAML.
     assert!(mermaid.contains(r#"title: "odd \"graph\"""#), "{mermaid}");
     assert!(
@@ -218,7 +265,9 @@ fn names_and_types_are_escaped() {
         "{mermaid}"
     );
 
-    let dot = manifest.to_dot(Some(&layout)).expect("draw");
+    let dot = manifest
+        .to_dot(Some(&layout), Direction::LeftToRight)
+        .expect("draw");
     assert!(dot.starts_with(r#"digraph "odd \"graph\"" {"#), "{dot}");
     assert!(dot.contains(r#"label="my \"seg\"";"#), "{dot}");
     assert!(
@@ -232,7 +281,9 @@ fn names_and_types_are_escaped() {
 fn the_mermaid_title_is_a_yaml_string() {
     let mut manifest = reference_manifest(|_| true);
     manifest.name = "chat: demo # 2".to_string();
-    let mermaid = manifest.to_mermaid(None).expect("draw");
+    let mermaid = manifest
+        .to_mermaid(None, Direction::LeftToRight)
+        .expect("draw");
     assert!(
         mermaid.starts_with("---\ntitle: \"chat: demo # 2\"\n---\n"),
         "{mermaid}"
@@ -270,8 +321,8 @@ fn a_layout_of_another_graph_is_refused() {
     };
     let reference = three_segments();
     for drawn in [
-        other.to_dot(Some(&reference)),
-        other.to_mermaid(Some(&reference)),
+        other.to_dot(Some(&reference), Direction::LeftToRight),
+        other.to_mermaid(Some(&reference), Direction::LeftToRight),
     ] {
         let error = drawn.expect_err("another graph's layout");
         assert_eq!(gdl::Error::from(error).kind(), gdl::ErrorKind::Placement);
@@ -290,7 +341,10 @@ fn an_inconsistent_manifest_is_refused() {
     let mut untyped = reference_manifest(|_| true);
     untyped.hops[1].backward_types.pop();
     for manifest in [undeclared, untyped] {
-        for drawn in [manifest.to_dot(None), manifest.to_mermaid(None)] {
+        for drawn in [
+            manifest.to_dot(None, Direction::LeftToRight),
+            manifest.to_mermaid(None, Direction::LeftToRight),
+        ] {
             let error = drawn.expect_err("inconsistent manifest");
             assert_eq!(gdl::Error::from(error).kind(), gdl::ErrorKind::Placement);
         }
@@ -338,7 +392,9 @@ fn a_type_named_by_its_path_is_labeled_by_its_name() {
         }],
         properties: Vec::new(),
     };
-    let mermaid = manifest.to_mermaid(None).expect("draw");
+    let mermaid = manifest
+        .to_mermaid(None, Direction::LeftToRight)
+        .expect("draw");
     assert!(
         mermaid.contains(r#"n0 -->|"Session + stream Frame (no codec)"| n1"#),
         "{mermaid}"

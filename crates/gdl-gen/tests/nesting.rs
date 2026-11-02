@@ -213,7 +213,7 @@ fn every_entry_point_refuses_a_type_past_the_bound() {
                 .map_err(|e| e.to_string())
         }),
         ("diagram", |s, _, t| {
-            gdl_gen::diagram(s, t, Format::Mermaid)
+            gdl_gen::diagram(s, t, Format::Mermaid, gdl_gen::Direction::LeftToRight)
                 .map(drop)
                 .map_err(|e| e.to_string())
         }),

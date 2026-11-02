@@ -13,6 +13,62 @@ use std::time::Duration;
 
 use common::{Running, cargo, example, generated, root, target};
 
+/// `cargo gdl diagram --direction tb` draws the same graph top to bottom,
+/// and `lr`, or no option, left to right. Any other value, or the option
+/// on another command, is a usage error.
+#[test]
+fn the_diagram_command_takes_a_direction() {
+    let spec = example().join("gdl.toml");
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+            .args(["diagram", "--spec"])
+            .arg(&spec)
+            .args(args)
+            .arg("--target-dir")
+            .arg(target("gdl-gen-tests"))
+            .output()
+            .expect("cargo-gdl")
+    };
+    let stdout = |args: &[&str]| {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("utf-8")
+    };
+    let default = stdout(&["--format", "mermaid"]);
+    assert!(default.contains("\nflowchart LR\n"), "{default}");
+    assert_eq!(
+        default,
+        stdout(&["--format", "mermaid", "--direction", "lr"])
+    );
+    let down = stdout(&["--format", "mermaid", "--direction", "tb"]);
+    assert_eq!(
+        down,
+        default.replace("\nflowchart LR\n", "\nflowchart TB\n")
+    );
+    let dot = stdout(&["--format", "dot"]);
+    assert_eq!(
+        stdout(&["--format", "dot", "--direction", "tb"]),
+        dot.replace("rankdir=LR;", "rankdir=TB;")
+    );
+    let output = run(&["--format", "dot", "--direction", "up"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--direction takes lr or tb"),
+        "{output:?}"
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["resolve", "--spec"])
+        .arg(&spec)
+        .args(["--direction", "tb"])
+        .output()
+        .expect("cargo-gdl");
+    assert!(!output.status.success(), "{output:?}");
+}
+
 /// The spec's placement draws as a diagram: one cluster per segment, and
 /// the three crossings (Truncate to Engine, Engine to Detokenize, Format to
 /// Preprocess) marked.
@@ -20,7 +76,13 @@ use common::{Running, cargo, example, generated, root, target};
 fn the_placed_graph_draws_as_a_diagram() {
     let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
     let target = target("gdl-gen-tests");
-    let mermaid = gdl_gen::diagram(&spec, &target, gdl_gen::Format::Mermaid).expect("mermaid");
+    let mermaid = gdl_gen::diagram(
+        &spec,
+        &target,
+        gdl_gen::Format::Mermaid,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("mermaid");
     for line in [
         r#"subgraph s0["engine"]"#,
         r#"subgraph s1["front"]"#,
@@ -29,7 +91,13 @@ fn the_placed_graph_draws_as_a_diagram() {
     ] {
         assert!(mermaid.contains(line), "{line} in:\n{mermaid}");
     }
-    let dot = gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("dot");
+    let dot = gdl_gen::diagram(
+        &spec,
+        &target,
+        gdl_gen::Format::Dot,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("dot");
     assert_eq!(dot.matches("subgraph cluster_").count(), 3, "{dot}");
     assert_eq!(dot.matches("penwidth=2").count(), 3, "{dot}");
 }
@@ -485,7 +553,13 @@ fn rendering_a_graph_spec_writes_nothing_in_the_output() {
     let target = target("gdl-gen-tests");
     let files = gdl_gen::render(&spec, out, &target).expect("render");
     assert!(files.contains_key(Path::new("contract/src/lib.rs")));
-    gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
+    gdl_gen::diagram(
+        &spec,
+        &target,
+        gdl_gen::Format::Dot,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("diagram");
     let written: Vec<_> = std::fs::read_dir(out).expect("out").collect();
     assert!(written.is_empty(), "{written:?}");
 }

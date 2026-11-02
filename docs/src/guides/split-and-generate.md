@@ -122,10 +122,11 @@ It reports a missing, changed, or stale file, and a file in a segment crate that
 
 ```bash
 cargo gdl diagram --spec examples/chat/gdl.toml --format mermaid
+cargo gdl diagram --spec examples/chat/gdl.toml --format mermaid --direction tb
 cargo gdl diagram --spec examples/chat/gdl.toml --format dot | dot -Tsvg -o chat.svg
 ```
 
-The command writes the placed graph to stdout and no file. Request edges are solid and response edges are dashed. Each edge carries its message type's name, or `(no codec)` when the type has none, because no placement can cut that edge. Each segment is a cluster, and an edge that crosses segments is thick and red. A node's label also says which property kinds it provides and needs, and the title names each declared kind with its type. In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`, with `None` for no segments or a `Layout` for a placed graph.
+The command writes the placed graph to stdout and no file. `--direction lr`, the default, runs the ranks left to right. `--direction tb` runs them top to bottom, which fits a page better when the graph is wide: the output differs only in the direction line (`flowchart TB`, or DOT's `rankdir=TB`). Request edges are solid and response edges are dashed. Each edge carries its message type's name, or `(no codec)` when the type has none, because no placement can cut that edge. Each segment is a cluster, and an edge that crosses segments is thick and red. A node's label also says which property kinds it provides and needs, and the title names each declared kind with its type. In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`, with `None` for no segments or a `Layout` for a placed graph, and a `Direction` for the way the ranks run.
 
 ## Export
 

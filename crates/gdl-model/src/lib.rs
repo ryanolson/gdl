@@ -33,6 +33,7 @@ pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
     SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
 };
+pub use diagram::Direction;
 pub use encoding::Encoding;
 pub use fleet::{
     Cluster, ClusterResources, Fleet, FleetBackend, FleetDirectory, FleetError, FleetErrors,

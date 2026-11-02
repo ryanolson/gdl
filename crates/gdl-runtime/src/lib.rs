@@ -42,11 +42,11 @@ pub use gdl;
 #[doc(hidden)]
 pub use gdl::message_encoding;
 pub use gdl_model::{
-    CrossingReport, DeploymentSpec, DirectoryBackend, Encoding, GraphConfig, HUB_CONTROL_PORT,
-    HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
-    PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed, RequestRouter, Role,
-    Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout,
-    resolve_config,
+    CrossingReport, DeploymentSpec, Direction, DirectoryBackend, Encoding, GraphConfig,
+    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
+    Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed,
+    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason,
+    layout, resolve_config,
 };
 #[cfg(feature = "hub")]
 pub use gdl_pools::PoolState;

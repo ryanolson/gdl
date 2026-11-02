@@ -7,7 +7,7 @@ use common::streamed::{self, Script, ask, replies, words};
 use common::{Events, WAIT, collect, settles, velo_node};
 use gdl::Cx;
 use gdl_runtime::{
-    ItemInfo, Placement, PlacementError, RuntimeConfig, TypeInfo, WireReason, layout,
+    Direction, ItemInfo, Placement, PlacementError, RuntimeConfig, TypeInfo, WireReason, layout,
 };
 
 #[test]
@@ -140,7 +140,7 @@ fn request_anchors_are_counted_in_the_crossing_report() {
 #[test]
 fn a_streamed_edge_is_labelled_with_its_item_type() {
     let mermaid = streamed::contract::manifest()
-        .to_mermaid(None)
+        .to_mermaid(None, Direction::LeftToRight)
         .expect("diagram");
     assert!(mermaid.contains("Brief + stream Word"), "{mermaid}");
 }

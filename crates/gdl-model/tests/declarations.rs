@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use gdl_model::{
-    Encoding, HopInfo, Manifest, NodeInfo, Placement, PropertyConsumer, PropertyInfo, PropertyNeed,
-    Role, TypeInfo, layout, property_supply,
+    Direction, Encoding, HopInfo, Manifest, NodeInfo, Placement, PropertyConsumer, PropertyInfo,
+    PropertyNeed, Role, TypeInfo, layout, property_supply,
 };
 
 /// `S => F { D }`: F's own hop crosses from `global` into `model_x`, so
@@ -240,7 +240,9 @@ fn a_need_the_layout_cannot_meet_is_refused_for_what_it_is() {
 #[test]
 fn a_diagram_draws_what_each_node_provides_and_needs() {
     let declared = manifest(vec![shard()]);
-    let mermaid = declared.to_mermaid(None).expect("a diagram");
+    let mermaid = declared
+        .to_mermaid(None, Direction::LeftToRight)
+        .expect("a diagram");
     assert!(
         mermaid.contains("title: \"classed; property shard: Shard\""),
         "{mermaid}"
@@ -253,15 +255,22 @@ fn a_diagram_draws_what_each_node_provides_and_needs() {
         mermaid.contains("n2[(\"D<br/>sink<br/>provides shard\")]"),
         "{mermaid}"
     );
-    let dot = declared.to_dot(None).expect("a diagram");
+    let dot = declared
+        .to_dot(None, Direction::LeftToRight)
+        .expect("a diagram");
     assert!(dot.contains("label=\"property shard: Shard\""), "{dot}");
     assert!(dot.contains("\"D\\nsink\\nprovides shard\""), "{dot}");
     let plain = manifest(vec![]);
     assert!(
         !plain
-            .to_mermaid(None)
+            .to_mermaid(None, Direction::LeftToRight)
             .expect("a diagram")
             .contains("provides")
     );
-    assert!(!plain.to_dot(None).expect("a diagram").contains("labelloc"));
+    assert!(
+        !plain
+            .to_dot(None, Direction::LeftToRight)
+            .expect("a diagram")
+            .contains("labelloc")
+    );
 }

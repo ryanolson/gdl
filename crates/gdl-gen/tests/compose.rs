@@ -177,7 +177,13 @@ fn a_message_in_a_private_module_needs_an_export() {
         resolution.messages["Prompt"].path,
         "exported_protocols::Prompt"
     );
-    gdl_gen::diagram(&spec, &target(), gdl_gen::Format::Mermaid).expect("diagram");
+    gdl_gen::diagram(
+        &spec,
+        &target(),
+        gdl_gen::Format::Mermaid,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("diagram");
 }
 
 /// The manifest program is run by cargo, as it was built: a target named
@@ -2237,7 +2243,13 @@ fn every_step_that_writes_a_manifest_refuses_a_gdl_path_to_the_definitions() {
         "export",
     );
     gdl_gen::resolve(&spec, &target).expect("resolve");
-    gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
+    gdl_gen::diagram(
+        &spec,
+        &target,
+        gdl_gen::Format::Dot,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("diagram");
 }
 
 /// A Git repository in `dir`, committed: a pool policy crate `regpolicy`

@@ -51,8 +51,13 @@ fn the_asr_segments_render() {
 #[test]
 fn the_asr_diagram_labels_its_streamed_edges() {
     let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
-    let mermaid = gdl_gen::diagram(&spec, &target("gdl-gen-tests"), gdl_gen::Format::Mermaid)
-        .expect("mermaid");
+    let mermaid = gdl_gen::diagram(
+        &spec,
+        &target("gdl-gen-tests"),
+        gdl_gen::Format::Mermaid,
+        gdl_gen::Direction::LeftToRight,
+    )
+    .expect("mermaid");
     for label in ["Session + stream Audio", "Session + stream Pcm"] {
         assert!(mermaid.contains(label), "{label} in:\n{mermaid}");
     }

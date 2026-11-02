@@ -7,7 +7,7 @@
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
-//! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+//! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
 //! cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
 //! cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
@@ -39,7 +39,7 @@
 //! as `generate` does, and with `--fleet` the fleet file against it,
 //! writing nothing; it prints every problem in both files, each with its
 //! file, table, and key, and fails if there is any. `diagram` prints the
-//! placed graph. `export` and `diagram` take a spec of one layout.
+//! placed graph, left to right unless `--direction tb`. `export` and `diagram` take a spec of one layout.
 //! `compose` writes a Docker Compose bundle; a spec with classes or several
 //! layouts it deploys only by pool, with `--fleet`: one hub per pool, and
 //! each pool's segments. With `--fleet` it runs the same check as `check`
@@ -81,7 +81,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use gdl_gen::Format;
+use gdl_gen::{Direction, Format};
 
 const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--probe] [--target-dir <dir>]
        cargo gdl catalog <dir>
@@ -89,7 +89,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
-       cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+       cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
        cargo gdl k8s --spec <gdl.toml> --fleet <fleet.toml> --out <directory> [--tag <tag>] [--images <images.json>] [--local] [--target-dir <dir>]
        cargo gdl images --spec <gdl.toml> --fleet <fleet.toml> [--push] [--out <images.json>] [--local] [--target-dir <dir>]
@@ -144,7 +144,7 @@ enum Command {
         out: Option<PathBuf>,
         release: bool,
     },
-    Diagram(Format),
+    Diagram(Format, Direction),
     Export {
         out: PathBuf,
     },
@@ -166,8 +166,8 @@ fn args() -> Result<Args, String> {
         .next()
         .and_then(|a| a.into_string().ok())
         .ok_or_else(|| USAGE.to_string())?;
-    let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
-        (None, None, None, None, None, None);
+    let (mut spec, mut out, mut catalog, mut target, mut format, mut direction, mut krate) =
+        (None, None, None, None, None, None, None);
     let (mut fleet, mut tag, mut images) = (None, None, None);
     let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
     let mut push = false;
@@ -185,6 +185,7 @@ fn args() -> Result<Args, String> {
             Some("--catalog") => catalog = Some(value()?),
             Some("--target-dir") => target = Some(value()?),
             Some("--format") => format = Some(value()?),
+            Some("--direction") => direction = Some(value()?),
             Some("--fleet") => fleet = Some(value()?),
             Some("--images") => images = Some(value()?),
             Some("--push") => push = true,
@@ -266,24 +267,37 @@ fn args() -> Result<Args, String> {
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
         },
-        "diagram" => match format.as_ref().and_then(|f| f.to_str()) {
-            Some("dot") => Command::Diagram(Format::Dot),
-            Some("mermaid") => Command::Diagram(Format::Mermaid),
-            other => {
-                return Err(format!(
-                    "--format takes dot or mermaid, not {other:?}\n{USAGE}"
-                ));
-            }
-        },
+        "diagram" => {
+            let format = match format.take().as_ref().and_then(|f| f.to_str()) {
+                Some("dot") => Format::Dot,
+                Some("mermaid") => Format::Mermaid,
+                other => {
+                    return Err(format!(
+                        "--format takes dot or mermaid, not {other:?}\n{USAGE}"
+                    ));
+                }
+            };
+            let direction = match direction.take().as_ref().and_then(|d| d.to_str()) {
+                None | Some("lr") => Direction::LeftToRight,
+                Some("tb") => Direction::TopToBottom,
+                Some(other) => {
+                    return Err(format!(
+                        "--direction takes lr or tb, not {other:?}\n{USAGE}"
+                    ));
+                }
+            };
+            Command::Diagram(format, direction)
+        }
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(
         command,
         Command::Extract { .. } | Command::Catalog(_) | Command::Down { .. }
     );
-    // `--fleet`, `--tag`, `--images`, `--push`, `--local`, and `--release`
-    // are for the commands that took them above.
+    // `--fleet`, `--tag`, `--images`, `--push`, `--local`, `--release`, and
+    // `--direction` are for the commands that took them above.
     if (needs_spec && spec.is_none())
+        || direction.is_some()
         || fleet.is_some()
         || tag.is_some()
         || images.is_some()
@@ -380,12 +394,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let target = target(spec.dir());
             print!("{}", gdl_gen::resolve(&spec, &target).map_err(located)?);
         }
-        Command::Diagram(format) => {
+        Command::Diagram(format, direction) => {
             let spec = spec()?;
             let target = target(spec.dir());
             print!(
                 "{}",
-                gdl_gen::diagram(&spec, &target, *format).map_err(located)?
+                gdl_gen::diagram(&spec, &target, *format, *direction).map_err(located)?
             );
         }
         Command::Check { fleet } => {

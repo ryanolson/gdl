@@ -70,6 +70,7 @@ pub use fleet::check_files;
 /// The working catalogue, its entries, and what a crate offers, read from
 /// its source.
 pub use gdl_extract::{Catalog, Entry, Offer};
+pub use gdl_model::Direction;
 use offers::offers;
 pub use offers::{CRATES_IO, GitSource, Offers, git_source};
 pub use output::{drift, write};
@@ -330,7 +331,7 @@ pub(crate) fn checked(
         for (name, layout) in layouts {
             let mermaid = prepared
                 .manifest
-                .to_mermaid(Some(&layout))
+                .to_mermaid(Some(&layout), Direction::LeftToRight)
                 .map_err(|e| Error::new(e.to_string()))?;
             let mermaid = service::diagram(&spec, &prepared.manifest, mermaid);
             let crossings = layout.report().to_string();
@@ -354,17 +355,22 @@ pub enum Format {
 }
 
 /// The spec's placed graph as a diagram: each segment a cluster, and each
-/// edge that crosses segments marked. The contract's manifest is got as
-/// for [`render`]. A spec of
+/// edge that crosses segments marked. Ranks run in `direction`. The
+/// contract's manifest is got as for [`render`]. A spec of
 /// several layouts is refused: a diagram draws one.
-pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
+pub fn diagram(
+    spec: &Spec,
+    target: &Path,
+    format: Format,
+    direction: Direction,
+) -> Result<String, Error> {
     let laid = spec.only_layout("`diagram`")?;
     let manifest = prepare(spec, None, target, emit::Deps::Relative, Offers::Read)?.manifest;
     let layout = gdl_model::layout(&manifest, laid.placement)
         .map_err(|errors| Error::all(laid.problems(&errors)))?;
     match format {
-        Format::Dot => manifest.to_dot(Some(&layout)),
-        Format::Mermaid => manifest.to_mermaid(Some(&layout)),
+        Format::Dot => manifest.to_dot(Some(&layout), direction),
+        Format::Mermaid => manifest.to_mermaid(Some(&layout), direction),
     }
     .map_err(|e| Error::new(e.to_string()))
 }
