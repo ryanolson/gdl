@@ -705,3 +705,33 @@ async fn a_re_registration_keeps_the_first_join_stamp() {
         ]
     );
 }
+
+/// A member that registers again under its id, in a segment outside the
+/// pool's class, ends its earlier registration, which the hub replaces
+/// without a removal: a retire request for that registration ends with
+/// it, and a request that names it is refused.
+#[test]
+fn a_retire_request_ends_when_its_member_registers_outside_the_class() {
+    let feed = feed();
+    let member = peer();
+    let id = member.instance_id();
+    feed.joined(
+        "f",
+        Incarnation::from_u64(1),
+        RegistrationEpoch::new(),
+        member.clone(),
+    );
+    feed.retire(id, 1, false).expect("held");
+    assert_eq!(feed.retire_requests().len(), 1, "the control");
+    feed.joined(
+        "a",
+        Incarnation::from_u64(2),
+        RegistrationEpoch::new(),
+        member,
+    );
+    assert!(feed.retire_requests().is_empty());
+    assert_eq!(
+        feed.retire(id, 1, false),
+        Err(super::super::retire::Refused::Unknown)
+    );
+}

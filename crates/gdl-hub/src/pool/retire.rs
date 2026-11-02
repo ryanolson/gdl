@@ -35,14 +35,19 @@ pub(super) enum Refused {
 }
 
 impl Requests {
-    /// `id` registered in `incarnation`: a request for an earlier
-    /// registration of it ended with that registration.
-    pub(super) fn joined(&mut self, id: InstanceId, incarnation: Incarnation) {
+    /// `id` registered in `incarnation`, as a `member` of the pool's
+    /// class or not: a request for an earlier registration of it ended
+    /// with that registration, and one outside the class is no member.
+    pub(super) fn joined(&mut self, id: InstanceId, incarnation: Incarnation, member: bool) {
         match self.members.get_mut(&id) {
-            Some(member) if member.incarnation >= incarnation => {}
-            Some(member) => {
-                member.incarnation = incarnation;
-                member.requested = false;
+            Some(held) if held.incarnation >= incarnation => {}
+            Some(_) if !member => {
+                self.members.remove(&id);
+            }
+            None if !member => {}
+            Some(held) => {
+                held.incarnation = incarnation;
+                held.requested = false;
             }
             None => {
                 self.members.insert(
@@ -128,8 +133,8 @@ mod tests {
     fn a_late_removal_of_an_earlier_registration_changes_nothing() {
         let mut requests = Requests::default();
         let id = InstanceId::new_v4();
-        requests.joined(id, Incarnation::from_u64(3));
-        requests.joined(id, Incarnation::from_u64(5));
+        requests.joined(id, Incarnation::from_u64(3), true);
+        requests.joined(id, Incarnation::from_u64(5), true);
         assert_eq!(requests.request(id, 3, false), Err(Refused::Stale));
         assert!(requests.request(id, 5, false).expect("taken").is_some());
         let held = vec![RetireRequest {
@@ -139,7 +144,7 @@ mod tests {
         requests.removed(&removal(id, 3));
         assert_eq!(requests.held(), held);
         // A commit of the earlier one, delivered late, keeps the later.
-        requests.joined(id, Incarnation::from_u64(3));
+        requests.joined(id, Incarnation::from_u64(3), true);
         assert_eq!(requests.held(), held);
         requests.removed(&removal(id, 5));
         assert_eq!(requests.request(id, 5, false), Err(Refused::Unknown));
@@ -154,7 +159,7 @@ mod tests {
         let mut requests = Requests::default();
         let id = InstanceId::new_v4();
         assert_eq!(requests.request(id, 1, true), Err(Refused::Unknown));
-        requests.joined(id, Incarnation::from_u64(1));
+        requests.joined(id, Incarnation::from_u64(1), true);
         assert_eq!(requests.request(id, 2, true), Err(Refused::Draining));
         assert_eq!(requests.request(id, 1, true), Err(Refused::Draining));
         assert!(requests.held().is_empty());

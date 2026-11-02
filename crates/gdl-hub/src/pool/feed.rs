@@ -348,9 +348,10 @@ impl Feed {
     ) {
         let mut shared = self.lock();
         let id = peer.instance_id();
-        if shared.segments.iter().any(|(name, _)| name == segment) {
-            shared.requests.joined(id, incarnation);
-        }
+        // Every registration ends the earlier one of its id, whatever its
+        // segment: the hub replaces it without a removal.
+        let member = shared.segments.iter().any(|(name, _)| name == segment);
+        shared.requests.joined(id, incarnation, member);
         let Some(index) = shared.entry_index(segment) else {
             return;
         };
