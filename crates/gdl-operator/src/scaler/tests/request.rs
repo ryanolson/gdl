@@ -393,3 +393,26 @@ async fn request_mode_needs_a_drain_bound() {
     );
     assert!(fake.take_writes().is_empty());
 }
+
+/// A victim asked to retire is still waited for at most `drainBound` once
+/// the spec leaves request mode: without a bound the scale-down blocks,
+/// and with one the victim's drain goes on to its commit.
+#[tokio::test]
+async fn a_victim_asked_before_the_mode_changed_still_needs_its_bound() {
+    let fake = three();
+    let mut spec = request(2);
+    once(&fake, &spec, 0).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
+    spec.retire = Some(Retire::Signal);
+    spec.drain_bound = None;
+    assert_eq!(once(&fake, &spec, 1_000).await, BLOCKED);
+    assert_eq!(
+        condition(&fake, "Blocked"),
+        ("True".into(), "DrainBoundRequired".into())
+    );
+    spec.drain_bound = Some("20s".into());
+    phase(&fake, 2, "drained");
+    once(&fake, &spec, 2_000).await;
+    assert_eq!(victim(&fake).phase, RetiringPhase::Removing);
+    assert_eq!(fake.state().replicas, 2);
+}

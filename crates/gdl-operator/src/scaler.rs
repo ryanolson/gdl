@@ -204,7 +204,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         let bound = spec
             .drain_bound()
             .map_err(|e| Stop::Blocked("BadDuration", format!("drainBound: {e}")))?;
-        if self.request && bound.is_none() {
+        // A victim asked to retire is waited for at most the bound, also
+        // once the spec has left request mode.
+        let asked = |v: &Retiring| v.asked.is_some() && uncommitted(v);
+        if bound.is_none() && (self.request || retiring.iter().any(asked)) {
             return Err(Stop::Blocked(
                 "DrainBoundRequired",
                 "`retire: request` waits for a victim at most `drainBound`, which is not set"
@@ -365,13 +368,13 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     }
                 }
             }
+            let bound = bound.unwrap_or_default();
             if commit && self.request && kept[at].phase == RetiringPhase::Unrouting {
                 commit = false;
-                held = self.ask(&mut kept, at, pod).await?;
+                held = self.ask(&mut kept, at, pod, bound).await?;
             } else if kept[at].phase == RetiringPhase::Retiring {
-                held = self.ask(&mut kept, at, pod).await?;
+                held = self.ask(&mut kept, at, pod, bound).await?;
             } else if kept[at].phase == RetiringPhase::Draining {
-                let bound = bound.expect("request mode has a drain bound");
                 commit = self.hold(&mut kept[at], pod, bound).await;
             }
             if commit {
@@ -575,7 +578,10 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             let at = kept.len() - 1;
             match kept[at].phase {
                 RetiringPhase::Unrouting => self.label(pod, false).await?,
-                RetiringPhase::Retiring => return self.ask(kept, at, pod).await,
+                RetiringPhase::Retiring => {
+                    let bound = self.spec.drain_bound().ok().flatten().unwrap_or_default();
+                    return self.ask(kept, at, pod, bound).await;
+                }
                 _ => replicas = self.commit(kept, at, pod, replicas, fence).await?,
             }
         }

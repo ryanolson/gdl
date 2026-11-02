@@ -11,7 +11,7 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Api, Client, Resource};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{DELETION_COST, GdlScaler, GdlScalerStatus, ROUTABLE, SCALER_MANAGER};
 
@@ -422,6 +422,11 @@ impl Cluster for KubeCluster {
             }
             for field in ["last", "observedGeneration"] {
                 fields.entry(field).or_insert(serde_json::Value::Null);
+            }
+            // A merge patch merges an object key by key: a removal
+            // without a handoff would keep the last one's.
+            if let Some(last) = fields.get_mut("last").and_then(Value::as_object_mut) {
+                last.entry("handoff").or_insert(Value::Null);
             }
         }
         // With a resourceVersion, the merge patch is refused if another

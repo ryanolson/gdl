@@ -25,7 +25,7 @@ pub(super) const RETIRE_REFUSED: &str = "RetireRefused";
 
 impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     /// Ask the hub of `kept[at]`'s pool, whose pod is `pod`, to retire its
-    /// instance. A victim leaving its Service first reads its instance's
+    /// instance, waiting for it to take the request at most `bound`. A victim leaving its Service first reads its instance's
     /// registration, and stores its retire step; one whose registration
     /// changed since is stored again before it is asked. Once the hub
     /// takes the request, the victim is `draining`. Why it waits, when it
@@ -35,6 +35,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         kept: &mut [Retiring],
         at: usize,
         pod: &PodView,
+        bound: Duration,
     ) -> Result<Option<(&'static str, String)>, Stop> {
         let pool = self.spec.pool.clone();
         let listed = self.cx.probe.instances(&pool).await;
@@ -107,7 +108,6 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             .as_deref()
             .and_then(millis)
             .unwrap_or(self.now_ms);
-        let bound = self.spec.drain_bound().ok().flatten().unwrap_or_default();
         if self.now_ms - asked < millis_of(bound) {
             tracing::debug!(pod = %kept[at].pod, %refused, "the retire request waits");
             return Ok(None);

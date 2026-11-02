@@ -309,3 +309,67 @@ async fn a_pod_delete_is_fenced_by_its_uid_and_version() {
     assert_eq!(seen[0]["preconditions"]["uid"], "uid-3");
     assert_eq!(seen[1]["preconditions"]["resourceVersion"], "9");
 }
+
+/// A status write is a merge patch, which merges `last` key by key: a
+/// removal without a handoff names it null, so that the last removal's
+/// handoff does not stay.
+#[tokio::test]
+async fn a_status_write_clears_a_handoff_the_last_removal_had() {
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let bodies = Arc::clone(&seen);
+    let service = service_fn(move |request: Request<Body>| {
+        let bodies = Arc::clone(&bodies);
+        async move {
+            assert!(
+                request
+                    .uri()
+                    .path()
+                    .ends_with("/gdlscalers/global-front/status")
+            );
+            let bytes = request.into_body().collect_bytes().await.expect("body");
+            bodies
+                .lock()
+                .expect("bodies")
+                .push(serde_json::from_slice(&bytes).expect("a merge patch"));
+            let reply = json!({
+                "apiVersion": "gdl.dev/v1alpha1", "kind": "GdlScaler",
+                "metadata": {"name": "global-front", "resourceVersion": "2"},
+                "spec": {"pool": "p", "segment": "s",
+                         "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "d"}},
+            });
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(reply.to_string().into_bytes()))
+                    .expect("response"),
+            )
+        }
+    });
+    let cluster = KubeCluster::new(Client::new(service, "test"), "test");
+    let status = GdlScalerStatus {
+        last: Some(crate::Last {
+            pod: "pod-2".into(),
+            chosen: "uid-2".into(),
+            deleted: "uid-2".into(),
+            reason: String::new(),
+            duration_ms: 1,
+            outcome: crate::Outcome::Removed,
+            handoff: None,
+        }),
+        ..GdlScalerStatus::default()
+    };
+    cluster
+        .status("global-front", &status, Some("1"))
+        .await
+        .expect("written");
+    let seen = seen.lock().expect("bodies");
+    assert_eq!(seen[0]["status"]["last"]["handoff"], Value::Null);
+    assert!(
+        seen[0]["status"]["last"]
+            .as_object()
+            .expect("last")
+            .contains_key("handoff"),
+        "named, so the merge clears it: {}",
+        seen[0]
+    );
+}
