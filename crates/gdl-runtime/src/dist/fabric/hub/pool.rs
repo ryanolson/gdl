@@ -702,14 +702,16 @@ async fn run(
                     };
                     // The pool's own summary, for its nodes' gate
                     // ([`gdl::OfferGate::own`]): as it comes, snapshot or not.
+                    // Not for a reader of its requests alone, whose pool has
+                    // no entry instance to summarize.
                     match event {
                         PoolWatchEvent::Pool {
                             epoch: of, load, ..
-                        } => {
+                        } if reader.drains => {
                             epoch = of;
                             gate.set_own(load.map(|load| (epoch, load)));
                         }
-                        PoolWatchEvent::Load { load } => {
+                        PoolWatchEvent::Load { load } if reader.drains => {
                             gate.set_own(load.map(|load| (epoch, load)));
                         }
                         _ => {}
