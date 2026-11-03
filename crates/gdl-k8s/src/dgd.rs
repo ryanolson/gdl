@@ -36,9 +36,44 @@ fn templates(component: &mut Value) -> Vec<&mut Value> {
             .is_some_and(|roles| roles.iter().any(|role| !role["podTemplate"].is_null()));
     if by_role && component["roles"].is_array() {
         let roles = component["roles"].as_array_mut().into_iter().flatten();
-        return roles.map(|role| &mut role["podTemplate"]).collect();
+        return roles
+            .filter_map(|role| role.as_object_mut())
+            .map(|role| role.entry("podTemplate").or_insert(Value::Null))
+            .collect();
     }
-    vec![&mut component["podTemplate"]]
+    match component.as_object_mut() {
+        Some(fields) => vec![fields.entry("podTemplate").or_insert(Value::Null)],
+        None => Vec::new(),
+    }
+}
+
+/// Put `checksum` in `template`'s [`CONFIG`] annotation, making the
+/// template, its metadata and its annotations where they are absent.
+/// Refused where one of them is not an object, as dynamo would refuse
+/// the DGD: indexing a field of another JSON value would panic.
+fn annotate(template: &mut Value, component: &str, checksum: &str) -> Result<(), String> {
+    let template = object(template, "pod template", component)?;
+    let metadata = template.entry("metadata").or_insert(Value::Null);
+    let metadata = object(metadata, "pod template's metadata", component)?;
+    let annotations = metadata.entry("annotations").or_insert(Value::Null);
+    object(annotations, "pod template's annotations", component)?
+        .insert(CONFIG.into(), checksum.into());
+    Ok(())
+}
+
+/// `value` as an object, made one where it is absent; refused where it is
+/// another JSON value, as `what` of component `component`.
+fn object<'v>(
+    value: &'v mut Value,
+    what: &str,
+    component: &str,
+) -> Result<&'v mut Map<String, Value>, String> {
+    if value.is_null() {
+        *value = Value::Object(Map::new());
+    }
+    value.as_object_mut().ok_or_else(|| {
+        format!("component `{component}` of the pool's DGD has a {what} that is not an object")
+    })
 }
 
 /// The components of `dgd`, as JSON, that run a segment: those whose pod
@@ -127,11 +162,16 @@ pub(crate) fn render(
                     segment.name
                 )
             })?;
+        if found["roles"]
+            .as_array()
+            .is_some_and(|roles| roles.iter().any(|role| !role.is_object()))
+        {
+            return Err(format!(
+                "component `{component}` of the pool's DGD has a role that is not an object"
+            ));
+        }
         for template in templates(found) {
-            if template.is_null() {
-                *template = Value::Object(Map::new());
-            }
-            template["metadata"]["annotations"][CONFIG] = checksum.into();
+            annotate(template, component, checksum)?;
         }
     }
     for component in components.iter_mut() {

@@ -277,13 +277,15 @@ pub trait Pools {
     /// `deployment` controls, by uid.
     fn pods(&self, deployment: &Live) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
 
-    /// The pods of component `component` of the DGD `dgd` that have not
-    /// ended, by the labels dynamo's operator puts on them: dynamo's
-    /// controllers own them, not the pool.
-    fn component_pods(
+    /// The pods of the DGD `dgd` that run a segment and have not ended:
+    /// each of a component in `components`, by the label dynamo's operator
+    /// puts on it, and each that carries `gdl.dev/config`, which it took
+    /// from the template it was made from, whatever its component runs
+    /// now. dynamo's controllers own them, not the pool.
+    fn segment_pods(
         &self,
         dgd: &str,
-        component: &str,
+        components: &[String],
     ) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
 
     /// Whether the cluster serves PodMonitors, as asked once when the
@@ -616,20 +618,28 @@ impl Pools for KubePools {
             .collect())
     }
 
-    async fn component_pods(&self, dgd: &str, component: &str) -> Result<Vec<PodView>, String> {
-        let selector = format!(
-            "{}={dgd},{}={component}",
-            gdl_k8s::DGD_LABEL,
-            gdl_k8s::COMPONENT_LABEL
-        );
+    async fn segment_pods(&self, dgd: &str, components: &[String]) -> Result<Vec<PodView>, String> {
+        let selector = format!("{}={dgd}", gdl_k8s::DGD_LABEL);
         let pods = self
             .pods
             .list(&ListParams::default().labels(&selector))
             .await
-            .map_err(|e| format!("pods of component `{component}` of DGD `{dgd}`: {e}"))?;
+            .map_err(|e| format!("pods of DGD `{dgd}`: {e}"))?;
+        let segment = |metadata: &ObjectMeta| {
+            let component = metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(gdl_k8s::COMPONENT_LABEL));
+            let marked = metadata
+                .annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.contains_key("gdl.dev/config"));
+            marked || component.is_some_and(|c| components.contains(c))
+        };
         Ok(pods
             .items
             .iter()
+            .filter(|pod| segment(&pod.metadata))
             .filter(|pod| {
                 let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
                 !matches!(phase, Some("Succeeded" | "Failed"))

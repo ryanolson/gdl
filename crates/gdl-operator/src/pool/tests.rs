@@ -6,7 +6,7 @@
 //! record is withdrawn once drained, when a test lets it). It logs every
 //! write in order, a status write with the step and the uids it names.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -51,6 +51,9 @@ struct State {
     /// Running pods of the pool's DGD, by component, which dynamo's
     /// controllers run: a test starts and stops them.
     dgd_pods: BTreeMap<String, u32>,
+    /// The components of the DGD whose running pods carry `gdl.dev/config`
+    /// from the template they were made from: a test marks them.
+    marked: BTreeSet<String>,
     log: Vec<String>,
     events: Vec<String>,
     next: u32,
@@ -195,14 +198,22 @@ impl State {
     /// Whether a pod runs of a segment in the pool's DGD: of a component
     /// that runs a segment in the DGD as applied, not a worker's.
     fn dgd_segments_run(&self) -> bool {
-        self.objects
+        let applied = self
+            .objects
             .get(&(Kind::DynamoGraphDeployment, "p".to_string()))
-            .is_some_and(|dgd| {
-                dgd.live
-                    .components
-                    .iter()
-                    .any(|c| self.dgd_pods.get(c).is_some_and(|n| *n > 0))
-            })
+            .map(|dgd| dgd.live.components.clone())
+            .unwrap_or_default();
+        self.segment_pods_in_dgd(&applied) > 0
+    }
+
+    /// The running pods of the DGD that run a segment: those of each
+    /// component of `components`, and those that carry `gdl.dev/config`.
+    fn segment_pods_in_dgd(&self, components: &[String]) -> u32 {
+        self.dgd_pods
+            .iter()
+            .filter(|(c, _)| components.contains(c) || self.marked.contains(*c))
+            .map(|(_, n)| n)
+            .sum()
     }
 }
 
@@ -437,17 +448,17 @@ impl Pools for Fake {
         Ok(pods)
     }
 
-    async fn component_pods(&self, dgd: &str, component: &str) -> Result<Vec<PodView>, String> {
+    async fn segment_pods(&self, dgd: &str, components: &[String]) -> Result<Vec<PodView>, String> {
         let state = self.state();
         // The pool's DGD is named after it, and only it has pods here.
         let count = match dgd {
-            "p" => state.dgd_pods.get(component).copied().unwrap_or(0),
+            "p" => state.segment_pods_in_dgd(components),
             _ => 0,
         };
         Ok((0..count)
             .map(|n| PodView {
-                name: format!("{component}-{n}"),
-                uid: format!("{component}-{n}"),
+                name: format!("segment-{n}"),
+                uid: format!("segment-{n}"),
                 resource_version: "1".into(),
                 ip: None,
                 created_ms: 0,

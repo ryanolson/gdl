@@ -377,10 +377,13 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
     }
 
     /// Whether a pod runs of a segment in a DGD among `owned`: dynamo's
-    /// controllers own these pods, so they are found by the DGD's name and
-    /// each component that runs a segment. Those components are read from
-    /// the DGD as applied, never from the pool's current spec, which a held
-    /// generation may have changed. The DGD's other components, dynamo's
+    /// controllers own these pods, so they are found by the DGD's name,
+    /// and are a segment's by their component or by the `gdl.dev/config`
+    /// they took from their template. The components are read from the DGD
+    /// as applied, never from the pool's current spec, which a held
+    /// generation may have changed; the annotation finds the pods of a
+    /// component the segment has since left, which dynamo has not replaced
+    /// yet. The DGD's other components, dynamo's
     /// workers, are not segments: the segments' requests need them until
     /// the segments have drained, and garbage collection deletes them with
     /// the DGD once the pool is released.
@@ -389,11 +392,13 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             .iter()
             .filter(|o| o.kind == Kind::DynamoGraphDeployment)
         {
-            for component in &dgd.components {
-                let pods = self.cx.pools.component_pods(&dgd.name, component).await?;
-                if !pods.is_empty() {
-                    return Ok(true);
-                }
+            let pods = self
+                .cx
+                .pools
+                .segment_pods(&dgd.name, &dgd.components)
+                .await?;
+            if !pods.is_empty() {
+                return Ok(true);
             }
         }
         Ok(false)

@@ -41,6 +41,8 @@ async fn running_dgd(parent: bool) -> Fake {
     let mut state = fake.state();
     state.dgd_pods.insert("Frontend".into(), 2);
     state.dgd_pods.insert("Worker".into(), 3);
+    // The frontends were made from the template that runs the segment.
+    state.marked.insert("Frontend".into());
     state.log.clear();
     state.status_writes = 0;
     drop(state);
@@ -324,5 +326,25 @@ async fn a_malformed_dgd_template_is_refused_without_panicking() {
         !log.iter()
             .any(|entry| entry.starts_with("create ") || entry.starts_with("apply ")),
         "a malformed DGD must apply nothing: {log:?}"
+    );
+}
+
+/// A segment's pod that does not carry `gdl.dev/config`, as when dynamo
+/// does not copy a template's annotations to its pods, is still the
+/// segment's by its component in the DGD as applied: the hub waits for it.
+#[tokio::test]
+async fn a_segment_pod_found_by_its_component_alone_holds_the_hub() {
+    let fake = running_dgd(false).await;
+    fake.state().marked.clear();
+    fake.delete(false);
+    fake.reconcile(1_000).await.expect("a reconcile");
+    fake.settle();
+    fake.reconcile(2_000).await.expect("a reconcile");
+    assert_eq!(step(&fake), Some(StopStep::Segments));
+    assert!(!released(&fake));
+    let log = fake.log();
+    assert!(
+        !log.iter().any(|e| e.starts_with("write Deployment/p ")),
+        "{log:?}"
     );
 }

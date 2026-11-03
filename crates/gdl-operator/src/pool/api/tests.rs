@@ -212,3 +212,55 @@ async fn a_pool_stop_does_not_wait_for_terminal_pods() {
         );
     }
 }
+
+/// A DGD's pods are asked by the DGD's label alone. A segment's are those
+/// of a component the DGD runs a segment in, and those that carry
+/// `gdl.dev/config` in another component; a worker's, and an ended one,
+/// are not.
+#[tokio::test]
+async fn a_dgds_segment_pods_are_found_by_component_or_annotation() {
+    let service = service_fn(|request: Request<Body>| async move {
+        assert!(request.uri().path().ends_with("/pods"));
+        let query = request.uri().query().unwrap_or_default().to_string();
+        assert_eq!(
+            query,
+            "&labelSelector=nvidia.com%2Fdynamo-graph-deployment-name%3Dp"
+        );
+        let pod = |name: &str, component: &str, marked: bool, phase: &str| {
+            let mut pod = json!({
+                "metadata": {"name": name, "uid": name, "labels": {
+                    "nvidia.com/dynamo-graph-deployment-name": "p",
+                    "nvidia.com/dynamo-component": component,
+                }},
+                "status": {"phase": phase},
+            });
+            if marked {
+                pod["metadata"]["annotations"] = json!({"gdl.dev/config": "c"});
+            }
+            pod
+        };
+        let items = vec![
+            pod("frontend", "Frontend", false, "Running"),
+            pod("moved", "Worker", true, "Running"),
+            pod("worker", "Worker", false, "Running"),
+            pod("ended", "Frontend", true, "Succeeded"),
+        ];
+        Ok::<_, Infallible>(
+            Response::builder()
+                .status(200)
+                .body(Body::from(
+                    json!({"apiVersion": "v1", "kind": "PodList", "items": items})
+                        .to_string()
+                        .into_bytes(),
+                ))
+                .expect("response"),
+        )
+    });
+    let pools = KubePools::new(Client::new(service, "ns"), "ns", false, true);
+    let pods = pools
+        .segment_pods("p", &["Frontend".to_string()])
+        .await
+        .expect("pods");
+    let names: Vec<&str> = pods.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["frontend", "moved"]);
+}
