@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use futures::Stream;
 
-use super::{Items, Producer, bound};
+use super::{Items, Producer, bound, bound_measured};
 use crate::Result;
 use crate::cx::{Cx, REGISTERED};
 use crate::error::Error;
@@ -92,6 +92,10 @@ impl Drop for Scripted {
 enum Form {
     Boxed,
     Unboxed,
+    // The root's attempt boundary (`bound_measured`), with no visit to
+    // report to, over each form of the node boundary.
+    MeasuredBoxed,
+    MeasuredUnboxed,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +165,8 @@ async fn record(form: Form, case: &Case) -> Vec<String> {
     let mut out = Some(match form {
         Form::Boxed => bound(&attempt, guard, producer.fuse(inner)),
         Form::Unboxed => bound(&attempt, guard, producer.fused(inner)),
+        Form::MeasuredBoxed => bound_measured(&attempt, guard, producer.fuse(inner), None),
+        Form::MeasuredUnboxed => bound_measured(&attempt, guard, producer.fused(inner), None),
     });
 
     let waker = Waker::from(Arc::new(Noting {
@@ -409,6 +415,14 @@ async fn the_unboxed_node_boundary_ends_and_drops_as_the_boxed_one_does() {
             "{}: the unboxed form differs\nboxed: {boxed:#?}",
             case.name
         );
+        for form in [Form::MeasuredBoxed, Form::MeasuredUnboxed] {
+            let measured = record(form, case).await;
+            assert_eq!(
+                measured, boxed,
+                "{}: the {form:?} form differs\nboxed: {boxed:#?}",
+                case.name
+            );
+        }
         // The record is not empty or trivially equal: the producer ran and
         // was dropped in every case.
         assert!(

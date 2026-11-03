@@ -824,6 +824,20 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <around|around-wide> <u64|large> <0|5> <10000|20000> 1
 ```
 
+**A distributed hop whose plan is local holds its node boundary unboxed too.** Its inner end returns its `Fuse`, the root's attempt boundary (`bound_measured`) takes it as its inner stream, and a backward chain with no node hands it on as it is. A request of one item allocates 8 times, against 9 (`tests/allocations.rs` in `gdl-runtime`). Per item, over `requests single-<size>` (the lean graph with both its nodes in one segment), base and change built in one target directory and run from paths of the same length, six rounds each, on the same aarch64 host:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench requests --no-run
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/requests-<hash> single-<8|512> <10000|20000>
+```
+
+| Per item | Base | Change |
+|---|---|---|
+| 8 B items, median (range) | 307.3 Ir (300.2 to 317.2) | 286.6 Ir (279.8 to 294.3) |
+| 512 B items, median (range) | 340.1 Ir (332.7 to 347.6) | 320.2 Ir (312.7 to 320.4) |
+
+The bench's process runs a multi-threaded runtime, so its rounds spread further than the `stages` rounds do. The `stages` rows did not move, `around` and `around-wide` included: 0.1 Ir per item and 6 Ir per request at most, and the same `.text`. The `requests` bench grows by 1,344 B of `.text`. A hop with an around node boxes its node boundary as before: the around node's backward half takes `Items`, as a backward node does.
+
 ### Copies of an item
 
 A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.

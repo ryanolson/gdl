@@ -21,7 +21,8 @@
 //!
 //! `lean-<size>` and `direct-<size>` count items rather than requests: one
 //! stream of `<count>` items of `<size>` bytes, through `remote`'s lean
-//! two-segment graph or the same stream on velo alone. The stream is opened
+//! two-segment graph or the same stream on velo alone. `single-<size>` runs
+//! the lean graph in one segment: a hop whose plan is local. The stream is opened
 //! once, so the difference between two counts is the cost of the items
 //! alone, with no share of a request's. `perf record` on one of these
 //! profiles the item path, both ends, in one process.
@@ -60,7 +61,7 @@ async fn node() -> velo::Velo {
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics | -velo] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics | -velo] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct | single>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -90,7 +91,7 @@ fn main() {
         }
         if let Some((kind, size)) = which
             .split_once('-')
-            .filter(|(kind, _)| matches!(*kind, "lean" | "direct"))
+            .filter(|(kind, _)| matches!(*kind, "lean" | "direct" | "single"))
         {
             let size: u32 = size.parse().expect(usage);
             items(kind, Ask { items: count, size }).await;
@@ -165,8 +166,12 @@ fn main() {
 
 /// One stream of `ask.items` items, read to its end and checked.
 async fn items(kind: &str, ask: Ask) {
-    if kind == "lean" {
-        let lean = lean_front().await;
+    if kind == "lean" || kind == "single" {
+        let lean = if kind == "lean" {
+            lean_front().await
+        } else {
+            lean_single_front().await
+        };
         let out = lean(Cx::new(), ask).await.expect("call");
         drain(out, ask.items, |blob| {
             assert_eq!(blob.0.len(), ask.size as usize, "gdl: item size");

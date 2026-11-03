@@ -100,6 +100,12 @@ pub fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
     Producer::of(scope).fuse(inner)
 }
 
+/// The node boundary [`fuse`] describes, not boxed, for an attempt boundary
+/// that holds it as its inner stream ([`bound_measured`]).
+pub fn fused<T>(inner: Items<T>, scope: &Cx) -> Fuse<T> {
+    Producer::of(scope).fused(inner)
+}
+
 /// What a node boundary keeps of its producer's scope. Taken before the
 /// scope moves into the producer, it spares a clone of the whole context,
 /// which copies the metadata, extensions, and visit handles too.
@@ -136,9 +142,10 @@ impl Producer {
 /// Consecutive ready items a node boundary passes before it yields.
 const YIELD_INTERVAL: u16 = 1024;
 
-/// The node boundary [`fuse`] describes. Public only because a hop's
-/// backward chain names it as the stream its attempt boundary takes; it is
-/// not reachable from outside the crate.
+/// The node boundary [`fuse`] describes. Public because a hop's backward
+/// chain names it as the stream its attempt boundary takes, and the runtime
+/// holds it unboxed in its own hops ([`fused`]); outside the crate it is
+/// reachable only through the runtime's hidden module.
 pub struct Fuse<T> {
     inner: Option<Items<T>>,
     // The producer's scope, cancelled at any ending or drop; `None` once
@@ -225,13 +232,18 @@ where
 }
 
 /// `bound` for the root's attempt, ending the visit `response` owns with
-/// the outcome the boundary reports, and noting its first item out.
-pub fn bound_measured<T: Send + 'static>(
+/// the outcome the boundary reports, and noting its first item out. `inner`
+/// is boxed, or a node boundary held unboxed ([`fused`]), as in `bound`.
+pub fn bound_measured<T, S>(
     cx: &Cx,
     guard: CancelOnDrop,
-    inner: Items<T>,
+    inner: S,
     response: Option<Owner>,
-) -> Items<T> {
+) -> Items<T>
+where
+    T: Send + 'static,
+    S: Stream<Item = Result<T>> + Unpin + Send + 'static,
+{
     let response = Measured {
         first_pending: response.is_some(),
         owner: response,

@@ -15,7 +15,7 @@ use futures::StreamExt;
 
 use super::{EncodedItem, Head};
 use crate::wire::{Codec, RequestCodec, SizeHint};
-use gdl::__runtime::{fuse, until_error};
+use gdl::__runtime::{Fuse, fuse, fused, until_error};
 use gdl::Cx;
 use gdl::{Around, Backward, Forward, Next, Operator, Sink};
 use gdl::{Error, ErrorKind, Result};
@@ -413,6 +413,18 @@ pub trait DBackward<Stack = ()>: sealed::Sealed + Send + Sync + 'static {
         bytes: Items<Bytes>,
         stack: Stack,
     ) -> Result<BwdExit<Self::Out>>;
+
+    /// The stream a local plan's attempt boundary takes: the whole chain's,
+    /// or, with no backward node, the inner end's node boundary itself,
+    /// unboxed. `None` if the chain would leave the segment, which a local
+    /// plan never does.
+    #[doc(hidden)]
+    type Answer: futures::Stream<Item = Result<Self::Out>> + Unpin + Send + 'static;
+
+    /// The whole chain, from its first position, over the inner end's node
+    /// boundary, with the slots of its around nodes.
+    #[doc(hidden)]
+    fn answer(&self, attempt: &Cx, fused: Fuse<Self::In>, stack: Stack) -> Option<Self::Answer>;
 }
 
 /// One backward node of a distributed hop.
@@ -500,6 +512,15 @@ where
         }
         self.rest.enter(pos + 1, target, end, attempt, bytes, stack)
     }
+
+    type Answer = Items<R::Out>;
+
+    fn answer(&self, attempt: &Cx, fused: Fuse<B::In>, stack: S) -> Option<Items<R::Out>> {
+        match self.walk(1, usize::MAX, attempt, Box::pin(fused), stack) {
+            BwdExit::Here(items) => Some(items),
+            BwdExit::Leave { .. } => None,
+        }
+    }
 }
 
 /// The backward half of an around node in a distributed hop.
@@ -585,6 +606,22 @@ where
         drop(slot);
         self.rest.enter(pos + 1, target, end, attempt, bytes, rest)
     }
+
+    // An around node's backward half takes `Items`, as a backward node
+    // does: the inner end's node boundary is boxed into it.
+    type Answer = Items<R::Out>;
+
+    fn answer(
+        &self,
+        attempt: &Cx,
+        fused: Fuse<P::DownItem>,
+        stack: (Slot<P>, Rest),
+    ) -> Option<Items<R::Out>> {
+        match self.walk(1, usize::MAX, attempt, Box::pin(fused), stack) {
+            BwdExit::Here(items) => Some(items),
+            BwdExit::Leave { .. } => None,
+        }
+    }
 }
 
 impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
@@ -617,6 +654,15 @@ impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
         }
         Ok(BwdExit::Here(decode_stream(self.codec, bytes)))
     }
+
+    // Nothing comes between the node boundary and the attempt boundary, so
+    // the attempt boundary holds it as it is, as in local composition: one
+    // box fewer per request, and one dynamic poll fewer per item.
+    type Answer = Fuse<T>;
+
+    fn answer(&self, _attempt: &Cx, fused: Fuse<T>, (): ()) -> Option<Fuse<T>> {
+        Some(fused)
+    }
 }
 
 /// The inner end of a distributed hop: a sink, or an operator with its own
@@ -632,13 +678,14 @@ pub trait DInner: sealed::Sealed + Send + Sync + 'static {
     fn absent(&self) -> bool;
 
     /// Call the inner end under `scope`, its own scope, and return its
-    /// stream behind a node boundary, ended with the scope.
+    /// stream behind a node boundary, ended with the scope. The boundary is
+    /// not boxed: a local plan's attempt boundary may hold it as it is.
     #[doc(hidden)]
     fn call(
         &self,
         scope: &Cx,
         req: Self::Req,
-    ) -> impl Future<Output = Result<Items<Self::Item>>> + Send;
+    ) -> impl Future<Output = Result<Fuse<Self::Item>>> + Send;
 
     #[doc(hidden)]
     fn register(&self, entries: &mut super::runtime::Entries);
@@ -664,14 +711,14 @@ impl<S: Sink> DInner for DSink<S> {
         S::ABSENT
     }
 
-    async fn call(&self, scope: &Cx, req: S::Req) -> Result<Items<S::Item>> {
+    async fn call(&self, scope: &Cx, req: S::Req) -> Result<Fuse<S::Item>> {
         let items = self.sink.generate(scope.clone(), req).await?;
         // The request has reached its sink: the segment's request path
         // ends here, unless a hand-off ended it first.
         if let Some(visit) = scope.visit() {
             visit.producing();
         }
-        Ok(fuse(items, scope))
+        Ok(fused(items, scope))
     }
 
     fn register(&self, _entries: &mut super::runtime::Entries) {}
@@ -705,12 +752,12 @@ where
 
     /// An operator's return does not end the request path: it may return
     /// its stream before it calls `next`, and the hop it calls ends it.
-    async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
+    async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Fuse<O::UpItem>> {
         let items = self
             .op
             .generate(scope.clone(), req, self.next.for_request(scope))
             .await?;
-        Ok(fuse(items, scope))
+        Ok(fused(items, scope))
     }
 
     fn register(&self, entries: &mut super::runtime::Entries) {

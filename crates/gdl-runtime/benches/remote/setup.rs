@@ -118,6 +118,32 @@ where
     })
 }
 
+/// The lean graph with both nodes in one segment: a hop whose plan is
+/// local, with no forward or backward node.
+pub async fn lean_single_front() -> LeanCaller {
+    let node = super::node().await;
+    let placement = Placement::new().segment("all", ["S", "D"]);
+    let mut roster = Roster::new();
+    roster.add("all", node.peer_info());
+    let deployment = Deployment::new(
+        node.clone(),
+        &lean::manifest(),
+        &placement,
+        "all",
+        &roster,
+        RuntimeConfig::default(),
+    )
+    .expect("deployment");
+    let root = lean::assemble(&deployment, lean::Bindings::new().d(Emit)).expect("all");
+    let front = Arc::new(deployment.start(root).expect("all"));
+    // The bench runs for the life of the process.
+    std::mem::forget(node);
+    Box::new(move |cx, ask| {
+        let front = Arc::clone(&front);
+        Box::pin(async move { front.call(cx, ask).await })
+    })
+}
+
 pub type LeanCaller =
     Box<dyn Fn(Cx, Ask) -> BoxFuture<'static, gdl::Result<Items<Blob>>> + Send + Sync>;
 

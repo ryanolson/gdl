@@ -155,7 +155,9 @@ pub mod __runtime {
     pub use crate::compose::race_done;
     pub use crate::cx::{CancelOnDrop, Scope, wall_now_nanos};
     pub use crate::followed::{PoolSource, PropertyKindsNow};
-    pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
+    pub use crate::items::{
+        CHECK_INTERVAL, Fuse, bound_measured, failed, fuse, fused, until_error,
+    };
     pub use crate::lifecycle::{LeaveHook, LeaveParts};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Spans, Visit, ended,

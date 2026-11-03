@@ -663,7 +663,7 @@ where
 {
     /// Every stage is in this segment: a nested call, as in local
     /// composition.
-    async fn run_local(&self, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
+    async fn run_local(&self, attempt: &Cx, req: F::In) -> Result<B::Answer> {
         let (value, stack) = match self.fwd.walk(1, usize::MAX, attempt, req, ()).await? {
             (FwdExit::Here(value), stack) => (value, stack),
             (FwdExit::Leave { .. }, _) => return Err(internal("a local hop left its segment")),
@@ -672,10 +672,9 @@ where
         let scope = attempt.child();
         let items = self.inner.call(&scope, value).await?;
         attempt.check()?;
-        match self.bwd.walk(1, usize::MAX, attempt, items, stack) {
-            BwdExit::Here(items) => Ok(items),
-            BwdExit::Leave { .. } => Err(internal("a local hop left its segment")),
-        }
+        self.bwd
+            .answer(attempt, items, stack)
+            .ok_or_else(|| internal("a local hop left its segment"))
     }
 
     /// The outer end's side of a hop that leaves its segment, with what
@@ -1445,7 +1444,7 @@ where
         let items = match produced {
             Ok(items) => {
                 armed.disarm();
-                items
+                Box::pin(items)
             }
             Err(error) => return failed(out, error, owner.as_ref()).await,
         };
