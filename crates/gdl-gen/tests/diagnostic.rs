@@ -4,10 +4,15 @@
 
 mod common;
 
+/// With stderr a full pipe, `run` removes its settings directory before it
+/// writes its warning, which then waits for the pipe as any write does.
+/// Draining stderr lets it exit.
+///
+/// It takes about 7 s: the stop's SIGTERM, SIGKILL, and give-up take 3 s,
+/// and the test watches for 4 s before it drains.
 #[test]
-#[ignore = "F8: a full stderr pipe blocks the cancellation warning and settings cleanup"]
 #[allow(unsafe_code)]
-fn a_full_stderr_pipe_does_not_hold_the_cancellation_open() {
+fn a_full_stderr_pipe_does_not_hold_the_settings_cleanup() {
     use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -164,12 +169,10 @@ exec "$REAL_CARGO" "$@"
         .recv_timeout(Duration::from_secs(2))
         .expect("closed stderr");
     let warning = String::from_utf8_lossy(&bytes).contains("which `run` cannot reap");
-    assert_eq!(std::fs::read_dir(&temporary).expect("temporary").count(), 0);
-    if before_drain.is_none() {
-        assert!(warning, "the give-up diagnostic caused the blocked write");
-    }
-    assert!(
-        before_drain.is_some(),
-        "after 4 s: run={before_drain:?}, wchan={wchan}, settings={settings}; draining stderr released run={after_drain}"
+    assert_eq!(
+        settings, 0,
+        "after 4 s, before the drain: run={before_drain:?}, wchan={wchan}, settings={settings}"
     );
+    assert!(warning, "the warning was written after the cleanup");
+    assert!(!after_drain.success(), "run was stopped: {after_drain}");
 }

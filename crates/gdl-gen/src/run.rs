@@ -59,7 +59,15 @@ pub fn run(mut prepare: Command) -> Result<(), Error> {
         .tempdir()
         .map_err(|e| Error::new(format!("a directory for the segments' settings: {e}")))?;
     prepare.arg("--prepare-into").arg(dir.path());
-    unix::preparing(&stops, prepare)?;
+    if let Err(unprepared) = unix::preparing(&stops, prepare) {
+        // The settings directory goes before any warning: a write to a full
+        // stderr blocks, and must not keep `run` from its own cleanup.
+        let _ = dir.close();
+        if let Some(warning) = unprepared.warning {
+            eprintln!("cargo gdl: {warning}");
+        }
+        return Err(unprepared.error);
+    }
     let file = dir.path().join(PLAN);
     let text = std::fs::read_to_string(&file)
         .map_err(|e| Error::new(format!("{}: {e}", file.display())))?;

@@ -115,12 +115,13 @@ const KILL_GRACE: Duration = Duration::from_secs(1);
 /// process watches `stops`. Its stdin is closed and its stdout goes to
 /// stderr: this process's stdout carries only answers. A stop sends
 /// SIGTERM to the group, and SIGKILL after [`PREPARE_GRACE`]. It returns
-/// once the group is empty, or [`KILL_GRACE`] after the SIGKILL, saying so
-/// if members are left.
+/// once the group is empty, or [`KILL_GRACE`] after the SIGKILL with the
+/// warning that members are left, which it does not write: the caller
+/// cleans up first, since a write to a full stderr blocks.
 ///
 /// The terminal's SIGINT does not reach the group: this process takes it
 /// and stops the group itself, Cargo's compilers among it.
-pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error> {
+pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Unprepared> {
     use std::os::unix::process::CommandExt;
 
     let stdout = std::io::stderr()
@@ -154,7 +155,8 @@ pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error
                         // It printed its problem on stderr.
                         false => Err(Error::new(format!(
                             "preparing the segments failed: {status}"
-                        ))),
+                        ))
+                        .into()),
                     };
                 }
             }
@@ -162,16 +164,18 @@ pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error
                 if status.is_some() {
                     group.reaped = true;
                 }
-                let stopped = Err(Error::new("stopped while preparing the segments"));
+                let stopped = |warning| Unprepared {
+                    error: Error::new("stopped while preparing the segments"),
+                    warning,
+                };
                 if group.reaped && group.is_empty() {
-                    return stopped;
+                    return Err(stopped(None));
                 }
                 if since.elapsed() > PREPARE_GRACE + KILL_GRACE {
-                    eprintln!(
-                        "cargo gdl: the stopped preparation left processes in group {}, which `run` cannot reap",
+                    return Err(stopped(Some(format!(
+                        "the stopped preparation left processes in group {}, which `run` cannot reap",
                         group.id.as_raw_pid()
-                    );
-                    return stopped;
+                    ))));
                 }
                 if since.elapsed() > PREPARE_GRACE {
                     group.signal(Signal::KILL);
@@ -179,6 +183,22 @@ pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error
             }
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// Why a preparation did not finish, and what to warn of once `run` has
+/// cleaned up.
+pub(super) struct Unprepared {
+    pub(super) error: Error,
+    pub(super) warning: Option<String>,
+}
+
+impl From<Error> for Unprepared {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            warning: None,
+        }
     }
 }
 
