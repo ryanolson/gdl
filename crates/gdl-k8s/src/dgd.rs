@@ -111,9 +111,10 @@ pub fn set_image(dgd: &mut Value, component: &str, image: &str) -> Result<(), St
 /// what [`crate::children`] refuses of it, and a named component without
 /// `scalingAdapter`, or whose name dynamo would hash into its adapter's,
 /// or without exactly one container `main` ([`set_image`]), or without
-/// `runtimeVersionOverride`: dynamo's webhook reads a component's image
-/// tag as its version, and refuses one that is not a semantic version,
-/// as `cargo gdl`'s tags never are, unless the component names it. `cargo gdl
+/// `runtimeVersionOverride`, or with one that dynamo's schema refuses
+/// ([`runtime_version`]): dynamo's webhook reads a component's image tag
+/// as its version, and refuses one that is not a semantic version, as
+/// `cargo gdl`'s tags never are, unless the component names it. `cargo gdl
 /// check` asks it of a fleet's DGD file, so that the file is refused
 /// before anything is built.
 pub fn check_dgd(
@@ -132,13 +133,35 @@ pub fn check_dgd(
             .into_iter()
             .flatten()
             .find(|c| c["name"] == *component);
-        if found.is_some_and(|c| c["runtimeVersionOverride"].is_null()) {
+        let version = found.map(|c| &c["runtimeVersionOverride"]);
+        if version.is_none_or(Value::is_null) {
             return Err(format!(
                 "component `{component}` of the pool's DGD runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`, the dynamo version the segment links, since dynamo's webhook refuses the component without it"
             ));
         }
+        if let Some(version) = version
+            && !version.as_str().is_some_and(runtime_version)
+        {
+            return Err(format!(
+                "component `{component}` of the pool's DGD has `runtimeVersionOverride` {version}, and dynamo takes only a string MAJOR.MINOR.PATCH, each part 0 or 1 to 4 digits without a leading 0, such as \"1.7.0\""
+            ));
+        }
     }
     Ok(())
+}
+
+/// Whether `version` is a `runtimeVersionOverride` that dynamo's DGD
+/// schema takes: `^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+/// (`deploy/operator/api/v1beta1/dynamocomponentdeployment_types.go`).
+fn runtime_version(version: &str) -> bool {
+    let part = |part: &str| {
+        part == "0"
+            || (!part.starts_with('0')
+                && (1..=4).contains(&part.len())
+                && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| part(p))
 }
 
 /// Put `checksum` in `template`'s [`CONFIG`] annotation, making the

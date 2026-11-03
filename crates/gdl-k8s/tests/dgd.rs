@@ -371,6 +371,30 @@ fn check_dgd_refuses_what_the_operators_render_would() {
     let error =
         gdl_k8s::check_dgd("p", "ns", &unversioned, &[("pool", "Frontend")]).expect_err("refused");
     assert!(error.contains("`runtimeVersionOverride`"), "{error}");
+    // dynamo's schema: three parts, each 0 or 1 to 4 digits without a
+    // leading 0, as a string.
+    for good in ["0.0.0", "1.7.0", "9999.10.1"] {
+        let mut versioned = dgd.clone();
+        versioned["spec"]["components"][0]["runtimeVersionOverride"] = good.into();
+        gdl_k8s::check_dgd("p", "ns", &versioned, &[("pool", "Frontend")]).expect(good);
+    }
+    for bad in [
+        json!(""),
+        json!("1.7"),
+        json!("1.7.0.1"),
+        json!("01.7.0"),
+        json!("10000.0.0"),
+        json!("v1.7.0"),
+        json!("1.7.0-dev"),
+        json!(7),
+        json!(true),
+    ] {
+        let mut versioned = dgd.clone();
+        versioned["spec"]["components"][0]["runtimeVersionOverride"] = bad.clone();
+        let error = gdl_k8s::check_dgd("p", "ns", &versioned, &[("pool", "Frontend")])
+            .expect_err("refused");
+        assert!(error.contains("MAJOR.MINOR.PATCH"), "{bad}: {error}");
+    }
     let mut unscaled = dgd.clone();
     unscaled["spec"]["components"][0]
         .as_object_mut()
