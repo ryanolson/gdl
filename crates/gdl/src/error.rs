@@ -1,5 +1,7 @@
 use std::fmt;
 use std::num::NonZeroU32;
+use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +18,12 @@ use serde::{Deserialize, Serialize};
 /// name it was sent under: [`Error::unknown_kind`] returns it, `Display`
 /// shows it, and a segment that sends the error on sends it under that
 /// name, so that a peer that knows the kind reads it as itself.
+///
+/// An error may also hold a source ([`Error::with_source`]), which is local
+/// to the process that attached it. It is never sent: an error that crosses
+/// a segment arrives without its source, whichever encoding it crosses in,
+/// so nothing may rely on a source across segments. Across a crossing, a
+/// failure is its kind and its message.
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "Wire<Received, String>")]
 pub struct Error {
@@ -23,7 +31,7 @@ pub struct Error {
     /// The message, after the name of the kind it was sent under when this
     /// build does not know that kind: one buffer, so that keeping the name
     /// adds nothing to the size of every `Result` that holds an error.
-    text: String,
+    text: Box<str>,
     /// The length of that name at the start of `text`, plus one; `None`
     /// for a kind this build knows.
     unknown: Option<NonZeroU32>,
@@ -32,11 +40,16 @@ pub struct Error {
     /// counts an error once, where it was raised. It is not sent: the
     /// receiving segment sets it again.
     relayed: bool,
+    /// What caused the error in this process. It is not sent. A thin
+    /// pointer, not an `Arc<dyn Error>`, so that an error stays the size
+    /// that `an_error_is_as_large_as_it_was` pins.
+    source: Option<Arc<Box<dyn std::error::Error + Send + Sync>>>,
 }
 
 /// Two errors are equal when their kind, the name of a kind this build
 /// does not know, and message are: whether one was relayed is the
-/// runtime's bookkeeping, not part of the error.
+/// runtime's bookkeeping, and a source does not cross, so neither is part
+/// of the error.
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind && self.unknown == other.unknown && self.text == other.text
@@ -52,7 +65,11 @@ impl fmt::Debug for Error {
         if let Some(name) = self.unknown_kind() {
             debug.field("unknown_kind", &name);
         }
-        debug.field("message", &self.message()).finish()
+        debug.field("message", &self.message());
+        if self.source.is_some() {
+            debug.field("source", &true);
+        }
+        debug.finish()
     }
 }
 
@@ -65,16 +82,32 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    /// The error attached with [`Error::with_source`] in this process, if
+    /// any: `None` for an error received from another segment.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|source| &***source as _)
+    }
+}
+
+// Without these, the `dyn Error` of a source takes both traits from every
+// error, and a consumer that holds one across `catch_unwind` stops building.
+// They speak for the error's own fields, which a panic cannot leave half
+// changed. A source's state is its own: a caller that catches a panic from a
+// source's methods cannot trust that state. `anyhow::Error` makes this choice
+// too, and requiring unwind safety of a source would refuse many errors.
+impl UnwindSafe for Error {}
+impl RefUnwindSafe for Error {}
 
 impl Error {
     /// Create an error of the given kind.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
-            text: message.into(),
+            text: message.into().into_boxed_str(),
             unknown: None,
             relayed: false,
+            source: None,
         }
     }
 
@@ -128,6 +161,18 @@ impl Error {
     /// Where the message starts in `text`.
     fn split(&self) -> usize {
         self.unknown.map_or(0, |length| length.get() as usize - 1)
+    }
+
+    /// The error, with `source` as what caused it. It replaces a source
+    /// attached earlier, and [`std::error::Error::source`] returns it.
+    ///
+    /// The source is local to this process. Serialization skips it, so an
+    /// error that crosses a segment arrives without it: a consumer in
+    /// another segment sees only the kind and the message. It is not part
+    /// of the error's equality or its `Display`, and clones share it.
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Arc::new(Box::new(source)));
+        self
     }
 
     /// The error, marked as received from another segment.
@@ -343,9 +388,10 @@ impl TryFrom<Wire<Received, String>> for Error {
                 text.push_str(&message);
                 Ok(Self {
                     kind: ErrorKind::Transport,
-                    text,
+                    text: text.into_boxed_str(),
                     unknown: Some(length),
                     relayed: false,
+                    source: None,
                 })
             }
         }
@@ -375,6 +421,8 @@ impl From<gdl_model::PlacementErrors> for Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
     use super::*;
 
     /// The error as velo sends it in a stream item, a struct as an array.
@@ -424,10 +472,185 @@ mod tests {
     }
 
     /// An error is in every stream item's result and every hop's future:
-    /// keeping an unknown kind's name costs it no size.
+    /// keeping an unknown kind's name, or a source, costs it no size.
     #[test]
     fn an_error_is_as_large_as_it_was() {
         assert_eq!(std::mem::size_of::<Error>(), 32);
+        assert_eq!(std::mem::size_of::<Result<()>>(), 32);
+    }
+
+    /// A consumer outside this workspace can hold an error wherever these
+    /// let it: losing one of them breaks that consumer's build, however
+    /// the error's fields change.
+    #[test]
+    fn an_error_keeps_its_auto_traits() {
+        fn holds<T>()
+        where
+            T: Send + Sync + Unpin + UnwindSafe + RefUnwindSafe + 'static,
+        {
+        }
+        holds::<Error>();
+        holds::<Result<()>>();
+    }
+
+    /// What a caller attaches, with the failure under it, if any.
+    #[derive(Debug)]
+    struct Attached(Option<Inner>);
+
+    /// A failure under the attached one.
+    #[derive(Debug)]
+    struct Inner;
+
+    impl fmt::Display for Attached {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("attached")
+        }
+    }
+
+    impl fmt::Display for Inner {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("inner")
+        }
+    }
+
+    impl std::error::Error for Attached {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.as_ref().map(|inner| inner as _)
+        }
+    }
+
+    impl std::error::Error for Inner {}
+
+    /// The source as a caller reaches it: through the standard trait.
+    fn source(error: &Error) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(error)
+    }
+
+    /// A caller finds the attached type by downcasting, which is how a walk
+    /// of the chain reads it, and goes on from it to what is under it.
+    #[test]
+    fn the_source_is_the_error_attached() {
+        assert!(source(&Error::node("x")).is_none());
+        let error = Error::node("x").with_source(Attached(Some(Inner)));
+        let attached = source(&error).expect("a source");
+        assert!(attached.downcast_ref::<Attached>().is_some());
+        let under = attached.source().expect("the attached error's source");
+        assert!(under.downcast_ref::<Inner>().is_some());
+    }
+
+    /// The last source attached is the one the error keeps.
+    #[test]
+    fn a_later_source_replaces_an_earlier_one() {
+        let error = Error::node("x")
+            .with_source(Attached(None))
+            .with_source(Inner);
+        assert!(source(&error).expect("a source").is::<Inner>());
+    }
+
+    /// A clone shares the source: it costs a reference count, not a copy,
+    /// and the attached error need not be `Clone`.
+    #[test]
+    fn a_clone_shares_the_source() {
+        let error = Error::node("x").with_source(Inner);
+        let clone = error.clone();
+        let (first, second) = (error.source.as_ref(), clone.source.as_ref());
+        assert!(Arc::ptr_eq(
+            first.expect("a source"),
+            second.expect("a source")
+        ));
+    }
+
+    /// The source stays through what the runtime does to an error it
+    /// passes on in this process.
+    #[test]
+    fn a_relayed_error_keeps_its_source() {
+        let error = Error::node("x").with_source(Inner).relayed();
+        assert!(source(&error).expect("a source").is::<Inner>());
+    }
+
+    /// The source is not part of the error: only `Debug` says one is there.
+    #[test]
+    fn a_source_is_not_compared_or_displayed() {
+        let plain = Error::node("x");
+        let error = plain.clone().with_source(Inner);
+        assert_eq!(error, plain);
+        assert_eq!(error.to_string(), plain.to_string());
+        assert_eq!(
+            format!("{error:?}"),
+            r#"Error { kind: Node, message: "x", source: true }"#
+        );
+        assert_eq!(
+            format!("{plain:?}"),
+            r#"Error { kind: Node, message: "x" }"#
+        );
+    }
+
+    /// A source stays in the process that attached it: in each encoding the
+    /// error crosses in, it is sent as the same bytes as an error without
+    /// one, and arrives without one.
+    #[test]
+    fn a_crossing_drops_the_source() {
+        let plain = Error::node("why");
+        let error = plain.clone().with_source(Attached(Some(Inner)));
+        for (encoding, encode, decode) in encodings::<Error, Error>() {
+            let bytes = encode(&error);
+            assert_eq!(bytes, encode(&plain), "{encoding}");
+            let received = decode(&bytes);
+            assert_eq!(received, plain, "{encoding}");
+            assert!(source(&received).is_none(), "{encoding}");
+        }
+        assert_eq!(array(&error), b"\x92\xa4Node\xa3why");
+    }
+
+    /// Changes its own state, then panics, when asked for its source.
+    #[derive(Debug)]
+    struct Halting(AtomicU8);
+
+    impl fmt::Display for Halting {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("halting")
+        }
+    }
+
+    impl std::error::Error for Halting {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.store(1, Ordering::Relaxed);
+            panic!("halfway");
+        }
+    }
+
+    /// The unwind markers speak for the error's own fields. A panic in a
+    /// source leaves those whole, and leaves the source's state as the
+    /// panic left it, which is the source's to answer for.
+    #[test]
+    fn a_panic_in_a_source_leaves_the_error_whole() {
+        let error = Error::node("x").with_source(Halting(AtomicU8::new(0)));
+        let walk =
+            std::panic::catch_unwind(|| source(&error).expect("a source").source().is_some());
+        assert!(walk.is_err());
+        assert_eq!(error, Error::node("x"));
+        let halting = source(&error)
+            .expect("a source")
+            .downcast_ref::<Halting>()
+            .expect("the attached error");
+        assert_eq!(halting.0.load(Ordering::Relaxed), 1);
+    }
+
+    /// An error of a kind this build does not know takes a source like any
+    /// other, and is sent on under the kind's name without it.
+    #[test]
+    fn an_unknown_kind_takes_a_source_and_drops_it_on_a_crossing() {
+        let sent = later::Error {
+            kind: later::ErrorKind::Throttled,
+            message: "slow down".into(),
+        };
+        let bytes = array(&sent);
+        let received: Error = rmp_serde::from_slice(&bytes).expect("decode");
+        let error = received.with_source(Inner);
+        assert!(source(&error).expect("a source").is::<Inner>());
+        assert_eq!(error.unknown_kind(), Some("Throttled"));
+        assert_eq!(error.message(), "slow down");
+        assert_eq!(array(&error), bytes);
     }
 
     /// The error and its kinds as the build before `OutcomeUnknown`

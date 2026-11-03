@@ -93,7 +93,7 @@ Stream items cross on velo's byte path: each is one velo frame whose payload is 
 
 - **Open:** an empty item, sent with `StreamSender::send_bytes`. The producer's stream exists. It is sent before any item.
 - **Item:** the item's bytes from the edge's codec. The edge decode reads them in the buffer velo received them in, with no copy.
-- **Fail:** velo's sender error, carrying the `gdl::Error` as JSON. It is a terminal failure for gdl. velo does not end the stream on it, so the producer finalizes right after it, and the consumer stops reading.
+- **Fail:** velo's sender error, carrying the `gdl::Error` as JSON, without its source ([Streams and errors](model.md#streams-and-errors)). It is a terminal failure for gdl. velo does not end the stream on it, so the producer finalizes right after it, and the consumer stops reading.
 
 Each stream reserves room in an item's frame for the smaller of its last two items' sizes. A stream of like items then reserves each one exactly, and one large item raises the reservation for no more than one item after it.
 

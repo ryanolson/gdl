@@ -97,6 +97,69 @@ impl Operator for Pass {
     }
 }
 
+/// What a sink attaches to the error it fails with.
+#[derive(Debug)]
+struct Refused;
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("refused")
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Fails with a source: at once, or as its first item.
+struct Failing {
+    eagerly: bool,
+}
+
+impl Sink for Failing {
+    type Req = String;
+    type Item = String;
+
+    async fn generate(&self, _cx: Cx, _req: String) -> Result<Items<String>> {
+        let failure = gdl::Error::node("no").with_source(Refused);
+        if self.eagerly {
+            return Err(failure);
+        }
+        Ok(items(stream::iter([Err(failure)])))
+    }
+}
+
+/// An error goes through nested calls by value, so a caller above an
+/// operator and a join finds the type the sink attached, for a failure
+/// returned at once and for one in the stream alike. Nothing on the way
+/// rebuilds the error, which would lose it.
+#[tokio::test]
+async fn a_source_reaches_the_caller_of_a_local_graph() {
+    for eagerly in [true, false] {
+        let inner = Source::new(Hop::new(
+            (Arc::new(Upper), ()),
+            OperatorStage::new(
+                Arc::new(Pass),
+                Source::new(Hop::new(
+                    (),
+                    SinkStage::new(Arc::new(Failing { eagerly })),
+                    (),
+                )),
+            ),
+            (Arc::new(Mark), ()),
+        ));
+        let graph = Source::new(Hop::new((), Join::new(inner), (Arc::new(Mark), ())));
+        let error = match graph.generate(Cx::new(), "x".to_string()).await {
+            Err(error) => error,
+            Ok(mut out) => out
+                .next()
+                .await
+                .expect("an item")
+                .expect_err("the sink's failure"),
+        };
+        let source = std::error::Error::source(&error).expect("a source");
+        assert!(source.is::<Refused>(), "eagerly: {eagerly}");
+    }
+}
+
 /// Answers as `Spell` does, with a large future: it holds a buffer across
 /// an await.
 struct Wide;

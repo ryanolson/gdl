@@ -55,6 +55,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** earlier builds refuse an error kind they do not know. Later builds read an unknown kind as `Transport` and keep its name (`Error::unknown_kind`, in `crates/gdl/src/error.rs`).
 - **Lifts:** nothing, for the earlier builds. A kind added later needs no such step.
 
+### An error's source does not cross a segment
+- **What:** `std::error::Error::source` returns `None` for an error that came from another segment, although the node that raised it called `Error::with_source`. A caller that downcasts the source finds nothing.
+- **When:** the error crosses a segment, also between two segments in one process. An error that stays in one segment keeps its source.
+- **Why:** a source is any Rust type, so a peer could not read it. Only the kind and the message are sent. See [Streams and errors](../concepts/model.md#streams-and-errors).
+- **Workaround:** decide by `Error::kind`, and put what the consumer needs in the kind or in the message. A recoverable application error belongs in the stream's item type.
+
 ### A ready producer can overrun a cancel or a deadline by 64 items
 - **What:** after a cancel or a deadline, a producer whose stream is always ready can yield up to 64 more items before its attempt ends. A pending producer is interrupted at once.
 - **Why:** an attempt boundary polls the cancel and deadline futures only while its producer is pending. For a ready producer, it checks the cancel flag and the clock every 64 items (`CHECK_INTERVAL`, in `crates/gdl/src/items.rs`). See [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked).
