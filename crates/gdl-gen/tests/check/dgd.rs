@@ -245,3 +245,30 @@ fn compose_refuses_a_dgd_table() {
     );
     assert!(!out.exists(), "compose wrote a bundle");
 }
+
+/// Dynamo's DGD schema requires a string in canonical MAJOR.MINOR.PATCH
+/// form; an empty override also leaves the generated image unversioned.
+#[test]
+fn check_refuses_runtime_version_overrides_the_dgd_schema_rejects() {
+    let control = files(FLEET, DGD).check();
+    assert!(control.status.success(), "{control:?}");
+
+    let mut accepted = Vec::new();
+    for value in ["\"\"", "\"latest\"", "\"1.7\"", "true", "7"] {
+        let dgd = DGD.replace(
+            "runtimeVersionOverride: 1.7.0",
+            &format!("runtimeVersionOverride: {value}"),
+        );
+        let output = files(FLEET, &dgd).check();
+        if output.status.success() {
+            accepted.push(value);
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("runtimeVersionOverride"), "{stderr}");
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "check accepted runtimeVersionOverride values that Dynamo rejects: {accepted:?}"
+    );
+}
