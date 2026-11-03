@@ -478,3 +478,105 @@ fn a_parent_death_after_the_pid_check_still_stops_the_child() {
         "child survived parent death before exec: pending_SIGTERM={pending_term}, executed_sleep={executed_sleep}, state={remaining:?}"
     );
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+#[ignore = "F5: an inherited blocked SIGTERM leaves the parent-death signal pending forever"]
+#[allow(unsafe_code)]
+fn a_blocked_signal_in_the_parent_does_not_orphan_the_child() {
+    use std::os::unix::process::CommandExt;
+
+    const RECORD: &str = "GDL_TEST_MASK_RECORD";
+    if let Some(record) = std::env::var_os(RECORD) {
+        let _stops = Stops::caught().expect("handlers");
+        // The mask belongs to this fixture's spawning thread.
+        unsafe {
+            let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            assert_eq!(libc::sigemptyset(mask.as_mut_ptr()), 0);
+            assert_eq!(libc::sigaddset(mask.as_mut_ptr(), libc::SIGTERM), 0);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, mask.as_ptr(), std::ptr::null_mut()),
+                0
+            );
+        }
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        stop_with_run(&mut command);
+        let mut child = command.spawn().expect("child");
+        std::fs::write(record, child.id().to_string()).expect("record child");
+        let _ = child.wait();
+        return;
+    }
+
+    struct Family(Child);
+    impl Drop for Family {
+        fn drop(&mut self) {
+            let group = Pid::from_raw(self.0.id() as i32).expect("group");
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let scratch = tempfile::Builder::new()
+        .prefix("gdl-mask-")
+        .tempdir()
+        .expect("scratch");
+    let record = scratch.path().join("child");
+    let mut parent = Family(
+        Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "run::unix::a_blocked_signal_in_the_parent_does_not_orphan_the_child",
+            ])
+            .env(RECORD, &record)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("parent fixture"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let child = loop {
+        if let Some(pid) = std::fs::read_to_string(&record)
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    parent.0.kill().expect("SIGKILL to parent alone");
+    parent.0.wait().expect("reap parent");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let alive = loop {
+        let alive = std::fs::read_to_string(format!("/proc/{child}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, rest)| !rest.starts_with("Z "))
+            })
+            .unwrap_or(false);
+        if !alive || Instant::now() >= deadline {
+            break alive;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let status = std::fs::read_to_string(format!("/proc/{child}/status")).unwrap_or_default();
+    let bits = |key: &str| {
+        status
+            .lines()
+            .find(|line| line.starts_with(key))
+            .and_then(|line| u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok())
+            .unwrap_or(0)
+    };
+    let term = 1 << (libc::SIGTERM - 1);
+    assert!(
+        !alive,
+        "child survived parent death: SIGTERM_blocked={}, SIGTERM_pending={}",
+        bits("SigBlk:") & term != 0,
+        (bits("SigPnd:") | bits("ShdPnd:")) & term != 0
+    );
+}
