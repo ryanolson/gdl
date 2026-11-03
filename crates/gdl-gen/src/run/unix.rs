@@ -274,7 +274,9 @@ fn outcome(all: &[Running], first: Option<usize>, stopped: bool) -> Result<(), E
 /// Have the process `command` starts get a SIGTERM when `run` dies, by
 /// any signal, SIGKILL among them: no handler of `run`'s could tell it.
 /// If `run` died before the death signal was set, the process does not
-/// start.
+/// start. The child takes the default action for SIGTERM and SIGINT
+/// before the death signal is set: until exec it still has `run`'s
+/// handlers, which would take a death signal and let it start.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn stop_with_run(command: &mut Command) {
@@ -282,11 +284,18 @@ fn stop_with_run(command: &mut Command) {
 
     let run = rustix::process::getpid();
     // SAFETY: the closure runs in the child between fork and exec, where
-    // only async-signal-safe calls are sound. It makes two system calls
-    // through rustix, which neither allocates nor takes a lock, and turns
-    // an error code into an `io::Error`, which does not allocate.
+    // only async-signal-safe calls are sound. `signal` is one by POSIX.
+    // The others are system calls through rustix, which neither allocates
+    // nor takes a lock. Turning an error code into an `io::Error` does not
+    // allocate. In this order, a death signal from any point on finds the
+    // default action, which ends the child before or after exec.
     unsafe {
         command.pre_exec(move || {
+            for signal in [libc::SIGTERM, libc::SIGINT] {
+                if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             rustix::process::set_parent_process_death_signal(Some(Signal::TERM))?;
             match rustix::process::getppid() {
                 Some(parent) if parent == run => Ok(()),
@@ -298,7 +307,6 @@ fn stop_with_run(command: &mut Command) {
 
 #[cfg(all(test, target_os = "linux"))]
 #[test]
-#[ignore = "F4: the inherited SIGTERM handler consumes a parent-death signal before exec"]
 #[allow(unsafe_code)]
 fn a_parent_death_after_the_pid_check_still_stops_the_child() {
     use std::os::unix::process::CommandExt;
@@ -333,7 +341,6 @@ fn a_parent_death_after_the_pid_check_still_stops_the_child() {
     let mut parent = Family(
         Command::new(std::env::current_exe().expect("test binary"))
             .args([
-                "--ignored",
                 "--exact",
                 "run::unix::a_parent_death_after_the_pid_check_still_stops_the_child",
             ])

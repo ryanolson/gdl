@@ -33,8 +33,9 @@ tar = { version = "0.4", default-features = false }
 toml = { workspace = true }
 
 # `cargo gdl run` catches the stops it must not pass on, and sends one of
-# its own, without `unsafe`.
+# its own. `libc` resets a segment's handlers between fork and exec.
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 rustix = { workspace = true, features = ["process"] }
 signal-hook = "0.3"
 

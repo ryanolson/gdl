@@ -1430,6 +1430,7 @@ dependencies = [
  "gdl-model",
  "gdl-syntax",
  "icu_normalizer",
+ "libc",
  "mimalloc",
  "proc-macro2",
  "quote",
