@@ -123,6 +123,14 @@ pub(crate) fn render(
             None => Ok(None),
         };
     };
+    // dynamo labels each pod of the DGD with its name, the pool's, and the
+    // operator finds the pods by that label: it must fit a label's value.
+    if name.len() > crate::labels::LABEL_LIMIT {
+        return Err(format!(
+            "pool `{name}` has a `dgd`, and its name is longer than {} characters, which a label's value holds: dynamo labels the DGD's pods with it",
+            crate::labels::LABEL_LIMIT
+        ));
+    }
     let mut dgd: Value =
         serde_json::from_str(text).map_err(|e| format!("the pool's `dgd` is not JSON: {e}"))?;
     if dgd["apiVersion"] != DGD_API_VERSION || dgd["kind"] != DGD_KIND {

@@ -390,6 +390,11 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
     /// requests need them until the segments have drained, and garbage
     /// collection deletes them with the DGD once the pool is released.
     async fn segments_in_dgd(&self, owned: &[Live]) -> Result<bool, Stop> {
+        // A name longer than a label's value cannot select pods, and the
+        // render refuses a DGD for such a pool, so it has no DGD's pods.
+        if self.name.len() > gdl_k8s::LABEL_LIMIT {
+            return Ok(false);
+        }
         let components = owned
             .iter()
             .find(|o| o.kind == Kind::DynamoGraphDeployment && o.name == self.name)

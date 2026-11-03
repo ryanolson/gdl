@@ -242,3 +242,16 @@ fn a_role_template_component_keeps_valid_templates_and_rolls_its_pods() {
         );
     }
 }
+
+/// dynamo labels the DGD's pods with its name, the pool's, so a pool
+/// whose name is longer than a label's value cannot have a DGD.
+#[test]
+fn a_pool_name_longer_than_a_label_cannot_have_a_dgd() {
+    let name = "p".repeat(64);
+    let mut dgd = dgd();
+    dgd["metadata"]["name"] = name.clone().into();
+    let mut pool = pool();
+    pool.dgd = Some(dgd.to_string());
+    let error = children(&name, "ns", &pool, Scaling::Fixed).expect_err("refused");
+    assert!(error.contains("longer than 63"), "{error}");
+}
