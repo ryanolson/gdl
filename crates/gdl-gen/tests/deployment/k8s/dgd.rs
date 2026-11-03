@@ -199,7 +199,17 @@ fn a_dgd_table_renders_only_with_its_file_read() {
     );
 }
 
-fn render_file(mirror: &Mirror, text: &str) -> Value {
+/// The spec and [`DGD_FLEET`] in a directory of their own, with `text`
+/// as the DGD file, and what `check` finds in them.
+struct Written {
+    _temp: tempfile::TempDir,
+    spec_path: PathBuf,
+    fleet_path: PathBuf,
+    fleet_text: String,
+    problems: gdl_model::Problems,
+}
+
+fn written(mirror: &Mirror, text: &str) -> Written {
     let temp = tempfile::Builder::new()
         .prefix("gdl-dgd-yaml-")
         .tempdir()
@@ -222,10 +232,23 @@ fn render_file(mirror: &Mirror, text: &str) -> Value {
     std::fs::create_dir(temp.path().join("dynamo")).expect("a directory");
     std::fs::write(temp.path().join("dynamo/dgd.yaml"), text).expect("the DGD");
     let problems = gdl_gen::check_files(&spec_path, Some(&fleet_path), &mirror.target());
-    assert!(problems.is_empty(), "{problems}");
-    let spec = gdl_gen::Spec::load(&spec_path).expect("the spec");
-    let fleet = fleet(&fleet_text);
-    let dgds = gdl_gen::Dgds::read(&fleet, &fleet_path).expect("the DGD files");
+    Written {
+        _temp: temp,
+        spec_path,
+        fleet_path,
+        fleet_text,
+        problems,
+    }
+}
+
+/// The DGD that the render of `text` puts in the DGD pool's `GdlPool`,
+/// once `check` finds no problem.
+fn render_file(mirror: &Mirror, text: &str) -> Value {
+    let written = written(mirror, text);
+    assert!(written.problems.is_empty(), "{}", written.problems);
+    let spec = gdl_gen::Spec::load(&written.spec_path).expect("the spec");
+    let fleet = fleet(&written.fleet_text);
+    let dgds = gdl_gen::Dgds::read(&fleet, &written.fleet_path).expect("the DGD files");
     parsed(pool_of(
         &render_dgd(mirror, &spec, &fleet, &dgds),
         "dgd-use1",
@@ -233,10 +256,19 @@ fn render_file(mirror: &Mirror, text: &str) -> Value {
         .clone()
 }
 
+/// What `check` refuses of `text`, which it must refuse.
+fn refusal(mirror: &Mirror, text: &str) -> String {
+    let written = written(mirror, text);
+    assert!(!written.problems.is_empty(), "{text}");
+    written.problems.to_string()
+}
+
 /// Kubernetes expands merge keys before decoding a node selector as
 /// string values; an unexpanded merge becomes an invalid selector value.
+/// So a merge, here nested in a component's node selector, is refused,
+/// and the same fields written out render as written.
 #[test]
-fn a_dgd_yaml_merge_keeps_the_inherited_node_selector() {
+fn a_dgd_yaml_merge_is_refused_and_its_fields_written_out_render() {
     let mirror = Mirror::new();
     let fixture = manifest_dir().join("tests/fixtures/k8s/dgd/dynamo/dgd.yaml");
     let source = std::fs::read_to_string(fixture).expect("the DGD");
@@ -256,10 +288,12 @@ fn a_dgd_yaml_merge_keeps_the_inherited_node_selector() {
         expected["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"]["kubernetes.io/arch"],
         "amd64"
     );
-    let rendered = render_file(&mirror, &anchored);
-    assert_eq!(
-        rendered["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"],
-        expected["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"]
+    // gdl does not expand a merge: `check` refuses it at any depth, and
+    // names the fix.
+    let error = refusal(&mirror, &anchored);
+    assert!(
+        error.contains("YAML merge keys are not supported; write the fields out"),
+        "{error}"
     );
 }
 
