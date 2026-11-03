@@ -198,3 +198,47 @@ fn a_dgd_takes_the_pools_name() {
     let dgd = find(&objects, "DynamoGraphDeployment", "p").expect("the DGD");
     assert_eq!(dgd["metadata"]["labels"]["gdl.dev/pool"], "p");
 }
+
+/// Dynamo forbids a shared template beside role templates, and each role must roll when its settings change.
+#[test]
+fn a_role_template_component_keeps_valid_templates_and_rolls_its_pods() {
+    let template = json!({"spec": {"containers": [{
+        "name": "main",
+        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+    }]}});
+    let source = json!({
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "p"},
+        "spec": {
+            "backendFramework": "vllm",
+            "components": [{
+                "name": "Frontend",
+                "type": "worker",
+                "scalingAdapter": {},
+                "multinode": {"nodeCount": 2},
+                "roles": [
+                    {"name": "leader", "podTemplate": template},
+                    {"name": "worker", "podTemplate": template},
+                ],
+            }],
+        },
+    });
+    let mut pool = pool();
+    pool.dgd = Some(source.to_string());
+    let objects = children("p", "ns", &pool, Scaling::Operator).expect("objects");
+    let dgd = find(&objects, "DynamoGraphDeployment", "p").expect("the DGD");
+    let rendered = component(dgd, "Frontend");
+    assert!(
+        rendered.get("podTemplate").is_none(),
+        "dynamo refuses podTemplate combined with roles[].podTemplate: {rendered}"
+    );
+    let checksum = gdl_k8s::checksum(find(&objects, "ConfigMap", "p").expect("the settings"));
+    for role in rendered["roles"].as_array().expect("roles") {
+        assert_eq!(
+            role["podTemplate"]["metadata"]["annotations"]["gdl.dev/config"], checksum,
+            "role {} must roll when its settings change",
+            role["name"]
+        );
+    }
+}
