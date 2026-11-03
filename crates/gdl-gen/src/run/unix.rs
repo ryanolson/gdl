@@ -341,17 +341,28 @@ fn stop_with_run(command: &mut Command) {
 
     let run = rustix::process::getpid();
     // SAFETY: the closure runs in the child between fork and exec, where
-    // only async-signal-safe calls are sound. `signal` is one by POSIX.
-    // The others are system calls through rustix, which neither allocates
-    // nor takes a lock. Turning an error code into an `io::Error` does not
-    // allocate. In this order, a death signal from any point on finds the
-    // default action, which ends the child before or after exec.
+    // only async-signal-safe calls are sound. `signal`, `sigemptyset`, and
+    // `sigprocmask` are, by POSIX, and `sigemptyset` initializes the set
+    // before `sigprocmask` reads it. The others are system calls through
+    // rustix, which neither allocates nor takes a lock. Turning an error
+    // code into an `io::Error` does not allocate. In this order (the
+    // default action, no blocked signal, the death signal, the parent
+    // check), a death signal from any point on ends the child, before or
+    // after exec.
     unsafe {
         command.pre_exec(move || {
             for signal in [libc::SIGTERM, libc::SIGINT] {
                 if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
                     return Err(std::io::Error::last_os_error());
                 }
+            }
+            // A mask inherited from the thread that started it would hold the
+            // death signal pending, never delivered.
+            let mut none = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            if libc::sigemptyset(none.as_mut_ptr()) != 0
+                || libc::sigprocmask(libc::SIG_SETMASK, none.as_ptr(), std::ptr::null_mut()) != 0
+            {
+                return Err(std::io::Error::last_os_error());
             }
             rustix::process::set_parent_process_death_signal(Some(Signal::TERM))?;
             match rustix::process::getppid() {
@@ -481,7 +492,6 @@ fn a_parent_death_after_the_pid_check_still_stops_the_child() {
 
 #[cfg(all(test, target_os = "linux"))]
 #[test]
-#[ignore = "F5: an inherited blocked SIGTERM leaves the parent-death signal pending forever"]
 #[allow(unsafe_code)]
 fn a_blocked_signal_in_the_parent_does_not_orphan_the_child() {
     use std::os::unix::process::CommandExt;
@@ -525,7 +535,6 @@ fn a_blocked_signal_in_the_parent_does_not_orphan_the_child() {
     let mut parent = Family(
         Command::new(std::env::current_exe().expect("test binary"))
             .args([
-                "--ignored",
                 "--exact",
                 "run::unix::a_blocked_signal_in_the_parent_does_not_orphan_the_child",
             ])
