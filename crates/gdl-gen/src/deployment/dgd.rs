@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use gdl_model::{Fleet, PoolDgd, Problem, Problems};
 use serde_json::Value;
+use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
+use yaml_rust2::scanner::{Marker, TScalarStyle};
 use yaml_rust2::{Yaml, YamlLoader};
 
 /// The DGD file of each pool of a fleet that names one, as JSON, by the
@@ -104,16 +106,109 @@ fn read(dgd: &PoolDgd, fleet_file: &Path) -> Result<Value, String> {
 
 /// `text`, one YAML document, as JSON, with each alias read as the value
 /// it names; refused, with why, unless JSON can hold it as written: its
-/// keys strings and no merge key (`<<`), and its numbers finite.
+/// keys strings and no merge key (`<<`), its numbers finite, and no plain
+/// scalar that YAML 1.1 reads as another value ([`one_reading`]).
 fn parse(text: &str) -> Result<Value, String> {
     let documents = YamlLoader::load_from_str(text).map_err(|e| format!("is not YAML: {e}"))?;
-    match documents.as_slice() {
-        [document] => json(document),
-        others => Err(format!(
-            "holds {} YAML documents, and a DGD file holds one",
-            others.len()
+    let value = match documents.as_slice() {
+        [document] => json(document)?,
+        others => {
+            return Err(format!(
+                "holds {} YAML documents, and a DGD file holds one",
+                others.len()
+            ));
+        }
+    };
+    one_reading(text)?;
+    Ok(value)
+}
+
+/// Refused, with the line and the fix, when `text` has a plain scalar
+/// that YAML 1.1, which kubectl reads, reads as another value than YAML
+/// 1.2, which gdl reads ([`differs`]): the file would apply one way by
+/// hand and another way from its `GdlPool`. A quoted or tagged scalar has
+/// one reading. The tree that [`YamlLoader`] builds keeps neither a
+/// scalar's style nor its text, so the parser's events are read here.
+fn one_reading(text: &str) -> Result<(), String> {
+    /// The first plain scalar that two readings give, and its line.
+    struct Found(Option<(String, usize, &'static str)>);
+    impl MarkedEventReceiver for Found {
+        fn on_event(&mut self, event: Event, mark: Marker) {
+            if self.0.is_none()
+                && let Event::Scalar(value, TScalarStyle::Plain, _, None) = event
+                && let Some(fix) = differs(&value)
+            {
+                self.0 = Some((value, mark.line(), fix));
+            }
+        }
+    }
+    let mut found = Found(None);
+    Parser::new_from_str(text)
+        .load(&mut found, true)
+        .map_err(|e| format!("is not YAML: {e}"))?;
+    match found.0 {
+        None => Ok(()),
+        Some((value, line, fix)) => Err(format!(
+            "has `{value}` at line {line}: YAML 1.1, which kubectl reads, and YAML 1.2, which gdl reads, give it two values. {fix}"
         )),
     }
+}
+
+/// How to write plain scalar `plain` so that YAML 1.1 and 1.2 read it
+/// alike, when they do not: a 1.1 boolean (`yes`, `no`, `on`, `off`, `y`,
+/// `n`, in any case), a number with a leading zero (1.1 octal), a 1.1
+/// binary number or one with `_`, a 1.2 octal (`0o`), or a 1.1 base-60
+/// number (`1:30`).
+fn differs(plain: &str) -> Option<&'static str> {
+    const NUMBER: &str = "Quote it if it is a string, or write it in decimal";
+    const BOOLEAN: &str = "Quote it if it is a string, or write `true` or `false`";
+    let lower = plain.to_ascii_lowercase();
+    if ["y", "n", "yes", "no", "on", "off"].contains(&lower.as_str()) {
+        return Some(BOOLEAN);
+    }
+    let body = plain.strip_prefix(['-', '+']).unwrap_or(plain);
+    let digits = |s: &str, of: &dyn Fn(u8) -> bool| !s.is_empty() && s.bytes().all(of);
+    let decimal = |b: u8| b.is_ascii_digit() || b == b'_';
+    let number = digits(body, &decimal)
+        && body.as_bytes()[0].is_ascii_digit()
+        && (body.contains('_') || (body.len() > 1 && body.starts_with('0')));
+    let prefixed = |prefix: &str, of: &dyn Fn(u8) -> bool| {
+        body.strip_prefix(prefix)
+            .is_some_and(|rest| digits(rest, of))
+    };
+    let binary = prefixed("0b", &|b| b == b'0' || b == b'1' || b == b'_');
+    let octal = prefixed("0o", &|b| (b'0'..=b'7').contains(&b));
+    (number || binary || octal || sexagesimal(body)).then_some(NUMBER)
+}
+
+/// Whether `body`, unsigned, is a YAML 1.1 base-60 number: digits, then
+/// one or more `:` and a part below 60 (`[0-5]?[0-9]`), the last of which
+/// may end in a fraction.
+fn sexagesimal(body: &str) -> bool {
+    let mut parts = body.split(':');
+    let first = parts.next().unwrap_or_default();
+    let rest: Vec<&str> = parts.collect();
+    let sixty = |part: &str| {
+        let bytes = part.as_bytes();
+        bytes.iter().all(u8::is_ascii_digit)
+            && match bytes {
+                [_] => true,
+                [tens, _] => *tens <= b'5',
+                _ => false,
+            }
+    };
+    let Some((last, middle)) = rest.split_last() else {
+        return false;
+    };
+    let (last, fraction) = match last.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (*last, ""),
+    };
+    first.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && first.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        && middle.iter().all(|part| sixty(part))
+        && sixty(last)
+        && fraction.bytes().all(|b| b.is_ascii_digit() || b == b'_')
 }
 
 /// `yaml` as JSON.
@@ -164,10 +259,65 @@ mod tests {
     /// as do quoted numbers and booleans. An alias is its anchor's value.
     #[test]
     fn a_dgd_file_reads_as_json_with_its_scalars_kept() {
-        let text = "a: 1.7.0\nb: \"1\"\nc: \"false\"\nd: 630\ne: 0.5\nf: true\ng: null\nh: yes\ni: [1, x]\nj: &k 2\nl: *k\n";
+        let text = "a: 1.7.0\nb: \"1\"\nc: \"false\"\nd: 630\ne: 0.5\nf: true\ng: null\nh: \"yes\"\ni: [1, x]\nj: &k 2\nl: *k\n";
         assert_eq!(
             parse(text).expect("JSON"),
             json!({"a": "1.7.0", "b": "1", "c": "false", "d": 630, "e": 0.5, "f": true, "g": null, "h": "yes", "i": [1, "x"], "j": 2, "l": 2})
+        );
+    }
+
+    /// A plain scalar that YAML 1.1, which kubectl reads, reads as
+    /// another value than YAML 1.2 does, which gdl reads: a number, a
+    /// boolean, or a base-60 number. Each kind is refused, with the line.
+    fn refused_as(text: &str, why: &str) {
+        let error = parse(text).expect_err(text);
+        assert!(error.contains(why), "{text}: {error}");
+    }
+
+    const NUMBER: &str = "Quote it if it is a string, or write it in decimal";
+    const BOOLEAN: &str = "Quote it if it is a string, or write `true` or `false`";
+
+    #[test]
+    fn a_number_with_a_leading_zero_is_refused() {
+        refused_as("a: 1\nmode: 0400\n", NUMBER);
+        refused_as("mode: -0644\n", NUMBER);
+        refused_as("mode: 09\n", NUMBER);
+        let error = parse("a: 1\nmode: 0400\n").expect_err("refused");
+        assert!(error.contains("has `0400` at line 2"), "{error}");
+    }
+
+    #[test]
+    fn a_number_that_only_one_version_reads_is_refused() {
+        refused_as("a: 0o400\n", NUMBER);
+        refused_as("a: 0b101\n", NUMBER);
+        refused_as("a: 1_000\n", NUMBER);
+    }
+
+    #[test]
+    fn a_yaml_11_boolean_is_refused_in_any_case() {
+        for word in ["yes", "No", "ON", "off", "y", "N", "yEs"] {
+            refused_as(&format!("a: {word}\n"), BOOLEAN);
+        }
+        refused_as("on: x\n", BOOLEAN);
+    }
+
+    #[test]
+    fn a_base_60_number_is_refused() {
+        refused_as("a: 1:30\n", NUMBER);
+        refused_as("a: -1:30:59\n", NUMBER);
+        refused_as("a: 1:30.5\n", NUMBER);
+    }
+
+    /// Quoted, tagged, or written the one way both versions read, a
+    /// value is taken.
+    #[test]
+    fn a_value_both_versions_read_alike_is_taken() {
+        let text = "a: \"0400\"\nb: '0644'\nc: !!str 0400\nd: 256\ne: 0\nf: true\ng: \"yes\"\nh: \"1:30\"\n\
+            i: 0x1F\nj: 1.7.0\nk: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0\nl: 10:61\nm: 0.5\n";
+        assert_eq!(
+            parse(text).expect("JSON"),
+            json!({"a": "0400", "b": "0644", "c": "0400", "d": 256, "e": 0, "f": true, "g": "yes", "h": "1:30",
+                   "i": 31, "j": "1.7.0", "k": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "l": "10:61", "m": 0.5})
         );
     }
 
