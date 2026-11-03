@@ -240,17 +240,19 @@ where
     T: Send + 'static,
     S: Stream<Item = Result<T>> + Unpin + Send + 'static,
 {
-    // The fields are built in their order, and a panic while building them
-    // (`sleep_until` on a runtime without timers) drops those already built:
-    // `inner` first, so a node boundary in it ends its producer.
+    // The fields are built in the order written here, and a panic while
+    // building them (`sleep_until` on a runtime without timers) drops those
+    // already built: `inner` first, so a node boundary in it ends its
+    // producer. The guard is disarmed after the last call that can panic,
+    // so an unwind then drops it still armed, and it cancels the attempt.
     let deadline_at = cx.deadline().map(|deadline| deadline.instant());
     Box::pin(Bounded {
         inner: Some(inner),
+        cancelled: None,
+        deadline: deadline_at.map(tokio::time::sleep_until),
         // The guard's token is `cx`'s: the stream cancels it itself, and
         // needs no clone of it to read it.
         token: Some(guard.disarm()),
-        cancelled: None,
-        deadline: deadline_at.map(tokio::time::sleep_until),
         deadline_at,
         since_check: 0,
         ready_run: 0,

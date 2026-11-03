@@ -423,3 +423,84 @@ async fn an_attempt_cancelled_as_its_inner_end_returns_ends_the_producer() {
         assert!(scope.is_cancelled(), "has_backward={has_backward}");
     }
 }
+
+/// A construction panic must cancel the attempt's forward work too.
+#[test]
+fn a_boundary_construction_panic_cancels_the_attempt() {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use gdl::{Backward, Forward, Hop, Next, Sink, SinkStage};
+
+    struct ObserveAttempt(Arc<OnceLock<Cx>>);
+    impl Forward for ObserveAttempt {
+        type In = ();
+        type Out = ();
+
+        async fn forward(&self, cx: &Cx, (): ()) -> Result<()> {
+            self.0.set(cx.clone()).expect("one attempt");
+            Ok(())
+        }
+    }
+
+    struct Starts(Arc<OnceLock<Cx>>);
+    impl Sink for Starts {
+        type Req = ();
+        type Item = ();
+
+        async fn generate(&self, cx: Cx, (): ()) -> Result<Items<()>> {
+            self.0.set(cx).expect("one producer");
+            Ok(items(futures::stream::pending()))
+        }
+    }
+
+    struct Keep;
+    impl Backward for Keep {
+        type In = ();
+        type Out = ();
+
+        fn backward(&self, _cx: &Cx, input: Items<()>) -> Items<()> {
+            input
+        }
+    }
+
+    let mut uncancelled = Vec::new();
+    for timers in [true, false] {
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        if timers {
+            builder.enable_time();
+        }
+        let runtime = builder.build().expect("runtime");
+        for has_backward in [true, false] {
+            let attempt = Arc::new(OnceLock::new());
+            let scope = Arc::new(OnceLock::new());
+            let forward = (Arc::new(ObserveAttempt(Arc::clone(&attempt))), ());
+            let sink = SinkStage::new(Arc::new(Starts(Arc::clone(&scope))));
+            let cx = Cx::new().with_timeout(Duration::from_secs(60));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                runtime.block_on(async {
+                    if has_backward {
+                        Hop::new(forward, sink, (Arc::new(Keep), ()))
+                            .generate(cx, ())
+                            .await
+                    } else {
+                        Hop::new(forward, sink, ()).generate(cx, ()).await
+                    }
+                })
+            }));
+            if timers {
+                drop(result.expect("timers enabled").expect("stream"));
+            } else {
+                assert!(result.is_err(), "the deadline requires a timer driver");
+            }
+            assert!(scope.get().expect("producer started").is_cancelled());
+            if !attempt.get().expect("attempt started").is_cancelled() {
+                uncancelled.push((timers, has_backward));
+            }
+        }
+    }
+    assert!(
+        uncancelled.is_empty(),
+        "boundary construction left attempts live: (timers, has_backward)={uncancelled:?}"
+    );
+}
