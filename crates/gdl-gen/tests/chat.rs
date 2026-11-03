@@ -361,6 +361,53 @@ fn a_terminal_interrupt_stops_every_segment() {
     drop(stdin);
 }
 
+/// A preparation that fails ends `run` with its own problem, which it
+/// printed: here a source pinned to a frontend, which `run` refuses. The
+/// preparation's flag belongs to `run` alone, and no usage line shows it.
+#[test]
+fn a_failed_preparation_shows_its_own_problem() {
+    let run = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .current_dir(root())
+        .args([
+            "gdl",
+            "run",
+            "--spec",
+            "examples/http/gdl.toml",
+            "--target-dir",
+        ])
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .stdin(Stdio::null())
+        .output()
+        .expect("cargo gdl run");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("this graph's source is pinned to a frontend"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("plan"), "{stderr}");
+    assert!(run.stdout.is_empty(), "{:?}", run.stdout);
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args([
+            "gdl",
+            "build",
+            "--spec",
+            "examples/chat/gdl.toml",
+            "--prepare-into",
+            "x",
+        ])
+        .output()
+        .expect("cargo gdl build");
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(!build.status.success());
+    assert!(
+        stderr.contains("usage:") && !stderr.contains("prepare"),
+        "{stderr}"
+    );
+}
+
 /// `cargo gdl run` on the chat example, started by `command` (a program
 /// that runs `cargo-gdl` as `cargo gdl`), in a process group of its own
 /// that is killed if the test ends first.

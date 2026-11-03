@@ -102,55 +102,112 @@ impl Drop for Running {
     }
 }
 
-/// Run `prepare` on a thread of its own, while this one watches `stops`.
-/// A stop sends SIGTERM to each process that preparation started, Cargo
-/// among them, and preparation then fails.
-pub(super) fn preparing<T: Send>(
-    stops: &Stops,
-    prepare: impl FnOnce() -> Result<T, Error> + Send,
-) -> Result<T, Error> {
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(prepare);
-        let mut stopped = false;
-        while !worker.is_finished() {
-            if !stopped && stops.any() {
-                stopped = true;
-                stop_children();
-            }
-            std::thread::sleep(POLL);
-        }
-        let prepared = worker
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        match stopped || stops.any() {
-            true => Err(Error::new("stopped while preparing the segments")),
-            false => prepared,
-        }
-    })
-}
+/// How long a stopped preparation's process group may take to end on its
+/// SIGTERM before it is killed.
+const PREPARE_GRACE: Duration = Duration::from_secs(2);
 
-/// Send SIGTERM to each child of this process, of any of its threads.
-#[cfg(target_os = "linux")]
-fn stop_children() {
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return;
-    };
-    for task in tasks.flatten() {
-        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
-            continue;
-        };
-        for child in children.split_whitespace() {
-            if let Some(pid) = child.parse().ok().and_then(Pid::from_raw) {
-                let _ = kill_process(pid, Signal::TERM);
+/// Run the preparation `prepare` in a process group of its own, while this
+/// process watches `stops`. Its stdin is closed and its stdout goes to
+/// stderr: this process's stdout carries only answers. A stop sends
+/// SIGTERM to the group, and SIGKILL after [`PREPARE_GRACE`], and returns
+/// once the group is empty.
+///
+/// The terminal's SIGINT does not reach the group: this process takes it
+/// and stops the group itself, Cargo's compilers among it.
+pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error> {
+    use std::os::unix::process::CommandExt;
+
+    let stdout = std::io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| Error::new(format!("the preparation: {e}")))?;
+    prepare
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .process_group(0);
+    let child = prepare
+        .spawn()
+        .map_err(|e| Error::new(format!("the preparation: {e}")))?;
+    let mut group = Group::of(child)?;
+    let mut stopped: Option<Instant> = None;
+    loop {
+        let status = group
+            .leader
+            .try_wait()
+            .map_err(|e| Error::new(format!("the preparation: {e}")))?;
+        match stopped {
+            None if stops.any() => {
+                group.signal(Signal::TERM);
+                stopped = Some(Instant::now());
+            }
+            None => {
+                if let Some(status) = status {
+                    group.reaped = true;
+                    return match status.success() {
+                        true => Ok(()),
+                        // It printed its problem on stderr.
+                        false => Err(Error::new(format!(
+                            "preparing the segments failed: {status}"
+                        ))),
+                    };
+                }
+            }
+            Some(since) => {
+                if status.is_some() {
+                    group.reaped = true;
+                }
+                if group.reaped && group.is_empty() {
+                    return Err(Error::new("stopped while preparing the segments"));
+                }
+                if since.elapsed() > PREPARE_GRACE {
+                    group.signal(Signal::KILL);
+                }
             }
         }
+        std::thread::sleep(POLL);
     }
 }
 
-/// Elsewhere a process cannot list its children: the build runs on to
-/// its end, unless the terminal stopped it too.
-#[cfg(not(target_os = "linux"))]
-fn stop_children() {}
+/// A preparation's process group: its leader, and whatever it started.
+/// Killed whole if `run` returns before it ends.
+struct Group {
+    leader: Child,
+    id: Pid,
+    reaped: bool,
+}
+
+impl Group {
+    fn of(leader: Child) -> Result<Self, Error> {
+        let id = i32::try_from(leader.id())
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| Error::new("the preparation has no process id"))?;
+        Ok(Self {
+            leader,
+            id,
+            reaped: false,
+        })
+    }
+
+    fn signal(&self, signal: Signal) {
+        let _ = rustix::process::kill_process_group(self.id, signal);
+    }
+
+    /// Whether no process is left in the group. Its id stays the group's
+    /// while any member lives, so it names no other group.
+    fn is_empty(&self) -> bool {
+        rustix::process::test_kill_process_group(self.id).is_err()
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if !self.reaped || !self.is_empty() {
+            self.signal(Signal::KILL);
+            let _ = self.leader.wait();
+        }
+    }
+}
 
 /// Start the segments of `plan`, and run them until each has exited; see
 /// [`run`](super::run). Called from the thread that lives as long as

@@ -76,7 +76,7 @@ use offers::offers;
 pub use offers::{CRATES_IO, GitSource, Offers, git_source};
 pub use output::{drift, write};
 pub use resolve::Resolved;
-pub use run::run;
+pub use run::{prepare_run, run};
 pub use spec::{Spec, runtime_at};
 use validate::{library_clashes, validate};
 

@@ -155,6 +155,9 @@ enum Command {
     },
     Run {
         release: bool,
+        /// Internal: prepare into this directory, for the `run` that
+        /// started this process.
+        prepare_into: Option<PathBuf>,
     },
     Diagram(Format, Direction),
     Export {
@@ -185,6 +188,7 @@ fn args() -> Result<Args, String> {
     let mut push = false;
     let mut release = false;
     let mut allow_pool_restart = false;
+    let mut prepare_into = None;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -213,6 +217,7 @@ fn args() -> Result<Args, String> {
             Some("--local") => local = true,
             Some("--allow-pool-restart") => allow_pool_restart = true,
             Some("--release") => release = true,
+            Some("--prepare-into") => prepare_into = Some(value()?),
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
             }
@@ -239,6 +244,7 @@ fn args() -> Result<Args, String> {
         },
         "run" => Command::Run {
             release: std::mem::take(&mut release),
+            prepare_into: prepare_into.take(),
         },
         "compose" => Command::Compose {
             out: out.ok_or_else(|| USAGE.to_string())?,
@@ -311,8 +317,10 @@ fn args() -> Result<Args, String> {
     );
     // `--fleet`, `--tag`, `--images`, `--push`, `--local`, `--release`, and
     // `--direction` are for the commands that took them above.
+    // `--prepare-into` is internal to `run`, and in no usage line.
     if (needs_spec && spec.is_none())
         || direction.is_some()
+        || prepare_into.is_some()
         || fleet.is_some()
         || tag.is_some()
         || images.is_some()
@@ -582,15 +590,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 println!("{}", binary.display());
             }
         }
-        Command::Run { release } => {
+        Command::Run {
+            release,
+            prepare_into: Some(dir),
+        } => {
             let spec = spec()?;
             let target = target(spec.dir());
             let how = gdl_gen::Build {
                 out: None,
                 release: *release,
             };
+            gdl_gen::prepare_run(&spec, &target, &how, dir).map_err(located)?;
+        }
+        Command::Run {
+            prepare_into: None, ..
+        } => {
+            // The preparation is this command again, in a process of its own,
+            // so that a stop can end it with all that it started.
+            let mut prepare = std::process::Command::new(std::env::current_exe()?);
+            prepare.args(std::env::args_os().skip(1));
             // A segment that fails is no problem of the spec.
-            gdl_gen::run(&spec, &target, &how)?;
+            gdl_gen::run(prepare)?;
         }
         Command::Generate { out, check } => {
             let spec = spec()?;
