@@ -705,7 +705,7 @@ With no stages, `operator` and `hop` are one hop over the sink: 139 Ir per item,
 - **A stage's own map makes every copy of an item.** At 512 B each stage adds 3 calls of `memcpy` per item in all three shapes, the control too: `futures`' `map` takes the item by value into its closure and back. A stage costs about 230 Ir more per item at 512 B than at 8 B in every shape, so gdl's boundaries add no copy ([Copies of an item](#copies-of-an-item)).
 - **An operator stage costs 87 Ir per item more than its map.** Each item passes an attempt boundary (`Bounded`) and a node boundary (`Fuse`) at every hop. In the 5-stage `u64` run, `Bounded::poll_next` held 40% of the run's Ir by itself, `Fuse::poll_next` 20%, and `map` 20%. `Bounded` checks the cancel flag and the clock once in 64 items, as [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked) says: callgrind counts 944 calls of the check per 10,000 items over 6 boundaries.
 - **A stage inside one hop costs 23 Ir per item more than its map**: the node boundary of each backward node but the last, whose boundary is the hop's attempt boundary.
-- **Per request, a stage of its own hop costs about 20 maps.** Each hop makes two child contexts, two cancel tokens below its parent's, two boundaries, and the operator's boxed future.
+- **Per request, a stage of its own hop costs about 20 maps.** Each hop makes two child contexts, two cancel tokens below its parent's, two boundaries, and the operator's boxed future. Since one scope node holds both stop and cancel, about 11 maps (below).
 
 Each change to the boundaries since, measured the same way, against the commit before it:
 
@@ -713,8 +713,35 @@ Each change to the boundaries since, measured the same way, against the commit b
 |---|---|---|---|---|
 | main at `71b9fb92` | 120.3 Ir (356.2 at 512 B) | 56.1 (286.3) | 138.6 (417.6) | 5,120 |
 | the attempt boundary passes itself to its wait, not its fields | 106.2 (339.1) | 56.1 (286.3) | 124.5 (400.5) | 5,092 |
+| one scope node for stop and cancel | 105.5 (338.3) | 56.0 (286.3) | 122.9 (399.9) | 2,814 |
 
 - **Passing the attempt boundary whole to its wait saves 14 Ir per item at each hop.** `wait` took the boundary's fields as a struct of pointers, so every poll built that struct on the stack before it polled the producer: 9 stores of pointers, and the registers they needed.
+- **One scope node for stop and cancel saves 2,279 Ir and 4 allocations per operator stage per request**, and a little under 1 Ir per item at each hop. Each child context was a stop node, a cancel token's tree node, and a place in its parent's list of children, and each create, clone, check, and drop of the token took its lock. Now a child context is one node, made, checked, and dropped with no lock ([Runtime design](../development/runtime-design.md#node-contexts)). Base `9ab1301e` and the change built in one target directory, two rounds each, which agreed within 1.2 Ir:
+
+| Per request | Base | Change |
+|---|---|---|
+| `operator`, per stage at 5 stages | 5,092.6 Ir, 10 allocations | 2,813.9 Ir, 6.07 allocations |
+| `operator`, per stage at 1 stage | 4,808.1 Ir, 10 allocations | 2,526.2 Ir, 6.04 allocations |
+| `hop`, per stage at 5 stages | 1,950.0 Ir, 4 allocations | 987.0 Ir, 2.4 allocations |
+| one hop | 5,906.6 Ir, 13 allocations | 3,196.6 Ir, 8 allocations |
+| `plain` with no stages, the control | 1,716.2 Ir, 5 allocations | 1,310.1 Ir, 4 allocations |
+
+- **A check now grows with the depth of the chain.** A cancel check reads one flag for each scope up to the root, where the token read one, under its lock. A stage at 5 stages costs 288 Ir more per request than a stage at 1 stage; most of that difference is the six checks of each hop walking further. In the 5-stage run, `Cx::check` and the boundaries' check held 11% of the run's Ir, and no cancel token function remained.
+- **A ready request registers no waiter, except when its task's budget runs out.** The bench runs every request in one task, and each hop spends one unit of the task's budget, so at 5 stages a request yields part way down about once in 21 requests, and the hops above the yield register a waiter. That is the 0.07 of an allocation above 6 per stage.
+- **A waiting request costs more the deeper it waits.** With `pending`, the sink's stream waits once, and every boundary above it registers on its own scope and on each scope above. Per request, one hop: 7,095.4 Ir and 13 allocations, then 4,872.2 and 10. Per `operator` stage at 1 stage: 5,441.5 Ir and 10 allocations, then 4,066.3 and 8. At 5 stages: 5,730.0 Ir and 10 allocations, then 6,201.7 and 8.8. A cancel token registered a waiter with one lock; a scope node takes one lock on each scope up to the root, so the five nested waits of the 5-stage shape take more than the token did.
+- **Many waiters below one root.** With `pending` and a count, that many 1-stage requests run at once below one root context, whose list of waiters then holds them all. Per request:
+
+| Requests at once | Base | Change |
+|---|---|---|
+| 1 | 12,536.9 Ir, 23 allocations | 8,938.4 Ir, 18 allocations |
+| 4 | 14,630.5 Ir, 23.25 allocations | 11,400.6 Ir, 17.5 allocations |
+| 16 | 15,477.8 Ir, 21.81 allocations | 12,301.2 Ir, 16.5 allocations |
+| 64 | 16,898.6 Ir, 22.28 allocations | 14,033.2 Ir, 17.17 allocations |
+
+```bash
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages operator u64 <0|1|5> 1 <200|400> pending
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages operator u64 1 1 <200|400> pending <1|4|16|64>
+```
 
 ### Copies of an item
 

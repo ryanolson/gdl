@@ -23,7 +23,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 
 # The request id's clock: the kernel's coarse wall clock, read safely.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
@@ -37,6 +36,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 trybuild = { workspace = true }
 # Parses the request id as a UUID in tests, independently of how it is minted.
 uuid = { workspace = true }
+
+# The scope node's models, under `--cfg gdl_loom` (src/cx/scope/models.rs). A
+# dev-dependency, so that nothing that depends on gdl resolves it.
+[target.'cfg(gdl_loom)'.dev-dependencies]
+loom = { workspace = true }
 
 [[bench]]
 name = "projection"

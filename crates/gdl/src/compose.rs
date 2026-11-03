@@ -3,7 +3,7 @@
 //! there is no anchor and no map on this path.
 
 use std::future::{Future, poll_fn};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -55,7 +55,7 @@ where
             // chain hands the request on to the inner end, not back here: each
             // return would move the whole request once more.
             let at = &attempt;
-            let mut run = pin!(self.fwd.run(at, req, move |req| async move {
+            let run = pin!(self.fwd.run(at, req, move |req| async move {
                 // A forward stage can finish in the same instant the attempt is
                 // interrupted; the inner end must not start for a dead attempt.
                 let attempt = at;
@@ -73,34 +73,9 @@ where
                 attempt.check()?;
                 Ok(self.bwd.apply(attempt, items))
             }));
-            let mut done = pin!(attempt.done());
-            // The first pass polls `run` before the cancel, so an attempt that
-            // finishes at once never registers a waiter (two more locks of the
-            // attempt's token); the checks inside `run` and below still see a
-            // cancel that came first. Later passes poll the cancel first, and no
-            // pass polls `run` twice. As in `tokio::select!`, a pass with the
-            // task's budget spent yields at once: the cancel would yield for it
-            // and `run`, polled alone, could finish a cancelled attempt.
-            let mut first = true;
-            let items = poll_fn(|task| {
-                if !tokio::task::coop::has_budget_remaining() {
-                    task.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-                if !first && let Poll::Ready(reason) = done.as_mut().poll(task) {
-                    return Poll::Ready(Err(reason));
-                }
-                if let Poll::Ready(result) = run.as_mut().poll(task) {
-                    return Poll::Ready(result);
-                }
-                if std::mem::take(&mut first)
-                    && let Poll::Ready(reason) = done.as_mut().poll(task)
-                {
-                    return Poll::Ready(Err(reason));
-                }
-                Poll::Pending
-            })
-            .await?;
+            // The checks inside `run` give a cancel that came first its
+            // precedence; the race only waits.
+            let items = race_done(at, run).await?;
             // Success is reported only for a live attempt; dropping `items` on
             // the error path ends whatever the inner end started.
             attempt.check()?;
@@ -375,4 +350,45 @@ fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
 #[inline(never)]
 fn build<F>(make: impl FnOnce() -> F) -> F {
     make()
+}
+
+/// Run an attempt's work against the attempt's cancel and deadline.
+///
+/// The first pass polls `run` before the cancel, so an attempt that
+/// finishes at once registers no waiter. Later passes poll the cancel
+/// first, and no pass polls `run` twice. As in `tokio::select!`, a pass
+/// with the task's budget spent yields at once: the cancel would yield for
+/// it, and `run`, polled alone, could finish a cancelled attempt.
+///
+/// The race alone gives a cancel no precedence over the first poll of
+/// `run`: a cancel made just before it still lets `run` take one step. So
+/// `run` must check `attempt` before it acts, as a hop's forward chain and
+/// inner end do. `run` is pinned by the caller, where it was built: moved
+/// in here, a hop's future would copy its request once more.
+#[doc(hidden)]
+pub async fn race_done<T, F>(attempt: &Cx, mut run: Pin<&mut F>) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let mut done = pin!(attempt.done());
+    let mut first = true;
+    poll_fn(|task| {
+        if !tokio::task::coop::has_budget_remaining() {
+            task.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        if !first && let Poll::Ready(reason) = done.as_mut().poll(task) {
+            return Poll::Ready(Err(reason));
+        }
+        if let Poll::Ready(result) = run.as_mut().poll(task) {
+            return Poll::Ready(result);
+        }
+        if std::mem::take(&mut first)
+            && let Poll::Ready(reason) = done.as_mut().poll(task)
+        {
+            return Poll::Ready(Err(reason));
+        }
+        Poll::Pending
+    })
+    .await
 }

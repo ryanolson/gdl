@@ -234,3 +234,38 @@ async fn the_front_call_future_stays_under_its_ceiling() {
         "the front's call future is {size} bytes, over its ceiling of {FRONT_CALL_FUTURE_CEILING}"
     );
 }
+
+/// A local runtime hop whose work finishes at once registers no waiter on
+/// its scope: it polls its work before its cancel, as local composition
+/// does. A waiter registers on every scope above its own, so the root
+/// shows one. On one thread, the task the sink spawns, and the boundary
+/// that waits for it, run only after the call returns, so the root is read
+/// then, before the stream.
+#[tokio::test]
+async fn a_ready_local_hop_registers_no_waiter() {
+    let nodes = [velo_node().await];
+    let placement = Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]);
+    let cluster = deploy(
+        &nodes,
+        &placement,
+        &Events::quiet(),
+        RuntimeConfig::default(),
+    );
+    let root = Cx::new();
+    let out = cluster
+        .segment("front")
+        .call(
+            root.clone(),
+            prompt(
+                "ready",
+                Plan {
+                    tokens: 3,
+                    ..Plan::default()
+                },
+            ),
+        )
+        .await
+        .expect("call");
+    assert!(!root.waited(), "a ready local hop registered a waiter");
+    assert_eq!(collect(out).await, expected(0..3));
+}

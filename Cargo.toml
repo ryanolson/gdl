@@ -21,6 +21,7 @@ dashmap = "6"
 figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 futures = "0.3"
 linkme = "0.3"
+loom = "0.7"
 pin-project-lite = "0.2"
 # The version dynamo pins; without protobuf, which the text format does not need.
 prometheus = { version = "0.14", default-features = false }
@@ -61,7 +62,9 @@ unsafe_code = "deny"
 missing_docs = "warn"
 # The remote bench reports tasks spawned per request when built with
 # `--cfg tokio_unstable`, the only way tokio exposes that count.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+# The scope node in `gdl` is model-checked with loom under `--cfg gdl_loom`;
+# a plain `--cfg loom` would switch tokio into its own loom build.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)", "cfg(gdl_loom)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

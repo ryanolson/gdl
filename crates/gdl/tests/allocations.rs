@@ -81,9 +81,8 @@ impl Next<u64, u64> for Direct {
     }
 }
 
-/// A hop makes two child contexts, the attempt and the inner end's scope.
-/// Each is a node of the stop tree, a node of the cancel tree, and a place
-/// in its parent's list of cancel children: three allocations. The node
+/// A hop makes two child contexts, the attempt and the inner end's scope:
+/// one scope node each, which holds both stop and cancel. The node
 /// boundary and the attempt boundary box one stream each. Every allocation
 /// is on the request path, so this is an upper bound.
 #[tokio::test]
@@ -96,7 +95,7 @@ async fn a_hop_allocates_two_contexts_and_two_boundaries() {
     allocations(&hop).await;
 
     let own = allocations(&hop).await - allocations(&direct).await;
-    assert!(own <= 8, "a hop allocated {own} times");
+    assert!(own <= 4, "a hop allocated {own} times");
 }
 
 /// What one `affinity` selection allocates, through the erased selector

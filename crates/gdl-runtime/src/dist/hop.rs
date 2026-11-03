@@ -15,7 +15,7 @@ use super::offers::{Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit, HeadInfo};
 use gdl::__runtime as meter;
-use gdl::__runtime::{CHECK_INTERVAL, bound_measured};
+use gdl::__runtime::{CHECK_INTERVAL, bound_measured, race_done};
 use gdl::__runtime::{END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
 use gdl::__runtime::{Presence, Want};
 use gdl::Decline;
@@ -556,11 +556,12 @@ where
         // it returns, the response stream owns the guard.
         let guard = attempt.cancel_on_drop();
         if core.plan.local {
-            let items = tokio::select! {
-                biased;
-                reason = attempt.done() => return meter::note(root.as_ref(), Err(reason)),
-                result = core.run_local(&attempt, req) => meter::note(root.as_ref(), result)?,
-            };
+            // The work first, as in local composition: an attempt that
+            // finishes at once registers no waiter on its scope. A cancel
+            // that came first still wins, through the checks `run_local`
+            // makes before each stage.
+            let run = std::pin::pin!(core.run_local(&attempt, req));
+            let items = meter::note(root.as_ref(), race_done(&attempt, run).await)?;
             meter::note(root.as_ref(), attempt.check())?;
             return Ok(bound_measured(&attempt, guard, items, root));
         }

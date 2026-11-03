@@ -2,10 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::cx::{CancelOnDrop, Cancelled, Scope};
 use futures::Stream;
 use pin_project_lite::pin_project;
 use tokio::time::{Instant, Sleep};
-use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
 use crate::cx::Cx;
 use crate::error::{Error, Result};
@@ -101,10 +101,10 @@ pub fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
 }
 
 /// What a node boundary keeps of its producer's scope. Taken before the
-/// scope moves into the producer, it spares a clone of the whole context:
-/// each clone and drop of a cancel token takes the token's lock.
+/// scope moves into the producer, it spares a clone of the whole context,
+/// which copies the metadata, extensions, and visit handles too.
 pub(crate) struct Producer {
-    token: CancellationToken,
+    token: Scope,
     deadline_at: Option<Instant>,
 }
 
@@ -134,7 +134,7 @@ struct Fuse<T> {
     inner: Option<Items<T>>,
     // The producer's scope, cancelled at any ending or drop; `None` once
     // the stream has ended. One token does what a guard and a clone did.
-    token: Option<CancellationToken>,
+    token: Option<Scope>,
     deadline_at: Option<Instant>,
     ready_run: u16,
 }
@@ -196,7 +196,7 @@ impl<T> Stream for Fuse<T> {
 /// caller that holds the stream unread keeps its local scopes past the
 /// deadline until it reads or drops the stream. Watching the deadline
 /// without a read would take a task per attempt.
-pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T>) -> Items<T> {
+pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: CancelOnDrop, inner: Items<T>) -> Items<T> {
     bound_measured(cx, guard, inner, None)
 }
 
@@ -204,7 +204,7 @@ pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T
 /// the outcome the boundary reports, and noting its first item out.
 pub fn bound_measured<T: Send + 'static>(
     cx: &Cx,
-    guard: DropGuard,
+    guard: CancelOnDrop,
     inner: Items<T>,
     response: Option<Owner>,
 ) -> Items<T> {
@@ -225,13 +225,13 @@ pub fn bound_measured<T: Send + 'static>(
 }
 
 /// How many ready items may pass between checks of the cancel flag and the
-/// clock. Both reads cost more than an item should (`CancellationToken::
-/// is_cancelled` takes a mutex; a clock read is a syscall-class call), and a
-/// producer that never returns `Pending` never lets the cancel or deadline
-/// futures be polled (an unpolled `Sleep` never even registers). So the
-/// ready path checks every this many items: a ready producer can overrun a
-/// cancel or a deadline by at most this many items, and a pending producer
-/// is woken by the futures at once.
+/// clock. Both reads cost more than an item should (a cancel check reads a
+/// flag on every scope up to the root; a clock read is a syscall-class
+/// call), and a producer that never returns `Pending` never lets the cancel
+/// or deadline futures be polled (an unpolled `Sleep` never even
+/// registers). So the ready path checks every this many items: a ready
+/// producer can overrun a cancel or a deadline by at most this many items,
+/// and a pending producer is woken by the futures at once.
 pub const CHECK_INTERVAL: u8 = 64;
 
 pin_project! {
@@ -242,11 +242,11 @@ pin_project! {
         inner: Option<Items<T>>,
         // The attempt's, cancelled at any ending or drop; `None` once the
         // stream has ended.
-        token: Option<CancellationToken>,
+        token: Option<Scope>,
         // Made the first time the producer waits: a stream whose items are
         // all ready never pays for the clone and the waiter.
         #[pin]
-        cancelled: Option<WaitForCancellationFutureOwned>,
+        cancelled: Option<Cancelled>,
         #[pin]
         deadline: Option<Sleep>,
         deadline_at: Option<Instant>,
@@ -397,10 +397,10 @@ fn item_of<T>(polled: Poll<Option<Result<T>>>) -> Option<T> {
     }
 }
 
-fn interrupted(token: Option<&CancellationToken>, deadline_at: Option<Instant>) -> Option<Error> {
+fn interrupted(token: Option<&Scope>, deadline_at: Option<Instant>) -> Option<Error> {
     if deadline_at.is_some_and(|at| Instant::now() >= at) {
         Some(Error::deadline_exceeded())
-    } else if token.is_some_and(CancellationToken::is_cancelled) {
+    } else if token.is_some_and(Scope::is_cancelled) {
         Some(Error::cancelled())
     } else {
         None
@@ -410,8 +410,8 @@ fn interrupted(token: Option<&CancellationToken>, deadline_at: Option<Instant>) 
 /// Drop the producer's stream, then cancel its scope, in the order a
 /// stream that held a drop guard used. The guard is made first, so the
 /// cancel happens even when the stream's destructor panics.
-fn end<T>(inner: &mut Option<Items<T>>, token: &mut Option<CancellationToken>) {
-    let _cancel = token.take().map(CancellationToken::drop_guard);
+fn end<T>(inner: &mut Option<Items<T>>, token: &mut Option<Scope>) {
+    let _cancel = token.take().map(Scope::drop_guard);
     *inner = None;
 }
 
@@ -428,7 +428,7 @@ mod tests {
         items.into_iter().map(|r| r.map_err(|e| e.kind())).collect()
     }
 
-    fn attempt_of(cx: &Cx) -> (Cx, DropGuard) {
+    fn attempt_of(cx: &Cx) -> (Cx, CancelOnDrop) {
         let attempt = cx.child();
         let guard = attempt.cancel_on_drop();
         (attempt, guard)
@@ -665,5 +665,31 @@ mod tests {
         drop(out);
         assert!(attempt.is_cancelled());
         assert!(!parent.is_cancelled());
+    }
+
+    /// A node boundary yields after 1,024 ready items in a row, and the
+    /// attempt boundary above it then waits. It registers its waiter on its
+    /// first wait and keeps it, so a stream that yields five times
+    /// registers as often as one that yields twice: once on each node from
+    /// the attempt up.
+    #[tokio::test]
+    async fn an_attempt_boundary_registers_once_per_stream() {
+        async fn registrations(n: u64) -> usize {
+            let root = Cx::new();
+            let (attempt, guard) = attempt_of(&root);
+            let scope = attempt.child();
+            let inner = fuse(items(futures::stream::iter((0..n).map(Ok))), &scope);
+            crate::cx::REGISTERED.with(|count| count.set(0));
+            let count = bound(&attempt, guard, inner).count().await;
+            assert_eq!(count, usize::try_from(n).expect("a count"));
+            crate::cx::REGISTERED.with(std::cell::Cell::get)
+        }
+        assert_eq!(registrations(1_000).await, 0, "no yield, no wait");
+        assert_eq!(registrations(3_000).await, 2, "the attempt and the root");
+        assert_eq!(
+            registrations(6_000).await,
+            2,
+            "a boundary registered more than once"
+        );
     }
 }

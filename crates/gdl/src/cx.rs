@@ -7,11 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use std::sync::atomic::AtomicBool;
-
-use tokio::sync::Notify;
 use tokio::time::Instant;
-use tokio_util::sync::{CancellationToken, DropGuard};
+
+pub(crate) use scope::Cancelled;
+#[cfg(test)]
+pub(crate) use scope::REGISTERED;
+use scope::{CANCEL, STOP};
+pub use scope::{CancelOnDrop, Scope};
+
+mod scope;
 
 use crate::error::{Error, Result};
 use crate::meter::Visit;
@@ -106,37 +110,34 @@ impl Cx {
 
     /// Cancel this context and every context below it.
     pub fn cancel(&self) {
-        self.scope.cancel.cancel();
+        self.scope.cancel();
     }
 
     /// Ask this context and every context below it to stop gracefully:
     /// finish buffered output, then end.
     pub fn request_stop(&self) {
-        self.scope.stop.stop();
+        self.scope.request_stop();
     }
 
     /// Whether this context was cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.scope.cancel.is_cancelled()
+        self.scope.is_cancelled()
     }
 
     /// Resolves when this context is cancelled.
     pub async fn cancelled(&self) {
-        self.scope.cancel.cancelled().await;
+        self.scope.wait(CANCEL).await;
     }
 
     /// Whether this context should stop producing: a stop was requested or it
     /// was cancelled. A cancel is a stop that also discards.
     pub fn is_stopping(&self) -> bool {
-        self.scope.stop.is_stopped() || self.scope.cancel.is_cancelled()
+        self.scope.is_stopping()
     }
 
     /// Resolves when a stop is requested or the context is cancelled.
     pub async fn stopping(&self) {
-        tokio::select! {
-            () = self.scope.stop.stopped() => {}
-            () = self.scope.cancel.cancelled() => {}
-        }
+        self.scope.wait(STOP | CANCEL).await;
     }
 
     /// `Ok` while the request may continue; the reason otherwise.
@@ -163,23 +164,31 @@ impl Cx {
                 () = tokio::time::sleep_until(deadline.instant()) => Error::deadline_exceeded(),
                 // The timer fires on a whole-millisecond tick; a deadline
                 // that has passed is reported even if its timer has not.
-                () = self.scope.cancel.cancelled() => if deadline.is_expired() {
+                () = self.scope.wait(CANCEL) => if deadline.is_expired() {
                     Error::deadline_exceeded()
                 } else {
                     Error::cancelled()
                 },
             },
             None => {
-                self.scope.cancel.cancelled().await;
+                self.scope.wait(CANCEL).await;
                 Error::cancelled()
             }
         }
     }
 
-    /// The cancel token of this context's scope.
+    /// This context's scope, for a boundary that keeps it apart from the
+    /// context.
     #[doc(hidden)]
-    pub fn cancel_token(&self) -> CancellationToken {
-        self.scope.cancel.clone()
+    pub fn cancel_token(&self) -> Scope {
+        self.scope.clone()
+    }
+
+    /// Whether a waiter has ever registered on this context's scope: a
+    /// test reads it to show that a path registers no waiter.
+    #[doc(hidden)]
+    pub fn waited(&self) -> bool {
+        self.scope.waited()
     }
 
     /// A context for a request that arrived from another segment: the same
@@ -219,8 +228,8 @@ impl Cx {
     /// inside every attempt's response stream, so dropping the stream cancels
     /// the attempt.
     #[doc(hidden)]
-    pub fn cancel_on_drop(&self) -> DropGuard {
-        self.scope.cancel.clone().drop_guard()
+    pub fn cancel_on_drop(&self) -> CancelOnDrop {
+        self.scope.clone().drop_guard()
     }
 }
 
@@ -239,129 +248,6 @@ impl fmt::Debug for Cx {
             .field("stopping", &self.is_stopping())
             .field("cancelled", &self.is_cancelled())
             .finish_non_exhaustive()
-    }
-}
-
-/// Stop and cancel are separate trees. Stop must not imply cancel (a stopped
-/// producer still delivers its buffered output), and a cancel must reach
-/// children whose stop has its own parent, so each signal gets its own tree
-/// and readers check both.
-#[derive(Clone)]
-struct Scope {
-    stop: Stop,
-    cancel: CancellationToken,
-}
-
-impl Scope {
-    fn root() -> Self {
-        Self {
-            stop: Stop::root(),
-            cancel: CancellationToken::new(),
-        }
-    }
-
-    fn child(&self) -> Self {
-        Self {
-            stop: self.stop.child(),
-            cancel: self.cancel.child_token(),
-        }
-    }
-}
-
-/// One scope of the stop tree. A child points at its parent and a parent
-/// knows nothing of its children, so making, cloning, and dropping a scope
-/// takes no lock, where a cancel token takes one for each. A context checks
-/// its own flag and each of its parents'. A stop is rare, so every waiter of
-/// one request waits on one `Notify` at the root, and a stop wakes them all
-/// to check again.
-#[derive(Clone)]
-struct Stop(Arc<StopNode>);
-
-struct StopNode {
-    stopped: AtomicBool,
-    up: Up,
-}
-
-enum Up {
-    Root(Notify),
-    Parent(Arc<StopNode>),
-    /// Only while the node is dropped, which nothing reads.
-    Gone,
-}
-
-impl Drop for StopNode {
-    fn drop(&mut self) {
-        // A context replaced by its child, over and over, holds a long chain
-        // of parents that only it keeps. Dropped by recursion, the chain
-        // would overflow the stack; unlink it one node at a time instead.
-        let mut up = std::mem::replace(&mut self.up, Up::Gone);
-        while let Up::Parent(parent) = up {
-            let Ok(mut parent) = Arc::try_unwrap(parent) else {
-                return;
-            };
-            up = std::mem::replace(&mut parent.up, Up::Gone);
-        }
-    }
-}
-
-impl Stop {
-    fn root() -> Self {
-        Self(Arc::new(StopNode {
-            stopped: AtomicBool::new(false),
-            up: Up::Root(Notify::new()),
-        }))
-    }
-
-    fn child(&self) -> Self {
-        Self(Arc::new(StopNode {
-            stopped: AtomicBool::new(false),
-            up: Up::Parent(Arc::clone(&self.0)),
-        }))
-    }
-
-    fn stop(&self) {
-        // Set before the wake: a waiter that misses the wake sees the flag.
-        if !self.0.stopped.swap(true, Ordering::SeqCst) {
-            self.notify().notify_waiters();
-        }
-    }
-
-    fn is_stopped(&self) -> bool {
-        let mut node = &*self.0;
-        loop {
-            if node.stopped.load(Ordering::SeqCst) {
-                return true;
-            }
-            match &node.up {
-                Up::Parent(parent) => node = parent,
-                Up::Root(_) | Up::Gone => return false,
-            }
-        }
-    }
-
-    async fn stopped(&self) {
-        let notify = self.notify();
-        loop {
-            // Made before the check: `notify_waiters` wakes a `Notified`
-            // from the moment it exists, so a stop between the check and the
-            // await still wakes it.
-            let notified = notify.notified();
-            if self.is_stopped() {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    fn notify(&self) -> &Notify {
-        let mut node = &*self.0;
-        loop {
-            match &node.up {
-                Up::Root(notify) => return notify,
-                Up::Parent(parent) => node = parent,
-                Up::Gone => unreachable!("a node being dropped is never read"),
-            }
-        }
     }
 }
 

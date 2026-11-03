@@ -151,7 +151,8 @@ pub use gdl_macros::Projection;
 #[doc(hidden)]
 pub mod __runtime {
     pub use crate::codec::{TAIL_ROOM, decoder, encoder, encoder_into, encoder_sized};
-    pub use crate::cx::wall_now_nanos;
+    pub use crate::compose::race_done;
+    pub use crate::cx::{CancelOnDrop, Scope, wall_now_nanos};
     pub use crate::followed::{PoolSource, PropertyKindsNow};
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::lifecycle::{LeaveHook, LeaveParts};
