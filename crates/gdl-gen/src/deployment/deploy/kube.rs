@@ -228,6 +228,11 @@ pub(super) const SCALERS: &str = "gdlscalers.gdl.dev";
 /// The API group of [`SCALERS`].
 pub(super) const GDL: &str = "gdl.dev";
 
+/// dynamo's DynamoGraphDeployment, as its CRD names it: asked for only in
+/// a cluster that runs a pool with a DGD, at the version the gdl operator
+/// asks for ([`gdl_k8s::DGD_API_VERSION`]).
+pub(super) const DGDS: &str = "dynamographdeployments.nvidia.com";
+
 /// The gdl operator's `GdlPool`, as `kubectl get` takes it: listed only in
 /// a cluster that has its CRD, and never with [`RESOURCES`], since a
 /// `GdlPool` is deleted only with background propagation
@@ -314,6 +319,12 @@ impl At<'_> {
             &namespace,
             &timeout,
         ])
+    }
+
+    /// The resources the cluster serves at `group_version`, as an
+    /// `APIResourceList`: refused as `NotFound` when it serves none there.
+    pub(super) fn served(&self, group_version: &str) -> Vec<String> {
+        self.cluster(&["get", "--raw", &format!("/apis/{group_version}")])
     }
 
     /// The resources of API group `group` the cluster has, one name a

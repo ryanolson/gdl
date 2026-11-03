@@ -25,7 +25,9 @@ mod kube;
 mod live;
 mod operated;
 
-use kube::{At, CONTROL, GDL, JOBS, MONITORING, PODMONITORS, POOLS, PUBLIC, SCALERS, bounded};
+use kube::{
+    At, CONTROL, DGDS, GDL, JOBS, MONITORING, PODMONITORS, POOLS, PUBLIC, SCALERS, bounded,
+};
 pub use kube::{Kube, Kubectl, Reply};
 use live::{Live, Stopping};
 use operated::{Operated, Order};
@@ -158,6 +160,25 @@ pub fn deploy(
             return Err(Error::new(format!(
                 "cluster `{}`: the fleet asks the gdl operator to run its pools (`[cluster.{}] operator`), but the cluster lacks `{POOLS}` or `{SCALERS}`: install the operator there (`gdl-operator manifests`), or leave `operator` out",
                 cluster.name, cluster.name
+            )));
+        }
+        // Without dynamo's CRD the operator applies nothing of a pool with
+        // a DGD, and the pool would stay `Pending` past the health wait.
+        let dgds: Vec<&str> = fleet
+            .dgds()
+            .map(|(pool, _)| pool)
+            .filter(|pool| {
+                fleet
+                    .cluster_of(pool)
+                    .is_some_and(|(name, _)| name == cluster.name)
+            })
+            .collect();
+        if !dgds.is_empty() && !cluster.serves_dgds(kube, how.waits.objects)? {
+            return Err(Error::new(format!(
+                "cluster `{}`: pool `{}` has a DGD, and the cluster does not serve `{DGDS}` at `{}`: install dynamo's platform there first (its CRDs and operator), then deploy again",
+                cluster.name,
+                dgds.join("`, `"),
+                gdl_k8s::DGD_API_VERSION
             )));
         }
     }
@@ -608,6 +629,38 @@ impl Cluster {
         self.scalers = self.discover(kube, GDL, SCALERS, budget)?;
         self.pools = self.discover(kube, GDL, POOLS, budget)?;
         Ok(())
+    }
+
+    /// Whether the cluster serves dynamo's DGDs at the version the gdl
+    /// operator asks for: its group version is served, and lists
+    /// `dynamographdeployments`, as the operator itself asks.
+    fn serves_dgds(&self, kube: &mut dyn Kube, budget: Duration) -> Result<bool, Error> {
+        let args = bounded(self.at().served(gdl_k8s::DGD_API_VERSION), budget);
+        let reply = kube.run(&args, None)?;
+        if !reply.success {
+            if reply.stderr.contains("NotFound") {
+                return Ok(false);
+            }
+            return Err(Error::new(format!(
+                "cluster `{}`: asking whether it has `{DGDS}`: `kubectl {}` failed: {}",
+                self.name,
+                args.join(" "),
+                reply.stderr.trim()
+            )));
+        }
+        let list: Value = serde_json::from_str(&reply.stdout).map_err(|e| {
+            Error::new(format!(
+                "cluster `{}`: the resources of `{}` are not JSON: {e}",
+                self.name,
+                gdl_k8s::DGD_API_VERSION
+            ))
+        })?;
+        let plural = DGDS.split('.').next().unwrap_or_default();
+        Ok(list["resources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|resource| resource["name"] == plural))
     }
 
     /// Whether the cluster serves `resource` of API group `group`.

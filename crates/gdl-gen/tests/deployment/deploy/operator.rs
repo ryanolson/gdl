@@ -125,17 +125,14 @@ fn a_cluster_the_operator_runs_gets_one_gdl_pool_per_pool() {
     );
 }
 
-/// A pool's DGD file, named by the fleet file, is read beside it: the
-/// applied `GdlPool` holds the DGD, with the `main` image of `Frontend` set
-/// to the `engine` segment's pushed image, and places `engine` in it.
-#[test]
-fn deploy_applies_a_pools_dgd_from_the_fleet_file() {
-    let mirror = Mirror::new();
+/// The api fleet with pool `model-x-us` running `engine` in the DGD's
+/// `Frontend`, whose file is beside the fleet file.
+fn dgd_files(mirror: &Mirror) -> Files {
     let fleet = format!(
         "{}[pool.model-x-us.dgd]\nfile = \"dynamo/dgd.yaml\"\ncomponents = {{ engine = \"Frontend\" }}\n",
         fleet_text()
     );
-    let files = files(&mirror, &fleet);
+    let files = files(mirror, &fleet);
     let dynamo = files.fleet.parent().expect("a directory").join("dynamo");
     std::fs::create_dir(&dynamo).expect("a directory");
     let fixture =
@@ -144,9 +141,31 @@ fn deploy_applies_a_pools_dgd_from_the_fleet_file() {
         .expect("the DGD")
         .replace("name: dgd-use1", "name: model-x-us");
     std::fs::write(dynamo.join("dgd.yaml"), dgd).expect("the DGD");
+    files
+}
+
+/// Whether `command` asks which resources `nvidia.com/v1beta1` serves.
+fn asks_for_dgds(command: &[String]) -> bool {
+    command.iter().any(|arg| arg == "/apis/nvidia.com/v1beta1")
+}
+
+/// A pool's DGD file, named by the fleet file, is read beside it: the
+/// applied `GdlPool` holds the DGD, with the `main` image of `Frontend` set
+/// to the `engine` segment's pushed image, and places `engine` in it. The
+/// cluster that runs it is asked first whether it serves the DGD CRD.
+#[test]
+fn deploy_applies_a_pools_dgd_from_the_fleet_file() {
+    let mirror = Mirror::new();
+    let files = dgd_files(&mirror);
     let log = Log::default();
     let (mut docker, mut kube) = fakes(&log);
     deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    let asked: Vec<Vec<String>> = commands(&log)
+        .into_iter()
+        .filter(|c| asks_for_dgds(c))
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0][1], "kind-use1");
     let held = &kube.objects["kind-use1"][&("GdlPool".to_string(), "model-x-us".to_string())];
     let engine = &held["spec"]["segments"][0];
     assert_eq!(engine["name"], "engine");
@@ -163,6 +182,56 @@ fn deploy_applies_a_pools_dgd_from_the_fleet_file() {
             .contains("@sha256:"),
         "{engine}"
     );
+}
+
+/// Without dynamo's DGD CRD the gdl operator would leave a pool with a
+/// DGD `Pending`, and the health wait would time out without naming the
+/// cause. So the deploy is refused before anything is built or applied,
+/// and the refusal names the CRD.
+#[test]
+fn a_dgd_pool_in_a_cluster_without_the_dgd_crd_is_refused() {
+    let mirror = Mirror::new();
+    let files = dgd_files(&mirror);
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.without_dgds = vec!["kind-use1"];
+    let error = deploy(&mirror, &files, &mut docker, &mut kube)
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        error.contains("`dynamographdeployments.nvidia.com` at `nvidia.com/v1beta1`")
+            && error.contains("install dynamo's platform there first"),
+        "{error}"
+    );
+    assert!(!log.borrow().iter().any(|c| matches!(c, Call::Docker)));
+    // The first word after the context and namespace is the verb.
+    let verb = |c: &Vec<String>| {
+        let rest = &c[2..];
+        let rest = match rest.first().map(String::as_str) {
+            Some("--namespace") => &rest[2..],
+            _ => rest,
+        };
+        rest[0].clone()
+    };
+    let verbs: Vec<String> = commands(&log).iter().map(verb).collect();
+    assert!(
+        !verbs
+            .iter()
+            .any(|v| v == "apply" || v == "create" || v == "label"),
+        "{verbs:?}"
+    );
+}
+
+/// A fleet without a DGD pool never asks for the DGD CRD.
+#[test]
+fn a_fleet_without_a_dgd_pool_never_asks_for_the_dgd_crd() {
+    let mirror = Mirror::new();
+    let files = files(&mirror, &fleet_text());
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    kube.without_dgds = vec!["kind-use1", "kind-euw1"];
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    assert!(!commands(&log).iter().any(|c| asks_for_dgds(c)));
 }
 
 /// A cluster that asks for the operator and has neither of its CRDs is

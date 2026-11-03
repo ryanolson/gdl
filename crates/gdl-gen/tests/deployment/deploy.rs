@@ -103,6 +103,9 @@ struct Kube {
     /// The contexts whose user may not list `GdlPool`s, though their
     /// cluster has the CRD.
     forbidden_pools: Vec<&'static str>,
+    /// The contexts whose cluster does not serve dynamo's
+    /// `dynamographdeployments` at `nvidia.com/v1beta1`.
+    without_dgds: Vec<&'static str>,
 }
 
 /// What the fake's gdl operator does with a `GdlPool`.
@@ -144,6 +147,7 @@ impl Kube {
             raced: 0,
             operator: Operator::Ready,
             forbidden_pools: Vec::new(),
+            without_dgds: Vec::new(),
         }
     }
 
@@ -356,6 +360,22 @@ impl gdl_gen::Kube for Kube {
             .map(|i| rest[i + 1].as_str());
         let reply = match (verb, raw) {
             ("auth", _) => gdl_gen::Reply::ok(format!("{}\n", self.can_i)),
+            // As the API server answers for a group version it serves, and
+            // for one it does not.
+            ("get", Some("/apis/nvidia.com/v1beta1")) => {
+                match self.without_dgds.contains(&context.as_str()) {
+                    false => gdl_gen::Reply::ok(
+                        json!({"kind": "APIResourceList", "groupVersion": "nvidia.com/v1beta1", "resources": [
+                            {"name": "dynamographdeployments", "kind": "DynamoGraphDeployment", "namespaced": true},
+                            {"name": "dynamographdeploymentscalingadapters", "kind": "DynamoGraphDeploymentScalingAdapter", "namespaced": true},
+                        ]})
+                        .to_string(),
+                    ),
+                    true => gdl_gen::Reply::failed(
+                        "Error from server (NotFound): the server could not find the requested resource",
+                    ),
+                }
+            }
             ("api-resources", _) if rest.contains(&"--api-group=gdl.dev".to_string()) => {
                 match self.scalers(&context) {
                     true => gdl_gen::Reply::ok("gdlpools.gdl.dev\ngdlscalers.gdl.dev\n"),
