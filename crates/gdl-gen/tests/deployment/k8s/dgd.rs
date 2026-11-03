@@ -262,3 +262,38 @@ fn a_dgd_yaml_merge_keeps_the_inherited_node_selector() {
         expected["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"]
     );
 }
+
+/// Kubernetes reads volume modes with a leading zero as octal. Reading
+/// each file fetches the mirror's sources, so these renders take seconds.
+#[test]
+fn a_dgd_yaml_octal_volume_mode_keeps_its_permissions() {
+    let mirror = Mirror::new();
+    let fixture = manifest_dir().join("tests/fixtures/k8s/dgd/dynamo/dgd.yaml");
+    let source = std::fs::read_to_string(fixture).expect("the DGD");
+    let mut found = Vec::new();
+    let mut expected = Vec::new();
+    for (literal, mode) in [("0400", 0o400), ("0644", 0o644)] {
+        let with_mode = |value: &str| {
+            source.replace(
+                "          configMap:\n            name: dgd-use1\n",
+                &format!("          configMap:\n            name: dgd-use1\n            defaultMode: {value}\n"),
+            )
+        };
+        let decimal = render_file(&mirror, &with_mode(&mode.to_string()));
+        let yaml = render_file(&mirror, &with_mode(literal));
+        let control = decimal
+            .pointer("/spec/components/0/podTemplate/spec/volumes/0/configMap/defaultMode")
+            .expect("the mode");
+        assert_eq!(control, &serde_json::json!(mode));
+        expected.push(control.clone());
+        found.push(
+            yaml.pointer("/spec/components/0/podTemplate/spec/volumes/0/configMap/defaultMode")
+                .expect("the mode")
+                .clone(),
+        );
+    }
+    assert_eq!(
+        found, expected,
+        "octal YAML modes changed in the DGD's JSON"
+    );
+}
