@@ -817,13 +817,13 @@ fn only_the_binary_sets_the_chosen_allocator() {
         (
             Allocator::Mimalloc,
             "mimalloc::MiMalloc",
-            "mimalloc = \"0.1\"\n",
+            "\nmimalloc = { version = \"0.1\", features = [\"no_thp\"] }\n",
             "jemalloc",
         ),
         (
             Allocator::Jemalloc,
             "tikv_jemallocator::Jemalloc",
-            "tikv-jemallocator = \"0.6\"\n",
+            "\ntikv-jemallocator = \"0.6\"\n",
             "mimalloc",
         ),
     ] {
@@ -853,6 +853,38 @@ fn only_the_binary_sets_the_chosen_allocator() {
             if !binary {
                 assert_eq!(text, &system[path], "{}", path.display());
             }
+        }
+    }
+}
+
+/// mimalloc is built with `no_thp`, which compiles out its
+/// `madvise(MADV_HUGEPAGE)` on Linux. With it, each first touch of a 2 MB
+/// block of the arena may compact memory, and a segment's start stalls for
+/// seconds on a host whose memory is fragmented
+/// (`docs/src/appendix/spec-reference.md`). jemalloc takes no feature.
+#[test]
+fn mimalloc_is_built_without_transparent_huge_pages() {
+    let out = Path::new("/work/segments");
+    for (allocator, package, features) in [
+        (Allocator::Mimalloc, "mimalloc", Some(vec!["no_thp"])),
+        (Allocator::Jemalloc, "tikv-jemallocator", None),
+    ] {
+        let mut chosen = spec(split(), &[("D", "tiny_nodes::D")]);
+        chosen.allocator = allocator;
+        let files = rendered(&chosen, &manifest(), out).expect("render");
+        for segment in ["front", "engine"] {
+            let text = &files[&PathBuf::from(format!("{segment}/Cargo.toml"))];
+            let manifest = toml::from_str::<toml::Table>(text).expect("the manifest parses");
+            let dependency = &manifest["dependencies"][package];
+            let named = dependency.get("features").map(|features| {
+                features
+                    .as_array()
+                    .expect("a list")
+                    .iter()
+                    .map(|feature| feature.as_str().expect("a name"))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(named, features, "{package} in {segment}:\n{text}");
         }
     }
 }

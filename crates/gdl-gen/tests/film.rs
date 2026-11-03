@@ -294,6 +294,11 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+        // A ready segment has reserved its allocator's arena, so no wait.
+        #[cfg(target_os = "linux")]
+        for process in &processes {
+            no_huge_pages_asked(process.0.id());
+        }
         let (code, before) = get(systems[engine_component], "/metrics");
         assert_eq!(code, 200);
         metric(
@@ -362,6 +367,41 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
             tap_component,
             0,
         );
+    }
+}
+
+/// No mapping of the process asks for transparent huge pages: the `hg`
+/// flag that `madvise(MADV_HUGEPAGE)` sets. mimalloc asks for them on its
+/// arena unless it is built with `no_thp`, and then each first touch of a
+/// 2 MB block may compact memory, which stalled starts for seconds on a
+/// fragmented host (`docs/src/appendix/spec-reference.md`).
+#[cfg(target_os = "linux")]
+fn no_huge_pages_asked(pid: u32) {
+    let setting = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled");
+    if !setting
+        .as_deref()
+        .is_ok_and(|mode| !mode.contains("[never]"))
+    {
+        // The check still runs, but it may prove nothing here.
+        eprintln!("transparent huge pages are off or absent on this host: {setting:?}");
+    }
+    let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps")).expect("smaps");
+    let (mut mapping, mut size) = ("", "");
+    for line in smaps.lines() {
+        if let Some(flags) = line.strip_prefix("VmFlags:") {
+            assert!(
+                !flags.split_whitespace().any(|flag| flag == "hg"),
+                "process {pid} asks for huge pages on {mapping} ({size})"
+            );
+        } else if let Some(bytes) = line.strip_prefix("Size:") {
+            size = bytes.trim();
+        } else if !line
+            .split_whitespace()
+            .next()
+            .is_some_and(|key| key.ends_with(':'))
+        {
+            mapping = line;
+        }
     }
 }
 

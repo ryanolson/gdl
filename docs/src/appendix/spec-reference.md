@@ -91,7 +91,7 @@ A `[deployment]` table, or the `compose` command, makes the generated crates ask
 |---|---|---|
 | `[binary] allocator` | each segment binary's global allocator: `"system"`, `"mimalloc"`, or `"jemalloc"` | `"system"` |
 
-The generated `main.rs` sets `#[global_allocator]` to the chosen allocator, and the segment's manifest depends on its crate and on no other allocator's: `mimalloc` 0.1, or `tikv-jemallocator` 0.6. A segment's lock therefore holds only the chosen crate. `"system"` sets nothing, so a spec that names it generates the same crates as a spec that does not. Only the binary sets the allocator. A program that deploys a segment through its library keeps its own, since a library that set one would not link into a program that sets another. A node crate may not take the chosen crate's package or library name. The setting is not part of the placement or its hash: it changes how a binary is built, not what crosses a cut. The hub's binary keeps the system allocator. The images that `cargo gdl images` builds, and that `cargo gdl k8s` names, link mimalloc into each segment when the spec sets `"system"`, `"mimalloc"`, or nothing, and refuse `"jemalloc"`: jemalloc fixes the page size when it is built, and an image runs on nodes whose page size the build host does not know ([Deploy a fleet on Kubernetes](../guides/kubernetes.md#images)).
+The generated `main.rs` sets `#[global_allocator]` to the chosen allocator, and the segment's manifest depends on its crate and on no other allocator's: `mimalloc` 0.1 with its `no_thp` feature, or `tikv-jemallocator` 0.6. A segment's lock therefore holds only the chosen crate. `"system"` sets nothing, so a spec that names it generates the same crates as a spec that does not. Only the binary sets the allocator. A program that deploys a segment through its library keeps its own, since a library that set one would not link into a program that sets another. A node crate may not take the chosen crate's package or library name. The setting is not part of the placement or its hash: it changes how a binary is built, not what crosses a cut. The hub's binary keeps the system allocator. The images that `cargo gdl images` builds, and that `cargo gdl k8s` names, link mimalloc into each segment when the spec sets `"system"`, `"mimalloc"`, or nothing, and refuse `"jemalloc"`: jemalloc fixes the page size when it is built, and an image runs on nodes whose page size the build host does not know ([Deploy a fleet on Kubernetes](../guides/kubernetes.md#images)).
 
 Both crates build C code with the build image's compiler.
 
@@ -99,6 +99,17 @@ Both crates build C code with the build image's compiler.
 - jemalloc fixes its page size when it is built, to the build host's. A binary built on a host of 4 KB pages does not start on a host of 64 KB pages, such as some arm64 servers. Build it with `JEMALLOC_SYS_WITH_LG_PAGE=16` in the build's environment, which runs on both.
 
 mimalloc has neither limit. [Known limitations](../operations/limitations.md#jemalloc-needs-make-and-the-run-hosts-page-size-at-build-time) has the workarounds.
+
+mimalloc is built with its `no_thp` feature, so it does not ask for transparent huge pages. Without the feature, mimalloc calls `madvise(MADV_HUGEPAGE)` on its 1 GiB arena. On a host where transparent huge pages are set to `madvise` and memory is fragmented, each first touch of a 2 MB block of the arena can then run compaction in the kernel before the page fault returns. On Linux and Android, `no_thp` removes that call when mimalloc is compiled. It adds no crate to the lock. `crates/gdl-gen/tests/film.rs` checks that no mapping of a running mimalloc segment has the `hg` flag in `/proc/<pid>/smaps`.
+
+The measurement used the serving binaries of an HTTP endpoint service, which link mimalloc 0.1.52, not generated segments. It ran on an aarch64 host under load, with transparent huge pages set to `madvise` and 19 free 2 MB blocks (order 9) in the Normal zone. The two variants started 40 times each, in alternation. Without load, a start took 85 ms. Under load, the slow starts were all system time in the engine before it joined the roster.
+
+| mimalloc | Start to ready, median / max | Engine system time, median / max | Host compaction stalls per start, median / max |
+|---|---|---|---|
+| asks for huge pages (its default) | 156 ms / 6,892 ms | 30 ms / 3,070 ms | 5 / 129 |
+| does not ask (`MIMALLOC_ALLOW_THP=0`) | 128 ms / 199 ms | max 10 ms | 0 / 0 |
+
+The second row used mimalloc's runtime variable, which turns off the same `madvise` call that `no_thp` removes. Rejected: letting mimalloc ask for huge pages. A start stalled for up to 6.9 s. The throughput that huge pages gain through fewer TLB misses was not measured, and neither was whether the arena's growth after start stalls requests in the same way. Rejected: setting `MIMALLOC_ALLOW_THP=0` where the binary runs. It works only where each deployment sets it, and a binary started without it asks for huge pages again.
 
 ## fleet.toml
 

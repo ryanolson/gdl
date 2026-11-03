@@ -356,7 +356,10 @@ fn an_image_holds_its_binary_and_no_settings() {
             "{reference}: {paths:?}"
         );
         let manifest = &context[&Path::new(segment).join("Cargo.toml")];
-        assert!(manifest.contains("\nmimalloc = "), "{manifest}");
+        assert!(
+            manifest.contains("\nmimalloc = { version = \"0.1\", features = [\"no_thp\"] }\n"),
+            "{manifest}"
+        );
         assert!(
             context[&Path::new(segment).join("src/main.rs")].contains("#[global_allocator]"),
             "{reference}"

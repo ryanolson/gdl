@@ -602,7 +602,21 @@ impl Unit<'_> {
         }
         // Only the chosen allocator's crate, so that the lock holds no other.
         if let Some(allocator) = self.spec.allocator.source() {
-            let _ = writeln!(text, "{} = \"{}\"", allocator.package, allocator.version);
+            let (package, version) = (allocator.package, allocator.version);
+            if allocator.features.is_empty() {
+                let _ = writeln!(text, "{package} = \"{version}\"");
+            } else {
+                let features = allocator
+                    .features
+                    .iter()
+                    .map(|feature| format!("\"{feature}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    text,
+                    "{package} = {{ version = \"{version}\", features = [{features}] }}"
+                );
+            }
         }
         let _ = writeln!(
             text,

@@ -279,7 +279,9 @@ pub(crate) enum Allocator {
     /// and the segment crate is what it was before allocators could be
     /// chosen.
     System,
-    /// mimalloc, from the `mimalloc` crate.
+    /// mimalloc, from the `mimalloc` crate, built with `no_thp` so that it
+    /// does not ask for transparent huge pages: on a host with fragmented
+    /// memory, they stall a segment's start for seconds.
     Mimalloc,
     /// jemalloc, from the `tikv-jemallocator` crate.
     Jemalloc,
@@ -294,6 +296,8 @@ pub(crate) struct AllocatorCrate {
     pub(crate) lib: &'static str,
     /// The version requirement the manifest gives.
     pub(crate) version: &'static str,
+    /// The features the manifest turns on.
+    pub(crate) features: &'static [&'static str],
     /// The type `#[global_allocator]` names, which is also its value.
     pub(crate) ty: &'static str,
 }
@@ -310,12 +314,16 @@ impl Allocator {
                 package: "mimalloc",
                 lib: "mimalloc",
                 version: "0.1",
+                // Compiles out `madvise(MADV_HUGEPAGE)` on its arena, on
+                // Linux and Android. It adds no crate to the lock.
+                features: &["no_thp"],
                 ty: "mimalloc::MiMalloc",
             }),
             Self::Jemalloc => Some(AllocatorCrate {
                 package: "tikv-jemallocator",
                 lib: "tikv_jemallocator",
                 version: "0.6",
+                features: &[],
                 ty: "tikv_jemallocator::Jemalloc",
             }),
         }
