@@ -355,13 +355,23 @@ fn a_segments_image_is_placed_exactly_once() {
     assert!(error.contains("no component `Router`"), "{error}");
 }
 
-/// `check_dgd` refuses what the render would, and what only the
-/// operator's render needs, a scaling adapter, on any cluster; a DGD that
-/// fits passes.
+/// `check_dgd` refuses what the render would, what only the operator's
+/// render needs, a scaling adapter, on any cluster, and a component
+/// without `runtimeVersionOverride`; a DGD that fits passes.
 #[test]
 fn check_dgd_refuses_what_the_operators_render_would() {
-    gdl_k8s::check_dgd("p", "ns", &dgd(), &[("pool", "Frontend")]).expect("it fits");
-    let mut unscaled = dgd();
+    let mut dgd = dgd();
+    dgd["spec"]["components"][0]["runtimeVersionOverride"] = "1.7.0".into();
+    gdl_k8s::check_dgd("p", "ns", &dgd, &[("pool", "Frontend")]).expect("it fits");
+    let mut unversioned = dgd.clone();
+    unversioned["spec"]["components"][0]
+        .as_object_mut()
+        .expect("an object")
+        .remove("runtimeVersionOverride");
+    let error =
+        gdl_k8s::check_dgd("p", "ns", &unversioned, &[("pool", "Frontend")]).expect_err("refused");
+    assert!(error.contains("`runtimeVersionOverride`"), "{error}");
+    let mut unscaled = dgd.clone();
     unscaled["spec"]["components"][0]
         .as_object_mut()
         .expect("an object")
@@ -369,9 +379,8 @@ fn check_dgd_refuses_what_the_operators_render_would() {
     let error =
         gdl_k8s::check_dgd("p", "ns", &unscaled, &[("pool", "Frontend")]).expect_err("refused");
     assert!(error.contains("`scalingAdapter: {}`"), "{error}");
-    let error =
-        gdl_k8s::check_dgd("q", "ns", &dgd(), &[("pool", "Frontend")]).expect_err("refused");
+    let error = gdl_k8s::check_dgd("q", "ns", &dgd, &[("pool", "Frontend")]).expect_err("refused");
     assert!(error.contains("name `p`, and it must be `q`"), "{error}");
-    let error = gdl_k8s::check_dgd("p", "ns", &dgd(), &[("pool", "Router")]).expect_err("refused");
+    let error = gdl_k8s::check_dgd("p", "ns", &dgd, &[("pool", "Router")]).expect_err("refused");
     assert!(error.contains("does not have"), "{error}");
 }

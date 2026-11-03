@@ -110,7 +110,10 @@ pub fn set_image(dgd: &mut Value, component: &str, image: &str) -> Result<(), St
 /// `namespace` can own with each `(segment, component)` of `placed`:
 /// what [`crate::children`] refuses of it, and a named component without
 /// `scalingAdapter`, or whose name dynamo would hash into its adapter's,
-/// or without exactly one container `main` ([`set_image`]). `cargo gdl
+/// or without exactly one container `main` ([`set_image`]), or without
+/// `runtimeVersionOverride`: dynamo's webhook reads a component's image
+/// tag as its version, and refuses one that is not a semantic version,
+/// as `cargo gdl`'s tags never are, unless the component names it. `cargo gdl
 /// check` asks it of a fleet's DGD file, so that the file is refused
 /// before anything is built.
 pub fn check_dgd(
@@ -124,6 +127,16 @@ pub fn check_dgd(
     for (_, component) in placed {
         adapter_name(&dgd, name, component)?;
         set_image(&mut dgd, component, "")?;
+        let found = dgd["spec"]["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["name"] == *component);
+        if found.is_some_and(|c| c["runtimeVersionOverride"].is_null()) {
+            return Err(format!(
+                "component `{component}` of the pool's DGD runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`, the dynamo version the segment links, since dynamo's webhook refuses the component without it"
+            ));
+        }
     }
     Ok(())
 }

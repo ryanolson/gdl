@@ -501,7 +501,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** a secret for Kubernetes alone, with no `file`. See [Deploy a fleet on Kubernetes](../guides/kubernetes.md).
 
 ### A pool's DGD file must carry what the segment's Deployment would
-- **What:** for a segment in a component of a pool's DGD, the render sets only the `main` container's image. The file writes the rest of the container: its command, its ports, its `GDL_POOL__*` and `GDL_HUB__HOST` variables, and its mounts of the pool's ConfigMap. `check` does not compare them with what gdl renders for a segment's Deployment, so a fleet change, such as a new quorum, does not reach the file. `check` does not judge `runtimeVersionOverride` either: dynamo's webhook refuses a typed component whose image tag is not a semantic version and that has no override. A pool with a DGD needs the gdl operator, and Compose refuses the table.
+- **What:** for a segment in a component of a pool's DGD, the render sets only the `main` container's image. The file writes the rest of the container: its command, its ports, its `GDL_POOL__*` and `GDL_HUB__HOST` variables, and its mounts of the pool's ConfigMap. `check` does not compare them with what gdl renders for a segment's Deployment, so a fleet change, such as a new quorum, does not reach the file. A pool with a DGD needs the gdl operator, and Compose refuses the table.
 - **Why:** the DGD is dynamo's object, and the render leaves it as written but for the image, which `cargo gdl` builds.
 - **Workaround:** copy the variables from the segment in the pool's `GdlPool` that `cargo gdl k8s` writes without the table, and keep them in step with the fleet.
 

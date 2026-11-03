@@ -43,6 +43,7 @@ spec:
   - name: Frontend
     type: frontend
     scalingAdapter: {}
+    runtimeVersionOverride: 1.7.0
     podTemplate:
       spec:
         containers:
@@ -143,6 +144,19 @@ fn check_refuses_a_component_the_dgd_does_not_have() {
 fn check_refuses_a_component_without_a_scaling_adapter() {
     let dgd = DGD.replace("    scalingAdapter: {}\n", "");
     refused(FLEET, &dgd, Some("file"), "give it `scalingAdapter: {}`");
+}
+
+/// gdl's image tags are never semantic versions, and dynamo's webhook
+/// refuses a component whose tag is not one unless it names its version.
+#[test]
+fn check_refuses_a_component_without_a_runtime_version_override() {
+    let dgd = DGD.replace("    runtimeVersionOverride: 1.7.0\n", "");
+    refused(
+        FLEET,
+        &dgd,
+        Some("file"),
+        "component `Frontend` of the pool's DGD runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`",
+    );
 }
 
 #[test]
