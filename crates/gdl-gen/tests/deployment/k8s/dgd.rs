@@ -198,3 +198,67 @@ fn a_dgd_table_renders_only_with_its_file_read() {
         "{error}"
     );
 }
+
+fn render_file(mirror: &Mirror, text: &str) -> Value {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-dgd-yaml-")
+        .tempdir()
+        .expect("a directory");
+    let root = manifest_dir().join("../..");
+    let source = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("the spec");
+    let source = mirror
+        .portable(&source)
+        .replace(super::super::SEGMENTS, &format!("{SPLIT}{}", deployment()));
+    let spec_path = temp.path().join("gdl.toml");
+    std::fs::write(&spec_path, source).expect("the spec");
+    std::fs::copy(
+        root.join("examples/api/api.gdl"),
+        temp.path().join("api.gdl"),
+    )
+    .expect("the graph");
+    let fleet_path = temp.path().join("fleet.toml");
+    let fleet_text = std::fs::read_to_string(manifest_dir().join(DGD_FLEET)).expect("the fleet");
+    std::fs::write(&fleet_path, &fleet_text).expect("the fleet");
+    std::fs::create_dir(temp.path().join("dynamo")).expect("a directory");
+    std::fs::write(temp.path().join("dynamo/dgd.yaml"), text).expect("the DGD");
+    let problems = gdl_gen::check_files(&spec_path, Some(&fleet_path), &mirror.target());
+    assert!(problems.is_empty(), "{problems}");
+    let spec = gdl_gen::Spec::load(&spec_path).expect("the spec");
+    let fleet = fleet(&fleet_text);
+    let dgds = gdl_gen::Dgds::read(&fleet, &fleet_path).expect("the DGD files");
+    parsed(pool_of(
+        &render_dgd(mirror, &spec, &fleet, &dgds),
+        "dgd-use1",
+    ))["spec"]["dgd"]
+        .clone()
+}
+
+/// Kubernetes expands merge keys before decoding a node selector as
+/// string values; an unexpanded merge becomes an invalid selector value.
+#[test]
+fn a_dgd_yaml_merge_keeps_the_inherited_node_selector() {
+    let mirror = Mirror::new();
+    let fixture = manifest_dir().join("tests/fixtures/k8s/dgd/dynamo/dgd.yaml");
+    let source = std::fs::read_to_string(fixture).expect("the DGD");
+    let anchored = source
+        .replace(
+            "terminationGracePeriodSeconds: 120",
+            "terminationGracePeriodSeconds: 120\n        nodeSelector: &placement\n          kubernetes.io/arch: amd64",
+        )
+        .replace(
+            "  - name: Worker\n    type: decode\n    replicas: 3\n    podTemplate:\n      spec:\n",
+            "  - name: Worker\n    type: decode\n    replicas: 3\n    podTemplate:\n      spec:\n        nodeSelector:\n          <<: *placement\n          node.kubernetes.io/instance-type: gpu\n",
+        );
+    assert!(anchored.contains("<<: *placement"));
+    let expanded = anchored.replace("<<: *placement", "kubernetes.io/arch: amd64");
+    let expected = render_file(&mirror, &expanded);
+    assert_eq!(
+        expected["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"]["kubernetes.io/arch"],
+        "amd64"
+    );
+    let rendered = render_file(&mirror, &anchored);
+    assert_eq!(
+        rendered["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"],
+        expected["spec"]["components"][1]["podTemplate"]["spec"]["nodeSelector"]
+    );
+}
