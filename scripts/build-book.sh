@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the mdBook in docs/ and check its internal links and the headings they name.
+# Check the book for host names, then build the mdBook in docs/ and check its
+# internal links and the headings they name.
 #
 # With INSTALL_TOOLS=1, download the pinned tool versions first (x86_64 Linux
 # release binaries, as on GitHub-hosted runners). The versions match
@@ -13,6 +14,10 @@ MDBOOK_LINKCHECK_VERSION="0.7.7"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 command -v uv >/dev/null || { echo "build-book.sh: uv is not on the PATH; install it from https://docs.astral.sh/uv/getting-started/installation/" >&2; exit 1; }
+
+# Host names are internal, and the book is published. This needs no tools,
+# so it runs first and fails fast.
+uv run -q --script "${root}/scripts/book/hosts.py"
 
 if [[ "${INSTALL_TOOLS:-0}" == "1" && "$(uname -m)" != "x86_64" ]]; then
   # mdbook-linkcheck publishes no release binary for other architectures, so build all three.

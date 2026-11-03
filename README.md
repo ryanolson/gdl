@@ -103,7 +103,7 @@ A graph that is not cut costs no encoding. A cut costs one encode and one decode
 
 ## Build and test
 
-The Python scripts (the book's heading check and the benchmark runners) run with [uv](https://docs.astral.sh/uv/getting-started/installation/), which reads each script's header and picks the interpreter. Install uv once; no other Python setup is needed.
+The Python scripts (the book's checks and the benchmark runners) run with [uv](https://docs.astral.sh/uv/getting-started/installation/), which reads each script's header and picks the interpreter. Install uv once; no other Python setup is needed.
 
 ```bash
 cargo fmt --all --check

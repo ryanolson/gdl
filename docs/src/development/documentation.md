@@ -21,7 +21,7 @@ This book is the documentation of dynamo-gdl. The source is in `docs/src/`.
 - **Keep only what lasts.** Write how it works, why, the numbers with their setup, and the results that did not work. Do not copy plans, milestone labels, ruling numbers, PR numbers, or handoff notes. History is in git. The test `crates/gdl-gen/tests/references.rs` fails on a reference to `agent-docs/`, a ruling, a milestone, a review, or a PR number in the code or the book.
 - **Write in simple English.** Use the `simple-english` skill for the book, README files, and comments.
 - **Keep comments short.** A comment says why, or which fault the code avoids. It does not repeat the code, and it does not point to a plan.
-- **Name a machine by its hardware, not its host name.** A measurement says "a shared 20-core aarch64 host", with its load, not the machine's name. Host names are internal, and the book is published.
+- **Name a machine by its hardware, not its host name.** A measurement says "a shared 20-core aarch64 host", with its load, not the machine's name. Host names are internal, and the book is published. `scripts/book/hosts.py` enforces this: it fails on a bench host's name in `docs/src`, `examples`, or `README.md`, and `scripts/build-book.sh` runs it before it builds the book.
 - **Update the book in the same change.** Each change to behavior updates the chapters that describe it, the top-level `README.md`, and the known limitations.
 
 ## Build the book locally
@@ -40,13 +40,13 @@ Or let the script put them in `.book-tools/`. It downloads release binaries on x
 INSTALL_TOOLS=1 bash scripts/build-book.sh
 ```
 
-Build the book and check its links:
+Build the book and check its host names and links:
 
 ```bash
 bash scripts/build-book.sh
 ```
 
-A link to a missing page fails the build, and so does a link to a missing heading (`page.md#heading`). `mdbook-linkcheck` 0.7.7 does not check the part after `#`, so the script then runs `scripts/book/anchors.py`, which reads the built HTML and checks each heading link against the ids of the page it resolves to. It skips the links of the print page, which joins every chapter, and the heading links that mdBook writes on the 404 page. It runs with `uv run --script` and needs [uv](https://docs.astral.sh/uv/getting-started/installation/), which the build script checks for first. Its tests run with `uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/book/tests`. CI runs the same script, the heading check's tests, and the reference test, on each pull request and on each push to `main` (`.github/workflows/ci.yml`). Each push to `main` also publishes the book to the repository's private GitHub Pages site (`.github/workflows/pages.yml`). To preview while you edit, serve the book:
+The script first runs `scripts/book/hosts.py`, which needs no book tools, so a host name fails the build at once. A link to a missing page fails the build, and so does a link to a missing heading (`page.md#heading`). `mdbook-linkcheck` 0.7.7 does not check the part after `#`, so the script then runs `scripts/book/anchors.py`, which reads the built HTML and checks each heading link against the ids of the page it resolves to. It skips the links of the print page, which joins every chapter, and the heading links that mdBook writes on the 404 page. It runs with `uv run --script` and needs [uv](https://docs.astral.sh/uv/getting-started/installation/), which the build script checks for first. The tests of both checks run with `uv run -q --no-project --python '>=3.8' python -m unittest discover -s scripts/book/tests`. CI runs the same script, the tests of both checks, and the reference test, on each pull request and on each push to `main` (`.github/workflows/ci.yml`). Each push to `main` also publishes the book to the repository's private GitHub Pages site (`.github/workflows/pages.yml`). To preview while you edit, serve the book:
 
 ```bash
 mdbook serve docs --open
