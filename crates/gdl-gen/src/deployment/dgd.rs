@@ -103,8 +103,8 @@ fn read(dgd: &PoolDgd, fleet_file: &Path) -> Result<Value, String> {
 }
 
 /// `text`, one YAML document, as JSON, with each alias read as the value
-/// it names; refused, with why, unless JSON can hold it: its keys
-/// strings, and its numbers finite.
+/// it names; refused, with why, unless JSON can hold it as written: its
+/// keys strings and no merge key (`<<`), and its numbers finite.
 fn parse(text: &str) -> Result<Value, String> {
     let documents = YamlLoader::load_from_str(text).map_err(|e| format!("is not YAML: {e}"))?;
     match documents.as_slice() {
@@ -137,6 +137,13 @@ fn json(yaml: &Yaml) -> Result<Value, String> {
                         "has a key that is not a string, `{key:?}`, which a Kubernetes object never has"
                     ));
                 };
+                // The loader keeps `<<` as a key. kubectl would merge it, and
+                // the CRD's schema would prune it here, losing the fields.
+                if key == "<<" {
+                    return Err(
+                        "has `<<`: YAML merge keys are not supported; write the fields out".into(),
+                    );
+                }
                 object.insert(key.clone(), json(value)?);
             }
             Value::Object(object)
@@ -169,6 +176,10 @@ mod tests {
         for (text, why) in [
             ("a: .inf\n", "a number that JSON cannot hold"),
             ("1: a\n", "a key that is not a string"),
+            (
+                "base: &defaults\n  replicas: 1\ncomponent:\n  <<: *defaults\n  name: Worker\n",
+                "YAML merge keys are not supported; write the fields out",
+            ),
         ] {
             let error = parse(text).expect_err("refused");
             assert!(error.contains(why), "{text}: {error}");
