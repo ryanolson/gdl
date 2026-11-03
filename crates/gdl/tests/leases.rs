@@ -388,6 +388,17 @@ fn a_lease_of_any_size_and_alignment_is_dropped_once() {
     assert_eq!((seen.accepted(), seen.dropped()), (1, 1));
 }
 
+#[test]
+#[ignore = "F1: Empty counters are shared across the lease tests"]
+fn zero_sized_checks_are_independent_of_test_order() {
+    std::thread::spawn(a_leased_pick_allocates_once)
+        .join()
+        .expect("allocation check");
+    std::thread::spawn(a_lease_of_any_size_and_alignment_is_dropped_once)
+        .join()
+        .expect("alignment check");
+}
+
 /// A choice is two words, with or without a lease, and a policy's return is
 /// three: no larger than an `Option` of a choice.
 #[test]
