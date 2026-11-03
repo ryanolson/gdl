@@ -22,6 +22,42 @@ pub const DGD_LABEL: &str = "nvidia.com/dynamo-graph-deployment-name";
 /// name.
 pub const COMPONENT_LABEL: &str = "nvidia.com/dynamo-component";
 
+/// The annotation of a pod template that holds the checksum of what its
+/// pods read from the pool's ConfigMap.
+const CONFIG: &str = "gdl.dev/config";
+
+/// The pod templates of DGD component `component`, as dynamo takes them:
+/// each role's when it is an LPX component or a role has one, since
+/// dynamo then refuses a shared template beside them; else the shared one.
+fn templates(component: &mut Value) -> Vec<&mut Value> {
+    let by_role = component["type"] == "lpx"
+        || component["roles"]
+            .as_array()
+            .is_some_and(|roles| roles.iter().any(|role| !role["podTemplate"].is_null()));
+    if by_role && component["roles"].is_array() {
+        let roles = component["roles"].as_array_mut().into_iter().flatten();
+        return roles.map(|role| &mut role["podTemplate"]).collect();
+    }
+    vec![&mut component["podTemplate"]]
+}
+
+/// The components of `dgd`, as JSON, that run a segment: those whose pod
+/// templates carry the pool's [`CONFIG`] checksum, as the render gives
+/// them. A DGD as applied says it, whatever the pool's spec says now.
+pub fn segment_components(dgd: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    for component in dgd["spec"]["components"].as_array().into_iter().flatten() {
+        let mut component = component.clone();
+        let marked = templates(&mut component)
+            .iter()
+            .any(|template| !template["metadata"]["annotations"][CONFIG].is_null());
+        if marked && let Some(name) = component["name"].as_str() {
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
 /// The DGD of `pool`, named `name` in `namespace`, with `labels` and
 /// `annotations` added to its own. A component that runs a segment
 /// carries `checksum` in its pods' `gdl.dev/config`, so that a change to
@@ -91,11 +127,12 @@ pub(crate) fn render(
                     segment.name
                 )
             })?;
-        let template = &mut found["podTemplate"];
-        if template.is_null() {
-            *template = Value::Object(Map::new());
+        for template in templates(found) {
+            if template.is_null() {
+                *template = Value::Object(Map::new());
+            }
+            template["metadata"]["annotations"][CONFIG] = checksum.into();
         }
-        template["metadata"]["annotations"]["gdl.dev/config"] = checksum.into();
     }
     for component in components.iter_mut() {
         if !component["scalingAdapter"].is_null()

@@ -112,7 +112,7 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     // they are touched. A step back ends the reconcile.
                     let pool = self.name.clone();
                     if self.running(&owned, |d| d.name != pool).await?
-                        || self.segments_in_dgd().await?
+                        || self.segments_in_dgd(&owned).await?
                     {
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
                         return Ok(BLOCKED);
@@ -152,7 +152,8 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     StopStep::Release
                 }
                 StopStep::Release => {
-                    if self.running(&owned, |_| true).await? || self.segments_in_dgd().await? {
+                    if self.running(&owned, |_| true).await? || self.segments_in_dgd(&owned).await?
+                    {
                         // A pod of the pool runs again: the stop starts its
                         // segments over, in the next reconcile.
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
@@ -333,7 +334,7 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         Ok(self
             .running(owned, |deployment| deployment.name != pool)
             .await?
-            || self.segments_in_dgd().await?)
+            || self.segments_in_dgd(owned).await?)
     }
 
     /// The hub step: scale the hub's Deployment to 0. Whether its pod still
@@ -375,20 +376,24 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         Ok(false)
     }
 
-    /// Whether a pod runs of a segment in the pool's DGD, which is named
-    /// after the pool: dynamo's controllers own these pods, so they are
-    /// found by the component each segment names. The DGD's other
-    /// components, dynamo's workers, are not segments: the segments' turns
-    /// need them until the segments have drained, and garbage collection
-    /// deletes them with the DGD once the pool is released.
-    async fn segments_in_dgd(&self) -> Result<bool, Stop> {
-        for segment in &self.pool.spec.pool.segments {
-            let Some(component) = &segment.component else {
-                continue;
-            };
-            let pods = self.cx.pools.component_pods(&self.name, component).await?;
-            if !pods.is_empty() {
-                return Ok(true);
+    /// Whether a pod runs of a segment in a DGD among `owned`: dynamo's
+    /// controllers own these pods, so they are found by the DGD's name and
+    /// each component that runs a segment. Those components are read from
+    /// the DGD as applied, never from the pool's current spec, which a held
+    /// generation may have changed. The DGD's other components, dynamo's
+    /// workers, are not segments: the segments' requests need them until
+    /// the segments have drained, and garbage collection deletes them with
+    /// the DGD once the pool is released.
+    async fn segments_in_dgd(&self, owned: &[Live]) -> Result<bool, Stop> {
+        for dgd in owned
+            .iter()
+            .filter(|o| o.kind == Kind::DynamoGraphDeployment)
+        {
+            for component in &dgd.components {
+                let pods = self.cx.pools.component_pods(&dgd.name, component).await?;
+                if !pods.is_empty() {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)

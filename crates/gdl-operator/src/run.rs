@@ -44,8 +44,8 @@ struct Shared {
 /// the cluster has none.
 pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     let client = Client::try_default().await?;
-    let monitors = serves(&client, "monitoring.coreos.com", "podmonitors").await?;
-    let dgds = serves(&client, "nvidia.com", "dynamographdeployments").await?;
+    let monitors = serves(&client, "monitoring.coreos.com/v1", "podmonitors").await?;
+    let dgds = serves(&client, gdl_k8s::DGD_API_VERSION, "dynamographdeployments").await?;
     let scalers: Api<GdlScaler> = Api::namespaced(client.clone(), namespace);
     let pools: Api<GdlPool> = Api::namespaced(client.clone(), namespace);
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
@@ -86,21 +86,23 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the cluster serves `resource` in API group `group`.
-async fn serves(client: &Client, group: &str, resource: &str) -> anyhow::Result<bool> {
+/// Whether the cluster serves `resource` at `group_version`, the one the
+/// operator asks it at: a group that serves the kind only at another
+/// version would refuse every request.
+async fn serves(client: &Client, group_version: &str, resource: &str) -> anyhow::Result<bool> {
+    let group = group_version.split('/').next().unwrap_or_default();
     let groups = client.list_api_groups().await?;
-    let Some(group) = groups.groups.iter().find(|served| served.name == group) else {
+    let served = groups
+        .groups
+        .iter()
+        .filter(|served| served.name == group)
+        .flat_map(|served| &served.versions)
+        .any(|version| version.group_version == group_version);
+    if !served {
         return Ok(false);
-    };
-    for version in &group.versions {
-        let resources = client
-            .list_api_group_resources(&version.group_version)
-            .await?;
-        if resources.resources.iter().any(|r| r.name == resource) {
-            return Ok(true);
-        }
     }
-    Ok(false)
+    let resources = client.list_api_group_resources(group_version).await?;
+    Ok(resources.resources.iter().any(|r| r.name == resource))
 }
 
 async fn reconcile_pool(pool: Arc<GdlPool>, shared: Arc<Shared>) -> Result<Action, Failed> {
@@ -219,7 +221,7 @@ mod tests {
                 )
             });
             let client = Client::new(service, "ns");
-            let supported = serves(&client, "nvidia.com", "dynamographdeployments")
+            let supported = serves(&client, gdl_k8s::DGD_API_VERSION, "dynamographdeployments")
                 .await
                 .expect("discovery");
             assert_eq!(

@@ -132,6 +132,9 @@ pub struct Live {
     pub created: bool,
     /// For a Deployment, its selector's labels, `key=value,...`.
     pub selector: Option<String>,
+    /// For a DynamoGraphDeployment, its components that run a segment, as
+    /// it was applied ([`gdl_k8s::segment_components`]).
+    pub components: Vec<String>,
 }
 
 impl Live {
@@ -167,8 +170,13 @@ impl Live {
                     .join(",")
             })
             .filter(|_| kind == Kind::Deployment);
+        let components = match kind {
+            Kind::DynamoGraphDeployment => gdl_k8s::segment_components(object),
+            _ => Vec::new(),
+        };
         Some(Self {
             selector,
+            components,
             created,
             kind,
             name: text(&metadata["name"])?,

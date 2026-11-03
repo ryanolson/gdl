@@ -193,15 +193,16 @@ impl State {
     }
 
     /// Whether a pod runs of a segment in the pool's DGD: of a component
-    /// a segment names, not a worker's.
+    /// that runs a segment in the DGD as applied, not a worker's.
     fn dgd_segments_run(&self) -> bool {
-        let pool = self.pool.as_ref().expect("a pool");
-        pool.spec.pool.segments.iter().any(|segment| {
-            segment
-                .component
-                .as_ref()
-                .is_some_and(|c| self.dgd_pods.get(c).is_some_and(|n| *n > 0))
-        })
+        self.objects
+            .get(&(Kind::DynamoGraphDeployment, "p".to_string()))
+            .is_some_and(|dgd| {
+                dgd.live
+                    .components
+                    .iter()
+                    .any(|c| self.dgd_pods.get(c).is_some_and(|n| *n > 0))
+            })
     }
 }
 
