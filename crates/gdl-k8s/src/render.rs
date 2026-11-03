@@ -73,10 +73,12 @@ pub enum Scaling {
 
 /// The objects of `pool`, named `name` in namespace `namespace`: its
 /// ConfigMap, its hub's claim under the relay directory when it is a
-/// parent, its hub's Deployment and Service, and for each segment a
+/// parent, its hub's Deployment and Service, for each segment a
 /// Deployment, a Service when it publishes ports, and a `GdlScaler` under
-/// [`Scaling::Operator`]. Refused when a segment's settings are not TOML
-/// or give its probes no fixed port.
+/// [`Scaling::Operator`], and last its DGD when it has one, which runs
+/// the segments placed in its components in place of their own objects.
+/// Refused when a segment's settings are not TOML or give its probes no
+/// fixed port, or when the DGD does not fit the pool.
 pub fn children(
     name: &str,
     namespace: &str,
@@ -109,7 +111,19 @@ pub fn children(
     objects.extend(render.state_claim());
     objects.push(render.hub(&hub_checksum));
     objects.push(render.hub_service());
+    let dgd = crate::dgd::render(
+        name,
+        namespace,
+        pool,
+        render.labels(None).as_object().cloned().unwrap_or_default(),
+        render.whole(None),
+        &checksum,
+    )?;
     for (segment, settings) in pool.segments.iter().zip(&settings) {
+        // dynamo's operator runs the pods of a segment in the pool's DGD.
+        if segment.component.is_some() {
+            continue;
+        }
         objects.push(render.segment(segment, settings, &checksum));
         if !segment.ports.is_empty() {
             objects.push(render.entry_service(segment));
@@ -118,6 +132,7 @@ pub fn children(
             objects.push(render.scaler(segment, settings));
         }
     }
+    objects.extend(dgd);
     Ok(objects)
 }
 

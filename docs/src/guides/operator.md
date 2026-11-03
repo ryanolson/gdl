@@ -36,6 +36,7 @@ The Role grants only what the operator uses, in its namespace:
 | `apps` `replicasets` | get, list, watch | Find a pool's pods by what its Deployments own, at its stop |
 | `discovery.k8s.io` `endpointslices` | get, list, watch | See that a victim has left its entry Service |
 | `monitoring.coreos.com` `podmonitors` | get, list, watch, create, update, patch, delete | A pool's PodMonitor, where the cluster runs the Prometheus operator |
+| `nvidia.com` `dynamographdeployments` | get, list, watch, create, update, patch, delete | A pool's DynamoGraphDeployment, where the cluster runs dynamo's operator ([A pool with a DGD](#a-pool-with-a-dgd)) |
 | `events.k8s.io` `events` | create, patch | Say what it held, refused, or could not prove |
 
 It deletes only a pool's own objects, and a pod only in `retire: request` mode, and only a victim it retired. It has nothing on Secrets, ServiceAccounts, Namespaces, or Leases. It has no `services/proxy` right: the operator runs in the cluster, and reaches hubs and pods at their addresses.
@@ -90,26 +91,27 @@ A duration is a count and one unit: `ms`, `s`, `m`, or `h`. The schema refuses a
 
 ## The `GdlPool` resource
 
-Group `gdl.dev`, version `v1alpha1`, namespaced. One per pool, named after it. Its spec is the pool with every value resolved: what `gdl-k8s` renders the pool's objects from, so that the operator in the cluster renders what `cargo gdl k8s` would. The operator owns each object it renders, by a controller reference: the pool's ConfigMap, its hub's Deployment, Service and claim, each segment's Deployment and entry Service, a `GdlScaler` per segment, and the pool's PodMonitor when it asks for one and the cluster serves them.
+Group `gdl.dev`, version `v1alpha1`, namespaced. One per pool, named after it. Its spec is the pool with every value resolved: what `gdl-k8s` renders the pool's objects from, so that the operator in the cluster renders what `cargo gdl k8s` would. The operator owns each object it renders, by a controller reference: the pool's ConfigMap, its hub's Deployment, Service and claim, each segment's Deployment and entry Service, a `GdlScaler` per segment, the pool's PodMonitor when it asks for one and the cluster serves them, and the pool's DynamoGraphDeployment when it has one ([A pool with a DGD](#a-pool-with-a-dgd)).
 
 | Field | Meaning |
 |---|---|
 | `spec.fleet`, `spec.cluster`, `spec.class`, `spec.region` | Where the pool is, as the fleet names it |
 | `spec.deployment` | The pool's layout as its hub admits it, the `DeploymentSpec` as JSON |
 | `spec.hub` | The hub's image, variables, resources, and, for a parent under `relay`, its state directory |
-| `spec.segments[]` | Each segment's name, image, settings file, quorum, published ports, variables, secrets, and resources |
+| `spec.segments[]` | Each segment's name, image, settings file, quorum, published ports, variables, secrets, and resources, and the component of the pool's DGD that runs it, if one does |
 | `spec.serviceAccountName`, `spec.nodeSelector`, `spec.tolerations` | Where its pods run |
 | `spec.parent` | `{home: <pool>}` or `{parents: <class>}`; absent for a top pool |
 | `spec.dynamodb` | The tables of the DynamoDB directory; absent under `relay` |
 | `spec.podMonitor` | Whether the pool has a PodMonitor, named after it |
 | `spec.presence` | `serving`, or `scaledToZero` |
 | `spec.allowPoolRestart` | Whether a change that replaces the hub may be applied |
+| `spec.dgd` | The pool's DynamoGraphDeployment as JSON text, kept verbatim; absent for a pool of gdl's Deployments alone |
 | `status.phase` | `Pending`, `Ready`, `Degraded`, `Unavailable`, from the hub's health; `Draining`, `Stopping`, `Withdrawn` while it stops |
 | `status.segments`, `status.withdrawn` | Each segment's usable instances and quorum, and the withdrawal, as the hub says them |
 | `status.missing` | The objects the pool renders that do not exist yet |
 | `status.held` | The generation the pool-restart guard holds |
 | `status.stop` | The step of the pool's stop, its start, and the uid of each object it acts on |
-| `status.conditions` | `Applied`, `Healthy`, `Presence`, `PodMonitor`, `NotOwned`, `PoolRestartPending`, `Draining`, `Withdrawn`, `HubGone`, and `ForegroundDelete` |
+| `status.conditions` | `Applied`, `Healthy`, `Presence`, `PodMonitor`, `Dgd`, `NotOwned`, `PoolRestartPending`, `Draining`, `Withdrawn`, `HubGone`, and `ForegroundDelete` |
 
 ### How a pool is kept
 
@@ -154,6 +156,25 @@ sequenceDiagram
 ```
 
 The step is stored, with the uid of each object it acts on, before it is taken. A restart takes the step stored. An object made again under the same name, with another uid, is written into the step before it is acted on, and every write carries the uid, so a stale step is never taken on another object. Each step checks its precondition each time it is taken, on what the pool owns: the hub step waits while a segment pod the pool owns runs, going back to the segments step, and for a pool with a parent it reads the current hub's word that its record is withdrawn: a hub that restarted since the drain has published a record again, so the pool drains again. A top pool, whose hub refuses a drain, and a pool whose hub's Deployment is gone (`HubGone`) start at the segments. A withdrawal the hub has not said within the bound, or a drain it refuses, keeps the finalizer, with the `Withdrawn` condition and an event: the parent would still hold the pool's record. A pool deleted with foreground propagation is named in `ForegroundDelete` and an event, and still loses the finalizer once no pod of it runs ([Known limitations](../operations/limitations.md)).
+
+### A pool with a DGD
+
+A pool can run some of its segments in a DynamoGraphDeployment (DGD), dynamo's deployment unit, beside dynamo's own workers. The pool's hub, ConfigMap and other segments stay gdl's. Ownership is split this way:
+
+| What | Owner |
+|---|---|
+| The DGD's pods, Deployments and Services, rollouts, dynamo's discovery, and the workers' count | dynamo's operator |
+| The DGD object, the hub, the pool's record and settings, and its stop | the pool |
+
+`spec.dgd` holds the DGD as JSON text, and `spec.segments[].component` names the component that runs a segment. The pool renders the DGD as one of its objects, under its controller reference, so that its stop orders it and garbage collection deletes it:
+
+- **Named after the pool, in its namespace.** The operator finds the DGD's pods by its name. A DGD whose `metadata.name` or `metadata.namespace` differs from the pool's is refused (`BadSpec`), never renamed. Only `nvidia.com/v1beta1`, whose components are a list, is taken.
+- **No Deployment, entry Service or scaler** for a segment in the DGD: dynamo's operator runs its pods. Its settings stay in the pool's ConfigMap, which the component mounts.
+- **The settings roll its pods.** Each component that runs a segment carries the pool's `gdl.dev/config` checksum in its pod template, as a segment's Deployment does. dynamo's operator watches no ConfigMap, so without it a change of settings would replace no pod.
+- **No `replicas` on a component with a scaling adapter** (`scalingAdapter`). The adapter owns the count, and dynamo's webhook refuses any other writer.
+- **No DGD kind, no pool.** The operator asks once at its start whether the cluster serves `dynamographdeployments.nvidia.com`. Where it does not, a pool with a `dgd` applies nothing: its `Dgd` condition is false (`NoCrd`), `Applied` is false (`NoDgdCrd`), and its phase stays `Pending`. Install dynamo's platform first, or restart the operator after it.
+
+The stop runs as for any pool, and finds a DGD segment's pods by the labels dynamo's operator puts on them, `nvidia.com/dynamo-graph-deployment-name` and `nvidia.com/dynamo-component`: the segments step waits for them, the hub step goes back to the segments while one runs, and the release waits for them too. dynamo's workers are not segments. A segment's requests need them until it has drained, so the stop does not stop them: garbage collection deletes them with the DGD once the pool is released. A DGD segment drains as any segment does: through the hub with the pool's drain, and on its own SIGTERM when its pod goes. The stop does not scale a DGD segment itself ([Known limitations](../operations/limitations.md)).
 
 ## How a scale-down runs
 

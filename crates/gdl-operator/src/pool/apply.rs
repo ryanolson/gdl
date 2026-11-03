@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use super::api::{Kind, Live, MANAGER, Pools, TEMPLATE};
 use super::hub::Hubs;
-use super::reconcile::{BUSY, IDLE, Run, Stop};
+use super::reconcile::{BLOCKED, BUSY, IDLE, Run, Stop};
 use crate::SCALER_MANAGER;
 use crate::pool::{FINALIZER, Phase, SegmentStatus};
 
@@ -60,6 +60,22 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             gdl_k8s::Scaling::Operator,
         )
         .map_err(|e| Stop::Blocked("Applied", "BadSpec", e))?;
+        // A pool whose segments run in a DGD cannot serve without it, so a
+        // cluster without the kind holds the pool whole, rather than apply
+        // the rest and call it ready.
+        if spec.dgd.is_some() {
+            if !self.cx.pools.dgds() {
+                let message = format!(
+                    "the pool has a `dgd`, and the cluster does not serve `dynamographdeployments.nvidia.com`, which dynamo's operator installs: nothing of generation {} was applied. Install dynamo's platform, then restart the gdl operator, which asks once at its start",
+                    self.generation()
+                );
+                self.warn("Dgd", false, "NoCrd", &message);
+                self.condition("Applied", false, "NoDgdCrd", "");
+                self.status.phase = Some(Phase::Pending);
+                return Ok(BLOCKED);
+            }
+            self.condition("Dgd", true, "Rendered", "");
+        }
         if spec.pod_monitor {
             if self.cx.pools.monitors() {
                 objects.push(gdl_k8s::pool_monitor(&self.name, self.cx.namespace, spec));

@@ -9,8 +9,10 @@
 //!   s. A wait that runs out keeps the finalizer: the pool's parent would
 //!   still hold its record.
 //! - Each segment's scaler is then suspended at 0, and the stop waits
-//!   until no segment pod runs. Each instance drains on its SIGTERM while
-//!   the hub still runs.
+//!   until no segment pod runs, those of a segment in the pool's DGD
+//!   included. Each instance drains on its SIGTERM while the hub still
+//!   runs. The DGD's other components, dynamo's workers, serve the
+//!   segments' requests until then, and go with the DGD after the release.
 //! - The hub's Deployment is then scaled to 0, and the stop waits until
 //!   its pod is gone. Before it is, no segment pod the pool owns may run,
 //!   and the hub of a pool with a parent must say, when asked then, that
@@ -109,7 +111,9 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     // first, and written into the segments step before
                     // they are touched. A step back ends the reconcile.
                     let pool = self.name.clone();
-                    if self.running(&owned, |d| d.name != pool).await? {
+                    if self.running(&owned, |d| d.name != pool).await?
+                        || self.segments_in_dgd().await?
+                    {
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
                         return Ok(BLOCKED);
                     }
@@ -148,7 +152,7 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
                     StopStep::Release
                 }
                 StopStep::Release => {
-                    if self.running(&owned, |_| true).await? {
+                    if self.running(&owned, |_| true).await? || self.segments_in_dgd().await? {
                         // A pod of the pool runs again: the stop starts its
                         // segments over, in the next reconcile.
                         self.ahead(StopStep::Segments, &owned, Some(&stop)).await?;
@@ -326,8 +330,10 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
             }
         }
         let pool = self.name.clone();
-        self.running(owned, |deployment| deployment.name != pool)
-            .await
+        Ok(self
+            .running(owned, |deployment| deployment.name != pool)
+            .await?
+            || self.segments_in_dgd().await?)
     }
 
     /// The hub step: scale the hub's Deployment to 0. Whether its pod still
@@ -363,6 +369,25 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
     async fn running(&self, owned: &[Live], which: impl Fn(&Live) -> bool) -> Result<bool, Stop> {
         for deployment in owned.iter().filter(|o| o.kind == Kind::Deployment) {
             if which(deployment) && !self.cx.pools.pods(deployment).await?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether a pod runs of a segment in the pool's DGD, which is named
+    /// after the pool: dynamo's controllers own these pods, so they are
+    /// found by the component each segment names. The DGD's other
+    /// components, dynamo's workers, are not segments: the segments' turns
+    /// need them until the segments have drained, and garbage collection
+    /// deletes them with the DGD once the pool is released.
+    async fn segments_in_dgd(&self) -> Result<bool, Stop> {
+        for segment in &self.pool.spec.pool.segments {
+            let Some(component) = &segment.component else {
+                continue;
+            };
+            let pods = self.cx.pools.component_pods(&self.name, component).await?;
+            if !pods.is_empty() {
                 return Ok(true);
             }
         }

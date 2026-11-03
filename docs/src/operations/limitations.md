@@ -591,6 +591,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a `GdlPool` with a parent is deleted only once its hub says its drained record is withdrawn (`GET /v1/ext/gdl-pool/withdrawn`). When the hub does not say so within the longest stop grace of its segments and 60 s, or refuses the drain, the finalizer stays, with the `Withdrawn` condition and an event, and the pool's objects stay. A pool whose hub's Deployment is gone stops as a top pool does, with `HubGone`: its parent still holds its record.
 - **Workaround:** withdraw the pool on its parent's hub (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on the control port), then remove the finalizer `gdl.dev/stop` by hand.
 
+### A pool's stop does not scale a segment in its DGD
+- **What:** a segment that runs in a component of the pool's DynamoGraphDeployment has no `GdlScaler`, and the stop writes no count of dynamo's. So the stop waits at its segments step until the segment's pods are gone, and holds the hub meanwhile ([A pool with a DGD](../guides/operator.md#a-pool-with-a-dgd)).
+- **Workaround:** scale the component to 0 by hand: through its scaling adapter, `kubectl scale dgdsa <adapter> --replicas=0`, or its `replicas` in the DGD when it has no adapter.
+
 ### A change that restarts a pool's hub waits for `allowPoolRestart`
 - **What:** a hub restart drains its pool ([A segment does not outlive a hub restart](#a-segment-does-not-outlive-a-hub-restart)). So the operator holds a `GdlPool` generation that changes its hub's pod template, such as a new deployment or hub image, and applies nothing of it, not even its segments' changes, until `allowPoolRestart` is set. The pool's `PoolRestartPending` condition and an event name the held generation.
 - **DynamoDB Local:** the hubs of a fleet's other clusters name the Local by its pod IP, in their variables. A Local made again gets a new IP, which changes those hubs' pod template, so their pools in a cluster the operator runs are held until a deploy with `--allow-pool-restart`.

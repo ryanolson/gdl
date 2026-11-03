@@ -52,7 +52,7 @@ async fn a_child_created_after_the_ownership_read_is_not_adopted() {
         )
         .await
         .expect("pool");
-    let pools = KubePools::new(client.clone(), &space, false);
+    let pools = KubePools::new(client.clone(), &space, false, false);
     let maps = Api::<ConfigMap>::namespaced(client, &space);
     let object = json!({
         "apiVersion": "v1", "kind": "ConfigMap",
@@ -103,7 +103,7 @@ async fn a_child_created_after_the_ownership_read_is_not_adopted() {
 async fn a_created_child_is_the_pools_apply_from_its_start() {
     let client = client().await;
     let space = namespace(&client, "gdl-review-p1-create-").await;
-    let pools = KubePools::new(client.clone(), &space, false);
+    let pools = KubePools::new(client.clone(), &space, false, false);
     let first = json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": {"name": "p", "namespace": space},
@@ -200,7 +200,7 @@ async fn a_held_fleet_rename_keeps_the_hub_until_its_segment_pods_stop() {
         )
         .await
         .expect("pool");
-    let api = KubePools::new(client.clone(), &space, false);
+    let api = KubePools::new(client.clone(), &space, false, false);
     let cx = crate::pool::Context {
         pools: &api,
         hubs: &Hubs,

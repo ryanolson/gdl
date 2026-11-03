@@ -521,6 +521,11 @@
                     "description": "The pool's layout as its hub admits it: the `DeploymentSpec` as\nJSON text, kept verbatim, since its checksum decides when pods are\nreplaced.",
                     "type": "string"
                   },
+                  "dgd": {
+                    "description": "The DynamoGraphDeployment (DGD) that runs the segments placed in\nits components, as JSON text, kept verbatim: the pool owns it, and\ndynamo's operator runs its pods. Absent for a pool of gdl's\nDeployments alone. See `docs/src/guides/operator.md`.",
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "dynamodb": {
                     "description": "The DynamoDB tables the pool's hub publishes its record to: absent\nunder the relay directory, where it reports to its parent's hub.",
                     "nullable": true,
@@ -665,6 +670,11 @@
                     "items": {
                       "description": "A segment of a pool.",
                       "properties": {
+                        "component": {
+                          "description": "The component of the pool's DGD that runs it, when dynamo's\noperator runs its pods: it then has no Deployment, entry Service\nor scaler of its own.",
+                          "nullable": true,
+                          "type": "string"
+                        },
                         "env": {
                           "description": "Its variables.",
                           "items": {
@@ -847,7 +857,7 @@
                 "nullable": true,
                 "properties": {
                   "conditions": {
-                    "description": "`Applied`, `Healthy`, `Draining`, `Withdrawn`, `HubGone`,\n`PodMonitor`, `PoolRestartPending`, `ForegroundDelete`, and\n`Adopted` when a child is not the pool's to change.",
+                    "description": "`Applied`, `Healthy`, `Draining`, `Withdrawn`, `HubGone`,\n`PodMonitor`, `Dgd`, `PoolRestartPending`, `ForegroundDelete`, and\n`Adopted` when a child is not the pool's to change.",
                     "items": {
                       "description": "Condition contains details for one aspect of the current state of this API Resource.",
                       "properties": {

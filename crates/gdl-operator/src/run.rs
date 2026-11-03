@@ -38,12 +38,14 @@ struct Shared {
 /// Run the operator for the scalers and pools in `namespace` until a
 /// signal stops it, with the victim policies `victims`. Each scaler is
 /// named after its target, so a change to a Deployment wakes the scaler of
-/// its name. Whether the cluster serves PodMonitors is asked once, here,
-/// and a question that fails stops the operator: a pool that asks for one
-/// would otherwise be told the cluster has none.
+/// its name. Whether the cluster serves PodMonitors and
+/// DynamoGraphDeployments is asked once, here, and a question that fails
+/// stops the operator: a pool that asks for one would otherwise be told
+/// the cluster has none.
 pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     let client = Client::try_default().await?;
-    let monitors = monitors(&client).await?;
+    let monitors = serves(&client, "monitoring.coreos.com", "podmonitors").await?;
+    let dgds = serves(&client, "nvidia.com", "dynamographdeployments").await?;
     let scalers: Api<GdlScaler> = Api::namespaced(client.clone(), namespace);
     let pools: Api<GdlPool> = Api::namespaced(client.clone(), namespace);
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
@@ -51,7 +53,7 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
         scalers: scalers.clone(),
         pools: pools.clone(),
         cluster: KubeCluster::new(client.clone(), namespace),
-        kube: KubePools::new(client.clone(), namespace, monitors),
+        kube: KubePools::new(client.clone(), namespace, monitors, dgds),
         probe: HttpProbe::new(namespace).map_err(anyhow::Error::msg)?,
         victims,
         namespace: namespace.to_string(),
@@ -84,21 +86,17 @@ pub async fn run(namespace: &str, victims: Victims) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the cluster serves `podmonitors` in `monitoring.coreos.com`.
-async fn monitors(client: &Client) -> anyhow::Result<bool> {
+/// Whether the cluster serves `resource` in API group `group`.
+async fn serves(client: &Client, group: &str, resource: &str) -> anyhow::Result<bool> {
     let groups = client.list_api_groups().await?;
-    let Some(group) = groups
-        .groups
-        .iter()
-        .find(|group| group.name == "monitoring.coreos.com")
-    else {
+    let Some(group) = groups.groups.iter().find(|served| served.name == group) else {
         return Ok(false);
     };
     for version in &group.versions {
         let resources = client
             .list_api_group_resources(&version.group_version)
             .await?;
-        if resources.resources.iter().any(|r| r.name == "podmonitors") {
+        if resources.resources.iter().any(|r| r.name == resource) {
             return Ok(true);
         }
     }

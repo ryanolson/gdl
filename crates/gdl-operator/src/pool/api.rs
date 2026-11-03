@@ -40,17 +40,21 @@ pub enum Kind {
     GdlScaler,
     /// The pool's PodMonitor.
     PodMonitor,
+    /// The pool's DynamoGraphDeployment, whose components run some of
+    /// its segments.
+    DynamoGraphDeployment,
 }
 
 impl Kind {
     /// Every kind, in the order the controller applies them.
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 7] = [
         Kind::ConfigMap,
         Kind::PersistentVolumeClaim,
         Kind::Deployment,
         Kind::Service,
         Kind::GdlScaler,
         Kind::PodMonitor,
+        Kind::DynamoGraphDeployment,
     ];
 
     /// The kind `kind`, as an object names it.
@@ -67,6 +71,7 @@ impl Kind {
             Self::Service => "Service",
             Self::GdlScaler => "GdlScaler",
             Self::PodMonitor => "PodMonitor",
+            Self::DynamoGraphDeployment => gdl_k8s::DGD_KIND,
         }
     }
 
@@ -78,6 +83,7 @@ impl Kind {
             Self::Service => ("", "v1", "services"),
             Self::GdlScaler => ("gdl.dev", "v1alpha1", "gdlscalers"),
             Self::PodMonitor => ("monitoring.coreos.com", "v1", "podmonitors"),
+            Self::DynamoGraphDeployment => ("nvidia.com", "v1beta1", "dynamographdeployments"),
         };
         let api_version = match group {
             "" => version.to_string(),
@@ -263,9 +269,22 @@ pub trait Pools {
     /// `deployment` controls, by uid.
     fn pods(&self, deployment: &Live) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
 
+    /// The pods of component `component` of the DGD `dgd` that have not
+    /// ended, by the labels dynamo's operator puts on them: dynamo's
+    /// controllers own them, not the pool.
+    fn component_pods(
+        &self,
+        dgd: &str,
+        component: &str,
+    ) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
+
     /// Whether the cluster serves PodMonitors, as asked once when the
     /// operator started.
     fn monitors(&self) -> bool;
+
+    /// Whether the cluster serves DynamoGraphDeployments, as asked once
+    /// when the operator started.
+    fn dgds(&self) -> bool;
 }
 
 /// [`Pools`] over the Kubernetes API, in one namespace.
@@ -278,12 +297,14 @@ pub struct KubePools {
     sets: Api<ReplicaSet>,
     recorder: Recorder,
     monitors: bool,
+    dgds: bool,
 }
 
 impl KubePools {
-    /// The pools `client` reaches in `namespace`. `monitors` says whether
-    /// the cluster serves PodMonitors.
-    pub fn new(client: Client, namespace: &str, monitors: bool) -> Self {
+    /// The pools `client` reaches in `namespace`. `monitors` and `dgds`
+    /// say whether the cluster serves PodMonitors and
+    /// DynamoGraphDeployments.
+    pub fn new(client: Client, namespace: &str, monitors: bool, dgds: bool) -> Self {
         let reporter = Reporter {
             controller: crate::NAME.into(),
             instance: std::env::var("HOSTNAME").ok(),
@@ -295,6 +316,7 @@ impl KubePools {
             recorder: Recorder::new(client.clone(), reporter),
             namespace: namespace.to_string(),
             monitors,
+            dgds,
             client,
         }
     }
@@ -307,6 +329,7 @@ impl KubePools {
         Kind::ALL
             .into_iter()
             .filter(|kind| self.monitors || *kind != Kind::PodMonitor)
+            .filter(|kind| self.dgds || *kind != Kind::DynamoGraphDeployment)
     }
 }
 
@@ -585,8 +608,34 @@ impl Pools for KubePools {
             .collect())
     }
 
+    async fn component_pods(&self, dgd: &str, component: &str) -> Result<Vec<PodView>, String> {
+        let selector = format!(
+            "{}={dgd},{}={component}",
+            gdl_k8s::DGD_LABEL,
+            gdl_k8s::COMPONENT_LABEL
+        );
+        let pods = self
+            .pods
+            .list(&ListParams::default().labels(&selector))
+            .await
+            .map_err(|e| format!("pods of component `{component}` of DGD `{dgd}`: {e}"))?;
+        Ok(pods
+            .items
+            .iter()
+            .filter(|pod| {
+                let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+                !matches!(phase, Some("Succeeded" | "Failed"))
+            })
+            .filter_map(PodView::of)
+            .collect())
+    }
+
     fn monitors(&self) -> bool {
         self.monitors
+    }
+
+    fn dgds(&self) -> bool {
+        self.dgds
     }
 }
 

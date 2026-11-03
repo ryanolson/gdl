@@ -61,6 +61,12 @@ pub struct Pool {
     /// the pool's status says so (`PoolRestartPending`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_pool_restart: bool,
+    /// The DynamoGraphDeployment (DGD) that runs the segments placed in
+    /// its components, as JSON text, kept verbatim: the pool owns it, and
+    /// dynamo's operator runs its pods. Absent for a pool of gdl's
+    /// Deployments alone. See `docs/src/guides/operator.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dgd: Option<String>,
 }
 
 /// A pool's parent.
@@ -174,6 +180,11 @@ pub struct Segment {
     /// Its requests and limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Resources>,
+    /// The component of the pool's DGD that runs it, when dynamo's
+    /// operator runs its pods: it then has no Deployment, entry Service
+    /// or scaler of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 /// A container's variable, as Kubernetes reads it: `$(NAME)` in a value

@@ -49,7 +49,7 @@ fn recording() -> (KubePools, Arc<Mutex<Vec<Seen>>>) {
             )
         }
     });
-    let pools = KubePools::new(Client::new(service, "ns"), "ns", false);
+    let pools = KubePools::new(Client::new(service, "ns"), "ns", false, false);
     (pools, seen)
 }
 
@@ -194,7 +194,7 @@ async fn a_pool_stop_does_not_wait_for_terminal_pods() {
                     .expect("response"),
             )
         });
-        let pools = KubePools::new(Client::new(service, "ns"), "ns", false);
+        let pools = KubePools::new(Client::new(service, "ns"), "ns", false, false);
         let deployment = Live::of(
             Kind::Deployment,
             &json!({

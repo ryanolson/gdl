@@ -30,6 +30,9 @@ mod recheck;
 #[path = "tests/alerts.rs"]
 mod alerts;
 
+#[path = "tests/dgd.rs"]
+mod dgd;
+
 const UID: &str = "pool-uid";
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,9 @@ struct State {
     objects: BTreeMap<(Kind, String), Obj>,
     /// Running pods, by segment: `hub` for the hub's.
     pods: BTreeMap<String, u32>,
+    /// Running pods of the pool's DGD, by component, which dynamo's
+    /// controllers run: a test starts and stops them.
+    dgd_pods: BTreeMap<String, u32>,
     log: Vec<String>,
     events: Vec<String>,
     next: u32,
@@ -66,6 +72,7 @@ struct State {
 struct Fake {
     state: Mutex<State>,
     monitors: bool,
+    dgds: bool,
 }
 
 impl Fake {
@@ -184,6 +191,18 @@ impl State {
         }
         Ok(())
     }
+
+    /// Whether a pod runs of a segment in the pool's DGD: of a component
+    /// a segment names, not a worker's.
+    fn dgd_segments_run(&self) -> bool {
+        let pool = self.pool.as_ref().expect("a pool");
+        pool.spec.pool.segments.iter().any(|segment| {
+            segment
+                .component
+                .as_ref()
+                .is_some_and(|c| self.dgd_pods.get(c).is_some_and(|n| *n > 0))
+        })
+    }
 }
 
 /// The step and the uids a status names, for the log.
@@ -236,7 +255,7 @@ impl Pools for Fake {
             .pool
             .as_ref()
             .is_some_and(|p| p.metadata.deletion_timestamp.is_some());
-        if deleting && state.pods.values().any(|n| *n > 0) {
+        if deleting && (state.pods.values().any(|n| *n > 0) || state.dgd_segments_run()) {
             state
                 .log
                 .push("VIOLATION: the finalizer went while a pod runs".into());
@@ -346,7 +365,8 @@ impl Pools for Fake {
         let segments_run = state
             .pods
             .iter()
-            .any(|(segment, n)| segment != "hub" && *n > 0);
+            .any(|(segment, n)| segment != "hub" && *n > 0)
+            || state.dgd_segments_run();
         if kind == Kind::Deployment && name == "p" && spec["replicas"] == 0 && segments_run {
             state
                 .log
@@ -416,8 +436,36 @@ impl Pools for Fake {
         Ok(pods)
     }
 
+    async fn component_pods(&self, dgd: &str, component: &str) -> Result<Vec<PodView>, String> {
+        let state = self.state();
+        // The pool's DGD is named after it, and only it has pods here.
+        let count = match dgd {
+            "p" => state.dgd_pods.get(component).copied().unwrap_or(0),
+            _ => 0,
+        };
+        Ok((0..count)
+            .map(|n| PodView {
+                name: format!("{component}-{n}"),
+                uid: format!("{component}-{n}"),
+                resource_version: "1".into(),
+                ip: None,
+                created_ms: 0,
+                ready: true,
+                terminating: false,
+                routable: None,
+                system_port: None,
+                restarts: 0,
+                containers: Vec::new(),
+            })
+            .collect())
+    }
+
     fn monitors(&self) -> bool {
         self.monitors
+    }
+
+    fn dgds(&self) -> bool {
+        self.dgds
     }
 }
 
@@ -481,6 +529,7 @@ fn pool(parent: bool) -> GdlPool {
         env: Vec::new(),
         secrets: Vec::new(),
         resources: None,
+        component: None,
     };
     let spec = gdl_k8s::Pool {
         fleet: "api".into(),
@@ -512,6 +561,7 @@ fn pool(parent: bool) -> GdlPool {
         pod_monitor: false,
         presence: gdl_k8s::Presence::Serving,
         allow_pool_restart: false,
+        dgd: None,
     };
     let mut pool = GdlPool::new("p", GdlPoolSpec { pool: spec });
     pool.metadata.namespace = Some("ns".into());

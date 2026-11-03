@@ -17,6 +17,7 @@ fn pool() -> Pool {
         }],
         secrets: Vec::new(),
         resources: None,
+        component: None,
     };
     Pool {
         fleet: "api".into(),
@@ -48,6 +49,7 @@ fn pool() -> Pool {
         pod_monitor: false,
         presence: Default::default(),
         allow_pool_restart: false,
+        dgd: None,
     }
 }
 

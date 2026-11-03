@@ -119,6 +119,7 @@ impl Pod<'_> {
                         })
                         .collect(),
                     resources: self.resources(&segment.name),
+                    component: None,
                 })
             })
             .collect::<Result<_, Error>>()?;
@@ -143,6 +144,7 @@ impl Pod<'_> {
             pod_monitor: self.model.metrics().pod_monitor,
             presence: gdl_k8s::Presence::Serving,
             allow_pool_restart: false,
+            dgd: None,
         })
     }
 

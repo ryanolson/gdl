@@ -24,6 +24,7 @@ fn pool(presence: gdl_k8s::Presence) -> gdl_k8s::Pool {
         pod_monitor: true,
         presence,
         allow_pool_restart: false,
+        dgd: None,
     }
 }
 

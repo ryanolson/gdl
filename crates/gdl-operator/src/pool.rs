@@ -76,7 +76,7 @@ pub struct GdlPoolStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
     /// `Applied`, `Healthy`, `Draining`, `Withdrawn`, `HubGone`,
-    /// `PodMonitor`, `PoolRestartPending`, `ForegroundDelete`, and
+    /// `PodMonitor`, `Dgd`, `PoolRestartPending`, `ForegroundDelete`, and
     /// `Adopted` when a child is not the pool's to change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,

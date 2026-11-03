@@ -5,9 +5,10 @@
 //! in its namespace: a pool's objects, which it makes and deletes, its
 //! pods, which it reads and labels, and events. No Secrets, no
 //! ServiceAccounts, nothing cluster-wide, and no service proxy, since the
-//! operator reaches hubs and pods from inside the cluster. PodMonitors are
-//! granted whether or not the cluster has their CRD: a rule for a kind the
-//! cluster does not serve grants nothing.
+//! operator reaches hubs and pods from inside the cluster. PodMonitors and
+//! dynamo's DynamoGraphDeployments are granted whether or not the cluster
+//! has their CRDs: a rule for a kind the cluster does not serve grants
+//! nothing.
 
 use kube::CustomResourceExt;
 use serde_json::{Value, json};
@@ -69,6 +70,7 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("apps", &["replicasets"], &read),
             rule("discovery.k8s.io", &["endpointslices"], &read),
             rule("monitoring.coreos.com", &["podmonitors"], &write),
+            rule("nvidia.com", &["dynamographdeployments"], &write),
             rule("events.k8s.io", &["events"], &["create", "patch"]),
         ],
     });
