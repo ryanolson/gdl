@@ -649,7 +649,7 @@ cargo bench -p dynamo-protocol-adapters --bench pipeline -- 'hop'
 | fewer locks of the cancel token | 4.36 us | 5.77 us | 6.01 us | 45, 56 | 5,376 B |
 | stop scope without locks | 4.10 us | 5.20 us | 5.39 us | 43, 52 | 4,848 B |
 
-The hop itself (`empty hop` less `Build direct`) went from 1.89 us and 10 allocations to 1.09 us and 9: 8 for the hop (`a_hop_allocates_two_contexts_and_two_boundaries`) and 1 for the boxed join. `Build direct` gains too, since the pipeline's first hop is a hop. With 200 messages the rows move by about the same amounts.
+The hop itself (`empty hop` less `Build direct`) went from 1.89 us and 10 allocations to 1.09 us and 9: 8 for the hop and 1 for the boxed join. `Build direct` gains too, since the pipeline's first hop is a hop. With 200 messages the rows move by about the same amounts.
 
 A profile of the `empty hop` row (`perf record -g`) agrees. `memcpy`, mostly futures moved whole, took 30% of 6.92 us at the base and 24% of 5.13 us after. The mutex atomics of the cancel tokens took 14% and 10%: about 1.0 us, then 0.5 us.
 
@@ -714,6 +714,7 @@ Each change to the boundaries since, measured the same way, against the commit b
 | main at `71b9fb92` | 120.3 Ir (356.2 at 512 B) | 56.1 (286.3) | 138.6 (417.6) | 5,120 |
 | the attempt boundary passes itself to its wait, not its fields | 106.2 (339.1) | 56.1 (286.3) | 124.5 (400.5) | 5,092 |
 | one scope node for stop and cancel | 105.5 (338.3) | 56.0 (286.3) | 122.9 (399.9) | 2,814 |
+| a hop with no backward node holds its node boundary unboxed | 90.3 (320.2) | 59.0 (289.9) | 107.8 (381.9) | 2,642 |
 
 - **Passing the attempt boundary whole to its wait saves 14 Ir per item at each hop.** `wait` took the boundary's fields as a struct of pointers, so every poll built that struct on the stack before it polled the producer: 9 stores of pointers, and the registers they needed.
 - **One scope node for stop and cancel saves 2,279 Ir and 4 allocations per operator stage per request**, and a little under 1 Ir per item at each hop. Each child context was a stop node, a cancel token's tree node, and a place in its parent's list of children, and each create, clone, check, and drop of the token took its lock. Now a child context is one node, made, checked, and dropped with no lock ([Runtime design](../development/runtime-design.md#node-contexts)). Base `9ab1301e` and the change built in one target directory, two rounds each, which agreed within 1.2 Ir:
@@ -742,6 +743,8 @@ Each change to the boundaries since, measured the same way, against the commit b
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages operator u64 <0|1|5> 1 <200|400> pending
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages operator u64 1 1 <200|400> pending <1|4|16|64>
 ```
+
+- **A hop with no backward node that holds its node boundary unboxed saves 15 Ir per item, and 172 Ir and one allocation per request.** An `operator` stage now costs 90.3 Ir per item and 5 allocations per request. The `hop` column moves only because its base, a hop with no stages, is such a hop. A hop with backward nodes runs as before: at 5 stages, 403.0 Ir per item in both, and within 6 Ir per request. A waiting request (`pending`) saves one allocation per hop: one hop goes from 4,872 Ir to 4,684, and 5 stages from 35,884 Ir and 54 allocations to 34,753 and 48. Base `e91e40ae` and the change were built in one target directory, two rounds each, which agreed within 0.1 Ir per item and 8 Ir per request. Compare binaries at paths of the same length: under callgrind, a longer path to the same executable moved its `pending` counts by about 90 Ir per request. The code grows by one attempt boundary and its wait per item type: 5,440 B of `.text` in the `stages` example, 0.8%.
 
 ### Copies of an item
 

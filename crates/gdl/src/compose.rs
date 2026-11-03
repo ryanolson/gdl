@@ -7,10 +7,12 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::Poll;
 
+use futures::Stream;
+
 use crate::Cx;
 use crate::Items;
 use crate::Result;
-use crate::items::{Producer, bound, fuse};
+use crate::items::{Fuse, Producer, bound, fuse};
 use crate::{Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
@@ -67,11 +69,11 @@ where
                 let scope = attempt.child();
                 let producer = Producer::of(&scope);
                 let items = self.inner.call(scope, req).await?;
-                let items = producer.fuse(items);
+                let items = producer.fused(items);
                 // As before the inner end: no backward stage starts for an
                 // attempt interrupted while the inner end was finishing.
                 attempt.check()?;
-                Ok(self.bwd.apply(attempt, items))
+                Ok(self.bwd.answer(attempt, items))
             }));
             // The checks inside `run` give a cancel that came first its
             // precedence; the race only waits.
@@ -231,6 +233,17 @@ pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
     /// Wrap one response stream, already fused, in the chain. `attempt` is
     /// the hop's attempt context.
     fn apply(&self, attempt: &Cx, items: Items<In>) -> Items<Self::Out>;
+
+    /// The stream the hop's attempt boundary takes: the chain's, or, with no
+    /// nodes, the inner end's node boundary itself, unboxed. Every chain in
+    /// the crate implements it; it is not part of the interface.
+    #[doc(hidden)]
+    type Answer: Stream<Item = Result<Self::Out>> + Unpin + Send + 'static;
+
+    /// The chain over the inner end's node boundary, for the hop's attempt
+    /// boundary.
+    #[doc(hidden)]
+    fn answer(&self, attempt: &Cx, fused: Fuse<In>) -> Self::Answer;
 }
 
 impl<In: Send + 'static> BackwardChain<In> for () {
@@ -240,6 +253,15 @@ impl<In: Send + 'static> BackwardChain<In> for () {
 
     fn apply(&self, _attempt: &Cx, items: Items<In>) -> Items<In> {
         items
+    }
+
+    // Nothing comes between the node boundary and the attempt boundary, so
+    // the attempt boundary holds it as it is: one box fewer per request, and
+    // one dynamic poll fewer per item (docs/src/development/runtime-design.md).
+    type Answer = Fuse<In>;
+
+    fn answer(&self, _attempt: &Cx, fused: Fuse<In>) -> Fuse<In> {
+        fused
     }
 }
 
@@ -264,6 +286,12 @@ where
         let scope = attempt.child();
         let out = self.0.backward(&scope, items);
         self.1.apply(attempt, fuse(out, &scope))
+    }
+
+    type Answer = Items<R::Out>;
+
+    fn answer(&self, attempt: &Cx, fused: Fuse<B::In>) -> Items<R::Out> {
+        self.apply(attempt, Box::pin(fused))
     }
 }
 

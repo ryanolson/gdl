@@ -82,11 +82,12 @@ impl Next<u64, u64> for Direct {
 }
 
 /// A hop makes two child contexts, the attempt and the inner end's scope:
-/// one scope node each, which holds both stop and cancel. The node
-/// boundary and the attempt boundary box one stream each. Every allocation
-/// is on the request path, so this is an upper bound.
+/// one scope node each, which holds both stop and cancel. A hop with no
+/// backward node boxes one stream: its attempt boundary holds the node
+/// boundary unboxed. Every allocation is on the request path, so this is
+/// an upper bound.
 #[tokio::test]
-async fn a_hop_allocates_two_contexts_and_two_boundaries() {
+async fn a_hop_allocates_two_contexts_and_one_boundary() {
     let ready = Arc::new(Ready);
     let direct = Direct(Arc::clone(&ready));
     let hop = Source::new(Hop::new((), SinkStage::new(ready), ()));
@@ -95,7 +96,7 @@ async fn a_hop_allocates_two_contexts_and_two_boundaries() {
     allocations(&hop).await;
 
     let own = allocations(&hop).await - allocations(&direct).await;
-    assert!(own <= 4, "a hop allocated {own} times");
+    assert!(own <= 3, "a hop allocated {own} times");
 }
 
 /// What one `affinity` selection allocates, through the erased selector

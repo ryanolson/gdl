@@ -808,6 +808,70 @@ async fn a_node_cancelling_its_own_context_behaves_the_same_whatever_follows_it(
     assert!(!first.is_cancelled() && !second.is_cancelled());
 }
 
+/// A sink that cancels the context it was given, then answers with 200
+/// ready items and ends its stream.
+struct CancelsItselfAndAnswers;
+
+impl gdl::Sink for CancelsItselfAndAnswers {
+    type Req = Pre;
+    type Item = Raw;
+
+    async fn generate(&self, cx: Cx, _req: Pre) -> gdl::Result<gdl::Items<Raw>> {
+        cx.cancel();
+        Ok(gdl::items(futures::stream::iter(
+            (0..200).map(|n| Ok(Raw(n))),
+        )))
+    }
+}
+
+/// The attempt boundary checks the attempt's cancel every 64 ready items,
+/// not the node's own scope: a node that cancels its own context still
+/// delivers every item it makes, and only its end is reported as the
+/// cancel. A hop with no backward node does the node boundary's work in
+/// its attempt boundary, so a check of the wrong token there would cut the
+/// stream after 64 items.
+#[tokio::test]
+async fn a_node_that_cancels_itself_delivers_its_ready_items_with_or_without_backward_nodes() {
+    use std::sync::Arc;
+
+    let pre = || Pre {
+        text: "x".into(),
+        attempt: 0,
+        plan: Plan::default(),
+    };
+    let bare = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(CancelsItselfAndAnswers)),
+        (),
+    );
+    let with_backward = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(CancelsItselfAndAnswers)),
+        (Arc::new(Identity), ()),
+    );
+    let ends = |all: Vec<gdl::Result<Raw>>| {
+        let items = all.iter().filter(|r| r.is_ok()).count();
+        (
+            items,
+            all.last()
+                .map(|r| r.as_ref().map(|_| ()).map_err(|e| e.kind())),
+        )
+    };
+    let out = bare.generate(Cx::new(), pre()).await.expect("attempt");
+    let bare_end = ends(collect(out).await);
+    let out = with_backward
+        .generate(Cx::new(), pre())
+        .await
+        .expect("attempt");
+    let backward_end = ends(collect(out).await);
+    assert_eq!(
+        bare_end,
+        (200, Some(Err(ErrorKind::Cancelled))),
+        "without a backward node"
+    );
+    assert_eq!(backward_end, bare_end, "with a backward node");
+}
+
 #[test]
 fn an_operator_retrying_instant_failures_does_not_starve_its_canceller() {
     let ended = within(WAIT, async {

@@ -1,9 +1,11 @@
 //! Local hops over large items and a large request, for `tests/codegen.rs`,
 //! which reads this example's release IR.
 //!
-//! - A node boundary, and the stream of a streamed request, hand each 2 KiB
-//!   item on without a copy. `Copying`, a boundary that copies, is the
-//!   control.
+//! - A node boundary, an attempt boundary, and the stream of a streamed
+//!   request hand each 2 KiB item on without a copy: through a hop with a
+//!   backward node, which has both boundaries, and through a hop without
+//!   one, whose attempt boundary does the node boundary's work too.
+//!   `Copying`, a boundary that copies, is the control.
 //! - A 4 KiB request goes through an endpoint's shape, an operator over a hop
 //!   with one forward node and a join. The operator's future is built on the
 //!   heap, not copied there. `boxed`, which boxes an operator's future as
@@ -17,8 +19,8 @@ use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt};
 use gdl::{
-    Cx, Forward, Hop, Items, Join, Next, Operator, OperatorStage, Result, Sink, SinkStage, Source,
-    Streamed, items,
+    Backward, Cx, Forward, Hop, Items, Join, Next, Operator, OperatorStage, Result, Sink,
+    SinkStage, Source, Streamed, items,
 };
 
 /// An item about as large as a chat chunk, with a field to drop.
@@ -41,6 +43,19 @@ impl Sink for Burst {
                 words: [i; 254],
             })
         }))))
+    }
+}
+
+/// Hands its input on as it is, so that a hop has a node boundary of its
+/// own.
+struct Keep;
+
+impl Backward for Keep {
+    type In = Big;
+    type Out = Big;
+
+    fn backward(&self, _cx: &Cx, input: Items<Big>) -> Items<Big> {
+        input
     }
 }
 
@@ -130,6 +145,11 @@ fn boxed<N: Next<Ask, u64>>(
 
 fn main() {
     let graph = Source::new(Hop::new((), SinkStage::new(Arc::new(Burst)), ()));
+    let kept = Source::new(Hop::new(
+        (),
+        SinkStage::new(Arc::new(Burst)),
+        (Arc::new(Keep), ()),
+    ));
     let below = Source::new(Hop::new((Arc::new(Stamp), ()), Join::new(Engine), ()));
     let endpoint = Source::new(Hop::new(
         (),
@@ -140,6 +160,14 @@ fn main() {
         .build()
         .expect("runtime");
     runtime.block_on(async {
+        let got: Vec<Big> = kept
+            .call(Cx::new(), 3)
+            .await
+            .expect("call")
+            .map(|item| item.expect("item"))
+            .collect()
+            .await;
+        assert_eq!(got.len(), 3);
         let out = graph.call(Cx::new(), 3).await.expect("call");
         // A streamed request's items end at their first error.
         let (_, streamed) = Streamed::new((), out).into_parts();

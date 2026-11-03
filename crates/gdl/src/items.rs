@@ -118,19 +118,28 @@ impl Producer {
 
     /// The node boundary [`fuse`] describes, over the producer's stream.
     pub(crate) fn fuse<T: Send + 'static>(self, inner: Items<T>) -> Items<T> {
-        Box::pin(Fuse {
+        Box::pin(self.fused(inner))
+    }
+
+    /// The same node boundary, not boxed: an attempt boundary with nothing
+    /// between it and the producer holds it as its inner stream.
+    pub(crate) fn fused<T>(self, inner: Items<T>) -> Fuse<T> {
+        Fuse {
             inner: Some(inner),
             token: Some(self.token),
             deadline_at: self.deadline_at,
             ready_run: 0,
-        })
+        }
     }
 }
 
 /// Consecutive ready items a node boundary passes before it yields.
 const YIELD_INTERVAL: u16 = 1024;
 
-struct Fuse<T> {
+/// The node boundary [`fuse`] describes. Public only because a hop's
+/// backward chain names it as the stream its attempt boundary takes; it is
+/// not reachable from outside the crate.
+pub struct Fuse<T> {
     inner: Option<Items<T>>,
     // The producer's scope, cancelled at any ending or drop; `None` once
     // the stream has ended. One token does what a guard and a clone did.
@@ -149,6 +158,10 @@ impl<T> Stream for Fuse<T> {
     type Item = Result<T>;
 
     // hot path: local-item-boundary
+    // Forced into the attempt boundary that holds it unboxed: left to the
+    // compiler, it stays a call there, which costs 14 Ir per item. Behind a
+    // box it is called through the vtable as before.
+    #[inline(always)]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.inner.is_none() {
             return Poll::Ready(None);
@@ -196,8 +209,19 @@ impl<T> Stream for Fuse<T> {
 /// caller that holds the stream unread keeps its local scopes past the
 /// deadline until it reads or drops the stream. Watching the deadline
 /// without a read would take a task per attempt.
-pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: CancelOnDrop, inner: Items<T>) -> Items<T> {
-    bound_measured(cx, guard, inner, None)
+///
+/// `inner` is the attempt's last node's stream: boxed behind that node's
+/// boundary, or, when nothing comes between the producer and the attempt
+/// boundary, the producer's node boundary itself ([`Fuse`]), held here
+/// unboxed. The attempt boundary then polls it directly, and drops it in
+/// the same place a boxed one is dropped: every end, drop and panic path of
+/// the node boundary is its own code either way.
+pub(crate) fn bound<T, S>(cx: &Cx, guard: CancelOnDrop, inner: S) -> Items<T>
+where
+    T: Send + 'static,
+    S: Stream<Item = Result<T>> + Unpin + Send + 'static,
+{
+    bounded(cx, guard, inner, None)
 }
 
 /// `bound` for the root's attempt, ending the visit `response` owns with
@@ -208,6 +232,17 @@ pub fn bound_measured<T: Send + 'static>(
     inner: Items<T>,
     response: Option<Owner>,
 ) -> Items<T> {
+    bounded(cx, guard, inner, response)
+}
+
+fn bounded<T, S>(cx: &Cx, guard: CancelOnDrop, inner: S, response: Option<Owner>) -> Items<T>
+where
+    T: Send + 'static,
+    S: Stream<Item = Result<T>> + Unpin + Send + 'static,
+{
+    // The fields are built in their order, and a panic while building them
+    // (`sleep_until` on a runtime without timers) drops those already built:
+    // `inner` first, so a node boundary in it ends its producer.
     let deadline_at = cx.deadline().map(|deadline| deadline.instant());
     Box::pin(Bounded {
         inner: Some(inner),
@@ -236,10 +271,12 @@ pub const CHECK_INTERVAL: u8 = 64;
 
 pin_project! {
     #[project = BoundedProj]
-    struct Bounded<T> {
+    struct Bounded<S> {
         // `None` once the stream has ended; dropping the inner stream drops
-        // the attempt's node streams.
-        inner: Option<Items<T>>,
+        // the attempt's node streams. Boxed (`Items`), or the producer's
+        // node boundary unboxed (`Fuse`): either way the same field, so it
+        // drops at the same point.
+        inner: Option<S>,
         // The attempt's, cancelled at any ending or drop; `None` once the
         // stream has ended.
         token: Option<Scope>,
@@ -263,7 +300,7 @@ pin_project! {
         response: Option<Owner>,
     }
 
-    impl<T> PinnedDrop for Bounded<T> {
+    impl<S> PinnedDrop for Bounded<S> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             end(this.inner, this.token);
@@ -271,7 +308,7 @@ pin_project! {
     }
 }
 
-impl<T> Stream for Bounded<T> {
+impl<T, S: Stream<Item = Result<T>> + Unpin> Stream for Bounded<S> {
     type Item = Result<T>;
 
     // hot path: local-item-boundary
@@ -296,7 +333,7 @@ impl<T> Stream for Bounded<T> {
             }
         }
 
-        let polled = inner.as_mut().poll_next(cx);
+        let polled = Pin::new(inner).poll_next(cx);
         // As in `Fuse`: returned as it came, with no call while it is held.
         match polled {
             Poll::Ready(Some(Ok(_))) if !*this.first_pending => *this.ready_run += 1,
@@ -340,8 +377,8 @@ impl<T> Stream for Bounded<T> {
 /// boundary whole, not its projection: a projection passed out of line is a
 /// struct of pointers that every poll would build first, 14 Ir per item.
 #[inline(never)]
-fn wait<T>(
-    bounded: Pin<&mut Bounded<T>>,
+fn wait<T, S>(
+    bounded: Pin<&mut Bounded<S>>,
     cx: &mut Context<'_>,
     _pending: Poll<Option<Result<T>>>,
 ) -> Option<Error> {
@@ -410,10 +447,13 @@ fn interrupted(token: Option<&Scope>, deadline_at: Option<Instant>) -> Option<Er
 /// Drop the producer's stream, then cancel its scope, in the order a
 /// stream that held a drop guard used. The guard is made first, so the
 /// cancel happens even when the stream's destructor panics.
-fn end<T>(inner: &mut Option<Items<T>>, token: &mut Option<Scope>) {
+fn end<S>(inner: &mut Option<S>, token: &mut Option<Scope>) {
     let _cancel = token.take().map(Scope::drop_guard);
     *inner = None;
 }
+
+#[cfg(test)]
+mod order;
 
 #[cfg(test)]
 mod tests {
@@ -671,25 +711,36 @@ mod tests {
     /// attempt boundary above it then waits. It registers its waiter on its
     /// first wait and keeps it, so a stream that yields five times
     /// registers as often as one that yields twice: once on each node from
-    /// the attempt up.
+    /// the attempt up. The same holds with the node boundary boxed or held
+    /// unboxed.
     #[tokio::test]
     async fn an_attempt_boundary_registers_once_per_stream() {
-        async fn registrations(n: u64) -> usize {
+        async fn registrations(n: u64, boxed: bool) -> usize {
             let root = Cx::new();
             let (attempt, guard) = attempt_of(&root);
-            let scope = attempt.child();
-            let inner = fuse(items(futures::stream::iter((0..n).map(Ok))), &scope);
+            let producer = Producer::of(&attempt.child());
+            let inner = items(futures::stream::iter((0..n).map(Ok)));
             crate::cx::REGISTERED.with(|count| count.set(0));
-            let count = bound(&attempt, guard, inner).count().await;
+            let count = if boxed {
+                bound(&attempt, guard, producer.fuse(inner)).count().await
+            } else {
+                bound(&attempt, guard, producer.fused(inner)).count().await
+            };
             assert_eq!(count, usize::try_from(n).expect("a count"));
             crate::cx::REGISTERED.with(std::cell::Cell::get)
         }
-        assert_eq!(registrations(1_000).await, 0, "no yield, no wait");
-        assert_eq!(registrations(3_000).await, 2, "the attempt and the root");
-        assert_eq!(
-            registrations(6_000).await,
-            2,
-            "a boundary registered more than once"
-        );
+        for boxed in [true, false] {
+            assert_eq!(registrations(1_000, boxed).await, 0, "no yield, no wait");
+            assert_eq!(
+                registrations(3_000, boxed).await,
+                2,
+                "the attempt and the root"
+            );
+            assert_eq!(
+                registrations(6_000, boxed).await,
+                2,
+                "a boundary registered more than once: boxed={boxed}"
+            );
+        }
     }
 }
