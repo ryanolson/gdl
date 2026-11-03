@@ -376,32 +376,27 @@ impl<P: Pools, H: Hubs> Run<'_, '_, P, H> {
         Ok(false)
     }
 
-    /// Whether a pod runs of a segment in a DGD among `owned`: dynamo's
-    /// controllers own these pods, so they are found by the DGD's name,
-    /// and are a segment's by their component or by the `gdl.dev/config`
-    /// they took from their template. The components are read from the DGD
-    /// as applied, never from the pool's current spec, which a held
-    /// generation may have changed; the annotation finds the pods of a
-    /// component the segment has since left, which dynamo has not replaced
-    /// yet. The DGD's other components, dynamo's
-    /// workers, are not segments: the segments' requests need them until
-    /// the segments have drained, and garbage collection deletes them with
-    /// the DGD once the pool is released.
+    /// Whether a pod runs of a segment in the pool's DGD, which is named
+    /// after the pool: dynamo's controllers own these pods, so they are
+    /// found by the DGD's name, and are a segment's by their component or by
+    /// the `gdl.dev/config` they took from their template. The pods are
+    /// asked for whether or not the DGD still exists: one the pool no
+    /// longer renders is deleted, and its pods still run while they drain.
+    /// The components are read from the DGD among `owned` as applied, never
+    /// from the pool's current spec, which a held generation may have
+    /// changed; the annotation finds the pods of a component the segment
+    /// has since left, and those of a DGD already gone. The DGD's other
+    /// components, dynamo's workers, are not segments: the segments'
+    /// requests need them until the segments have drained, and garbage
+    /// collection deletes them with the DGD once the pool is released.
     async fn segments_in_dgd(&self, owned: &[Live]) -> Result<bool, Stop> {
-        for dgd in owned
+        let components = owned
             .iter()
-            .filter(|o| o.kind == Kind::DynamoGraphDeployment)
-        {
-            let pods = self
-                .cx
-                .pools
-                .segment_pods(&dgd.name, &dgd.components)
-                .await?;
-            if !pods.is_empty() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+            .find(|o| o.kind == Kind::DynamoGraphDeployment && o.name == self.name)
+            .map(|dgd| dgd.components.clone())
+            .unwrap_or_default();
+        let pods = self.cx.pools.segment_pods(&self.name, &components).await?;
+        Ok(!pods.is_empty())
     }
 }
 
