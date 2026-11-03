@@ -371,6 +371,13 @@ fn check_dgd_refuses_what_the_operators_render_would() {
     let error =
         gdl_k8s::check_dgd("p", "ns", &unversioned, &[("pool", "Frontend")]).expect_err("refused");
     assert!(error.contains("`runtimeVersionOverride`"), "{error}");
+    // Only a typed component needs it.
+    let mut untyped = unversioned.clone();
+    untyped["spec"]["components"][0]
+        .as_object_mut()
+        .expect("an object")
+        .remove("type");
+    gdl_k8s::check_dgd("p", "ns", &untyped, &[("pool", "Frontend")]).expect("untyped");
     // dynamo's schema: three parts, each 0 or 1 to 4 digits without a
     // leading 0, as a string.
     for good in ["0.0.0", "1.7.0", "9999.10.1"] {

@@ -155,8 +155,20 @@ fn check_refuses_a_component_without_a_runtime_version_override() {
         FLEET,
         &dgd,
         Some("file"),
-        "component `Frontend` of the pool's DGD runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`",
+        "component `Frontend` of the pool's DGD is of type `frontend` and runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`",
     );
+}
+
+/// dynamo's webhook requires the override only of a typed component:
+/// one without a `type` may omit it.
+#[test]
+fn an_untyped_component_may_omit_its_runtime_version_override() {
+    let dgd = DGD
+        .replace("    type: frontend\n", "")
+        .replace("    runtimeVersionOverride: 1.7.0\n", "");
+    assert!(!dgd.contains("runtimeVersionOverride") && !dgd.contains("type: frontend"));
+    let output = files(FLEET, &dgd).check();
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]

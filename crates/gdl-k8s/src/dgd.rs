@@ -110,11 +110,12 @@ pub fn set_image(dgd: &mut Value, component: &str, image: &str) -> Result<(), St
 /// `namespace` can own with each `(segment, component)` of `placed`:
 /// what [`crate::children`] refuses of it, and a named component without
 /// `scalingAdapter`, or whose name dynamo would hash into its adapter's,
-/// or without exactly one container `main` ([`set_image`]), or without
-/// `runtimeVersionOverride`, or with one that dynamo's schema refuses
-/// ([`runtime_version`]): dynamo's webhook reads a component's image tag
-/// as its version, and refuses one that is not a semantic version, as
-/// `cargo gdl`'s tags never are, unless the component names it. `cargo gdl
+/// or without exactly one container `main` ([`set_image`]), or of a type
+/// in [`VERSIONED`] without `runtimeVersionOverride`, or with one that
+/// dynamo's schema refuses ([`runtime_version`]): dynamo's webhook reads
+/// such a component's image tag as its version, and refuses one that is
+/// not a semantic version, as `cargo gdl`'s tags never are, unless the
+/// component names it. `cargo gdl
 /// check` asks it of a fleet's DGD file, so that the file is refused
 /// before anything is built.
 pub fn check_dgd(
@@ -133,11 +134,20 @@ pub fn check_dgd(
             .into_iter()
             .flatten()
             .find(|c| c["name"] == *component);
-        let version = found.map(|c| &c["runtimeVersionOverride"]);
-        if version.is_none_or(Value::is_null) {
-            return Err(format!(
-                "component `{component}` of the pool's DGD runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`, the dynamo version the segment links, since dynamo's webhook refuses the component without it"
-            ));
+        let version = found
+            .map(|c| &c["runtimeVersionOverride"])
+            .filter(|v| !v.is_null());
+        let typed = found
+            .and_then(|c| c["type"].as_str())
+            .filter(|t| VERSIONED.contains(t));
+        match (version, typed) {
+            (None, Some(kind)) => {
+                return Err(format!(
+                    "component `{component}` of the pool's DGD is of type `{kind}` and runs a segment, whose image tag is not a semantic version: give it `runtimeVersionOverride`, the dynamo version the segment links, since dynamo's webhook refuses a typed component without it"
+                ));
+            }
+            (None, None) => continue,
+            (Some(_), _) => {}
         }
         if let Some(version) = version
             && !version.as_str().is_some_and(runtime_version)
@@ -149,6 +159,15 @@ pub fn check_dgd(
     }
     Ok(())
 }
+
+/// The component types whose missing `runtimeVersionOverride` dynamo's
+/// webhook refuses when the image tag is not a version
+/// (`toleratesMissingRuntimeVersionOverride` in its
+/// `internal/webhook/validation/shared_helpers.go`): `epp` always, and the
+/// others unless the webhook's `allowMissingRuntimeVersionOverride`
+/// setting, off for a DGD, says otherwise. Any other type, or none, may
+/// omit it.
+const VERSIONED: [&str; 6] = ["epp", "frontend", "worker", "prefill", "decode", "planner"];
 
 /// Whether `version` is a `runtimeVersionOverride` that dynamo's DGD
 /// schema takes: `^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
