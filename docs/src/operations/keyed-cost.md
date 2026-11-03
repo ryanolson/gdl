@@ -49,7 +49,7 @@ On a host whose cores sleep deeply, a get that follows a pause costs 6 to 15 tim
 
 Pinned to core 0 alone, two runs: a get took 43.5 to 44.5 µs back to back and 52.9 to 61.1 µs after a pause, and the health route 30.6 to 33.1 µs and 36.8 to 42.3 µs.
 
-On spark-d (spark-e504, 20 cores, 1-minute load 5 to 11), with the bench pinned to the cores in the first column, one run each. The host is shared, and a second 4-core run gave 347 µs for a get after 1 ms.
+On a shared 20-core aarch64 host (1-minute load 5 to 11), with the bench pinned to the cores in the first column, one run each. The host is shared, and a second 4-core run gave 347 µs for a get after 1 ms.
 
 | Cores | get, back to back | health, back to back | get after 1 ms | health after 1 ms | get after 5 ms | health after 5 ms |
 |---|---|---|---|---|---|---|
@@ -59,7 +59,7 @@ On spark-d (spark-e504, 20 cores, 1-minute load 5 to 11), with the bench pinned 
 
 The pools are p50s. Two costs add up:
 
-- **A core that wakes.** On one core, the client and the hub share one core, and a request still costs about 130 to 170 µs more after a pause. spark-d's cores have idle states with exit latencies of 42, 231, and 433 µs (`/sys/devices/system/cpu/cpu0/cpuidle/state*/latency`). During one 4-core run of the bench, those cores entered the two deepest states 70,637 times.
+- **A core that wakes.** On one core, the client and the hub share one core, and a request still costs about 130 to 170 µs more after a pause. The host's cores have idle states with exit latencies of 42, 231, and 433 µs (`/sys/devices/system/cpu/cpu0/cpuidle/state*/latency`). During one 4-core run of the bench, those cores entered the two deepest states 70,637 times.
 - **More threads to wake.** With more cores, a request crosses more threads, and each sleeping thread must be woken on its own core. The p50 after a pause grows from about 150 to 190 µs on one core to about 390 to 510 µs on four.
 
 ### In Compose
