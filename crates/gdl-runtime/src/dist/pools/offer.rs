@@ -2233,10 +2233,10 @@ mod tests {
         }
     }
 
-    /// A choice with a lease allocates twice per pick, the lease and the
-    /// thin box it is held in, and the pick nothing more.
+    /// A choice with a lease allocates once per pick, the block that holds
+    /// the lease, and the pick nothing more.
     #[test]
-    fn a_choice_with_a_lease_allocates_twice() {
+    fn a_choice_with_a_lease_allocates_once() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
         let mut policies = gdl::PoolPolicies::new();
@@ -2257,6 +2257,6 @@ mod tests {
             drop(lease);
         }
         counting(false);
-        assert_eq!(counted() - before, 2000);
+        assert_eq!(counted() - before, 1000);
     }
 }

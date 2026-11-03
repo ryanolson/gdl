@@ -158,7 +158,6 @@ impl PoolPolicy for Leasing {
 /// to call and drop it. Telling the lease and dropping it allocate nothing,
 /// and the drop frees what the pick allocated.
 #[test]
-#[ignore = "a leased pick allocates twice: the lease's box and the box around it"]
 fn a_leased_pick_allocates_once() {
     let seen = Seen::new();
     let policy = Leasing(Arc::clone(&seen));

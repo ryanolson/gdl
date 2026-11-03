@@ -28,6 +28,7 @@ mod damped;
 mod decline;
 mod home_first;
 mod round_robin;
+mod thin;
 
 pub use damped::{Damped, Window};
 pub use decline::Decline;
@@ -130,9 +131,9 @@ const VIEW: usize = 1 << (usize::BITS - 1);
 /// A choice's lease behind one thin pointer, so that a choice is two words
 /// and a choice without a lease costs the pick what an index did: a fat
 /// pointer cost each pick 2 to 4 ns more
-/// (`docs/src/operations/feature-costs.md`). A lease is two allocations.
+/// (`docs/src/operations/feature-costs.md`). A lease is one allocation.
 #[doc(hidden)]
-pub struct ChoiceHeld(Box<Box<dyn ChoiceLease>>);
+pub struct ChoiceHeld(thin::Lease);
 
 impl ChoiceHeld {
     /// The chosen pool accepted the offer.
@@ -195,9 +196,10 @@ impl PoolChoice {
     /// pool may have run the request but did not say it took it), and
     /// when the runtime chooses again because the pool stopped taking
     /// work. So a request that no pool accepts tells none of its leases.
-    /// The lease is boxed, twice: a choice without one allocates nothing.
+    /// Keeping a lease allocates once; a choice without one allocates
+    /// nothing.
     pub fn with_lease(mut self, lease: impl ChoiceLease) -> Self {
-        self.lease = Some(ChoiceHeld(Box::new(Box::new(lease))));
+        self.lease = Some(ChoiceHeld(thin::Lease::new(lease)));
         self
     }
 

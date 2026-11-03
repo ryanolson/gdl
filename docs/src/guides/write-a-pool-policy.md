@@ -137,7 +137,7 @@ Ok(PoolChoice::new(at).with_lease(Record { store, fingerprint, pool: pools[at].n
 - The runtime calls `accepted` once if the chosen pool accepts the offer. Then it holds the lease while the sending segment holds the request, as it holds a selector's lease, and drops it.
 - It drops the lease without calling `accepted` when the pool declines the offer, when the offer never left, and when the outcome is unknown. An unknown outcome means no answer came, so the pool may have run the request, but it did not say that it took it. A request that no pool accepts tells none of its leases.
 - Each attempt has its own lease. After a decline, the first attempt's lease is dropped before the next choice is made. A request re-queued for its pool (below) keeps its lease through each offer to that pool.
-- A choice without a lease allocates nothing. A lease allocates twice, so give one only to the choices that need it. A router that records a session's pool needs one on a first turn, on a turn that finds no record, and on a failover (`request.excluded()` is not empty). It does not need one on a turn that goes to its recorded pool.
+- A choice without a lease allocates nothing. A lease allocates once, so give one only to the choices that need it. A router that records a session's pool needs one on a first turn, on a turn that finds no record, and on a failover (`request.excluded()` is not empty). It does not need one on a turn that goes to its recorded pool.
 
 ### Keep a request with a full pool
 
