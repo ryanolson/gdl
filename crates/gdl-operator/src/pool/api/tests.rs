@@ -264,3 +264,94 @@ async fn a_dgds_segment_pods_are_found_by_component_or_annotation() {
     let names: Vec<&str> = pods.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["frontend", "moved"]);
 }
+
+/// A pool with no children must be deletable even when its name cannot fit a pod label.
+#[tokio::test]
+async fn a_pool_name_longer_than_a_label_can_finish_its_stop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+
+    for length in [63, 64] {
+        let name = "p".repeat(length);
+        let mut pool = crate::GdlPool::new(
+            &name,
+            crate::GdlPoolSpec {
+                pool: crate::pool::tests::spec(),
+            },
+        );
+        pool.metadata.uid = Some("pool-uid".into());
+        pool.metadata.resource_version = Some("1".into());
+        pool.metadata.namespace = Some("ns".into());
+        pool.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::UNIX_EPOCH));
+        pool.metadata.finalizers = Some(vec![crate::pool::FINALIZER.into()]);
+        let reply = serde_json::to_value(&pool).expect("pool");
+        let released = Arc::new(AtomicBool::new(false));
+        let removed = Arc::clone(&released);
+        let service = service_fn(move |request: Request<Body>| {
+            let mut reply = reply.clone();
+            let removed = Arc::clone(&removed);
+            async move {
+                let path = request.uri().path().to_string();
+                let query = request.uri().query().unwrap_or_default().to_string();
+                let (status, body) = if path.ends_with("/pods") {
+                    // Kubernetes validates selector values as labels, even on an empty namespace.
+                    let value = query.split("%3D").nth(1).unwrap_or_default();
+                    if value.len() > gdl_k8s::LABEL_LIMIT {
+                        (
+                            400,
+                            json!({
+                                "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                                "reason": "BadRequest", "code": 400,
+                                "message": "unable to parse requirement: values must be no more than 63 characters",
+                            }),
+                        )
+                    } else {
+                        (
+                            200,
+                            json!({"apiVersion": "v1", "kind": "PodList", "items": []}),
+                        )
+                    }
+                } else if request.method() == http::Method::PATCH {
+                    let bytes = request
+                        .into_body()
+                        .collect_bytes()
+                        .await
+                        .expect("patch body");
+                    let patch: Value = serde_json::from_slice(&bytes).expect("patch JSON");
+                    if !path.ends_with("/status") {
+                        assert_eq!(patch["metadata"]["finalizers"], json!([]));
+                        removed.store(true, Ordering::SeqCst);
+                    }
+                    json_patch::merge(&mut reply, &patch);
+                    reply["metadata"]["resourceVersion"] = "2".into();
+                    (200, reply)
+                } else {
+                    assert_eq!(request.method(), http::Method::GET);
+                    (
+                        200,
+                        json!({"apiVersion": "v1", "kind": "List", "items": []}),
+                    )
+                };
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(body.to_string().into_bytes()))
+                        .expect("response"),
+                )
+            }
+        });
+        let pools = KubePools::new(Client::new(service, "ns"), "ns", false, false);
+        let hubs = crate::probe::HttpProbe::new("ns").expect("probe");
+        let cx = crate::pool::Context {
+            pools: &pools,
+            hubs: &hubs,
+            namespace: "ns",
+        };
+        let result = crate::pool::reconcile(&cx, &pool, 0).await;
+        assert!(
+            result.is_ok() && released.load(Ordering::SeqCst),
+            "a {length}-character pool with no children must release its finalizer: {result:?}"
+        );
+    }
+}
