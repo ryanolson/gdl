@@ -10,6 +10,7 @@
 
 use std::future::Future;
 use std::marker::PhantomPinned;
+use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr;
@@ -41,7 +42,7 @@ impl Scope {
         Self(Arc::new(Node {
             state: AtomicU8::new(0),
             parent: None,
-            waiters: Mutex::new(Vec::new()),
+            waiters: Mutex::default(),
         }))
     }
 
@@ -49,7 +50,7 @@ impl Scope {
         Self(Arc::new(Node {
             state: AtomicU8::new(0),
             parent: Some(Arc::clone(&self.0)),
-            waiters: Mutex::new(Vec::new()),
+            waiters: Mutex::default(),
         }))
     }
 
@@ -124,8 +125,11 @@ pub(crate) struct Node {
     state: AtomicU8,
     // Set when the node is made; taken only by `drop`.
     parent: Option<Arc<Node>>,
-    // The waiters at or below this node. An empty `Vec` does not allocate.
-    waiters: Mutex<Vec<Entry>>,
+    // The waiters at or below this node. Dropped by `Node::drop`, and only
+    // if a waiter has ever registered here: a node that never had one has
+    // nothing to free, and the drop of the list would be a call on every
+    // node of every request.
+    waiters: Mutex<ManuallyDrop<Waiters>>,
 }
 
 struct Entry {
@@ -159,7 +163,7 @@ impl Node {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Vec<Entry>> {
+    fn lock(&self) -> MutexGuard<'_, ManuallyDrop<Waiters>> {
         // No foreign code runs under this lock, but a poisoned list is
         // still a valid list.
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
@@ -171,7 +175,7 @@ impl Node {
             return;
         }
         let taken = std::mem::take(&mut *self.lock());
-        WakeAll(taken.into_iter()).run();
+        WakeAll(ManuallyDrop::into_inner(taken).entries()).run();
     }
 
     /// A stop, waking at most `B` entries per lock.
@@ -198,7 +202,7 @@ impl Node {
         REGISTERED.with(|count| count.set(count.get() + 1));
         let rejected = {
             let mut list = self.lock();
-            list.push(Entry {
+            let first = list.push(Entry {
                 key,
                 interest,
                 waker,
@@ -207,7 +211,7 @@ impl Node {
             if prev & interest == 0 {
                 return true;
             }
-            list.pop()
+            list.pop(first)
         };
         drop(rejected);
         false
@@ -215,9 +219,7 @@ impl Node {
 
     /// Take a waiter's entry out, if a stop or cancel has not already.
     fn remove(&self, key: usize) -> Option<Entry> {
-        let mut list = self.lock();
-        let at = list.iter().position(|entry| entry.key == key)?;
-        Some(list.swap_remove(at))
+        self.lock().remove(key)
     }
 
     /// Replace a waiter's waker; `false` if a stop or cancel took its
@@ -225,12 +227,24 @@ impl Node {
     fn update(&self, key: usize, waker: Waker) -> bool {
         let old = {
             let mut list = self.lock();
-            match list.iter_mut().find(|entry| entry.key == key) {
+            match list.get_mut(key) {
                 Some(entry) => Some(std::mem::replace(&mut entry.waker, waker)),
                 None => None,
             }
         };
         old.is_some()
+    }
+
+    /// Frees the list of a node that has had a waiter. Out of line, so that
+    /// the drop of a node that never had one stays small enough to inline.
+    #[cold]
+    #[inline(never)]
+    fn free_waiters(&mut self) {
+        let waiters = self
+            .waiters
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(ManuallyDrop::into_inner(std::mem::take(waiters)));
     }
 
     #[cfg(test)]
@@ -247,6 +261,11 @@ impl Drop for Node {
         // `into_inner` gives the last owner the node, even when two
         // children of one parent drop at once.
         debug_assert!(self.lock().is_empty(), "a node with a waiter is reachable");
+        if self.state.load(Ordering::Acquire) & WAITED != 0 {
+            self.free_waiters();
+        } else {
+            debug_assert_eq!(self.lock().rest.capacity(), 0, "a list with no waiter");
+        }
         let mut up = self.parent.take();
         while let Some(parent) = up {
             up = match sync::into_inner(parent) {
@@ -257,9 +276,91 @@ impl Drop for Node {
     }
 }
 
+/// A node's waiters. The first is held in the node: most nodes never hold
+/// more than one waiter at once, so a request that waits allocates no more
+/// than one that does not. The `Vec` holds the rest, and allocates only
+/// for a second waiter.
+#[derive(Default)]
+struct Waiters {
+    first: Option<Entry>,
+    rest: Vec<Entry>,
+}
+
+impl Waiters {
+    /// Adds `entry`; `true` if it took the place held in the node.
+    fn push(&mut self, entry: Entry) -> bool {
+        if self.first.is_none() {
+            self.first = Some(entry);
+            true
+        } else {
+            self.rest.push(entry);
+            false
+        }
+    }
+
+    /// Takes the entry that `push` just added, which said where it went.
+    fn pop(&mut self, first: bool) -> Option<Entry> {
+        if first {
+            self.first.take()
+        } else {
+            self.rest.pop()
+        }
+    }
+
+    fn get_mut(&mut self, key: usize) -> Option<&mut Entry> {
+        match &mut self.first {
+            Some(entry) if entry.key == key => Some(entry),
+            _ => self.rest.iter_mut().find(|entry| entry.key == key),
+        }
+    }
+
+    fn remove(&mut self, key: usize) -> Option<Entry> {
+        if self.first.as_ref().is_some_and(|entry| entry.key == key) {
+            return self.first.take();
+        }
+        let at = self.rest.iter().position(|entry| entry.key == key)?;
+        Some(self.rest.swap_remove(at))
+    }
+
+    /// Takes the next entry whose interest includes a bit of `bits`.
+    /// `at` is where to go on in `rest`; it starts at 0 for each lock.
+    fn take_next(&mut self, bits: u8, at: &mut usize) -> Option<Entry> {
+        if self
+            .first
+            .as_ref()
+            .is_some_and(|entry| entry.interest & bits != 0)
+        {
+            return self.first.take();
+        }
+        while *at < self.rest.len() {
+            if self.rest[*at].interest & bits != 0 {
+                return Some(self.rest.swap_remove(*at));
+            }
+            *at += 1;
+        }
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.is_none() && self.rest.is_empty()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + self.rest.len()
+    }
+
+    fn entries(self) -> Entries {
+        self.first.into_iter().chain(self.rest)
+    }
+}
+
+/// A node's waiters, taken out of it.
+type Entries = std::iter::Chain<std::option::IntoIter<Entry>, std::vec::IntoIter<Entry>>;
+
 /// Wakes the entries a cancel took. If a wake panics, the guard's drop
 /// wakes the rest, so that one panicking waker strands no other waiter.
-struct WakeAll(std::vec::IntoIter<Entry>);
+struct WakeAll(Entries);
 
 impl WakeAll {
     fn run(mut self) {
@@ -293,13 +394,11 @@ impl<const B: usize> StopDrain<'_, B> {
                 let mut list = self.node.lock();
                 let mut at = 0;
                 let mut taken = 0;
-                while at < list.len() && taken < B {
-                    if list[at].interest & STOP != 0 {
-                        self.batch[taken] = Some(list.swap_remove(at).waker);
-                        taken += 1;
-                    } else {
-                        at += 1;
-                    }
+                while taken < B
+                    && let Some(entry) = list.take_next(STOP, &mut at)
+                {
+                    self.batch[taken] = Some(entry.waker);
+                    taken += 1;
                 }
                 if taken == 0 {
                     break;

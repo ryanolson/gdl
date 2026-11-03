@@ -203,3 +203,34 @@ fn a_stop_drain_past_a_full_batch() {
         drop(scope.0.remove(4));
     });
 }
+
+/// M8: the node's first waiter leaves while a second registers and the
+/// node cancels. The second lands in the place held in the node, or in
+/// the list after it. Each entry is woken or removed exactly once, and a
+/// removal finds its entry unless the cancel took it first.
+#[test]
+fn a_second_waiter_registers_while_the_first_leaves() {
+    model(|| {
+        let scope = Scope::root();
+        let (first, first_waker) = mock();
+        assert!(scope.0.register(1, CANCEL, first_waker));
+        let leaving = scope.clone();
+        let leaver = thread::spawn(move || {
+            let removed = leaving.0.remove(1).is_some();
+            assert!(
+                removed || leaving.is_cancelled(),
+                "a listed entry was not found"
+            );
+            removed
+        });
+        let registering = scope.clone();
+        let (second, second_waker) = mock();
+        let registerer = thread::spawn(move || registering.0.register(2, CANCEL, second_waker));
+        scope.cancel();
+        let removed = leaver.join().expect("the leaver");
+        let listed = registerer.join().expect("the registerer");
+        assert_eq!(wakes(&first), usize::from(!removed));
+        assert_eq!(wakes(&second), usize::from(listed));
+        assert_eq!(scope.0.listed(), 0);
+    });
+}

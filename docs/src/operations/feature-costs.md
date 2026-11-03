@@ -745,6 +745,19 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 ```
 
 - **A hop with no backward node that holds its node boundary unboxed saves 15 Ir per item, and 172 Ir and one allocation per request.** An `operator` stage now costs 90.3 Ir per item and 5 allocations per request. The `hop` column moves only because its base, a hop with no stages, is such a hop. A hop with backward nodes runs as before: at 5 stages, 403.0 Ir per item in both, and within 6 Ir per request. A waiting request (`pending`) saves one allocation per hop: one hop goes from 4,872 Ir to 4,684, and 5 stages from 35,884 Ir and 54 allocations to 34,753 and 48. Base `e91e40ae` and the change were built in one target directory, two rounds each, which agreed within 0.1 Ir per item and 8 Ir per request. Compare binaries at paths of the same length: under callgrind, a longer path to the same executable moved its `pending` counts by about 90 Ir per request. The code grows by one attempt boundary and its wait per item type: 5,440 B of `.text` in the `stages` example, 0.8%.
+- **A scope that holds its first waiter in place saves two allocations per request for each hop that waits, and costs a ready request nothing** ([Node contexts](../development/runtime-design.md#node-contexts)). A waiting request (`pending`) saves 2 allocations at one hop and 4 at five stages. The 5-stage `pending` shape still allocates more than a ready one: its five hops all wait, so the scopes above them hold more than one waiter each. A ready request allocates as before and runs no more instructions: 1 Ir fewer at one hop, and 100 to 115 fewer at five stages. Most of that saving is in glibc's `_int_malloc` and `_int_free`, which take less for the larger node, so it depends on the allocator. Making a node costs a few Ir more in `Cx::child`, and dropping one that never had a waiter costs less. Per item nothing moves. A scope node grows from 48 B to 80 B. Measured on an aarch64 host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 25 to 70, rustc 1.93.1, valgrind 3.28.0. Base `bafcb07c` and the change were built in one target directory and run from paths of the same length, two rounds each, which agreed within 4 Ir per request and 0.1 Ir per item:
+
+| Per request | Base | Change |
+|---|---|---|
+| one hop (`operator`, 0 stages) | 3,027.6 Ir, 7 allocations | 3,026.8 Ir, 7 allocations |
+| `operator`, 1 stage | 5,385.1 Ir, 12.04 allocations | 5,368.1 Ir, 12 allocations |
+| `operator`, 5 stages | 16,251.0 Ir, 32.33 allocations | 16,150.7 Ir, 32.2 allocations |
+| `hop`, 5 stages | 8,137.2 Ir, 21 allocations | 8,023.3 Ir, 21 allocations |
+| one hop, `pending` | 4,687.3 Ir, 9 allocations | 4,338.9 Ir, 7 allocations |
+| `operator`, 1 stage, `pending` | 8,569.6 Ir, 16 allocations | 8,363.6 Ir, 14 allocations |
+| `operator`, 5 stages, `pending` | 34,769.8 Ir, 48 allocations | 32,783.9 Ir, 44 allocations |
+
+The first build held the first waiter in place and dropped the list on every scope. That drop was a call on every scope of every request, and the ready request ran 55 Ir more at one hop and 16 Ir more for each operator stage. Dropping the list only on a scope that has had a waiter, out of line, removed that cost.
 
 ### Copies of an item
 

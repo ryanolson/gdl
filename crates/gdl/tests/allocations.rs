@@ -84,8 +84,8 @@ impl Next<u64, u64> for Direct {
 /// A hop makes two child contexts, the attempt and the inner end's scope:
 /// one scope node each, which holds both stop and cancel. A hop with no
 /// backward node boxes one stream: its attempt boundary holds the node
-/// boundary unboxed. Every allocation is on the request path, so this is
-/// an upper bound.
+/// boundary unboxed. The count is exact, so a change that adds an
+/// allocation, or removes one, updates it.
 #[tokio::test]
 async fn a_hop_allocates_two_contexts_and_one_boundary() {
     let ready = Arc::new(Ready);
@@ -96,7 +96,46 @@ async fn a_hop_allocates_two_contexts_and_one_boundary() {
     allocations(&hop).await;
 
     let own = allocations(&hop).await - allocations(&direct).await;
-    assert!(own <= 3, "a hop allocated {own} times");
+    assert_eq!(own, 3, "a hop allocated {own} times");
+}
+
+/// Answers with one item, after its call waits once.
+struct Waits;
+
+impl Sink for Waits {
+    type Req = u64;
+    type Item = u64;
+
+    async fn generate(&self, _cx: Cx, n: u64) -> Result<Items<u64>> {
+        let mut waited = false;
+        std::future::poll_fn(|task| {
+            if std::mem::replace(&mut waited, true) {
+                std::task::Poll::Ready(())
+            } else {
+                task.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+        Ok(items(futures::stream::iter((0..n).map(Ok))))
+    }
+}
+
+/// A call that waits registers the hop's wait for its attempt's end on the
+/// attempt's scope and on the root's, one waiter on each. A scope holds its
+/// first waiter in place, so the wait allocates nothing. Before, each scope
+/// allocated its list of waiters, so a request that waited cost two
+/// allocations more than one that did not. Whether a request waits can
+/// depend on timing, for example on when a blocking thread finishes, so the
+/// count of a request moved with the load on the host.
+#[tokio::test]
+async fn a_call_that_waits_allocates_what_a_ready_call_does() {
+    let ready = Source::new(Hop::new((), SinkStage::new(Arc::new(Ready)), ()));
+    let waits = Source::new(Hop::new((), SinkStage::new(Arc::new(Waits)), ()));
+    allocations(&ready).await;
+    allocations(&waits).await;
+
+    assert_eq!(allocations(&waits).await, allocations(&ready).await);
 }
 
 /// What one `affinity` selection allocates, through the erased selector
