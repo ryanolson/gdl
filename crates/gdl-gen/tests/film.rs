@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::{Running, cargo, generated, get, listener, root, target};
+use common::{Running, WAIT, cargo, generated, get, listener, root, target};
 use gdl_extract::{Offer, Origin, Workspace};
 
 fn example() -> PathBuf {
@@ -251,8 +251,6 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
 
         let accounting = TcpListener::bind("127.0.0.1:0").expect("accounting listener");
         let accounting_address = accounting.local_addr().expect("accounting address");
-        let (events, received) = mpsc::channel();
-        let receiver = std::thread::spawn(move || receive_usage(accounting, events));
         let reservation = TcpListener::bind("127.0.0.1:0").expect("frontend port");
         let frontend = reservation.local_addr().expect("frontend address");
         let roster = scratch.path().join("roster");
@@ -285,11 +283,11 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
                     .expect("segment process"),
             );
             let errors = process.stderr();
-            let system = listener(&errors.find("system listener at", Duration::from_secs(3)));
+            let system = listener(&errors.find("system listener at", WAIT));
             systems.insert(*segment, system);
             processes.push(process);
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + WAIT;
         for system in systems.values().copied() {
             while get(system, "/health").0 != 200 {
                 assert!(Instant::now() < deadline, "segment did not become ready");
@@ -315,6 +313,10 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
             0,
         );
 
+        // Started with the request, so that its bound is the request's and
+        // not the segments' start.
+        let (events, received) = mpsc::channel();
+        let receiver = std::thread::spawn(move || receive_usage(accounting, events));
         let response = generate(frontend, r#"{"text":"hello graph"}"#);
         let chunks: Vec<serde_json::Value> = response
             .lines()

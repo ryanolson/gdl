@@ -7,11 +7,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Chat, ask, get, listener};
-
-/// The longest a case waits for a process to say something it expects.
-/// Generous: a cold start of three processes on a loaded machine.
-const WAIT: Duration = Duration::from_secs(60);
+use common::{Chat, WAIT, ask, get, listener};
 
 /// How long a process may take to exit once it should.
 const EXIT: Duration = Duration::from_secs(15);

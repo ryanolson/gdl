@@ -19,6 +19,12 @@ use std::time::{Duration, Instant};
 /// takes 3 s alone took over 30 s so.
 pub const CARGO_LIMIT: &str = "300";
 
+/// The longest a test waits for a process to say something it expects.
+/// Generous: a cold start of three processes on a loaded machine. It
+/// guards against a hang and claims nothing about speed: the wait ends as
+/// the line comes.
+pub const WAIT: Duration = Duration::from_secs(60);
+
 pub fn root() -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     dir.parent()
@@ -196,15 +202,22 @@ impl Lines {
     }
 
     /// The first line that contains `text`, within `within`; the lines
-    /// before it are dropped.
+    /// before it are dropped. A failure says whether the wait passed or
+    /// the process closed the stream, and shows the lines it dropped.
     pub fn find(&self, text: &str, within: Duration) -> String {
         let deadline = Instant::now() + within;
+        let mut before = Vec::new();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.0.recv_timeout(left) {
                 Ok(line) if line.contains(text) => return line,
-                Ok(_) => {}
-                Err(_) => panic!("no line with {text:?} within {within:?}"),
+                Ok(line) => before.push(line),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("no line with {text:?} within {within:?}, after {before:?}")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the stream closed with no line with {text:?}, after {before:?}")
+                }
             }
         }
     }
