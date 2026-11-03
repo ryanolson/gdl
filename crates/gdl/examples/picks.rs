@@ -3,7 +3,9 @@
 //! run it at two counts and divide the difference by the difference in
 //! picks, so that the setup cancels. `<policy>` is `home_first`,
 //! `one_shard` (`home_first` through `choose_where`, keeping one shard's 3
-//! pools), or `round_robin`.
+//! pools), `round_robin`, or `leased` (`home_first`, keeping a lease the
+//! size of a set router's with each choice, which is told it was accepted
+//! and dropped, as the runtime does).
 //!
 //! ```text
 //! cargo build --release -p gdl --example picks
@@ -16,7 +18,8 @@
 use std::hint::black_box;
 
 use gdl::{
-    Cx, Encoded, HomeFirst, Load, LoadSummary, Pool, PoolPolicy, PoolRequest, PoolState, RoundRobin,
+    ChoiceLease, Cx, Encoded, HomeFirst, Load, LoadSummary, Pool, PoolPolicy, PoolRequest,
+    PoolState, RoundRobin,
 };
 use tokio::time::Instant;
 
@@ -48,10 +51,34 @@ fn main() {
             "round_robin" => RoundRobin
                 .choose(request, black_box(&pools))
                 .map_or(usize::MAX, |choice| choice.at()),
-            other => panic!("no policy `{other}`: home_first, one_shard, or round_robin"),
+            "leased" => HomeFirst
+                .choose(request, black_box(&pools))
+                .map_or(usize::MAX, |choice| {
+                    let (at, lease) = choice.with_lease(Booked([turn; 15])).into_parts();
+                    if let Some(mut lease) = lease {
+                        lease.accepted_at(1);
+                    }
+                    at
+                }),
+            other => panic!("no policy `{other}`: home_first, one_shard, round_robin, or leased"),
         });
     }
     println!("{}", black_box(sink));
+}
+
+/// A lease of 120 bytes, as a set router's record of a pick is.
+struct Booked([u64; 15]);
+
+impl ChoiceLease for Booked {
+    fn accepted(&mut self) {
+        self.0[0] = black_box(self.0[0] + 1);
+    }
+}
+
+impl Drop for Booked {
+    fn drop(&mut self) {
+        black_box(&self.0);
+    }
 }
 
 /// The bench's pools: 3 of each of 4 shards, the third of each in another
