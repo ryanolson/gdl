@@ -9,7 +9,7 @@ use prometheus::{GaugeVec, Opts};
 
 use gdl_model::MetricField;
 
-use super::{Construct, labels, opts};
+use super::{Construct, label_names, opts};
 
 /// A gauge vector that a node fills when the registry is scraped, from a
 /// closure over state it already holds, such as each model's status.
@@ -105,9 +105,9 @@ impl Shared {
 }
 
 impl Construct for ScrapeGaugeVec {
-    fn construct(definition: &MetricField, node: &str) -> prometheus::Result<Self> {
-        let opts = opts(definition, node);
-        let template = GaugeVec::new(opts.clone(), &labels(definition))?;
+    fn construct(definition: &MetricField, labels: &[(&str, &str)]) -> prometheus::Result<Self> {
+        let opts = opts(definition, labels);
+        let template = GaugeVec::new(opts.clone(), &label_names(definition))?;
         Ok(Self {
             shared: Arc::new(Shared {
                 opts,

@@ -18,6 +18,15 @@ Every laptop number here is provisional: Apple M5, macOS, loopback, a shared mac
 
 `gdl::Metrics` has a hidden supertrait that only the derive implements, as `ConfigSchema` does. The source reader reads a metrics type from the derive's attributes, without building the crate. A hand-written impl could register metrics the catalogue never shows. The parsing and the naming checks live in `gdl-syntax`, which the derive and the reader share, so the two cannot accept different definitions. `derive(Node)` registers the definitions of `Build::Metrics` whether or not it names them, so `extract --verify` sees a node that leaves them out of `#[gdl(metrics = ...)]`.
 
+### A host chooses the labels
+
+`Metrics::register` sets `dynamo_endpoint` to the node's name, and the runtime's registry adds the other identity labels. A host whose registry adds all of them, `dynamo_endpoint` too, calls `register_with(registry, &[])`. `register_with` is the one path: the derive's `register` calls it with `dynamo_endpoint`, so a segment's text is the same byte for byte (`a_nodes_text_stays_the_same`).
+
+- **`register` stays a required method, and `register_with` has the default.** `gdl` has outside users, so a new trait method needs a default. Two defaults that call each other would recurse without end in an impl that defines neither.
+- **The default fails closed.** An impl with only `register` can apply `dynamo_endpoint` and no other label, so the default refuses other `labels` with an error. Ignoring them would serve series the host did not ask for. `()` has no metrics, and accepts any `labels`.
+- **gdl refuses what prometheus lets through.** Prometheus takes const labels as a map, so a name given twice loses a value. It keeps const labels apart from a field's own labels, so a shared name shows twice in each series. `check_labels` refuses both before the first field registers.
+- **Rejected: an options struct.** There is one option, so a slice is enough.
+
 ### The `Builder` checks definitions across nodes
 
 Two nodes of a segment may share a metric name only with the same kind, help, labels, and buckets. Prometheus refuses a different help or label set with a message that names neither node. It does not notice a different kind at all. So the `Builder` compares the definitions first and names both nodes.

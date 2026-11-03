@@ -47,11 +47,11 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
         if scrape_gauge(&field.ty) {
             return quote_spanned! {field.ty.span()=>
                 #ident: ::gdl::__private::metric::<::gdl::ScrapeGaugeVec>(
-                    registry, node, &definitions[#index],
+                    registry, labels, &definitions[#index],
                 )?
             };
         }
-        quote!(#ident: ::gdl::__private::metric(registry, node, &definitions[#index])?)
+        quote!(#ident: ::gdl::__private::metric(registry, labels, &definitions[#index])?)
     });
     let ident = &input.ident;
     Ok(quote! {
@@ -64,7 +64,17 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
                 registry: &::gdl::prometheus::Registry,
                 node: &str,
             ) -> ::gdl::prometheus::Result<Self> {
+                <Self as ::gdl::Metrics>::register_with(
+                    registry,
+                    &[(::gdl::__private::ENDPOINT_LABEL, node)],
+                )
+            }
+            fn register_with(
+                registry: &::gdl::prometheus::Registry,
+                labels: &[(&str, &str)],
+            ) -> ::gdl::prometheus::Result<Self> {
                 let definitions = <Self as ::gdl::Metrics>::definitions();
+                ::gdl::__private::check_labels(&definitions, labels)?;
                 ::core::result::Result::Ok(Self { #(#fields),* })
             }
         }

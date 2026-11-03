@@ -167,10 +167,11 @@ pub mod __runtime {
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::metrics::{Construct, MetricsDerived, metric};
+    pub use crate::metrics::{Construct, MetricsDerived, check_labels, metric};
     pub use crate::select::{ProjectionDerived, SameType, field};
     pub use gdl_message::__private::*;
     pub use gdl_model::__private::*;
+    pub use gdl_model::ENDPOINT_LABEL;
 
     use crate::{Backward, Forward, Frontend, Operator, Sink};
 

@@ -94,3 +94,24 @@ A crate that registers a collector through a field type named like a prometheus 
 1. Make the field a `gdl::ScrapeGaugeVec`, with the same name, doc comment, and labels. The catalogue entry does not change.
 2. Delete the alias, the `Construct` impl, and the `Collector` impl.
 3. Where the crate hands the collector its state (the gate's `watch(view)`), call `fill_with` with a closure over that state. Set each series with `set`, and set none before the state is ready.
+
+## 5. Register on a host's registry
+
+A segment registers a node's metrics for you. A program that hosts a node without a segment registers them itself, with one of two calls:
+
+- `register(registry, node)` adds `dynamo_endpoint` with the node's name to each series.
+- `register_with(registry, labels)` adds exactly `labels`.
+
+Use `register_with` when the registry adds the identity labels itself, as a registry from `Registry::new_custom` does. Pass the empty slice, and each series has each label once:
+
+```rust
+let labels = identity_labels(); // a HashMap of the host's four labels
+let registry = Registry::new_custom(Some("dynamo_component".into()), Some(labels))?;
+let metrics = EngineMetrics::register_with(&registry, &[])?;
+```
+
+With `register` on that registry, a series has `dynamo_endpoint` twice, and Prometheus refuses the scrape.
+
+- `register(registry, node)` is `register_with(registry, &[("dynamo_endpoint", node)])`. The text they serve is the same.
+- A label that the slice names twice, or that a field also has, is refused with an error, and nothing is registered.
+- A registry does not show the labels it adds, so gdl cannot compare them with the slice. Do not pass a label that the registry adds.
