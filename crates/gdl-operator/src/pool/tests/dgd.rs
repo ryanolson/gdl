@@ -240,6 +240,43 @@ async fn a_held_generation_cannot_hide_a_running_dgd_segment() {
     assert_eq!(step(&fake), Some(StopStep::Segments));
 }
 
+/// The pool schema admits DGD JSON text, so the render must refuse a non-object spec without panicking.
+#[tokio::test]
+async fn a_nonobject_dgd_spec_is_refused_without_panicking() {
+    for spec in [
+        serde_json::json!(null),
+        serde_json::json!([]),
+        serde_json::json!("not an object"),
+        serde_json::json!(true),
+        serde_json::json!(7),
+    ] {
+        let mut pool = dgd_pool(false);
+        let mut dgd: Value = serde_json::from_str(pool.spec.pool.dgd.as_deref().expect("the DGD"))
+            .expect("DGD JSON");
+        dgd["spec"] = spec.clone();
+        pool.spec.pool.dgd = Some(dgd.to_string());
+        let mut fake = Fake::with(pool);
+        fake.dgds = true;
+
+        fake.reconcile(0).await.expect("refuse the malformed spec");
+
+        assert!(
+            fake.status()
+                .conditions
+                .iter()
+                .any(|condition| condition.type_ == "Applied" && condition.reason == "BadSpec"),
+            "spec {spec}: {:?}",
+            fake.status()
+        );
+        let log = fake.log();
+        assert!(
+            !log.iter()
+                .any(|entry| entry.starts_with("create ") || entry.starts_with("apply ")),
+            "spec {spec} must apply nothing: {log:?}"
+        );
+    }
+}
+
 /// A DGD rollout can leave pods from the previous segment component using the hub.
 #[tokio::test]
 async fn a_component_move_keeps_running_segment_pods_in_the_stop() {
