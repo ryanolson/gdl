@@ -191,21 +191,35 @@ fn kept(lease: impl ChoiceLease) -> (u64, u64) {
     (allocated, freed)
 }
 
-/// A lease of no size.
+/// A lease of no size. It has nowhere to keep its counts, so it keeps them
+/// in its thread, and a test reads only what it added: tests run in any
+/// order, on their own threads or on one.
 struct Empty;
 
-static EMPTY_TOLD: AtomicUsize = AtomicUsize::new(0);
-static EMPTY_DROPPED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// How often an `Empty` on this thread was told, and dropped.
+    static EMPTY: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+impl Empty {
+    /// How often an `Empty` was told and dropped while `f` ran.
+    fn seen<R>(f: impl FnOnce() -> R) -> (R, (u64, u64)) {
+        let before = EMPTY.with(Cell::get);
+        let out = f();
+        let after = EMPTY.with(Cell::get);
+        (out, (after.0 - before.0, after.1 - before.1))
+    }
+}
 
 impl ChoiceLease for Empty {
     fn accepted(&mut self) {
-        EMPTY_TOLD.fetch_add(1, Ordering::SeqCst);
+        EMPTY.with(|n| n.set((n.get().0 + 1, n.get().1)));
     }
 }
 
 impl Drop for Empty {
     fn drop(&mut self) {
-        EMPTY_DROPPED.fetch_add(1, Ordering::SeqCst);
+        EMPTY.with(|n| n.set((n.get().0, n.get().1 + 1)));
     }
 }
 
@@ -373,23 +387,18 @@ fn a_lease_that_panics_when_dropped_is_freed_once() {
 /// own address and dropped once, and what keeping them allocates is freed.
 #[test]
 fn a_lease_of_any_size_and_alignment_is_dropped_once() {
-    let (allocated, freed) = kept(Empty);
+    let ((allocated, freed), seen) = Empty::seen(|| kept(Empty));
     assert_eq!(freed, allocated);
-    assert_eq!(
-        (
-            EMPTY_TOLD.load(Ordering::SeqCst),
-            EMPTY_DROPPED.load(Ordering::SeqCst)
-        ),
-        (1, 1)
-    );
+    assert_eq!(seen, (1, 1));
     let seen = Seen::new();
     let (allocated, freed) = kept(Wide::new(&seen));
     assert_eq!(freed, allocated);
     assert_eq!((seen.accepted(), seen.dropped()), (1, 1));
 }
 
+/// The tests that keep an `Empty` pass in either order, on their own
+/// threads or on one, as a runner may schedule them.
 #[test]
-#[ignore = "F1: Empty counters are shared across the lease tests"]
 fn zero_sized_checks_are_independent_of_test_order() {
     std::thread::spawn(a_leased_pick_allocates_once)
         .join()
@@ -397,6 +406,8 @@ fn zero_sized_checks_are_independent_of_test_order() {
     std::thread::spawn(a_lease_of_any_size_and_alignment_is_dropped_once)
         .join()
         .expect("alignment check");
+    a_leased_pick_allocates_once();
+    a_lease_of_any_size_and_alignment_is_dropped_once();
 }
 
 /// A choice is two words, with or without a lease, and a policy's return is
