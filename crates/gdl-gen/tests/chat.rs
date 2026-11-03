@@ -362,7 +362,7 @@ fn a_terminal_interrupt_stops_every_segment() {
 }
 
 /// A preparation that fails ends `run` with its own problem, which it
-/// printed: here a source pinned to a frontend, which `run` refuses. The
+/// printed: here a spec that cannot be read. The
 /// preparation's flag belongs to `run` alone, and no usage line shows it.
 #[test]
 fn a_failed_preparation_shows_its_own_problem() {
@@ -372,7 +372,7 @@ fn a_failed_preparation_shows_its_own_problem() {
             "gdl",
             "run",
             "--spec",
-            "examples/http/gdl.toml",
+            "examples/chat/missing.toml",
             "--target-dir",
         ])
         .arg(target("gdl-gen-tests"))
@@ -382,10 +382,7 @@ fn a_failed_preparation_shows_its_own_problem() {
         .expect("cargo gdl run");
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(!run.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("this graph's source is pinned to a frontend"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("examples/chat/missing.toml"), "{stderr}");
     assert!(!stderr.contains("plan"), "{stderr}");
     assert!(run.stdout.is_empty(), "{:?}", run.stdout);
 

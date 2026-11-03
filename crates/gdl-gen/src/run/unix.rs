@@ -260,18 +260,30 @@ pub(super) fn supervise(plan: &Plan, stops: &Stops) -> Result<(), Error> {
         .iter()
         .map(|segment| launch(segment, false))
         .collect::<Result<_, _>>()?;
-    watch(launch(&plan.front, true)?, others, stops)
+    let front = launch(&plan.front, plan.frontend.is_none())?;
+    if let Some(frontend) = &plan.frontend {
+        let segment = &plan.front.name;
+        match &frontend.listen {
+            Some(listen) => println!("frontend `{}` listens on {listen}", frontend.source),
+            None => println!(
+                "frontend `{}` listens on its own default address: `[settings.{segment}.frontend] listen` sets it",
+                frontend.source
+            ),
+        }
+    }
+    watch(front, others, stops)
 }
 
-/// Start `segment`. The source's segment (`front`) takes this process's
-/// stdin and stdout. The others read nothing, and write to its stderr,
-/// so that stdout holds only the answers.
-fn launch(segment: &Segment, front: bool) -> Result<Running, Error> {
+/// Start `segment`. A segment that reads requests (`reads`) on stdin takes
+/// this process's stdin and stdout. The others read nothing, and write to
+/// its stderr, so that stdout holds only the answers, or the frontend's
+/// address.
+fn launch(segment: &Segment, reads: bool) -> Result<Running, Error> {
     let mut command = Command::new(&segment.binary);
     command.arg(&segment.settings);
     #[cfg(target_os = "linux")]
     stop_with_run(&mut command);
-    if !front {
+    if !reads {
         let stderr = std::io::stderr()
             .as_fd()
             .try_clone_to_owned()
@@ -289,6 +301,8 @@ pub(super) fn watch(front: Running, others: Vec<Running>, stops: &Stops) -> Resu
     all.extend(others);
     let mut first = None;
     let mut stopping: Option<Instant> = None;
+    // Whether `run` has sent its one SIGTERM to the segments.
+    let mut sent = false;
     loop {
         for (index, running) in all.iter_mut().enumerate() {
             if running.reap()?.is_some() && first.is_none() {
@@ -310,10 +324,19 @@ pub(super) fn watch(front: Running, others: Vec<Running>, stops: &Stops) -> Resu
                 for running in &all {
                     running.stop();
                 }
+                sent = true;
                 stopping = Some(Instant::now());
             }
             None => {}
             Some(since) => {
+                // A SIGTERM after the SIGINT is the user's second stop, which
+                // ends each drain at once.
+                if terminated && !sent {
+                    for running in &all {
+                        running.stop();
+                    }
+                    sent = true;
+                }
                 for running in &mut all {
                     if running.status.is_none() && since.elapsed() > running.grace {
                         let _ = running.child.kill();

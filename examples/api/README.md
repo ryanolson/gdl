@@ -18,6 +18,14 @@ Entry nodes run beside the frontend. The shared pipeline can span segments. Inde
 
 From the repository root:
 
+Run both segments on this machine, then call the paths below. The frontend listens on its default, `127.0.0.1:8082`. Ctrl-C stops the segments:
+
+```bash
+cargo run -p gdl-gen -- run --spec examples/api/gdl.toml
+```
+
+To build the segments and run them yourself:
+
 ```bash
 cargo run -p gdl-gen -- build --spec examples/api/gdl.toml
 ```

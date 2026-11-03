@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use crate::Offers;
 #[cfg(unix)]
-use crate::deployment::{merge_config, stdin_source};
+use crate::deployment::{merge_config, pinned_source, stdin_source};
 use crate::{Build, Error, Spec};
 
 /// The file in the settings directory that a preparation writes its plan
@@ -87,7 +87,7 @@ pub fn run(_: Command) -> Result<(), Error> {
 /// each segment's settings and the plan for `run` in `dir`.
 ///
 /// Errors: a problem of the spec; a spec of several layouts; a source that
-/// is pinned to a frontend or cannot read stdin; a failed build.
+/// is neither pinned to a frontend nor reads stdin; a failed build.
 #[cfg(unix)]
 pub fn prepare_run(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<(), Error> {
     let plan = prepare(spec, target, how, dir)?;
@@ -113,6 +113,19 @@ pub fn prepare_run(
 struct Plan {
     front: Segment,
     others: Vec<Segment>,
+    /// The frontend the front serves with, when one is pinned on the
+    /// source; else the front reads JSON requests on stdin.
+    frontend: Option<Frontend>,
+}
+
+/// A frontend pinned on the source, and where it listens.
+#[cfg(unix)]
+#[derive(Serialize, Deserialize)]
+struct Frontend {
+    source: String,
+    /// Its `[frontend] listen` setting, when the spec sets one as text:
+    /// gdl does not know the frontend's own default.
+    listen: Option<String>,
 }
 
 /// One segment as `run` starts it.
@@ -132,16 +145,16 @@ fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, 
     let laid = spec.only_layout("`run`")?;
     // Before the build: a spec `run` cannot serve is refused at once.
     let checked = crate::check(spec, target, Offers::Read)?;
-    let source = match stdin_source(spec, &checked.manifest) {
-        Ok(Some(source)) => source,
+    let (source, pinned) = match stdin_source(spec, &checked.manifest) {
+        Ok(Some(source)) => (source, false),
         Ok(None) => {
-            return Err(Error::new(
-                "`run` serves JSON requests on stdin, and this graph's source is pinned to a frontend: build the segments and run them yourself",
-            ));
+            let source = pinned_source(spec, &checked.manifest)
+                .ok_or_else(|| Error::new("no source is pinned to a frontend"))?;
+            (source, true)
         }
         Err(_) => {
             return Err(Error::new(
-                "`run` needs a source that reads JSON requests on stdin: the graph's only source, whose request is one value, and whose request and item cross segments",
+                "`run` needs a source pinned to a frontend, or one that reads JSON requests on stdin: the graph's only source, whose request is one value, and whose request and item cross segments",
             ));
         }
     };
@@ -175,8 +188,23 @@ fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, 
             others.push(segment);
         }
     }
-    let front = front.ok_or_else(|| Error::new(format!("no segment hosts source `{source}`")))?;
-    Ok(Plan { front, others })
+    let front: Segment =
+        front.ok_or_else(|| Error::new(format!("no segment hosts source `{source}`")))?;
+    let frontend = pinned.then(|| Frontend {
+        listen: spec
+            .settings
+            .get(&front.name)
+            .and_then(|table| table.get("frontend"))
+            .and_then(|frontend| frontend.get("listen"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+        source,
+    });
+    Ok(Plan {
+        front,
+        others,
+        frontend,
+    })
 }
 
 /// A segment's settings under `run`: a listener on a free loopback port,

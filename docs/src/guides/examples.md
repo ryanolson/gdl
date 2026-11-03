@@ -59,11 +59,11 @@ curl http://127.0.0.1:8081/generate -H 'content-type: application/json' -d '{"te
 curl http://127.0.0.1:8081/generate -H 'content-type: application/json' -d '{"text":"hello source","stream":false}'
 ```
 
-The first request returns NDJSON, one `item` for each word. The second returns `{"text":"hello source"}`. See [Hosted frontends and service entries](frontends.md) and `examples/http/README.md`.
+The first request returns NDJSON, one `item` for each word. The second returns `{"text":"hello source"}`. To run the generated segment instead, use `cargo run -p gdl-gen -- run --spec examples/http/gdl.toml`. The frontend listens on its default, `127.0.0.1:8081`, and Ctrl-C stops it. See [Hosted frontends and service entries](frontends.md) and `examples/http/README.md`.
 
 ## api
 
-`ApiFrontend` hosts `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` on one listener. Each entry has its own request and response types, and all three call one shared `Prompt`/`Chunk` pipeline. The schemas are small demonstrations, not the full OpenAI or Anthropic APIs. `examples/api/README.md` has the steps to generate the segments, write the two config files, and call each path. `examples/api/deploy.toml` is the deployment spec for `cargo gdl compose` and the composer's Deploy tab.
+`ApiFrontend` hosts `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` on one listener. Each entry has its own request and response types, and all three call one shared `Prompt`/`Chunk` pipeline. The schemas are small demonstrations, not the full OpenAI or Anthropic APIs. `examples/api/README.md` has the steps to generate the segments, write the two config files, and call each path. `cargo run -p gdl-gen -- run --spec examples/api/gdl.toml` runs both segments in one step. The frontend listens on its default, `127.0.0.1:8082`, and Ctrl-C stops them. `examples/api/deploy.toml` is the deployment spec for `cargo gdl compose` and the composer's Deploy tab.
 
 ## film
 

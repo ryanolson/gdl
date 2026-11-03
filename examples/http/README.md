@@ -46,6 +46,12 @@ Run the generated service:
 examples/http/target/gdl/http/gdl/bin/debug/http-main /tmp/gdl-http.toml
 ```
 
+Or build and run it in one step. The frontend listens on its default, `127.0.0.1:8081`, and Ctrl-C stops it:
+
+```bash
+cargo run -p gdl-gen -- run --spec examples/http/gdl.toml
+```
+
 The graph spec pins the source explicitly under `[nodes] pin`. Without a source pin, a graph has a programmatic entry point. Its generated binary uses the existing JSON-lines frontend when the types support it.
 
 Build tests before the bounded run:

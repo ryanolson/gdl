@@ -150,6 +150,32 @@ mod processes {
         assert_eq!((play.stops("front"), play.stops("post")), (0, 0));
     }
 
+    /// A SIGTERM after a SIGINT is the user's second stop: it goes once to
+    /// each segment still running, which then ends at once, rather than
+    /// when its grace runs out.
+    #[test]
+    fn a_termination_after_an_interrupt_is_sent_once() {
+        let play = Play::new();
+        let stops = Stops::default();
+        stops.interrupted.store(true, Ordering::Relaxed);
+        let front = play.segment("front", &[], COUNTS_STOPS, GRACE);
+        let others = vec![play.segment("post", &[], COUNTS_STOPS, GRACE)];
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                play.ready("front");
+                play.ready("post");
+                stops.terminated.store(true, Ordering::Relaxed);
+            });
+            watch(front, others, &stops).expect("a clean stop");
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited out the grace"
+        );
+        assert_eq!((play.stops("front"), play.stops("post")), (1, 1));
+    }
+
     /// A SIGTERM to `run` goes once to every segment.
     #[test]
     fn a_termination_is_sent_once_to_each_segment() {

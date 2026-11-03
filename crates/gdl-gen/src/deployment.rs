@@ -857,11 +857,23 @@ pub(crate) fn stdin_source(
     spec: &Spec,
     manifest: &gdl_model::Manifest,
 ) -> Result<Option<String>, Error> {
-    let pinned = |name: &str| {
-        spec.bind.contains_key(name)
-            || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
-    };
-    reads_stdin(manifest, pinned)
+    reads_stdin(manifest, |name| pinned(spec, name))
+}
+
+/// The source that is pinned to a frontend, if one is.
+pub(crate) fn pinned_source(spec: &Spec, manifest: &gdl_model::Manifest) -> Option<String> {
+    manifest
+        .nodes
+        .iter()
+        .find(|n| n.role == gdl_model::Role::Source && pinned(spec, &n.name))
+        .map(|n| n.name.clone())
+}
+
+/// Whether node `name` is pinned: in `[nodes]` of a graph spec, or in
+/// `[bind]` of a contract spec.
+fn pinned(spec: &Spec, name: &str) -> bool {
+    spec.bind.contains_key(name)
+        || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
 }
 
 /// [`stdin_source`], with the pins as `pinned` says.
