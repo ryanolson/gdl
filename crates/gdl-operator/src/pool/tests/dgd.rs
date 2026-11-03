@@ -237,3 +237,63 @@ async fn a_held_generation_cannot_hide_a_running_dgd_segment() {
     );
     assert_eq!(step(&fake), Some(StopStep::Segments));
 }
+
+/// A DGD rollout can leave pods from the previous segment component using the hub.
+#[tokio::test]
+async fn a_component_move_keeps_running_segment_pods_in_the_stop() {
+    let fake = running_dgd(false).await;
+    {
+        let mut state = fake.state();
+        let pool = state.pool.as_mut().expect("a pool");
+        pool.metadata.generation = Some(2);
+        pool.spec.pool.segments[0].component = Some("Worker".into());
+        let mut dgd: Value = serde_json::from_str(pool.spec.pool.dgd.as_deref().expect("the DGD"))
+            .expect("DGD JSON");
+        dgd["spec"]["components"][0]["podTemplate"] = serde_json::json!({
+            "spec": {"containers": [{"name": "main", "image": "registry.example/dynamo:tag"}]},
+        });
+        dgd["spec"]["components"][1]["podTemplate"] = serde_json::json!({
+            "spec": {"containers": [{"name": "main", "image": "registry.example/engine:tag"}]},
+        });
+        pool.spec.pool.dgd = Some(dgd.to_string());
+        state.version += 1;
+    }
+    fake.reconcile(1_000)
+        .await
+        .expect("apply the component move");
+    assert_eq!(fake.status().held, None);
+    assert!(
+        fake.log()
+            .contains(&"apply DynamoGraphDeployment/p".to_string())
+    );
+    assert_eq!(
+        fake.state().objects[&(Kind::DynamoGraphDeployment, "p".into())]
+            .live
+            .components,
+        ["Worker"],
+        "the DGD now marks only the destination component"
+    );
+    // Dynamo has not retired the previous template's Frontend pods yet.
+    // Scaling the destination to zero does not end those source pods.
+    fake.state().dgd_pods.insert("Worker".into(), 0);
+    fake.state().log.clear();
+    fake.delete(false);
+    fake.reconcile(2_000).await.expect("stop the gdl segment");
+    fake.settle();
+    fake.reconcile(3_000)
+        .await
+        .expect("wait for the source pods");
+    fake.settle();
+    fake.reconcile(4_000).await.expect("keep waiting");
+
+    assert_eq!(fake.state().dgd_pods["Frontend"], 2);
+    let log = fake.log();
+    assert!(
+        !released(&fake)
+            && !log
+                .iter()
+                .any(|entry| entry.starts_with("write Deployment/p ")),
+        "the previous template's segment pods still need the hub: {log:?}"
+    );
+    assert_eq!(step(&fake), Some(StopStep::Segments));
+}
