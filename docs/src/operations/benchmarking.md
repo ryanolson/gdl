@@ -1,10 +1,10 @@
 # Benchmarking
 
-This chapter says what a performance number in this book may claim and how to take one. It records what the gb300 host found, now history, and the baselines on brev-x86-cpu, which replaced it. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
+This chapter says what a performance number in this book may claim and how to take one. It records what a quiet 72-core aarch64 Neoverse-V2 host found, now history, and the baselines on an 8-core x86_64 EPYC virtual machine, which replaced it. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
 
-Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. Many tables came from the gb300 bench host: a 72-core Neoverse-V2 server that ran one bench job at a time, where `perf` could count and sample. The owner counted it as the dedicated machine for the claims in [Claims checked on gb300](#claims-checked-on-gb300). gb300 is no longer available. Every number from it is marked **gb300 history**. It compares only with other gb300 numbers.
+Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. Many tables came from the Neoverse-V2 host: a 72-core aarch64 server that ran one bench job at a time, where `perf` could count and sample. The owner counted it as the dedicated machine for the claims in [Claims checked on the Neoverse-V2 host](#claims-checked-on-the-neoverse-v2-host). That host is no longer available. Every number from it is marked **Neoverse-V2 history**. It compares only with other Neoverse-V2 numbers.
 
-The current bench host is brev-x86-cpu, an 8-core x86 virtual machine ([Baselines on brev-x86-cpu](#baselines-on-brev-x86-cpu)). No table mixes the two hosts, and no brev number is compared with a gb300 number.
+The current bench host is the x86 VM ([Baselines on the x86 VM](#baselines-on-the-x86-vm)). No table mixes the two hosts, and no number from the x86 VM is compared with a Neoverse-V2 number.
 
 ## What a shared machine may claim
 
@@ -27,7 +27,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Measurement traps
 
-- **Kernel instructions were noise on gb300 (history).** About half of a crossing request's instructions run in the kernel: futex waits, epoll, and socket calls. That half varies by up to 15% between rounds of the same build, because it follows how the threads are scheduled. The user half varies by under 1%. Counted together, two segments ranged over ±7% and settled nothing at 1%. The user count leaves out the system calls a change adds, so a change that adds them needs its own check.
+- **Kernel instructions were noise on a quiet 72-core aarch64 Neoverse-V2 host (history).** About half of a crossing request's instructions run in the kernel: futex waits, epoll, and socket calls. That half varies by up to 15% between rounds of the same build, because it follows how the threads are scheduled. The user half varies by under 1%. Counted together, two segments ranged over ±7% and settled nothing at 1%. The user count leaves out the system calls a change adds, so a change that adds them needs its own check.
 - **A run under compile load is not a number.** One full run showed `request/gdl` at +22% and several `velo-direct` controls at +8% to +14% while the workspace suite compiled. None of it reproduced when the run was repeated alone.
 - **Resident memory is wrong for held memory.** The system allocator keeps freed pages resident, so resident memory grows only for whichever path runs first. Use live heap bytes from a counting allocator.
 - **A bench can allocate for itself.** Extra velo nodes that a bench starts allocate in the background while it counts. A rise of 1.5 allocations per request came from the bench, not from gdl.
@@ -36,7 +36,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Gates
 
-The gates are relative: base and change are built under the same profile and compared. The gb300 history numbers in [Hot paths](hot-paths.md) and in the gate tables of this book are under Cargo's defaults (A). The brev-x86-cpu baselines are under B.
+The gates are relative: base and change are built under the same profile and compared. The numbers from a quiet 72-core aarch64 Neoverse-V2 host (history) in [Hot paths](hot-paths.md) and in the gate tables of this book are under Cargo's defaults (A). The baselines on an 8-core x86_64 EPYC virtual machine are under B.
 
 | Path | A change may cost |
 |---|---|
@@ -47,7 +47,7 @@ The gates are relative: base and change are built under the same profile and com
 
 ## Dedicated machines
 
-The claims a laptop measured wait for a machine where the spread is small. The gb300 host stood in for machine 1, on Arm, until it was lost. brev-x86-cpu runs the benches now. It has no hardware counters, so it counts instructions with callgrind, which compares a base and a change within one job. Machine 2 does not exist yet.
+The claims a laptop measured wait for a machine where the spread is small. A quiet 72-core aarch64 Neoverse-V2 host stood in for machine 1, on Arm, until it was lost. An 8-core x86_64 EPYC virtual machine runs the benches now. It has no hardware counters, so it counts instructions with callgrind, which compares a base and a change within one job. Machine 2 does not exist yet.
 
 | # | Setup | Settles |
 |---|---|---|
@@ -59,11 +59,11 @@ Set the performance governor, fix SMT, pin the bench with `taskset` to isolated 
 
 Still to measure on machine 2: time to first item and inter-item p50 and p99 for a three-segment graph, requests per second at saturation, how long a deployment-wide stop takes to drain under load, and the bring-up time to `ready`.
 
-## Claims checked on gb300
+## Claims checked on the Neoverse-V2 host
 
-**gb300 history.** These results stand as measured and compare only with each other. The guards that are measured again run on brev-x86-cpu ([Baselines on brev-x86-cpu](#baselines-on-brev-x86-cpu)).
+**Neoverse-V2 history.** These results stand as measured and compare only with each other. The guards that are measured again run on an 8-core x86_64 EPYC virtual machine ([Baselines on the x86 VM](#baselines-on-the-x86-vm)).
 
-| Claim | Laptop result | gb300, user instructions | Holds? |
+| Claim | Laptop result | Neoverse-V2, user instructions | Holds? |
 |---|---|---|---|
 | Velo's `retired()` unused costs nothing | 112.6k against 112.7k per stream (prototype) | Mux +589 per stream (+0.60%), median beyond the base range. Per-stream TCP within the spread | No: it costs 0.6% |
 | Reply renewal costs nothing per request | Within the noise of a 57 us crossing | Wall time only: every row within the spread | Yes |
@@ -78,7 +78,7 @@ Codec timings are not in this list. They are measured in time, not instructions,
 
 ### Setup
 
-gb300: aarch64 Neoverse-V2, 72 cores, Linux 6.17 with 64 KiB pages, performance governor. Every run is pinned to cores 8 to 15 (`nproc` 8 under `taskset`). rustc 1.93.1, the bench profile as shipped, measured on 2026-10-27. Each table gives the load average at the start of its rounds. A service on the host restarted in a loop during some runs. It raised the load to 15 at times. The user counts did not follow it.
+The Neoverse-V2 host: aarch64, 72 cores, Linux 6.17 with 64 KiB pages, performance governor. Every run is pinned to cores 8 to 15 (`nproc` 8 under `taskset`). rustc 1.93.1, the bench profile as shipped, measured on 2026-10-27. Each table gives the load average at the start of its rounds. A service on the host restarted in a loop during some runs. It raised the load to 15 at times. The user counts did not follow it.
 
 Each comparison builds every commit in turn in one worktree and one target directory, and copies each binary aside. Each round runs every build at 10,000 and 20,000 requests under `perf stat`. The order of the builds and of the counts is reversed every other round. The figure is (count at 20,000 − count at 10,000) / 10,000 user instructions: the median of the rounds, with their range. A change is real only when its median is outside the range of the base.
 
@@ -209,7 +209,7 @@ The fit through zero is 2,105 per visit. Resampling the thirty rounds of each se
 | two segments (one stream sent) | 306,621 (305,854 to 308,038) | 309,999 (308,367 to 312,344) | +3,378 (+1.10%) |
 | three segments (two streams sent) | 546,726 (544,540 to 547,989) | 558,658 (551,915 to 559,340) | +11,931 (+2.18%) |
 
-- **Two and three segments are beyond the spread.** Every round of the change is above every round of the base. The owner accepted +1.5% on three segments from the laptop. gb300 measures +2.18%.
+- **Two and three segments are beyond the spread.** Every round of the change is above every round of the base. The owner accepted +1.5% on three segments from the laptop. The Neoverse-V2 host measures +2.18%.
 - **The owner accepts +2.18% on three segments for now** (2026-10-27), and the cost is to be watched. The three-segment row is a guarded row: [Hot paths](hot-paths.md#roster-stream-retirement) gives the check that a change to rosters or to stream retirement runs.
 - **Wall time** (`remote`, three runs, load average 1.8 to 10.1): the change median of `request/reference-2-segments` is above the base range, +3.7% against the base median. The other five rows, `concurrent-32x1000-16B/lean-2-segments` among them, are inside it.
 
@@ -268,9 +268,9 @@ User instructions per request, the change minus the base. The medians of the thr
 
 - **Wall time** (`remote` and `hop`, three runs, load average 1.8 to 5.6): these change medians are outside the base range, given against the base median: `request/gdl` in the pools series (+1.2%) and in the offers (−0.4%), `request/reference-1-segment` in the pools series (−2.4%) and in the offers (+0.7%), and `reference-items/2-segments` in the watch and roster series (+0.4%). The other rows are inside it.
 
-## Baselines on brev-x86-cpu
+## Baselines on the x86 VM
 
-brev-x86-cpu is an 8-core x86 virtual machine (AMD EPYC 7B13), measured from 2026-10-27, rustc 1.93.1, bench profile B (thin LTO, one codegen unit). It has no performance-monitoring unit: `perf` reports `instructions:u` as not supported, even as root. Instruction rows are therefore counted in software, with valgrind's callgrind, as **callgrind Ir**. Callgrind Ir is a series of its own. It counts user instructions of every thread under an emulator that runs the threads one at a time. Never compare it with a gb300 `perf` count, and compare a base and a change only inside one job.
+The x86 VM is an 8-core x86_64 virtual machine (AMD EPYC 7B13), measured from 2026-10-27, rustc 1.93.1, bench profile B (thin LTO, one codegen unit). It has no performance-monitoring unit: `perf` reports `instructions:u` as not supported, even as root. Instruction rows are therefore counted in software, with valgrind's callgrind, as **callgrind Ir**. Callgrind Ir is a series of its own. It counts user instructions of every thread under an emulator that runs the threads one at a time. Never compare it with a `perf` count from the Neoverse-V2 host, and compare a base and a change only inside one job.
 
 ### Wall time
 
@@ -287,7 +287,7 @@ for run in 1 2 3; do
 done
 ```
 
-These rows are unconfirmed. brev-x86-cpu is a shared VM whose wall times have not been shown to hold still, so no decision rests on them until a host that can time is in place. They are recorded here so that host has something to compare with. Three runs each:
+These rows are unconfirmed. The x86 VM is shared, and its wall times have not been shown to hold still, so no decision rests on them until a host that can time is in place. They are recorded here so that host has something to compare with. Three runs each:
 
 | Row | 16 B | 1 KiB |
 |---|---|---|
@@ -336,7 +336,7 @@ Per request, 200 and 400 requests:
 | three segments | 476,806 (465,913 to 490,129) | 473,906 (470,017 to 484,930) | within the spread |
 
 - **Metrics cost about 750 Ir per visit** on one and two segments. Within one round, on − off per visit ranges from −483 to 2,214 on one segment and from −241 to 1,853 on two. Three segments spread over ±3%, which hides a cost of this size.
-- **Callgrind Ir is not the gb300 count.** It is another machine and another counter, so the 750 here and the 2,100 on gb300 are not a change. The budget of 2,000 per visit was set on hardware counters.
+- **Callgrind Ir is not the Neoverse-V2 count.** It is another machine and another counter, so the 750 here and the 2,100 on the Neoverse-V2 host are not a change. The budget of 2,000 per visit was set on hardware counters.
 
 Per item, 1,000 and 2,000 items on one stream (the guard of `crossing-item-send`):
 
@@ -359,7 +359,7 @@ At 16 B the gdl crossing costs 464 Ir per item more than velo alone, beyond both
 | three segments | 491,043 (468,303 to 496,113) | 484,560 (478,228 to 496,365) | 478,836 (465,894 to 483,167) |
 
 - **Two segments: live rosters add 1,937 Ir (+0.70%)**, with the change median above the base range.
-- **Three segments: inside the spread.** Its rounds spread over ±3% under callgrind, wider than any other setup here, so this row cannot show the 2% that gb300 measured. A guard on this host reads the two-segment row first.
+- **Three segments: inside the spread.** Its rounds spread over ±3% under callgrind, wider than any other setup here, so this row cannot show the 2% that the Neoverse-V2 host measured. A guard on this host reads the two-segment row first.
 - **Larger counts do not settle three segments.** A second job ran three segments only, at 400 and 800 requests, with the same three builds and seven rounds. The load average was 3.5 falling to 1.6. The base rounds fall in two groups, 481k to 483k and 492k to 494k, so the base still spreads ±1.4%:
 
 | Three segments, 400 and 800 requests | Median (range) |
@@ -403,7 +403,7 @@ cargo bench -p gdl -p gdl-runtime --bench choose --bench followed --bench remote
 
 The profile reaches velo, a git dependency. In the build's `-v` output, velo's `rustc` line has `-C codegen-units=1 -C linker-plugin-lto` under B, against `-C embed-bitcode=no` under A, and each bench binary's line has `-C lto=thin`.
 
-**Setup (gb300 history).** The gb300 bench host (Neoverse-V2, 72 cores, Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, before the workspace set a profile, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
+**Setup (Neoverse-V2 history).** A quiet 72-core aarch64 Neoverse-V2 host (Linux 6.17.0, 64 KiB pages), rustc 1.93.1, gdl at `51b8015`, before the workspace set a profile, velo `e892f87`. Each config is one job: a clean build into a fresh target directory, then the runs. Every job built from the same absolute path, because two builds of identical sources in two directories differed by 7% in instructions. The criterion rows ran on core 5, or on cores 16 to 23 for rows that start a runtime and velo nodes, with 1 s warm-up and 3 s measurement:
 
 ```bash
 cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
@@ -453,7 +453,7 @@ The instruction counts are `perf stat -e instructions:u` on cores 16 to 23 over 
 
 The builds use all 72 cores. The segment is built with `cargo build --release -p chat-front` in `examples/chat`, into its own fresh target directory.
 
-The same builds on a spark host (aarch64, 20 cores, shared with other builds, load 3.5 to 10.1), at gdl `a5e050a`, after the workspace set its profiles, each into a fresh target directory. B and E are the workspace's and the exported segment's own profiles. A is set through `CARGO_PROFILE_*` variables. The segment is `chat/front` from `cargo gdl export --spec examples/chat/gdl.toml`, built with `cargo build --release --manifest-path chat/front/Cargo.toml`. Its manifest carries E, and the archive has no lock file, so it resolved current crate versions.
+The same builds on a 20-core aarch64 host shared with other builds (load 3.5 to 10.1), at gdl `a5e050a`, after the workspace set its profiles, each into a fresh target directory. B and E are the workspace's and the exported segment's own profiles. A is set through `CARGO_PROFILE_*` variables. The segment is `chat/front` from `cargo gdl export --spec examples/chat/gdl.toml`, built with `cargo build --release --manifest-path chat/front/Cargo.toml`. Its manifest carries E, and the archive has no lock file, so it resolved current crate versions.
 
 | Build | A | B | E |
 |---|---|---|---|
@@ -470,7 +470,7 @@ The same builds on a spark host (aarch64, 20 cores, shared with other builds, lo
 
 Two recent changes cut a cost by changing inlining or code layout. Each was measured at the commit before it and at its own commit, in every config. A config "makes" a hand change when the two commits run alike under it.
 
-**Constant thresholds in a pick, `8c651a3`.** Base `cf2b60d`, the commit before it. [Thresholds as constants in a pick](feature-costs.md#thresholds-as-constants-in-a-pick) says what it changed. Both commits ran the same `crates/gdl/examples/picks.rs`, built in turn in one worktree and one target directory, and counted with `perf stat -e instructions:u` at 10 and 20 million picks, in 7 rounds on core 5 of the gb300 bench host. Its rows here are gb300 history. Across the rounds, each count repeats to within 0.001 instructions per pick.
+**Constant thresholds in a pick, `8c651a3`.** Base `cf2b60d`, the commit before it. [Thresholds as constants in a pick](feature-costs.md#thresholds-as-constants-in-a-pick) says what it changed. Both commits ran the same `crates/gdl/examples/picks.rs`, built in turn in one worktree and one target directory, and counted with `perf stat -e instructions:u` at 10 and 20 million picks, in 7 rounds on core 5 of the Neoverse-V2 host. Its rows here are Neoverse-V2 history. Across the rounds, each count repeats to within 0.001 instructions per pick.
 
 | User instructions per pick, before and after | A | B | C | D | E |
 |---|---|---|---|---|---|
@@ -479,9 +479,9 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 | `round_robin`, every pool | 803 / 628 | 809 / 638 | 889 / 703 | 842 / 660 | 365 / 368 |
 
 - **Fat LTO nearly makes the change to `home_first` and `round_robin` over every pool.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
-- **Under every LTO config, the change costs a pick of one shard 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on the brev bench host a pick of one shard then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
+- **Under every LTO config, the change costs a pick of one shard 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. The cost is the tier step kept out of line: at the commit before, LTO inlined it into the filtered pass. The pass now calls the filter before the tier step, and on an 8-core x86_64 EPYC virtual machine a pick of one shard then runs 273 to 277 fewer callgrind Ir than at `cf2b60d` under B and E ([The filter before the tier step](feature-costs.md#the-filter-before-the-tier-step)).
 
-**gb300 history.** Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
+**Neoverse-V2 history.** Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the Neoverse-V2 host, one job per config. The instruction counts repeat the table above exactly.
 
 | User cycles per pick, before and after | A | B | E |
 |---|---|---|---|
