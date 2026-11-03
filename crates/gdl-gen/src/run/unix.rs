@@ -295,3 +295,122 @@ fn stop_with_run(command: &mut Command) {
         });
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+#[ignore = "F4: the inherited SIGTERM handler consumes a parent-death signal before exec"]
+#[allow(unsafe_code)]
+fn a_parent_death_after_the_pid_check_still_stops_the_child() {
+    use std::os::unix::process::CommandExt;
+
+    const HELPER: &str = "GDL_TEST_DEATH_WINDOW";
+    if std::env::var_os(HELPER).is_some() {
+        let _stops = Stops::caught().expect("handlers");
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        stop_with_run(&mut command);
+        // Pause after the guard to make a death before exec observable.
+        unsafe {
+            command.pre_exec(|| {
+                kill_process(rustix::process::getpid(), Signal::STOP).map_err(std::io::Error::from)
+            });
+        }
+        let mut child = command.spawn().expect("child");
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+
+    struct Family(Child);
+    impl Drop for Family {
+        fn drop(&mut self) {
+            let group = Pid::from_raw(self.0.id() as i32).expect("group");
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut parent = Family(
+        Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "run::unix::a_parent_death_after_the_pid_check_still_stops_the_child",
+            ])
+            .env(HELPER, "child")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("parent fixture"),
+    );
+    let state = |pid: u32| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, rest) = stat.rsplit_once(") ")?;
+        let mut fields = rest.split_whitespace();
+        Some((
+            fields.next()?.to_string(),
+            fields.next()?.parse::<u32>().ok()?,
+        ))
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let child = loop {
+        let tasks =
+            std::fs::read_dir(format!("/proc/{}/task", parent.0.id())).expect("parent threads");
+        let mut paused = None;
+        for task in tasks.flatten() {
+            if let Ok(children) = std::fs::read_to_string(task.path().join("children")) {
+                paused = children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok())
+                    .find(|pid| state(*pid).is_some_and(|(state, _)| state == "T"));
+                if paused.is_some() {
+                    break;
+                }
+            }
+        }
+        if let Some(child) = paused {
+            break child;
+        }
+        assert!(Instant::now() < deadline, "child did not reach the guard");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // A live member with a parent outside the group prevents an orphaned-group
+    // SIGHUP from masking the death-signal race.
+    let _keeper = Running::spawn(
+        "keeper",
+        Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(i32::try_from(parent.0.id()).expect("process group"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        Duration::ZERO,
+    )
+    .expect("group keeper");
+    parent.0.kill().expect("SIGKILL to parent alone");
+    parent.0.wait().expect("reap parent");
+    let pending_term = std::fs::read_to_string(format!("/proc/{child}/status"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with("SigPnd:") || line.starts_with("ShdPnd:"))
+        .filter_map(|line| u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok())
+        .any(|bits| bits & (1 << 14) != 0);
+    let pid = Pid::from_raw(child as i32).expect("child pid");
+    let _ = kill_process(pid, Signal::CONT);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let remaining = loop {
+        let remaining = state(child);
+        if remaining.as_ref().is_none_or(|(state, _)| state == "Z") || Instant::now() >= deadline {
+            break remaining;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let executed_sleep = std::fs::read_link(format!("/proc/{child}/exe")).ok()
+        == std::fs::canonicalize("/bin/sleep").ok();
+    assert!(
+        remaining.as_ref().is_none_or(|(state, _)| state == "Z"),
+        "child survived parent death before exec: pending_SIGTERM={pending_term}, executed_sleep={executed_sleep}, state={remaining:?}"
+    );
+}
