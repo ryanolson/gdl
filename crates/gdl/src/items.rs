@@ -275,8 +275,8 @@ impl<T> Stream for Bounded<T> {
     type Item = Result<T>;
 
     // hot path: local-item-boundary
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().project();
         let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
@@ -322,7 +322,7 @@ impl<T> Stream for Bounded<T> {
                 return Poll::Ready(error.map(Err));
             }
             Poll::Pending => {
-                return match wait(this, cx, polled) {
+                return match wait(self, cx, polled) {
                     Some(error) => Poll::Ready(Some(Err(error))),
                     None => Poll::Pending,
                 };
@@ -336,13 +336,16 @@ impl<T> Stream for Bounded<T> {
 /// the error to end with if either has come. It takes the pending poll, so
 /// that `Bounded::poll_next` holds none across these calls, and it returns
 /// no poll, so that the caller's own poll can be its result. Out of line:
-/// inlined, the poll would be held across its calls again.
+/// inlined, the poll would be held across its calls again. It takes the
+/// boundary whole, not its projection: a projection passed out of line is a
+/// struct of pointers that every poll would build first, 14 Ir per item.
 #[inline(never)]
 fn wait<T>(
-    this: BoundedProj<'_, T>,
+    bounded: Pin<&mut Bounded<T>>,
     cx: &mut Context<'_>,
     _pending: Poll<Option<Result<T>>>,
 ) -> Option<Error> {
+    let this = bounded.project();
     *this.ready_run = 0;
     // The deadline is polled first: when both have happened it is the
     // cause worth reporting, as everywhere else (see `Cx::check`).

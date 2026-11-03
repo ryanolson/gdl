@@ -677,6 +677,45 @@ cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
 
 No row got slower beyond its spread. `items/direct` runs no gdl code, and it moved by as much as `items/gdl` did between builds, so the items rows show no change.
 
+### Stages in callgrind Ir
+
+What one local stage costs a request and an item, over `crates/gdl/examples/stages.rs`. Each shape has 0, 1, or 5 pass-through stages over a sink that answers with ready items:
+
+- `operator`: nested hops, each with an `OperatorStage` whose operator maps its stream, as a chain of operators is built;
+- `hop`: one hop with that many forward nodes and backward nodes, each backward node mapping its stream;
+- `plain`: the control, that many boxed `map`s over the sink's stream, with no gdl code between them.
+
+Items are `u64`, or `large`: 512 B with a field to drop, about the size of a streamed chat chunk. Measured on spark-e504 (aarch64, 20 cores, shared, load average 30 to 50), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.28.0 callgrind. Per request is the count at 400 one-item requests minus the count at 200, divided by 200. Per item is the count at one request of 20,000 items minus one of 10,000, divided by 10,000. A stage is the difference between 5 stages and 0, divided by 5. Main at `71b9fb92`, three rounds, which agreed within 2 Ir.
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example stages
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <shape> <u64|large> <0|1|5> 1 <200|400>
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <shape> <u64|large> <0|1|5> <10000|20000> 1
+```
+
+| Per stage | `plain` | `operator` | `hop` |
+|---|---|---|---|
+| Ir per item, `u64` | 33 | 120 | 56 |
+| Ir per item, 512 B | 261 | 356 | 286 |
+| Ir per request, one `u64` item | 252 | 5,120 | 1,956 |
+| allocations per request | 1 | 10 | 4 |
+
+With no stages, `operator` and `hop` are one hop over the sink: 139 Ir per item, 5,838 Ir and 13 allocations per request. `plain` with no stages is 53 Ir per item, 1,602 Ir and 5 allocations per request.
+
+- **A stage's own map makes every copy of an item.** At 512 B each stage adds 3 calls of `memcpy` per item in all three shapes, the control too: `futures`' `map` takes the item by value into its closure and back. A stage costs about 230 Ir more per item at 512 B than at 8 B in every shape, so gdl's boundaries add no copy ([Copies of an item](#copies-of-an-item)).
+- **An operator stage costs 87 Ir per item more than its map.** Each item passes an attempt boundary (`Bounded`) and a node boundary (`Fuse`) at every hop. In the 5-stage `u64` run, `Bounded::poll_next` held 40% of the run's Ir by itself, `Fuse::poll_next` 20%, and `map` 20%. `Bounded` checks the cancel flag and the clock once in 64 items, as [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked) says: callgrind counts 944 calls of the check per 10,000 items over 6 boundaries.
+- **A stage inside one hop costs 23 Ir per item more than its map**: the node boundary of each backward node but the last, whose boundary is the hop's attempt boundary.
+- **Per request, a stage of its own hop costs about 20 maps.** Each hop makes two child contexts, two cancel tokens below its parent's, two boundaries, and the operator's boxed future.
+
+Each change to the boundaries since, measured the same way, against the commit before it:
+
+| Change | `operator` per stage, per item | `hop` per stage, per item | one hop, per item | `operator` per stage, per request |
+|---|---|---|---|---|
+| main at `71b9fb92` | 120.3 Ir (356.2 at 512 B) | 56.1 (286.3) | 138.6 (417.6) | 5,120 |
+| the attempt boundary passes itself to its wait, not its fields | 106.2 (339.1) | 56.1 (286.3) | 124.5 (400.5) | 5,092 |
+
+- **Passing the attempt boundary whole to its wait saves 14 Ir per item at each hop.** `wait` took the boundary's fields as a struct of pointers, so every poll built that struct on the stack before it polled the producer: 9 stores of pointers, and the registers they needed.
+
 ### Copies of an item
 
 A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.
@@ -721,6 +760,10 @@ The copies gdl made were part of the endpoint's `memcpy`, not most of it. On the
 ### Copies of a request
 
 A request is copied whole each time a future takes it by value or returns it. In an endpoint's shape, a gdb trace of every `memcpy` counted the copies that gdl itself made, per request with three chunks: 21,240 B before this change and 8,368 B after it. Of those 21,240 B, 4,640 B was the operator's future copied into its box, and most of the rest was the 768 B request moving through the hop, the forward chain, and the inner ends ([Node contexts](../development/runtime-design.md#node-contexts)). All `memcpy` bytes per request fell from 50,933 to 38,189. The rest are the probe's own: its chunks, its reply converter, and its nodes' `async fn` arguments.
+
+In an endpoint's shape on spark-e504 at `e0c6c4f1` (an operator over a hop with two forward nodes and a join, a 1,464 B request that the first forward node wraps into a 2,824 B one), a `memcpy` interposer counted 17 copies of 1 KiB or more per request, each traced to its source line. About 13 are gdl's: in the forward chain, each node's request is moved into its `forward`, out of its `Result`, and into the next node's future, and the inner end's call and its boxed future take it once more each. About 4 are the nodes' own: the operator's call of the hop below it and its `.await`, and an `async fn` that moves its argument into a local. Each is a move from one future's state into another's, and none was cut.
+
+Under mimalloc the operator's future and the join's are each copied once more per request, into their boxes. In an endpoint's shape on spark-e504, counted with a `memcpy` interposer, that added 2,928 B for the join and 10,896 B for the operator per request; the system allocator added none ([Known limitations](limitations.md#under-an-allocator-the-compiler-does-not-know-a-nested-hops-future-is-copied-into-its-box)).
 
 **gb300 history.** The same `hop` bench on the gb300 runner, core 9, load average 2.5 to 3.8, three runs each. Base `0fa33eb8`, change `4931dcaf`:
 
