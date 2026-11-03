@@ -603,6 +603,7 @@ impl Crossing {
         head: &[u8],
         left: Left<'_>,
     ) -> Result<Result<Pooled<'t>, NoPool>> {
+        // hot path: pool-pick
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
         let request = PoolRequest::new(cx, &(), &target.region, tokio::time::Instant::now())

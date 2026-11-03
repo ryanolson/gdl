@@ -178,7 +178,39 @@ A policy's `choose` returns a `PoolChoice`, which may carry a lease that learns 
 | boundary pick | 133 ns | 132 ns | 137 to 138 ns | 132 ns |
 | boundary pick and acceptance | 152 ns | 152 ns | 156 ns | 151 ns |
 
-With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were three words each. Every pick paid for that, with or without a lease. Behind one more box, each is two words, and a choice costs what an index did. A lease then allocates twice. `send_forward`'s future went from 896 to 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`), and the front's call future stayed at 11,504 bytes (`requests sizes 0`).
+With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were three words each. Every pick paid for that, with or without a lease. Behind one more box, each is two words, and a choice costs what an index did. A lease then allocated twice, until [One allocation for a lease](#one-allocation-for-a-lease). `send_forward`'s future went from 896 to 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`), and the front's call future stayed at 11,504 bytes (`requests sizes 0`).
+
+### One allocation for a lease
+
+A choice's lease is one block behind one thin pointer: a header of three functions built for the lease's type (accepted, accepted at an epoch, drop), then the lease (`crates/gdl/src/policy/thin.rs`). `Box` allocates and frees the block. Before, the lease was a `Box<dyn ChoiceLease>` in a second box, which kept the pointer thin at the cost of a second allocation on every leased pick. A choice stays two words, and a policy's return three (`a_choice_stays_two_words`). A leased pick allocates once (`a_leased_pick_allocates_once`). A set router keeps a lease on the picks that start or move a session, so these were its only allocations per pick.
+
+Rejected: reading the fat pointer's vtable out of a `Box<dyn ChoiceLease>` and keeping it in the block. Rust does not define that layout. A thin box crate would add a dependency for about 130 lines.
+
+Measured with callgrind 3.22.0 on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 14 to 15, rustc 1.93.1, rustix on its libc backend. Base is the commit before the change, with the `leased` mode of `crates/gdl/examples/picks.rs`, which keeps a 120-byte lease with each `home_first` choice, tells it, and drops it. Both were built in turn in one checkout and one target directory, under B and E. Instructions are callgrind Ir per pick, (Ir at 2,000 picks − Ir at 1,000) / 1,000, three rounds, which repeat exactly:
+
+```bash
+export RUSTFLAGS="--cfg rustix_use_libc" CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_LTO=thin   # fat for E
+cargo build --release -p gdl --example picks    # at base and change; copy each binary aside
+valgrind --tool=callgrind --callgrind-out-file=/dev/null picks-<base|change> <policy> <1000|2000>
+valgrind --tool=dhat --dhat-out-file=/dev/null picks-<base|change> leased <1000|2000>
+```
+
+| Callgrind Ir per pick, B / E | Base | Change |
+|---|---|---|
+| `leased` | 2,079.8 / 2,091.8 | 1,933.8 / 1,945.8 |
+| `home_first`, no lease | 1,719.8 / 1,721.8 | 1,717.8 / 1,730.8 |
+| `round_robin`, no lease | 645.0 / 393.0 | 643.0 / 383.0 |
+
+| DHAT per leased pick | Base | Change |
+|---|---|---|
+| blocks | 2 | 1 |
+| bytes | 136 | 128 |
+
+- **A leased pick runs 146 fewer instructions under both profiles**, and allocates once. Keeping, telling, and dropping a lease costs 360 to 370 instructions over a pick without one before, and 215 to 216 after.
+- **The picks without a lease run none of the change's code.** They move by 2 to 10 instructions, from where the code is placed.
+- **The block is 8 bytes of header and the lease.** The second box was 16 bytes, a fat pointer.
+
+The unsafe code is checked by Miri, with and without `-Zmiri-strict-provenance` and under Tree Borrows: the module's tests and `crates/gdl/tests/leases.rs`, which cover each path that drops a lease, a lease that panics when told or dropped, a lease of no size, and leases aligned to 64 and 4,096 bytes. Miri's leak check is what shows that a lease whose `Drop` panics still frees its block. Wall time is not measured here.
 
 ### A reason for no pool
 
