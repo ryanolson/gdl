@@ -147,6 +147,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### `cargo gdl run` serves only a source that reads stdin, and only on Unix
 - **What:** `run` refuses a spec whose source is pinned to a frontend, such as the `http` and `api` examples, and a spec of several layouts. It stops its segments with Unix signals, and fails on other systems.
+- **Outside Linux:** a segment outlives a `run` that was killed with SIGKILL, and a SIGTERM to `run` while it builds lets the build run to its end. Linux has a signal for the death of a parent and lists a process's children. macOS has neither.
 - **Workaround:** build the segments with `cargo gdl build` and start them yourself ([Getting started](../guides/getting-started.md#run-the-segments-yourself)), or deploy them with `cargo gdl compose`.
 
 ### A drain is bounded, and a stop while starting exits with code 1

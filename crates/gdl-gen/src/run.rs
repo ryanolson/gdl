@@ -1,10 +1,16 @@
 //! `cargo gdl run`: build a spec's segments and run them on this machine.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
+use crate::Offers;
+#[cfg(unix)]
 use crate::deployment::{merge_config, stdin_source};
-use crate::{Build, Error, Offers, Spec};
+use crate::{Build, Error, Spec};
 
 /// Build `spec`'s segments as [`build`](crate::build) does, then run them
 /// as processes on this machine until the source's segment ends, and stop
@@ -23,27 +29,41 @@ use crate::{Build, Error, Offers, Spec};
 /// once to each segment. A segment that ends before the source's segment
 /// does stops the others, and `run` fails, naming it.
 ///
-/// `run` catches SIGINT and SIGTERM for the life of the process. Unix only.
+/// `run` catches SIGINT and SIGTERM for the life of the process. A stop
+/// while it builds stops the build, and `run` fails. On Linux, each segment
+/// gets a SIGTERM when `run` dies, even by SIGKILL. Unix only.
 ///
 /// Errors: a problem of the spec; a spec of several layouts; a source that
-/// is pinned to a frontend or cannot read stdin; a failed build; a segment
-/// that failed or was killed.
+/// is pinned to a frontend or cannot read stdin; a failed build; a stop
+/// while it builds; a segment that failed or was killed.
+#[cfg(unix)]
 pub fn run(spec: &Spec, target: &Path, how: &Build) -> Result<(), Error> {
+    // First: a stop that came before the handlers would end `run` at once,
+    // and leave its build running and its settings directory behind.
+    let stops = unix::Stops::caught()?;
     let dir = tempfile::Builder::new()
         .prefix("gdl-run-")
         .tempdir()
         .map_err(|e| Error::new(format!("a directory for the segments' settings: {e}")))?;
-    let plan = prepare(spec, target, how, dir.path())?;
-    supervise(&plan)
+    let plan = unix::preparing(&stops, || prepare(spec, target, how, dir.path()))?;
+    unix::supervise(&plan, &stops)
+}
+
+/// [`run`] on a system that is not Unix: refused.
+#[cfg(not(unix))]
+pub fn run(_: &Spec, _: &Path, _: &Build) -> Result<(), Error> {
+    Err(Error::new("`run` needs Unix"))
 }
 
 /// What `run` starts: the segment that hosts the source, and the others.
+#[cfg(unix)]
 struct Plan {
     front: Segment,
     others: Vec<Segment>,
 }
 
 /// One segment as `run` starts it.
+#[cfg(unix)]
 struct Segment {
     name: String,
     binary: PathBuf,
@@ -53,6 +73,7 @@ struct Segment {
 }
 
 /// Check `spec`, build it, and write each segment's settings in `dir`.
+#[cfg(unix)]
 fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, Error> {
     let laid = spec.only_layout("`run`")?;
     // Before the build: a spec `run` cannot serve is refused at once.
@@ -107,6 +128,7 @@ fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, 
 /// A segment's settings under `run`: a listener on a free loopback port,
 /// the shared roster directory `roster`, and the spec's `config` table for
 /// it.
+#[cfg(unix)]
 fn settings(roster: &Path, config: Option<&toml::Table>) -> Result<toml::Table, Error> {
     let roster = roster.to_str().ok_or_else(|| {
         Error::new(format!(
@@ -123,26 +145,8 @@ fn settings(roster: &Path, config: Option<&toml::Table>) -> Result<toml::Table, 
     Ok(table)
 }
 
-#[cfg(not(unix))]
-fn supervise(_: &Plan) -> Result<(), Error> {
-    Err(Error::new("`run` needs Unix"))
-}
-
-#[cfg(unix)]
-fn supervise(plan: &Plan) -> Result<(), Error> {
-    // Before the first segment starts: a Ctrl-C would otherwise end `run`
-    // and leave the segments it started unreaped.
-    let stops = unix::Stops::caught()?;
-    let others = plan
-        .others
-        .iter()
-        .map(|segment| unix::launch(segment, false))
-        .collect::<Result<_, _>>()?;
-    unix::watch(unix::launch(&plan.front, true)?, others, &stops)
-}
-
 #[cfg(unix)]
 mod unix;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

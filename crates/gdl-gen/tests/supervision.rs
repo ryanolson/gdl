@@ -6,7 +6,6 @@ mod common;
 
 /// A killed supervisor must not leave the graph running without an owner.
 #[test]
-#[ignore = "F1: SIGKILL leaves all three segments running after run exits"]
 fn killing_run_does_not_orphan_its_segments() {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
@@ -48,7 +47,10 @@ fn killing_run_does_not_orphan_its_segments() {
     let _stderr = run.0.stderr();
     let mut input = run.0.0.stdin.take().expect("input");
     writeln!(input, r#"{{"text":"hello","max_words":1}}"#).expect("request");
-    output.find(r#"{"done":null}"#, Duration::from_secs(5));
+    // The first answer waits for `run`'s check and for a build with nothing
+    // to do: nested cargo, which waits for the package cache lock that
+    // every cargo on the host shares.
+    output.find(r#"{"done":null}"#, Duration::from_secs(120));
     let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", run.0.0.id()))
         .expect("children")
         .split_whitespace()

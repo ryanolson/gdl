@@ -21,7 +21,6 @@ fn the_spec_adds_to_each_segments_settings() {
     }
 }
 
-#[cfg(unix)]
 mod processes {
     use std::path::PathBuf;
     use std::process::Command;

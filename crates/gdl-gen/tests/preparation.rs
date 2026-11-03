@@ -5,7 +5,6 @@
 mod common;
 
 #[test]
-#[ignore = "F2: SIGTERM during preparation leaves cargo running and the settings directory behind"]
 fn terminating_run_during_preparation_removes_its_settings() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;

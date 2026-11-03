@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
 
-use super::Segment;
+use super::{Plan, Segment};
 use crate::Error;
 
 /// How often the children are looked at. A segment's exit is seen within
@@ -38,6 +38,11 @@ impl Stops {
         register(signal_hook::consts::SIGINT, &stops.interrupted)?;
         register(signal_hook::consts::SIGTERM, &stops.terminated)?;
         Ok(stops)
+    }
+
+    /// Whether any stop has come.
+    fn any(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed) || self.terminated.load(Ordering::Relaxed)
     }
 }
 
@@ -97,12 +102,82 @@ impl Drop for Running {
     }
 }
 
+/// Run `prepare` on a thread of its own, while this one watches `stops`.
+/// A stop sends SIGTERM to each process that preparation started, Cargo
+/// among them, and preparation then fails.
+pub(super) fn preparing<T: Send>(
+    stops: &Stops,
+    prepare: impl FnOnce() -> Result<T, Error> + Send,
+) -> Result<T, Error> {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(prepare);
+        let mut stopped = false;
+        while !worker.is_finished() {
+            if !stopped && stops.any() {
+                stopped = true;
+                stop_children();
+            }
+            std::thread::sleep(POLL);
+        }
+        let prepared = worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        match stopped || stops.any() {
+            true => Err(Error::new("stopped while preparing the segments")),
+            false => prepared,
+        }
+    })
+}
+
+/// Send SIGTERM to each child of this process, of any of its threads.
+#[cfg(target_os = "linux")]
+fn stop_children() {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return;
+    };
+    for task in tasks.flatten() {
+        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        for child in children.split_whitespace() {
+            if let Some(pid) = child.parse().ok().and_then(Pid::from_raw) {
+                let _ = kill_process(pid, Signal::TERM);
+            }
+        }
+    }
+}
+
+/// Elsewhere a process cannot list its children: the build runs on to
+/// its end, unless the terminal stopped it too.
+#[cfg(not(target_os = "linux"))]
+fn stop_children() {}
+
+/// Start the segments of `plan`, and run them until each has exited; see
+/// [`run`](super::run). Called from the thread that lives as long as
+/// `run`: on Linux a segment's death signal follows the thread that
+/// started it, not the process.
+pub(super) fn supervise(plan: &Plan, stops: &Stops) -> Result<(), Error> {
+    // A SIGINT from before the start reached no segment, and a wait for
+    // them to drain on it would never end.
+    if stops.any() {
+        return Err(Error::new("stopped before the segments started"));
+    }
+    let others = plan
+        .others
+        .iter()
+        .map(|segment| launch(segment, false))
+        .collect::<Result<_, _>>()?;
+    watch(launch(&plan.front, true)?, others, stops)
+}
+
 /// Start `segment`. The source's segment (`front`) takes this process's
 /// stdin and stdout. The others read nothing, and write to its stderr,
 /// so that stdout holds only the answers.
-pub(super) fn launch(segment: &Segment, front: bool) -> Result<Running, Error> {
+fn launch(segment: &Segment, front: bool) -> Result<Running, Error> {
     let mut command = Command::new(&segment.binary);
     command.arg(&segment.settings);
+    #[cfg(target_os = "linux")]
+    stop_with_run(&mut command);
     if !front {
         let stderr = std::io::stderr()
             .as_fd()
@@ -193,5 +268,30 @@ fn outcome(all: &[Running], first: Option<usize>, stopped: bool) -> Result<(), E
     match problems.is_empty() {
         true => Ok(()),
         false => Err(Error::new(problems.join("; "))),
+    }
+}
+
+/// Have the process `command` starts get a SIGTERM when `run` dies, by
+/// any signal, SIGKILL among them: no handler of `run`'s could tell it.
+/// If `run` died before the death signal was set, the process does not
+/// start.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn stop_with_run(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    let run = rustix::process::getpid();
+    // SAFETY: the closure runs in the child between fork and exec, where
+    // only async-signal-safe calls are sound. It makes two system calls
+    // through rustix, which neither allocates nor takes a lock, and turns
+    // an error code into an `io::Error`, which does not allocate.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::process::set_parent_process_death_signal(Some(Signal::TERM))?;
+            match rustix::process::getppid() {
+                Some(parent) if parent == run => Ok(()),
+                _ => Err(rustix::io::Errno::SRCH.into()),
+            }
+        });
     }
 }
