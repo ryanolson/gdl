@@ -66,6 +66,8 @@ An attempt boundary watches the cancel and deadline futures while its producer i
 
 A node boundary inside an attempt ends the stream after the first `Err`, and cancels the producing node's scope when the stream ends or is dropped. It also yields after 1,024 consecutive ready items. Without that, a node that consumes without producing (a filter) would loop inside one poll and never return to the attempt boundary. A node that ends its stream cleanly after its scope was cancelled, or after the deadline, is reported as interrupted, not as a success.
 
+So the cancel is also the cleanup at the end of every stream. A node's `cx.cancelled()` resolves after its stream ends normally, not only when the caller leaves, and that ends whatever the node runs under its scope. A node cannot tell a hang-up from a normal end by the cancel. To learn that the caller left, a node checks whether its stream was dropped before its last item, for example with a guard inside the stream that it disarms after it yields the last item.
+
 The inner end always runs in its own scope. So a node that cancels its own context gets the same outcome whatever follows it.
 
 A remote attempt enforces its deadline whether or not anyone reads its stream: a watcher at the outer end drops the response anchor at the deadline or cancel, which cancels the producer and releases its buffer. A local scope, including a local hop that encloses a remote attempt, enforces its deadline only at its boundaries, when its stream is read. A caller that holds a stream unread keeps its own process's scopes until it reads or drops the stream.
@@ -75,6 +77,7 @@ A remote attempt enforces its deadline whether or not anyone reads its stream: a
 | Event | What happens |
 |---|---|
 | The caller drops the response stream | The outer end's anchor is dropped and cancels its producer. Each pump cancels the anchor it reads. The cancel reaches the inner end. |
+| A stream ends normally | The node boundary cancels the producing node's scope, which ends what the node runs under it. The node's `cx.cancelled()` resolves, though the caller did not leave. |
 | The caller asks to stop | The outer end asks its anchor's producer to stop. Each pump passes the stop to the anchor it reads. The inner end sees `cx.stopping()`, finishes, and ends its stream. |
 | The deadline passes | Every stage stops on its own clock, including work that no cancel reaches. |
 | A producer dies | velo reports the dropped sender or a transport error after its heartbeat check, or the deadline fires first. Either way the consumer gets a terminal `Err`. |
