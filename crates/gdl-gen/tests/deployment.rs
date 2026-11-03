@@ -295,6 +295,45 @@ fn a_source_that_reads_stdin_keeps_it_open() {
     );
 }
 
+/// A segment's `[deployment.segment.<name>.config]` table is laid over its
+/// `[settings.<segment>]` table field by field: a value the deployment
+/// sets wins, a table in both is merged, and a segment without a
+/// deployment table keeps its own settings.
+#[test]
+fn the_deployment_lays_its_settings_over_the_segments_own() {
+    let mirror = Mirror::new();
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-settings-")
+        .tempdir()
+        .expect("a directory");
+    let extra = "\n[deployment.segment.engine.config.node.Engine]\nuppercase = false\n\
+        [deployment.segment.engine.config.runtime]\ndrain_ms = 5000\n";
+    let files = gdl_gen::compose_files(
+        &chat_spec(&mirror, extra),
+        None,
+        temp.path(),
+        &mirror.target(),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
+    let config = |segment: &str| -> toml::Table {
+        toml::from_str(&files[&Path::new(segment).join("config.toml")]).expect("settings")
+    };
+    let engine = config("engine");
+    let node = &engine["node"]["Engine"];
+    assert_eq!(node["load_ms"].as_integer(), Some(200), "{engine}");
+    assert_eq!(node["uppercase"].as_bool(), Some(false), "{engine}");
+    assert_eq!(
+        engine["runtime"]["drain_ms"].as_integer(),
+        Some(5000),
+        "{engine}"
+    );
+    assert_eq!(engine["listen"].as_str(), Some("0.0.0.0:9000"), "{engine}");
+    let post = config("post");
+    assert_eq!(post["node"]["Format"]["open"].as_str(), Some("<"), "{post}");
+    assert!(config("front").get("node").is_none());
+}
+
 /// The mirror commit that `examples/api/deploy.toml` pins gdl and the
 /// example package to, read from that file so that a pin is moved in one
 /// place.

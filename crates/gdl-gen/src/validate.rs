@@ -65,20 +65,40 @@ pub(crate) fn unbound(
         }
     }
     problems.extend(spec.deployment.iter().flat_map(|d| d.secret_problems()));
-    problems.extend(spec.deployment.iter().flat_map(|d| d.port_problems()));
+    // A segment's own settings can name its system port.
+    problems.extend(
+        spec.deployment
+            .iter()
+            .flat_map(|d| d.over(&spec.settings).port_problems()),
+    );
     // One segment's settings serve it in every layout that has it.
-    for name in spec.deployment.iter().flat_map(|d| d.segments()) {
+    let unplaced = |name: &str| {
         let placed = spec.layouts().any(|laid| {
             laid.placement
                 .segments()
                 .any(|(segment, _)| segment == name)
         });
-        if !placed {
-            let why = match spec.placements.tabled() {
-                true => format!("no layout has a segment `{name}`"),
-                false => format!("the placement has no segment `{name}`"),
-            };
+        match (placed, spec.placements.tabled()) {
+            (true, _) => None,
+            (false, true) => Some(format!("no layout has a segment `{name}`")),
+            (false, false) => Some(format!("the placement has no segment `{name}`")),
+        }
+    };
+    for name in spec.deployment.iter().flat_map(|d| d.segments()) {
+        if let Some(why) = unplaced(name) {
             problems.push(format!("[deployment.segment.{name}]: {why}"));
+        }
+    }
+    for (name, table) in &spec.settings {
+        if let Some(why) = unplaced(name) {
+            problems.push(format!("[settings.{name}]: {why}"));
+        }
+        for key in crate::deployment::PEER_KEYS {
+            if table.contains_key(key) {
+                problems.push(format!(
+                    "[settings.{name}]: a segment's settings cannot set `{key}`: `run`, the deployment, or the fleet writes it"
+                ));
+            }
         }
     }
     for (name, entry) in &spec.entry {

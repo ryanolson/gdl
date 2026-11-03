@@ -28,12 +28,13 @@ nodes = ["Engine"]
 [segment.post]
 nodes = ["Detokenize", "Format"]
 
-# Each segment's settings, as `cargo gdl run` and `cargo gdl compose`
-# write them: a node's table reaches only the segment that hosts it.
-[deployment.segment.engine.config.node.Engine]
+# Each segment's own settings, which `cargo gdl run` and
+# `cargo gdl compose` write for it: a node's table reaches only the
+# segment that hosts it.
+[settings.engine.node.Engine]
 load_ms = 200
 uppercase = true
 
-[deployment.segment.post.config.node.Format]
+[settings.post.node.Format]
 open = "<"
 close = ">"

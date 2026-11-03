@@ -31,6 +31,7 @@ fn manifest() -> Manifest {
 fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
     Spec {
         deployment: Default::default(),
+        settings: Default::default(),
         pipeline_names: BTreeMap::new(),
         entry: BTreeMap::new(),
         service: None,

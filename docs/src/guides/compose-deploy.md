@@ -59,7 +59,7 @@ The bundle names the file and never holds it: the generator does not open the fi
 
   The file must exist before `docker compose up`, or Compose refuses to start the service.
 
-A runtime image must run the binary built in `build_image` and supply its libraries. The generator installs no packages into it. The default runtime image holds glibc and the C runtime, and no shell, and runs as a user that is not root (uid 65532). The default build image is the toolchain that `rust-toolchain.toml` pins, on Debian 12, the release that the runtime image is built from, so a binary finds the glibc that it was linked against. A runtime image that runs as root, such as a CUDA image, works too: nothing in the image or the bundle depends on the user. A `config` table adds to the segment's settings ([Segment settings](../operations/configuration.md)).
+A runtime image must run the binary built in `build_image` and supply its libraries. The generator installs no packages into it. The default runtime image holds glibc and the C runtime, and no shell, and runs as a user that is not root (uid 65532). The default build image is the toolchain that `rust-toolchain.toml` pins, on Debian 12, the release that the runtime image is built from, so a binary finds the glibc that it was linked against. A runtime image that runs as root, such as a CUDA image, works too: nothing in the image or the bundle depends on the user. A `config` table adds to the segment's settings, laid over its `[settings.<segment>]` table field by field ([Segment settings](../operations/configuration.md)).
 
 ## 2. Write the bundle
 

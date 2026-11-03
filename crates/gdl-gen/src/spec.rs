@@ -65,6 +65,9 @@ use crate::Error;
 #[derive(Debug, Clone)]
 pub struct Spec {
     pub(crate) deployment: Option<crate::deployment::Settings>,
+    /// Each segment's settings by segment name, as `run` and `compose` write
+    /// them: in no hash, since no generated file holds them.
+    pub(crate) settings: BTreeMap<String, toml::Table>,
     pub(crate) pipeline_names: BTreeMap<String, String>,
     pub(crate) entry: BTreeMap<String, crate::service::EntrySpec>,
     pub(crate) service: Option<crate::service::ServiceBinding>,
@@ -341,6 +344,8 @@ pub(crate) struct Bind {
 struct Raw {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deployment: Option<crate::deployment::Settings>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    settings: BTreeMap<String, toml::Table>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pipeline_names: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -762,6 +767,7 @@ impl Spec {
             .collect::<Result<_, Error>>()?;
         Ok(Self {
             deployment: raw.deployment,
+            settings: raw.settings,
             pipeline_names: raw.pipeline_names,
             entry: raw.entry,
             service: None,

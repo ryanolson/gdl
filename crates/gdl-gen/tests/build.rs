@@ -247,8 +247,8 @@ fn a_build_generates_in_the_target_rewrites_only_changes_and_removes_only_its_ow
         .replace("[segment.engine]\nnodes = [\"Engine\"]\n", "")
         // The engine's settings move with it.
         .replace(
-            "[deployment.segment.engine.config.node.Engine]",
-            "[deployment.segment.post.config.node.Engine]",
+            "[settings.engine.node.Engine]",
+            "[settings.post.node.Engine]",
         )
         .replace(
             "nodes = [\"Detokenize\", \"Format\"]",

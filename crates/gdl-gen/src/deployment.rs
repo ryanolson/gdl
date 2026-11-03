@@ -26,14 +26,34 @@ pub(crate) const DEFAULT_BASE_IMAGE: &str = "gcr.io/distroless/cc-debian12:nonro
 /// so that a binary finds the glibc it was linked against.
 pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93.1-slim-bookworm";
 
-/// Add `[deployment.segment.<name>.config]` table `config` to a segment's
-/// settings `base`, each key in place of the one there. Where a segment
-/// finds its peers is the deployment's to say, and its pool the fleet's:
-/// `config` cannot set them.
+/// Lay `over` on `under`, field by field: each value of `over` replaces
+/// the one in `under`, except that a table in both is laid the same way.
+fn overlay(under: &mut toml::Table, over: &toml::Table) {
+    for (key, value) in over {
+        match (under.get_mut(key), value) {
+            (Some(toml::Value::Table(below)), toml::Value::Table(above)) => overlay(below, above),
+            _ => {
+                under.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// The keys of a segment's settings that say where it finds its peers,
+/// which `run` or the deployment writes, and its pool, which is the
+/// fleet's: neither `[settings.<segment>]` nor
+/// `[deployment.segment.<name>.config]` can set them.
+pub(crate) const PEER_KEYS: [&str; 4] = ["hub", "roster", "instances", "pool"];
+
+/// Add a segment's own settings `config` to the settings `base` that `run`
+/// or a deployment writes, each top-level key in place of the one there.
+/// A key of [`PEER_KEYS`] is refused.
 pub(crate) fn merge_config(base: &mut toml::Table, config: &toml::Table) -> Result<(), Error> {
     for (key, value) in config {
-        if ["hub", "roster", "instances", "pool"].contains(&key.as_str()) {
-            return Err(Error::new(format!("deployment cannot override `{key}`")));
+        if PEER_KEYS.contains(&key.as_str()) {
+            return Err(Error::new(format!(
+                "a segment's settings cannot set `{key}`"
+            )));
         }
         base.insert(key.clone(), value.clone());
     }
@@ -41,10 +61,18 @@ pub(crate) fn merge_config(base: &mut toml::Table, config: &toml::Table) -> Resu
 }
 
 impl Settings {
-    /// Segment `segment`'s `[deployment.segment.<name>.config]` table, if
-    /// the spec has one.
-    pub(crate) fn config(&self, segment: &str) -> Option<&toml::Table> {
-        self.segment.get(segment).map(|image| &image.config)
+    /// These settings with each segment's `[settings.<segment>]` table in
+    /// `own` under its `config`, field by field: a value of `config` wins,
+    /// and a table in both is merged the same way.
+    pub(crate) fn over(&self, own: &std::collections::BTreeMap<String, toml::Table>) -> Self {
+        let mut folded = self.clone();
+        for (segment, table) in own {
+            let image = folded.segment.entry(segment.clone()).or_default();
+            let mut merged = table.clone();
+            overlay(&mut merged, &image.config);
+            image.config = merged;
+        }
+        folded
     }
 
     /// The segments that `[deployment.segment.<name>]` tables name.
@@ -170,7 +198,7 @@ impl Default for Settings {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Image {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -414,7 +442,9 @@ impl Bundle {
         // A deployment discovers its segments through the hub, whether or
         // not the spec says anything else about it.
         let mut spec = spec.clone();
-        let settings = spec.deployment.get_or_insert_with(Default::default).clone();
+        let deployment = spec.deployment.get_or_insert_with(Default::default).clone();
+        // Each segment's own settings, with the deployment's laid over them.
+        let settings = deployment.over(&spec.settings);
         let Source::Graph(source) = &spec.source else {
             return Err(Error::new(
                 "Deploy requires a graph definition with Git or crates.io packages, not a local contract crate",

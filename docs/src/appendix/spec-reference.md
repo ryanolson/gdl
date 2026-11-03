@@ -66,12 +66,13 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | Key | Meaning | Default |
 |---|---|---|
 | `[config.<Node>] <field>` | a value for a graph-affecting field of the node's `Build::Config`: a bool, an integer, or a string. The field must exist and have that type. | the field's declared default |
+| `[settings.<segment>]` | the segment's own settings: top-level keys of its settings file, such as `[node.<Node>]`, `[runtime]`, and `[system]`, which `run`, `compose`, and `k8s` write over the generated ones. Unlike `[config.<Node>]`, which sets graph-affecting `Build::Config` fields, it holds what a segment reads when it starts, and is in neither hash. Unlike `[deployment.segment.<name>] config`, it implies no deployment. It must name a segment of some layout, and cannot set `hub`, `roster`, `instances`, or `pool` | none |
 | `[deployment] base_image` | the image a segment runs in | `gcr.io/distroless/cc-debian12:nonroot` |
 | `[deployment] build_image` | the image every binary is built in | `rust:1.93.1-slim-bookworm` |
 | `[deployment] hub_image` | the image the hub runs in | `base_image` |
 | `[deployment.segment.<name>] base_image` | one segment's run image | `base_image` |
 | `[deployment.segment.<name>] ports` | the ports the segment publishes, as Compose writes them. The segment's system port (9090 unless its `config` sets `[system] port`) is gdl's: `check` refuses it bare (`"9090"`). A host publication of the system port (`"127.0.0.1:9091:9090"`) is for Compose; Kubernetes declares the port as `system` and publishes nothing | none |
-| `[deployment.segment.<name>] config` | top-level keys of the segment's settings file, which replace the generated ones. `run` and `compose` write them | none |
+| `[deployment.segment.<name>] config` | top-level keys of the segment's settings file, which replace the generated ones. Laid over the segment's `[settings.<segment>]` table field by field: a value here wins, and a table in both is merged. `run` does not read it | none |
 | `[deployment.segment.<name>] secrets` | the declared secrets the segment mounts, each at `/run/secrets/<secret>` | none |
 | `[deployment.secrets.<secret>] file` | the secret's file on the Docker host, by absolute path. The generator never opens it. | required |
 | `[entry.<name>] forward` | the forward nodes of a service entry arm, by type path | none |
@@ -82,7 +83,7 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | `[entry.<name>] needs` | the property kinds the entry's adapters read, each with the class whose pools they read it from: `needs = { model = "sets" }`. Only in the entry's own table, not a nested arm's. The source's segment must choose pools of the class, and an entry segment of the class must provide each kind, or `[pools.<class>] provides` name it. Each adapter of the entry, in nested arms too, reads the class with `FollowedPools::needed_class` ([What a node reads](../concepts/pool-routing.md#what-a-node-reads)). In neither hash: a change of it changes only what the hosting segment reads. | none |
 | `[pipeline_names] <Source>` | a label for a pipeline root. Nonempty and unique, and the graph must have that source. | none |
 
-A `[deployment]` table, or the `compose` command, makes the generated crates ask for hub discovery. A `[deployment.segment.<name>]` table must name a segment that some layout has. Image names are validated: letters, digits, and `/ _ . : @ -`. A secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`. Its file must be absolute and outside the bundle's build context ([Secrets](../guides/compose-deploy.md#secrets)). [Deploy with Docker Compose](../guides/compose-deploy.md) covers the deployment, and [Hosted frontends](../guides/frontends.md) covers entries.
+A `[deployment]` table, or the `compose` command, makes the generated crates ask for hub discovery. A `[settings.<segment>]` table does not. A `[deployment.segment.<name>]` table must name a segment that some layout has. Image names are validated: letters, digits, and `/ _ . : @ -`. A secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`. Its file must be absolute and outside the bundle's build context ([Secrets](../guides/compose-deploy.md#secrets)). [Deploy with Docker Compose](../guides/compose-deploy.md) covers the deployment, and [Hosted frontends](../guides/frontends.md) covers entries.
 
 ### Binary
 

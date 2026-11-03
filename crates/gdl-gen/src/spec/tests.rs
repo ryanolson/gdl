@@ -564,6 +564,72 @@ fn the_examples_keep_their_placement_hash() {
     }
 }
 
+/// A segment's `[settings.<segment>]` table enters neither hash: a change
+/// of it changes no generated file, and leaves the contract's hash and the
+/// placement's as they are.
+#[test]
+fn a_segments_settings_change_no_hash() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the chat spec");
+    let graph = std::fs::read_to_string(dir.join("chat.gdl")).expect("the graph");
+    let (head, _) = text.split_once("[settings.").expect("settings tables");
+    let target = tempfile::Builder::new()
+        .prefix("gdl-settings-")
+        .tempdir()
+        .expect("a target directory");
+    let hashes = |settings: &str| {
+        let spec = Spec::from_text(&format!("{head}{settings}"), &graph, &dir).expect("a spec");
+        let checked = crate::check(&spec, target.path(), crate::Offers::Read).expect("checked");
+        let files = crate::render(&spec, Path::new("/work/out"), target.path()).expect("rendered");
+        (
+            checked.manifest.contract_hash(),
+            spec.placement().hash(),
+            files,
+        )
+    };
+    let none = hashes("");
+    assert_eq!(
+        none,
+        hashes("[settings.engine.node.Engine]\nuppercase = true\n")
+    );
+    assert_eq!(
+        none,
+        hashes(
+            "[settings.engine.node.Engine]\nuppercase = false\n[settings.front.runtime]\ndrain_ms = 1\n"
+        )
+    );
+}
+
+/// A `[settings.<segment>]` table must name a segment of the placement,
+/// and cannot say where the segment finds its peers or its pool.
+#[test]
+fn a_segments_settings_name_it_and_not_its_peers() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the chat spec");
+    let graph = std::fs::read_to_string(dir.join("chat.gdl")).expect("the graph");
+    let target = tempfile::Builder::new()
+        .prefix("gdl-settings-")
+        .tempdir()
+        .expect("a target directory");
+    let wrong = format!(
+        "{text}\n[settings.gpu]\nlisten = \"127.0.0.1:0\"\n\
+         [settings.post]\nroster = \"/tmp/x\"\nhub = {{ host = \"h\" }}\ninstances = []\npool = \"p\"\n"
+    );
+    let spec = Spec::from_text(&wrong, &graph, &dir).expect("a spec");
+    let error = crate::check(&spec, target.path(), crate::Offers::Read)
+        .expect_err("refused")
+        .to_string();
+    for problem in [
+        "[settings.gpu]: the placement has no segment `gpu`",
+        "[settings.post]: a segment's settings cannot set `roster`",
+        "[settings.post]: a segment's settings cannot set `hub`",
+        "[settings.post]: a segment's settings cannot set `instances`",
+        "[settings.post]: a segment's settings cannot set `pool`",
+    ] {
+        assert!(error.contains(problem), "{problem} in:\n{error}");
+    }
+}
+
 const CLASSED: &str = r#"
     [contract]
     path = "contract"

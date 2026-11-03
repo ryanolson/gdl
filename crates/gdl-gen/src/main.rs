@@ -39,7 +39,7 @@
 //! rebuilds only what a change reaches. `run` builds as `build` does, then runs every
 //! segment on this machine, each with settings of its own in a temporary
 //! directory: a listener on a free loopback port, one shared roster
-//! directory, and its `[deployment.segment.<name>.config]` table. The
+//! directory, and its `[settings.<segment>]` table. The
 //! segment that hosts the source reads JSON requests from stdin; when it
 //! ends, each other segment gets one SIGTERM and drains. A SIGINT reaches
 //! every segment from the terminal, and `run` sends none. Unix only.

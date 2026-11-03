@@ -95,14 +95,14 @@ To send requests from a script, pipe them in. `run` ends when its input ends:
 echo '{"text": "hello big wide world", "max_words": 3}' | cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml
 ```
 
-The engine's and the post segment's settings come from the spec's `[deployment.segment.<name>.config]` tables. `compose` writes the same tables into its bundle:
+The engine's and the post segment's settings come from the spec's `[settings.<segment>]` tables. `compose` writes the same tables into its bundle:
 
 ```toml
-[deployment.segment.engine.config.node.Engine]
+[settings.engine.node.Engine]
 load_ms = 200
 uppercase = true
 
-[deployment.segment.post.config.node.Format]
+[settings.post.node.Format]
 open = "<"
 close = ">"
 ```
@@ -129,6 +129,6 @@ These files have no node tables, so the answer is in lower case with square brac
 
 ## Next
 
-- Add a `[system]` table with a `port` to a segment's settings, under `run` in its `[deployment.segment.<name>.config]` table, and read `GET /metrics` there. See [Health and metrics](../operations/observability.md).
+- Add a `[system]` table with a `port` to a segment's settings, in its `[settings.<segment>]` table, and read `GET /metrics` there. See [Health and metrics](../operations/observability.md).
 - `crates/gdl-gen/tests/chat.rs` runs these steps as a test.
 - More examples: [Run the examples](examples.md). Your own graph: [Define a graph](define-a-graph.md) and [Write nodes](write-nodes.md).

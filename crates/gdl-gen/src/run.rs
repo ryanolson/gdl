@@ -12,8 +12,9 @@ use crate::{Build, Error, Offers, Spec};
 ///
 /// Every segment gets settings of its own in a new temporary directory: a
 /// listener on a free loopback port, one roster directory that they share,
-/// and its `[deployment.segment.<name>.config]` table. The segment that
-/// hosts the source reads JSON requests from this process's stdin and
+/// and its `[settings.<segment>]` table. A deployment's
+/// `[deployment.segment.<name>.config]` is for its containers, and is not
+/// read. The segment that hosts the source reads JSON requests from this process's stdin and
 /// writes the answers to its stdout. The others write to its stderr. When
 /// the source's segment ends, at the end of its input, each other segment
 /// gets one SIGTERM and drains. A SIGINT, such as Ctrl-C at a terminal,
@@ -72,7 +73,6 @@ fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, 
     let binaries = crate::build(spec, target, how)?;
     let roster = dir.join("roster");
     std::fs::create_dir(&roster).map_err(|e| Error::new(format!("the roster directory: {e}")))?;
-    let deployment = spec.deployment.clone().unwrap_or_default();
     let mut front = None;
     let mut others = Vec::new();
     for (name, nodes) in laid.placement.segments() {
@@ -83,7 +83,7 @@ fn prepare(spec: &Spec, target: &Path, how: &Build, dir: &Path) -> Result<Plan, 
             .find(|path| path.file_name().is_some_and(|f| f == file.as_str()))
             .ok_or_else(|| Error::new(format!("the build made no binary `{file}`")))?
             .clone();
-        let table = settings(&roster, deployment.config(name))?;
+        let table = settings(&roster, spec.settings.get(name))?;
         let settings = dir.join(format!("{name}.toml"));
         let text = toml::to_string_pretty(&table).map_err(|e| Error::new(e.to_string()))?;
         std::fs::write(&settings, text)
