@@ -315,3 +315,63 @@ fn a_dgd_segment_needs_an_adapter_the_scaler_can_name() {
     let error = children("p", "ns", &hashed, Scaling::Operator).expect_err("refused");
     assert!(error.contains("p-front_end"), "{error}");
 }
+
+/// `cargo gdl` sets the image of the `main` container of a component that
+/// runs a segment, and changes nothing else of the DGD.
+#[test]
+fn a_segments_image_is_set_in_its_components_main_container() {
+    let mut dgd = dgd();
+    gdl_k8s::set_image(&mut dgd, "Frontend", "registry.example/gdl/pool:built").expect("set");
+    let mut expected = self::dgd();
+    expected["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["image"] =
+        "registry.example/gdl/pool:built".into();
+    assert_eq!(dgd, expected);
+}
+
+/// A component's role templates are where dynamo takes its pods from, so
+/// a `main` in each of two roles is two places for one image, and a
+/// component with no `main` has none: both are refused, and the DGD is
+/// left as it was.
+#[test]
+fn a_segments_image_is_placed_exactly_once() {
+    let main = json!({"spec": {"containers": [{"name": "main", "image": "a"}]}});
+    let mut roles = dgd();
+    roles["spec"]["components"][0]["roles"] = json!([
+        {"name": "leader", "podTemplate": main},
+        {"name": "worker", "podTemplate": main},
+    ]);
+    let mut nameless = dgd();
+    nameless["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["name"] =
+        "app".into();
+    for (mut dgd, found) in [(roles, "has 2 containers"), (nameless, "has 0 containers")] {
+        let before = dgd.clone();
+        let error = gdl_k8s::set_image(&mut dgd, "Frontend", "x").expect_err("refused");
+        assert!(error.contains(found), "{error}");
+        assert!(error.contains("named `main`"), "{error}");
+        assert_eq!(dgd, before);
+    }
+    let mut absent = dgd();
+    let error = gdl_k8s::set_image(&mut absent, "Router", "x").expect_err("refused");
+    assert!(error.contains("no component `Router`"), "{error}");
+}
+
+/// `check_dgd` refuses what the render would, and what only the
+/// operator's render needs, a scaling adapter, on any cluster; a DGD that
+/// fits passes.
+#[test]
+fn check_dgd_refuses_what_the_operators_render_would() {
+    gdl_k8s::check_dgd("p", "ns", &dgd(), &[("pool", "Frontend")]).expect("it fits");
+    let mut unscaled = dgd();
+    unscaled["spec"]["components"][0]
+        .as_object_mut()
+        .expect("an object")
+        .remove("scalingAdapter");
+    let error =
+        gdl_k8s::check_dgd("p", "ns", &unscaled, &[("pool", "Frontend")]).expect_err("refused");
+    assert!(error.contains("`scalingAdapter: {}`"), "{error}");
+    let error =
+        gdl_k8s::check_dgd("q", "ns", &dgd(), &[("pool", "Frontend")]).expect_err("refused");
+    assert!(error.contains("name `p`, and it must be `q`"), "{error}");
+    let error = gdl_k8s::check_dgd("p", "ns", &dgd(), &[("pool", "Router")]).expect_err("refused");
+    assert!(error.contains("does not have"), "{error}");
+}

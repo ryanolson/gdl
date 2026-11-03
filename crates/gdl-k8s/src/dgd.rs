@@ -6,7 +6,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::pool::{Pool, Segment};
+use crate::pool::Pool;
 
 /// The API version of the DGDs a pool renders: the one whose components
 /// are a list, which dynamo's operator stores.
@@ -30,11 +30,7 @@ const CONFIG: &str = "gdl.dev/config";
 /// each role's when it is an LPX component or a role has one, since
 /// dynamo then refuses a shared template beside them; else the shared one.
 fn templates(component: &mut Value) -> Vec<&mut Value> {
-    let by_role = component["type"] == "lpx"
-        || component["roles"]
-            .as_array()
-            .is_some_and(|roles| roles.iter().any(|role| !role["podTemplate"].is_null()));
-    if by_role && component["roles"].is_array() {
+    if by_role(component) {
         let roles = component["roles"].as_array_mut().into_iter().flatten();
         return roles
             .filter_map(|role| role.as_object_mut())
@@ -45,6 +41,91 @@ fn templates(component: &mut Value) -> Vec<&mut Value> {
         Some(fields) => vec![fields.entry("podTemplate").or_insert(Value::Null)],
         None => Vec::new(),
     }
+}
+
+/// Whether dynamo takes DGD component `component`'s pods from its roles'
+/// templates ([`templates`]).
+fn by_role(component: &Value) -> bool {
+    let roled = component["type"] == "lpx"
+        || component["roles"]
+            .as_array()
+            .is_some_and(|roles| roles.iter().any(|role| !role["podTemplate"].is_null()));
+    roled && component["roles"].is_array()
+}
+
+/// Set the image of DGD component `component`'s container `main` to
+/// `image`: the image of the segment it runs, which `cargo gdl` builds.
+/// Refused unless the component's pod templates, as dynamo takes them
+/// ([`templates`]), hold exactly one container of that name, since
+/// otherwise no one place holds the segment's image. Nothing else of
+/// the DGD changes.
+pub fn set_image(dgd: &mut Value, component: &str, image: &str) -> Result<(), String> {
+    let found = dgd
+        .get_mut("spec")
+        .and_then(|spec| spec.get_mut("components"))
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .find(|c| c["name"] == component)
+        .ok_or_else(|| format!("the pool's DGD has no component `{component}`"))?;
+    // Read through `get_mut` alone: `templates` makes the templates it
+    // does not find, and an image is set in none of them.
+    let shared = !by_role(found);
+    let templates: Vec<&mut Value> = match shared {
+        true => found.get_mut("podTemplate").into_iter().collect(),
+        false => found
+            .get_mut("roles")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+            .filter_map(|role| role.get_mut("podTemplate"))
+            .collect(),
+    };
+    let mut mains: Vec<&mut Value> = templates
+        .into_iter()
+        .filter_map(|template| template.pointer_mut("/spec/containers"))
+        .filter_map(Value::as_array_mut)
+        .flatten()
+        .filter(|container| container["name"] == "main")
+        .collect();
+    match mains.as_mut_slice() {
+        [main] => {
+            if let Some(fields) = main.as_object_mut() {
+                fields.insert("image".into(), image.into());
+            }
+            Ok(())
+        }
+        others => Err(format!(
+            "component `{component}` of the pool's DGD has {} containers named `main` in its pod templates ({}): the segment's image is set in exactly one",
+            others.len(),
+            match shared {
+                true => "`podTemplate.spec.containers`",
+                false => "each role's `podTemplate.spec.containers`",
+            }
+        )),
+    }
+}
+
+/// Refused unless `dgd`, as JSON, is a DGD that pool `name` in namespace
+/// `namespace` can own with each `(segment, component)` of `placed`:
+/// what [`crate::children`] refuses of it, and a named component without
+/// `scalingAdapter`, or whose name dynamo would hash into its adapter's,
+/// or without exactly one container `main` ([`set_image`]). `cargo gdl
+/// check` asks it of a fleet's DGD file, so that the file is refused
+/// before anything is built.
+pub fn check_dgd(
+    name: &str,
+    namespace: &str,
+    dgd: &Value,
+    placed: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut dgd = dgd.clone();
+    fit(name, namespace, &mut dgd, placed, "")?;
+    for (_, component) in placed {
+        adapter_name(&dgd, name, component)?;
+        set_image(&mut dgd, component, "")?;
+    }
+    Ok(())
 }
 
 /// Put `checksum` in `template`'s [`CONFIG`] annotation, making the
@@ -139,36 +220,16 @@ fn dns_subdomain(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
 }
 
-/// The DGD of `pool`, named `name` in `namespace`, with `labels` and
-/// `annotations` added to its own. A component that runs a segment
-/// carries `checksum` in its pods' `gdl.dev/config`, so that a change to
-/// the pool's ConfigMap rolls them. A component with a scaling adapter
-/// carries no `replicas`: the adapter owns the count, and dynamo's
-/// webhook refuses any other writer. `None` for a pool without a DGD.
-/// Refused when the DGD is not one the pool can own as written, or a
-/// segment names a component it does not have.
-pub(crate) fn render(
+/// Refused unless `dgd` is a DGD that pool `name` in `namespace` can own
+/// as written, with each `(segment, component)` of `placed`; each named
+/// component's pod templates then carry `checksum` in [`CONFIG`].
+fn fit(
     name: &str,
     namespace: &str,
-    pool: &Pool,
-    labels: Map<String, Value>,
-    annotations: Map<String, Value>,
+    dgd: &mut Value,
+    placed: &[(&str, &str)],
     checksum: &str,
-) -> Result<Option<Value>, String> {
-    let placed: Vec<(&Segment, &str)> = pool
-        .segments
-        .iter()
-        .filter_map(|segment| Some((segment, segment.component.as_deref()?)))
-        .collect();
-    let Some(text) = &pool.dgd else {
-        return match placed.first() {
-            Some((segment, component)) => Err(format!(
-                "segment `{}` runs in component `{component}` of the pool's DGD, and the pool has no `dgd`",
-                segment.name
-            )),
-            None => Ok(None),
-        };
-    };
+) -> Result<(), String> {
     // dynamo labels each pod of the DGD with its name, the pool's, and the
     // operator finds the pods by that label: it must fit a label's value.
     if name.len() > crate::labels::LABEL_LIMIT {
@@ -177,8 +238,6 @@ pub(crate) fn render(
             crate::labels::LABEL_LIMIT
         ));
     }
-    let mut dgd: Value =
-        serde_json::from_str(text).map_err(|e| format!("the pool's `dgd` is not JSON: {e}"))?;
     if dgd["apiVersion"] != DGD_API_VERSION || dgd["kind"] != DGD_KIND {
         return Err(format!(
             "the pool's `dgd` is a {} of {}: a pool owns a {DGD_KIND} of {DGD_API_VERSION}",
@@ -208,8 +267,7 @@ pub(crate) fn render(
     for (at, (segment, component)) in placed.iter().enumerate() {
         if let Some((other, _)) = placed[..at].iter().find(|(_, c)| c == component) {
             return Err(format!(
-                "segments `{}` and `{}` both run in component `{component}` of the pool's DGD",
-                other.name, segment.name
+                "segments `{other}` and `{segment}` both run in component `{component}` of the pool's DGD"
             ));
         }
         let found = components
@@ -217,8 +275,7 @@ pub(crate) fn render(
             .find(|c| c["name"] == *component)
             .ok_or_else(|| {
                 format!(
-                    "segment `{}` runs in component `{component}`, which the pool's DGD does not have",
-                    segment.name
+                    "segment `{segment}` runs in component `{component}`, which the pool's DGD does not have"
                 )
             })?;
         if found["roles"]
@@ -233,7 +290,45 @@ pub(crate) fn render(
             annotate(template, component, checksum)?;
         }
     }
-    for component in components.iter_mut() {
+    Ok(())
+}
+
+/// The DGD of `pool`, named `name` in `namespace`, with `labels` and
+/// `annotations` added to its own. A component that runs a segment
+/// carries `checksum` in its pods' `gdl.dev/config`, so that a change to
+/// the pool's ConfigMap rolls them. A component with a scaling adapter
+/// carries no `replicas`: the adapter owns the count, and dynamo's
+/// webhook refuses any other writer. `None` for a pool without a DGD.
+/// Refused when the DGD is not one the pool can own as written, or a
+/// segment names a component it does not have.
+pub(crate) fn render(
+    name: &str,
+    namespace: &str,
+    pool: &Pool,
+    labels: Map<String, Value>,
+    annotations: Map<String, Value>,
+    checksum: &str,
+) -> Result<Option<Value>, String> {
+    let placed: Vec<(&str, &str)> = pool
+        .segments
+        .iter()
+        .filter_map(|segment| Some((segment.name.as_str(), segment.component.as_deref()?)))
+        .collect();
+    let Some(text) = &pool.dgd else {
+        return match placed.first() {
+            Some((segment, component)) => Err(format!(
+                "segment `{segment}` runs in component `{component}` of the pool's DGD, and the pool has no `dgd`"
+            )),
+            None => Ok(None),
+        };
+    };
+    let mut dgd: Value =
+        serde_json::from_str(text).map_err(|e| format!("the pool's `dgd` is not JSON: {e}"))?;
+    fit(name, namespace, &mut dgd, &placed, checksum)?;
+    let components = dgd
+        .pointer_mut("/spec/components")
+        .and_then(Value::as_array_mut);
+    for component in components.into_iter().flatten() {
         if !component["scalingAdapter"].is_null()
             && let Some(fields) = component.as_object_mut()
         {
