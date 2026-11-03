@@ -189,3 +189,51 @@ async fn a_release_waits_for_a_dgd_segment_pod() {
     assert_eq!(step(&fake), Some(StopStep::Segments));
     assert!(!released(&fake), "{:?}", fake.log());
 }
+
+/// A held generation cannot hide the segment pods that still use the hub.
+#[tokio::test]
+async fn a_held_generation_cannot_hide_a_running_dgd_segment() {
+    let fake = running_dgd(false).await;
+    let dgd_uid = fake.uid(Kind::DynamoGraphDeployment, "p");
+    {
+        let mut state = fake.state();
+        let pool = state.pool.as_mut().expect("a pool");
+        pool.metadata.generation = Some(2);
+        pool.spec.pool.hub.image = "registry.example/hub:next".into();
+        pool.spec.pool.segments[0].component = None;
+        pool.spec.pool.dgd = None;
+        state.version += 1;
+    }
+    fake.reconcile(1_000).await.expect("the generation is held");
+    assert_eq!(fake.status().held, Some(2));
+    assert_eq!(fake.uid(Kind::DynamoGraphDeployment, "p"), dgd_uid);
+    assert!(
+        !fake.log().iter().any(|entry| {
+            entry.starts_with("apply ")
+                || entry.starts_with("create ")
+                || entry.starts_with("delete ")
+        }),
+        "{:?}",
+        fake.log()
+    );
+
+    fake.delete(false);
+    fake.reconcile(2_000).await.expect("stop the gdl segment");
+    fake.settle();
+    fake.reconcile(3_000)
+        .await
+        .expect("wait for the DGD segment");
+    fake.settle();
+    fake.reconcile(4_000).await.expect("keep waiting");
+
+    assert_eq!(fake.state().dgd_pods["Frontend"], 2);
+    let log = fake.log();
+    assert!(
+        !released(&fake)
+            && !log
+                .iter()
+                .any(|entry| entry.starts_with("write Deployment/p ")),
+        "the live DGD segment still needs the hub: {log:?}"
+    );
+    assert_eq!(step(&fake), Some(StopStep::Segments));
+}
