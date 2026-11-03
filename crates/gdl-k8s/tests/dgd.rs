@@ -79,14 +79,14 @@ fn component<'a>(dgd: &'a Value, name: &str) -> &'a Value {
         .expect("the component")
 }
 
-/// The segment in the DGD has no Deployment, entry Service or scaler of
-/// its own; the hub and the other segment render as in any pool; and the
+/// The segment in the DGD has no Deployment or entry Service of its
+/// own; the hub and the other segment render as in any pool; and the
 /// DGD is one of the pool's objects, named after the pool and labelled
 /// as its others are.
 #[test]
 fn a_dgd_segment_runs_in_the_pools_dgd() {
     let objects = children("p", "ns", &pool(), Scaling::Operator).expect("objects");
-    for kind in ["Deployment", "Service", "GdlScaler"] {
+    for kind in ["Deployment", "Service"] {
         assert!(find(&objects, kind, "p-pool").is_none(), "{kind}");
     }
     assert!(find(&objects, "Deployment", "p").is_some(), "the hub");
@@ -254,4 +254,64 @@ fn a_pool_name_longer_than_a_label_cannot_have_a_dgd() {
     pool.dgd = Some(dgd.to_string());
     let error = children(&name, "ns", &pool, Scaling::Fixed).expect_err("refused");
     assert!(error.contains("longer than 63"), "{error}");
+}
+
+/// Under the operator, the segment in the DGD has a scaler that writes
+/// its component's scaling adapter, named as dynamo names it, and retires
+/// each victim through the hub: the segment has no entry Service to take
+/// a victim out of. A fixed pool has no scaler.
+#[test]
+fn a_dgd_segment_is_scaled_through_its_adapter() {
+    let objects = children("p", "ns", &pool(), Scaling::Operator).expect("objects");
+    let scaler = find(&objects, "GdlScaler", "p-pool").expect("the scaler");
+    assert_eq!(
+        scaler["spec"]["targetRef"],
+        json!({
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeploymentScalingAdapter",
+            "name": "p-frontend",
+        })
+    );
+    assert_eq!(scaler["spec"]["retire"], "request");
+    assert!(scaler["spec"]["drainBound"].is_string());
+    assert!(scaler["spec"].get("service").is_none());
+    let front = find(&objects, "GdlScaler", "p-front").expect("the other scaler");
+    assert_eq!(front["spec"]["targetRef"]["kind"], "Deployment");
+
+    let fixed = children("p", "ns", &pool(), Scaling::Fixed).expect("objects");
+    assert!(fixed.iter().all(|o| o["kind"] != "GdlScaler"));
+}
+
+/// The operator scales a DGD segment only through an adapter it can name:
+/// a component without `scalingAdapter`, or whose name dynamo would hash
+/// into the adapter's, is refused. A fixed pool needs no adapter.
+#[test]
+fn a_dgd_segment_needs_an_adapter_the_scaler_can_name() {
+    let with = |edit: &dyn Fn(&mut Value), segment: &str| {
+        let mut dgd = dgd();
+        edit(&mut dgd);
+        let mut pool = pool();
+        pool.dgd = Some(dgd.to_string());
+        pool.segments[1].component = Some(segment.into());
+        pool
+    };
+    let unscaled = with(
+        &|d| {
+            d["spec"]["components"][0]
+                .as_object_mut()
+                .expect("a component")
+                .remove("scalingAdapter");
+        },
+        "Frontend",
+    );
+    let error = children("p", "ns", &unscaled, Scaling::Operator).expect_err("refused");
+    assert!(error.contains("scalingAdapter"), "{error}");
+    children("p", "ns", &unscaled, Scaling::Fixed).expect("a fixed pool needs no adapter");
+
+    let hashed = with(
+        &|d| d["spec"]["components"][0]["name"] = "Front_End".into(),
+        "Front_End",
+    );
+    let error = children("p", "ns", &hashed, Scaling::Operator).expect_err("refused");
+    assert!(error.contains("p-front_end"), "{error}");
 }

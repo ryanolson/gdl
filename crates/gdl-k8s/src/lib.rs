@@ -12,7 +12,10 @@ mod pool;
 mod render;
 mod settings;
 
-pub use dgd::{COMPONENT_LABEL, DGD_API_VERSION, DGD_KIND, DGD_LABEL, segment_components};
+pub use dgd::{
+    ADAPTER_API_VERSION, ADAPTER_KIND, COMPONENT_LABEL, DGD_API_VERSION, DGD_KIND, DGD_LABEL,
+    segment_components,
+};
 pub use labels::{LABEL_LIMIT, LABEL_PREFIX, checksum, fnv, label_value};
 pub use monitor::{pod_monitor, pool_monitor};
 pub use pool::{

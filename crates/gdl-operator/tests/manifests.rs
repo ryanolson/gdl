@@ -148,6 +148,14 @@ fn the_role_grants_only_what_the_operator_uses() {
             ("discovery.k8s.io/endpointslices", "get,list,watch"),
             ("monitoring.coreos.com/podmonitors", write),
             ("nvidia.com/dynamographdeployments", write),
+            (
+                "nvidia.com/dynamographdeploymentscalingadapters",
+                "get,list,watch"
+            ),
+            (
+                "nvidia.com/dynamographdeploymentscalingadapters/scale",
+                "get,update,patch",
+            ),
             ("events.k8s.io/events", "create,patch"),
         ]
     );

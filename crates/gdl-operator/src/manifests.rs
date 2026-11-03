@@ -71,6 +71,12 @@ pub fn namespaced(namespace: &str, image: &str) -> Vec<Value> {
             rule("discovery.k8s.io", &["endpointslices"], &read),
             rule("monitoring.coreos.com", &["podmonitors"], &write),
             rule("nvidia.com", &["dynamographdeployments"], &write),
+            rule("nvidia.com", &["dynamographdeploymentscalingadapters"], &read),
+            rule(
+                "nvidia.com",
+                &["dynamographdeploymentscalingadapters/scale"],
+                &["get", "update", "patch"],
+            ),
             rule("events.k8s.io", &["events"], &["create", "patch"]),
         ],
     });

@@ -93,6 +93,52 @@ pub fn segment_components(dgd: &Value) -> Vec<String> {
     found
 }
 
+/// The API version of dynamo's DGD scaling adapter.
+pub const ADAPTER_API_VERSION: &str = "nvidia.com/v1beta1";
+
+/// The kind of dynamo's DGD scaling adapter.
+pub const ADAPTER_KIND: &str = "DynamoGraphDeploymentScalingAdapter";
+
+/// The name of the scaling adapter that dynamo's operator makes for
+/// component `component` of the rendered DGD `dgd`, named `name`, which a
+/// segment's `GdlScaler` writes. dynamo names it `<dgd>-<component in lower
+/// case>` when that is a DNS subdomain, and hashes it otherwise
+/// (`generateAdapterName` in its operator), so a component whose name
+/// gives no plain one is refused, as is one without `scalingAdapter`:
+/// without an adapter, dynamo's webhook lets no one but its operator
+/// write the count.
+pub(crate) fn adapter_name(dgd: &Value, name: &str, component: &str) -> Result<String, String> {
+    let found = dgd["spec"]["components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| c["name"] == component)
+        .ok_or_else(|| format!("the pool's DGD has no component `{component}`"))?;
+    if found["scalingAdapter"].is_null() {
+        return Err(format!(
+            "component `{component}` of the pool's DGD runs a segment, and the operator scales it through its scaling adapter: give it `scalingAdapter: {{}}`"
+        ));
+    }
+    let adapter = format!("{name}-{}", component.to_lowercase());
+    if !dns_subdomain(&adapter) {
+        return Err(format!(
+            "component `{component}` of the pool's DGD gives its scaling adapter the name `{adapter}`, which dynamo would hash: name the component with letters, digits and `-`"
+        ));
+    }
+    Ok(adapter)
+}
+
+/// Whether `name` is a DNS subdomain, as Kubernetes names an object.
+fn dns_subdomain(name: &str) -> bool {
+    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    name.len() <= 253
+        && edge(name.chars().next())
+        && edge(name.chars().last())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
 /// The DGD of `pool`, named `name` in `namespace`, with `labels` and
 /// `annotations` added to its own. A component that runs a segment
 /// carries `checksum` in its pods' `gdl.dev/config`, so that a change to

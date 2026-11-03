@@ -123,11 +123,11 @@
                     "description": "The object whose `replicas` it writes.",
                     "properties": {
                       "apiVersion": {
-                        "description": "`apps/v1`.",
+                        "description": "`apps/v1`, or `nvidia.com/v1beta1` for an adapter.",
                         "type": "string"
                       },
                       "kind": {
-                        "description": "`Deployment`.",
+                        "description": "`Deployment`, or `DynamoGraphDeploymentScalingAdapter`.",
                         "type": "string"
                       },
                       "name": {
@@ -315,7 +315,7 @@
                           "type": "array"
                         },
                         "deployment": {
-                          "description": "The uid of the Deployment it was chosen from. A Deployment made\nagain under the same name has another, and the scaler abandons the\nremoval.",
+                          "description": "The uid of the target it was chosen from: the Deployment, or the\nscaling adapter. A target made again under the same name has\nanother, and the scaler abandons the removal.",
                           "type": "string"
                         },
                         "egress": {
@@ -401,7 +401,7 @@
                           "type": "string"
                         },
                         "target": {
-                          "description": "The Deployment's `replicas` once it is removed: one below the count\nwhen it was chosen. A count at or below it shows that its scale-down\nwas written.",
+                          "description": "The target's count once it is removed: one below the count\nwhen it was chosen. A count at or below it shows that its scale-down\nwas written.",
                           "format": "int32",
                           "type": "integer"
                         },

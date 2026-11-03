@@ -121,7 +121,26 @@ pub fn children(
     )?;
     for (segment, settings) in pool.segments.iter().zip(&settings) {
         // dynamo's operator runs the pods of a segment in the pool's DGD.
-        if segment.component.is_some() {
+        // Its scaler writes its component's scaling adapter, and retires
+        // each victim through the hub before the count goes down: the
+        // segment has no entry Service to take it out of.
+        if let Some(component) = &segment.component {
+            if scaling == Scaling::Operator
+                && let Some(dgd) = &dgd
+            {
+                let adapter = crate::dgd::adapter_name(dgd, name, component)?;
+                let target = json!({
+                    "apiVersion": crate::dgd::ADAPTER_API_VERSION,
+                    "kind": crate::dgd::ADAPTER_KIND,
+                    "name": adapter,
+                });
+                let mut scaler = render.scaler(segment, settings, target);
+                scaler["spec"]["retire"] = "request".into();
+                if let Some(fields) = scaler["spec"].as_object_mut() {
+                    fields.remove("service");
+                }
+                objects.push(scaler);
+            }
             continue;
         }
         objects.push(render.segment(segment, settings, &checksum));
@@ -129,7 +148,12 @@ pub fn children(
             objects.push(render.entry_service(segment));
         }
         if scaling == Scaling::Operator {
-            objects.push(render.scaler(segment, settings));
+            let target = json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": object_name(name, &segment.name),
+            });
+            objects.push(render.scaler(segment, settings, target));
         }
     }
     objects.extend(dgd);
@@ -440,17 +464,17 @@ impl Render<'_> {
         deployment
     }
 
-    /// The `GdlScaler` of the pool's `segment`, named after its
-    /// Deployment, without `replicas`, which only its bootstrap and then
-    /// its HPA or a person write: the segment's quorum as its minimum, its
-    /// drain bound, its entry Service when it publishes ports, and its
-    /// metrics' prefix.
-    fn scaler(&self, segment: &Segment, settings: &Settings) -> Value {
+    /// The `GdlScaler` of the pool's `segment`, which scales `target`,
+    /// named `<pool>-<segment>`, without `replicas`, which only its
+    /// bootstrap and then its HPA or a person write: the segment's quorum
+    /// as its minimum, its drain bound, its entry Service when it
+    /// publishes ports, and its metrics' prefix.
+    fn scaler(&self, segment: &Segment, settings: &Settings, target: Value) -> Value {
         let name = object_name(self.name, &segment.name);
         let mut spec = json!({
             "pool": self.name,
             "segment": segment.name,
-            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
+            "targetRef": target,
             "minReplicas": segment.quorum.max(1),
             "drainBound": format!("{}ms", settings.drain.as_millis()),
         });

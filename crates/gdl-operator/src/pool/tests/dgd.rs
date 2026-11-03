@@ -50,7 +50,7 @@ async fn running_dgd(parent: bool) -> Fake {
 }
 
 /// The pool owns its DGD: it makes it beside its hub and its other
-/// segment, and makes no Deployment or scaler for the segment in it.
+/// segment, and makes a scaler but no Deployment for the segment in it.
 #[tokio::test]
 async fn the_pool_makes_its_dgd() {
     let fake = fake(false, true);
@@ -65,7 +65,14 @@ async fn the_pool_makes_its_dgd() {
         log.contains(&"create Deployment/p-front".to_string()),
         "{log:?}"
     );
-    assert!(!log.iter().any(|e| e.contains("p-engine")), "{log:?}");
+    assert!(
+        !log.iter().any(|e| e.contains("Deployment/p-engine")),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&"create GdlScaler/p-engine".to_string()),
+        "{log:?}"
+    );
     assert_eq!(
         condition(&fake, "Dgd"),
         Some(("True".into(), "Rendered".into()))
@@ -294,6 +301,8 @@ async fn a_component_move_keeps_running_segment_pods_in_the_stop() {
         dgd["spec"]["components"][1]["podTemplate"] = serde_json::json!({
             "spec": {"containers": [{"name": "main", "image": "registry.example/engine:tag"}]},
         });
+        // The scaler of a segment in the DGD writes its component's adapter.
+        dgd["spec"]["components"][1]["scalingAdapter"] = serde_json::json!({});
         pool.spec.pool.dgd = Some(dgd.to_string());
         state.version += 1;
     }

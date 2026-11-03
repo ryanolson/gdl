@@ -107,13 +107,14 @@ pub struct GdlScalerSpec {
     pub metrics_prefix: Option<String>,
 }
 
-/// The object a `GdlScaler` scales.
+/// The object a `GdlScaler` scales: a Deployment, or the scaling adapter
+/// of the DGD component that runs the segment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetRef {
-    /// `apps/v1`.
+    /// `apps/v1`, or `nvidia.com/v1beta1` for an adapter.
     pub api_version: String,
-    /// `Deployment`.
+    /// `Deployment`, or `DynamoGraphDeploymentScalingAdapter`.
     pub kind: String,
     /// Its name, in the scaler's namespace.
     pub name: String,
@@ -177,11 +178,11 @@ pub struct Retiring {
     pub pod: String,
     /// Its pod's uid, by which the scaler tracks it.
     pub uid: String,
-    /// The uid of the Deployment it was chosen from. A Deployment made
-    /// again under the same name has another, and the scaler abandons the
-    /// removal.
+    /// The uid of the target it was chosen from: the Deployment, or the
+    /// scaling adapter. A target made again under the same name has
+    /// another, and the scaler abandons the removal.
     pub deployment: String,
-    /// The Deployment's `replicas` once it is removed: one below the count
+    /// The target's count once it is removed: one below the count
     /// when it was chosen. A count at or below it shows that its scale-down
     /// was written.
     pub target: i32,
@@ -346,7 +347,7 @@ pub enum Outcome {
     Cancelled,
     /// Its pod went before its removal was committed.
     Lost,
-    /// Its Deployment was made again under the same name: the scaler put
+    /// Its target was made again under the same name: the scaler put
     /// back what it had changed on the pod, and starts over.
     Abandoned,
 }

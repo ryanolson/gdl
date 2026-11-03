@@ -197,8 +197,8 @@ impl<'a> PausedWrite<'a> {
 }
 
 impl Cluster for PausedWrite<'_> {
-    async fn target(&self, name: &str) -> Result<Option<Target>, String> {
-        self.fake.target(name).await
+    async fn target(&self, target: &TargetRef) -> Result<Option<Target>, String> {
+        self.fake.target(target).await
     }
 
     async fn pods(&self, selector: &str) -> Result<Vec<PodView>, String> {
@@ -209,9 +209,14 @@ impl Cluster for PausedWrite<'_> {
         self.fake.endpoints(service).await
     }
 
-    async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
+    async fn scale(
+        &self,
+        target: &TargetRef,
+        replicas: i32,
+        fence: &Fence,
+    ) -> Result<String, Refused> {
         self.before("scale").await;
-        self.fake.scale(name, replicas, fence).await
+        self.fake.scale(target, replicas, fence).await
     }
 
     async fn routable(

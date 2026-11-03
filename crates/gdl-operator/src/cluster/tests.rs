@@ -374,3 +374,146 @@ async fn a_status_write_clears_a_handoff_the_last_removal_had() {
         seen[0]
     );
 }
+
+/// A DGD scaling adapter's target: the adapter, and `deployments`, the
+/// answer to the list of the component's Deployments by dynamo's labels.
+/// The mock checks that the list asks by those labels.
+async fn adapter_target(deployments: Vec<Value>) -> Result<Option<Target>, String> {
+    const ADAPTER: &str = "/apis/nvidia.com/v1beta1/namespaces/test/dynamographdeploymentscalingadapters/pool-frontend";
+    let service = service_fn(move |request: Request<Body>| {
+        let deployments = deployments.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let body = match path.as_str() {
+                ADAPTER => {
+                    json!({
+                        "apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeploymentScalingAdapter",
+                        "metadata": {"name": "pool-frontend", "uid": "adapter-a", "resourceVersion": "7"},
+                        "spec": {"replicas": 2, "dgdRef": {"name": "pool", "componentName": "Frontend"}},
+                    })
+                }
+                "/apis/apps/v1/namespaces/test/deployments" => {
+                    let query = request.uri().query().unwrap_or_default().to_string();
+                    assert!(
+                        query.contains("labelSelector=nvidia.com%2Fdynamo-graph-deployment-name%3Dpool%2Cnvidia.com%2Fdynamo-component%3DFrontend"),
+                        "{query}"
+                    );
+                    json!({"apiVersion": "apps/v1", "kind": "DeploymentList", "metadata": {}, "items": deployments})
+                }
+                other => panic!("an unexpected request: {other}"),
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(body.to_string().into_bytes()))
+                    .expect("a response"),
+            )
+        }
+    });
+    let cluster = KubeCluster::new(Client::new(service, "test"), "test");
+    let target = TargetRef {
+        api_version: ADAPTER_API_VERSION.into(),
+        kind: ADAPTER_KIND.into(),
+        name: "pool-frontend".into(),
+    };
+    cluster.target(&target).await
+}
+
+fn component_deployment(name: &str) -> Value {
+    json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name, "uid": format!("{name}-uid"), "resourceVersion": "3", "generation": 1},
+        "spec": {"replicas": 2, "selector": {"matchLabels": {"nvidia.com/selector": name}}, "template": {}},
+        "status": {"replicas": 2, "updatedReplicas": 2, "observedGeneration": 1},
+    })
+}
+
+/// The adapter's component's Deployment is found by dynamo's labels,
+/// whatever its name: the count and the fence are the adapter's, the pods
+/// the Deployment's. No Deployment, or two, is refused with a reason.
+#[tokio::test]
+async fn an_adapters_deployment_is_found_by_its_labels() {
+    let target = adapter_target(vec![component_deployment("not-the-convention")])
+        .await
+        .expect("a read")
+        .expect("the adapter");
+    assert_eq!(target.replicas, 2);
+    assert_eq!(target.fence.uid, "adapter-a");
+    assert_eq!(target.fence.resource_version, "7");
+    assert_eq!(target.selector, "nvidia.com/selector=not-the-convention");
+    assert!(!target.rolling);
+
+    let none = adapter_target(Vec::new()).await.expect_err("refused");
+    assert!(none.contains("0 Deployments"), "{none}");
+    let two = adapter_target(vec![component_deployment("a"), component_deployment("b")])
+        .await
+        .expect_err("refused");
+    assert!(two.contains("2 Deployments"), "{two}");
+}
+
+/// The scaler writes an adapter's count by a merge patch of its `/scale`
+/// that carries the resourceVersion it read: an adapter changed since
+/// refuses it, and the refusal reads as stale.
+#[tokio::test]
+async fn an_adapters_count_is_written_through_scale_and_fenced() {
+    let seen: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+    let server_seen = Arc::clone(&seen);
+    let service = service_fn(move |request: Request<Body>| {
+        let seen = Arc::clone(&server_seen);
+        async move {
+            assert_eq!(request.method(), http::Method::PATCH);
+            let path = request.uri().path().to_string();
+            let kind = request
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(kind, "application/merge-patch+json");
+            let bytes = request.into_body().collect_bytes().await.expect("a body");
+            let patch: Value = serde_json::from_slice(&bytes).expect("patch JSON");
+            seen.lock().expect("seen").push((path, patch.clone()));
+            let (code, body) = if patch["metadata"]["resourceVersion"] == "7" {
+                (
+                    StatusCode::OK,
+                    json!({"apiVersion": "autoscaling/v1", "kind": "Scale", "metadata": {"name": "pool-frontend", "resourceVersion": "8"}, "spec": {"replicas": patch["spec"]["replicas"]}}),
+                )
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Conflict", "message": "the object has been modified", "code": 409}),
+                )
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(code)
+                    .body(Body::from(body.to_string().into_bytes()))
+                    .expect("a response"),
+            )
+        }
+    });
+    let cluster = KubeCluster::new(Client::new(service, "test"), "test");
+    let target = TargetRef {
+        api_version: ADAPTER_API_VERSION.into(),
+        kind: ADAPTER_KIND.into(),
+        name: "pool-frontend".into(),
+    };
+    let fence = |version: &str| Fence {
+        uid: "adapter-a".into(),
+        resource_version: version.into(),
+    };
+    assert_eq!(cluster.scale(&target, 1, &fence("7")).await, Ok("8".into()));
+    assert!(matches!(
+        cluster.scale(&target, 1, &fence("6")).await,
+        Err(Refused::Stale(_))
+    ));
+    let seen = seen.lock().expect("seen");
+    assert_eq!(
+        seen[0].0,
+        "/apis/nvidia.com/v1beta1/namespaces/test/dynamographdeploymentscalingadapters/pool-frontend/scale"
+    );
+    assert_eq!(
+        seen[0].1,
+        json!({"metadata": {"resourceVersion": "7"}, "spec": {"replicas": 1}})
+    );
+}

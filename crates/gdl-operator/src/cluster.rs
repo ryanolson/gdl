@@ -1,6 +1,7 @@
 //! The scaler's view of the Kubernetes API, as a trait: [`KubeCluster`]
 //! is the real one, and the tests give a fake that plays a Deployment and
-//! its ReplicaSet. Each read returns only what the scaler decides on, so a
+//! its ReplicaSet, or a DGD component's scaling adapter and its
+//! Deployment. Each read returns only what the scaler decides on, so a
 //! fake needs no Kubernetes types.
 
 use std::collections::BTreeSet;
@@ -8,14 +9,17 @@ use std::collections::BTreeSet;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions};
+use kube::api::{
+    ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, Preconditions,
+};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Api, Client, Resource};
 use serde_json::{Value, json};
 
-use crate::{DELETION_COST, GdlScaler, GdlScalerStatus, ROUTABLE, SCALER_MANAGER};
+use crate::{DELETION_COST, GdlScaler, GdlScalerStatus, ROUTABLE, SCALER_MANAGER, TargetRef};
 
-/// A target Deployment, as the scaler reads it.
+/// A target, as the scaler reads it: a Deployment, or a DGD component's
+/// scaling adapter with the Deployment that runs its pods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// Its uid and its resourceVersion when read: every write the scaler
@@ -66,6 +70,108 @@ impl Target {
             selector,
             rolling,
         })
+    }
+}
+
+pub use gdl_k8s::{ADAPTER_API_VERSION, ADAPTER_KIND};
+
+/// What a scaler can target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    /// An `apps/v1` Deployment: the scaler writes its `replicas`.
+    Deployment,
+    /// A DGD component's scaling adapter: the scaler writes its `/scale`,
+    /// and dynamo's operator carries the count to the component's
+    /// Deployment.
+    Adapter,
+}
+
+impl TargetKind {
+    /// The kind `target` names, or `None` for one the scaler cannot scale.
+    pub fn of(target: &TargetRef) -> Option<Self> {
+        match (target.api_version.as_str(), target.kind.as_str()) {
+            ("apps/v1", "Deployment") => Some(Self::Deployment),
+            (ADAPTER_API_VERSION, ADAPTER_KIND) => Some(Self::Adapter),
+            _ => None,
+        }
+    }
+
+    /// Its name, as an object's `kind`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Deployment => "Deployment",
+            Self::Adapter => ADAPTER_KIND,
+        }
+    }
+}
+
+impl Target {
+    /// The view of a DGD component through its scaling adapter `adapter`,
+    /// as JSON, whose pods `deployment` runs. The count and the fence are
+    /// the adapter's: the scaler writes the adapter alone. The pods and the
+    /// rollout are the Deployment's. A Deployment whose count is not the
+    /// adapter's yet is rolling: dynamo's operator has not carried the
+    /// last count to it, so the pods do not show it.
+    pub fn of_adapter(adapter: &Value, deployment: &Deployment) -> Result<Self, String> {
+        let name = adapter["metadata"]["name"].as_str().unwrap_or_default();
+        let replicas = adapter["spec"]["replicas"]
+            .as_i64()
+            .and_then(|r| i32::try_from(r).ok())
+            .ok_or_else(|| format!("{ADAPTER_KIND} `{name}` has no `spec.replicas`"))?;
+        let text = |field: &str| {
+            adapter["metadata"][field]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{ADAPTER_KIND} `{name}` has no `{field}`"))
+        };
+        let pods = Self::of(deployment).ok_or_else(|| {
+            format!(
+                "the Deployment of {ADAPTER_KIND} `{name}` selects its pods by more than labels"
+            )
+        })?;
+        let caught_up = deployment.spec.as_ref().and_then(|s| s.replicas) == Some(replicas);
+        Ok(Self {
+            fence: Fence {
+                uid: text("uid")?,
+                resource_version: text("resourceVersion")?,
+            },
+            replicas,
+            selector: pods.selector,
+            rolling: pods.rolling || !caught_up,
+        })
+    }
+}
+
+/// The DGD and the component that scaling adapter `adapter`, as JSON,
+/// scales, from its `spec.dgdRef`.
+pub fn component_of(adapter: &Value) -> Result<(String, String), String> {
+    let name = adapter["metadata"]["name"].as_str().unwrap_or_default();
+    let field = |key: &str| {
+        adapter["spec"]["dgdRef"][key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("{ADAPTER_KIND} `{name}` has no `spec.dgdRef.{key}`"))
+    };
+    Ok((field("name")?, field("componentName")?))
+}
+
+/// The one Deployment among `found` that runs component `component` of
+/// DGD `dgd`: found by the labels dynamo's operator puts on it, not by its
+/// name, which is dynamo's convention and no contract. Refused unless
+/// there is exactly one.
+pub fn one_deployment(
+    found: Vec<Deployment>,
+    dgd: &str,
+    component: &str,
+) -> Result<Deployment, String> {
+    let count = found.len();
+    let mut found = found.into_iter();
+    match (found.next(), count) {
+        (Some(deployment), 1) => Ok(deployment),
+        _ => Err(format!(
+            "{count} Deployments carry the labels of component `{component}` of DGD `{dgd}`, and the scaler needs exactly one"
+        )),
     }
 }
 
@@ -193,8 +299,11 @@ impl PodView {
 
 /// What the scaler reads and writes in its namespace.
 pub trait Cluster {
-    /// The Deployment `name`, or `None` when there is none.
-    fn target(&self, name: &str) -> impl Future<Output = Result<Option<Target>, String>> + Send;
+    /// The object `target` names, or `None` when there is none.
+    fn target(
+        &self,
+        target: &TargetRef,
+    ) -> impl Future<Output = Result<Option<Target>, String>> + Send;
 
     /// The pods `selector` selects.
     fn pods(&self, selector: &str) -> impl Future<Output = Result<Vec<PodView>, String>> + Send;
@@ -207,11 +316,11 @@ pub trait Cluster {
         service: &str,
     ) -> impl Future<Output = Result<BTreeSet<String>, String>> + Send;
 
-    /// Set the Deployment `name`'s `replicas`, as its one owner, only if
-    /// it is still as `fence` read it: its resourceVersion after.
+    /// Set the count of the object `target` names, as its one owner, only
+    /// if it is still as `fence` read it: its resourceVersion after.
     fn scale(
         &self,
-        name: &str,
+        target: &TargetRef,
         replicas: i32,
         fence: &Fence,
     ) -> impl Future<Output = Result<String, Refused>> + Send;
@@ -258,10 +367,22 @@ pub trait Cluster {
     ) -> impl Future<Output = Result<Option<String>, Refused>> + Send;
 }
 
+/// The resource of dynamo's DGD scaling adapters.
+fn adapter_resource() -> ApiResource {
+    ApiResource {
+        group: "nvidia.com".into(),
+        version: "v1beta1".into(),
+        api_version: ADAPTER_API_VERSION.into(),
+        kind: ADAPTER_KIND.into(),
+        plural: "dynamographdeploymentscalingadapters".into(),
+    }
+}
+
 /// [`Cluster`] over the Kubernetes API, in one namespace.
 #[derive(Clone)]
 pub struct KubeCluster {
     deployments: Api<Deployment>,
+    adapters: Api<DynamicObject>,
     pods: Api<Pod>,
     slices: Api<EndpointSlice>,
     scalers: Api<GdlScaler>,
@@ -273,6 +394,7 @@ impl KubeCluster {
     pub fn new(client: Client, namespace: &str) -> Self {
         Self {
             deployments: Api::namespaced(client.clone(), namespace),
+            adapters: Api::namespaced_with(client.clone(), namespace, &adapter_resource()),
             pods: Api::namespaced(client.clone(), namespace),
             slices: Api::namespaced(client.clone(), namespace),
             scalers: Api::namespaced(client.clone(), namespace),
@@ -312,17 +434,50 @@ impl KubeCluster {
 }
 
 impl Cluster for KubeCluster {
-    async fn target(&self, name: &str) -> Result<Option<Target>, String> {
-        let deployment = self
-            .deployments
-            .get_opt(name)
-            .await
-            .map_err(|e| format!("Deployment `{name}`: {e}"))?;
-        match deployment {
-            None => Ok(None),
-            Some(deployment) => Target::of(&deployment)
-                .map(Some)
-                .ok_or_else(|| format!("Deployment `{name}` selects its pods by more than labels")),
+    async fn target(&self, target: &TargetRef) -> Result<Option<Target>, String> {
+        let name = &target.name;
+        match TargetKind::of(target) {
+            Some(TargetKind::Deployment) => {
+                let deployment = self
+                    .deployments
+                    .get_opt(name)
+                    .await
+                    .map_err(|e| format!("Deployment `{name}`: {e}"))?;
+                match deployment {
+                    None => Ok(None),
+                    Some(deployment) => Target::of(&deployment).map(Some).ok_or_else(|| {
+                        format!("Deployment `{name}` selects its pods by more than labels")
+                    }),
+                }
+            }
+            Some(TargetKind::Adapter) => {
+                let Some(adapter) = self
+                    .adapters
+                    .get_opt(name)
+                    .await
+                    .map_err(|e| format!("{ADAPTER_KIND} `{name}`: {e}"))?
+                else {
+                    return Ok(None);
+                };
+                let adapter = serde_json::to_value(&adapter).map_err(|e| e.to_string())?;
+                let (dgd, component) = component_of(&adapter)?;
+                let selector = format!(
+                    "{}={dgd},{}={component}",
+                    gdl_k8s::DGD_LABEL,
+                    gdl_k8s::COMPONENT_LABEL
+                );
+                let found = self
+                    .deployments
+                    .list(&ListParams::default().labels(&selector))
+                    .await
+                    .map_err(|e| format!("Deployments `{selector}`: {e}"))?;
+                let deployment = one_deployment(found.items, &dgd, &component)?;
+                Target::of_adapter(&adapter, &deployment).map(Some)
+            }
+            None => Err(format!(
+                "a {} of {} is not a target",
+                target.kind, target.api_version
+            )),
         }
     }
 
@@ -350,7 +505,29 @@ impl Cluster for KubeCluster {
             .collect())
     }
 
-    async fn scale(&self, name: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
+    async fn scale(
+        &self,
+        target: &TargetRef,
+        replicas: i32,
+        fence: &Fence,
+    ) -> Result<String, Refused> {
+        let name = target.name.as_str();
+        if TargetKind::of(target) == Some(TargetKind::Adapter) {
+            // A merge patch of the adapter's `/scale`, as an HPA writes it.
+            // Its resourceVersion makes it a write of what the decision
+            // read: an adapter changed since refuses it (409), and one made
+            // again has another resourceVersion too.
+            let patch = json!({
+                "metadata": {"resourceVersion": fence.resource_version},
+                "spec": {"replicas": replicas},
+            });
+            let written = self
+                .adapters
+                .patch_scale(name, &PatchParams::default(), &Patch::Merge(patch))
+                .await
+                .map_err(|e| Refused::of(&format!("{ADAPTER_KIND} `{name}`"), e))?;
+            return Ok(written.metadata.resource_version.unwrap_or_default());
+        }
         // A forced apply of the one field: the scaler is its designated
         // owner, so force is its normal mode and it meets no field
         // conflict, and it changes no other field. Its uid and

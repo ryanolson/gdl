@@ -571,9 +571,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the operator takes a frontend's victim out of its Service's endpoints before its pod goes, so no new connection reaches it through kube-proxy. A keep-alive connection that is already open stays, and the frontend learns that it retires only at its SIGTERM, so a request on it can race the close. A load balancer in front of the Service reports no withdrawal, so the operator waits `routingGrace` for it.
 - **Workaround:** close keep-alive connections while the frontend drains, in its own drain policy. Behind the AWS load balancer controller, use IP targets, and set `routingGrace` to its reconcile time plus the target group's deregistration delay.
 
-### The operator scales only Deployments
-- **What:** a `GdlScaler` targets an `apps/v1` Deployment.
-- **Workaround:** none.
+### The operator scales only Deployments and DGD scaling adapters
+- **What:** a `GdlScaler` targets an `apps/v1` Deployment, or a `nvidia.com/v1beta1` `DynamoGraphDeploymentScalingAdapter`. Behind an adapter, the victim's deletion cost steers a ReplicaSet, so a DGD on Grove, which makes none, removes a pod of its own choice.
+- **Workaround:** set `nvidia.com/enable-grove: "false"` on a DGD whose segment the operator scales.
 
 ### The operator retires on request one victim at a time
 - **What:** in `retire: request` mode a victim drains before its removal is committed, and still holds work after its commit until its pod is gone. So the scaler takes one victim at a time, from its choice until its pod is gone, whatever `maxConcurrentDrains` says.
@@ -590,10 +590,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### A pool's stop waits on its hub to say it withdrew
 - **What:** a `GdlPool` with a parent is deleted only once its hub says its drained record is withdrawn (`GET /v1/ext/gdl-pool/withdrawn`). When the hub does not say so within the longest stop grace of its segments and 60 s, or refuses the drain, the finalizer stays, with the `Withdrawn` condition and an event, and the pool's objects stay. A pool whose hub's Deployment is gone stops as a top pool does, with `HubGone`: its parent still holds its record.
 - **Workaround:** withdraw the pool on its parent's hub (`POST /v1/ext/gdl-pool/children/<class>/<pool>/withdraw` on the control port), then remove the finalizer `gdl.dev/stop` by hand.
-
-### A pool's stop does not scale a segment in its DGD
-- **What:** a segment that runs in a component of the pool's DynamoGraphDeployment has no `GdlScaler`, and the stop writes no count of dynamo's. So the stop waits at its segments step until the segment's pods are gone, and holds the hub meanwhile ([A pool with a DGD](../guides/operator.md#a-pool-with-a-dgd)).
-- **Workaround:** scale the component to 0 by hand: through its scaling adapter, `kubectl scale dgdsa <adapter> --replicas=0`, or its `replicas` in the DGD when it has no adapter.
 
 ### A change that restarts a pool's hub waits for `allowPoolRestart`
 - **What:** a hub restart drains its pool ([A segment does not outlive a hub restart](#a-segment-does-not-outlive-a-hub-restart)). So the operator holds a `GdlPool` generation that changes its hub's pod template, such as a new deployment or hub image, and applies nothing of it, not even its segments' changes, until `allowPoolRestart` is set. The pool's `PoolRestartPending` condition and an event name the held generation.

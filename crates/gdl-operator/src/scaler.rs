@@ -31,7 +31,9 @@ use std::time::Duration;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use k8s_openapi::jiff::Timestamp;
 
-use crate::cluster::{Cluster, Fence, PodView, Refused};
+use crate::cluster::{
+    ADAPTER_API_VERSION, ADAPTER_KIND, Cluster, Fence, PodView, Refused, TargetKind,
+};
 use crate::probe::{Held, Instances, Probe};
 use crate::victim::{Candidate, Victims};
 use crate::{
@@ -192,15 +194,15 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
     async fn step(&mut self, retiring: Vec<Retiring>) -> Result<Duration, Stop> {
         let spec = self.spec;
         let target_ref = &spec.target_ref;
-        if target_ref.api_version != "apps/v1" || target_ref.kind != "Deployment" {
+        let Some(kind) = TargetKind::of(target_ref) else {
             return Err(Stop::Blocked(
                 "UnsupportedTarget",
                 format!(
-                    "the target is a {} of {}; the scaler scales an apps/v1 Deployment",
+                    "the target is a {} of {}; the scaler scales an apps/v1 Deployment, or a {ADAPTER_KIND} of {ADAPTER_API_VERSION}",
                     target_ref.kind, target_ref.api_version
                 ),
             ));
-        }
+        };
         let grace = spec
             .routing_grace()
             .map_err(|e| Stop::Blocked("BadDuration", format!("routingGrace: {e}")))?;
@@ -213,17 +215,20 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         // asked is followed first: one that has gone, or whose container
         // restarted, needs no bound.
         let unasked = self.request && bound.is_none();
-        let target = self
-            .cx
-            .cluster
-            .target(&target_ref.name)
-            .await?
-            .ok_or_else(|| {
-                Stop::Blocked(
-                    "TargetMissing",
-                    format!("Deployment `{}` does not exist", target_ref.name),
-                )
-            })?;
+        // An adapter's target is read through dynamo's objects, which the
+        // scaler does not own: one that does not fit, such as a component
+        // with no Deployment or two, is said in the status, not only logged.
+        let read = self.cx.cluster.target(target_ref).await;
+        let read = match (kind, read) {
+            (TargetKind::Adapter, Err(error)) => Err(Stop::Blocked("TargetUnfit", error)),
+            (_, read) => read.map_err(Stop::Failed),
+        };
+        let target = read?.ok_or_else(|| {
+            Stop::Blocked(
+                "TargetMissing",
+                format!("{} `{}` does not exist", kind.name(), target_ref.name),
+            )
+        })?;
         self.status.selector = target.selector.clone();
         let pods = self.cx.cluster.pods(&target.selector).await?;
         let mut fence = target.fence.clone();
@@ -312,7 +317,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
                     self.cancel(&mut kept, at, &pods).await?;
                 }
                 if replicas != 0 {
-                    self.cx.cluster.scale(&target_ref.name, 0, &fence).await?;
+                    self.cx.cluster.scale(target_ref, 0, &fence).await?;
                 }
             }
             self.count(&pods, kept);
@@ -362,11 +367,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
             if kept.iter().any(|v| alive(&pods, &v.uid).is_some()) {
                 waiting = true;
             } else {
-                fence.resource_version = self
-                    .cx
-                    .cluster
-                    .scale(&target_ref.name, desired, &fence)
-                    .await?;
+                fence.resource_version = self.cx.cluster.scale(target_ref, desired, &fence).await?;
                 replicas = desired;
             }
         }
@@ -655,7 +656,7 @@ impl<C: Cluster, P: Probe> Run<'_, '_, C, P> {
         fence.resource_version = self
             .cx
             .cluster
-            .scale(&self.spec.target_ref.name, target, fence)
+            .scale(&self.spec.target_ref, target, fence)
             .await?;
         kept[at].phase = RetiringPhase::Removing;
         kept[at].scaled = Some(rfc3339(self.now_ms));

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use super::*;
-use crate::cluster::{Fence, Refused, Target};
+use crate::cluster::{Fence, Refused, Target, TargetKind};
 use crate::probe::Asked;
 use crate::{GdlScalerSpec, Suspend, TargetRef};
 
@@ -20,6 +20,9 @@ mod two;
 
 #[path = "tests/request.rs"]
 mod request;
+
+#[path = "tests/adapter.rs"]
+mod adapter;
 
 #[derive(Debug, Clone)]
 struct FakePod {
@@ -43,11 +46,53 @@ struct State {
     /// The Deployment's uid and resourceVersion, moved by each write.
     deployment: String,
     version: u64,
+    /// The DGD scaling adapter in front of the Deployment, when the test
+    /// targets one. The Deployment takes its count only when a test says
+    /// dynamo's operator has carried it ([`Fake::propagate`]).
+    adapter: Option<Adapter>,
+    /// Why the adapter's target does not fit, when a test says so.
+    unfit: Option<String>,
     /// Every write to a pod or the target, in order.
     writes: Vec<String>,
     /// Every write, status writes included, in order.
     events: Vec<String>,
     next: u32,
+}
+
+/// A DGD scaling adapter: its uid, its resourceVersion, moved by each
+/// write, and its count.
+#[derive(Debug, Clone)]
+struct Adapter {
+    uid: String,
+    version: u64,
+    replicas: i32,
+}
+
+impl Adapter {
+    /// The adapter as the API server serves it.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "metadata": {"name": "dgd-frontend", "uid": self.uid, "resourceVersion": self.version.to_string()},
+            "spec": {"replicas": self.replicas, "dgdRef": {"name": "dgd", "componentName": "Frontend"}},
+        })
+    }
+}
+
+impl State {
+    /// The Deployment as the API server serves it: rolling while the
+    /// test says so.
+    fn deployment_object(&self) -> k8s_openapi::api::apps::v1::Deployment {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "name": "dgd-frontend-x", "uid": self.deployment,
+                "resourceVersion": self.version.to_string(),
+                "generation": if self.rolling { 2 } else { 1 },
+            },
+            "spec": {"replicas": self.replicas, "selector": {"matchLabels": {"app": "front"}}, "template": {}},
+            "status": {"observedGeneration": 1, "replicas": self.replicas, "updatedReplicas": self.replicas},
+        }))
+        .expect("a Deployment")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -84,6 +129,31 @@ impl Fake {
             state.deployment = "deployment-a".into();
         }
         fake
+    }
+
+    /// As [`Fake::with`], with a DGD scaling adapter at the same count in
+    /// front of the Deployment.
+    fn with_adapter(loads: &[u64]) -> Self {
+        let fake = Self::with(loads);
+        {
+            let mut state = fake.state();
+            state.adapter = Some(Adapter {
+                uid: "adapter-a".into(),
+                version: 1,
+                replicas: state.replicas,
+            });
+        }
+        fake
+    }
+
+    /// dynamo's operator carries the adapter's count to the Deployment.
+    fn propagate(&self) {
+        let mut state = self.state();
+        let replicas = state.adapter.as_ref().expect("an adapter").replicas;
+        if state.replicas != replicas {
+            state.replicas = replicas;
+            state.version += 1;
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -226,9 +296,17 @@ impl Fake {
 }
 
 impl Cluster for Fake {
-    async fn target(&self, name: &str) -> Result<Option<Target>, String> {
-        assert_eq!(name, "global-front");
+    async fn target(&self, target: &TargetRef) -> Result<Option<Target>, String> {
         let state = self.state();
+        if TargetKind::of(target) == Some(TargetKind::Adapter) {
+            assert_eq!(target.name, "dgd-frontend");
+            if let Some(why) = state.unfit.clone() {
+                return Err(why);
+            }
+            let adapter = state.adapter.clone().expect("an adapter");
+            return Target::of_adapter(&adapter.json(), &state.deployment_object()).map(Some);
+        }
+        assert_eq!(target.name, "global-front");
         Ok(Some(Target {
             fence: Fence {
                 uid: state.deployment.clone(),
@@ -261,8 +339,25 @@ impl Cluster for Fake {
         Ok(self.state().listed.clone())
     }
 
-    async fn scale(&self, _: &str, replicas: i32, fence: &Fence) -> Result<String, Refused> {
+    async fn scale(
+        &self,
+        target: &TargetRef,
+        replicas: i32,
+        fence: &Fence,
+    ) -> Result<String, Refused> {
         let mut state = self.state();
+        if TargetKind::of(target) == Some(TargetKind::Adapter) {
+            let adapter = state.adapter.as_mut().expect("an adapter");
+            if fence.uid != adapter.uid || fence.resource_version != adapter.version.to_string() {
+                return Err(Refused::Stale("the adapter changed".into()));
+            }
+            adapter.replicas = replicas;
+            adapter.version += 1;
+            let version = adapter.version.to_string();
+            state.writes.push(format!("adapter {replicas}"));
+            state.events.push(format!("adapter {replicas}"));
+            return Ok(version);
+        }
         if fence.uid != state.deployment || fence.resource_version != state.version.to_string() {
             return Err(Refused::Stale("the Deployment changed".into()));
         }

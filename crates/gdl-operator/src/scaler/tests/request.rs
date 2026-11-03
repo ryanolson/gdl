@@ -987,3 +987,69 @@ async fn a_pod_written_by_another_controller_is_still_asked() {
     assert!(writes.iter().any(|w| w == "retire i-2 2"), "{writes:?}");
     assert_eq!(victim(&fake).phase, RetiringPhase::Draining);
 }
+
+/// A DGD's frontend can be replaced under the scaler: dynamo's operator
+/// rolls the component's pods on a spec change. A victim whose pod goes
+/// while it drains ends lost, and its retire request named its own
+/// registration only: the pod that replaces it registers anew and is
+/// never asked under the old one. The scale-down then chooses again, and
+/// asks the new choice by its own registration.
+#[tokio::test]
+async fn a_dgd_victim_replaced_while_it_drains_is_not_asked_again() {
+    let fake = Fake::with_adapter(&[5, 0, 5]);
+    list(&fake, &[(1, "ready"), (2, "ready"), (3, "ready")]);
+    let mut spec = request(2);
+    spec.target_ref = TargetRef {
+        api_version: crate::cluster::ADAPTER_API_VERSION.into(),
+        kind: crate::cluster::ADAPTER_KIND.into(),
+        name: "dgd-frontend".into(),
+    };
+    once(&fake, &spec, 0).await;
+    assert_eq!(fake.take_writes(), ["retire i-2 2"]);
+
+    // dynamo's rollout deletes the victim's pod, and its ReplicaSet makes
+    // another, which registers in incarnation 4.
+    {
+        let mut state = fake.state();
+        let victim = state
+            .pods
+            .iter_mut()
+            .find(|p| p.view.name == "pod-2")
+            .expect("the victim");
+        victim.view.terminating = true;
+        let pod = state.make();
+        state.pods.push(pod);
+    }
+    fake.exit();
+    list(&fake, &[(1, "ready"), (3, "ready"), (4, "ready")]);
+    once(&fake, &spec, 1_000).await;
+    let last = status(&fake).last.expect("ended");
+    assert_eq!(
+        (last.outcome, last.chosen.as_str()),
+        (Outcome::Lost, "uid-2")
+    );
+    once(&fake, &spec, 2_000).await;
+    let retires: Vec<String> = fake
+        .take_writes()
+        .into_iter()
+        .filter(|w| w.starts_with("retire"))
+        .collect();
+    assert_eq!(retires.len(), 1, "one new choice: {retires:?}");
+    assert!(retires.iter().all(|w| w != "retire i-2 2"), "{retires:?}");
+    for retire in &retires {
+        let n: u32 = retire
+            .split_whitespace()
+            .nth(2)
+            .and_then(|n| n.parse().ok())
+            .expect("an incarnation");
+        assert_eq!(
+            retire,
+            &format!("retire {} {n}", id(n)),
+            "its own registration"
+        );
+    }
+    assert_eq!(
+        fake.state().adapter.as_ref().expect("an adapter").replicas,
+        3
+    );
+}
