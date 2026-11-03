@@ -683,6 +683,7 @@ What one local stage costs a request and an item, over `crates/gdl/examples/stag
 
 - `operator`: nested hops, each with an `OperatorStage` whose operator maps its stream, as a chain of operators is built;
 - `hop`: one hop with that many forward nodes and backward nodes, each backward node mapping its stream;
+- `around` and `around-wide`: one hop with that many nested around nodes, keeping a `u64` or 512 B, each backward half mapping its stream;
 - `plain`: the control, that many boxed `map`s over the sink's stream, with no gdl code between them.
 
 Items are `u64`, or `large`: 512 B with a field to drop, about the size of a streamed chat chunk. Measured on a shared 20-core aarch64 host (load average 30 to 50), rustc 1.93.1, the release profile with `RUSTFLAGS="--cfg rustix_use_libc"`, valgrind 3.28.0 callgrind. Per request is the count at 400 one-item requests minus the count at 200, divided by 200. Per item is the count at one request of 20,000 items minus one of 10,000, divided by 10,000. A stage is the difference between 5 stages and 0, divided by 5. Main at `71b9fb92`, three rounds, which agreed within 2 Ir.
@@ -800,6 +801,28 @@ An `operator` stage now costs 81.2 Ir per item (311.2 at 512 B), against 90.3 (3
 - **Per item, a deadline adds no instruction to a boundary's poll.** The 3.4 Ir are tokio's time driver at each yield and one clock read per hop every 64 items.
 - **Per request, it adds about 36 clock reads at 5 stages**, in `Cx::check` (four for each hop) and in each boundary's check at its end. Each costs about 70 Ir under callgrind, and more on the hardware.
 - **Rejected: an attempt boundary and a node boundary typed by whether they have a deadline.** Measured as an upper bound, by builds that removed the deadline outright: from the attempt boundary, it saved nothing per item (0.6 Ir more) and cost 11 Ir per request per stage. From `Fuse`, it saved 2.0 Ir per item (4.1 at 512 B) and 55 Ir per request per stage, since `Option<Fuse>` then tests a tag. But it helps only a request with no deadline, and no attempt leaves its segment without one, and the HTTP and API fronts set one. Building it would give each hop two attempt futures, or a backward chain typed by the deadline, and two attempt boundaries for each item type.
+
+- **An around node costs what a forward node and a backward node cost, and a hop without one pays nothing for it** ([Runtime design](../development/runtime-design.md#node-contexts)). The `around` shape is one hop with that many nested around nodes, each keeping a `u64`; `around-wide` keeps 512 B. Their backward halves map their stream as `hop`'s backward nodes do, and name their state on each item so that it is kept. Measured on an aarch64 host (Cortex-X925 and Cortex-A725, 20 cores, 121 GiB), shared, load average 25 to 35, rustc 1.93.1, valgrind 3.28.0. Base `74fef013` and the change were built in one target directory and run from paths of the same length, two rounds each, which agreed within 0.4 Ir per request and 0.01 Ir per item. Per stage:
+
+| Shape | Per request, base | Per request, change | Per item, base | Per item, change | Allocations per request |
+|---|---|---|---|---|---|
+| `plain`, `u64` | 251.2 Ir | 251.2 Ir | 33.0 Ir | 33.0 Ir | 1, both |
+| `operator`, `u64` | 2,619.9 Ir | 2,621.3 Ir | 81.26 Ir | 81.29 Ir | 5.04, both |
+| `hop`, `u64` | 1,002.0 Ir | 1,003.2 Ir | 59.43 Ir | 59.44 Ir | 2.8, both |
+| `around`, `u64` | | 1,018.4 Ir | | 63.46 Ir | 2.8 |
+| `around-wide`, `u64` | | 1,417.9 Ir | | 63.9 Ir | 2.8 |
+| `operator`, 512 B items | 3,007.7 Ir | 3,009.2 Ir | 311.17 Ir | 311.2 Ir | 5.04, both |
+| `hop`, 512 B items | 1,387.0 Ir | 1,388.3 Ir | 290.05 Ir | 290.07 Ir | 2.8, both |
+| `around`, 512 B items | | 1,403.2 Ir | | 294.08 Ir | 2.8 |
+
+- An around node with a `u64` state costs 15 Ir more per request than a forward node and a backward node: the moves of its value down the chain. A 512 B state costs 415 Ir more, about five copies of it, so a node with a large state is better off boxing it.
+- Its 4 Ir more per item is the bench node's own read of its state. With the read removed (and the state dropped in `backward`), a stage costs 59.46 Ir per item, as a `hop` stage does.
+- The chains' new stack moves nothing in a hop without around nodes: within 2 Ir per request and 0.03 Ir per item of base in every shape, with the same allocations.
+
+```bash
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <around|around-wide> <u64|large> <0|5> 1 <200|400>
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <around|around-wide> <u64|large> <0|5> <10000|20000> 1
+```
 
 ### Copies of an item
 

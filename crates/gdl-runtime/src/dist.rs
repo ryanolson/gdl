@@ -39,4 +39,7 @@ pub use runtime::{Entries, RuntimeConfig};
 #[cfg(feature = "fault-injection")]
 pub use runtime::{Faults, Gate};
 pub use segment::{Deployment, Segment, SegmentLoad, Served};
-pub use stages::{BwdEnd, BwdStep, DBackward, DForward, DInner, DOperator, DSink, FwdEnd, FwdStep};
+pub use stages::{
+    BwdAround, BwdEnd, BwdStep, DBackward, DForward, DInner, DOperator, DSink, FwdAround, FwdEnd,
+    FwdStep,
+};

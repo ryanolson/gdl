@@ -42,7 +42,8 @@ mod service;
 mod streamed;
 
 pub use compose::{
-    BackwardChain, ForwardChain, Hop, Inner, Join, OperatorStage, SinkStage, Source,
+    BackwardChain, BackwardHalf, ForwardChain, ForwardHalf, Hop, Inner, Join, Kept, OperatorStage,
+    SinkStage, Source, around,
 };
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
@@ -75,7 +76,7 @@ pub use records::{
 };
 #[doc(hidden)]
 pub use records::{RecordAnswer, RecordLink, RecordOp, RecordReply};
-pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
+pub use role::{Around, Backward, Build, Forward, Frontend, Next, Operator, Sink};
 #[doc(hidden)]
 pub use select::JoinStamps;
 pub use select::{
@@ -174,7 +175,7 @@ pub mod __private {
     pub use gdl_model::__private::*;
     pub use gdl_model::ENDPOINT_LABEL;
 
-    use crate::{Backward, Forward, Frontend, Operator, Sink};
+    use crate::{Around, Backward, Forward, Frontend, Operator, Sink};
 
     /// A message a generated segment sends or receives across a cut: a
     /// wire type. Each segment asserts it of every message that crosses
@@ -364,6 +365,14 @@ pub mod __private {
         Backward,
         "backward",
         [In, Out]
+    );
+    probe!(
+        AroundYes,
+        AroundNo,
+        __gdl_around,
+        Around,
+        "around",
+        [UpReq, UpItem, DownReq, DownItem]
     );
     probe!(
         OperatorYes,

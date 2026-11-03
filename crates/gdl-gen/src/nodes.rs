@@ -194,6 +194,7 @@ fn check(
         Sig::Forward { .. } => Role::Forward,
         Sig::Backward { .. } => Role::Backward,
         Sig::Operator { .. } => Role::Operator,
+        Sig::Around { .. } => Role::Around,
     };
     if entry.role != role {
         problems.push(format!(
@@ -223,6 +224,12 @@ fn check(
             ]
         }
         Sig::Operator {
+            up_req,
+            up_item,
+            down_req,
+            down_item,
+        }
+        | Sig::Around {
             up_req,
             up_item,
             down_req,

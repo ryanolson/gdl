@@ -167,6 +167,7 @@ const TABLE: &[Row] = &[
     row(Item::Role(Role::Forward), "Forward", GDL),
     row(Item::Role(Role::Backward), "Backward", GDL),
     row(Item::Role(Role::Operator), "Operator", GDL),
+    row(Item::Role(Role::Around), "Around", GDL),
 ];
 
 /// The row of this name.

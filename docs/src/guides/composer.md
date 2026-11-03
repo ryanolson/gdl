@@ -39,7 +39,7 @@ An empty catalogue offers **Load examples**, which imports `examples/api` from G
 
 ## Draw the graph
 
-Requests flow down the page to each hop's inner end. Responses flow back up through the backward nodes. Operators and sinks span both columns, and an operator's own hop is drawn beneath it.
+Requests flow down the page to each hop's inner end. Responses flow back up through the backward nodes. Operators and sinks span both columns, and an operator's own hop is drawn beneath it. The composer does not offer around nodes yet: write a graph that has one in its graph file ([Known limitations](../operations/limitations.md#the-composer-does-not-place-around-nodes)).
 
 1. Use the pencil beside **Graph Name** to name the graph `chat`. In the source card, choose **Single** input with `Prompt` and **Stream** output with `Chunk`. To host the graph instead, choose a catalogue frontend, whose ports then fix these messages.
 2. At the inner end, choose `Preprocess`. Each slot offers only nodes whose port carries the arriving message.

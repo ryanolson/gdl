@@ -5,7 +5,7 @@ use gdl_model::Role;
 
 use gdl::Cx;
 use gdl::Items;
-use gdl::{Backward, Forward, Next, Operator, Sink};
+use gdl::{Around, Backward, Forward, Next, Operator, Sink};
 use gdl::{Error, Result};
 
 /// A node declaration: the marker type a graph definition creates for each
@@ -60,6 +60,18 @@ pub trait BackwardDecl: NodeDecl {
     type In: Send + 'static;
     /// See [`Backward::Out`].
     type Out: Send + 'static;
+}
+
+/// Port types of an around node.
+pub trait AroundDecl: NodeDecl {
+    /// See [`Around::UpReq`].
+    type UpReq: Send + 'static;
+    /// See [`Around::UpItem`].
+    type UpItem: Send + 'static;
+    /// See [`Around::DownReq`].
+    type DownReq: Send + 'static;
+    /// See [`Around::DownItem`].
+    type DownItem: Send + 'static;
 }
 
 /// The implementation slot of a node that this segment does not host.
@@ -125,6 +137,28 @@ impl<D: BackwardDecl> Backward for Absent<D> {
     const ABSENT: bool = true;
 
     fn backward(&self, _cx: &Cx, _input: Items<Self::In>) -> Items<Self::Out> {
+        Box::pin(futures::stream::once(async {
+            Err(Error::not_hosted(D::NAME))
+        }))
+    }
+}
+
+// It keeps `()`: a segment hosts both halves of an around node or neither
+// (the layout refuses a split pair), so within one build every entry for a
+// pair has one type, whatever the node keeps where it is hosted.
+impl<D: AroundDecl> Around for Absent<D> {
+    type UpReq = D::UpReq;
+    type UpItem = D::UpItem;
+    type DownReq = D::DownReq;
+    type DownItem = D::DownItem;
+    type State = ();
+    const ABSENT: bool = true;
+
+    async fn forward(&self, _cx: &Cx, _req: Self::UpReq) -> Result<(Self::DownReq, ())> {
+        Err(Error::not_hosted(D::NAME))
+    }
+
+    fn backward(&self, _cx: &Cx, (): (), _input: Items<Self::DownItem>) -> Items<Self::UpItem> {
         Box::pin(futures::stream::once(async {
             Err(Error::not_hosted(D::NAME))
         }))

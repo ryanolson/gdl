@@ -182,6 +182,12 @@ pub(crate) fn port_types(sig: &Sig) -> Vec<&Type> {
             up_item,
             down_req,
             down_item,
+        }
+        | Sig::Around {
+            up_req,
+            up_item,
+            down_req,
+            down_item,
         } => request(up_req)
             .chain(std::iter::once(up_item))
             .chain(request(down_req))

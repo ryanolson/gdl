@@ -1,0 +1,7 @@
+// `Keep` keeps the request's text for its backward half, which marks each
+// item with it.
+name = "around", schema = 1;
+source Front: Text -> stream Text;
+around Keep: (Text -> stream Text) over (Text -> stream Text);
+sink   Echo: Text -> stream Text;
+topology: Front => Keep { Echo };

@@ -374,6 +374,7 @@ fn dot_shape(role: Role) -> &'static str {
         Role::Forward => "shape=box",
         Role::Sink => "shape=cylinder",
         Role::Backward => "shape=box, style=rounded",
+        Role::Around => "shape=box, peripheries=2, style=rounded",
     }
 }
 
@@ -384,6 +385,7 @@ fn mermaid_shape(role: Role) -> (&'static str, &'static str) {
         Role::Forward => ("[", "]"),
         Role::Sink => ("[(", ")]"),
         Role::Backward => ("(", ")"),
+        Role::Around => ("[/", "\\]"),
     }
 }
 

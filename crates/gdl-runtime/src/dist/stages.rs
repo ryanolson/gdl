@@ -17,7 +17,7 @@ use super::{EncodedItem, Head};
 use crate::wire::{Codec, RequestCodec, SizeHint};
 use gdl::__runtime::{fuse, until_error};
 use gdl::Cx;
-use gdl::{Backward, Forward, Next, Operator, Sink};
+use gdl::{Around, Backward, Forward, Next, Operator, Sink};
 use gdl::{Error, ErrorKind, Result};
 use gdl::{Items, items};
 
@@ -49,11 +49,24 @@ pub enum BwdExit<T> {
 
 /// A hop's forward nodes in this segment's view, as a cons list ending in
 /// [`FwdEnd`]. Position 0 is the outer end; the first node is position 1.
-pub trait DForward: sealed::Sealed + Send + Sync + 'static {
+///
+/// `Below` is the stack of slots that the around nodes before this part of
+/// the chain fill: one slot for each, whichever segment runs it, so that
+/// one build serves every placement. A slot is filled only where its
+/// forward half ran.
+pub trait DForward<Below = ()>: sealed::Sealed + Send + Sync + 'static {
     /// The request type the chain receives from the outer end.
     type In: Send + 'static;
     /// The request type that reaches the inner end.
     type Out: Send + 'static;
+    /// `Below` with a slot pushed for each around node of the chain.
+    #[doc(hidden)]
+    type Stack: Send + 'static;
+
+    /// The stack of this part of the chain with every slot it adds empty:
+    /// for the positions a walk does not run.
+    #[doc(hidden)]
+    fn empty(below: Below) -> Self::Stack;
 
     /// Collect the positions in this part of the hop, from `pos`, whose
     /// slot is `Absent`.
@@ -77,9 +90,14 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
         end: usize,
         cx: &Cx,
         value: Self::In,
-    ) -> impl Future<Output = Result<FwdExit<Self::Out>>> + Send;
+        below: Below,
+    ) -> impl Future<Output = Result<(FwdExit<Self::Out>, Self::Stack)>> + Send;
 
     #[doc(hidden)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a walk's position, its request, and its stack, each passed down the chain"
+    )]
     fn enter(
         &self,
         pos: usize,
@@ -88,8 +106,13 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
         cx: &Cx,
         head: &[u8],
         input: Option<Items<Bytes>>,
-    ) -> impl Future<Output = Result<FwdExit<Self::Out>>> + Send;
+        below: Below,
+    ) -> impl Future<Output = Result<(FwdExit<Self::Out>, Self::Stack)>> + Send;
 }
+
+/// The value one around node kept, or `None` where its forward half did not
+/// run. Tagged with the node's type, as the local chain's entries are.
+pub struct Slot<P: Around>(Option<P::State>);
 
 /// The head a forward edge carries, including when its node is absent.
 #[doc(hidden)]
@@ -142,14 +165,20 @@ impl<C: RequestCodec> FwdEnd<C> {
     }
 }
 
-impl<F, R, C> DForward for FwdStep<F, R, C>
+impl<F, R, C, Below> DForward<Below> for FwdStep<F, R, C>
 where
     F: Forward,
-    R: DForward<In = F::Out>,
+    R: DForward<Below, In = F::Out>,
     C: RequestCodec<Value = F::In>,
+    Below: Send + 'static,
 {
     type In = F::In;
     type Out = R::Out;
+    type Stack = R::Stack;
+
+    fn empty(below: Below) -> R::Stack {
+        R::empty(below)
+    }
 
     fn absent(&self, pos: usize, out: &mut Vec<usize>) {
         if F::ABSENT {
@@ -168,15 +197,22 @@ where
         self.rest.heads(out);
     }
 
-    async fn walk(&self, pos: usize, end: usize, cx: &Cx, value: F::In) -> Result<FwdExit<R::Out>> {
+    async fn walk(
+        &self,
+        pos: usize,
+        end: usize,
+        cx: &Cx,
+        value: F::In,
+        below: Below,
+    ) -> Result<(FwdExit<R::Out>, R::Stack)> {
         if pos >= end {
-            return leave(self.codec, pos, value);
+            return Ok((leave(self.codec, pos, value)?, R::empty(below)));
         }
         // As in local composition: no forward stage starts for an
         // interrupted request.
         cx.check()?;
         let out = self.node.forward(cx, value).await?;
-        self.rest.walk(pos + 1, end, cx, out).await
+        self.rest.walk(pos + 1, end, cx, out, below).await
     }
 
     async fn enter(
@@ -187,18 +223,117 @@ where
         cx: &Cx,
         head: &[u8],
         input: Option<Items<Bytes>>,
-    ) -> Result<FwdExit<R::Out>> {
+        below: Below,
+    ) -> Result<(FwdExit<R::Out>, R::Stack)> {
         if pos == target {
             let value = join(self.codec, head, input)?;
-            return self.walk(pos, end, cx, value).await;
+            return self.walk(pos, end, cx, value, below).await;
         }
-        self.rest.enter(pos + 1, target, end, cx, head, input).await
+        self.rest
+            .enter(pos + 1, target, end, cx, head, input, below)
+            .await
     }
 }
 
-impl<C: RequestCodec> DForward for FwdEnd<C> {
+/// The forward half of an around node in a distributed hop. `C` is the
+/// codec of the edge entering it.
+pub struct FwdAround<P, R, C> {
+    node: Arc<P>,
+    codec: Option<C>,
+    rest: R,
+}
+
+impl<P, R, C> FwdAround<P, R, C>
+where
+    P: Around,
+    C: RequestCodec<Value = P::UpReq>,
+{
+    /// An around node, the codec of the edge entering it, and the rest.
+    pub fn new(node: Arc<P>, codec: Option<C>, rest: R) -> Self {
+        Self { node, codec, rest }
+    }
+}
+
+impl<P, R, C, Below> DForward<Below> for FwdAround<P, R, C>
+where
+    P: Around,
+    R: DForward<(Slot<P>, Below), In = P::DownReq>,
+    C: RequestCodec<Value = P::UpReq>,
+    Below: Send + 'static,
+{
+    type In = P::UpReq;
+    type Out = R::Out;
+    type Stack = R::Stack;
+
+    fn empty(below: Below) -> R::Stack {
+        R::empty((Slot(None), below))
+    }
+
+    fn absent(&self, pos: usize, out: &mut Vec<usize>) {
+        if P::ABSENT {
+            out.push(pos);
+        }
+        self.rest.absent(pos + 1, out);
+    }
+
+    fn streamed(&self, out: &mut Vec<bool>) {
+        out.push(C::STREAMED);
+        self.rest.streamed(out);
+    }
+
+    fn heads(&self, out: &mut Vec<HeadInfo>) {
+        out.push(HeadInfo::new(self.codec));
+        self.rest.heads(out);
+    }
+
+    async fn walk(
+        &self,
+        pos: usize,
+        end: usize,
+        cx: &Cx,
+        value: P::UpReq,
+        below: Below,
+    ) -> Result<(FwdExit<R::Out>, R::Stack)> {
+        if pos >= end {
+            return Ok((leave(self.codec, pos, value)?, Self::empty(below)));
+        }
+        cx.check()?;
+        let (out, state) = self.node.forward(cx, value).await?;
+        let below = (Slot(Some(state)), below);
+        self.rest.walk(pos + 1, end, cx, out, below).await
+    }
+
+    async fn enter(
+        &self,
+        pos: usize,
+        target: usize,
+        end: usize,
+        cx: &Cx,
+        head: &[u8],
+        input: Option<Items<Bytes>>,
+        below: Below,
+    ) -> Result<(FwdExit<R::Out>, R::Stack)> {
+        if pos == target {
+            let value = join(self.codec, head, input)?;
+            return self.walk(pos, end, cx, value, below).await;
+        }
+        // A position before the one this run starts at: its forward half
+        // ran elsewhere, if anywhere, and its slot stays empty.
+        let below = (Slot(None), below);
+        self.rest
+            .enter(pos + 1, target, end, cx, head, input, below)
+            .await
+    }
+}
+
+impl<C: RequestCodec, Below: Send + 'static> DForward<Below> for FwdEnd<C> {
     type In = C::Value;
     type Out = C::Value;
+    type Stack = Below;
+
+    fn empty(below: Below) -> Below {
+        below
+    }
 
     fn absent(&self, _pos: usize, _out: &mut Vec<usize>) {}
 
@@ -216,11 +351,12 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
         end: usize,
         _cx: &Cx,
         value: C::Value,
-    ) -> Result<FwdExit<C::Value>> {
+        below: Below,
+    ) -> Result<(FwdExit<C::Value>, Below)> {
         if pos >= end {
-            return leave(self.codec, pos, value);
+            return Ok((leave(self.codec, pos, value)?, below));
         }
-        Ok(FwdExit::Here(value))
+        Ok((FwdExit::Here(value), below))
     }
 
     async fn enter(
@@ -231,17 +367,22 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
         _cx: &Cx,
         head: &[u8],
         input: Option<Items<Bytes>>,
-    ) -> Result<FwdExit<C::Value>> {
+        below: Below,
+    ) -> Result<(FwdExit<C::Value>, Below)> {
         if pos != target {
             return Err(position_error(target));
         }
-        Ok(FwdExit::Here(join(self.codec, head, input)?))
+        Ok((FwdExit::Here(join(self.codec, head, input)?), below))
     }
 }
 
 /// A hop's backward nodes in this segment's view, as a cons list ending in
 /// [`BwdEnd`]. Position 0 is the inner end; the first node is position 1.
-pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
+///
+/// `Stack` holds the slots of the around nodes whose backward halves are in
+/// this part of the chain, the next one on top. The end takes only an
+/// empty stack.
+pub trait DBackward<Stack = ()>: sealed::Sealed + Send + Sync + 'static {
     /// The item type the chain receives from the inner end.
     type In: Send + 'static;
     /// The item type that reaches the outer end.
@@ -259,6 +400,7 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
         end: usize,
         attempt: &Cx,
         items: Items<Self::In>,
+        stack: Stack,
     ) -> BwdExit<Self::Out>;
 
     #[doc(hidden)]
@@ -269,6 +411,7 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
         end: usize,
         attempt: &Cx,
         bytes: Items<Bytes>,
+        stack: Stack,
     ) -> Result<BwdExit<Self::Out>>;
 }
 
@@ -298,10 +441,11 @@ impl<T> BwdEnd<T> {
     }
 }
 
-impl<B, R> DBackward for BwdStep<B, R>
+impl<B, R, S> DBackward<S> for BwdStep<B, R>
 where
     B: Backward,
-    R: DBackward<In = B::Out>,
+    R: DBackward<S, In = B::Out>,
+    S: Send + 'static,
 {
     type In = B::In;
     type Out = R::Out;
@@ -313,7 +457,14 @@ where
         self.rest.absent(pos + 1, out);
     }
 
-    fn walk(&self, pos: usize, end: usize, attempt: &Cx, items: Items<B::In>) -> BwdExit<R::Out> {
+    fn walk(
+        &self,
+        pos: usize,
+        end: usize,
+        attempt: &Cx,
+        items: Items<B::In>,
+        stack: S,
+    ) -> BwdExit<R::Out> {
         if pos >= end {
             return BwdExit::Leave {
                 at: pos,
@@ -323,15 +474,15 @@ where
         // As in local composition: an interrupted request starts no further
         // backward node, and the reason travels on in its place.
         if let Err(reason) = attempt.check() {
-            return self
-                .rest
-                .walk(pos + 1, end, attempt, gdl::__runtime::failed(reason));
+            let failed = gdl::__runtime::failed(reason);
+            return self.rest.walk(pos + 1, end, attempt, failed, stack);
         }
         // Each node runs in its own scope, ended by the fuse after it, as in
         // local composition.
         let scope = attempt.child();
         let out = self.node.backward(&scope, items);
-        self.rest.walk(pos + 1, end, attempt, fuse(out, &scope))
+        self.rest
+            .walk(pos + 1, end, attempt, fuse(out, &scope), stack)
     }
 
     fn enter(
@@ -341,22 +492,108 @@ where
         end: usize,
         attempt: &Cx,
         bytes: Items<Bytes>,
+        stack: S,
     ) -> Result<BwdExit<R::Out>> {
         if pos == target {
             let items = decode_stream(self.codec, bytes);
-            return Ok(self.walk(pos, end, attempt, items));
+            return Ok(self.walk(pos, end, attempt, items, stack));
         }
-        self.rest.enter(pos + 1, target, end, attempt, bytes)
+        self.rest.enter(pos + 1, target, end, attempt, bytes, stack)
     }
 }
 
-impl<T: Send + 'static> DBackward for BwdEnd<T> {
+/// The backward half of an around node in a distributed hop.
+pub struct BwdAround<P: Around, R> {
+    node: Arc<P>,
+    codec: Option<Codec<P::DownItem>>,
+    rest: R,
+}
+
+impl<P: Around, R> BwdAround<P, R> {
+    /// An around node, the codec of the edge entering its backward half, and
+    /// the rest.
+    pub fn new(node: Arc<P>, codec: Option<Codec<P::DownItem>>, rest: R) -> Self {
+        Self { node, codec, rest }
+    }
+}
+
+impl<P, R, Rest> DBackward<(Slot<P>, Rest)> for BwdAround<P, R>
+where
+    P: Around,
+    R: DBackward<Rest, In = P::UpItem>,
+    Rest: Send + 'static,
+{
+    type In = P::DownItem;
+    type Out = R::Out;
+
+    fn absent(&self, pos: usize, out: &mut Vec<usize>) {
+        if P::ABSENT {
+            out.push(pos);
+        }
+        self.rest.absent(pos + 1, out);
+    }
+
+    fn walk(
+        &self,
+        pos: usize,
+        end: usize,
+        attempt: &Cx,
+        items: Items<P::DownItem>,
+        (Slot(state), rest): (Slot<P>, Rest),
+    ) -> BwdExit<R::Out> {
+        if pos >= end {
+            return BwdExit::Leave {
+                at: pos,
+                bytes: encode_stream(self.codec, items),
+            };
+        }
+        // Skipped, as a backward node is: the value is dropped here, and the
+        // node never sees it.
+        if let Err(reason) = attempt.check() {
+            drop(state);
+            let failed = gdl::__runtime::failed(reason);
+            return self.rest.walk(pos + 1, end, attempt, failed, rest);
+        }
+        // The layout places both halves where one task runs them, so the
+        // forward half filled this slot in this task.
+        let Some(state) = state else {
+            let failed = gdl::__runtime::failed(Error::new(
+                ErrorKind::Placement,
+                "an around node's backward half ran where its forward half did not",
+            ));
+            return self.rest.walk(pos + 1, end, attempt, failed, rest);
+        };
+        let scope = attempt.child();
+        let out = self.node.backward(&scope, state, items);
+        self.rest
+            .walk(pos + 1, end, attempt, fuse(out, &scope), rest)
+    }
+
+    fn enter(
+        &self,
+        pos: usize,
+        target: usize,
+        end: usize,
+        attempt: &Cx,
+        bytes: Items<Bytes>,
+        (slot, rest): (Slot<P>, Rest),
+    ) -> Result<BwdExit<R::Out>> {
+        if pos == target {
+            let items = decode_stream(self.codec, bytes);
+            return Ok(self.walk(pos, end, attempt, items, (slot, rest)));
+        }
+        drop(slot);
+        self.rest.enter(pos + 1, target, end, attempt, bytes, rest)
+    }
+}
+
+impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
     type In = T;
     type Out = T;
 
     fn absent(&self, _pos: usize, _out: &mut Vec<usize>) {}
 
-    fn walk(&self, pos: usize, end: usize, _attempt: &Cx, items: Items<T>) -> BwdExit<T> {
+    fn walk(&self, pos: usize, end: usize, _attempt: &Cx, items: Items<T>, (): ()) -> BwdExit<T> {
         if pos >= end {
             return BwdExit::Leave {
                 at: pos,
@@ -373,6 +610,7 @@ impl<T: Send + 'static> DBackward for BwdEnd<T> {
         _end: usize,
         _attempt: &Cx,
         bytes: Items<Bytes>,
+        (): (),
     ) -> Result<BwdExit<T>> {
         if pos != target {
             return Err(position_error(target));
@@ -539,6 +777,8 @@ mod sealed {
     impl<F, R, C> Sealed for super::FwdStep<F, R, C> {}
     impl<C> Sealed for super::FwdEnd<C> {}
     impl<B: gdl::Backward, R> Sealed for super::BwdStep<B, R> {}
+    impl<P, R, C> Sealed for super::FwdAround<P, R, C> {}
+    impl<P: gdl::Around, R> Sealed for super::BwdAround<P, R> {}
     impl<T> Sealed for super::BwdEnd<T> {}
     impl<S> Sealed for super::DSink<S> {}
     impl<O, H> Sealed for super::DOperator<O, H> {}

@@ -4,7 +4,7 @@ A gdl graph is a set of typed nodes joined into nested hops. The graph fixes eac
 
 ## Roles
 
-Each node has one of five roles:
+Each node has one of six roles:
 
 | Role | Sees | Does |
 |---|---|---|
@@ -13,8 +13,9 @@ Each node has one of five roles:
 | forward | the request only | Changes the request on its way in. |
 | sink | the request | Produces the item stream. |
 | backward | the response stream only | Changes the item stream on its way out. |
+| around | the request, then the response stream | A forward half and a backward half in one hop, with a value kept from one to the other for each attempt. See [Around nodes](#around-nodes). |
 
-An operator and a source keep per-request state across both directions in one task. So each of them is placed whole, in one segment. A forward or backward node holds no state across directions, so a placement can put it anywhere.
+An operator and a source keep per-request state across both directions in one task. So each of them is placed whole, in one segment. An around node keeps a value across directions too, and both its halves must run in one task: with the hop's outer end, or with its inner end ([Specs, segments, and layouts](placement.md#what-is-checked-and-when)). A forward or backward node holds no state across directions, so a placement can put it anywhere.
 
 ## Hops
 
@@ -23,8 +24,10 @@ A hop is an outer end (a source or an operator), its forward nodes, an inner end
 ```text
 Graph    := Source Hop
 Hop      := Forward* Inner Backward*
-Inner    := Sink | Operator Hop
+Inner    := Sink | Operator Hop | Around Hop
 ```
+
+An around node opens no hop of its own. In `A => P { Rest } => B`, its forward half comes after `A`'s forward nodes and before those in `Rest`, and its backward half after the backward nodes in `Rest`. The braces must hold the hop's inner end.
 
 The reference graph that the runtime tests use has two hops. Requests go right along the top line, and responses go left along the bottom line:
 
@@ -70,6 +73,13 @@ pub trait Operator: Send + Sync + 'static {
     fn generate<N>(&self, cx: Cx, req: Self::UpReq, next: N) -> impl Future<Output = Result<Items<Self::UpItem>>> + Send
     where N: Next<Self::DownReq, Self::DownItem>;
 }
+pub trait Around: Send + Sync + 'static {
+    type UpReq: Send + 'static; type UpItem: Send + 'static;
+    type DownReq: Send + 'static; type DownItem: Send + 'static;
+    type State: Send + 'static;
+    fn forward(&self, cx: &Cx, req: Self::UpReq) -> impl Future<Output = Result<(Self::DownReq, Self::State)>> + Send;
+    fn backward(&self, cx: &Cx, state: Self::State, input: Items<Self::DownItem>) -> Items<Self::UpItem>;
+}
 pub trait Frontend: Build {
     type Req: Send + 'static; type Item: Send + 'static;
     fn serve<N>(self, next: N, shutdown: impl Future<Output = ()> + Send + 'static) -> impl Future<Output = Result<()>> + Send
@@ -78,6 +88,22 @@ pub trait Frontend: Build {
 ```
 
 A returned stream is `'static`. It owns what it uses and cannot borrow `&self` or `&Cx`. Each call of `Next::generate` is one attempt. [Requests, attempts, and deadlines](requests.md) gives the attempt rules.
+
+### Around nodes
+
+An `Around` node is an operator that calls the rest of its hop exactly once, folded into the hop. It has a forward half and a backward half. The forward half changes the request and keeps a value, its `State`. The backward half of the same attempt receives that value by value, with the response stream. So a stage whose response side needs what its request side computed, such as a tokenizer's state, costs what a forward node and a backward node cost, not an operator's hop of its own ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
+
+In a graph file, an around node takes an operator's signature and braces around the rest of its hop ([Define a graph](../guides/define-a-graph.md#write-a-graph-file)). In local composition, `gdl::around(node)` returns the two halves, `ForwardHalf` and `BackwardHalf`. The first goes in a hop's forward chain and the second in the same hop's backward chain:
+
+```rust,ignore
+let (ahead, behind) = gdl::around(Arc::new(backend));
+let hop = Hop::new((ahead, ()), engine, (behind, ()));
+```
+
+- **The value belongs to one attempt.** It moves down the forward chain with the request, then into the stream the backward half returns. It is never stored where another attempt could reach it, and nothing looks it up. A retry is a new attempt with a new value.
+- **Halves pair by nesting, as brackets do.** The forward chain pushes each value on a typed stack, and the backward chain takes them in the reverse order. A half with no partner, or two pairs of different node types that cross, do not compile. Two pairs of the same node type that cross are not caught ([Known limitations](../operations/limitations.md#two-around-nodes-of-one-type-can-cross-in-a-hand-built-hop)).
+- **The halves get a forward node's and a backward node's contexts.** The forward half gets the attempt's context. A backward half that is the last node of a local backward chain gets the attempt's own context, so its stop reaches the inner end. Any other backward half gets a scope of its own below the attempt.
+- **If `forward` fails, the call fails.** A failure in `backward` is an error item in the stream. A check that only needs the request belongs in `forward`, so that it keeps its kind and its place as the call's error.
 
 A generated segment binary builds each implementation through `Build`, from that node's section of the segment settings. `build` gets the node's configuration and its metrics, already registered. It must return quickly, because the segment registers with its deployment only after every node is built. `ready` resolves when the node can take work, for example when a model is loaded. It resolves at once by default. A node without metrics writes `type Metrics = ();`. [Write nodes](../guides/write-nodes.md) shows each trait in use, and [Segment lifecycle](lifecycle.md) shows where `build` and `ready` run.
 

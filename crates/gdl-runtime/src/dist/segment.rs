@@ -113,7 +113,7 @@ impl Deployment {
     where
         F: DForward,
         I: DInner,
-        B: DBackward,
+        B: DBackward<F::Stack>,
     {
         DHop::new(Arc::clone(&self.rt), index, fwd, inner, bwd)
     }

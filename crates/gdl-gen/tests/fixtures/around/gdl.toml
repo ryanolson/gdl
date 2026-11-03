@@ -1,0 +1,18 @@
+# Both halves of `Keep` with the outer end, the sink in another segment.
+[graph]
+path = "around.gdl"
+
+[messages]
+crates = ["protocols"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Keep"]
+
+[segment.back]
+nodes = ["Echo"]

@@ -31,6 +31,7 @@ Each port type must be a message that derives `Message`, `()`, or `gdl::Streamed
 | `Forward` | the request only | `In`, `Out` | `forward(&self, &cx, req)` |
 | `Backward` | the response stream only | `In`, `Out` | `backward(&self, &cx, items)` |
 | `Operator` | both, and calls the rest of the graph through `Next` | `UpReq`, `UpItem`, `DownReq`, `DownItem` | `generate(&self, cx, req, next)` |
+| `Around` | both, as a forward half and a backward half of one hop, with a value kept between them | `UpReq`, `UpItem`, `DownReq`, `DownItem`, `State` | `forward(&self, &cx, req)` and `backward(&self, &cx, state, items)` |
 | `Frontend`, `Service` | hosts a service that calls the graph | see [Hosted frontends](frontends.md) | `serve(self, ..)` |
 
 [The graph model](../concepts/model.md) explains hops, inner ends, and edge nodes. Two rules apply to every role:
@@ -39,6 +40,12 @@ Each port type must be a message that derives `Message`, `()`, or `gdl::Streamed
 - End your work and your stream when the `Cx` is cancelled or asked to stop. The context is how the runtime stops a node.
 
 A `Backward` node's returned stream must own what it uses, because it outlives the call. An `Operator` may call `next` zero or more times. Each call is one attempt with its own cancel scope.
+
+Use an `Around` instead of an `Operator` when the node would call `next` exactly once, and every value its response side needs from its request side belongs to that attempt. It costs what a forward node and a backward node cost ([The graph model](../concepts/model.md#around-nodes)):
+
+- Return the value its backward half needs beside the request: `Ok((req, state))`. A retry runs `forward` again, with a new value.
+- Make the checks that only need the request in `forward`. An `Err` there is the call's error. In `backward`, the same failure is an error item in the stream.
+- A node may hold any value its constructor builds, such as a handle to the hop below that hand-written composition code builds. Work sent through it runs outside the attempt ([Known limitations](../operations/limitations.md#work-sent-through-a-handle-a-node-holds-runs-outside-the-attempt)).
 
 ## Build and readiness
 

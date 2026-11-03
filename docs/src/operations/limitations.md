@@ -22,6 +22,29 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Lifts:** a control anchor per attempt, or an in-band frame down the request path. Both cost something on every request.
 - **Tests:** `a_stop_a_relay_asks_for_after_its_input_ended_waits_for_the_deadline` and `a_stop_a_relay_asks_for_as_it_finishes_waits_for_the_deadline` in `crates/gdl-runtime/tests/inputs.rs`.
 
+### Two around nodes of one type can cross in a hand-built hop
+- **What:** in a hop built by hand, two nodes of the same `Around` type whose halves cross instead of nesting (`([A1, A2], [A1, A2])`) each get the other's value.
+- **Why:** the stack tags each value with its node's type, so pairs of different types that cross do not compile. Two values of one type cannot be told apart by a type. See [The graph model](../concepts/model.md#around-nodes).
+- **Workaround:** take both halves from one call of `gdl::around(node)` and place them as brackets nest: the first forward half pairs with the last backward half.
+
+### An around node's halves must run in one task
+- **What:** `check`, `generate`, and the segment's start refuse a placement that puts an around node where its two halves run in two tasks: in a segment between the outer end and the inner end, in a backward run that the outer end opens, or with an inner end whose forward path never left the outer end's segment.
+- **Why:** the value the forward half keeps is held in that task's future, and never crosses a segment. Two runs in one segment can be two tasks on two instances. See [Specs, segments, and layouts](../concepts/placement.md#what-is-checked-and-when).
+- **Workaround:** place the around node with the hop's outer end or with its inner end. Where its halves must be apart, make it an operator in the shared segment, or carry the value in the messages.
+
+### A generated graph gets no handle to the hop below
+- **What:** an around node in a generated segment cannot send a request of its own to the rest of its hop. Only hand-written composition code can build such a handle and give it to the node.
+- **Workaround:** make the node an operator, which calls `next`.
+
+### The composer does not place around nodes
+- **What:** the composer offers no around node when it builds a graph.
+- **Workaround:** write the graph file by hand ([Define a graph](../guides/define-a-graph.md#write-a-graph-file)).
+
+### Work sent through a handle a node holds runs outside the attempt
+- **What:** a node can hold a handle that hand-written composition code builds over the hop below, for example for a warmup request after the response. The request it sends through that handle is not part of the attempt: the attempt's cancel, deadline, and stop do not reach it, and the attempt's figures do not count it.
+- **Why:** the handle is the node's own value, built once, and the attempt's scope is not below it. A node gets the attempt's downstream only as an operator does, through `next`.
+- **Workaround:** give the request its own context with a deadline, or make the node an operator, which calls `next` inside the attempt.
+
 ### A selector's lease can end at the hand-off
 - **What:** a selector's lease (`Choice::with_lease`) is given back when the hand-off is acknowledged, not when the response ends. `least_loaded` then takes turns, as `round_robin` does.
 - **When:** the boundary's sending segment is not the hop's outer end, and the request is not streamed. A streamed request's relay holds the lease until its input ends.

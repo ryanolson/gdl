@@ -94,6 +94,58 @@ pub trait Backward: Send + Sync + 'static {
     fn backward(&self, cx: &Cx, input: Items<Self::In>) -> Items<Self::Out>;
 }
 
+/// A node with a forward half and a backward half in one hop. The forward
+/// half changes the request and keeps a value; the backward half of the same
+/// attempt receives that value with the response stream.
+///
+/// It is an operator that calls the rest of the hop exactly once, folded
+/// into the hop: it costs what a forward and a backward node cost, not an
+/// operator's hop of its own. Each attempt runs `forward` once and then,
+/// unless the attempt ends first, `backward` once, with the value that
+/// attempt's `forward` kept. A retry is a new attempt with a new value.
+///
+/// An `Err` from `forward` is the call's error. A failure in `backward`
+/// is an error item in the stream, so a check that only needs the request
+/// belongs in `forward`.
+pub trait Around: Send + Sync + 'static {
+    /// The request it receives from the outer end's side.
+    type UpReq: Send + 'static;
+    /// The item type it passes on toward the outer end.
+    type UpItem: Send + 'static;
+    /// The request it passes on toward the inner end.
+    type DownReq: Send + 'static;
+    /// The item type it receives from the inner end's side.
+    type DownItem: Send + 'static;
+    /// What the forward half keeps for the backward half of the same
+    /// attempt. It moves a few times on each request, so a large value is
+    /// better behind a box the node makes.
+    type State: Send + 'static;
+
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
+    #[doc(hidden)]
+    const ABSENT: bool = false;
+
+    /// Transform one request, and keep a value for this attempt's backward
+    /// half.
+    fn forward(
+        &self,
+        cx: &Cx,
+        req: Self::UpReq,
+    ) -> impl Future<Output = Result<(Self::DownReq, Self::State)>> + Send;
+
+    /// Transform this attempt's response stream. `state` is the value this
+    /// attempt's `forward` kept. The returned stream must own what it uses:
+    /// it outlives this call.
+    fn backward(
+        &self,
+        cx: &Cx,
+        state: Self::State,
+        input: Items<Self::DownItem>,
+    ) -> Items<Self::UpItem>;
+}
+
 /// The downstream part of a graph as an operator sees it.
 ///
 /// Each call is one attempt with its own cancellation scope below `cx`.

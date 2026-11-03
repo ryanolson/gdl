@@ -169,6 +169,18 @@ pub enum PlacementError {
         /// The class the policy names.
         class: String,
     },
+    /// An around node's two halves run in two tasks, so the value its
+    /// forward half keeps cannot reach its backward half.
+    AroundSplit {
+        /// The around node.
+        node: String,
+        /// The index of its hop.
+        hop: usize,
+        /// Where its forward half runs.
+        forward: &'static str,
+        /// Where its backward half runs.
+        backward: &'static str,
+    },
     /// An edge that must be encoded carries a type with no codec.
     NotWire {
         /// The edge's upstream node.
@@ -209,7 +221,9 @@ impl PlacementError {
             Self::UnknownNode { segment, .. } | Self::EmptySegment { segment } => {
                 at(format!("segment.{segment}"), Some("nodes"))
             }
-            Self::Unplaced { .. } | Self::PlacedTwice { .. } => at("segment".into(), None),
+            Self::Unplaced { .. } | Self::PlacedTwice { .. } | Self::AroundSplit { .. } => {
+                at("segment".into(), None)
+            }
             Self::InvalidClassName { class, .. } => at(format!("class.{class}"), None),
             Self::UnknownSegment { class, .. }
             | Self::EmptyClass { class }
@@ -331,6 +345,15 @@ impl fmt::Display for PlacementError {
             Self::PoolPolicyNotEntered { class } => write!(
                 f,
                 "pool policy `[pools.{class}]`: no class boundary enters class `{class}`; a pool policy picks a pool of a class that another class sends to"
+            ),
+            Self::AroundSplit {
+                node,
+                hop,
+                forward,
+                backward,
+            } => write!(
+                f,
+                "around node `{node}` (hop {hop}): its forward half runs in {forward} and its backward half in {backward}; place both halves where one task runs them, with the hop's outer end or with its inner end"
             ),
             Self::NotWire {
                 from,

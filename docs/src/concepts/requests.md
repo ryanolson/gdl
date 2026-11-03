@@ -43,6 +43,7 @@ An attempt is one call of `next.generate(cx, req)`. These rules hold in every pl
 2. Attempts can run at the same time, in no fixed order. Each remote attempt mints its own anchors.
 3. A `Next` can be cloned and kept inside the returned stream, for a retry or a migration. After the parent scope is cancelled or its deadline passes, `generate` fails at once.
 4. A returned stream is `'static`.
+5. An around node's value belongs to its attempt. Its forward half keeps it, and the backward half of the same attempt receives it. A retry, or a new call of `next`, runs the forward half again and gets a new value. No other attempt can reach it ([The graph model](model.md#around-nodes)).
 
 Each attempt spends one unit of tokio's cooperative budget. So an operator that retries attempts which fail at once still yields to other tasks.
 

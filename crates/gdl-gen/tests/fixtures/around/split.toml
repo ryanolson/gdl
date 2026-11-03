@@ -1,0 +1,21 @@
+# `Keep` in a segment of its own: its halves would run in two tasks.
+[graph]
+path = "around.gdl"
+
+[messages]
+crates = ["protocols"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front"]
+
+[segment.mid]
+nodes = ["Keep"]
+
+[segment.back]
+nodes = ["Echo"]

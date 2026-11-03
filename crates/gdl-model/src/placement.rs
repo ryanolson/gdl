@@ -798,7 +798,8 @@ fn place(
     let hops: Vec<HopLayout> = manifest
         .hops
         .iter()
-        .map(|hop| hop_layout(hop, &segment_of, &mut errors))
+        .enumerate()
+        .map(|(index, hop)| hop_layout(index, hop, &segment_of, &mut errors))
         .collect();
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
@@ -860,6 +861,7 @@ fn place(
 }
 
 fn hop_layout(
+    index: usize,
     hop: &HopInfo,
     segment_of: &BTreeMap<String, String>,
     errors: &mut Vec<PlacementError>,
@@ -888,6 +890,7 @@ fn hop_layout(
             .map(|t| t.stream.is_some())
             .collect(),
     };
+    around_frames(index, hop, &layout, errors);
     for wire in layout.wire_edges() {
         let (path, types) = match wire.leg {
             Leg::Forward => (&forward, &hop.forward_types),
@@ -902,6 +905,85 @@ fn hop_layout(
         );
     }
     layout
+}
+
+/// The task that runs a stage of a hop, for an around node, whose two
+/// halves must run in one task: its value is kept in that task's future and
+/// never crosses. See `docs/src/concepts/placement.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// The outer end's task: the forward walk up to the first hand-off, and
+    /// the backward run the response returns to.
+    Outer,
+    /// The task a hand-off starts at the inner end: the last forward run,
+    /// the inner end, and the first backward run.
+    Inner,
+    /// A task that runs only one direction: a middle forward run, a backward
+    /// run the outer end opens, or the inner end's task when the forward
+    /// path never left the outer end's segment.
+    Other,
+}
+
+impl Frame {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Outer => "the outer end's task",
+            Self::Inner => "the inner end's task",
+            Self::Other => "a task of its own",
+        }
+    }
+}
+
+fn forward_frame(layout: &HopLayout, pos: usize) -> Frame {
+    let runs = &layout.forward_runs;
+    if pos < runs[0].start + runs[0].stages.len() {
+        Frame::Outer
+    } else if runs.len() > 1 && pos >= runs[runs.len() - 1].start {
+        Frame::Inner
+    } else {
+        Frame::Other
+    }
+}
+
+fn backward_frame(layout: &HopLayout, pos: usize) -> Frame {
+    let runs = &layout.backward_runs;
+    // With one backward run, the outer end applies every backward node.
+    if runs.len() == 1 || pos >= runs[runs.len() - 1].start {
+        Frame::Outer
+    } else if pos < runs[1].start && layout.forward_runs.len() > 1 {
+        Frame::Inner
+    } else {
+        Frame::Other
+    }
+}
+
+/// Refuses each around node whose two halves run in two tasks.
+fn around_frames(
+    index: usize,
+    hop: &HopInfo,
+    layout: &HopLayout,
+    errors: &mut Vec<PlacementError>,
+) {
+    if layout.local {
+        return;
+    }
+    for (at, node) in hop.forward.iter().enumerate() {
+        let Some(back) = hop.backward.iter().position(|b| b == node) else {
+            continue;
+        };
+        let (ahead, behind) = (
+            forward_frame(layout, at + 1),
+            backward_frame(layout, back + 1),
+        );
+        if ahead != behind || ahead == Frame::Other {
+            errors.push(PlacementError::AroundSplit {
+                node: node.clone(),
+                hop: index,
+                forward: ahead.name(),
+                backward: behind.name(),
+            });
+        }
+    }
 }
 
 fn runs(path: &[&str], segment_of: &BTreeMap<String, String>) -> Vec<Run> {
@@ -987,13 +1069,40 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
             bad(format!("hop {index}: operator must own the next hop"));
         }
         for node in &hop.forward {
-            if role(node) != Some(Role::Forward) {
+            if !matches!(role(node), Some(Role::Forward | Role::Around)) {
                 bad(format!("hop {index}: `{node}` must be a Forward"));
             }
         }
         for node in &hop.backward {
-            if role(node) != Some(Role::Backward) {
+            if !matches!(role(node), Some(Role::Backward | Role::Around)) {
                 bad(format!("hop {index}: `{node}` must be a Backward"));
+            }
+        }
+        // An around node's halves pair as brackets do: the backward chain
+        // meets them in the reverse of the forward chain's order.
+        let arounds = |nodes: &[String]| -> Vec<String> {
+            nodes
+                .iter()
+                .filter(|n| role(n) == Some(Role::Around))
+                .cloned()
+                .collect()
+        };
+        let (ahead, mut behind) = (arounds(&hop.forward), arounds(&hop.backward));
+        behind.reverse();
+        if ahead != behind {
+            let mut unpaired: Vec<&String> = ahead
+                .iter()
+                .filter(|n| !behind.contains(n))
+                .chain(behind.iter().filter(|n| !ahead.contains(n)))
+                .collect();
+            unpaired.dedup();
+            match unpaired.first() {
+                Some(node) => bad(format!(
+                    "hop {index}: around node `{node}` must be in both its forward and its backward chain"
+                )),
+                None => bad(format!(
+                    "hop {index}: around nodes {ahead:?} must nest, their backward halves in the reverse of their forward order"
+                )),
             }
         }
         if hop.forward_types.len() != hop.forward.len() + 1 {
@@ -1052,7 +1161,11 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
         }
     }
     for node in &manifest.nodes {
-        let expected = if node.role == Role::Operator { 2 } else { 1 };
+        let expected = if matches!(node.role, Role::Operator | Role::Around) {
+            2
+        } else {
+            1
+        };
         let found = places.get(node.name.as_str()).copied().unwrap_or(0);
         if found > expected && node.role != Role::Sink {
             bad(format!(

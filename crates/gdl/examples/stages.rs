@@ -9,9 +9,11 @@
 //!
 //! - `<shape>`: `operator`, nested hops, each with an `OperatorStage` that
 //!   maps its stream; `hop`, one hop with `<stages>` forward nodes and
-//!   `<stages>` backward nodes that map their stream; or `plain`, the
-//!   control: `<stages>` boxed maps over the sink's stream, with no gdl
-//!   code between them.
+//!   `<stages>` backward nodes that map their stream; `around`, one hop
+//!   with `<stages>` nested `Around` nodes that keep a `u64` and whose
+//!   backward halves map their stream; `around-wide`, the same keeping
+//!   512 B; or `plain`, the control: `<stages>` boxed maps over the sink's
+//!   stream, with no gdl code between them.
 //! - `<item>`: `u64`, or `large`, an item of 512 B, about the size of a
 //!   streamed chunk of a chat response.
 //! - `<stages>`: 0 to 5.
@@ -48,8 +50,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use futures::StreamExt;
 use gdl::{
-    Backward, Cx, Forward, Hop, Items, Next, Operator, OperatorStage, Result, Sink, SinkStage,
-    Source, items,
+    Around, Backward, Cx, Forward, Hop, Items, Next, Operator, OperatorStage, Result, Sink,
+    SinkStage, Source, around, items,
 };
 
 /// Requests sent before the measured ones, so that what a runtime sets up
@@ -63,7 +65,7 @@ fn main() {
             (shape, item, stages, count, requests, mode)
         }
         _ => panic!(
-            "usage: stages <operator|hop|plain> <u64|large> <stages> <items> <requests> [deadline] [pending [<together>]]"
+            "usage: stages <operator|hop|around|around-wide|plain> <u64|large> <stages> <items> <requests> [deadline] [pending [<together>]]"
         ),
     };
     let deadline = mode.first().is_some_and(|m| m == "deadline");
@@ -193,9 +195,53 @@ async fn shaped<T: Item>(shape: &str, stages: usize, run: Run) -> u64 {
             let b = (bwd(), (bwd(), (bwd(), (bwd(), (bwd(), ())))));
             measure(&Source::new(Hop::new(f, sink(), b)), run).await
         }
+        ("around", n) => paired::<T, u64>(sink(), n, run).await,
+        ("around-wide", n) => paired::<T, Wide>(sink(), n, run).await,
         (shape, stages) => {
-            panic!("no shape `{shape}` with {stages} stages: operator, hop, or plain, 0 to 5")
+            panic!(
+                "no shape `{shape}` with {stages} stages: operator, hop, around, around-wide, or plain, 0 to 5"
+            )
         }
+    }
+}
+
+/// One hop with `stages` nested around nodes, each keeping an `S`.
+async fn paired<T: Item, S: Default + Send + 'static>(
+    sink: SinkStage<Burst<T>>,
+    stages: usize,
+    run: Run,
+) -> u64 {
+    let pair = || around(Arc::new(Keep::<T, S>(PhantomData)));
+    match stages {
+        0 => measure(&Source::new(hop(sink)), run).await,
+        1 => {
+            let (f1, b1) = pair();
+            measure(&Source::new(Hop::new((f1, ()), sink, (b1, ()))), run).await
+        }
+        2 => {
+            let ((f1, b1), (f2, b2)) = (pair(), pair());
+            let h = Hop::new((f1, (f2, ())), sink, (b2, (b1, ())));
+            measure(&Source::new(h), run).await
+        }
+        3 => {
+            let ((f1, b1), (f2, b2), (f3, b3)) = (pair(), pair(), pair());
+            let h = Hop::new((f1, (f2, (f3, ()))), sink, (b3, (b2, (b1, ()))));
+            measure(&Source::new(h), run).await
+        }
+        4 => {
+            let ((f1, b1), (f2, b2), (f3, b3), (f4, b4)) = (pair(), pair(), pair(), pair());
+            let f = (f1, (f2, (f3, (f4, ()))));
+            let b = (b4, (b3, (b2, (b1, ()))));
+            measure(&Source::new(Hop::new(f, sink, b)), run).await
+        }
+        5 => {
+            let ((f1, b1), (f2, b2), (f3, b3), (f4, b4), (f5, b5)) =
+                (pair(), pair(), pair(), pair(), pair());
+            let f = (f1, (f2, (f3, (f4, (f5, ())))));
+            let b = (b5, (b4, (b3, (b2, (b1, ())))));
+            measure(&Source::new(Hop::new(f, sink, b)), run).await
+        }
+        n => panic!("no around shape with {n} stages: 0 to 5"),
     }
 }
 
@@ -331,6 +377,39 @@ impl<T: Item> Backward for Pass<T> {
 
     fn backward(&self, _cx: &Cx, input: Items<T>) -> Items<T> {
         items(input.map(|item| item))
+    }
+}
+
+/// A pass-through around node that keeps an `S`. Its backward half maps
+/// its stream as `Pass` does, and names the state on each item so that the
+/// state is kept: a closure that never used it would not capture it.
+struct Keep<T, S>(PhantomData<fn() -> (T, S)>);
+
+impl<T: Item, S: Default + Send + 'static> Around for Keep<T, S> {
+    type UpReq = u64;
+    type UpItem = T;
+    type DownReq = u64;
+    type DownItem = T;
+    type State = S;
+
+    async fn forward(&self, _cx: &Cx, req: u64) -> Result<(u64, S)> {
+        Ok((req, S::default()))
+    }
+
+    fn backward(&self, _cx: &Cx, state: S, input: Items<T>) -> Items<T> {
+        items(input.map(move |item| {
+            black_box(&state);
+            item
+        }))
+    }
+}
+
+/// 512 B of state, moved and never read: the shape measures its copies.
+struct Wide(#[allow(dead_code)] [u64; 64]);
+
+impl Default for Wide {
+    fn default() -> Self {
+        Self([0; 64])
     }
 }
 

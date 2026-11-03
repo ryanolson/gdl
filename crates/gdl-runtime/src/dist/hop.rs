@@ -370,7 +370,7 @@ fn run_end(segments: &[String], pos: usize) -> usize {
         .unwrap_or(segments.len())
 }
 
-impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
+impl<F: DForward, I: DInner, B: DBackward<F::Stack>> DHop<F, I, B> {
     pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
@@ -525,7 +525,7 @@ impl<F, I, B> Next<F::In, B::Out> for DHop<F, I, B>
 where
     F: DForward,
     I: DInner<Req = F::Out>,
-    B: DBackward<In = I::Item>,
+    B: DBackward<F::Stack, In = I::Item>,
 {
     async fn generate(&self, cx: Cx, req: F::In) -> Result<Items<B::Out>> {
         let core = &self.0;
@@ -587,7 +587,7 @@ impl<F, I, B> Register for DHop<F, I, B>
 where
     F: DForward,
     I: DInner<Req = F::Out>,
-    B: DBackward<In = I::Item>,
+    B: DBackward<F::Stack, In = I::Item>,
 {
     fn for_request(&self, cx: &Cx) -> Self {
         let core = &self.0;
@@ -659,20 +659,20 @@ impl<F, I, B> HopCore<F, I, B>
 where
     F: DForward,
     I: DInner<Req = F::Out>,
-    B: DBackward<In = I::Item>,
+    B: DBackward<F::Stack, In = I::Item>,
 {
     /// Every stage is in this segment: a nested call, as in local
     /// composition.
     async fn run_local(&self, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
-        let value = match self.fwd.walk(1, usize::MAX, attempt, req).await? {
-            FwdExit::Here(value) => value,
-            FwdExit::Leave { .. } => return Err(internal("a local hop left its segment")),
+        let (value, stack) = match self.fwd.walk(1, usize::MAX, attempt, req, ()).await? {
+            (FwdExit::Here(value), stack) => (value, stack),
+            (FwdExit::Leave { .. }, _) => return Err(internal("a local hop left its segment")),
         };
         attempt.check()?;
         let scope = attempt.child();
         let items = self.inner.call(&scope, value).await?;
         attempt.check()?;
-        match self.bwd.walk(1, usize::MAX, attempt, items) {
+        match self.bwd.walk(1, usize::MAX, attempt, items, stack) {
             BwdExit::Here(items) => Ok(items),
             BwdExit::Leave { .. } => Err(internal("a local hop left its segment")),
         }
@@ -752,7 +752,14 @@ where
                 rt.fabric.hold_reply(&reply)
             };
         }
-        let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
+        // What the outer end's around nodes kept stays in this future,
+        // through the hand-off and the wait for the response, for their
+        // backward halves below; an internal offer to another instance
+        // keeps it too.
+        let (exit, stack) = self
+            .fwd
+            .walk(1, self.plan.fwd_end(0), attempt, req, ())
+            .await?;
         let mut lease = Held::default();
         // As in local composition, nothing further starts for an interrupted
         // request. The last forward node may have ended the attempt, and a
@@ -780,8 +787,12 @@ where
                 let cx = attempt
                     .child()
                     .with_visit(owner.as_ref().map(|owner| Arc::clone(owner.visit())));
+                // The layout runs no around node's backward half in this
+                // task, so it gets no value.
+                let stack = F::empty(());
                 tokio::spawn(async move {
-                    hop.run_inner(cx, value, reply, None, egress, owner).await;
+                    hop.run_inner(cx, value, stack, reply, None, egress, owner)
+                        .await;
                 });
             }
             FwdExit::Leave { at, head, input } => {
@@ -876,7 +887,7 @@ where
         let bytes = response_items(inbound, attempt.visit().cloned());
         match self
             .bwd
-            .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
+            .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes, stack)?
         {
             BwdExit::Here(items) => Ok((items, lease)),
             BwdExit::Leave { .. } => Err(internal("the outer end's run left its segment")),
@@ -1001,12 +1012,14 @@ where
             let walked = tokio::select! {
                 biased;
                 reason = cx.done() => Err(reason),
-                walked = hop.fwd.enter(1, pos, end, &cx, &payload, input) => walked,
+                walked = hop.fwd.enter(1, pos, end, &cx, &payload, input, ()) => walked,
             };
             match walked {
-                Ok(FwdExit::Here(value)) => match egress {
+                // The inner end's task: the around nodes whose forward
+                // halves ran here have their backward halves in this run.
+                Ok((FwdExit::Here(value), stack)) => match egress {
                     Some(egress) => {
-                        hop.run_inner(cx, value, reply, Some(share), egress, owner)
+                        hop.run_inner(cx, value, stack, reply, Some(share), egress, owner)
                             .await;
                     }
                     None => {
@@ -1015,7 +1028,8 @@ where
                         hop.fail(&cx, &reply, error).await;
                     }
                 },
-                Ok(FwdExit::Leave { at, head, input }) => {
+                // A middle run keeps no around node's value.
+                Ok((FwdExit::Leave { at, head, input }, _)) => {
                     let onward = Forward {
                         version: VERSION,
                         identity: hop.rt.identity,
@@ -1333,7 +1347,9 @@ where
         }
         let upstream = inbound.canceller();
         let bytes = response_items(inbound, held.map(|owner| Arc::clone(owner.visit())));
-        match self.bwd.enter(1, pos, end, &cx, bytes) {
+        // A backward run that the outer end opened: the layout runs no
+        // around node's backward half here.
+        match self.bwd.enter(1, pos, end, &cx, bytes, F::empty(())) {
             Ok(BwdExit::Leave { bytes, .. }) => {
                 pump(bytes, out, &cx, Some(upstream), None, owner).await;
             }
@@ -1347,10 +1363,15 @@ where
 
     /// Run the inner end here and send its output, through this segment's
     /// part of the backward path, to `reply`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the hand-off's request, its stack, and what its task holds"
+    )]
     async fn run_inner(
         &self,
         cx: Cx,
         value: I::Req,
+        stack: F::Stack,
         reply: ReplyTo,
         share: Option<Share>,
         egress: EgressPermit,
@@ -1377,7 +1398,7 @@ where
             Ok(out) => out,
             Err(error) => return meter::ended(owner.as_ref(), Ending::Failed(&error)),
         };
-        self.produce_inner(&cx, value, out, owner, share.as_mut())
+        self.produce_inner(&cx, value, stack, out, owner, share.as_mut())
             .await;
         drop((share, egress));
     }
@@ -1390,6 +1411,7 @@ where
         &self,
         cx: &Cx,
         value: I::Req,
+        stack: F::Stack,
         out: Outbound,
         owner: Option<Owner>,
         sending: Option<&mut Share>,
@@ -1450,7 +1472,7 @@ where
                 return failed(out, reason, owner.as_ref()).await;
             }
         }
-        match self.bwd.walk(1, self.plan.inner_end, cx, items) {
+        match self.bwd.walk(1, self.plan.inner_end, cx, items, stack) {
             BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None, None, owner).await,
             BwdExit::Here(_) => {
                 let error = internal("the inner end's run reached the outer end");
@@ -2026,9 +2048,13 @@ mod tests {
         let (mut inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         let codec = Codec::from_fns(write_at, |bytes| read_at(&RESPONSE_READ, bytes));
-        let BwdExit::Leave { mut bytes, .. } =
-            BwdEnd::new(Some(codec)).walk(1, 0, &Cx::new(), items(futures::stream::iter([Ok(7)])))
-        else {
+        let BwdExit::Leave { mut bytes, .. } = BwdEnd::new(Some(codec)).walk(
+            1,
+            0,
+            &Cx::new(),
+            items(futures::stream::iter([Ok(7)])),
+            (),
+        ) else {
             panic!("the stream did not leave the run");
         };
         let item = bytes.next().await.expect("an item").expect("encoded");
@@ -2061,6 +2087,7 @@ mod tests {
             usize::MAX,
             &Cx::new(),
             response_items(frames, None),
+            (),
         ) else {
             panic!("the response did not enter its outer end");
         };
@@ -2087,9 +2114,10 @@ mod tests {
                 &Cx::new(),
                 &payload,
                 Some(input_items(frames)),
+                (),
             )
             .await;
-        let Ok(FwdExit::Here(request)) = entered else {
+        let Ok((FwdExit::Here(request), ())) = entered else {
             panic!("the request did not enter its inner end");
         };
         let (_, mut input) = request.into_parts();

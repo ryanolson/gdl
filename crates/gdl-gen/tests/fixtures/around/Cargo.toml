@@ -1,0 +1,6 @@
+# An around node end to end: read from source, checked, generated, built,
+# and run in two segments. Its own workspace: read and built by
+# `tests/around.rs`, never by the repository's.
+[workspace]
+members = ["nodes", "protocols"]
+resolver = "3"

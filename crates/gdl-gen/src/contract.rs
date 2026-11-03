@@ -144,6 +144,12 @@ pub(crate) fn signature(sig: &Sig, path: &dyn Fn(&str) -> String) -> String {
             up_item,
             down_req,
             down_item,
+        }
+        | Sig::Around {
+            up_req,
+            up_item,
+            down_req,
+            down_item,
         } => format!(
             "({} -> stream {}) over ({} -> stream {})",
             request(up_req),
@@ -173,22 +179,53 @@ fn request_signature(req: &Request, path: &dyn Fn(&str) -> String) -> String {
 }
 
 /// Hop `index` as the topology writes it after its outer end: forward
-/// nodes, the inner end with its own hop in braces, backward nodes.
+/// nodes, the inner end with its own hop in braces, backward nodes. An
+/// around node's braces hold the rest of its own hop.
 fn hop(graph: &Graph, index: usize) -> String {
     let hop = &graph.hops[index];
-    let mut parts: Vec<String> = hop.forward.iter().map(ToString::to_string).collect();
+    let names = |idents: &[syn::Ident]| idents.iter().map(ToString::to_string).collect::<Vec<_>>();
     // Hops run outermost first, each owned by the previous one's inner end.
-    match graph.hops.get(index + 1) {
+    let inner = match graph.hops.get(index + 1) {
         Some(next) if next.outer == hop.inner => {
-            parts.push(format!(
-                "{} {{ {} }}",
-                hop.inner,
-                self::hop(graph, index + 1)
-            ));
+            format!("{} {{ {} }}", hop.inner, self::hop(graph, index + 1))
         }
-        _ => parts.push(hop.inner.to_string()),
+        _ => hop.inner.to_string(),
+    };
+    let around = |name: &str| {
+        graph
+            .nodes
+            .iter()
+            .any(|n| n.ident == name && n.role() == gdl_syntax::Role::Around)
+    };
+    nested(&names(&hop.forward), inner, &names(&hop.backward), &around)
+}
+
+/// `forward => inner => backward`, with each around node's braces around
+/// what lies between its two halves.
+fn nested(
+    forward: &[String],
+    inner: String,
+    backward: &[String],
+    around: &dyn Fn(&str) -> bool,
+) -> String {
+    let split = forward.iter().position(|name| around(name)).and_then(|at| {
+        let back = backward.iter().position(|name| *name == forward[at])?;
+        Some((at, back))
+    });
+    let mut parts: Vec<String> = Vec::new();
+    match split {
+        None => {
+            parts.extend(forward.iter().cloned());
+            parts.push(inner);
+            parts.extend(backward.iter().cloned());
+        }
+        Some((at, back)) => {
+            let within = nested(&forward[at + 1..], inner, &backward[..back], around);
+            parts.extend(forward[..at].iter().cloned());
+            parts.push(format!("{} {{ {within} }}", forward[at]));
+            parts.extend(backward[back + 1..].iter().cloned());
+        }
     }
-    parts.extend(hop.backward.iter().map(ToString::to_string));
     parts.join(" => ")
 }
 
@@ -368,6 +405,31 @@ topology: Chunk => Gate { Sink => Back };
              sink     Sink: stream ::p::Chunk -> stream ::p::Chunk;\n\
              backward Back: ::p::Chunk -> ::p::Chunk;\n\
              topology: Chunk => Gate { Sink => Back };\n"
+        );
+        assert_eq!(shape(&reparse(&printed)), shape(&graph));
+    }
+
+    /// Around nodes write their braces around the rest of their hop, so
+    /// the contract reads back as the same hops.
+    #[test]
+    fn around_nodes_keep_their_braces() {
+        let graph = checked(
+            r#"name = "a", schema = 1;
+source   Http: Req -> stream Resp;
+forward  Trim: Req -> Req;
+around   Pre: (Req -> stream Resp) over (Req -> stream Resp);
+operator Retry: (Req -> stream Resp) over (Req -> stream Resp);
+around   Back: (Req -> stream Resp) over (Req -> stream Resp);
+sink     Engine: Req -> stream Resp;
+backward Mark: Resp -> Resp;
+topology: Http => Trim => Pre { Retry { Back { Engine => Mark } } };
+"#,
+        );
+        let printed = body(&graph, &|name| format!("::p::{name}"));
+        assert!(
+            printed
+                .contains("topology: Http => Trim => Pre { Retry { Back { Engine => Mark } } };"),
+            "{printed}"
         );
         assert_eq!(shape(&reparse(&printed)), shape(&graph));
     }

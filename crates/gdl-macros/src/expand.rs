@@ -125,9 +125,17 @@ fn expand_edges(graph: &Graph) -> TokenStream {
         };
         let mut sent = down_req;
         for ident in &hop.forward {
-            if let Sig::Forward { input, output } = &graph.node(ident).sig {
-                check_request(&mut checks, sent, input);
-                sent = output;
+            match &graph.node(ident).sig {
+                Sig::Forward { input, output }
+                | Sig::Around {
+                    up_req: input,
+                    down_req: output,
+                    ..
+                } => {
+                    check_request(&mut checks, sent, input);
+                    sent = output;
+                }
+                _ => {}
             }
         }
         let mut items = match &graph.node(&hop.inner).sig {
@@ -144,9 +152,17 @@ fn expand_edges(graph: &Graph) -> TokenStream {
             _ => unreachable!("checked: the inner end is a sink or an operator"),
         };
         for ident in &hop.backward {
-            if let Sig::Backward { input, output } = &graph.node(ident).sig {
-                check(&mut checks, items, input);
-                items = output;
+            match &graph.node(ident).sig {
+                Sig::Backward { input, output }
+                | Sig::Around {
+                    down_item: input,
+                    up_item: output,
+                    ..
+                } => {
+                    check(&mut checks, items, input);
+                    items = output;
+                }
+                _ => {}
             }
         }
         check(&mut checks, items, down_item);
@@ -217,6 +233,17 @@ fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
         Sig::Backward { input, output } => {
             quote! { #krate::gdl::Backward<In = #input, Out = #output> }
         }
+        Sig::Around {
+            up_req,
+            up_item,
+            down_req,
+            down_item,
+        } => {
+            let (up_req, down_req) = (request(up_req, krate), request(down_req, krate));
+            quote! {
+                #krate::gdl::Around<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
+            }
+        }
         Sig::Source { .. } => unreachable!("the source takes no binding"),
     }
 }
@@ -279,6 +306,25 @@ fn expand_nodes(graph: &Graph, krate: &TokenStream) -> TokenStream {
                 quote!(Backward),
                 quote! { impl #krate::BackwardDecl for nodes::#ident { type In = #input; type Out = #output; } },
             ),
+            Sig::Around {
+                up_req,
+                up_item,
+                down_req,
+                down_item,
+            } => {
+                let (up_req, down_req) = (request(up_req, krate), request(down_req, krate));
+                (
+                    quote!(Around),
+                    quote! {
+                        impl #krate::AroundDecl for nodes::#ident {
+                            type UpReq = #up_req;
+                            type UpItem = #up_item;
+                            type DownReq = #down_req;
+                            type DownItem = #down_item;
+                        }
+                    },
+                )
+            }
         };
         quote! {
             impl #krate::NodeDecl for nodes::#ident {
@@ -406,6 +452,7 @@ fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
             Role::Forward => quote!(Forward),
             Role::Sink => quote!(Sink),
             Role::Backward => quote!(Backward),
+            Role::Around => quote!(Around),
         };
         let binding = match &node.binding {
             None => quote!(::core::option::Option::None),
@@ -635,9 +682,16 @@ fn distributed_forward(graph: &Graph, hop: &Hop, krate: &TokenStream) -> TokenSt
     let last = request_codec(last, krate);
     let mut chain = quote! { #krate::FwdEnd::new(#last) };
     for (ident, req) in hop.forward.iter().zip(&hop.forward_types).rev() {
-        let f = local_var(graph.node(ident));
+        let node = graph.node(ident);
+        let f = local_var(node);
         let codec = request_codec(req, krate);
-        chain = quote! { #krate::FwdStep::new(#f, #codec, #chain) };
+        chain = match node.role() {
+            // The node's two halves share it.
+            Role::Around => {
+                quote! { #krate::FwdAround::new(::std::sync::Arc::clone(&#f), #codec, #chain) }
+            }
+            _ => quote! { #krate::FwdStep::new(#f, #codec, #chain) },
+        };
     }
     chain
 }
@@ -649,8 +703,14 @@ fn distributed_backward(graph: &Graph, hop: &Hop, krate: &TokenStream) -> TokenS
         .expect("one type per backward edge");
     let mut chain = quote! { #krate::BwdEnd::new(#krate::wire_codec!(#last)) };
     for (ident, ty) in hop.backward.iter().zip(&hop.backward_types).rev() {
-        let f = local_var(graph.node(ident));
-        chain = quote! { #krate::BwdStep::new(#f, #krate::wire_codec!(#ty), #chain) };
+        let node = graph.node(ident);
+        let f = local_var(node);
+        chain = match node.role() {
+            Role::Around => quote! {
+                #krate::BwdAround::new(::std::sync::Arc::clone(&#f), #krate::wire_codec!(#ty), #chain)
+            },
+            _ => quote! { #krate::BwdStep::new(#f, #krate::wire_codec!(#ty), #chain) },
+        };
     }
     chain
 }
@@ -664,14 +724,34 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let (result_type, result_value) = root_result(graph, krate, &generics, false);
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_local_{}", index);
+        // An around node's halves, each made by `around` from the node's `Arc`.
+        let half = |node: &Node, forward: bool| {
+            let local = local_var(node);
+            let half = if forward { quote!(0) } else { quote!(1) };
+            quote! { #krate::gdl::around(::std::sync::Arc::clone(&#local)).#half }
+        };
         let mut fwd = quote!(());
         for ident in hop.forward.iter().rev() {
-            let f = local_var(graph.node(ident));
+            let node = graph.node(ident);
+            let f = match node.role() {
+                Role::Around => half(node, true),
+                _ => {
+                    let f = local_var(node);
+                    quote!(#f)
+                }
+            };
             fwd = quote! { (#f, #fwd) };
         }
         let mut bwd = quote!(());
         for ident in hop.backward.iter().rev() {
-            let f = local_var(graph.node(ident));
+            let node = graph.node(ident);
+            let f = match node.role() {
+                Role::Around => half(node, false),
+                _ => {
+                    let f = local_var(node);
+                    quote!(#f)
+                }
+            };
             bwd = quote! { (#f, #bwd) };
         }
         let inner_node = graph.node(&hop.inner);

@@ -13,7 +13,7 @@ use crate::Cx;
 use crate::Items;
 use crate::Result;
 use crate::items::{Fuse, Producer, bound, fuse};
-use crate::{Backward, Forward, Next, Operator, Sink};
+use crate::{Around, Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
 /// of its outer end it is where attempts begin.
@@ -36,7 +36,7 @@ where
     Req: Send + 'static,
     F: ForwardChain<Req>,
     I: Inner<F::Out>,
-    B: BackwardChain<I::Item>,
+    B: BackwardChain<I::Item, F::Stack>,
 {
     // A block, not an `async fn`: the block uses `req` where it was
     // captured, where an `async fn` would move it into a local first.
@@ -57,7 +57,9 @@ where
             // chain hands the request on to the inner end, not back here: each
             // return would move the whole request once more.
             let at = &attempt;
-            let run = pin!(self.fwd.run(at, req, move |req| async move {
+            // What the chain's around nodes kept travels with the request, to
+            // the backward chain of this attempt alone.
+            let run = pin!(self.fwd.run(at, req, (), move |req, kept| async move {
                 // A forward stage can finish in the same instant the attempt is
                 // interrupted; the inner end must not start for a dead attempt.
                 let attempt = at;
@@ -73,7 +75,7 @@ where
                 // As before the inner end: no backward stage starts for an
                 // attempt interrupted while the inner end was finishing.
                 attempt.check()?;
-                Ok(self.bwd.answer(attempt, items))
+                Ok(self.bwd.answer(attempt, items, kept))
             }));
             // The checks inside `run` give a cancel that came first its
             // precedence; the race only waits.
@@ -161,46 +163,75 @@ where
 }
 
 /// Zero or more forward nodes, as a cons list: `()` is empty, `(Arc<F>, Rest)`
-/// runs `F` and then `Rest`.
-pub trait ForwardChain<In>: Clone + Send + Sync + 'static {
+/// runs `F` and then `Rest`, and `(ForwardHalf<P>, Rest)` runs the forward
+/// half of an [`Around`] node `P` and then `Rest`.
+///
+/// `Below` is the stack of values that the around nodes before this part of
+/// the chain kept. Each forward half pushes its value on it, so the last one
+/// is on top, where the first backward half takes it.
+pub trait ForwardChain<In, Below = ()>: Clone + Send + Sync + 'static {
     /// The request type after the whole chain.
     type Out: Send + 'static;
+    /// `Below` with the value of each around node in the chain pushed on.
+    type Stack: Send + 'static;
 
-    /// Run the chain on one request, then `then` on the request it makes.
+    /// Run the chain on one request, then `then` on the request it makes
+    /// and the values its around nodes kept.
     ///
     /// The request goes on to `then` rather than back to the caller: each
     /// future that returned it would move the whole request once more.
-    fn run<T, K, Fut>(&self, cx: &Cx, req: In, then: K) -> impl Future<Output = Result<T>> + Send
+    fn run<T, K, Fut>(
+        &self,
+        cx: &Cx,
+        req: In,
+        below: Below,
+        then: K,
+    ) -> impl Future<Output = Result<T>> + Send
     where
-        K: FnOnce(Self::Out) -> Fut + Send,
+        K: FnOnce(Self::Out, Self::Stack) -> Fut + Send,
         Fut: Future<Output = Result<T>> + Send;
 }
 
-impl<In: Send + 'static> ForwardChain<In> for () {
+impl<In: Send + 'static, Below: Send + 'static> ForwardChain<In, Below> for () {
     type Out = In;
+    type Stack = Below;
 
-    fn run<T, K, Fut>(&self, _cx: &Cx, req: In, then: K) -> impl Future<Output = Result<T>> + Send
+    fn run<T, K, Fut>(
+        &self,
+        _cx: &Cx,
+        req: In,
+        below: Below,
+        then: K,
+    ) -> impl Future<Output = Result<T>> + Send
     where
-        K: FnOnce(In) -> Fut + Send,
+        K: FnOnce(In, Below) -> Fut + Send,
         Fut: Future<Output = Result<T>> + Send,
     {
-        then(req)
+        then(req, below)
     }
 }
 
-impl<F, R> ForwardChain<F::In> for (Arc<F>, R)
+impl<F, R, Below> ForwardChain<F::In, Below> for (Arc<F>, R)
 where
     F: Forward,
-    R: ForwardChain<F::Out>,
+    R: ForwardChain<F::Out, Below>,
+    Below: Send + 'static,
 {
     type Out = R::Out;
+    type Stack = R::Stack;
 
     // As in `Hop::generate`: a block that uses `req` where it was captured,
     // and a match where `?` would move the request again.
     #[allow(clippy::manual_async_fn)]
-    fn run<T, K, Fut>(&self, cx: &Cx, req: F::In, then: K) -> impl Future<Output = Result<T>> + Send
+    fn run<T, K, Fut>(
+        &self,
+        cx: &Cx,
+        req: F::In,
+        below: Below,
+        then: K,
+    ) -> impl Future<Output = Result<T>> + Send
     where
-        K: FnOnce(R::Out) -> Fut + Send,
+        K: FnOnce(R::Out, R::Stack) -> Fut + Send,
         Fut: Future<Output = Result<T>> + Send,
     {
         async move {
@@ -212,18 +243,92 @@ where
                 Ok(req) => req,
                 Err(error) => return Err(error),
             };
-            self.1.run(cx, req, then).await
+            self.1.run(cx, req, below, then).await
+        }
+    }
+}
+
+/// The forward half of an [`Around`] node, for a hop's forward chain. Its
+/// backward half, [`BackwardHalf`], goes in the same hop's backward chain;
+/// [`around`] makes both.
+pub struct ForwardHalf<P>(Arc<P>);
+
+/// The backward half of an [`Around`] node, for a hop's backward chain.
+pub struct BackwardHalf<P>(Arc<P>);
+
+impl<P> Clone for ForwardHalf<P> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<P> Clone for BackwardHalf<P> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+/// Both halves of one [`Around`] node: the first for a hop's forward chain,
+/// the second for the same hop's backward chain.
+///
+/// The halves pair by nesting, as brackets do: the backward chain meets the
+/// halves in the reverse of the order the forward chain does. A half with no
+/// partner, or two pairs of different node types that cross, do not
+/// compile. Two nodes of the same type that cross are not caught.
+pub fn around<P: Around>(node: Arc<P>) -> (ForwardHalf<P>, BackwardHalf<P>) {
+    (ForwardHalf(Arc::clone(&node)), BackwardHalf(node))
+}
+
+/// The value one [`Around`] node kept for its backward half, on a hop's
+/// stack. Tagged with the node's type, so that two nodes whose values have
+/// one type still cannot take each other's.
+pub struct Kept<P: Around>(P::State);
+
+impl<P, R, Below> ForwardChain<P::UpReq, Below> for (ForwardHalf<P>, R)
+where
+    P: Around,
+    R: ForwardChain<P::DownReq, (Kept<P>, Below)>,
+    Below: Send + 'static,
+{
+    type Out = R::Out;
+    type Stack = R::Stack;
+
+    // As for a forward node.
+    #[allow(clippy::manual_async_fn)]
+    fn run<T, K, Fut>(
+        &self,
+        cx: &Cx,
+        req: P::UpReq,
+        below: Below,
+        then: K,
+    ) -> impl Future<Output = Result<T>> + Send
+    where
+        K: FnOnce(R::Out, R::Stack) -> Fut + Send,
+        Fut: Future<Output = Result<T>> + Send,
+    {
+        async move {
+            cx.check()?;
+            let (req, state) = match self.0.0.forward(cx, req).await {
+                Ok(done) => done,
+                Err(error) => return Err(error),
+            };
+            self.1.run(cx, req, (Kept(state), below), then).await
         }
     }
 }
 
 /// Zero or more backward nodes, as a cons list in the order the response
-/// passes through them: `(Arc<B>, Rest)` applies `B` first.
+/// passes through them: `(Arc<B>, Rest)` applies `B` first, and
+/// `(BackwardHalf<P>, Rest)` applies the backward half of an [`Around`] node
+/// `P` first, with the value on top of `Stack`.
 ///
 /// Every node output is fused exactly once: each node but the last runs in
 /// its own scope below the attempt and its output is fused against that
 /// scope; the last node's output is fused by the hop's attempt boundary.
-pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
+///
+/// The empty chain takes only an empty stack, so a hop whose around halves
+/// do not pair is not a `Next`.
+pub trait BackwardChain<In, Stack = ()>: Clone + Send + Sync + 'static {
     /// The item type after the whole chain.
     type Out: Send + 'static;
 
@@ -231,8 +336,9 @@ pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
     const EMPTY: bool;
 
     /// Wrap one response stream, already fused, in the chain. `attempt` is
-    /// the hop's attempt context.
-    fn apply(&self, attempt: &Cx, items: Items<In>) -> Items<Self::Out>;
+    /// the hop's attempt context; `stack` holds what the forward chain's
+    /// around nodes kept.
+    fn apply(&self, attempt: &Cx, items: Items<In>, stack: Stack) -> Items<Self::Out>;
 
     /// The stream the hop's attempt boundary takes: the chain's, or, with no
     /// nodes, the inner end's node boundary itself, unboxed. Every chain in
@@ -243,15 +349,15 @@ pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
     /// The chain over the inner end's node boundary, for the hop's attempt
     /// boundary.
     #[doc(hidden)]
-    fn answer(&self, attempt: &Cx, fused: Fuse<In>) -> Self::Answer;
+    fn answer(&self, attempt: &Cx, fused: Fuse<In>, stack: Stack) -> Self::Answer;
 }
 
-impl<In: Send + 'static> BackwardChain<In> for () {
+impl<In: Send + 'static> BackwardChain<In, ()> for () {
     type Out = In;
 
     const EMPTY: bool = true;
 
-    fn apply(&self, _attempt: &Cx, items: Items<In>) -> Items<In> {
+    fn apply(&self, _attempt: &Cx, items: Items<In>, (): ()) -> Items<In> {
         items
     }
 
@@ -260,38 +366,87 @@ impl<In: Send + 'static> BackwardChain<In> for () {
     // one dynamic poll fewer per item (docs/src/development/runtime-design.md).
     type Answer = Fuse<In>;
 
-    fn answer(&self, _attempt: &Cx, fused: Fuse<In>) -> Fuse<In> {
+    fn answer(&self, _attempt: &Cx, fused: Fuse<In>, (): ()) -> Fuse<In> {
         fused
     }
 }
 
-impl<B, R> BackwardChain<B::In> for (Arc<B>, R)
+impl<B, R, S> BackwardChain<B::In, S> for (Arc<B>, R)
 where
     B: Backward,
-    R: BackwardChain<B::Out>,
+    R: BackwardChain<B::Out, S>,
+    S: Send + 'static,
 {
     type Out = R::Out;
 
     const EMPTY: bool = false;
 
-    fn apply(&self, attempt: &Cx, items: Items<B::In>) -> Items<R::Out> {
+    fn apply(&self, attempt: &Cx, items: Items<B::In>, stack: S) -> Items<R::Out> {
         // A backward node's constructor may have side effects; an interrupted
         // attempt skips every remaining node and carries the reason through.
         if let Err(reason) = attempt.check() {
-            return self.1.apply(attempt, crate::items::failed(reason));
+            return self.1.apply(attempt, crate::items::failed(reason), stack);
         }
         if R::EMPTY {
-            return self.1.apply(attempt, self.0.backward(attempt, items));
+            return self
+                .1
+                .apply(attempt, self.0.backward(attempt, items), stack);
         }
         let scope = attempt.child();
         let out = self.0.backward(&scope, items);
-        self.1.apply(attempt, fuse(out, &scope))
+        self.1.apply(attempt, fuse(out, &scope), stack)
     }
 
     type Answer = Items<R::Out>;
 
-    fn answer(&self, attempt: &Cx, fused: Fuse<B::In>) -> Items<R::Out> {
-        self.apply(attempt, Box::pin(fused))
+    fn answer(&self, attempt: &Cx, fused: Fuse<B::In>, stack: S) -> Items<R::Out> {
+        self.apply(attempt, Box::pin(fused), stack)
+    }
+}
+
+impl<P, R, Rest> BackwardChain<P::DownItem, (Kept<P>, Rest)> for (BackwardHalf<P>, R)
+where
+    P: Around,
+    R: BackwardChain<P::UpItem, Rest>,
+    Rest: Send + 'static,
+{
+    type Out = R::Out;
+
+    const EMPTY: bool = false;
+
+    // The contexts are a backward node's: the last node of the chain gets
+    // the attempt itself, so its stop reaches the inner end, and the others
+    // a scope of their own.
+    fn apply(
+        &self,
+        attempt: &Cx,
+        items: Items<P::DownItem>,
+        (Kept(state), rest): (Kept<P>, Rest),
+    ) -> Items<R::Out> {
+        // Skipped, as a backward node is: the value is dropped here, and the
+        // node never sees it.
+        if let Err(reason) = attempt.check() {
+            drop(state);
+            return self.1.apply(attempt, crate::items::failed(reason), rest);
+        }
+        if R::EMPTY {
+            let out = self.0.0.backward(attempt, state, items);
+            return self.1.apply(attempt, out, rest);
+        }
+        let scope = attempt.child();
+        let out = self.0.0.backward(&scope, state, items);
+        self.1.apply(attempt, fuse(out, &scope), rest)
+    }
+
+    type Answer = Items<R::Out>;
+
+    fn answer(
+        &self,
+        attempt: &Cx,
+        fused: Fuse<P::DownItem>,
+        stack: (Kept<P>, Rest),
+    ) -> Items<R::Out> {
+        self.apply(attempt, Box::pin(fused), stack)
     }
 }
 

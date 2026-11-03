@@ -1,0 +1,65 @@
+error[E0277]: the trait bound `(BackwardHalf<Keep<1>>, ()): BackwardChain<u32>` is not satisfied
+  --> tests/ui/around-unmatched-backward.rs:44:18
+   |
+44 |     let _ = call(hop);
+   |             ---- ^^^ the trait `BackwardChain<u32>` is not implemented for `(BackwardHalf<Keep<1>>, ())`
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the following other types implement trait `BackwardChain<In, Stack>`
+  --> src/compose.rs
+   |
+   |   impl<In: Send + 'static> BackwardChain<In, ()> for () {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()` implements `BackwardChain<In>`
+...
+   | / impl<B, R, S> BackwardChain<B::In, S> for (Arc<B>, R)
+   | | where
+   | |     B: Backward,
+   | |     R: BackwardChain<B::Out, S>,
+   | |     S: Send + 'static,
+   | |______________________^ `(Arc<B>, R)` implements `BackwardChain<<B as Backward>::In, S>`
+...
+   | / impl<P, R, Rest> BackwardChain<P::DownItem, (Kept<P>, Rest)> for (BackwardHalf<P>, R)
+   | | where
+   | |     P: Around,
+   | |     R: BackwardChain<P::UpItem, Rest>,
+   | |     Rest: Send + 'static,
+   | |_________________________^ `(BackwardHalf<P>, R)` implements `BackwardChain<<P as Around>::DownItem, (Kept<P>, Rest)>`
+   = note: required for `Hop<(), SinkStage<Numbers>, (BackwardHalf<Keep<1>>, ())>` to implement `gdl::Next<u32, u32>`
+note: required by a bound in `call`
+  --> tests/ui/around-unmatched-backward.rs:37:18
+   |
+37 | async fn call<N: Next<u32, u32>>(next: N) {
+   |                  ^^^^^^^^^^^^^^ required by this bound in `call`
+
+error[E0277]: the trait bound `(BackwardHalf<Keep<1>>, ()): BackwardChain<u32>` is not satisfied
+  --> tests/ui/around-unmatched-backward.rs:44:13
+   |
+44 |     let _ = call(hop);
+   |             ^^^^^^^^^ the trait `BackwardChain<u32>` is not implemented for `(BackwardHalf<Keep<1>>, ())`
+   |
+help: the following other types implement trait `BackwardChain<In, Stack>`
+  --> src/compose.rs
+   |
+   |   impl<In: Send + 'static> BackwardChain<In, ()> for () {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()` implements `BackwardChain<In>`
+...
+   | / impl<B, R, S> BackwardChain<B::In, S> for (Arc<B>, R)
+   | | where
+   | |     B: Backward,
+   | |     R: BackwardChain<B::Out, S>,
+   | |     S: Send + 'static,
+   | |______________________^ `(Arc<B>, R)` implements `BackwardChain<<B as Backward>::In, S>`
+...
+   | / impl<P, R, Rest> BackwardChain<P::DownItem, (Kept<P>, Rest)> for (BackwardHalf<P>, R)
+   | | where
+   | |     P: Around,
+   | |     R: BackwardChain<P::UpItem, Rest>,
+   | |     Rest: Send + 'static,
+   | |_________________________^ `(BackwardHalf<P>, R)` implements `BackwardChain<<P as Around>::DownItem, (Kept<P>, Rest)>`
+   = note: required for `Hop<(), SinkStage<Numbers>, (BackwardHalf<Keep<1>>, ())>` to implement `gdl::Next<u32, u32>`
+note: required by a bound in `call`
+  --> tests/ui/around-unmatched-backward.rs:37:18
+   |
+37 | async fn call<N: Next<u32, u32>>(next: N) {
+   |                  ^^^^^^^^^^^^^^ required by this bound in `call`

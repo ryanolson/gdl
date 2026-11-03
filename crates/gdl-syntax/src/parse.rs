@@ -44,6 +44,7 @@ mod kw {
     syn::custom_keyword!(forward);
     syn::custom_keyword!(sink);
     syn::custom_keyword!(backward);
+    syn::custom_keyword!(around);
     syn::custom_keyword!(stream);
     syn::custom_keyword!(over);
     syn::custom_keyword!(topology);
@@ -126,6 +127,17 @@ pub enum Sig {
         /// The response item it passes on.
         output: Type,
     },
+    /// `around P: (UpReq -> stream UpItem) over (DownReq -> stream DownItem);`
+    Around {
+        /// The request it takes from the outer end's side.
+        up_req: Request,
+        /// The item it returns toward the outer end.
+        up_item: Type,
+        /// The request it passes on toward the inner end.
+        down_req: Request,
+        /// The item it reads from the inner end's side.
+        down_item: Type,
+    },
 }
 
 /// A request type: a value, or a head and a stream of items.
@@ -138,7 +150,7 @@ pub struct Request {
 }
 
 /// One element of a topology list: a node, and for an operator, the hop it
-/// owns in braces.
+/// owns in braces. An around node's braces hold the rest of its own hop.
 pub(crate) struct Element {
     pub(crate) ident: Ident,
     pub(crate) nested: Option<Vec<Element>>,
@@ -205,6 +217,9 @@ impl Parse for NodeDecl {
         } else if lookahead.peek(kw::backward) {
             input.parse::<kw::backward>()?;
             4
+        } else if lookahead.peek(kw::around) {
+            input.parse::<kw::around>()?;
+            6
         } else {
             return Err(lookahead.error());
         };
@@ -240,7 +255,7 @@ impl Parse for NodeDecl {
                 let (req, item) = streaming(input)?;
                 Sig::Source { req, item }
             }
-            1 => {
+            1 | 6 => {
                 let up;
                 parenthesized!(up in input);
                 let (up_req, up_item) = streaming(&up)?;
@@ -248,11 +263,20 @@ impl Parse for NodeDecl {
                 let down;
                 parenthesized!(down in input);
                 let (down_req, down_item) = streaming(&down)?;
-                Sig::Operator {
-                    up_req,
-                    up_item,
-                    down_req,
-                    down_item,
+                if sig_kind == 6 {
+                    Sig::Around {
+                        up_req,
+                        up_item,
+                        down_req,
+                        down_item,
+                    }
+                } else {
+                    Sig::Operator {
+                        up_req,
+                        up_item,
+                        down_req,
+                        down_item,
+                    }
                 }
             }
             2 => {
@@ -283,7 +307,7 @@ impl Parse for NodeDecl {
         Ok(Self {
             ident,
             sig,
-            builtin: sig_kind >= 5,
+            builtin: sig_kind == 5,
             provides,
             needs,
         })

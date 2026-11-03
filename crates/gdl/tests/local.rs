@@ -346,3 +346,52 @@ fn a_hop_holds_its_request_in_few_places() {
     let size = std::mem::size_of_val(&over_operator.generate(Cx::new(), Large([0; 1024])));
     assert_eq!(places(size), 2, "a hop over an operator");
 }
+
+/// Passes a large request on, as a forward node.
+struct Same;
+
+impl Forward for Same {
+    type In = Large;
+    type Out = Large;
+
+    async fn forward(&self, _cx: &Cx, req: Large) -> Result<Large> {
+        Ok(req)
+    }
+}
+
+/// Passes a large request on, as an around node that keeps a number.
+struct Carry;
+
+impl gdl::Around for Carry {
+    type UpReq = Large;
+    type UpItem = u64;
+    type DownReq = Large;
+    type DownItem = u64;
+    type State = u64;
+
+    async fn forward(&self, _cx: &Cx, req: Large) -> Result<(Large, u64)> {
+        Ok((req, 1))
+    }
+
+    fn backward(&self, _cx: &Cx, state: u64, input: Items<u64>) -> Items<u64> {
+        items(input.map(move |item| item.map(|n| n + state)))
+    }
+}
+
+/// An around node holds the request in no more places than a forward node
+/// in the same position: returning it beside a state moves it no more.
+#[test]
+fn a_hop_with_an_around_holds_its_request_in_few_places() {
+    let places = |future_size: usize| future_size / std::mem::size_of::<Large>();
+    let forward = Hop::new((Arc::new(Same), ()), SinkStage::new(Arc::new(Sum)), ());
+    let size = std::mem::size_of_val(&forward.generate(Cx::new(), Large([0; 1024])));
+    let with_forward = places(size);
+    let (ahead, behind) = gdl::around(Arc::new(Carry));
+    let paired = Hop::new((ahead, ()), SinkStage::new(Arc::new(Sum)), (behind, ()));
+    let size = std::mem::size_of_val(&paired.generate(Cx::new(), Large([0; 1024])));
+    assert_eq!(
+        places(size),
+        with_forward,
+        "an around node, against a forward node"
+    );
+}

@@ -82,6 +82,9 @@ pub enum Role {
     Sink,
     /// Transforms the response stream only.
     Backward,
+    /// A forward half and a backward half in one hop, with a value kept
+    /// between them for the same attempt.
+    Around,
 }
 
 impl Role {
@@ -93,6 +96,7 @@ impl Role {
             Self::Forward => "forward",
             Self::Sink => "sink",
             Self::Backward => "backward",
+            Self::Around => "around",
         }
     }
 
@@ -101,7 +105,7 @@ impl Role {
     pub fn ports(self) -> &'static [&'static str] {
         match self {
             Self::Source => &["Req", "Item"],
-            Self::Operator => &["UpReq", "UpItem", "DownReq", "DownItem"],
+            Self::Operator | Self::Around => &["UpReq", "UpItem", "DownReq", "DownItem"],
             Self::Forward | Self::Backward => &["In", "Out"],
             Self::Sink => &["Req", "Item"],
         }

@@ -91,6 +91,7 @@ impl Node {
             Sig::Forward { .. } => Role::Forward,
             Sig::Sink { .. } => Role::Sink,
             Sig::Backward { .. } => Role::Backward,
+            Sig::Around { .. } => Role::Around,
         }
     }
 }
@@ -210,6 +211,7 @@ impl Graph {
                     Sig::Source { req, .. } => req,
                     Sig::Operator { down_req, .. } => down_req,
                     Sig::Forward { output, .. } => output,
+                    Sig::Around { down_req, .. } => down_req,
                     Sig::Sink { .. } | Sig::Backward { .. } => {
                         unreachable!("checked: a request leaves a source, operator, or forward")
                     }
@@ -217,7 +219,7 @@ impl Graph {
                 let taken = match &self.node(to).sig {
                     Sig::Forward { input, .. } => input,
                     Sig::Sink { req, .. } => req,
-                    Sig::Operator { up_req, .. } => up_req,
+                    Sig::Operator { up_req, .. } | Sig::Around { up_req, .. } => up_req,
                     Sig::Source { .. } | Sig::Backward { .. } => {
                         unreachable!("checked: a request reaches a forward, sink, or operator")
                     }
@@ -247,6 +249,7 @@ impl Graph {
                     Sig::Sink { item, .. } => item,
                     Sig::Operator { up_item, .. } => up_item,
                     Sig::Backward { output, .. } => output,
+                    Sig::Around { up_item, .. } => up_item,
                     Sig::Source { .. } | Sig::Forward { .. } => {
                         unreachable!("checked: a response leaves a sink, operator, or backward")
                     }
@@ -254,7 +257,7 @@ impl Graph {
                 let taken = match &self.node(to).sig {
                     Sig::Backward { input, .. } => input,
                     Sig::Source { item, .. } => item,
-                    Sig::Operator { down_item, .. } => down_item,
+                    Sig::Operator { down_item, .. } | Sig::Around { down_item, .. } => down_item,
                     Sig::Sink { .. } | Sig::Forward { .. } => {
                         unreachable!("checked: a response reaches a backward, source, or operator")
                     }
@@ -480,58 +483,8 @@ impl<'a> Builder<'a> {
     /// hops nested inside its inner end.
     fn hop(&mut self, outer: Ident, list: Vec<Element>, span: Span) -> syn::Result<()> {
         self.take(&outer)?;
-        let mut forward = Vec::new();
-        let mut elements = list.into_iter();
-        let inner = loop {
-            let element = elements
-                .next()
-                .ok_or_else(|| syn::Error::new(span, "a hop needs a sink or an operator"))?;
-            match self.node(&element.ident)?.role() {
-                Role::Forward if element.nested.is_none() => forward.push(element.ident),
-                Role::Sink if element.nested.is_some() => {
-                    return Err(syn::Error::new(
-                        element.ident.span(),
-                        "a sink owns no nested hop",
-                    ));
-                }
-                Role::Operator if element.nested.is_none() => {
-                    return Err(syn::Error::new(
-                        element.ident.span(),
-                        "an operator needs its hop in braces: `Op { ... }`",
-                    ));
-                }
-                Role::Sink | Role::Operator => break element,
-                Role::Forward => {
-                    return Err(syn::Error::new(
-                        element.ident.span(),
-                        "only an operator owns a nested hop",
-                    ));
-                }
-                Role::Source => {
-                    return Err(syn::Error::new(
-                        element.ident.span(),
-                        "the source can only start the topology",
-                    ));
-                }
-                Role::Backward => {
-                    return Err(syn::Error::new(
-                        element.ident.span(),
-                        "a backward node cannot come before the hop's sink or operator",
-                    ));
-                }
-            }
-        };
-        let mut backward = Vec::new();
-        for element in elements {
-            let node = self.node(&element.ident)?;
-            if node.role() != Role::Backward || element.nested.is_some() {
-                return Err(syn::Error::new(
-                    element.ident.span(),
-                    "after a hop's sink or operator, only backward nodes follow",
-                ));
-            }
-            backward.push(element.ident);
-        }
+        let (mut forward, mut backward) = (Vec::new(), Vec::new());
+        let inner = self.stages(list, span, &mut forward, &mut backward)?;
 
         let outer_node = self.node(&outer)?;
         let down_req = match &outer_node.sig {
@@ -541,9 +494,17 @@ impl<'a> Builder<'a> {
         };
         let mut forward_types = vec![down_req];
         for ident in &forward {
-            if let Sig::Forward { input, output } = &self.node(ident)?.sig {
-                self.agree(forward_types.last(), input);
-                forward_types.push(output.clone());
+            match &self.node(ident)?.sig {
+                Sig::Forward { input, output }
+                | Sig::Around {
+                    up_req: input,
+                    down_req: output,
+                    ..
+                } => {
+                    self.agree(forward_types.last(), input);
+                    forward_types.push(output.clone());
+                }
+                _ => {}
             }
         }
         let inner_node = self.node(&inner.ident)?;
@@ -560,12 +521,18 @@ impl<'a> Builder<'a> {
         };
         let mut backward_types = vec![inner_item];
         for ident in &backward {
-            if let Sig::Backward { output, .. } = &self.node(ident)?.sig {
-                backward_types.push(output.clone());
+            match &self.node(ident)?.sig {
+                Sig::Backward { output, .. }
+                | Sig::Around {
+                    up_item: output, ..
+                } => backward_types.push(output.clone()),
+                _ => {}
             }
         }
         let inner_role = inner_node.role();
-        for ident in forward.iter().chain(&backward) {
+        // An around node is in both chains, and is used once.
+        let only_backward = backward.iter().filter(|b| !forward.contains(b));
+        for ident in forward.iter().chain(only_backward) {
             self.take(ident)?;
         }
 
@@ -593,6 +560,83 @@ impl<'a> Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// The stages of a hop after its outer end: forward nodes, then its inner
+    /// end, then backward nodes, into `forward` and `backward`. An around
+    /// node's braces hold the rest of the same hop, so its forward half
+    /// comes before what they hold and its backward half after. Returns the
+    /// inner end.
+    fn stages(
+        &mut self,
+        list: Vec<Element>,
+        span: Span,
+        forward: &mut Vec<Ident>,
+        backward: &mut Vec<Ident>,
+    ) -> syn::Result<Element> {
+        let mut elements = list.into_iter();
+        let inner = loop {
+            let element = elements
+                .next()
+                .ok_or_else(|| syn::Error::new(span, "a hop needs a sink or an operator"))?;
+            match self.node(&element.ident)?.role() {
+                Role::Forward if element.nested.is_none() => forward.push(element.ident),
+                Role::Around => {
+                    let Some(nested) = element.nested else {
+                        return Err(syn::Error::new(
+                            element.ident.span(),
+                            "an around node needs the rest of its hop in braces: `Around { ... }`",
+                        ));
+                    };
+                    forward.push(element.ident.clone());
+                    let inner = self.stages(nested, element.ident.span(), forward, backward)?;
+                    backward.push(element.ident);
+                    break inner;
+                }
+                Role::Sink if element.nested.is_some() => {
+                    return Err(syn::Error::new(
+                        element.ident.span(),
+                        "a sink owns no nested hop",
+                    ));
+                }
+                Role::Operator if element.nested.is_none() => {
+                    return Err(syn::Error::new(
+                        element.ident.span(),
+                        "an operator needs its hop in braces: `Op { ... }`",
+                    ));
+                }
+                Role::Sink | Role::Operator => break element,
+                Role::Forward => {
+                    return Err(syn::Error::new(
+                        element.ident.span(),
+                        "only an operator or an around node takes braces",
+                    ));
+                }
+                Role::Source => {
+                    return Err(syn::Error::new(
+                        element.ident.span(),
+                        "the source can only start the topology",
+                    ));
+                }
+                Role::Backward => {
+                    return Err(syn::Error::new(
+                        element.ident.span(),
+                        "a backward node cannot come before the hop's sink or operator",
+                    ));
+                }
+            }
+        };
+        for element in elements {
+            let node = self.node(&element.ident)?;
+            if node.role() != Role::Backward || element.nested.is_some() {
+                return Err(syn::Error::new(
+                    element.ident.span(),
+                    "after a hop's sink or operator, only backward nodes follow",
+                ));
+            }
+            backward.push(element.ident);
+        }
+        Ok(inner)
+    }
+
     /// A forward edge carries a stream at both of its ends or at neither.
     /// The types on it are checked by the compiler; this gives the streamed
     /// and the plain form of one type a clear error instead of a type

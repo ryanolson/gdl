@@ -20,6 +20,15 @@ topology: Frontend => Preprocess { Truncate => Engine => Detokenize => Format } 
 
 In the topology, each hop lists its forward nodes, then its inner end, then its backward nodes in the order the response goes through them. An operator owns its hop in braces.
 
+An around node takes an operator's signature, and braces around the rest of its own hop:
+
+```text
+around Backend: (Pre -> stream Out) over (Pre -> stream Token);
+topology: Http => Preprocess { Migration { Backend { Router } } };
+```
+
+Its braces stay in the same hop: `A => f1 => P { f2 => S => b1 } => b2` is one hop, with the forward chain `f1, P, f2`, the inner end `S`, and the backward chain `b1, P, b2`. The braces must hold the hop's inner end. [The graph model](../concepts/model.md#around-nodes) says what the node does.
+
 [Split, generate, and draw](split-and-generate.md#draw) draws it. A request position can be a stream: `Head + stream Item`, or `stream Item` for a head of `()`. [Streamed requests](../concepts/streamed-requests.md) says what a node receives.
 
 Keep these rules in mind:

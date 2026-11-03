@@ -208,3 +208,88 @@ fn a_cutoff_costs_an_affinity_selection_no_allocation() {
     }
     assert_eq!(plain, 1, "the erased selector's boxed future");
 }
+
+/// Passes the request on.
+struct Ahead;
+
+impl gdl::Forward for Ahead {
+    type In = u64;
+    type Out = u64;
+
+    async fn forward(&self, _cx: &Cx, n: u64) -> Result<u64> {
+        Ok(n)
+    }
+}
+
+/// Adds one to each item.
+struct Behind;
+
+impl gdl::Backward for Behind {
+    type In = u64;
+    type Out = u64;
+
+    fn backward(&self, _cx: &Cx, input: Items<u64>) -> Items<u64> {
+        items(input.map(|item| item.map(|n| n + 1)))
+    }
+}
+
+/// Keeps a number, and adds it to each item.
+struct Both;
+
+impl gdl::Around for Both {
+    type UpReq = u64;
+    type UpItem = u64;
+    type DownReq = u64;
+    type DownItem = u64;
+    type State = u64;
+
+    async fn forward(&self, _cx: &Cx, n: u64) -> Result<(u64, u64)> {
+        Ok((n, 1))
+    }
+
+    fn backward(&self, _cx: &Cx, state: u64, input: Items<u64>) -> Items<u64> {
+        items(input.map(move |item| item.map(|n| n + state)))
+    }
+}
+
+/// An around node allocates what a forward node and a backward node in its
+/// two places do: its value rides in the backward stream's own box, and the
+/// last backward half gets the attempt's context, as the last backward node
+/// does, with no scope of its own. Checked last in the chain and not last.
+#[tokio::test]
+async fn an_around_node_allocates_what_a_forward_and_a_backward_node_do() {
+    let sink = || SinkStage::new(Arc::new(Ready));
+    let plain_last = Source::new(Hop::new(
+        (Arc::new(Ahead), ()),
+        sink(),
+        (Arc::new(Behind), ()),
+    ));
+    let (ahead, behind) = gdl::around(Arc::new(Both));
+    let paired_last = Source::new(Hop::new((ahead, ()), sink(), (behind, ())));
+    allocations(&plain_last).await;
+    allocations(&paired_last).await;
+    assert_eq!(
+        allocations(&paired_last).await,
+        allocations(&plain_last).await,
+        "last"
+    );
+
+    let plain_first = Source::new(Hop::new(
+        (Arc::new(Ahead), ()),
+        sink(),
+        (Arc::new(Behind), (Arc::new(Behind), ())),
+    ));
+    let (ahead, behind) = gdl::around(Arc::new(Both));
+    let paired_first = Source::new(Hop::new(
+        (ahead, ()),
+        sink(),
+        (behind, (Arc::new(Behind), ())),
+    ));
+    allocations(&plain_first).await;
+    allocations(&paired_first).await;
+    assert_eq!(
+        allocations(&paired_first).await,
+        allocations(&plain_first).await,
+        "not last"
+    );
+}

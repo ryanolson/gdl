@@ -93,7 +93,8 @@ pub(crate) fn roles(root: &TokenStream, ty: &TokenStream) -> TokenStream {
     quote! { || {
         #[allow(unused_imports)]
         use #root::{
-            BackwardNo as _, BackwardYes as _, ForwardNo as _, ForwardYes as _,
+            AroundNo as _, AroundYes as _, BackwardNo as _, BackwardYes as _, ForwardNo as _,
+            ForwardYes as _,
             OperatorNo as _, OperatorYes as _, SinkNo as _, SinkYes as _,
             FrontendNo as _, FrontendYes as _, ServiceNo as _, ServiceYes as _,
         };
@@ -105,6 +106,7 @@ pub(crate) fn roles(root: &TokenStream, ty: &TokenStream) -> TokenStream {
         roles.extend((&probe).__gdl_forward());
         roles.extend((&probe).__gdl_backward());
         roles.extend((&probe).__gdl_operator());
+        roles.extend((&probe).__gdl_around());
         roles
     } }
 }

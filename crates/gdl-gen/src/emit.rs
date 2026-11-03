@@ -234,9 +234,11 @@ fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<
             let (decl, port) = match (inward, role) {
                 (true, Role::Forward) => ("ForwardDecl", "In"),
                 (true, Role::Sink) => ("SinkDecl", "Req"),
+                (true, Role::Around) => ("AroundDecl", "UpReq"),
                 (true, _) => ("OperatorDecl", "UpReq"),
                 (false, Role::Backward) => ("BackwardDecl", "In"),
                 (false, Role::Source) => ("SourceDecl", "Item"),
+                (false, Role::Around) => ("AroundDecl", "DownItem"),
                 (false, _) => ("OperatorDecl", "DownItem"),
             };
             let port = format!("{receiver} {decl} {port}");

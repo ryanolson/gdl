@@ -43,6 +43,7 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | Segment names, and package and library names do not collide | `check`, `generate` |
 | An implementation has its node's role and port types | the segment's build, naming the node |
 | Every cut edge, and every anchor-carried edge, has a codec | `check`, `generate`, and segment start |
+| Both halves of an around node run in one task: in the outer end's runs (the forward run it starts and the backward run it ends), or in the inner end's runs when the forward path leaves the outer end's segment. A middle forward run, a backward run the outer end opens, and the inner end's run when the forward path never leaves are each a task of their own, so a pair there is refused, even when both halves are in one segment | `check`, `generate`, and segment start |
 | Every cut or anchor-carried message is a wire type | the segment's build ([assertions](generation.md#the-crossing-assertions)) |
 | A `[routing]` key names a node that starts a remote request run | `check`, `generate`, and segment start |
 | Classes: each segment in exactly one, the boundary rule, no cycle, a pool policy only for a class a boundary enters | `check`, `generate`, and segment start |

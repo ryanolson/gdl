@@ -1,0 +1,41 @@
+error[E0277]: the trait bound `(): BackwardChain<u32, (Kept<Keep<1>>, ())>` is not satisfied
+  --> tests/ui/around-unmatched-forward.rs:45:18
+   |
+45 |     let _ = call(hop);
+   |             ---- ^^^ the trait `BackwardChain<u32, (Kept<Keep<1>>, ())>` is not implemented for `()`
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `BackwardChain<u32, (Kept<Keep<1>>, ())>` is not implemented for `()`
+      but trait `BackwardChain<u32, ()>` is implemented for it
+  --> src/compose.rs
+   |
+   | impl<In: Send + 'static> BackwardChain<In, ()> for () {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `()`, found `(Kept<Keep<1>>, ())`
+   = note: required for `Hop<(ForwardHalf<Keep<1>>, ()), SinkStage<Numbers>, ()>` to implement `gdl::Next<u32, u32>`
+note: required by a bound in `call`
+  --> tests/ui/around-unmatched-forward.rs:38:18
+   |
+38 | async fn call<N: Next<u32, u32>>(next: N) {
+   |                  ^^^^^^^^^^^^^^ required by this bound in `call`
+
+error[E0277]: the trait bound `(): BackwardChain<u32, (Kept<Keep<1>>, ())>` is not satisfied
+  --> tests/ui/around-unmatched-forward.rs:45:13
+   |
+45 |     let _ = call(hop);
+   |             ^^^^^^^^^ the trait `BackwardChain<u32, (Kept<Keep<1>>, ())>` is not implemented for `()`
+   |
+help: the trait `BackwardChain<u32, (Kept<Keep<1>>, ())>` is not implemented for `()`
+      but trait `BackwardChain<u32, ()>` is implemented for it
+  --> src/compose.rs
+   |
+   | impl<In: Send + 'static> BackwardChain<In, ()> for () {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `()`, found `(Kept<Keep<1>>, ())`
+   = note: required for `Hop<(ForwardHalf<Keep<1>>, ()), SinkStage<Numbers>, ()>` to implement `gdl::Next<u32, u32>`
+note: required by a bound in `call`
+  --> tests/ui/around-unmatched-forward.rs:38:18
+   |
+38 | async fn call<N: Next<u32, u32>>(next: N) {
+   |                  ^^^^^^^^^^^^^^ required by this bound in `call`

@@ -38,4 +38,5 @@ Where gdl differs from dynamo on purpose:
 | Shutdown unregisters, sleeps a 5 s grace, and drains each process alone. | Retirement with binding acknowledgements, and a drain that follows the graph's causality ([Segment lifecycle](../concepts/lifecycle.md)). |
 | The frontend correlates responses through a map of request ids. | No correlation maps: a minted anchor or a return value ([Crossing segments](../concepts/crossings.md)). |
 | Types are erased at each component boundary, so a skew between components shows at runtime. | Typed contracts checked at compile time, and admission by the hash of graph and placement. |
+| An operator that calls its downstream once, such as the preprocessor or Backend, is a stage with a hop of its own. | Such a stage can be an around node in the hop of the stage above it: what its request side computed reaches its response side by value, at a forward and a backward node's cost ([The graph model](../concepts/model.md#around-nodes)). |
 | A proposed velo-based request plane for dynamo, not merged, acknowledges a request only after the whole generation. | A hand-off is acknowledged when the receiving run is provisioned. |
