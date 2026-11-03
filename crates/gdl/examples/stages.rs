@@ -1,4 +1,4 @@
-//! `stages <shape> <item> <stages> <items> <requests> [pending [<together>]]`
+//! `stages <shape> <item> <stages> <items> <requests> [deadline] [pending [<together>]]`
 //! sends `requests`
 //! requests through `stages` pass-through stages, each answered with
 //! `items` items, for callgrind to count what a local stage costs a request
@@ -15,6 +15,9 @@
 //! - `<item>`: `u64`, or `large`, an item of 512 B, about the size of a
 //!   streamed chunk of a chat response.
 //! - `<stages>`: 0 to 5.
+//! - `deadline`: each request has a deadline an hour away, which no request
+//!   reaches, so that every boundary carries a deadline and reads the clock
+//!   at its checks. The runtime then has timers.
 //! - `pending`: the sink's stream waits once before its first item, so
 //!   every boundary above it waits and registers a waiter. `<together>`
 //!   sends that many requests at once below one root context, so that the
@@ -56,13 +59,15 @@ const WARM: u64 = 50;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (shape, item, stages, count, requests, mode) = match args.as_slice() {
-        [shape, item, stages, count, requests, mode @ ..] if mode.len() <= 2 => {
+        [shape, item, stages, count, requests, mode @ ..] if mode.len() <= 3 => {
             (shape, item, stages, count, requests, mode)
         }
         _ => panic!(
-            "usage: stages <operator|hop|plain> <u64|large> <stages> <items> <requests> [pending [<together>]]"
+            "usage: stages <operator|hop|plain> <u64|large> <stages> <items> <requests> [deadline] [pending [<together>]]"
         ),
     };
+    let deadline = mode.first().is_some_and(|m| m == "deadline");
+    let mode = &mode[usize::from(deadline)..];
     let stages: usize = stages.parse().expect("a count of stages");
     let run = Run {
         count: count.parse().expect("a count of items"),
@@ -75,10 +80,13 @@ fn main() {
         together: mode
             .get(1)
             .map_or(1, |k| k.parse().expect("a count of requests at once")),
+        deadline,
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a runtime");
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    if run.deadline {
+        builder.enable_time();
+    }
+    let runtime = builder.build().expect("a runtime");
     let allocations = runtime.block_on(async {
         match item.as_str() {
             "u64" => shaped::<u64>(shape, stages, run).await,
@@ -87,7 +95,8 @@ fn main() {
         }
     });
     println!(
-        "{shape} {item} stages={stages} items={count} requests={requests} pending={} together={} allocations/request={:.2}",
+        "{shape} {item} stages={stages} items={count} requests={requests} deadline={} pending={} together={} allocations/request={:.2}",
+        run.deadline,
         run.pending,
         run.together,
         allocations as f64 / (run.requests * run.together) as f64
@@ -204,21 +213,27 @@ fn op<T, H>(next: H) -> OperatorStage<Pass<T>, H> {
 /// `requests` requests of `count` items each.
 async fn measure<T: Item, N: Next<u64, T>>(next: &N, run: Run) -> u64 {
     for _ in 0..WARM {
-        together(next, 1, run.together).await;
+        together(next, 1, run).await;
     }
     let before = ALLOCATIONS.load(Relaxed);
     for _ in 0..run.requests {
-        together(next, run.count, run.together).await;
+        together(next, run.count, run).await;
     }
     ALLOCATIONS.load(Relaxed) - before
 }
 
-/// One request with a root of its own, or `k` at once below one root.
-async fn together<T: Item, N: Next<u64, T>>(next: &N, count: u64, k: u64) {
-    if k == 1 {
-        once(next, Cx::new(), count).await;
+/// One request with a root of its own, or `run.together` at once below one
+/// root.
+async fn together<T: Item, N: Next<u64, T>>(next: &N, count: u64, run: Run) {
+    let root = if run.deadline {
+        Cx::new().with_timeout(std::time::Duration::from_secs(3_600))
     } else {
-        let root = Cx::new();
+        Cx::new()
+    };
+    if run.together == 1 {
+        once(next, root, count).await;
+    } else {
+        let k = run.together;
         futures::future::join_all((0..k).map(|_| once(next, root.child(), count))).await;
     }
 }
@@ -244,6 +259,8 @@ struct Run {
     pending: bool,
     /// Requests sent at once below one root context.
     together: u64,
+    /// Whether each request has a deadline.
+    deadline: bool,
 }
 
 /// Answers a request for `n` items with `n` ready items, after one wait

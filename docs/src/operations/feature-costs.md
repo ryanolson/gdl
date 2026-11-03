@@ -691,6 +691,8 @@ Items are `u64`, or `large`: 512 B with a field to drop, about the size of a str
 RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example stages
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <shape> <u64|large> <0|1|5> 1 <200|400>
 valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <shape> <u64|large> <0|1|5> <10000|20000> 1
+# the same with a deadline on every request, an hour away
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages operator <u64|large> <0|1|5> 1 <200|400> deadline
 ```
 
 | Per stage | `plain` | `operator` | `hop` |
@@ -715,6 +717,10 @@ Each change to the boundaries since, measured the same way, against the commit b
 | the attempt boundary passes itself to its wait, not its fields | 106.2 (339.1) | 56.1 (286.3) | 124.5 (400.5) | 5,092 |
 | one scope node for stop and cancel | 105.5 (338.3) | 56.0 (286.3) | 122.9 (399.9) | 2,814 |
 | a hop with no backward node holds its node boundary unboxed | 90.3 (320.2) | 59.0 (289.9) | 107.8 (381.9) | 2,642 |
+| a scope holds its first waiter in place | 90.3 (320.2) | 59.0 (289.9) | 107.8 (381.9) | 2,625 |
+| the attempt boundary checks by its run of ready items | 87.3 (317.1) | 59.0 (289.9) | 104.8 (378.8) | 2,620 |
+| only the root's attempt boundary measures | 86.3 (312.1) | 58.8 (290.7) | 103.9 (373.8) | 2,627 |
+| the attempt boundary's endings run out of line | 81.2 (311.2) | 59.4 (290.1) | 98.8 (372.9) | 2,620 (3,008 at 512 B) |
 
 - **Passing the attempt boundary whole to its wait saves 14 Ir per item at each hop.** `wait` took the boundary's fields as a struct of pointers, so every poll built that struct on the stack before it polled the producer: 9 stores of pointers, and the registers they needed.
 - **One scope node for stop and cancel saves 2,279 Ir and 4 allocations per operator stage per request**, and a little under 1 Ir per item at each hop. Each child context was a stop node, a cancel token's tree node, and a place in its parent's list of children, and each create, clone, check, and drop of the token took its lock. Now a child context is one node, made, checked, and dropped with no lock ([Runtime design](../development/runtime-design.md#node-contexts)). Base `9ab1301e` and the change built in one target directory, two rounds each, which agreed within 1.2 Ir:
@@ -758,6 +764,42 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 | `operator`, 5 stages, `pending` | 34,769.8 Ir, 48 allocations | 32,783.9 Ir, 44 allocations |
 
 The first build held the first waiter in place and dropped the list on every scope. That drop was a call on every scope of every request, and the ready request ran 55 Ir more at one hop and 16 Ir more for each operator stage. Dropping the list only on a scope that has had a waiter, out of line, removed that cost.
+
+**Where an attempt boundary's instructions go.** Per item, at `operator u64 5`, base `993af293`, from callgrind's count of each instruction (`--dump-instr=yes`) at 20,000 items minus 10,000, divided by 10,000. The run is 559.4 Ir per item: 327.6 in the six attempt boundaries, which hold the producer's `Fuse` inlined, 165.5 in the five operators' `map`, 52.5 in the bench's own fold and source, 5.0 in the check every 64 items, and about 6 in the yield every 1,024. One attempt boundary is 54.6 Ir:
+
+| Instructions | Ir per item |
+|---|---|
+| saving and restoring 8 registers | 14 |
+| the test that the attempt boundary has not ended: `Option<Fuse>` keeps its `None` in `Fuse`'s deadline, an `Instant` whose nanoseconds hold a constant too large for one instruction | 6 |
+| the attempt boundary's yield test and count | 8 |
+| the attempt boundary's count of items to its next check | 7 |
+| the test that the node boundary has not ended, and its yield test and count | 8 |
+| the dynamic call of the stream below | 5 |
+| the test of the returned poll, which is 32 B and in memory | 4 |
+| the test for the first item, which only the root's attempt measures | 2 |
+
+The operator's `map` is 33.1 Ir per item, as in the `plain` control. 17 of those move the 32 B poll of a `u64` through the stack three times. A poll is that large because `gdl::Error` is about 32 B. The deadline costs no instruction of the attempt boundary's poll: with no deadline, the check every 64 items tests the deadline first and reads no clock, and callgrind shows no clock read from it.
+
+Three changes to the attempt boundary followed, each measured against the one before it, the base and the change built in one target directory and run from paths of the same length, two rounds each, which agreed within 0.5 Ir per item and request. On an aarch64 host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 6 to 40, rustc 1.93.1, valgrind 3.28.0:
+
+- **The check by the run of ready items saves 3.0 Ir per item at each hop**, and 5 Ir per request. The boundary counted the items to its next check with a second counter. It now checks on the last of every 64 items in the run of ready items it counts for its yield. A wait starts the run again but keeps its place among the 64, so a producer still overruns a cancel or a deadline by fewer than 64 items. The first build started the count again at a wait, and a producer that waited every 32 items overran the deadline without bound, since a wait polls the deadline's timer, which fires on a whole-millisecond tick. Reading the clock at each wait with a deadline closed that too, at about 62 Ir per hop for each wait. Keeping the place costs nothing measured: the counts below did not move by 0.1 Ir per item, and a request that waits with a deadline moved by under 12 Ir.
+- **Measuring only at the root saves 1.0 Ir per item at each hop, 5.0 at 512 B**, and costs 7 Ir per request. The attempt boundary takes what it reports as a type: nothing for every attempt but the root's, which then tests no flag per item, and the root's visit for `bound_measured`. A first build read the flag in the match on the poll. The call kept the poll alive, and the compiler copied each 512 B item twice: 77 Ir more per item, and `tests/codegen.rs` failed. The flag is now read before the poll.
+- **The endings out of line save 5.1 Ir per item at each hop with `u64` items, 0.9 at 512 B.** The end of the producer's stream and an interruption found by the check now run in functions of their own. Inlined, their calls kept registers saved and restored on every poll. Ending is now a call: at 512 B, a request costs 21 Ir more per stage, which 23 items win back, and with `u64` items 7 Ir less. Taking out only the interruption, or only the drops of an ending, saved nothing per item. Taking `Fuse`'s ending out too cost 512 B items 1 Ir per item and about 30 per request.
+
+An `operator` stage now costs 81.2 Ir per item (311.2 at 512 B), against 90.3 (320.2) at `993af293`, and one hop 98.8 against 107.8. Per request, the stage costs 2,620 Ir as before, and 3,008 at 512 B against 2,997.
+
+**With a deadline.** The `deadline` mode gives every request a deadline an hour away, and the runtime timers. Per `operator` stage, `u64` items, at the attempt boundary's endings out of line:
+
+| Per stage | No deadline | Deadline |
+|---|---|---|
+| Ir per item | 81.2 | 84.6 |
+| Ir per request | 2,620 | 3,054 |
+| one hop, Ir per item | 98.8 | 101.3 |
+| one hop, Ir per request | 3,029 | 3,617 |
+
+- **Per item, a deadline adds no instruction to a boundary's poll.** The 3.4 Ir are tokio's time driver at each yield and one clock read per hop every 64 items.
+- **Per request, it adds about 36 clock reads at 5 stages**, in `Cx::check` (four for each hop) and in each boundary's check at its end. Each costs about 70 Ir under callgrind, and more on the hardware.
+- **Rejected: an attempt boundary and a node boundary typed by whether they have a deadline.** Measured as an upper bound, by builds that removed the deadline outright: from the attempt boundary, it saved nothing per item (0.6 Ir more) and cost 11 Ir per request per stage. From `Fuse`, it saved 2.0 Ir per item (4.1 at 512 B) and 55 Ir per request per stage, since `Option<Fuse>` then tests a tag. But it helps only a request with no deadline, and no attempt leaves its segment without one, and the HTTP and API fronts set one. Building it would give each hop two attempt futures, or a backward chain typed by the deadline, and two attempt boundaries for each item type.
 
 ### Copies of an item
 

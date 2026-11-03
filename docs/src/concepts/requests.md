@@ -62,7 +62,7 @@ No attempt crosses segments without a deadline. An attempt with none gets `defau
 
 ## Where cancel and deadline are checked
 
-An attempt boundary watches the cancel and deadline futures while its producer is pending. When the producer is always ready, those futures never get polled. So the boundary also checks the cancel flag and the clock every 64 ready items (`CHECK_INTERVAL`). A ready producer can overrun a cancel or a deadline by at most 64 items. A pending producer is interrupted at once.
+An attempt boundary watches the cancel and deadline futures while its producer is pending. When the producer is always ready, those futures never get polled. So the boundary also checks the cancel flag and the clock every 64 ready items (`CHECK_INTERVAL`). A wait checks the cancel itself, and polls the deadline's timer, but the count runs on across it: the timer fires on a whole-millisecond tick, and can still be waiting after the deadline has passed. With no deadline, the check reads no clock. A ready producer can overrun a cancel or a deadline by at most 64 items. A pending producer is interrupted at once.
 
 A node boundary inside an attempt ends the stream after the first `Err`, and cancels the producing node's scope when the stream ends or is dropped. It also yields after 1,024 consecutive ready items. Without that, a node that consumes without producing (a filter) would loop inside one poll and never return to the attempt boundary. A node that ends its stream cleanly after its scope was cancelled, or after the deadline, is reported as interrupted, not as a success.
 

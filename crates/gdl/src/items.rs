@@ -221,7 +221,7 @@ where
     T: Send + 'static,
     S: Stream<Item = Result<T>> + Unpin + Send + 'static,
 {
-    bounded(cx, guard, inner, None)
+    bounded(cx, guard, inner, ())
 }
 
 /// `bound` for the root's attempt, ending the visit `response` owns with
@@ -232,13 +232,18 @@ pub fn bound_measured<T: Send + 'static>(
     inner: Items<T>,
     response: Option<Owner>,
 ) -> Items<T> {
+    let response = Measured {
+        first_pending: response.is_some(),
+        owner: response,
+    };
     bounded(cx, guard, inner, response)
 }
 
-fn bounded<T, S>(cx: &Cx, guard: CancelOnDrop, inner: S, response: Option<Owner>) -> Items<T>
+fn bounded<T, S, V>(cx: &Cx, guard: CancelOnDrop, inner: S, response: V) -> Items<T>
 where
     T: Send + 'static,
     S: Stream<Item = Result<T>> + Unpin + Send + 'static,
+    V: Response,
 {
     // The fields are built in the order written here, and a panic while
     // building them (`sleep_until` on a runtime without timers) drops those
@@ -254,9 +259,7 @@ where
         // needs no clone of it to read it.
         token: Some(guard.disarm()),
         deadline_at,
-        since_check: 0,
         ready_run: 0,
-        first_pending: response.is_some(),
         response,
     })
 }
@@ -271,9 +274,18 @@ where
 /// and a pending producer is woken by the futures at once.
 pub const CHECK_INTERVAL: u8 = 64;
 
+// The attempt boundary checks on the last item of every `CHECK_INTERVAL`
+// ready items, counted by the run it counts for its yield: a second
+// counter cost 4 Ir per item. A wait starts the run again but keeps its
+// place in the interval (`wait`), and a yield comes after a whole number
+// of intervals.
+const CHECK_MASK: u16 = CHECK_INTERVAL as u16 - 1;
+const _: () = assert!(CHECK_INTERVAL.is_power_of_two());
+const _: () = assert!(YIELD_INTERVAL.is_multiple_of(CHECK_INTERVAL as u16));
+
 pin_project! {
     #[project = BoundedProj]
-    struct Bounded<S> {
+    struct Bounded<S, V> {
         // `None` once the stream has ended; dropping the inner stream drops
         // the attempt's node streams. Boxed (`Items`), or the producer's
         // node boundary unboxed (`Fuse`): either way the same field, so it
@@ -289,20 +301,19 @@ pin_project! {
         #[pin]
         deadline: Option<Sleep>,
         deadline_at: Option<Instant>,
-        since_check: u8,
-        // Consecutive ready items; the boundary yields every
-        // `YIELD_INTERVAL` so a consumer draining an always-ready attempt
-        // cannot starve the task that would cancel it.
+        // Ready items since the last yield, and, in its low bits, since the
+        // last check. The boundary yields after at most `YIELD_INTERVAL` in
+        // a row, so a consumer draining an always-ready attempt cannot
+        // starve the task that would cancel it, and checks the cancel and
+        // the deadline every `CHECK_INTERVAL`.
         ready_run: u16,
-        // Whether the first item is still to come, for the visit
-        // `response` owns: one flag per item, no counter.
-        first_pending: bool,
-        // The root's visit, when the runtime records it; dropped with the
-        // stream, it ends as given up.
-        response: Option<Owner>,
+        // The root's visit (`Measured`), or nothing to report (`()`): a
+        // type, so that an attempt that reports nothing tests no flag per
+        // item. Dropped with the stream, a visit ends as given up.
+        response: V,
     }
 
-    impl<S> PinnedDrop for Bounded<S> {
+    impl<S, V> PinnedDrop for Bounded<S, V> {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
             end(this.inner, this.token);
@@ -310,7 +321,7 @@ pin_project! {
     }
 }
 
-impl<T, S: Stream<Item = Result<T>> + Unpin> Stream for Bounded<S> {
+impl<T, S: Stream<Item = Result<T>> + Unpin, V: Response> Stream for Bounded<S, V> {
     type Item = Result<T>;
 
     // hot path: local-item-boundary
@@ -325,41 +336,27 @@ impl<T, S: Stream<Item = Result<T>> + Unpin> Stream for Bounded<S> {
             return Poll::Pending;
         }
 
-        *this.since_check += 1;
-        if *this.since_check >= CHECK_INTERVAL {
-            *this.since_check = 0;
-            if let Some(error) = interrupted(this.token.as_ref(), *this.deadline_at) {
-                ended(this.response.as_ref(), Ending::Failed(&error));
-                end(this.inner, this.token);
-                return Poll::Ready(Some(Err(error)));
-            }
+        if *this.ready_run & CHECK_MASK == CHECK_MASK
+            && let Some(error) = interrupted(this.token.as_ref(), *this.deadline_at)
+        {
+            return Poll::Ready(Some(Err(interrupt(self, error))));
         }
 
+        // Read before the poll: a call while the poll is held, even one that
+        // returns a constant, keeps the compiler from writing the poll where
+        // the caller reads it, and every item is then copied.
+        let first_pending = this.response.first_pending();
         let polled = Pin::new(inner).poll_next(cx);
         // As in `Fuse`: returned as it came, with no call while it is held.
         match polled {
-            Poll::Ready(Some(Ok(_))) if !*this.first_pending => *this.ready_run += 1,
+            Poll::Ready(Some(Ok(_))) if !first_pending => *this.ready_run += 1,
             Poll::Ready(Some(Ok(_))) => {
                 let item = item_of(polled);
                 *this.ready_run += 1;
-                *this.first_pending = false;
-                if let Some(response) = this.response.as_ref() {
-                    response.visit().first_out();
-                }
+                this.response.first_out();
                 return Poll::Ready(item.map(Ok));
             }
-            Poll::Ready(Some(Err(_)) | None) => {
-                // A producer that honors its cancel or deadline often ends
-                // cleanly; the end must still be reported as the
-                // interruption it was, not as success. One check per
-                // stream, off the per-item path.
-                let error = error_of(polled)
-                    .or_else(|| interrupted(this.token.as_ref(), *this.deadline_at));
-                let ending = error.as_ref().map_or(Ending::Finished, Ending::Failed);
-                ended(this.response.as_ref(), ending);
-                end(this.inner, this.token);
-                return Poll::Ready(error.map(Err));
-            }
+            Poll::Ready(Some(Err(_)) | None) => return finish(self, error_of(polled)),
             Poll::Pending => {
                 return match wait(self, cx, polled) {
                     Some(error) => Poll::Ready(Some(Err(error))),
@@ -371,6 +368,40 @@ impl<T, S: Stream<Item = Result<T>> + Unpin> Stream for Bounded<S> {
     }
 }
 
+/// The check every `CHECK_INTERVAL` items found the attempt interrupted:
+/// end with `error`. Out of line, as `wait` is, and for the same reason as
+/// `finish`.
+#[cold]
+#[inline(never)]
+fn interrupt<S, V: Response>(bounded: Pin<&mut Bounded<S, V>>, error: Error) -> Error {
+    let this = bounded.project();
+    this.response.ended(Ending::Failed(&error));
+    end(this.inner, this.token);
+    error
+}
+
+/// The inner stream ended, with `error` or cleanly: end the attempt, and
+/// return its last poll. Out of line: inlined, the calls of an ending that
+/// runs once per stream keep registers saved and restored on every poll.
+/// It returns the poll, not the error: built in the caller, a poll as
+/// large as its item is built aside and copied whole.
+#[cold]
+#[inline(never)]
+fn finish<T, S, V: Response>(
+    bounded: Pin<&mut Bounded<S, V>>,
+    error: Option<Error>,
+) -> Poll<Option<Result<T>>> {
+    let this = bounded.project();
+    // A producer that honors its cancel or deadline often ends cleanly;
+    // the end must still be reported as the interruption it was, not as
+    // success. One check per stream, off the per-item path.
+    let error = error.or_else(|| interrupted(this.token.as_ref(), *this.deadline_at));
+    let ending = error.as_ref().map_or(Ending::Finished, Ending::Failed);
+    this.response.ended(ending);
+    end(this.inner, this.token);
+    Poll::Ready(error.map(Err))
+}
+
 /// The producer waits: wait on the deadline and the cancel too, and return
 /// the error to end with if either has come. It takes the pending poll, so
 /// that `Bounded::poll_next` holds none across these calls, and it returns
@@ -379,20 +410,25 @@ impl<T, S: Stream<Item = Result<T>> + Unpin> Stream for Bounded<S> {
 /// boundary whole, not its projection: a projection passed out of line is a
 /// struct of pointers that every poll would build first, 14 Ir per item.
 #[inline(never)]
-fn wait<T, S>(
-    bounded: Pin<&mut Bounded<S>>,
+fn wait<T, S, V: Response>(
+    bounded: Pin<&mut Bounded<S, V>>,
     cx: &mut Context<'_>,
     _pending: Poll<Option<Result<T>>>,
 ) -> Option<Error> {
     let this = bounded.project();
-    *this.ready_run = 0;
+    // The run of ready items starts again, but not the count to the next
+    // check: the timer fires on a whole-millisecond tick, so it can still
+    // be pending past the deadline, and a producer that waits every few
+    // items would otherwise never reach a check. The yield then comes at
+    // most `CHECK_INTERVAL` items early.
+    *this.ready_run &= CHECK_MASK;
     // The deadline is polled first: when both have happened it is the
     // cause worth reporting, as everywhere else (see `Cx::check`).
     if let Some(deadline) = this.deadline.as_pin_mut()
         && deadline.poll(cx).is_ready()
     {
         let error = Error::deadline_exceeded();
-        ended(this.response.as_ref(), Ending::Failed(&error));
+        this.response.ended(Ending::Failed(&error));
         end(this.inner, this.token);
         return Some(error);
     }
@@ -411,11 +447,59 @@ fn wait<T, S>(
         // fired yet.
         let error =
             interrupted(this.token.as_ref(), *this.deadline_at).unwrap_or_else(Error::cancelled);
-        ended(this.response.as_ref(), Ending::Failed(&error));
+        this.response.ended(Ending::Failed(&error));
         end(this.inner, this.token);
         return Some(error);
     }
     None
+}
+
+/// What an attempt boundary reports of its stream to the root's visit.
+trait Response: Send + 'static {
+    /// Whether the item being passed is the stream's first.
+    fn first_pending(&self) -> bool;
+    /// The first item has passed.
+    fn first_out(&mut self);
+    /// The stream ends with `ending`.
+    fn ended(&self, ending: Ending<'_>);
+}
+
+/// An attempt that reports to no visit: every attempt but the root's.
+impl Response for () {
+    #[inline(always)]
+    fn first_pending(&self) -> bool {
+        false
+    }
+
+    fn first_out(&mut self) {}
+
+    fn ended(&self, _: Ending<'_>) {}
+}
+
+/// The root's attempt, reporting to the visit `owner` holds when the
+/// runtime records it.
+struct Measured {
+    // Whether the first item is still to come: one flag per item, no
+    // counter.
+    first_pending: bool,
+    owner: Option<Owner>,
+}
+
+impl Response for Measured {
+    fn first_pending(&self) -> bool {
+        self.first_pending
+    }
+
+    fn first_out(&mut self) {
+        self.first_pending = false;
+        if let Some(owner) = &self.owner {
+            owner.visit().first_out();
+        }
+    }
+
+    fn ended(&self, ending: Ending<'_>) {
+        ended(self.owner.as_ref(), ending);
+    }
 }
 
 /// The error a poll ends with, taking the whole poll: a part of it left
@@ -564,6 +648,47 @@ mod tests {
             "{}",
             before.len()
         );
+    }
+
+    /// A cancel made after `cancel_at` items is seen within
+    /// `CHECK_INTERVAL` items, wherever a wait falls in the run: before the
+    /// cancel, so that the run of ready items starts again, or after it.
+    #[tokio::test]
+    async fn a_cancel_is_seen_within_the_check_interval_across_a_wait() {
+        let interval = usize::from(CHECK_INTERVAL);
+        for cancel_at in [1, 2, 63, 64, 65, 100, 127, 128, 200] {
+            for wait_at in [0, 1, 30, 62, 63, 64, 65, 90, 128, 150, 250] {
+                let (attempt, guard) = attempt_of(&Cx::new());
+                let mut polls = 0_usize;
+                let producer = futures::stream::poll_fn(move |task| {
+                    polls += 1;
+                    if polls == wait_at + 1 {
+                        task.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Some(Ok(7_u32)))
+                });
+                let mut out = bound(&attempt, guard, items(producer));
+                for _ in 0..cancel_at {
+                    assert!(out.next().await.is_some_and(|r| r.is_ok()));
+                }
+                attempt.cancel();
+                let mut after = 0;
+                loop {
+                    match out.next().await.expect("an ending") {
+                        Ok(_) => after += 1,
+                        Err(error) => {
+                            assert_eq!(error.kind(), ErrorKind::Cancelled);
+                            break;
+                        }
+                    }
+                    assert!(
+                        after < interval,
+                        "cancel after {cancel_at}, wait after {wait_at}: {after} items passed"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
