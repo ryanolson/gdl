@@ -297,3 +297,32 @@ async fn a_component_move_keeps_running_segment_pods_in_the_stop() {
     );
     assert_eq!(step(&fake), Some(StopStep::Segments));
 }
+
+/// A malformed template must set BadSpec instead of panicking the controller.
+#[tokio::test]
+async fn a_malformed_dgd_template_is_refused_without_panicking() {
+    let mut pool = dgd_pool(false);
+    let mut dgd: Value =
+        serde_json::from_str(pool.spec.pool.dgd.as_deref().expect("the DGD")).expect("DGD JSON");
+    dgd["spec"]["components"][0]["podTemplate"] = serde_json::json!([]);
+    pool.spec.pool.dgd = Some(dgd.to_string());
+    let mut fake = Fake::with(pool);
+    fake.dgds = true;
+
+    fake.reconcile(0)
+        .await
+        .expect("refuse the malformed template");
+
+    assert!(
+        fake.status()
+            .conditions
+            .iter()
+            .any(|condition| { condition.type_ == "Applied" && condition.reason == "BadSpec" })
+    );
+    let log = fake.log();
+    assert!(
+        !log.iter()
+            .any(|entry| entry.starts_with("create ") || entry.starts_with("apply ")),
+        "a malformed DGD must apply nothing: {log:?}"
+    );
+}
