@@ -166,3 +166,68 @@ fn retry(scaler: Arc<GdlScaler>, error: &Failed, _: Arc<Shared>) -> Action {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct Failed(String);
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use http::{Request, Response};
+    use kube::client::Body;
+    use serde_json::json;
+    use tower::service_fn;
+
+    use super::*;
+
+    /// Discovery must prove that the API version used for every DGD request exists.
+    #[tokio::test]
+    async fn dgd_discovery_requires_the_version_the_pool_uses() {
+        for version in ["v1beta1", "v1alpha1"] {
+            let service = service_fn(move |request: Request<Body>| async move {
+                let reply = if request.uri().path() == "/apis" {
+                    json!({
+                        "apiVersion": "v1", "kind": "APIGroupList",
+                        "groups": [{
+                            "name": "nvidia.com",
+                            "versions": [{
+                                "groupVersion": format!("nvidia.com/{version}"),
+                                "version": version,
+                            }],
+                            "preferredVersion": {
+                                "groupVersion": format!("nvidia.com/{version}"),
+                                "version": version,
+                            },
+                        }],
+                    })
+                } else {
+                    assert_eq!(request.uri().path(), format!("/apis/nvidia.com/{version}"));
+                    json!({
+                        "apiVersion": "v1", "kind": "APIResourceList",
+                        "groupVersion": format!("nvidia.com/{version}"),
+                        "resources": [{
+                            "name": "dynamographdeployments",
+                            "namespaced": true,
+                            "kind": "DynamoGraphDeployment",
+                            "verbs": ["get", "list", "create", "patch", "delete"],
+                        }],
+                    })
+                };
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(200)
+                        .body(Body::from(reply.to_string().into_bytes()))
+                        .expect("discovery response"),
+                )
+            });
+            let client = Client::new(service, "ns");
+            let supported = serves(&client, "nvidia.com", "dynamographdeployments")
+                .await
+                .expect("discovery");
+            assert_eq!(
+                supported,
+                version == "v1beta1",
+                "the pool only requests {} but discovery only serves nvidia.com/{version}",
+                gdl_k8s::DGD_API_VERSION
+            );
+        }
+    }
+}
