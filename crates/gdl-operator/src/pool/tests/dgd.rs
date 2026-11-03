@@ -348,3 +348,54 @@ async fn a_segment_pod_found_by_its_component_alone_holds_the_hub() {
         "{log:?}"
     );
 }
+
+/// Background deletion can remove a pruned DGD before its segment pods finish draining.
+#[tokio::test]
+async fn a_pruned_dgd_keeps_its_running_segment_pods_in_the_stop() {
+    let fake = running_dgd(false).await;
+    {
+        let mut state = fake.state();
+        let pool = state.pool.as_mut().expect("a pool");
+        pool.metadata.generation = Some(2);
+        pool.spec.pool.segments[0].component = None;
+        pool.spec.pool.dgd = None;
+        state.version += 1;
+    }
+    fake.reconcile(1_000)
+        .await
+        .expect("move the segment to a Deployment");
+    assert_eq!(fake.status().held, None);
+    assert!(
+        !fake
+            .state()
+            .objects
+            .contains_key(&(Kind::DynamoGraphDeployment, "p".into())),
+        "the DGD is pruned in the background"
+    );
+    assert!(
+        fake.log()
+            .iter()
+            .any(|entry| entry.starts_with("delete DynamoGraphDeployment/p "))
+    );
+    fake.settle();
+    fake.state().log.clear();
+    fake.delete(false);
+    fake.reconcile(2_000).await.expect("stop the Deployments");
+    fake.settle();
+    fake.reconcile(3_000)
+        .await
+        .expect("wait for the retiring DGD segment");
+    fake.settle();
+    fake.reconcile(4_000).await.expect("keep waiting");
+
+    assert_eq!(fake.state().dgd_pods["Frontend"], 2);
+    let log = fake.log();
+    assert!(
+        !released(&fake)
+            && !log
+                .iter()
+                .any(|entry| entry.starts_with("write Deployment/p ")),
+        "the deleted DGD's segment pods still need the hub: {log:?}"
+    );
+    assert_eq!(step(&fake), Some(StopStep::Segments));
+}
