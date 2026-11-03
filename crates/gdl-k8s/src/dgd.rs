@@ -143,8 +143,13 @@ pub(crate) fn render(
             ));
         }
     }
-    let components = dgd["spec"]["components"]
-        .as_array_mut()
+    // Checked lookups: indexing a field of a JSON value that is not an
+    // object would panic, and a pool's `dgd` is text anyone can write.
+    let components = dgd
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .and_then(|spec| spec.get_mut("components"))
+        .and_then(Value::as_array_mut)
         .ok_or("the pool's `dgd` has no `spec.components` list")?;
     for (at, (segment, component)) in placed.iter().enumerate() {
         if let Some((other, _)) = placed[..at].iter().find(|(_, c)| c == component) {
