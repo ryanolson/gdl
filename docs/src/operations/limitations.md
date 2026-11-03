@@ -145,9 +145,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Reuse:** a roster directory belongs to one deployment. Files are never removed, so a reused directory names instances that are gone. Requests to them fail, or the launch fails with "the directory must be fresh".
 - **Workaround:** set a shorter `[runtime] drain_ms`, stop the remaining peers twice (a second stop ends a drain at once), or use a hub, where a crashed instance's lease lapses in about 30 s. Use a fresh directory for each deployment. See [Segment lifecycle](../concepts/lifecycle.md).
 
-### `cargo gdl run` serves only a source that reads stdin, and only on Unix
+### `cargo gdl run` serves only a source that reads stdin, and its stops reach only so far
 - **What:** `run` refuses a spec whose source is pinned to a frontend, such as the `http` and `api` examples, and a spec of several layouts. It stops its segments with Unix signals, and fails on other systems.
 - **Outside Linux:** a segment outlives a `run` that was killed with SIGKILL. Linux has a signal for the death of a parent, and macOS has none.
+- **A build process in its own session:** a stop during the build reaches the preparation's process group. A compiler or build script that calls `setsid` leaves that group and outlives the stop. Catching it would need a subreaper or a cgroup.
+- **A member that cannot be reaped:** after the SIGKILL, `run` waits at most 1 s for the group to empty. A dead member whose parent does not reap it stays in the group, and `run` goes on and says so.
 - **Workaround:** build the segments with `cargo gdl build` and start them yourself ([Getting started](../guides/getting-started.md#run-the-segments-yourself)), or deploy them with `cargo gdl compose`.
 
 ### A drain is bounded, and a stop while starting exits with code 1

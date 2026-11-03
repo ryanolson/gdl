@@ -5,7 +5,7 @@
 mod common;
 
 #[test]
-#[ignore = "F6: a compiler that calls setsid survives preparation cancellation"]
+#[ignore = "a known limit: a compiler that calls setsid leaves the preparation's process group, and `run` cannot stop it; see docs/src/operations/limitations.md"]
 fn cancelling_preparation_stops_a_compiler_in_another_session() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
