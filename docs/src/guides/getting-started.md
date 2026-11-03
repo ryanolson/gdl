@@ -60,41 +60,75 @@ cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 
 `build` generates a contract crate and one crate per segment in `examples/chat/target/gdl/chat/gdl/workspace/`, and a `crossings.txt` that counts the crossings of one request. Then it builds them and prints the paths of the binaries `chat-engine`, `chat-front`, and `chat-post`, in `examples/chat/target/gdl/chat/gdl/bin/debug`. It writes nothing outside the target directory. Run it again after a change: it rebuilds only what the change reaches. See [Split, generate, and draw](split-and-generate.md#build) and [Code generation](../concepts/generation.md).
 
-## Configure and start the segments
+## Run the graph
 
-Each segment reads a TOML file that names its listen address and a roster directory. All segments of one deployment share the roster directory, and it must be new for each deployment:
+`run` builds the segments as `build` does, then runs all three on this machine. It needs no Docker. It runs on Unix only.
+
+1. **Start.** Run:
+
+   ```bash
+   cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml
+   ```
+
+   Each segment prints a line such as `engine: ready` on stderr. The `front` segment then reads one JSON request per line from stdin.
+
+2. **Send.** Type a request and press Enter:
+
+   ```
+   {"text": "hello big wide world", "max_words": 3}
+   ```
+
+   The output is one JSON line for each item, then a `done` line. The engine answers with the words in reverse order and in upper case, and `post` puts each word in angle brackets:
+
+   ```
+   {"item":{"index":0,"text":"<WIDE>"}}
+   {"item":{"index":1,"text":"<BIG>"}}
+   {"item":{"index":2,"text":"<HELLO>"}}
+   {"done":null}
+   ```
+
+3. **Stop.** Press Ctrl-D to end the input. The `front` segment exits, and `run` sends one SIGTERM to each of the other segments. Ctrl-C stops all segments at once: the terminal sends SIGINT to each of them, and `run` sends no stop of its own. Each segment drains before it exits. `run` fails, and names the segment, if a segment fails or exits before `front` does. See [Segment lifecycle](../concepts/lifecycle.md).
+
+To send requests from a script, pipe them in. `run` ends when its input ends:
 
 ```bash
-REPO=$PWD
-mkdir -p /tmp/chat && cd /tmp/chat
+echo '{"text": "hello big wide world", "max_words": 3}' | cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml
+```
+
+The engine's and the post segment's settings come from the spec's `[deployment.segment.<name>.config]` tables. `compose` writes the same tables into its bundle:
+
+```toml
+[deployment.segment.engine.config.node.Engine]
+load_ms = 200
+uppercase = true
+
+[deployment.segment.post.config.node.Format]
+open = "<"
+close = ">"
+```
+
+`run` writes each segment's settings to a new temporary directory, and removes the directory when it ends. Each segment listens on a free port on `127.0.0.1`, and all segments share one roster directory. See [Segment settings](../operations/configuration.md).
+
+### Run the segments yourself
+
+`run` is a shortcut. A deployment starts each binary with its own settings file. Each file names a listen address and a roster directory, which must be new for each deployment. Start the engine and the post segment, then pipe requests to the front segment:
+
+```bash
+BIN=examples/chat/target/gdl/chat/gdl/bin/debug
+D=$(mktemp -d) && mkdir $D/roster
 for s in front engine post; do
-  printf 'listen = "127.0.0.1:0"\nroster = "/tmp/chat/roster"\n' > $s.toml
+  printf 'listen = "127.0.0.1:0"\nroster = "%s/roster"\n' "$D" > $D/$s.toml
 done
-printf '[node.Engine]\nuppercase = true\n' >> engine.toml
+$BIN/chat-engine $D/engine.toml &
+$BIN/chat-post $D/post.toml &
+echo '{"text": "hello big wide world", "max_words": 3}' | $BIN/chat-front $D/front.toml
+kill %1 %2
 ```
 
-Start the engine and the post segment in the background, then send a request to the front segment. The front segment reads one JSON line from stdin for each request:
-
-```bash
-BIN=$REPO/examples/chat/target/gdl/chat/gdl/bin/debug
-$BIN/chat-engine engine.toml &
-$BIN/chat-post post.toml &
-echo '{"text": "hello big wide world", "max_words": 3}' | $BIN/chat-front front.toml
-```
-
-The output is one JSON line for each item, then a `done` line. The engine answers with the words in reverse order and upper case:
-
-```
-{"item":{"index":0,"text":"[WIDE]"}}
-{"item":{"index":1,"text":"[BIG]"}}
-{"item":{"index":2,"text":"[HELLO]"}}
-{"done":null}
-```
-
-Stop the background segments with `kill %1 %2`. A stopped segment drains before it exits. See [Segment lifecycle](../concepts/lifecycle.md).
+These files have no node tables, so the answer is in lower case with square brackets: `[wide]`. `kill %1 %2` stops the two background segments, and each drains before it exits.
 
 ## Next
 
-- Add a `[system]` table with a `port` to a segment's file and read `GET /metrics` there. See [Health and metrics](../operations/observability.md).
+- Add a `[system]` table with a `port` to a segment's settings, under `run` in its `[deployment.segment.<name>.config]` table, and read `GET /metrics` there. See [Health and metrics](../operations/observability.md).
 - `crates/gdl-gen/tests/chat.rs` runs these steps as a test.
 - More examples: [Run the examples](examples.md). Your own graph: [Define a graph](define-a-graph.md) and [Write nodes](write-nodes.md).

@@ -133,4 +133,4 @@ A segment name is lowercase letters, digits, `-`, and `_`, at most 58 characters
 
 ## What the Compose bundle sets
 
-`cargo gdl compose` writes each segment's `config.toml` with `listen = "0.0.0.0:9000"`, `rendezvous_ms = 60000`, `[hub] host = "hub"`, and `[system] port = 9090`. A `[deployment.segment.<name>.config]` table in the spec adds to it, but cannot set `hub`, `roster`, `instances`, or `pool` ([Deploy with Docker Compose](../guides/compose-deploy.md)).
+`cargo gdl run` writes each segment's settings with `listen = "127.0.0.1:0"` and a `roster` directory that all of them share, in a temporary directory. `cargo gdl compose` writes each segment's `config.toml` with `listen = "0.0.0.0:9000"`, `rendezvous_ms = 60000`, `[hub] host = "hub"`, and `[system] port = 9090`. A `[deployment.segment.<name>.config]` table in the spec adds to either, but cannot set `hub`, `roster`, `instances`, or `pool` ([Split, generate, and draw](../guides/split-and-generate.md#run), [Deploy with Docker Compose](../guides/compose-deploy.md)).

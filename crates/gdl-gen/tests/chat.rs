@@ -269,6 +269,232 @@ fn three_segment_binaries_answer_requests() {
     );
 }
 
+/// The getting-started guide's `run`, with its request piped in as the
+/// guide shows: the answer is the one the guide prints, and every segment
+/// that `run` started has exited when it ends.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_guides_run_answers_and_leaves_no_segment() {
+    common::chat_build();
+    let guide = std::fs::read_to_string(root().join("docs/src/guides/getting-started.md"))
+        .expect("the guide");
+    let (_, section) = guide.split_once("## Run the graph\n").expect("the section");
+    let (section, _) = section
+        .split_once("### Run the segments yourself")
+        .expect("its end");
+    let piped = section
+        .lines()
+        .find(|line| line.starts_with("echo '"))
+        .expect("the piped command");
+    let (echo, command) = piped.split_once(" | ").expect("a pipe");
+    assert_eq!(
+        command,
+        "cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml"
+    );
+    let request = echo
+        .strip_prefix("echo '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("one quoted request");
+    let answer: Vec<&str> = section
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(r#"{"item""#) || line.starts_with(r#"{"done""#))
+        .collect();
+    assert_eq!(answer.len(), 4, "{section}");
+
+    let mut run = run_group(Command::new(env!("CARGO_BIN_EXE_cargo-gdl")));
+    let stdin = run.answers(request, &answer);
+    let segments = segments_of(run.id());
+    // The end of the input ends `front`, and `run` stops the others.
+    drop(stdin);
+    run.ends_cleanly(&segments);
+}
+
+/// Ctrl-C at a terminal: the terminal sends SIGINT to its foreground
+/// process group, and each segment drains and exits on it. `cargo gdl`
+/// runs `cargo-gdl` in cargo's own process, so that no cargo is left to
+/// take the SIGINT or pass on a second stop. The input stays open: the
+/// SIGINT, not its end, stops the graph.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminal_interrupt_stops_every_segment() {
+    common::chat_build();
+    let built = Path::new(env!("CARGO_BIN_EXE_cargo-gdl"));
+    // Cargo looks for `cargo-gdl` in PATH, and first in its home's `bin`
+    // unless PATH lists that: this build comes first either way.
+    let home = std::env::var_os("CARGO_HOME").map_or_else(
+        || Path::new(&std::env::var_os("HOME").expect("HOME")).join(".cargo"),
+        std::path::PathBuf::from,
+    );
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        [built.parent().expect("its directory").to_path_buf()]
+            .into_iter()
+            .chain(std::env::split_paths(&path))
+            .chain([home.join("bin")]),
+    )
+    .expect("PATH");
+    let mut command = cargo();
+    command.env("PATH", path);
+    let mut run = run_group(command);
+    let request = r#"{"text": "hello big wide world", "max_words": 3}"#;
+    let stdin = run.answers(
+        request,
+        &[
+            r#"{"item":{"index":0,"text":"<WIDE>"}}"#,
+            r#"{"item":{"index":1,"text":"<BIG>"}}"#,
+            r#"{"item":{"index":2,"text":"<HELLO>"}}"#,
+            r#"{"done":null}"#,
+        ],
+    );
+    let exe = std::fs::read_link(format!("/proc/{}/exe", run.id())).expect("its program");
+    assert_eq!(
+        exe,
+        std::fs::canonicalize(built).expect("the build"),
+        "cargo is not the process it started"
+    );
+    let segments = segments_of(run.id());
+    let group =
+        rustix::process::Pid::from_raw(i32::try_from(run.id()).expect("a pid")).expect("a pid");
+    rustix::process::kill_process_group(group, rustix::process::Signal::INT).expect("SIGINT");
+    run.ends_cleanly(&segments);
+    drop(stdin);
+}
+
+/// `cargo gdl run` on the chat example, started by `command` (a program
+/// that runs `cargo-gdl` as `cargo gdl`), in a process group of its own
+/// that is killed if the test ends first.
+#[cfg(target_os = "linux")]
+fn run_group(mut command: Command) -> Group {
+    use std::os::unix::process::CommandExt;
+    command
+        .current_dir(root())
+        .args([
+            "gdl",
+            "run",
+            "--spec",
+            "examples/chat/gdl.toml",
+            "--target-dir",
+        ])
+        .arg(target("examples"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().expect("cargo gdl run");
+    let stdout = common::Lines::of(child.stdout.take().expect("stdout"));
+    let stderr = common::Lines::of(child.stderr.take().expect("stderr"));
+    Group {
+        child,
+        stdout,
+        stderr,
+    }
+}
+
+/// A `cargo gdl run` and its segments, in one process group.
+#[cfg(target_os = "linux")]
+struct Group {
+    child: std::process::Child,
+    stdout: common::Lines,
+    stderr: common::Lines,
+}
+
+#[cfg(target_os = "linux")]
+impl Group {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Send `request`, and see `answer`; return the input, still open.
+    fn answers(&mut self, request: &str, answer: &[&str]) -> std::process::ChildStdin {
+        let mut stdin = self.child.stdin.take().expect("stdin");
+        writeln!(stdin, "{request}").expect("the request");
+        // The first line waits for `run`'s check and for a build with
+        // nothing to do: nested cargo, which waits for the package cache
+        // lock that every cargo on the host shares.
+        let mut lines = vec![self.stdout.next(Duration::from_secs(120))];
+        while lines.len() < answer.len() {
+            lines.push(self.stdout.next(Duration::from_secs(5)));
+        }
+        assert_eq!(lines, answer);
+        stdin
+    }
+
+    /// `run` exits cleanly, with nothing more on stdout, and none of
+    /// `segments` outlives it.
+    fn ends_cleanly(&mut self, segments: &[(u32, String)]) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().expect("its state") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "run did not end; stderr: {:?}",
+                self.stderr.rest(Duration::ZERO)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let stderr = self.stderr.rest(Duration::from_secs(5));
+        assert!(status.success(), "{status}: {stderr:?}");
+        assert_eq!(
+            self.stdout.rest(Duration::from_secs(5)),
+            Vec::<String>::new()
+        );
+        for (pid, name) in segments {
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "{name} outlived run"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let group = i32::try_from(self.child.id())
+                .ok()
+                .and_then(rustix::process::Pid::from_raw);
+            if let Some(group) = group {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// The processes whose parent is `parent`, by id and name: the chat
+/// example's three segments, while `run` runs them.
+#[cfg(target_os = "linux")]
+fn segments_of(parent: u32) -> Vec<(u32, String)> {
+    let mut children = Vec::new();
+    for entry in std::fs::read_dir("/proc").expect("/proc").flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (name) state ppid ...`: the name may hold spaces and `)`.
+        let Some((head, rest)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let name = head.split_once(" (").map_or("", |(_, name)| name);
+        let ppid = rest.split_whitespace().nth(1).and_then(|p| p.parse().ok());
+        if ppid == Some(parent) {
+            children.push((pid, name.to_string()));
+        }
+    }
+    let mut names: Vec<&str> = children.iter().map(|(_, name)| name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["chat-engine", "chat-front", "chat-post"]);
+    children
+}
+
 /// `cargo gdl generate`, run as cargo runs it.
 fn gdl_gen(dir: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))

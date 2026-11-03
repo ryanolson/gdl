@@ -245,6 +245,11 @@ fn a_build_generates_in_the_target_rewrites_only_changes_and_removes_only_its_ow
     let spec = std::fs::read_to_string(project.spec()).expect("spec");
     let spec = spec
         .replace("[segment.engine]\nnodes = [\"Engine\"]\n", "")
+        // The engine's settings move with it.
+        .replace(
+            "[deployment.segment.engine.config.node.Engine]",
+            "[deployment.segment.post.config.node.Engine]",
+        )
         .replace(
             "nodes = [\"Detokenize\", \"Format\"]",
             "nodes = [\"Engine\", \"Detokenize\", \"Format\"]",

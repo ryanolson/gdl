@@ -18,7 +18,7 @@ Three segments, `front`, `engine`, and `post`, from `chat.gdl` and `gdl.toml`. B
 cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 ```
 
-[Getting started](getting-started.md) runs them.
+Run them on this machine with `cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml`. [Getting started](getting-started.md) walks through it.
 
 ## asr
 

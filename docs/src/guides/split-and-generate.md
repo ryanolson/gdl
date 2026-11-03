@@ -13,6 +13,7 @@ This guide takes a graph from a spec to checked, generated segment crates and bu
 | `resolve --spec <gdl.toml>` | Checks a graph file's names and prints the type each one resolves to. | stdout |
 | `generate --spec <gdl.toml> --out <dir> [--check]` | Writes the contract crate of a graph file and one crate per segment. With `--check` it writes nothing and fails on drift. | `--out` |
 | `build --spec <gdl.toml> [--out <dir>] [--release]` | Generates the same crates as one workspace in the target directory, builds every segment, and copies each binary out. Prints each binary's path. | the target directory, and `--out` |
+| `run --spec <gdl.toml> [--release]` | Builds as `build` does, then runs every segment on this machine. The source's segment reads JSON requests from stdin. Needs no Docker. Unix only. | the target directory, and a temporary directory |
 | `check --spec <gdl.toml> [--fleet <fleet.toml>]` | Checks the spec as `generate` does, and a fleet file against it. Prints every problem. | nothing |
 | `diagram --spec <gdl.toml> --format dot\|mermaid` | Draws the placed graph. Takes a spec of one layout. | stdout |
 | `export --spec <gdl.toml> --out <file.tar.gz>` | Writes the generated crates as one archive with `build-all.sh`. Takes a spec of one layout. | the archive |
@@ -25,6 +26,7 @@ This guide takes a graph from a spec to checked, generated segment crates and bu
 Every command that builds or fetches takes `--target-dir <dir>`. The default is `$CARGO_TARGET_DIR`, else `target` beside the spec (or beside the crate, for `extract`). Each command exits non-zero on a problem.
 
 - [The catalogue](../concepts/catalogue.md) covers `extract` and `catalog`.
+- [Run](#run) covers `run`.
 - [Deploy with Docker Compose](compose-deploy.md) and [Deploy a fleet of pools](fleet.md) cover `compose`.
 - [Deploy a fleet on Kubernetes](kubernetes.md) covers `k8s`, `images`, `deploy`, and `down`.
 
@@ -99,6 +101,22 @@ cargo gdl build --spec examples/chat/gdl.toml
 - Cargo runs in the spec's directory, so the `.cargo/config.toml` there applies. `CARGO_NET_OFFLINE` and the other Cargo variables apply too. The build uses the Cargo and Rust that run `cargo gdl`, as every command does. Run it in your project, so that rustup picks the project's toolchain.
 
 [Code generation](../concepts/generation.md#the-build-workspace) says how the workspace takes your crates, patches, and lock.
+
+## Run
+
+```bash
+cargo gdl run --spec examples/chat/gdl.toml
+```
+
+`run` builds the segments as `build` does, then starts each one as a process on this machine. It needs no Docker and no hub. It runs on Unix only.
+
+- **Settings.** Each segment gets a settings file in a new temporary directory, which `run` removes when it ends. The file sets `listen = "127.0.0.1:0"` and one roster directory that all segments share. The segment's `[deployment.segment.<name>.config]` table adds to it, as it does for `compose`, and cannot set `hub`, `roster`, `instances`, or `pool`.
+- **Input and output.** The segment that hosts the source reads JSON requests from `run`'s stdin, one per line, and writes the answers to its stdout. The other segments write to `run`'s stderr, so stdout holds only the answers.
+- **Stop.** At the end of the input, the source's segment exits, and `run` sends one SIGTERM to each other segment. Ctrl-C sends SIGINT to every segment through the terminal, and `run` sends no stop of its own, because a second stop ends a drain at once. A SIGTERM to `run` goes once to each segment. Each segment drains before it exits. A segment that does not exit within its drain bound and 30 s is killed.
+- **Failure.** If a segment fails, or a segment other than the source's exits first, `run` stops the others and fails. Its message names that segment first.
+- **Scope.** The spec must have one layout. Its source must read JSON requests on stdin: the graph's only source, with a request of one value, and a request and an item that cross segments. A source pinned to a frontend is refused.
+
+`cargo gdl` and `cargo run` run `cargo-gdl` in cargo's own process, so the terminal's SIGINT reaches only `run` and the segments. [Getting started](getting-started.md#run-the-graph) runs the chat example with it.
 
 ## Generate
 

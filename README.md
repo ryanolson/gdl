@@ -91,7 +91,13 @@ Generate the segment crates and build the three binaries, in `examples/chat/targ
 cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
 ```
 
-[Getting started](docs/src/guides/getting-started.md) writes the three config files, starts the segments, and sends a request.
+Run the three segments on this machine, and send one request:
+
+```bash
+echo '{"text": "hello big wide world", "max_words": 3}' | cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml
+```
+
+[Getting started](docs/src/guides/getting-started.md) walks through it.
 
 A graph that is not cut costs no encoding. A cut costs one encode and one decode for each message on each edge that crosses. See [Crossing performance](docs/src/operations/crossing-performance.md) for measurements.
 

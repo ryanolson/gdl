@@ -26,7 +26,27 @@ pub(crate) const DEFAULT_BASE_IMAGE: &str = "gcr.io/distroless/cc-debian12:nonro
 /// so that a binary finds the glibc it was linked against.
 pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93.1-slim-bookworm";
 
+/// Add `[deployment.segment.<name>.config]` table `config` to a segment's
+/// settings `base`, each key in place of the one there. Where a segment
+/// finds its peers is the deployment's to say, and its pool the fleet's:
+/// `config` cannot set them.
+pub(crate) fn merge_config(base: &mut toml::Table, config: &toml::Table) -> Result<(), Error> {
+    for (key, value) in config {
+        if ["hub", "roster", "instances", "pool"].contains(&key.as_str()) {
+            return Err(Error::new(format!("deployment cannot override `{key}`")));
+        }
+        base.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
 impl Settings {
+    /// Segment `segment`'s `[deployment.segment.<name>.config]` table, if
+    /// the spec has one.
+    pub(crate) fn config(&self, segment: &str) -> Option<&toml::Table> {
+        self.segment.get(segment).map(|image| &image.config)
+    }
+
     /// The segments that `[deployment.segment.<name>]` tables name.
     pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
         self.segment.keys().map(String::as_str)
@@ -633,14 +653,7 @@ impl Bundle {
         );
         if let Some(image) = settings.segment.get(segment) {
             let mut config: toml::Table = toml::from_str(&files[path]).map_err(io)?;
-            for (key, value) in &image.config {
-                // Where a segment finds its peers is the bundle's, and its
-                // pool the fleet's.
-                if ["hub", "roster", "instances", "pool"].contains(&key.as_str()) {
-                    return Err(Error::new(format!("deployment cannot override `{key}`")));
-                }
-                config.insert(key.clone(), value.clone());
-            }
+            merge_config(&mut config, &image.config)?;
             files.insert(
                 path.to_path_buf(),
                 toml::to_string_pretty(&config).map_err(io)?,
@@ -810,7 +823,10 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
 /// frontend is pinned on a source. A graph spec pins in its `[nodes]`
 /// table, a contract spec in `[bind]`. A source with neither is refused:
 /// its segment would serve nothing that a container can reach.
-fn stdin_source(spec: &Spec, manifest: &gdl_model::Manifest) -> Result<Option<String>, Error> {
+pub(crate) fn stdin_source(
+    spec: &Spec,
+    manifest: &gdl_model::Manifest,
+) -> Result<Option<String>, Error> {
     let pinned = |name: &str| {
         spec.bind.contains_key(name)
             || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))

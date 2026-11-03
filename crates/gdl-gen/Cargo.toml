@@ -32,6 +32,12 @@ syn = "2"
 tar = { version = "0.4", default-features = false }
 toml = { workspace = true }
 
+# `cargo gdl run` catches the stops it must not pass on, and sends one of
+# its own, without `unsafe`.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+signal-hook = "0.3"
+
 [dev-dependencies]
 gdl-hub = { path = "../gdl-hub" }
 # Not used by the tests' code. The film test builds a generated segment that

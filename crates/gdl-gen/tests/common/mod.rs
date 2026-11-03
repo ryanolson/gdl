@@ -178,7 +178,7 @@ impl Running {
 pub struct Lines(mpsc::Receiver<String>);
 
 impl Lines {
-    fn of(stream: impl Read + Send + 'static) -> Self {
+    pub fn of(stream: impl Read + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {

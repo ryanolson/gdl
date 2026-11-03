@@ -1,8 +1,9 @@
 # The chat example's spec: the graph file, the crate that holds its
 # messages, the crates that implement its nodes, and which segment hosts
-# which node. Build every segment with:
+# which node. Build every segment, and run them on this machine, with:
 #
 #     cargo run -p gdl-gen -- build --spec examples/chat/gdl.toml
+#     cargo run -p gdl-gen -- run --spec examples/chat/gdl.toml
 
 [graph]
 path = "chat.gdl"
@@ -26,3 +27,13 @@ nodes = ["Engine"]
 
 [segment.post]
 nodes = ["Detokenize", "Format"]
+
+# Each segment's settings, as `cargo gdl run` and `cargo gdl compose`
+# write them: a node's table reaches only the segment that hosts it.
+[deployment.segment.engine.config.node.Engine]
+load_ms = 200
+uppercase = true
+
+[deployment.segment.post.config.node.Format]
+open = "<"
+close = ">"

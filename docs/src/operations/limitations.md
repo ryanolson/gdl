@@ -145,6 +145,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Reuse:** a roster directory belongs to one deployment. Files are never removed, so a reused directory names instances that are gone. Requests to them fail, or the launch fails with "the directory must be fresh".
 - **Workaround:** set a shorter `[runtime] drain_ms`, stop the remaining peers twice (a second stop ends a drain at once), or use a hub, where a crashed instance's lease lapses in about 30 s. Use a fresh directory for each deployment. See [Segment lifecycle](../concepts/lifecycle.md).
 
+### `cargo gdl run` serves only a source that reads stdin, and only on Unix
+- **What:** `run` refuses a spec whose source is pinned to a frontend, such as the `http` and `api` examples, and a spec of several layouts. It stops its segments with Unix signals, and fails on other systems.
+- **Workaround:** build the segments with `cargo gdl build` and start them yourself ([Getting started](../guides/getting-started.md#run-the-segments-yourself)), or deploy them with `cargo gdl compose`.
+
 ### A drain is bounded, and a stop while starting exits with code 1
 - **What:** when `[runtime] drain_ms` runs out, the instance ends, even if a request is still in flight. A request whose deadline is longer than the bound is cut at the bound.
 - **Stop while starting:** a SIGINT or SIGTERM while the nodes load or the instances meet ends the launch with "stopped while starting" and exit code 1. A stop that arrives at the barrier, after the instance said it serves, drains first.

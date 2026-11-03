@@ -71,7 +71,7 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | `[deployment] hub_image` | the image the hub runs in | `base_image` |
 | `[deployment.segment.<name>] base_image` | one segment's run image | `base_image` |
 | `[deployment.segment.<name>] ports` | the ports the segment publishes, as Compose writes them. The segment's system port (9090 unless its `config` sets `[system] port`) is gdl's: `check` refuses it bare (`"9090"`). A host publication of the system port (`"127.0.0.1:9091:9090"`) is for Compose; Kubernetes declares the port as `system` and publishes nothing | none |
-| `[deployment.segment.<name>] config` | top-level keys of the segment's settings file, which replace the generated ones | none |
+| `[deployment.segment.<name>] config` | top-level keys of the segment's settings file, which replace the generated ones. `run` and `compose` write them | none |
 | `[deployment.segment.<name>] secrets` | the declared secrets the segment mounts, each at `/run/secrets/<secret>` | none |
 | `[deployment.secrets.<secret>] file` | the secret's file on the Docker host, by absolute path. The generator never opens it. | required |
 | `[entry.<name>] forward` | the forward nodes of a service entry arm, by type path | none |

@@ -6,6 +6,7 @@
 //! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
+//! cargo gdl run --spec <gdl.toml> [--release] [--target-dir <dir>]
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
 //! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
@@ -35,7 +36,14 @@
 //! never in the source tree, builds every segment, copies each binary to
 //! `--out`, else to `bin/<profile>` beside that workspace, and prints each
 //! copy's path. It writes only the files whose text changed, so Cargo
-//! rebuilds only what a change reaches. `check` checks the spec
+//! rebuilds only what a change reaches. `run` builds as `build` does, then runs every
+//! segment on this machine, each with settings of its own in a temporary
+//! directory: a listener on a free loopback port, one shared roster
+//! directory, and its `[deployment.segment.<name>.config]` table. The
+//! segment that hosts the source reads JSON requests from stdin; when it
+//! ends, each other segment gets one SIGTERM and drains. A SIGINT reaches
+//! every segment from the terminal, and `run` sends none. Unix only.
+//! `check` checks the spec
 //! as `generate` does, and with `--fleet` the fleet file against it,
 //! writing nothing; it prints every problem in both files, each with its
 //! file, table, and key, and fails if there is any. `diagram` prints the
@@ -88,6 +96,7 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl build --spec <gdl.toml> [--out <dir>] [--release] [--target-dir <dir>]
+       cargo gdl run --spec <gdl.toml> [--release] [--target-dir <dir>]
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--direction lr|tb] [--target-dir <dir>]
        cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
@@ -142,6 +151,9 @@ enum Command {
     },
     Build {
         out: Option<PathBuf>,
+        release: bool,
+    },
+    Run {
         release: bool,
     },
     Diagram(Format, Direction),
@@ -223,6 +235,9 @@ fn args() -> Result<Args, String> {
         },
         "build" => Command::Build {
             out: out.take(),
+            release: std::mem::take(&mut release),
+        },
+        "run" => Command::Run {
             release: std::mem::take(&mut release),
         },
         "compose" => Command::Compose {
@@ -566,6 +581,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             for binary in gdl_gen::build(&spec, &target, &how).map_err(located)? {
                 println!("{}", binary.display());
             }
+        }
+        Command::Run { release } => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            let how = gdl_gen::Build {
+                out: None,
+                release: *release,
+            };
+            // A segment that fails is no problem of the spec.
+            gdl_gen::run(&spec, &target, &how)?;
         }
         Command::Generate { out, check } => {
             let spec = spec()?;
