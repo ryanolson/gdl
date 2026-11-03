@@ -5,7 +5,6 @@
 mod common;
 
 #[test]
-#[ignore = "F7: zombie group members keep cancellation waiting after the SIGKILL bound"]
 fn cancelled_preparation_finishes_before_its_ancestor_reaps_orphans() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;

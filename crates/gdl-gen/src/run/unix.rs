@@ -106,11 +106,17 @@ impl Drop for Running {
 /// SIGTERM before it is killed.
 const PREPARE_GRACE: Duration = Duration::from_secs(2);
 
+/// How long `run` waits for a killed preparation's group to empty. A
+/// member that has died stays in it until its parent reaps it, and only
+/// the preparation itself is `run`'s to reap.
+const KILL_GRACE: Duration = Duration::from_secs(1);
+
 /// Run the preparation `prepare` in a process group of its own, while this
 /// process watches `stops`. Its stdin is closed and its stdout goes to
 /// stderr: this process's stdout carries only answers. A stop sends
-/// SIGTERM to the group, and SIGKILL after [`PREPARE_GRACE`], and returns
-/// once the group is empty.
+/// SIGTERM to the group, and SIGKILL after [`PREPARE_GRACE`]. It returns
+/// once the group is empty, or [`KILL_GRACE`] after the SIGKILL, saying so
+/// if members are left.
 ///
 /// The terminal's SIGINT does not reach the group: this process takes it
 /// and stops the group itself, Cargo's compilers among it.
@@ -156,8 +162,16 @@ pub(super) fn preparing(stops: &Stops, mut prepare: Command) -> Result<(), Error
                 if status.is_some() {
                     group.reaped = true;
                 }
+                let stopped = Err(Error::new("stopped while preparing the segments"));
                 if group.reaped && group.is_empty() {
-                    return Err(Error::new("stopped while preparing the segments"));
+                    return stopped;
+                }
+                if since.elapsed() > PREPARE_GRACE + KILL_GRACE {
+                    eprintln!(
+                        "cargo gdl: the stopped preparation left processes in group {}, which `run` cannot reap",
+                        group.id.as_raw_pid()
+                    );
+                    return stopped;
                 }
                 if since.elapsed() > PREPARE_GRACE {
                     group.signal(Signal::KILL);
@@ -202,9 +216,11 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
-        if !self.reaped || !self.is_empty() {
+        if !self.reaped {
             self.signal(Signal::KILL);
             let _ = self.leader.wait();
+        } else if !self.is_empty() {
+            self.signal(Signal::KILL);
         }
     }
 }
