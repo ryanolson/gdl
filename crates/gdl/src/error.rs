@@ -26,11 +26,18 @@ use serde::{Deserialize, Serialize};
 /// failure is its kind and its message.
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "Wire<Received, String>")]
-pub struct Error {
+pub struct Error(Box<Inner>);
+
+/// What an error holds, behind one pointer: one pointer wide, an error
+/// lets the poll of a stream of small items return in two registers
+/// (`an_error_is_one_pointer_wide`). An error is built off the hot path,
+/// so its box costs one allocation where no item pays it.
+#[derive(Clone)]
+struct Inner {
     kind: ErrorKind,
     /// The message, after the name of the kind it was sent under when this
     /// build does not know that kind: one buffer, so that keeping the name
-    /// adds nothing to the size of every `Result` that holds an error.
+    /// costs no allocation of its own.
     text: Box<str>,
     /// The length of that name at the start of `text`, plus one; `None`
     /// for a kind this build knows.
@@ -40,9 +47,8 @@ pub struct Error {
     /// counts an error once, where it was raised. It is not sent: the
     /// receiving segment sets it again.
     relayed: bool,
-    /// What caused the error in this process. It is not sent. A thin
-    /// pointer, not an `Arc<dyn Error>`, so that an error stays the size
-    /// that `an_error_is_as_large_as_it_was` pins.
+    /// What caused the error in this process. It is not sent. Shared, so
+    /// that a clone of the error has it too.
     source: Option<Arc<Box<dyn std::error::Error + Send + Sync>>>,
 }
 
@@ -52,7 +58,8 @@ pub struct Error {
 /// of the error.
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.unknown == other.unknown && self.text == other.text
+        let (a, b) = (&*self.0, &*other.0);
+        a.kind == b.kind && a.unknown == b.unknown && a.text == b.text
     }
 }
 
@@ -61,12 +68,12 @@ impl Eq for Error {}
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("Error");
-        debug.field("kind", &self.kind);
+        debug.field("kind", &self.0.kind);
         if let Some(name) = self.unknown_kind() {
             debug.field("unknown_kind", &name);
         }
         debug.field("message", &self.message());
-        if self.source.is_some() {
+        if self.0.source.is_some() {
             debug.field("source", &true);
         }
         debug.finish()
@@ -76,8 +83,13 @@ impl fmt::Debug for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.unknown_kind() {
-            Some(name) => write!(f, "{} (unknown kind {name}): {}", self.kind, self.message()),
-            None => write!(f, "{}: {}", self.kind, self.message()),
+            Some(name) => write!(
+                f,
+                "{} (unknown kind {name}): {}",
+                self.0.kind,
+                self.message()
+            ),
+            None => write!(f, "{}: {}", self.0.kind, self.message()),
         }
     }
 }
@@ -86,7 +98,7 @@ impl std::error::Error for Error {
     /// The error attached with [`Error::with_source`] in this process, if
     /// any: `None` for an error received from another segment.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|source| &***source as _)
+        self.0.source.as_ref().map(|source| &***source as _)
     }
 }
 
@@ -102,13 +114,13 @@ impl RefUnwindSafe for Error {}
 impl Error {
     /// Create an error of the given kind.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self {
+        Self(Box::new(Inner {
             kind,
             text: message.into().into_boxed_str(),
             unknown: None,
             relayed: false,
             source: None,
-        }
+        }))
     }
 
     /// An error raised by node code.
@@ -142,12 +154,12 @@ impl Error {
     /// The kind of this error: [`ErrorKind::Transport`] for one received
     /// under a kind this build does not know.
     pub fn kind(&self) -> ErrorKind {
-        self.kind
+        self.0.kind
     }
 
     /// The human-readable message.
     pub fn message(&self) -> &str {
-        &self.text[self.split()..]
+        &self.0.text[self.split()..]
     }
 
     /// The name of the kind the error was received under, when this build
@@ -155,12 +167,12 @@ impl Error {
     /// it, or, for one sent as its index, the index in decimal. `None` for
     /// every kind this build knows.
     pub fn unknown_kind(&self) -> Option<&str> {
-        self.unknown.map(|_| &self.text[..self.split()])
+        self.0.unknown.map(|_| &self.0.text[..self.split()])
     }
 
     /// Where the message starts in `text`.
     fn split(&self) -> usize {
-        self.unknown.map_or(0, |length| length.get() as usize - 1)
+        self.0.unknown.map_or(0, |length| length.get() as usize - 1)
     }
 
     /// The error, with `source` as what caused it. It replaces a source
@@ -171,21 +183,21 @@ impl Error {
     /// another segment sees only the kind and the message. It is not part
     /// of the error's equality or its `Display`, and clones share it.
     pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        self.source = Some(Arc::new(Box::new(source)));
+        self.0.source = Some(Arc::new(Box::new(source)));
         self
     }
 
     /// The error, marked as received from another segment.
     #[doc(hidden)]
     pub fn relayed(mut self) -> Self {
-        self.relayed = true;
+        self.0.relayed = true;
         self
     }
 
     /// Whether the error was received from another segment, not raised in
     /// this one.
     pub(crate) fn is_relayed(&self) -> bool {
-        self.relayed
+        self.0.relayed
     }
 }
 
@@ -290,7 +302,7 @@ impl Serialize for Error {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let kind = match self.unknown_kind() {
             Some(name) => Sent::Unknown(name),
-            None => Sent::Known(self.kind),
+            None => Sent::Known(self.0.kind),
         };
         Wire {
             kind,
@@ -386,13 +398,13 @@ impl TryFrom<Wire<Received, String>> for Error {
                     .and_then(NonZeroU32::new)
                     .ok_or_else(|| "an error kind's name is too long".to_string())?;
                 text.push_str(&message);
-                Ok(Self {
+                Ok(Self(Box::new(Inner {
                     kind: ErrorKind::Transport,
                     text: text.into_boxed_str(),
                     unknown: Some(length),
                     relayed: false,
                     source: None,
-                })
+                })))
             }
         }
     }
@@ -471,12 +483,20 @@ mod tests {
         assert_eq!(received, error);
     }
 
-    /// An error is in every stream item's result and every hop's future:
-    /// keeping an unknown kind's name, or a source, costs it no size.
+    /// An error is in every stream item's result and every hop's future.
+    /// One pointer wide, it lets the poll of a stream of small items fit in
+    /// two registers: at 32 B, every poll went through memory, and each
+    /// node's `map` copied it through the stack. Keeping an unknown kind's
+    /// name, or a source, costs it no size.
     #[test]
-    fn an_error_is_as_large_as_it_was() {
-        assert_eq!(std::mem::size_of::<Error>(), 32);
-        assert_eq!(std::mem::size_of::<Result<()>>(), 32);
+    fn an_error_is_one_pointer_wide() {
+        use std::mem::size_of;
+        use std::task::Poll;
+        const WORD: usize = size_of::<usize>();
+        assert_eq!(size_of::<Error>(), WORD);
+        assert_eq!(size_of::<Result<()>>(), WORD);
+        assert_eq!(size_of::<Result<u64>>(), 2 * WORD);
+        assert_eq!(size_of::<Poll<Option<Result<u64>>>>(), 2 * WORD);
     }
 
     /// A consumer outside this workspace can hold an error wherever these
@@ -553,7 +573,7 @@ mod tests {
     fn a_clone_shares_the_source() {
         let error = Error::node("x").with_source(Inner);
         let clone = error.clone();
-        let (first, second) = (error.source.as_ref(), clone.source.as_ref());
+        let (first, second) = (error.0.source.as_ref(), clone.0.source.as_ref());
         assert!(Arc::ptr_eq(
             first.expect("a source"),
             second.expect("a source")

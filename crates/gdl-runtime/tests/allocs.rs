@@ -76,9 +76,10 @@ fn main() {
     records();
 }
 
-/// Reading an error of a kind this build knows allocates its message
-/// alone, in each encoding it crosses in, for every kind: the kind is
-/// matched where it lies.
+/// Reading an error of a kind this build knows allocates its message and
+/// the box an error holds its fields in, and nothing else, in each
+/// encoding it crosses in, for every kind: the kind is matched where it
+/// lies.
 fn errors() {
     type Decode = fn(&[u8]) -> gdl::Error;
     let kinds: Vec<gdl::ErrorKind> = (0u8..=127)
@@ -106,7 +107,7 @@ fn errors() {
             let before = ALLOCATIONS.load(Ordering::Relaxed);
             let back = decode(bytes);
             let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
-            assert_eq!(allocations, 1, "reading a {kind:?} error in {encoding}");
+            assert_eq!(allocations, 2, "reading a {kind:?} error in {encoding}");
             assert_eq!(back, error);
         }
     }

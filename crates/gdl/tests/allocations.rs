@@ -293,3 +293,82 @@ async fn an_around_node_allocates_what_a_forward_and_a_backward_node_do() {
         "not last"
     );
 }
+
+/// Answers with one `Err` item.
+struct Fails;
+
+impl Sink for Fails {
+    type Req = u64;
+    type Item = u64;
+
+    async fn generate(&self, _cx: Cx, _n: u64) -> Result<Items<u64>> {
+        Ok(items(futures::stream::iter([Err(gdl::Error::node(
+            "failed",
+        ))])))
+    }
+}
+
+/// An error is one pointer wide, so building one allocates its box as
+/// well as its message: two allocations, where it was one. A request
+/// whose stream is one `Err` item makes two allocations more than a
+/// request with one `Ok` item, read by the same consumer, where it made
+/// one: the box is the only new one on the error path.
+#[tokio::test]
+async fn an_error_allocates_its_box_and_its_message() {
+    let count = |make: fn() -> gdl::Error| {
+        COUNTED.with(|counted| counted.set(0));
+        COUNTING.with(|counting| counting.set(true));
+        let error = make();
+        COUNTING.with(|counting| counting.set(false));
+        drop(error);
+        COUNTED.with(Cell::get)
+    };
+    assert_eq!(count(|| gdl::Error::node("failed")), 2, "a node error");
+    assert_eq!(count(gdl::Error::cancelled), 2, "a cancel");
+
+    let ready = Source::new(Hop::new((), SinkStage::new(Arc::new(Ready)), ()));
+    let fails = Source::new(Hop::new((), SinkStage::new(Arc::new(Fails)), ()));
+    allocations(&ready).await;
+    failing(&fails).await;
+    allocations(&fails).await;
+    let own = allocations(&fails).await - allocations(&ready).await;
+    assert_eq!(
+        own, 2,
+        "an Err item cost {own} allocations more than an Ok item"
+    );
+}
+
+/// The allocations of a request whose stream is one `Err` item.
+async fn failing<N: Next<u64, u64>>(next: &N) -> u64 {
+    let cx = Cx::new();
+    COUNTED.with(|counted| counted.set(0));
+    COUNTING.with(|counting| counting.set(true));
+    let items: Vec<Result<u64>> = next
+        .generate(cx, 1)
+        .await
+        .expect("a stream")
+        .collect()
+        .await;
+    COUNTING.with(|counting| counting.set(false));
+    assert!(items.len() == 1 && items[0].is_err());
+    COUNTED.with(Cell::get)
+}
+
+/// An error item's documented cost must use the same consumer on both streams.
+#[tokio::test]
+async fn an_err_item_adds_the_documented_allocations_with_the_same_consumer() {
+    let ready = Source::new(Hop::new((), SinkStage::new(Arc::new(Ready)), ()));
+    let fails = Source::new(Hop::new((), SinkStage::new(Arc::new(Fails)), ()));
+    allocations(&ready).await;
+    allocations(&fails).await;
+
+    let ok = allocations(&ready).await;
+    let err = allocations(&fails).await;
+    let collected_err = failing(&fails).await;
+    assert_eq!(collected_err - err, 1, "collect adds its own allocation");
+    assert_eq!(
+        err - ok,
+        2,
+        "the same count consumer made {ok} allocations for Ok and {err} for Err"
+    );
+}

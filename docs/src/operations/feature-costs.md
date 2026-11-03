@@ -568,7 +568,6 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 The rest of the difference is the search to the range's start, which probes one entry for each key and pool, 200 here, not one for each key, and the kind's index found by its type and name. A range is most often a few entries, so the doubling steps probe 3 entries here, where a second binary search probed 8.
 
 
-
 On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages from 10 to 24, without the filter, at `03be278` with the change:
 
 | Read | Time |
@@ -722,6 +721,7 @@ Each change to the boundaries since, measured the same way, against the commit b
 | the attempt boundary checks by its run of ready items | 87.3 (317.1) | 59.0 (289.9) | 104.8 (378.8) | 2,620 |
 | only the root's attempt boundary measures | 86.3 (312.1) | 58.8 (290.7) | 103.9 (373.8) | 2,627 |
 | the attempt boundary's endings run out of line | 81.2 (311.2) | 59.4 (290.1) | 98.8 (372.9) | 2,620 (3,008 at 512 B) |
+| an error is one pointer wide | 55.7 (309.7) | 37.4 (289.3) | 92.5 (373.5) | 2,440 (2,879 at 512 B) |
 
 - **Passing the attempt boundary whole to its wait saves 14 Ir per item at each hop.** `wait` took the boundary's fields as a struct of pointers, so every poll built that struct on the stack before it polled the producer: 9 stores of pointers, and the registers they needed.
 - **One scope node for stop and cancel saves 2,279 Ir and 4 allocations per operator stage per request**, and a little under 1 Ir per item at each hop. Each child context was a stop node, a cancel token's tree node, and a place in its parent's list of children, and each create, clone, check, and drop of the token took its lock. Now a child context is one node, made, checked, and dropped with no lock ([Runtime design](../development/runtime-design.md#node-contexts)). Base `9ab1301e` and the change built in one target directory, two rounds each, which agreed within 1.2 Ir:
@@ -837,6 +837,26 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/req
 | 512 B items, median (range) | 340.1 Ir (332.7 to 347.6) | 320.2 Ir (312.7 to 320.4) |
 
 The bench's process runs a multi-threaded runtime, so its rounds spread further than the `stages` rounds do. The `stages` rows did not move, `around` and `around-wide` included: 0.1 Ir per item and 6 Ir per request at most, and the same `.text`. The `requests` bench grows by 1,344 B of `.text`. A hop with an around node boxes its node boundary as before: the around node's backward half takes `Items`, as a backward node does.
+
+**An error one pointer wide.** `gdl::Error` holds its kind, message, unknown kind's name, relay flag and source behind one box, so it is 8 B, where it was 32 B. `Result<u64>` and the poll of a stream of `u64` items, `Poll<Option<Result<u64>>>`, are then 16 B, and a poll returns in two registers, where every poll went through memory (`an_error_is_one_pointer_wide`). Per stage, base `85dd18c0` and the change built in one target directory and run from paths of the same length, two rounds each, which agreed within 0.1 Ir per item and 4 Ir per request:
+
+| Per stage | Base | Change |
+|---|---|---|
+| `operator`, Ir per item, `u64` (512 B) | 81.3 (311.2) | 55.7 (309.7) |
+| `operator`, Ir per request, `u64` (512 B) | 2,621 (3,009) | 2,440 (2,879) |
+| `hop`, Ir per item, `u64` (512 B) | 59.4 (290.1) | 37.4 (289.3) |
+| `plain`, Ir per item, `u64` (512 B) | 33.0 (261.0) | 7.0 (261.0) |
+| one hop, Ir per item, `u64` (512 B) | 98.8 (372.9) | 92.5 (373.5) |
+| `operator` with a deadline, Ir per item, `u64` | 84.7 | 59.1 |
+| `around`, Ir per item / per request, `u64` | 63.5 / 1,018 | 46.4 / 938 |
+| `around-wide` (a 512 B state), Ir per item / per request, `u64` | 63.9 / 1,418 | 46.5 / 1,729 |
+| `around-wide`, Ir per item / per request, 512 B items | 294.1 / 1,801 | 294.5 / 2,150 |
+
+- **A `u64` item now costs a `map` 7 Ir, where it cost 33.** The 32 B poll was copied through the stack three times in every `map`, and every boundary tested its tag in memory.
+- **A 512 B item gains little,** 1.5 Ir per operator stage: its poll is as large as the item either way. One hop with no stages costs 0.6 Ir more per item at 512 B; the `plain` control with no stages, which runs no gdl code, costs 2.0 more, all in the bench's own fold, so the rise is the bench's code, not gdl's.
+- **An error costs one allocation more when it is built or read from another segment**, its box: two, where it was one (`tests/allocations.rs` in `gdl`, `tests/allocs.rs` in `gdl-runtime`). A request whose stream is one `Err` item makes 2 allocations more than one with an `Ok` item read the same way (6 against 4), where it made 1. No item that is not an error pays it.
+- **An around node with a large state costs more per request.** With a 512 B state, an `around-wide` stage costs 312 Ir more per request (349 at 512 B items), though 17 Ir less per `u64` item. The state is moved down the hop's forward chain by value, inside the futures of the forward halves, and the compiler now copies it 2.6 times per stage per request, where it copied it once: callgrind counts the `memcpy` calls at the forward half's push of the state (`compose.rs`). Building the next future inside the match on `forward`'s result moved it more, not less. A node with a large state boxes it ([Write nodes](../guides/write-nodes.md)), as any large value a future holds.
+- **Code size:** `.text` grows by 10,832 B in the `stages` example, which now has the around shapes.
 
 ### Copies of an item
 

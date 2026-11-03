@@ -44,6 +44,7 @@ A `Backward` node's returned stream must own what it uses, because it outlives t
 Use an `Around` instead of an `Operator` when the node would call `next` exactly once, and every value its response side needs from its request side belongs to that attempt. It costs what a forward node and a backward node cost ([The graph model](../concepts/model.md#around-nodes)):
 
 - Return the value its backward half needs beside the request: `Ok((req, state))`. A retry runs `forward` again, with a new value.
+- Box a large value (`type State = Box<...>`). The value travels down the hop's forward chain inside the futures of the forward halves, by value, and the compiler may copy it more than once on the way: a 512 B value was copied 2.6 times per around node per request ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
 - Make the checks that only need the request in `forward`. An `Err` there is the call's error. In `backward`, the same failure is an error item in the stream.
 - A node may hold any value its constructor builds, such as a handle to the hop below that hand-written composition code builds. Work sent through it runs outside the attempt ([Known limitations](../operations/limitations.md#work-sent-through-a-handle-a-node-holds-runs-outside-the-attempt)).
 
