@@ -19,6 +19,7 @@ fn fitted_monitor_names_remain_dns_labels() {
         let files = gdl_gen::k8s_files(
             &spec,
             &fleet,
+            &gdl_gen::Dgds::default(),
             &mirror.target(),
             Some("pinned"),
             None,
@@ -68,6 +69,7 @@ fn invalid_fleet_and_cluster_names_are_refused_before_rendering() {
             let error = gdl_gen::k8s_files(
                 &spec,
                 &fleet,
+                &gdl_gen::Dgds::default(),
                 &mirror.target(),
                 Some("pinned"),
                 None,

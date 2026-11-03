@@ -61,8 +61,8 @@ use std::path::{Path, PathBuf};
 
 pub use build::{Build, build};
 pub use deployment::{
-    Buildx, Built, ComposeBundle, Deploy, Digests, Docker, Kube, Kubectl, Outcome, Reply, Sources,
-    Waits, compose, compose_bundle, compose_files, deploy, down, images, k8s, k8s_files,
+    Buildx, Built, ComposeBundle, Deploy, Dgds, Digests, Docker, Kube, Kubectl, Outcome, Reply,
+    Sources, Waits, compose, compose_bundle, compose_files, deploy, down, images, k8s, k8s_files,
 };
 use emit::MARKER;
 pub use export::export;

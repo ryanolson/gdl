@@ -231,6 +231,7 @@ fn generating_the_bundle_cannot_activate_an_external_config_link() {
     let images = gdl_gen::images(
         &copy.spec(),
         &fleet(),
+        &gdl_gen::Dgds::default(),
         &target(),
         false,
         gdl_gen::Sources::Local,

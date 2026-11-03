@@ -138,19 +138,20 @@ pub(super) fn check_digest(digest: &str) -> Result<(), String> {
 }
 
 /// Build `fleet`'s images for `spec` with `docker`, after the checks that
-/// `k8s` makes. With `push`, an image whose tag its registry holds is
-/// neither built nor pushed, and each other one is built and pushed;
+/// `k8s` makes of the fleet and its DGD files, `dgds`. With `push`, an
+/// image whose tag its registry holds is neither built nor pushed, and each other one is built and pushed;
 /// without it, no registry is asked, and each is built into the local
 /// image store. Returns each image, in reference order.
 pub fn images(
     spec: &crate::Spec,
     fleet: &Fleet,
+    dgds: &super::Dgds,
     target: &Path,
     push: bool,
     sources: Sources,
     docker: &mut dyn Docker,
 ) -> Result<Vec<Built>, Error> {
-    let plan = super::k8s::judged(spec, fleet, target, sources)?;
+    let plan = super::k8s::judged(spec, fleet, dgds, target, sources)?;
     let unsupported: Vec<String> = plan
         .iter()
         .map(|image| image.platform.as_str())

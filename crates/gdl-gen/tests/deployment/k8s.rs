@@ -77,6 +77,7 @@ fn render(
     gdl_gen::k8s_files(
         spec,
         fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         Some(TAG),
         None,
@@ -570,6 +571,7 @@ fn the_objects_are_written_into_a_fresh_directory() {
     gdl_gen::k8s(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &out,
         &mirror.target(),
         Some(TAG),
@@ -582,6 +584,7 @@ fn the_objects_are_written_into_a_fresh_directory() {
     let again = gdl_gen::k8s(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &out,
         &mirror.target(),
         Some(TAG),
@@ -840,6 +843,8 @@ fn a_source_that_reads_stdin_is_refused() {
 
 #[path = "k8s/credentials.rs"]
 mod credentials;
+#[path = "k8s/dgd.rs"]
+mod dgd;
 #[path = "k8s/dynamodb.rs"]
 mod dynamodb;
 #[path = "k8s/images.rs"]

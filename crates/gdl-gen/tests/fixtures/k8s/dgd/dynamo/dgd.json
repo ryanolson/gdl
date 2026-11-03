@@ -1,0 +1,131 @@
+{
+  "apiVersion": "nvidia.com/v1beta1",
+  "kind": "DynamoGraphDeployment",
+  "metadata": {
+    "name": "dgd-use1",
+    "annotations": {
+      "nvidia.com/enable-grove": "false"
+    }
+  },
+  "spec": {
+    "components": [
+      {
+        "name": "Frontend",
+        "type": "frontend",
+        "scalingAdapter": {},
+        "runtimeVersionOverride": "1.7.0",
+        "podTemplate": {
+          "spec": {
+            "terminationGracePeriodSeconds": 120,
+            "containers": [
+              {
+                "name": "main",
+                "image": "placeholder.invalid/gdl/api-engine:dgd",
+                "command": [
+                  "/usr/local/bin/segment",
+                  "/etc/gdl/fleet/engine.toml"
+                ],
+                "ports": [
+                  {
+                    "name": "http",
+                    "containerPort": 8000
+                  },
+                  {
+                    "name": "system",
+                    "containerPort": 9090
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "GDL_HUB__HOST",
+                    "value": "dgd-use1"
+                  },
+                  {
+                    "name": "GDL_POOL__NAME",
+                    "value": "dgd-use1"
+                  },
+                  {
+                    "name": "GDL_POOL__CLASS",
+                    "value": "model_x"
+                  },
+                  {
+                    "name": "GDL_POOL__HUB",
+                    "value": "dgd-use1:1337"
+                  },
+                  {
+                    "name": "GDL_POOL__HOME",
+                    "value": "global-us"
+                  },
+                  {
+                    "name": "GDL_POOL__READY__ENGINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "GDL_POOL__REGION",
+                    "value": "us-east-1"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "fleet",
+                    "mountPath": "/etc/gdl/fleet",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "rollover",
+                    "mountPath": "/etc/gdl/rollover",
+                    "readOnly": true
+                  }
+                ]
+              }
+            ],
+            "volumes": [
+              {
+                "name": "fleet",
+                "configMap": {
+                  "name": "dgd-use1"
+                }
+              },
+              {
+                "name": "rollover",
+                "configMap": {
+                  "name": "dgd-use1-rollover",
+                  "optional": true
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "Worker",
+        "type": "decode",
+        "replicas": 3,
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "main",
+                "image": "localhost:5001/dynamo/dynamo-mocker:1.7.0-dev.20261102",
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.mocker"
+                ],
+                "args": [
+                  "--model-path",
+                  "/models/qwen3",
+                  "--model-name",
+                  "Qwen/Qwen3-0.6B",
+                  "--router-mode",
+                  "kv",
+                  "--no-router-track-active-blocks"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

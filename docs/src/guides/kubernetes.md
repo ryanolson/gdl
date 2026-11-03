@@ -139,7 +139,7 @@ Each file is a YAML stream of JSON documents. In a cluster the gdl operator runs
 | entry Service | `<pool>-<segment>` | ClusterIP, for a segment with `[deployment.segment.<name>] ports` only |
 | PersistentVolumeClaim | `<pool>-state` | 1Gi, for a parent's hub only, under `relay` |
 | `GdlScaler` | `<pool>-<segment>` | under the operator only: the segment's quorum as its `minReplicas`, its drain bound, and its entry Service |
-| DynamoGraphDeployment | `<pool>` | for a pool with a `dgd` only: the DGD as given, with the pool's labels. A segment in one of its components gets no Deployment or entry Service, and under the operator its `GdlScaler` targets the component's scaling adapter ([A pool with a DGD](operator.md#a-pool-with-a-dgd)) |
+| DynamoGraphDeployment | `<pool>` | for a pool with a `[pool.<name>.dgd]` table only, which only a cluster with `operator = true` takes: the DGD file the table names, with the pool's labels. A segment in one of its components gets no Deployment or entry Service, and under the operator its `GdlScaler` targets the component's scaling adapter ([A pool with a DGD](operator.md#a-pool-with-a-dgd)) |
 
 Every object carries `gdl.dev/fleet` and `gdl.dev/cluster`, the fleet's name for its cluster. Every object of a pool also carries `gdl.dev/pool`, `gdl.dev/class`, and `gdl.dev/region`, the pool's region. Every object of a pool but the ConfigMap also carries `gdl.dev/segment`, which is `hub` for the hub's objects. No segment can be named `hub`. A Deployment or a Service selects pods only by `gdl.dev/fleet`, `gdl.dev/pool`, and `gdl.dev/segment`, which no two pools' objects share. The class and the cluster are not in a selector: Kubernetes refuses a change to a Deployment's selector, and a fleet can rename a class. A label's value is at most 63 characters. A longer value, such as a class's name, is labelled by its first 52 characters, `-`, and 10 hex digits of its hash, and the object keeps the whole value in an annotation of the same key.
 
@@ -170,7 +170,7 @@ In a cluster the operator runs:
 - **A change that replaces a pool's hub is held** until the pool's `allowPoolRestart` is set, since a hub restart drains the pool. The hub's pods are replaced when its image or the pool's deployment changes; a segment's settings replace only that segment's pods. `cargo gdl deploy --allow-pool-restart` sets it on every `GdlPool` it applies, and a deploy without it leaves it out.
 - **A pool's presence** is `serving` unless its `GdlPool` says `presence: scaledToZero`, which the operator tells the pool's hub before it holds each segment at 0. `cargo gdl` writes the field only when it is not `serving`, so a redeploy leaves a `kubectl patch` of it in place.
 
-In a cluster without the operator, a pool's segments run the pool's quorum as `replicas`, under the manager `gdl`, and nothing else changes the count.
+In a cluster without the operator, a pool's segments run the pool's quorum as `replicas`, under the manager `gdl`, and nothing else changes the count. A pool with a DGD needs the operator: `check` refuses a `[pool.<name>.dgd]` table in a cluster without it ([A pool with a DGD](operator.md#a-pool-with-a-dgd)).
 
 ## Node groups and resources
 

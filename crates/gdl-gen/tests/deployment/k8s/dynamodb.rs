@@ -67,6 +67,7 @@ fn a_directory_can_run_in_a_cluster_without_pools() {
     let files = gdl_gen::k8s_files(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         None,
         None,

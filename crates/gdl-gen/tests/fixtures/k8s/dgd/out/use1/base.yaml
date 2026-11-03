@@ -1,0 +1,25 @@
+---
+{
+  "apiVersion": "v1",
+  "kind": "Namespace",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "gdl-api"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "ServiceAccount",
+  "metadata": {
+    "labels": {
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api"
+    },
+    "name": "api",
+    "namespace": "gdl-api"
+  }
+}

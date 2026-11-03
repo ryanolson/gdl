@@ -1,0 +1,124 @@
+---
+{
+  "apiVersion": "gdl.dev/v1alpha1",
+  "kind": "GdlPool",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "global",
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "global-us",
+      "gdl.dev/region": "us-east-1"
+    },
+    "name": "global-us",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "class": "global",
+    "cluster": "use1",
+    "deployment": "{\n  \"graph\": {\n    \"name\": \"api\",\n    \"schema\": 1,\n    \"nodes\": [\n      {\n        \"name\": \"Http\",\n        \"role\": \"source\",\n        \"binding\": null\n      },\n      {\n        \"name\": \"Engine\",\n        \"role\": \"sink\",\n        \"binding\": \"engine\"\n      }\n    ],\n    \"hops\": [\n      {\n        \"outer\": \"Http\",\n        \"forward\": [],\n        \"inner\": \"Engine\",\n        \"backward\": [],\n        \"forward_types\": [\n          {\n            \"name\": \":: api_frontend :: Prompt\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ],\n        \"backward_types\": [\n          {\n            \"name\": \":: api_frontend :: Chunk\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ]\n      }\n    ]\n  },\n  \"placement\": {\n    \"segment\": {\n      \"engine\": {\n        \"nodes\": [\n          \"Engine\"\n        ]\n      },\n      \"front\": {\n        \"nodes\": [\n          \"Http\"\n        ]\n      }\n    },\n    \"class\": {\n      \"global\": {\n        \"segments\": [\n          \"front\"\n        ]\n      },\n      \"model_x\": {\n        \"segments\": [\n          \"engine\"\n        ]\n      }\n    }\n  }\n}",
+    "fleet": "api",
+    "hub": {
+      "env": [
+        {
+          "name": "GDL_POOL__CLASS",
+          "value": "global"
+        },
+        {
+          "name": "GDL_POOL__DIRECTORY",
+          "value": "relay"
+        },
+        {
+          "name": "GDL_POOL__HUB",
+          "value": "$(GDL_POD_IP):1337"
+        },
+        {
+          "name": "GDL_POOL__NAME",
+          "value": "global-us"
+        },
+        {
+          "name": "GDL_POOL__READY__FRONT",
+          "value": "1"
+        },
+        {
+          "name": "GDL_POOL__REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "GDL_POOL__STATE_DIR",
+          "value": "/var/lib/gdl-hub"
+        },
+        {
+          "name": "GDL_POOL__SUMMARY_MS",
+          "value": "10000"
+        }
+      ],
+      "image": "registry.example/gdl/api-hub:pinned",
+      "stateDir": "/var/lib/gdl-hub"
+    },
+    "nodeSelector": {
+      "kubernetes.io/arch": "amd64",
+      "kubernetes.io/os": "linux"
+    },
+    "region": "us-east-1",
+    "segments": [
+      {
+        "env": [
+          {
+            "name": "GDL_HUB__HOST",
+            "value": "global-us"
+          },
+          {
+            "name": "GDL_POOL__CLASS",
+            "value": "global"
+          },
+          {
+            "name": "GDL_POOL__DIRECTORY",
+            "value": "relay"
+          },
+          {
+            "name": "GDL_POOL__HUB",
+            "value": "global-us:1337"
+          },
+          {
+            "name": "GDL_POOL__NAME",
+            "value": "global-us"
+          },
+          {
+            "name": "GDL_POOL__READY__FRONT",
+            "value": "1"
+          },
+          {
+            "name": "GDL_POOL__REGION",
+            "value": "us-east-1"
+          },
+          {
+            "name": "GDL_POOL__STATE_DIR",
+            "value": "/var/lib/gdl-hub"
+          },
+          {
+            "name": "GDL_POOL__SUMMARY_MS",
+            "value": "10000"
+          }
+        ],
+        "image": "registry.example/gdl/api-front:pinned",
+        "name": "front",
+        "ports": [
+          {
+            "port": 8080,
+            "protocol": "TCP"
+          }
+        ],
+        "quorum": 1,
+        "secrets": [
+          {
+            "holder": "api-fingerprint",
+            "name": "fingerprint"
+          }
+        ],
+        "settings": "listen = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[system]\nhost = \"0.0.0.0\"\nport = 9090\n"
+      }
+    ],
+    "serviceAccountName": "api"
+  }
+}

@@ -57,6 +57,10 @@ use cluster::{Header, check_clusters};
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// resources.segment.e = { limits = { memory = "8Gi" } }   # optional: over its cluster's
 ///
+/// [pool.model-x-01-us-east-1.dgd]   # optional: a DynamoGraphDeployment the pool owns ([`PoolDgd`])
+/// file = "dynamo/dgd.yaml"           # relative to the fleet file
+/// components = { e = "Frontend" }    # segment = the DGD component that runs it
+///
 /// [directory]                        # optional: without it, each child's hub reports to its parent's (`relay`)
 /// backend = "dynamodb"               # every pool's hub publishes to two DynamoDB tables
 /// records_table = "gdl-pools"
@@ -178,6 +182,25 @@ struct PoolSpec {
     /// This pool's pods' requests and limits, over its cluster's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resources: Option<PoolResources>,
+    /// The DynamoGraphDeployment the pool owns, which runs some of its
+    /// segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dgd: Option<PoolDgd>,
+}
+
+/// A pool's `dgd` table: the DynamoGraphDeployment (DGD) it owns, which
+/// dynamo's operator runs, and the segments that run in its components.
+/// A segment it does not name stays one of gdl's own Deployments. Only
+/// `cargo gdl k8s` and `deploy` read it, for a pool of a cluster the gdl
+/// operator runs; the file itself is read and judged there, beside the
+/// fleet file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolDgd {
+    /// The DGD's file, YAML or JSON, relative to the fleet file.
+    pub file: String,
+    /// Each segment that runs in the DGD, and the component that runs it.
+    pub components: BTreeMap<String, String>,
 }
 
 impl PoolSpec {
@@ -395,6 +418,9 @@ impl Fleet {
                     }),
                 },
             }
+            if let Some(dgd) = &pool.dgd {
+                self.dgd_problems(name, pool, dgd, runs, laid.as_ref(), &mut errors);
+            }
             if let Some(resources) = &pool.resources {
                 let cluster = pool
                     .cluster
@@ -436,6 +462,50 @@ impl Fleet {
             Ok(())
         } else {
             Err(FleetErrors(unique))
+        }
+    }
+
+    /// What is wrong with `pool`'s `dgd` table, which it runs in layout
+    /// `runs` when that is known: the gdl operator runs its cluster, since
+    /// it owns the DGD, its stop and its scaling, and `deploy` alone could
+    /// neither prune nor delete it; and each key of `components` is a
+    /// segment of the pool's class. What the file says is judged where it
+    /// is read.
+    fn dgd_problems(
+        &self,
+        name: &str,
+        pool: &PoolSpec,
+        dgd: &PoolDgd,
+        runs: Option<&str>,
+        laid: Option<&Laid<'_>>,
+        errors: &mut Vec<FleetError>,
+    ) {
+        let operated = pool
+            .cluster
+            .as_ref()
+            .and_then(|cluster| self.clusters.get(cluster))
+            .is_some_and(|cluster| cluster.operator);
+        if !operated {
+            errors.push(FleetError::DgdWithoutOperator {
+                pool: name.to_string(),
+                cluster: pool.cluster.clone(),
+            });
+        }
+        let Some(classes) = runs.and_then(|runs| laid?.get(runs)?.as_ref()) else {
+            return;
+        };
+        let Some(members) = classes.segments.get(pool.class.as_str()) else {
+            return;
+        };
+        for segment in dgd.components.keys() {
+            if !members.contains(segment.as_str()) {
+                errors.push(FleetError::DgdNotInClass {
+                    pool: name.to_string(),
+                    segment: segment.clone(),
+                    class: pool.class.clone(),
+                    layout: classes.named.map(str::to_string),
+                });
+            }
         }
     }
 
@@ -816,6 +886,19 @@ impl Fleet {
             }
         }
         Some(merged)
+    }
+
+    /// The `dgd` table of pool `pool`, if the fleet has the pool and it
+    /// has one.
+    pub fn dgd(&self, pool: &str) -> Option<&PoolDgd> {
+        self.pools.get(pool)?.dgd.as_ref()
+    }
+
+    /// Every pool with a `dgd` table, by its name, in name order.
+    pub fn dgds(&self) -> impl Iterator<Item = (&str, &PoolDgd)> + '_ {
+        self.pools
+            .iter()
+            .filter_map(|(name, pool)| Some((name.as_str(), pool.dgd.as_ref()?)))
     }
 
     /// The fleet's `[metrics]` table.

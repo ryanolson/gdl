@@ -1,6 +1,9 @@
 //! A fleet's Kubernetes objects: one directory per cluster, of plain
-//! objects only. Each cluster gets its Namespace and the fleet's
-//! ServiceAccount (`<cluster>/base.yaml`), with a PodMonitor of the fleet's
+//! objects, or of `GdlPool`s where the gdl operator runs the cluster's
+//! pools. A pool's `GdlPool` holds the DynamoGraphDeployment its fleet
+//! table names, when it has one ([`Dgds`]). Each cluster gets its
+//! Namespace and the fleet's ServiceAccount (`<cluster>/base.yaml`), with
+//! a PodMonitor of the fleet's
 //! pods when the fleet asks for one (`[metrics] pod_monitor`), and each of its pools one file
 //! (`<cluster>/pools/<pool>.yaml`): a ConfigMap of the pool's settings, its
 //! hub's Deployment and Service, a Deployment for each segment of its
@@ -15,7 +18,7 @@ use std::path::Path;
 use gdl_model::{Fleet, PoolSettings, Problem};
 
 use super::images::{self, Digests, Image};
-use super::{Bundle, Published, Sources, check_segment_name, io, pools, stdin_source};
+use super::{Bundle, Dgds, Published, Sources, check_segment_name, io, pools, stdin_source};
 use crate::spec::Allocator;
 use crate::{Error, Files, Offers, Spec, export::image_problem};
 
@@ -41,7 +44,11 @@ pub(super) use objects::{image, stream};
 /// a registry and a platform, its `secrets` only the spec's secrets and
 /// every one a segment there mounts, and its `env` no variable the
 /// render sets; under the relay directory each child is in its parent's
-/// cluster; and the spec does not choose jemalloc.
+/// cluster; the spec does not choose jemalloc; and each pool that names
+/// a DGD file has it in `dgds`, read beside the fleet file
+/// ([`Dgds::read`]), which its pool can own. Such a pool's `GdlPool`
+/// holds the file, with the `main` image of each component that runs a
+/// segment set to that segment's image, and the rest as written.
 ///
 /// With [`Sources::Local`], the images build gdl and its hub from the
 /// spec's `[gdl] path`, and the crates it names by path, as they are on
@@ -49,6 +56,7 @@ pub(super) use objects::{image, stream};
 pub fn k8s_files(
     spec: &Spec,
     fleet: &Fleet,
+    dgds: &Dgds,
     target: &Path,
     tag: Option<&str>,
     digests: Option<&Digests>,
@@ -57,16 +65,21 @@ pub fn k8s_files(
     if let Some(tag) = tag {
         objects::check_tag(tag)?;
     }
-    let prepared = prepare(spec, fleet, target, sources)?;
+    let prepared = prepare(spec, fleet, dgds, target, sources)?;
     let plan = images::plan(&prepared, fleet)?;
-    render(prepared, fleet, &Naming::new(tag, &plan, digests))
+    render(prepared, fleet, dgds, &Naming::new(tag, &plan, digests))
 }
 
 /// Write `fleet`'s objects ([`k8s_files`]) into `out`, which must not
 /// exist: all of them, or, on a failure, none.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "what `k8s_files` takes, and where to write it"
+)]
 pub fn k8s(
     spec: &Spec,
     fleet: &Fleet,
+    dgds: &Dgds,
     out: &Path,
     target: &Path,
     tag: Option<&str>,
@@ -76,7 +89,7 @@ pub fn k8s(
     if out.exists() {
         return Err(exists());
     }
-    let files = k8s_files(spec, fleet, target, tag, digests, sources)?;
+    let files = k8s_files(spec, fleet, dgds, target, tag, digests, sources)?;
     write_new(out, &files)
 }
 
@@ -112,12 +125,13 @@ pub(super) fn write_new(out: &Path, files: &Files) -> Result<(), Error> {
 pub(super) fn judged(
     spec: &Spec,
     fleet: &Fleet,
+    dgds: &Dgds,
     target: &Path,
     sources: Sources,
 ) -> Result<Vec<Image>, Error> {
-    let prepared = prepare(spec, fleet, target, sources)?;
+    let prepared = prepare(spec, fleet, dgds, target, sources)?;
     let plan = images::plan(&prepared, fleet)?;
-    render(prepared, fleet, &Naming::new(None, &plan, None))?;
+    render(prepared, fleet, dgds, &Naming::new(None, &plan, None))?;
     Ok(plan)
 }
 
@@ -131,7 +145,13 @@ pub(super) struct Prepared {
 }
 
 /// `spec` prepared for `fleet`, refused as [`k8s_files`] says.
-fn prepare(spec: &Spec, fleet: &Fleet, target: &Path, sources: Sources) -> Result<Prepared, Error> {
+fn prepare(
+    spec: &Spec,
+    fleet: &Fleet,
+    dgds: &Dgds,
+    target: &Path,
+    sources: Sources,
+) -> Result<Prepared, Error> {
     if pools::by_pool(spec).is_none() {
         return Err(Error::new(
             "a fleet on Kubernetes deploys a spec by pool: give its placement classes, and the fleet its pools",
@@ -143,7 +163,19 @@ fn prepare(spec: &Spec, fleet: &Fleet, target: &Path, sources: Sources) -> Resul
         .check(None)
         .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
     let settings = spec.deployment.clone().unwrap_or_default();
-    let problems = refusals::fleet(fleet, &settings);
+    let mut problems = refusals::fleet(fleet, &settings);
+    for (pool, dgd) in fleet.dgds() {
+        if dgds.get(pool).is_none() {
+            problems.push(Problem::at(
+                Some(format!("pool.{pool}.dgd")),
+                Some("file".into()),
+                format!(
+                    "pool `{pool}` names a DGD file, `{}`, which this render was not given: read it beside the fleet file",
+                    dgd.file
+                ),
+            ));
+        }
+    }
     if !problems.is_empty() {
         return Err(Error::all(problems));
     }
@@ -192,9 +224,15 @@ fn prepare(spec: &Spec, fleet: &Fleet, target: &Path, sources: Sources) -> Resul
 }
 
 /// The objects of `fleet` from `prepared`, each image named by `naming`.
-fn render(prepared: Prepared, fleet: &Fleet, naming: &Naming<'_>) -> Result<Files, Error> {
+fn render(
+    prepared: Prepared,
+    fleet: &Fleet,
+    dgds: &Dgds,
+    naming: &Naming<'_>,
+) -> Result<Files, Error> {
     Render {
         fleet,
+        dgds,
         bundle: prepared.bundle,
         names: Names::default(),
         problems: Vec::new(),
@@ -268,6 +306,8 @@ impl<'a> Naming<'a> {
 /// One render of a fleet: what is written so far, and what is wrong.
 struct Render<'f> {
     fleet: &'f Fleet,
+    /// The DGD file of each pool that names one.
+    dgds: &'f Dgds,
     bundle: Bundle,
     /// The objects' names in each cluster, so that two never share one.
     names: Names,
@@ -480,6 +520,7 @@ impl Render<'_> {
             cluster,
             naming,
             model: self.fleet,
+            dgd: self.fleet.dgd(&pool.name).zip(self.dgds.get(&pool.name)),
         };
         // A pod's mount of a secret its cluster does not map could never
         // be filled.

@@ -7,8 +7,8 @@
 #   bash scripts/kubeconform.sh [dir ...]
 #
 # Without a directory it validates the pinned objects in crates/gdl-gen/tests/fixtures/k8s/out,
-# crates/gdl-gen/tests/fixtures/k8s/dynamodb/out, and crates/gdl-gen/tests/fixtures/k8s/operated, the objects the
-# gdl operator makes from the pinned GdlPools. With
+# crates/gdl-gen/tests/fixtures/k8s/dynamodb/out, crates/gdl-gen/tests/fixtures/k8s/dgd/out (a GdlPool with a DGD),
+# and crates/gdl-gen/tests/fixtures/k8s/operated, the objects the gdl operator makes from the pinned GdlPools. With
 # INSTALL_TOOLS=1 it first downloads the pinned kubeconform and the schemas of the kinds that `cargo gdl k8s`
 # writes, and of the PodMonitor, into TOOLS_DIR (default: .k8s-tools at the repository's root, which git ignores).
 set -euo pipefail
@@ -75,7 +75,7 @@ done
 
 if [[ $# -eq 0 ]]; then
   set -- "${root}/crates/gdl-gen/tests/fixtures/k8s/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/dynamodb/out" \
-    "${root}/crates/gdl-gen/tests/fixtures/k8s/operated"
+    "${root}/crates/gdl-gen/tests/fixtures/k8s/dgd/out" "${root}/crates/gdl-gen/tests/fixtures/k8s/operated"
 fi
 # A kind with no schema here fails: -ignore-missing-schemas is not given. A custom resource's schema is found by its
 # group, as the catalog files it.

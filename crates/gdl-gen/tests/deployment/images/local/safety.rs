@@ -96,6 +96,7 @@ fn a_resolving_target_link_places_the_bundle_in_the_tree() {
     gdl_gen::images(
         &copy.spec(),
         &fleet(),
+        &gdl_gen::Dgds::default(),
         &target(),
         false,
         gdl_gen::Sources::Local,

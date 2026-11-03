@@ -102,6 +102,7 @@ fn a_link_within_the_sources_is_copied_as_a_link() {
     gdl_gen::images(
         &copy.spec(),
         &fleet(),
+        &gdl_gen::Dgds::default(),
         &target(),
         false,
         gdl_gen::Sources::Local,

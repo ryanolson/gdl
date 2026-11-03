@@ -1,0 +1,124 @@
+---
+{
+  "apiVersion": "gdl.dev/v1alpha1",
+  "kind": "GdlPool",
+  "metadata": {
+    "labels": {
+      "gdl.dev/class": "model_x",
+      "gdl.dev/cluster": "use1",
+      "gdl.dev/fleet": "api",
+      "gdl.dev/pool": "dgd-use1",
+      "gdl.dev/region": "us-east-1"
+    },
+    "name": "dgd-use1",
+    "namespace": "gdl-api"
+  },
+  "spec": {
+    "class": "model_x",
+    "cluster": "use1",
+    "deployment": "{\n  \"graph\": {\n    \"name\": \"api\",\n    \"schema\": 1,\n    \"nodes\": [\n      {\n        \"name\": \"Http\",\n        \"role\": \"source\",\n        \"binding\": null\n      },\n      {\n        \"name\": \"Engine\",\n        \"role\": \"sink\",\n        \"binding\": \"engine\"\n      }\n    ],\n    \"hops\": [\n      {\n        \"outer\": \"Http\",\n        \"forward\": [],\n        \"inner\": \"Engine\",\n        \"backward\": [],\n        \"forward_types\": [\n          {\n            \"name\": \":: api_frontend :: Prompt\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ],\n        \"backward_types\": [\n          {\n            \"name\": \":: api_frontend :: Chunk\",\n            \"wire\": true,\n            \"encoding\": \"msgpack\"\n          }\n        ]\n      }\n    ]\n  },\n  \"placement\": {\n    \"segment\": {\n      \"engine\": {\n        \"nodes\": [\n          \"Engine\"\n        ]\n      },\n      \"front\": {\n        \"nodes\": [\n          \"Http\"\n        ]\n      }\n    },\n    \"class\": {\n      \"global\": {\n        \"segments\": [\n          \"front\"\n        ]\n      },\n      \"model_x\": {\n        \"segments\": [\n          \"engine\"\n        ]\n      }\n    }\n  }\n}",
+    "dgd": "{\"apiVersion\":\"nvidia.com/v1beta1\",\"kind\":\"DynamoGraphDeployment\",\"metadata\":{\"annotations\":{\"nvidia.com/enable-grove\":\"false\"},\"name\":\"dgd-use1\"},\"spec\":{\"components\":[{\"name\":\"Frontend\",\"podTemplate\":{\"spec\":{\"containers\":[{\"command\":[\"/usr/local/bin/segment\",\"/etc/gdl/fleet/engine.toml\"],\"env\":[{\"name\":\"GDL_HUB__HOST\",\"value\":\"dgd-use1\"},{\"name\":\"GDL_POOL__NAME\",\"value\":\"dgd-use1\"},{\"name\":\"GDL_POOL__CLASS\",\"value\":\"model_x\"},{\"name\":\"GDL_POOL__HUB\",\"value\":\"dgd-use1:1337\"},{\"name\":\"GDL_POOL__HOME\",\"value\":\"global-us\"},{\"name\":\"GDL_POOL__READY__ENGINE\",\"value\":\"1\"},{\"name\":\"GDL_POOL__REGION\",\"value\":\"us-east-1\"}],\"image\":\"registry.example/gdl/api-engine:pinned\",\"name\":\"main\",\"ports\":[{\"containerPort\":8000,\"name\":\"http\"},{\"containerPort\":9090,\"name\":\"system\"}],\"volumeMounts\":[{\"mountPath\":\"/etc/gdl/fleet\",\"name\":\"fleet\",\"readOnly\":true},{\"mountPath\":\"/etc/gdl/rollover\",\"name\":\"rollover\",\"readOnly\":true}]}],\"terminationGracePeriodSeconds\":120,\"volumes\":[{\"configMap\":{\"name\":\"dgd-use1\"},\"name\":\"fleet\"},{\"configMap\":{\"name\":\"dgd-use1-rollover\",\"optional\":true},\"name\":\"rollover\"}]}},\"runtimeVersionOverride\":\"1.7.0\",\"scalingAdapter\":{},\"type\":\"frontend\"},{\"name\":\"Worker\",\"podTemplate\":{\"spec\":{\"containers\":[{\"args\":[\"--model-path\",\"/models/qwen3\",\"--model-name\",\"Qwen/Qwen3-0.6B\",\"--router-mode\",\"kv\",\"--no-router-track-active-blocks\"],\"command\":[\"python3\",\"-m\",\"dynamo.mocker\"],\"image\":\"localhost:5001/dynamo/dynamo-mocker:1.7.0-dev.20261102\",\"name\":\"main\"}]}},\"replicas\":3,\"type\":\"decode\"}]}}",
+    "fleet": "api",
+    "hub": {
+      "env": [
+        {
+          "name": "GDL_POOL__CLASS",
+          "value": "model_x"
+        },
+        {
+          "name": "GDL_POOL__DIRECTORY",
+          "value": "relay"
+        },
+        {
+          "name": "GDL_POOL__HOME",
+          "value": "global-us"
+        },
+        {
+          "name": "GDL_POOL__HUB",
+          "value": "$(GDL_POD_IP):1337"
+        },
+        {
+          "name": "GDL_POOL__NAME",
+          "value": "dgd-use1"
+        },
+        {
+          "name": "GDL_POOL__PARENT_HUB",
+          "value": "global-us:1337"
+        },
+        {
+          "name": "GDL_POOL__READY__ENGINE",
+          "value": "1"
+        },
+        {
+          "name": "GDL_POOL__REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "GDL_POOL__SUMMARY_MS",
+          "value": "10000"
+        }
+      ],
+      "image": "registry.example/gdl/api-hub:pinned"
+    },
+    "nodeSelector": {
+      "kubernetes.io/arch": "amd64",
+      "kubernetes.io/os": "linux"
+    },
+    "parent": {
+      "home": "global-us"
+    },
+    "region": "us-east-1",
+    "segments": [
+      {
+        "component": "Frontend",
+        "env": [
+          {
+            "name": "GDL_HUB__HOST",
+            "value": "dgd-use1"
+          },
+          {
+            "name": "GDL_POOL__CLASS",
+            "value": "model_x"
+          },
+          {
+            "name": "GDL_POOL__DIRECTORY",
+            "value": "relay"
+          },
+          {
+            "name": "GDL_POOL__HOME",
+            "value": "global-us"
+          },
+          {
+            "name": "GDL_POOL__HUB",
+            "value": "dgd-use1:1337"
+          },
+          {
+            "name": "GDL_POOL__NAME",
+            "value": "dgd-use1"
+          },
+          {
+            "name": "GDL_POOL__PARENT_HUB",
+            "value": "global-us:1337"
+          },
+          {
+            "name": "GDL_POOL__READY__ENGINE",
+            "value": "1"
+          },
+          {
+            "name": "GDL_POOL__REGION",
+            "value": "us-east-1"
+          },
+          {
+            "name": "GDL_POOL__SUMMARY_MS",
+            "value": "10000"
+          }
+        ],
+        "image": "registry.example/gdl/api-engine:pinned",
+        "name": "engine",
+        "quorum": 1,
+        "settings": "listen = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[runtime]\ndrain_ms = 90000\n\n[system]\nhost = \"0.0.0.0\"\nport = 9090\n"
+      }
+    ],
+    "serviceAccountName": "api"
+  }
+}

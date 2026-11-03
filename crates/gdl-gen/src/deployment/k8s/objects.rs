@@ -74,13 +74,17 @@ pub(super) struct Pod<'a> {
     pub(super) naming: &'a super::Naming<'a>,
     /// The fleet, for each pod's requests and limits.
     pub(super) model: &'a Fleet,
+    /// The pool's `dgd` table and the DGD file it names, as JSON, when it
+    /// has one.
+    pub(super) dgd: Option<(&'a gdl_model::PoolDgd, &'a Value)>,
 }
 
 impl Pod<'_> {
     /// The pool as [`gdl_k8s::children`] renders it: its layout's
     /// `deployment`, its hub's image of `hub_repository` and `hub` its
     /// variables, a parent hub's `state_dir`, and `segments`, each with
-    /// `variables`.
+    /// `variables`. A segment its `dgd` table names runs in that
+    /// component, whose `main` container gets the segment's image.
     pub(super) fn pool(
         &self,
         deployment: &str,
@@ -95,12 +99,23 @@ impl Pod<'_> {
             "GDL_HUB__HOST".into(),
             crate::deployment::variables::string(&self.pool.name).into(),
         );
+        let mut dgd = self.dgd.map(|(_, file)| file.clone());
         let segments = segments
             .iter()
             .map(|segment| {
+                let image = self.image(&segment.repository)?;
+                let component = self
+                    .dgd
+                    .and_then(|(table, _)| table.components.get(&segment.name))
+                    .cloned();
+                if let (Some(component), Some(dgd)) = (&component, dgd.as_mut()) {
+                    gdl_k8s::set_image(dgd, component, &image).map_err(|message| {
+                        Error::new(format!("pool `{}`: {message}", self.pool.name))
+                    })?;
+                }
                 Ok(gdl_k8s::Segment {
                     name: segment.name.clone(),
-                    image: self.image(&segment.repository)?,
+                    image,
                     settings: segment.config.clone(),
                     quorum: self.pool.quorum(&segment.name),
                     ports: segment.ports.clone(),
@@ -119,7 +134,7 @@ impl Pod<'_> {
                         })
                         .collect(),
                     resources: self.resources(&segment.name),
-                    component: None,
+                    component,
                 })
             })
             .collect::<Result<_, Error>>()?;
@@ -144,7 +159,7 @@ impl Pod<'_> {
             pod_monitor: self.model.metrics().pod_monitor,
             presence: gdl_k8s::Presence::Serving,
             allow_pool_restart: false,
-            dgd: None,
+            dgd: dgd.map(|dgd| dgd.to_string()),
         })
     }
 
@@ -464,6 +479,17 @@ pub(super) fn readme(fleet: &Fleet) -> String {
                 namespace = settings.namespace,
                 context = settings.context
             ));
+            let dgds: Vec<String> = fleet
+                .dgds()
+                .filter(|(pool, _)| fleet.cluster_of(pool).is_some_and(|(c, _)| c == cluster))
+                .map(|(pool, _)| format!("`{pool}`"))
+                .collect();
+            if !dgds.is_empty() {
+                text.push_str(&format!(
+                    "\nThe `GdlPool` of {} holds its DynamoGraphDeployment, which dynamo's operator runs: the cluster must serve `dynamographdeployments.nvidia.com` at `nvidia.com/v1beta1`, with dynamo's platform installed, before the gdl operator starts, or the pool applies nothing.\n",
+                    dgds.join(", ")
+                ));
+            }
         }
         if !settings.secrets.is_empty() {
             let secrets: Vec<String> = settings

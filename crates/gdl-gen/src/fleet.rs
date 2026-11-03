@@ -36,8 +36,9 @@ pub fn check_files(spec: &Path, fleet: Option<&Path>, target: &Path) -> Problems
 }
 
 /// Every problem with the fleet file at `path`, against the spec's
-/// `layouts` when the spec reads, and one note when a pool's children could
-/// not be judged for want of its layout. The note comes only with a spec
+/// `layouts` when the spec reads, and with each DGD file it names, read
+/// beside it ([`crate::deployment::dgd`]), and one note when a pool's
+/// children could not be judged for want of its layout. The note comes only with a spec
 /// that has problems of its own, so it never fails a check alone.
 fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) -> Problems {
     let located = |problems: Problems| problems.in_file(path.display());
@@ -53,6 +54,9 @@ fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) 
                 Err(errors) => errors.into(),
             };
             problems.0.extend(fleet.children_unchecked(layouts));
+            problems
+                .0
+                .extend(crate::deployment::dgd::problems(&fleet, path));
             located(problems)
         }
     }

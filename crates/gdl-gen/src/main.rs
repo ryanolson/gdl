@@ -471,6 +471,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let Some(Deployed {
                 spec,
                 fleet,
+                dgds,
                 target,
             }) = fleet_and_spec(&args, fleet, &target)?
             else {
@@ -490,6 +491,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             gdl_gen::k8s(
                 &spec,
                 &fleet,
+                &dgds,
                 out,
                 &target,
                 tag.as_deref(),
@@ -506,6 +508,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let Some(Deployed {
                 spec,
                 fleet,
+                dgds,
                 target,
             }) = fleet_and_spec(&args, fleet, &target)?
             else {
@@ -514,6 +517,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let built = gdl_gen::images(
                 &spec,
                 &fleet,
+                &dgds,
                 &target,
                 *push,
                 sources(*local),
@@ -635,10 +639,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// A spec, the fleet that deploys it, and the target directory to build in.
+/// A spec, the fleet that deploys it with the DGD files it names, and the
+/// target directory to build in.
 struct Deployed {
     spec: gdl_gen::Spec,
     fleet: gdl_model::Fleet,
+    dgds: gdl_gen::Dgds,
     target: PathBuf,
 }
 
@@ -660,11 +666,14 @@ fn fleet_and_spec(
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let fleet = gdl_model::Fleet::from_toml(&text)
         .map_err(|problems| problems.in_file(path.display()).to_string())?;
+    let dgds = gdl_gen::Dgds::read(&fleet, path)
+        .map_err(|problems| problems.in_file(path.display()).to_string())?;
     let spec = gdl_gen::Spec::load(file).map_err(|e| e.in_file(file.display()))?;
     let target = target(spec.dir());
     Ok(Some(Deployed {
         spec,
         fleet,
+        dgds,
         target,
     }))
 }

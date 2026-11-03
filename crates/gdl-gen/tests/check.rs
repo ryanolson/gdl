@@ -615,3 +615,6 @@ fn check_names_a_shared_pool_that_relay_refuses() {
     assert_problems(&problems(&compose), &expected);
     assert!(!out.exists(), "compose wrote a bundle");
 }
+
+#[path = "check/dgd.rs"]
+mod dgd;

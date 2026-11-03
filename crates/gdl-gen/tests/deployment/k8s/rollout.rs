@@ -10,6 +10,7 @@ fn changing_an_image_keeps_deployment_selectors() {
         &gdl_gen::k8s_files(
             &spec,
             &fleet,
+            &gdl_gen::Dgds::default(),
             &mirror.target(),
             Some("replacement"),
             None,

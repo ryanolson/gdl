@@ -154,6 +154,7 @@ fn different_file_and_link_trees_cannot_reuse_published_tags() {
         gdl_gen::images(
             &copy.spec(),
             &fleet(),
+            &gdl_gen::Dgds::default(),
             &target(),
             push,
             gdl_gen::Sources::Local,

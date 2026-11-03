@@ -87,6 +87,7 @@ fn the_generated_manifests_name_paths_within_the_tree() {
     gdl_gen::images(
         &copy.spec(),
         &fleet(),
+        &gdl_gen::Dgds::default(),
         &target(),
         false,
         gdl_gen::Sources::Local,

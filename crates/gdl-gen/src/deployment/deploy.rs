@@ -140,6 +140,8 @@ pub fn deploy(
         return Err(problems.into());
     }
     let fleet = read_fleet(&how.fleet)?;
+    let dgds = super::Dgds::read(&fleet, &how.fleet)
+        .map_err(|problems| Error::from(problems.in_file(how.fleet.display())))?;
     let spec = Spec::load(&how.spec).map_err(|e| Error::from(e.in_file(how.spec.display())))?;
     let mut clusters = Clusters::of(&fleet)?;
     for cluster in &mut clusters.0 {
@@ -161,12 +163,13 @@ pub fn deploy(
     }
     say("check: the spec, the fleet, and each cluster's context");
 
-    let built = images(&spec, &fleet, &how.target, true, how.sources, docker)?;
+    let built = images(&spec, &fleet, &dgds, &how.target, true, how.sources, docker)?;
     say(&format!("images: {} in their registries", built.len()));
 
     let mut files = k8s::k8s_files(
         &spec,
         &fleet,
+        &dgds,
         &how.target,
         None,
         Some(&Digests::of(&built)),

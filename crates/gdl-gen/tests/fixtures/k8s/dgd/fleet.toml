@@ -1,0 +1,38 @@
+# The api example's fleet in one cluster that the gdl operator runs: a
+# global pool, a model pool of gdl's own Deployments, and a model pool
+# whose `engine` segment runs in a DGD (`dynamo/dgd.yaml`).
+[fleet]
+name = "api"
+
+[cluster.use1]
+context = "kind-use1"
+namespace = "gdl-api"
+region = "us-east-1"
+registry = "registry.example/gdl"
+platform = "linux/amd64"
+secrets = { fingerprint = "api-fingerprint" }
+operator = true
+
+[class.global]
+ready = { front = 1 }
+
+[class.model_x]
+ready = { engine = 1 }
+
+[pool.global-us]
+class = "global"
+cluster = "use1"
+
+[pool.model-x-us]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.dgd-use1]
+class = "model_x"
+cluster = "use1"
+home = "global-us"
+
+[pool.dgd-use1.dgd]
+file = "dynamo/dgd.yaml"
+components = { engine = "Frontend" }

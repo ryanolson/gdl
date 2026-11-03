@@ -280,6 +280,25 @@ pub enum FleetError {
         /// The class it sends to and has no child of.
         class: String,
     },
+    /// A pool has a `dgd` table, and its cluster is not one the gdl
+    /// operator runs, or it has no cluster.
+    DgdWithoutOperator {
+        /// The pool.
+        pool: String,
+        /// Its cluster, if it names one.
+        cluster: Option<String>,
+    },
+    /// A key of a pool's `dgd.components` is not a segment of its class.
+    DgdNotInClass {
+        /// The pool.
+        pool: String,
+        /// The key.
+        segment: String,
+        /// The pool's class.
+        class: String,
+        /// The class's layout, when the spec has several.
+        layout: Option<String>,
+    },
 }
 
 /// A table of the fleet file.
@@ -590,6 +609,35 @@ impl FleetError {
                 None,
                 format!(
                     "no child of class `{class}` in layout `{layout}`; a pool of a class that sends to `{class}` has a child of it, a pool whose `home` is this one or whose `parents` is its class"
+                ),
+            ),
+            Self::DgdWithoutOperator {
+                pool: name,
+                cluster,
+            } => {
+                let remedy = match cluster {
+                    Some(cluster) => format!("Give `[cluster.{cluster}]` `operator = true`"),
+                    None => "Give the pool a cluster with `operator = true`".into(),
+                };
+                (
+                    Some(format!("pool.{name}.dgd")),
+                    None,
+                    format!(
+                        "a pool with a DGD needs the gdl operator, which owns the DGD, its stop, and its scaling: without it, `deploy`'s prune and `down` cannot find the DGD. {remedy}, or leave the table out"
+                    ),
+                )
+            }
+            Self::DgdNotInClass {
+                pool: name,
+                segment,
+                class,
+                layout,
+            } => (
+                Some(format!("pool.{name}.dgd")),
+                Some(format!("components.{segment}")),
+                format!(
+                    "not a segment of class `{class}`{}, which the pool runs",
+                    within(layout)
                 ),
             ),
         };

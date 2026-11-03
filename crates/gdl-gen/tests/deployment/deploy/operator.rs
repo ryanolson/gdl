@@ -125,6 +125,46 @@ fn a_cluster_the_operator_runs_gets_one_gdl_pool_per_pool() {
     );
 }
 
+/// A pool's DGD file, named by the fleet file, is read beside it: the
+/// applied `GdlPool` holds the DGD, with the `main` image of `Frontend` set
+/// to the `engine` segment's pushed image, and places `engine` in it.
+#[test]
+fn deploy_applies_a_pools_dgd_from_the_fleet_file() {
+    let mirror = Mirror::new();
+    let fleet = format!(
+        "{}[pool.model-x-us.dgd]\nfile = \"dynamo/dgd.yaml\"\ncomponents = {{ engine = \"Frontend\" }}\n",
+        fleet_text()
+    );
+    let files = files(&mirror, &fleet);
+    let dynamo = files.fleet.parent().expect("a directory").join("dynamo");
+    std::fs::create_dir(&dynamo).expect("a directory");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/k8s/dgd/dynamo/dgd.yaml");
+    let dgd = std::fs::read_to_string(fixture)
+        .expect("the DGD")
+        .replace("name: dgd-use1", "name: model-x-us");
+    std::fs::write(dynamo.join("dgd.yaml"), dgd).expect("the DGD");
+    let log = Log::default();
+    let (mut docker, mut kube) = fakes(&log);
+    deploy(&mirror, &files, &mut docker, &mut kube).expect("deploy");
+    let held = &kube.objects["kind-use1"][&("GdlPool".to_string(), "model-x-us".to_string())];
+    let engine = &held["spec"]["segments"][0];
+    assert_eq!(engine["name"], "engine");
+    assert_eq!(engine["component"], "Frontend");
+    let dgd: Value =
+        serde_json::from_str(held["spec"]["dgd"].as_str().expect("the DGD")).expect("JSON");
+    assert_eq!(dgd["metadata"]["name"], "model-x-us");
+    let main = &dgd["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0];
+    assert_eq!(main["image"], engine["image"]);
+    assert!(
+        engine["image"]
+            .as_str()
+            .expect("an image")
+            .contains("@sha256:"),
+        "{engine}"
+    );
+}
+
 /// A cluster that asks for the operator and has neither of its CRDs is
 /// refused before anything is built.
 #[test]

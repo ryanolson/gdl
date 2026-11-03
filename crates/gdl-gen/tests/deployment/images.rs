@@ -135,7 +135,16 @@ fn run_with(
     sources: gdl_gen::Sources,
     docker: &mut Fake,
 ) -> Vec<gdl_gen::Built> {
-    gdl_gen::images(spec, fleet, target, push, sources, docker).expect("images")
+    gdl_gen::images(
+        spec,
+        fleet,
+        &gdl_gen::Dgds::default(),
+        target,
+        push,
+        sources,
+        docker,
+    )
+    .expect("images")
 }
 
 /// A reference's repository and tag: `<registry>/<repository>:<tag>`.
@@ -451,6 +460,7 @@ fn the_hub_has_one_tag_for_every_layout() {
     let files = gdl_gen::k8s_files(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         None,
         Some(&digests),
@@ -486,6 +496,7 @@ fn the_objects_name_the_pushed_digests() {
         let files = gdl_gen::k8s_files(
             &spec,
             &fleet,
+            &gdl_gen::Dgds::default(),
             &mirror.target(),
             None,
             digests,
@@ -533,6 +544,7 @@ fn an_image_missing_from_the_digests_is_refused() {
     let error = gdl_gen::k8s_files(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         None,
         Some(&digests),
@@ -561,6 +573,7 @@ fn jemalloc_is_refused() {
     let error = gdl_gen::images(
         &spec,
         &fleet(&fleet_text()),
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         true,
         gdl_gen::Sources::Fetched,
@@ -584,6 +597,7 @@ fn a_platform_without_a_cross_build_is_refused() {
     let error = gdl_gen::images(
         &spec(&mirror),
         &fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         true,
         gdl_gen::Sources::Fetched,
@@ -668,6 +682,7 @@ fn the_directorys_cluster_gets_the_hubs_image_without_a_pool() {
     let files = gdl_gen::k8s_files(
         &spec,
         &fleet,
+        &gdl_gen::Dgds::default(),
         &mirror.target(),
         None,
         Some(&gdl_gen::Digests::of(&built)),

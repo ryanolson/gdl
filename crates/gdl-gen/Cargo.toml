@@ -31,6 +31,8 @@ sha2 = "0.10"
 syn = "2"
 tar = { version = "0.4", default-features = false }
 toml = { workspace = true }
+# Reads a pool's DGD file: YAML 1.2, in safe Rust.
+yaml-rust2 = { version = "0.11", default-features = false }
 
 # `cargo gdl run` catches the stops it must not pass on, and sends one of
 # its own. `libc` resets a segment's handlers between fork and exec.

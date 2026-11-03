@@ -166,6 +166,7 @@ impl Builder {
                 gdl_gen::images(
                     spec,
                     &fleet(),
+                    &gdl_gen::Dgds::default(),
                     &target(),
                     false,
                     gdl_gen::Sources::Local,
@@ -340,6 +341,7 @@ fn the_tags_and_the_objects_do_not_depend_on_where_the_sources_are() {
     let objects = gdl_gen::k8s_files(
         &one.spec(),
         &fleet(),
+        &gdl_gen::Dgds::default(),
         &target(),
         None,
         Some(&gdl_gen::Digests::of(&built_one)),

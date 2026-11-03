@@ -893,3 +893,26 @@ fn a_shared_pool_is_taken_under_a_dynamodb_directory() {
     assert_eq!(pool.parent, Some(Parent::Class("global".into())));
     assert!(matches!(pool.directory, DirectoryBackend::DynamoDb { .. }));
 }
+
+/// A pool's `dgd` table names its DGD file and the component of each
+/// segment it places there; the table refuses a key it does not know.
+#[test]
+fn a_pools_dgd_table_names_its_file_and_components() {
+    let text = "[pool.p]\nclass = \"model\"\nregion = \"us-east-1\"\n\
+        [pool.p.dgd]\nfile = \"dynamo/dgd.yaml\"\ncomponents = { engine = \"Frontend\" }\n";
+    let fleet = Fleet::from_toml(text).expect("a fleet");
+    let dgd = fleet.dgd("p").expect("the table");
+    assert_eq!(dgd.file, "dynamo/dgd.yaml");
+    assert_eq!(
+        dgd.components,
+        BTreeMap::from([("engine".to_string(), "Frontend".to_string())])
+    );
+    assert_eq!(
+        fleet.dgds().map(|(pool, _)| pool).collect::<Vec<_>>(),
+        ["p"]
+    );
+    let error = Fleet::from_toml(&text.replace("file =", "image = \"x\"\nfile ="))
+        .expect_err("refused")
+        .to_string();
+    assert!(error.contains("image"), "{error}");
+}

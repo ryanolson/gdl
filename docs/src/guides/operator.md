@@ -168,7 +168,20 @@ A pool can run some of its segments in a DynamoGraphDeployment (DGD), dynamo's d
 | The DGD's pods, Deployments and Services, rollouts, dynamo's discovery, and the workers' count | dynamo's operator |
 | The DGD object, the hub, the pool's record and settings, and its stop | the pool |
 
-`spec.dgd` holds the DGD as JSON text, and `spec.segments[].component` names the component that runs a segment. The pool renders the DGD as one of its objects, under its controller reference, so that its stop orders it and garbage collection deletes it:
+`spec.dgd` holds the DGD as JSON text, and `spec.segments[].component` names the component that runs a segment. `cargo gdl k8s` and `deploy` fill both from the fleet file, per pool:
+
+```toml
+[pool.dgd-use1.dgd]
+file = "dynamo/dgd.yaml"                 # relative to the fleet file
+components = { engine = "Frontend" }     # segment = DGD component
+```
+
+- **The file, nearly as written.** `spec.dgd` is the file as JSON. The render sets one thing in it: the image of the `main` container of each component in `components`, which becomes that segment's own image, in its cluster's registry. dynamo's images, `runtimeVersionOverride`, `scalingAdapter`, the workers' arguments, and the annotations stay as the file writes them. So the component's command, its `GDL_POOL__*` variables, and its mounts of the pool's ConfigMap come from the file too.
+- **Mixed pools.** A segment that `components` does not name stays one of gdl's own Deployments.
+- **Only under the gdl operator.** `check` refuses the table for a pool whose cluster does not set `operator = true`. The operator owns the DGD, its stop, and its scaling, and without it `deploy`'s prune and `down` cannot find the DGD. Compose refuses the table.
+- **Checked before a build.** `check` reads the file and refuses each DGD that the pool cannot own. The [spec reference](../appendix/spec-reference.md#fleettoml) lists each refusal.
+
+The pool renders the DGD as one of its objects, under its controller reference, so that its stop orders it and garbage collection deletes it:
 
 - **Named after the pool, in its namespace.** The operator finds the DGD's pods by its name, which dynamo puts in a label, so a pool with a DGD has a name of at most 63 characters. A DGD whose `metadata.name` or `metadata.namespace` differs from the pool's is refused (`BadSpec`), never renamed. Only `nvidia.com/v1beta1`, whose components are a list, is taken, and a component that runs a segment must have its pod templates, their metadata and their annotations as objects, where the render writes them.
 - **No Deployment or entry Service** for a segment in the DGD: dynamo's operator runs its pods. Its settings stay in the pool's ConfigMap, which the component mounts.

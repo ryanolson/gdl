@@ -255,6 +255,7 @@ use crate::{
 
 pub(crate) mod context;
 mod deploy;
+pub(crate) mod dgd;
 mod images;
 mod k8s;
 pub(crate) mod locks;
@@ -263,6 +264,7 @@ mod tree;
 mod variables;
 
 pub use deploy::{Deploy, Kube, Kubectl, Reply, Waits, deploy, down};
+pub use dgd::Dgds;
 pub use images::{Buildx, Built, Digests, Docker, Outcome, images};
 pub use k8s::{k8s, k8s_files};
 
@@ -307,6 +309,13 @@ fn bundle_files(
     target: &Path,
     sources: Sources,
 ) -> Result<(Files, Option<context::Context>), Error> {
+    // A pool's DGD runs under dynamo's operator, which Compose has no
+    // place for.
+    if let Some((pool, _)) = fleet.and_then(|fleet| fleet.dgds().next()) {
+        return Err(Error::new(format!(
+            "pool `{pool}` has a DGD (`[pool.{pool}.dgd]`), which only `cargo gdl k8s` and `deploy` render, for a cluster the gdl operator runs: Compose has no DGD, so leave the table out of a fleet that Compose deploys"
+        )));
+    }
     let by_pool = pools::by_pool(spec);
     if let (None, Some(why)) = (fleet, &by_pool) {
         return Err(Error::new(format!(
