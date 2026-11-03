@@ -1334,7 +1334,19 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
     let chooser = chooser(&spec, &hub).await;
     for stopped in [false, true] {
         let events = Events::new();
-        let m1 = pool(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+        // A drain bound longer than the test, as in
+        // `an_entry_declines_after_its_bound_while_its_body_finishes`: a
+        // stopped sink closes at its bound, and the steps after its stop
+        // must not race it.
+        let m1 = model_summarized(
+            &spec,
+            &directory,
+            ready(M1, "m1-hub:1337"),
+            "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 60000\n",
+            &|runtime| runtime,
+            &|deployment| reference_graph(deployment, &events),
+        )
+        .await;
         following(&tables(&chooser), &[(M1, PoolState::Ready)]).await;
         let held = gated(&chooser, &events, "held").await;
         let mut retired = phase(&m1.hub, "d", SegmentPhase::Retired).await;
