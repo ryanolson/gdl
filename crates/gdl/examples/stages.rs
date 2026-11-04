@@ -1,4 +1,4 @@
-//! `stages <shape> <item> <stages> <items> <requests> [deadline] [pending [<together>]]`
+//! `stages <shape> <item> <stages> <items> <requests> [<request>] [deadline] [pending [<together>]]`
 //! sends `requests`
 //! requests through `stages` pass-through stages, each answered with
 //! `items` items, for callgrind to count what a local stage costs a request
@@ -17,6 +17,12 @@
 //! - `<item>`: `u64`, or `large`, an item of 512 B, about the size of a
 //!   streamed chunk of a chat response.
 //! - `<stages>`: 0 to 5.
+//! - `<request>`: `large-request`, a request of 2 KiB with a field to drop,
+//!   about the size of a chat request, where it is a `u64` by default, so
+//!   that each copy of it is a call of `memcpy`; `boxed-request`, the same
+//!   request built in a `Box`, as a node author can choose; or
+//!   `copied-request`, the same request built on the stack and then boxed,
+//!   as a request that is deserialized and then boxed is.
 //! - `deadline`: each request has a deadline an hour away, which no request
 //!   reaches, so that every boundary carries a deadline and reads the clock
 //!   at its checks. The runtime then has timers.
@@ -61,13 +67,19 @@ const WARM: u64 = 50;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (shape, item, stages, count, requests, mode) = match args.as_slice() {
-        [shape, item, stages, count, requests, mode @ ..] if mode.len() <= 3 => {
+        [shape, item, stages, count, requests, mode @ ..] if mode.len() <= 4 => {
             (shape, item, stages, count, requests, mode)
         }
         _ => panic!(
-            "usage: stages <operator|hop|around|around-wide|plain> <u64|large> <stages> <items> <requests> [deadline] [pending [<together>]]"
+            "usage: stages <operator|hop|around|around-wide|plain> <u64|large> <stages> <items> <requests> [<request>] [deadline] [pending [<together>]]"
         ),
     };
+    let request = mode
+        .first()
+        .map(String::as_str)
+        .filter(|m| m.ends_with("-request"))
+        .unwrap_or("u64");
+    let mode = &mode[usize::from(request != "u64")..];
     let deadline = mode.first().is_some_and(|m| m == "deadline");
     let mode = &mode[usize::from(deadline)..];
     let stages: usize = stages.parse().expect("a count of stages");
@@ -90,14 +102,25 @@ fn main() {
     }
     let runtime = builder.build().expect("a runtime");
     let allocations = runtime.block_on(async {
-        match item.as_str() {
-            "u64" => shaped::<u64>(shape, stages, run).await,
-            "large" => shaped::<Large>(shape, stages, run).await,
-            other => panic!("no item `{other}`: u64 or large"),
+        match (item.as_str(), request) {
+            ("u64", "u64") => shaped::<u64, u64>(shape, stages, run).await,
+            ("large", "u64") => shaped::<Large, u64>(shape, stages, run).await,
+            ("u64", "large-request") => shaped::<u64, LargeRequest>(shape, stages, run).await,
+            ("large", "large-request") => shaped::<Large, LargeRequest>(shape, stages, run).await,
+            ("u64", "boxed-request") => shaped::<u64, Box<LargeRequest>>(shape, stages, run).await,
+            ("large", "boxed-request") => {
+                shaped::<Large, Box<LargeRequest>>(shape, stages, run).await
+            }
+            ("u64", "copied-request") => shaped::<u64, Copied>(shape, stages, run).await,
+            ("large", "copied-request") => shaped::<Large, Copied>(shape, stages, run).await,
+            ("u64" | "large", other) => {
+                panic!("no request `{other}`: large-request, boxed-request or copied-request")
+            }
+            (other, _) => panic!("no item `{other}`: u64 or large"),
         }
     });
     println!(
-        "{shape} {item} stages={stages} items={count} requests={requests} deadline={} pending={} together={} allocations/request={:.2}",
+        "{shape} {item} stages={stages} items={count} requests={requests} request={request} deadline={} pending={} together={} allocations/request={:.2}",
         run.deadline,
         run.pending,
         run.together,
@@ -141,18 +164,78 @@ impl Item for Large {
     }
 }
 
-async fn shaped<T: Item>(shape: &str, stages: usize, run: Run) -> u64 {
-    let sink = || SinkStage::new(Arc::new(Burst::<T>::new(run.pending)));
-    let fwd = || Arc::new(Pass::<T>(PhantomData));
-    let bwd = || Arc::new(Pass::<T>(PhantomData));
+/// A request the bench can make, which says how many items to answer.
+trait Request: Send + 'static {
+    fn make(n: u64) -> Self;
+    fn count(&self) -> u64;
+}
+
+impl Request for u64 {
+    fn make(n: u64) -> Self {
+        n
+    }
+
+    fn count(&self) -> u64 {
+        *self
+    }
+}
+
+/// 2 KiB, with a field to drop, as a chat request has. The text is empty,
+/// so it allocates nothing.
+struct LargeRequest {
+    text: String,
+    words: [u64; 253],
+}
+
+impl Request for LargeRequest {
+    fn make(n: u64) -> Self {
+        Self {
+            text: String::new(),
+            words: [n; 253],
+        }
+    }
+
+    fn count(&self) -> u64 {
+        self.words[0].max(self.words[252]) + self.text.len() as u64
+    }
+}
+
+/// A boxed request built on the stack first and then copied into its box,
+/// as a request deserialized into a local and then boxed is.
+struct Copied(Box<LargeRequest>);
+
+impl Request for Copied {
+    fn make(n: u64) -> Self {
+        Self(Box::new(black_box(LargeRequest::make(n))))
+    }
+
+    fn count(&self) -> u64 {
+        self.0.count()
+    }
+}
+
+impl Request for Box<LargeRequest> {
+    fn make(n: u64) -> Self {
+        Box::new(LargeRequest::make(n))
+    }
+
+    fn count(&self) -> u64 {
+        LargeRequest::count(self)
+    }
+}
+
+async fn shaped<T: Item, Q: Request>(shape: &str, stages: usize, run: Run) -> u64 {
+    let sink = || SinkStage::new(Arc::new(Burst::<T, Q>::new(run.pending)));
+    let fwd = || Arc::new(Pass::<T, Q>(PhantomData));
+    let bwd = || Arc::new(Pass::<T, Q>(PhantomData));
     // `T` named once: an operator over a hop does not pin down its own item type.
     macro_rules! op {
         ($next:expr) => {
-            op::<T, _>($next)
+            op::<T, Q, _>($next)
         };
     }
     match (shape, stages) {
-        ("plain", _) => measure(&Plain::<T>(stages, run.pending, PhantomData), run).await,
+        ("plain", _) => measure(&Plain::<T, Q>(stages, run.pending, PhantomData), run).await,
         ("operator", 0) => measure(&Source::new(hop(sink())), run).await,
         ("operator", 1) => measure(&Source::new(hop(op!(hop(sink())))), run).await,
         ("operator", 2) => {
@@ -195,8 +278,8 @@ async fn shaped<T: Item>(shape: &str, stages: usize, run: Run) -> u64 {
             let b = (bwd(), (bwd(), (bwd(), (bwd(), (bwd(), ())))));
             measure(&Source::new(Hop::new(f, sink(), b)), run).await
         }
-        ("around", n) => paired::<T, u64>(sink(), n, run).await,
-        ("around-wide", n) => paired::<T, Wide>(sink(), n, run).await,
+        ("around", n) => paired::<T, Q, u64>(sink(), n, run).await,
+        ("around-wide", n) => paired::<T, Q, Wide>(sink(), n, run).await,
         (shape, stages) => {
             panic!(
                 "no shape `{shape}` with {stages} stages: operator, hop, around, around-wide, or plain, 0 to 5"
@@ -206,12 +289,12 @@ async fn shaped<T: Item>(shape: &str, stages: usize, run: Run) -> u64 {
 }
 
 /// One hop with `stages` nested around nodes, each keeping an `S`.
-async fn paired<T: Item, S: Default + Send + 'static>(
-    sink: SinkStage<Burst<T>>,
+async fn paired<T: Item, Q: Request, S: Default + Send + 'static>(
+    sink: SinkStage<Burst<T, Q>>,
     stages: usize,
     run: Run,
 ) -> u64 {
-    let pair = || around(Arc::new(Keep::<T, S>(PhantomData)));
+    let pair = || around(Arc::new(Keep::<T, S, Q>(PhantomData)));
     match stages {
         0 => measure(&Source::new(hop(sink)), run).await,
         1 => {
@@ -251,13 +334,13 @@ fn hop<I>(inner: I) -> Hop<(), I, ()> {
 }
 
 /// A pass-through operator over `next`.
-fn op<T, H>(next: H) -> OperatorStage<Pass<T>, H> {
+fn op<T, Q, H>(next: H) -> OperatorStage<Pass<T, Q>, H> {
     OperatorStage::new(Arc::new(Pass(PhantomData)), next)
 }
 
 /// Warm up with one-item requests, then count the allocations of
 /// `requests` requests of `count` items each.
-async fn measure<T: Item, N: Next<u64, T>>(next: &N, run: Run) -> u64 {
+async fn measure<T: Item, Q: Request, N: Next<Q, T>>(next: &N, run: Run) -> u64 {
     for _ in 0..WARM {
         together(next, 1, run).await;
     }
@@ -270,7 +353,7 @@ async fn measure<T: Item, N: Next<u64, T>>(next: &N, run: Run) -> u64 {
 
 /// One request with a root of its own, or `run.together` at once below one
 /// root.
-async fn together<T: Item, N: Next<u64, T>>(next: &N, count: u64, run: Run) {
+async fn together<T: Item, Q: Request, N: Next<Q, T>>(next: &N, count: u64, run: Run) {
     let root = if run.deadline {
         Cx::new().with_timeout(std::time::Duration::from_secs(3_600))
     } else {
@@ -284,8 +367,8 @@ async fn together<T: Item, N: Next<u64, T>>(next: &N, count: u64, run: Run) {
     }
 }
 
-async fn once<T: Item, N: Next<u64, T>>(next: &N, cx: Cx, count: u64) {
-    let items = next.generate(cx, count).await.expect("a stream");
+async fn once<T: Item, Q: Request, N: Next<Q, T>>(next: &N, cx: Cx, count: u64) {
+    let items = next.generate(cx, Q::make(count)).await.expect("a stream");
     let read = items
         .fold(0u64, |sum, item| async move {
             sum ^ item.expect("an item").read()
@@ -311,12 +394,12 @@ struct Run {
 
 /// Answers a request for `n` items with `n` ready items, after one wait
 /// when `pending`.
-struct Burst<T> {
+struct Burst<T, Q> {
     pending: bool,
-    item: PhantomData<fn() -> T>,
+    item: PhantomData<fn() -> (T, Q)>,
 }
 
-impl<T> Burst<T> {
+impl<T, Q> Burst<T, Q> {
     fn new(pending: bool) -> Self {
         Self {
             pending,
@@ -325,11 +408,12 @@ impl<T> Burst<T> {
     }
 }
 
-impl<T: Item> Sink for Burst<T> {
-    type Req = u64;
+impl<T: Item, Q: Request> Sink for Burst<T, Q> {
+    type Req = Q;
     type Item = T;
 
-    async fn generate(&self, _cx: Cx, n: u64) -> Result<Items<T>> {
+    async fn generate(&self, _cx: Cx, req: Q) -> Result<Items<T>> {
+        let n = req.count();
         let ready = futures::stream::iter((0..n).map(|i| Ok(T::make(i))));
         if !self.pending {
             return Ok(items(ready));
@@ -348,30 +432,30 @@ impl<T: Item> Sink for Burst<T> {
 }
 
 /// A pass-through stage in each role.
-struct Pass<T>(PhantomData<fn() -> T>);
+struct Pass<T, Q>(PhantomData<fn() -> (T, Q)>);
 
-impl<T: Item> Operator for Pass<T> {
-    type UpReq = u64;
+impl<T: Item, Q: Request> Operator for Pass<T, Q> {
+    type UpReq = Q;
     type UpItem = T;
-    type DownReq = u64;
+    type DownReq = Q;
     type DownItem = T;
 
-    async fn generate<N: Next<u64, T>>(&self, cx: Cx, req: u64, next: N) -> Result<Items<T>> {
+    async fn generate<N: Next<Q, T>>(&self, cx: Cx, req: Q, next: N) -> Result<Items<T>> {
         let below = next.generate(cx, req).await?;
         Ok(items(below.map(|item| item)))
     }
 }
 
-impl<T: Item> Forward for Pass<T> {
-    type In = u64;
-    type Out = u64;
+impl<T: Item, Q: Request> Forward for Pass<T, Q> {
+    type In = Q;
+    type Out = Q;
 
-    async fn forward(&self, _cx: &Cx, req: u64) -> Result<u64> {
+    async fn forward(&self, _cx: &Cx, req: Q) -> Result<Q> {
         Ok(req)
     }
 }
 
-impl<T: Item> Backward for Pass<T> {
+impl<T: Item, Q: Request> Backward for Pass<T, Q> {
     type In = T;
     type Out = T;
 
@@ -380,19 +464,22 @@ impl<T: Item> Backward for Pass<T> {
     }
 }
 
+/// Names the types a bench node is generic over, without holding them.
+type Marker<T> = PhantomData<fn() -> T>;
+
 /// A pass-through around node that keeps an `S`. Its backward half maps
 /// its stream as `Pass` does, and names the state on each item so that the
 /// state is kept: a closure that never used it would not capture it.
-struct Keep<T, S>(PhantomData<fn() -> (T, S)>);
+struct Keep<T, S, Q>(Marker<(T, S, Q)>);
 
-impl<T: Item, S: Default + Send + 'static> Around for Keep<T, S> {
-    type UpReq = u64;
+impl<T: Item, S: Default + Send + 'static, Q: Request> Around for Keep<T, S, Q> {
+    type UpReq = Q;
     type UpItem = T;
-    type DownReq = u64;
+    type DownReq = Q;
     type DownItem = T;
     type State = S;
 
-    async fn forward(&self, _cx: &Cx, req: u64) -> Result<(u64, S)> {
+    async fn forward(&self, _cx: &Cx, req: Q) -> Result<(Q, S)> {
         Ok((req, S::default()))
     }
 
@@ -414,17 +501,17 @@ impl Default for Wide {
 }
 
 /// The control: the sink, then `.0` boxed maps, called directly.
-struct Plain<T>(usize, bool, PhantomData<fn() -> T>);
+struct Plain<T, Q>(usize, bool, PhantomData<fn() -> (T, Q)>);
 
-impl<T> Clone for Plain<T> {
+impl<T, Q> Clone for Plain<T, Q> {
     fn clone(&self) -> Self {
         Self(self.0, self.1, PhantomData)
     }
 }
 
-impl<T: Item> Next<u64, T> for Plain<T> {
-    async fn generate(&self, cx: Cx, n: u64) -> Result<Items<T>> {
-        let mut out = Burst::<T>::new(self.1).generate(cx, n).await?;
+impl<T: Item, Q: Request> Next<Q, T> for Plain<T, Q> {
+    async fn generate(&self, cx: Cx, req: Q) -> Result<Items<T>> {
+        let mut out = Burst::<T, Q>::new(self.1).generate(cx, req).await?;
         for _ in 0..self.0 {
             out = items(out.map(|item| item));
         }

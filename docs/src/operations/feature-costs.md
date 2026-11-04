@@ -931,3 +931,27 @@ cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/re
 - **`items/gdl` does not change** beyond its spread. Its request is a `u64`.
 - **The runtime's segment rows do not change** beyond their spread. `requests sizes 0` prints 11,504 B for the front's call future at both commits.
 - **The crossing does not change.** `uv run --script scripts/bench/items.py count` (cores 16 to 23, five rounds) gives 8,937 and 9,117 user instructions per item at 16 B, and 10,334 and 10,182 at 1 KiB, inside the band of [crossing-item-send](hot-paths.md#crossing-item-send).
+
+**A large request, by value and in a box.** The `stages` example sends a request of 2,048 B with a field to drop (`large-request`), the same request built in a `Box` (`boxed-request`), or built on the stack and then boxed (`copied-request`), as a request deserialized into a value and then boxed is. A `memcpy` interposer, loaded with `LD_PRELOAD`, counted the copies of 1 KiB or more per request, the count at 400 one-item requests minus the count at 200, divided by 200. A build with line tables mapped each copy to its source line. Ir is callgrind's, as in [Stages in callgrind Ir](#stages-in-callgrind-ir), two rounds, which agreed within 0.1 Ir. On an aarch64 host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 4 to 6, rustc 1.93.1, the release profile, valgrind 3.28.0, at `49fa7a49`. Per request, copies of 1 KiB or more, Ir, and allocations:
+
+| Shape, stages | `u64` request | 2 KiB by value | 2 KiB built in its box | 2 KiB copied into its box |
+|---|---|---|---|---|
+| `hop` 0 (one hop) | 0, 2,880 Ir, 7 | 4, 4,146 Ir, 7 | 0, 3,403 Ir, 8 | 1, 3,678 Ir, 8 |
+| `hop` 1 | 0, 3,350 Ir, 9 | 7, 5,464 Ir, 9 | 0, 3,884 Ir, 10 | 1, 4,155 Ir, 10 |
+| `hop` 5 | 0, 7,443 Ir, 21 | 19, 13,056 Ir, 21 | 0, 8,036 Ir, 22 | 1, 8,308 Ir, 22 |
+| `around` 1 | 0, 3,367 Ir, 9 | 7, 5,490 Ir, 9 | 0, 3,905 Ir, 10 | 1, 4,176 Ir, 10 |
+| `around` 5 | 0, 7,572 Ir, 21 | 15, 12,105 Ir, 21 | 0, 8,172 Ir, 22 | 1, 8,444 Ir, 22 |
+| `operator` 1 | 0, 5,033 Ir, 12 | 10, 8,176 Ir, 12 | 0, 5,569 Ir, 13 | 1, 5,844 Ir, 13 |
+| `operator` 5 | 0, 15,079 Ir, 32.2 | 35, 27,206 Ir, 32.2 | 0, 16,438 Ir, 33.2 | 1, 16,711 Ir, 33.2 |
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example stages
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <hop|around|operator> u64 <0|1|5> 1 <200|400> [large-request|boxed-request|copied-request]
+LD_PRELOAD=<memcpy interposer> target/release/examples/stages <hop|around|operator> u64 <0|1|5> 1 <200|400> large-request
+```
+
+- **By value, a hop copies the request 4 times, and each forward or around node 3 more.** The hop's 4: into the forward chain's first future, into the inner end's call, and the inner end's future, which holds the request, moved twice by its `.await`. A node's 3: into its `forward` future, and its result twice on the way into the next stage's future. The compiler places the next future's request 8 B past the slot of the result, in the same future, so the two overlap and it copies through a stack temporary. Nested around nodes skip one of those copies at some levels: 15 copies at 5 stages, not 19. The bench's nodes move nothing themselves; every copy is gdl's. A 2 KiB copy costs about 300 Ir. Fat and thin LTO give the same counts.
+- **In a box, nothing copies the request**, through hops, around nodes, and operators alike. The box costs one allocation per request, and about 520 Ir at one hop against a `u64` request: the allocation, filling the request, and freeing it. A stage then costs 11 to 15 Ir more than with a `u64` request. A request built on the stack and then boxed is copied once more, about 275 Ir.
+- **gdl does not box a request for its nodes.** A node takes its request by value, so a box inside the chain would be copied out into every node and boxed again after it, and a small request would pay an allocation for nothing. The message type is the node author's choice ([Write nodes](../guides/write-nodes.md#box-a-large-request)).
+- **Rejected: an in-place node form.** A trait whose node edits `&mut Req`, with `Forward` given by a blanket impl, let a run of such nodes copy the request once. At 5 nodes and 2 KiB it was 5 copies and 9,026 Ir, where a box was 0 and 8,036. It helps only a node whose request type is the same in and out, and it cost a `u64` request about 40 Ir per run. A default `forward_in_place` on `Forward` that calls `forward` cannot be written without `unsafe`: it would move the request out of a `&mut`.
+- **Rejected: pinning the inner end's call where it is built.** It removed the 2 moves of the inner end's future, about 565 Ir per hop at 2 KiB, but cost a `u64` request 2 to 7 Ir per hop. Three other forms of the forward chain's code moved none of a node's 3 copies.

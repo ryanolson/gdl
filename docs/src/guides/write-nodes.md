@@ -48,6 +48,26 @@ Use an `Around` instead of an `Operator` when the node would call `next` exactly
 - Make the checks that only need the request in `forward`. An `Err` there is the call's error. In `backward`, the same failure is an error item in the stream.
 - A node may hold any value its constructor builds, such as a handle to the hop below that hand-written composition code builds. Work sent through it runs outside the attempt ([Known limitations](../operations/limitations.md#work-sent-through-a-handle-a-node-holds-runs-outside-the-attempt)).
 
+## Box a large request
+
+A request goes through a hop by value. Each hop copies it 4 times, each forward node and around node about 3 times more, and each operator stage about 6. A small request costs nothing to copy, but a large one does: a 2 KiB request was copied 19 times through one hop with 5 forward nodes, about 300 instructions each ([Feature costs](../operations/feature-costs.md#copies-of-a-request)).
+
+For a request of a few hundred bytes or more, make the port's message type a box, so that the hop moves a pointer:
+
+```rust
+impl gdl::Forward for Translate {
+    type In = Box<ChatRequest>;
+    type Out = Box<EngineRequest>;
+    async fn forward(&self, cx: &Cx, req: Box<ChatRequest>) -> Result<Box<EngineRequest>> { /* .. */ }
+}
+```
+
+- A box costs one allocation per request. At 5 forward nodes with a 2 KiB request it brought a request from 19 copies and 13,056 instructions to none and 8,036. At one hop with no nodes, a box costs about 520 instructions more than a `u64` request.
+- Build the request in its box where you can, as `Box::new(ChatRequest { .. })`. A request built on the stack and then boxed, as one deserialized into a value is, is copied once into its box.
+- A node that changes the request type makes a new box, one more allocation.
+- An operator that retries keeps its request and clones it for each attempt. A boxed request clones into a new box: one allocation and one copy.
+- gdl does not box a request for you. A node takes its request by value, so a box inside gdl would be copied out into every node, and a small request would pay an allocation for nothing.
+
 ## Build and readiness
 
 A segment binary builds each node it hosts from that node's settings table, `[node.<Name>]`:
