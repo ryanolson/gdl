@@ -49,6 +49,8 @@ fn manifest() -> Manifest {
             name: name.into(),
             role: Role::Forward,
             binding: Some(name.to_lowercase()),
+            calls: Vec::new(),
+            unary: None,
         });
     }
     let hop = &mut manifest.hops[1];

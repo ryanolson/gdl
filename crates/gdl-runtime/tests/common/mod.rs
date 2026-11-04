@@ -756,6 +756,8 @@ pub fn reference_manifest(wire: impl Fn(&str) -> bool) -> gdl_runtime::Manifest 
         name: name.to_string(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let ty = |name: &str| TypeInfo::new(name, wire(name), Default::default());
     let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();

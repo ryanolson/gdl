@@ -22,6 +22,8 @@ pub(super) fn spec() -> DeploymentSpec {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let graph = Manifest {
         name: "drains-test".into(),

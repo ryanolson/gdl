@@ -22,6 +22,7 @@ pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_
 pub use config::build_node;
 pub use decl::{
     Absent, AroundDecl, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl,
+    UnaryDecl,
 };
 pub use declared::{EntryNeed, declare_properties};
 #[doc(hidden)]
@@ -48,8 +49,8 @@ pub use gdl_model::{
     CrossingReport, DeploymentSpec, Direction, DirectoryBackend, Encoding, GraphConfig,
     HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
     Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed,
-    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason,
-    layout, resolve_config,
+    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, UnaryInfo,
+    WireReason, layout, resolve_config,
 };
 #[cfg(feature = "hub")]
 pub use gdl_pools::PoolState;

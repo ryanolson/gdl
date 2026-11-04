@@ -451,11 +451,15 @@ async fn an_entry_with_a_source_is_confirmed_and_still_takes_external_work() {
             name: "X".into(),
             role: Role::Source,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         },
         NodeInfo {
             name: "Y".into(),
             role: Role::Sink,
             binding: Some("y".into()),
+            calls: Vec::new(),
+            unary: None,
         },
     ]);
     graph.hops.push(HopInfo {
@@ -644,11 +648,15 @@ fn spec_with_source_in_pool() -> DeploymentSpec {
             name: "X".into(),
             role: Role::Source,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         },
         NodeInfo {
             name: "Y".into(),
             role: Role::Sink,
             binding: Some("y".into()),
+            calls: Vec::new(),
+            unary: None,
         },
     ]);
     graph.hops.push(HopInfo {

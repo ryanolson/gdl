@@ -16,11 +16,15 @@ async fn a_later_pool_drain_releases_a_stopped_source_on_a_returning_path() {
             name: "X".into(),
             role: Role::Source,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         },
         NodeInfo {
             name: "Y".into(),
             role: Role::Sink,
             binding: Some("y".into()),
+            calls: Vec::new(),
+            unary: None,
         },
     ]);
     graph.hops.push(HopInfo {

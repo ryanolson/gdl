@@ -20,7 +20,7 @@
 //! that the spec binds, so that a spec that binds none keeps its golden
 //! crates (`crates/gdl-gen/tests/fixtures/golden`).
 //!
-//! A crossing is its check (`crosses` or `anchors`), its alias, and its
+//! A crossing is its check (`crosses`, `anchors` or `calls`), its alias, and its
 //! port: the receiving node, the declaration trait, the port, and `head` or
 //! `item` for one part of a streamed port. `serve` is `json_lines`, `none`,
 //! `frontend Node = path`, or `service { ... }`: the frontend, the clients'
@@ -54,7 +54,7 @@ pub(crate) struct Segment {
 
 /// A message checked to be a wire type.
 pub(crate) struct Crossing {
-    /// `crosses` or `anchors`.
+    /// `crosses`, `anchors` or `calls`.
     pub(crate) check: Ident,
     pub(crate) alias: Ident,
     pub(crate) node: Ident,

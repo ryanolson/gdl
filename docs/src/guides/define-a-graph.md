@@ -59,6 +59,37 @@ An entry adapter or a pool policy reads a kind too. It says so outside the graph
 
 `cargo gdl check` and `cargo gdl build` then check, in each layout, that each kind a node, an adapter, or a policy needs from a class is supplied: a node in an entry segment of the class provides it, or `[pools.<class>] provides` names it. Otherwise they fail, naming the kind, the reader, and the class. When a segment starts, each node that sets or reads a kind must use the declared type. A node may set only a kind that a node of its segment provides, and read only a kind that a node or an entry adapter of its segment needs.
 
+## Declare unary nodes
+
+A unary node takes one request and returns one response. It is not on a hop: a node reaches it through its `calls` clause.
+
+```text
+name = "routed", schema = 1;
+unary    Tokenize: Text -> Tokens idempotent;
+unary    Overlap: Blocks -> Scores calls Tokenize;
+source   Front: Ask -> stream Answer;
+operator Router: (Ask -> stream Answer) over (Ask -> stream Answer) calls Tokenize, Overlap;
+sink     Engine: Ask -> stream Answer;
+topology: Front => Router { Engine };
+```
+
+- `unary <Name>: <Req> -> <Resp>;` goes among the nodes. Neither type is streamed.
+- `idempotent` after a unary node's signature is the service author's promise: the service is safe to run twice, also at the same time. Only a unary node takes it.
+- `calls A, B` after any node's signature names the unary nodes it calls. A unary node may call another. A built-in identity calls nothing.
+- `calls`, `idempotent`, `provides`, and `needs` come in any order, and each is said once.
+- A unary node cannot provide or need a property yet ([Known limitations](../operations/limitations.md#a-unary-node-cannot-provide-or-need-a-property-yet)).
+
+`graph!`, `cargo gdl check`, and `cargo gdl generate` refuse each of these, and name the node and the clause:
+
+- a name in `calls` that no `unary` declares;
+- a node of the topology in `calls`;
+- a unary node in the topology;
+- a cycle of `calls`, through unary nodes;
+- a name twice in one `calls` list.
+- `provides` or `needs` on a unary node.
+
+The contract hash covers each unary node, with its types and `idempotent`, and each node's `calls`, in any order they are written. Where a unary node may run is the placement's to say ([Unary nodes](../concepts/placement.md#unary-nodes)). A generated segment does not host a unary node's implementation: the contract's `Bindings` has no slot for one ([Known limitations](../operations/limitations.md#a-generated-segment-hosts-no-unary-node)).
+
 ## Offer the messages
 
 A protocols crate depends on `gdl-message` and derives `Message` for each type the graph names, as [Messages and encodings](../concepts/messages.md#offering-a-message) shows. Every type needs `Serialize` and `DeserializeOwned` to cross segments, and must be `Send + 'static`.

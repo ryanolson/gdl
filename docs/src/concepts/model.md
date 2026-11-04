@@ -14,7 +14,7 @@ Each node has one of seven roles:
 | sink | the request | Produces the item stream. |
 | backward | the response stream only | Changes the item stream on its way out. |
 | around | the request, then the response stream | A forward half and a backward half in one hop, with a value kept from one to the other for each attempt. See [Around nodes](#around-nodes). |
-| unary | one request, then one response | Answers a request with one value. It is not in a hop: another node calls it through a `UnaryClient`. See [Unary services](#unary-services). |
+| unary | one request, then one response | Answers a request with one value. It is not in a hop: another node calls it through a `UnaryClient`. See [Unary services](#unary-services). The graph declares it with `unary`, and each caller says `calls` ([Declare unary nodes](../guides/define-a-graph.md#declare-unary-nodes)). |
 
 An operator and a source keep per-request state across both directions in one task. So each of them is placed whole, in one segment. An around node keeps a value across directions too, and both its halves must run in one task: with the hop's outer end, or with its inner end ([Specs, segments, and layouts](placement.md#what-is-checked-and-when)). A forward or backward node holds no state across directions, so a placement can put it anywhere.
 

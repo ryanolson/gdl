@@ -17,6 +17,8 @@ fn manifest() -> Manifest {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     Manifest {
         name: "classed".into(),
@@ -411,7 +413,7 @@ fn every_pool_policy_problem_is_reported_together() {
         .pool_policy("model_x", policy("Bad"));
     let errors = refusals(&placement);
     for expected in [
-        "request router `S` must target a request boundary",
+        "request router `S` must target a request boundary or a unary node",
         "pool policy `[pools.zz]`: the placement has no class `zz`",
         "pool policy `[pools.global]`: no class boundary enters class `global`",
         "pool policy `[pools.model_x]`: policy name `Bad` must be",
@@ -429,7 +431,7 @@ fn every_pool_policy_problem_is_reported_together() {
     assert_eq!(
         refusals(&plain),
         [
-            "request router `S` must target a request boundary",
+            "request router `S` must target a request boundary or a unary node",
             "pool policy `[pools.model_x]`: the placement has no classes",
         ]
     );
@@ -552,7 +554,7 @@ fn a_spelled_default_for_a_missing_name_is_refused() {
         ),
         (
             "[routing]\nGhost = 'round_robin'\n",
-            "request router `Ghost` must target a request boundary",
+            "request router `Ghost` must target a request boundary or a unary node",
         ),
     ] {
         let spelled = parsed(extra);

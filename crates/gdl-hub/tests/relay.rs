@@ -244,6 +244,8 @@ fn chain() -> DeploymentSpec {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let hop = |outer: &str, inner: &str| HopInfo {
         outer: outer.into(),

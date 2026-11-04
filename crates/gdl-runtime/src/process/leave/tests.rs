@@ -166,6 +166,8 @@ mod launched {
             name: name.into(),
             role,
             binding: (role != gdl_model::Role::Source).then(|| name.to_lowercase()),
+            calls: Vec::new(),
+            unary: None,
         };
         let graph = gdl_model::Manifest {
             name: "alone".into(),

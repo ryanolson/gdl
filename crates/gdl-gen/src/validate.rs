@@ -565,7 +565,11 @@ pub(crate) fn validate(
     }
     // A graph spec has reported each node that did not bind already.
     for node in &manifest.nodes {
-        if !graph_spec && node.binding.is_some() && !spec.bind.contains_key(&node.name) {
+        if !graph_spec
+            && node.binding.is_some()
+            && node.role != gdl_model::Role::Unary
+            && !spec.bind.contains_key(&node.name)
+        {
             problems.push(format!("node `{}` has no [bind.{}]", node.name, node.name));
         }
         if node.role == gdl_model::Role::Sink && node.binding.is_none() {

@@ -174,6 +174,7 @@ pub(crate) fn port_types(sig: &Sig) -> Vec<&Type> {
         std::iter::once(&req.head).chain(&req.item)
     }
     match sig {
+        Sig::Unary { req, resp } => vec![req, resp],
         Sig::Source { req, item } | Sig::Sink { req, item } => {
             request(req).chain(std::iter::once(item)).collect()
         }

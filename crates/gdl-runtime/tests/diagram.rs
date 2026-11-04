@@ -218,11 +218,15 @@ fn names_and_types_are_escaped() {
                 name: "start".to_string(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "end".to_string(),
                 role: Role::Sink,
                 binding: Some("end".to_string()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {
@@ -302,11 +306,15 @@ fn a_layout_of_another_graph_is_refused() {
                 name: "X".to_string(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "Y".to_string(),
                 role: Role::Sink,
                 binding: Some("y".to_string()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {
@@ -364,11 +372,15 @@ fn a_type_named_by_its_path_is_labeled_by_its_name() {
                 name: "A".to_string(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "B".to_string(),
                 role: Role::Sink,
                 binding: Some("b".to_string()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {

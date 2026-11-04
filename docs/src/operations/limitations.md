@@ -126,9 +126,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Test:** `egress_hold_and_wait_at_the_limit_is_refused_not_hung` in `crates/gdl-runtime/tests/inputs.rs`.
 
 ### A unary service is called only in its caller's process
-- **What:** a `UnaryClient` calls a service that runs in the caller's process. A graph file cannot declare a unary node or a node's calls, and a generated segment gives its nodes no client.
+- **What:** a `UnaryClient` calls a service that runs in the caller's process. A graph can declare unary nodes and calls, but a generated segment gives its nodes no client ([A generated segment hosts no unary node](#a-generated-segment-hosts-no-unary-node)).
 - **When:** always. A node gets a client only in local composition, where the code that builds the nodes makes it from the service.
-- **Why:** the client's call to another segment, and the graph's declaration of services and their callers, are not built. See [Unary services](../concepts/model.md#unary-services).
+- **Why:** the client's call to another segment is not built. See [Unary services](../concepts/model.md#unary-services).
 - **Workaround:** build the service and its callers in one place, and give each caller a client of that service.
 
 ## Bring-up, shutdown, and membership
@@ -364,6 +364,20 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** draw the graph in the composer. It lowers each enabled endpoint to its own root, followed by its adapters as ordinary graph nodes. A placement can put those in any segment. See [Several roots and shared sinks](../guides/frontends.md#several-roots-and-shared-sinks).
 - **Lifts:** placing entry adapters on their own in a service spec.
 
+### A call stays in its class
+- **What:** `check` and `generate` refuse a caller whose segment has no copy of a unary node it calls, when the one copy it would call is in another class.
+- **Why:** an instance in a pool waits for, and routes to, only its own class's segments. The class boundary rule covers hops, not calls. See [Specs, segments, and layouts](../concepts/placement.md#unary-nodes).
+- **Workaround:** list the unary node in a segment of the caller's class. Copies share no state.
+
+### A generated segment hosts no unary node
+- **What:** a graph may declare unary nodes and `calls`, and a placement may list them, but a generated segment binds no implementation of a unary node, and no node can call one. The contract's `Bindings` has no slot for a unary node.
+- **Workaround:** none in a generated segment. Call the service's code as a plain Rust type from the caller's node.
+
+### A unary node cannot provide or need a property yet
+- **What:** `check`, `generate`, and `graph!` refuse `provides` or `needs` on a unary node, naming the node and the clause.
+- **Why:** the property checks find the segment of each node that provides or needs a kind, and a unary node may be in several segments.
+- **Workaround:** provide or read the property in the node that calls the unary node, and pass what the service needs in its request.
+
 ## Logs
 
 ### A segment binary does not show records of the `log` crate
@@ -434,6 +448,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the catalogue reader and generator resolve marked message re-exports. The composer omits them from its message list. A frontend can have empty message selectors when its canonical messages are private, even with public marked exports. The composer does not list an instantiation of a generic message either. A node whose ports carry it still composes, and the graph file names it by its alias. When a user moves a node to another segment, the page takes each instantiation at the new cut for local, whatever the reader or a probe says, and refuses the move. The server's checks take the catalogue's reading.
 - **Why:** the composer fills these controls from public `messages` entries, without `exports` entries and their canonical identities.
 - **Lifts:** marked exports in the message controls, with their original message identities. See [Compose in the browser](../guides/composer.md).
+
+### A diagram draws no `calls`, and with a layout no unary node
+- **What:** `cargo gdl diagram` draws a unary node only without a layout, and draws no edge for a `calls` clause. With a layout, it draws each segment's nodes of the topology.
+- **Workaround:** read the `calls` clauses in the graph file.
 
 ### The composer's server cannot build crates that need CUDA
 - **What:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages cannot be built on a server without CUDA. With `--docker`, **Build and apply** builds every segment in the deployment's one build image (`build_image`). A segment whose crates need CUDA builds only if that image has the CUDA toolkit.

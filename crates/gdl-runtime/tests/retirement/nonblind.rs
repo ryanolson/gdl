@@ -17,6 +17,8 @@ async fn a_late_drain_preserves_a_nonblind_interiors_source_exit() {
             name: name.into(),
             role,
             binding: (role != Role::Source).then(|| name.to_lowercase()),
+            calls: Vec::new(),
+            unary: None,
         });
     }
     graph.hops.push(HopInfo {

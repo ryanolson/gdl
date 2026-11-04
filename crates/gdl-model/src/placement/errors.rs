@@ -192,6 +192,67 @@ pub enum PlacementError {
         /// Why the edge must be encoded.
         reason: WireReason,
     },
+    /// A node's `calls` names a node the graph does not declare as unary.
+    UnknownService {
+        /// The calling node.
+        node: String,
+        /// The name in its `calls`.
+        service: String,
+    },
+    /// A node's `calls` names a node of the topology.
+    CallsPipelineNode {
+        /// The calling node.
+        node: String,
+        /// The name in its `calls`.
+        service: String,
+        /// The named node's role.
+        role: Role,
+    },
+    /// The `calls` clauses make a cycle.
+    CallCycle {
+        /// The unary nodes on the cycle, from the first in name order, each
+        /// calling the next and the last calling the first.
+        nodes: Vec<String>,
+    },
+    /// A unary node provides or needs a property kind.
+    UnaryProperty {
+        /// The unary node.
+        node: String,
+        /// The clause as the graph writes it: `provides model`, or
+        /// `needs model from sets`.
+        clause: String,
+    },
+    /// A unary node is on a hop of the topology.
+    UnaryInTopology {
+        /// The unary node.
+        node: String,
+    },
+    /// A caller in one class has no copy of a service it calls in its own
+    /// segment, and the one copy it would call is in another class.
+    CallAcrossClasses {
+        /// The calling node.
+        node: String,
+        /// The caller's segment.
+        segment: String,
+        /// The unary node it calls.
+        service: String,
+        /// The caller's class.
+        from: String,
+        /// The class of the service's segment.
+        into: String,
+    },
+    /// A caller has no copy of a service it calls in its own segment, and
+    /// copies sit in more than one other segment.
+    CallAmbiguous {
+        /// The calling node.
+        node: String,
+        /// The caller's segment.
+        segment: String,
+        /// The unary node it calls.
+        service: String,
+        /// Every segment that lists the service.
+        segments: Vec<String>,
+    },
 }
 
 /// Why an edge must be encoded.
@@ -203,6 +264,9 @@ pub enum WireReason {
     /// anchor because the hop's forward path leaves that segment and comes
     /// back.
     AnchorCarried,
+    /// A node calls a unary node whose only copy is in another segment: the
+    /// edge carries the call's request and its response.
+    Call,
 }
 
 impl PlacementError {
@@ -217,7 +281,17 @@ impl PlacementError {
                 at("routing".into(), Some(node))
             }
             // A message type that cannot cross is the graph's to change.
-            Self::InvalidManifest(_) | Self::NotWire { .. } => (None, None),
+            Self::InvalidManifest(_)
+            | Self::NotWire { .. }
+            | Self::UnknownService { .. }
+            | Self::CallsPipelineNode { .. }
+            | Self::CallCycle { .. }
+            | Self::UnaryInTopology { .. }
+            | Self::UnaryProperty { .. } => (None, None),
+            // The caller's segment takes a copy of the service.
+            Self::CallAcrossClasses { segment, .. } | Self::CallAmbiguous { segment, .. } => {
+                at(format!("segment.{segment}"), Some("nodes"))
+            }
             Self::UnknownNode { segment, .. } | Self::EmptySegment { segment } => {
                 at(format!("segment.{segment}"), Some("nodes"))
             }
@@ -257,9 +331,10 @@ impl PlacementError {
 impl fmt::Display for PlacementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRouter(node) => {
-                write!(f, "request router `{node}` must target a request boundary")
-            }
+            Self::InvalidRouter(node) => write!(
+                f,
+                "request router `{node}` must target a request boundary or a unary node"
+            ),
             Self::InvalidSelector { node, reason } => {
                 write!(f, "request router `{node}`: {reason}")
             }
@@ -268,9 +343,10 @@ impl fmt::Display for PlacementError {
                 write!(f, "segment `{segment}` lists unknown node `{node}`")
             }
             Self::Unplaced { node } => write!(f, "node `{node}` is in no segment"),
-            Self::PlacedTwice { node, segments } => {
-                write!(f, "node `{node}` is in several segments: {segments:?}")
-            }
+            Self::PlacedTwice { node, segments } => write!(
+                f,
+                "node `{node}` is in several segments: {segments:?}; only a unary node may be"
+            ),
             Self::EmptySegment { segment } => write!(f, "segment `{segment}` has no nodes"),
             Self::InvalidClassName { class, reason } => write!(f, "class `{class}`: {reason}"),
             Self::UnknownSegment { class, segment } => {
@@ -364,12 +440,72 @@ impl fmt::Display for PlacementError {
                 let why = match reason {
                     WireReason::Crossing => "crosses a segment boundary",
                     WireReason::AnchorCarried => "is carried by a reply anchor",
+                    WireReason::Call => {
+                        return write!(
+                            f,
+                            "`{from}` calls `{to}` in another segment, but `{ty}` is not serializable; a remote call encodes its request and its response"
+                        );
+                    }
                 };
                 write!(
                     f,
                     "edge `{from}` -> `{to}` {why}, but its type `{ty}` is not serializable"
                 )
             }
+            Self::UnknownService { node, service } => write!(
+                f,
+                "node `{node}` has `calls {service}`, but the graph declares no unary node `{service}`: declare it with `unary {service}: <Req> -> <Resp>;`"
+            ),
+            Self::CallsPipelineNode {
+                node,
+                service,
+                role,
+            } => write!(
+                f,
+                "node `{node}` has `calls {service}`, but `{service}` is a {} in the topology; `calls` names only unary nodes",
+                role.name()
+            ),
+            Self::CallCycle { nodes } => {
+                let mut text = String::new();
+                for (index, node) in nodes.iter().enumerate() {
+                    let next = &nodes[(index + 1) % nodes.len()];
+                    if index > 0 {
+                        text.push_str(", and ");
+                    }
+                    text.push_str(&format!("`{node}` calls `{next}`"));
+                }
+                write!(
+                    f,
+                    "the `calls` clauses make a cycle: {text}; a unary node may call another only when no chain of calls leads back to it"
+                )
+            }
+            Self::UnaryProperty { node, clause } => write!(
+                f,
+                "unary node `{node}` has `{clause}`; a unary node cannot provide or need a property"
+            ),
+            Self::UnaryInTopology { node } => write!(
+                f,
+                "unary node `{node}` is in the topology; a unary node is on no hop, and a node reaches it with `calls {node}`"
+            ),
+            Self::CallAcrossClasses {
+                node,
+                segment,
+                service,
+                from,
+                into,
+            } => write!(
+                f,
+                "node `{node}` in segment `{segment}` of class `{from}` has `calls {service}`, but the only copy of `{service}` is in class `{into}`; a call stays in its class: list `{service}` in a segment of class `{from}`"
+            ),
+            Self::CallAmbiguous {
+                node,
+                segment,
+                service,
+                segments,
+            } => write!(
+                f,
+                "node `{node}` in segment `{segment}` has `calls {service}`, but `{segment}` lists no copy of `{service}`, and copies sit in several segments: {segments:?}; list `{service}` in `{segment}`, or in only one other segment"
+            ),
         }
     }
 }

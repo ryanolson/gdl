@@ -194,6 +194,8 @@ async fn a_placement_without_classes_follows_nothing() {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let graph = Manifest {
         name: "unclassed".into(),

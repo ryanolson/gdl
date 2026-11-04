@@ -1,0 +1,9 @@
+// The around fixture's graph, with a unary node that `Keep` calls. The
+// node is declared, checked and hashed; no generated segment hosts its
+// implementation.
+name = "unary", schema = 1;
+unary  Tok: Text -> Text idempotent;
+source Front: Text -> stream Text;
+around Keep: (Text -> stream Text) over (Text -> stream Text) calls Tok;
+sink   Echo: Text -> stream Text;
+topology: Front => Keep { Echo };

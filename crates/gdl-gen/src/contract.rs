@@ -159,6 +159,7 @@ pub(crate) fn signature(sig: &Sig, path: &dyn Fn(&str) -> String) -> String {
         ),
         Sig::Forward { input, output } => format!("{} -> {}", request(input), request(output)),
         Sig::Backward { input, output } => format!("{} -> {}", ty(input), ty(output)),
+        Sig::Unary { req, resp } => format!("{} -> {}", ty(req), ty(resp)),
     }
 }
 
@@ -233,6 +234,13 @@ fn nested(
 /// signature: empty for a node that does neither.
 fn clauses(node: &gdl_syntax::Node) -> String {
     let mut text = String::new();
+    if node.idempotent {
+        text.push_str(" idempotent");
+    }
+    if !node.calls.is_empty() {
+        let services: Vec<String> = node.calls.iter().map(ToString::to_string).collect();
+        text.push_str(&format!(" calls {}", services.join(", ")));
+    }
     if !node.provides.is_empty() {
         let kinds: Vec<String> = node.provides.iter().map(ToString::to_string).collect();
         text.push_str(&format!(" provides {}", kinds.join(", ")));

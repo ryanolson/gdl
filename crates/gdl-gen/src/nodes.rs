@@ -75,6 +75,17 @@ pub(crate) fn bind(
 
     let mut binds = BTreeMap::new();
     for node in &graph.nodes {
+        // A generated segment does not host a unary node's implementation:
+        // a unary node has no slot in the contract's `Bindings`.
+        if node.role() == Role::Unary {
+            if pins.contains_key(&node.ident.to_string()) {
+                problems.push(format!(
+                    "[nodes] pin.{0}: unary node `{0}` takes no implementation in a generated segment",
+                    node.ident
+                ));
+            }
+            continue;
+        }
         // A programmatic source has no service to build. A pin opts into a
         // hosted frontend instead of selecting one by a coincidental name.
         if node.role() == Role::Source && !pins.contains_key(&node.ident.to_string()) {
@@ -195,6 +206,7 @@ fn check(
         Sig::Backward { .. } => Role::Backward,
         Sig::Operator { .. } => Role::Operator,
         Sig::Around { .. } => Role::Around,
+        Sig::Unary { .. } => Role::Unary,
     };
     if entry.role != role {
         problems.push(format!(
@@ -217,6 +229,10 @@ fn check(
             vec![("Req", request(req)), ("Item", (message(item), None))]
         }
         Sig::Forward { input, output } => vec![("In", request(input)), ("Out", request(output))],
+        Sig::Unary { req, resp } => vec![
+            ("Req", (message(req), None)),
+            ("Resp", (message(resp), None)),
+        ],
         Sig::Backward { input, output } => {
             vec![
                 ("In", (message(input), None)),

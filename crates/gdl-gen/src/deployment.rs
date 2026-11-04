@@ -1222,6 +1222,8 @@ mod tests {
             name: name.into(),
             role,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         };
         Manifest {
             name: "g".into(),

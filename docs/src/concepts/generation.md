@@ -96,7 +96,7 @@ error[E0277]: `T` crosses between segments but is not a wire type
 
 A streamed port crosses as its head and its item, `Gateway_to_Resample_head` and `_item`, each checked apart.
 
-A response that returns through an anchor inside one segment, because its hop leaves the segment and comes back, is asserted the same way. Its error says `returns through an anchor`. Both assertions read the same list of edges as the placement check, so the two cannot disagree. The source's segment also asserts the request and item types its binary reads and writes as JSON lines, unless a crossing already asserts them. Their errors point at `reads_json` or `writes_json` in the call's `feeds`.
+A response that returns through an anchor inside one segment, because its hop leaves the segment and comes back, is asserted the same way. Its error says `returns through an anchor`. A call to a unary node in another segment is asserted too, in the caller's segment and in the service's: its request and its response, as `calls Keep_calls_Tok_req = Tok UnaryDecl Req;`. Its error says `is carried by a call to another segment`. The assertions read the same edges and calls as the placement check, so the two cannot disagree. The source's segment also asserts the request and item types its binary reads and writes as JSON lines, unless a crossing already asserts them. Their errors point at `reads_json` or `writes_json` in the call's `feeds`.
 
 A wrong "wire" from the reader fails the segment's build with one error that names the message and the crossing. A wrong "local" makes the generator refuse a cut that would work. `cargo gdl extract --verify` finds both.
 

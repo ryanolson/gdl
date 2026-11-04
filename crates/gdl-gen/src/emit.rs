@@ -183,7 +183,8 @@ pub(crate) fn files(
 /// A streamed request crosses as its head and its item, each asserted
 /// apart; a head of `()` needs no assertion. A response an anchor carries
 /// is asserted by `anchors`, whose error says so, and a crossing by
-/// `crosses`.
+/// `crosses`. The request and response of a call to a unary node in
+/// another segment are asserted by `calls`, in both segments.
 fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<Crossing>, Error> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -248,6 +249,7 @@ fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<
             let check = match wire.reason {
                 WireReason::Crossing => "crosses",
                 WireReason::AnchorCarried => "anchors",
+                WireReason::Call => unreachable!("a hop's edges carry no call"),
             };
             let ty = &types[edge];
             match &ty.stream {
@@ -264,6 +266,43 @@ fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<
                         format!("{name}_item"),
                         format!("{port} item"),
                         check,
+                    );
+                }
+            }
+        }
+    }
+    // A call to a unary node in another segment encodes its request and
+    // its response: asserted in the caller's segment and in the service's,
+    // as a crossing is in both of its segments. The layout resolved each
+    // remote call to exactly one segment.
+    for node in manifest.nodes.iter().filter(|node| !node.calls.is_empty()) {
+        let callers: Vec<&str> = if node.role == Role::Unary {
+            layout.service_segments(&node.name)
+        } else {
+            layout.segment_of(&node.name).into_iter().collect()
+        };
+        for from in callers {
+            for service in &node.calls {
+                let copies = layout.service_segments(service);
+                let [to] = copies[..] else {
+                    // Local, or refused by the layout's check.
+                    continue;
+                };
+                if to == from || (from != segment && to != segment) {
+                    continue;
+                }
+                let Some(unary) = manifest.node(service).and_then(|n| n.unary.as_ref()) else {
+                    return Err(Error::new(format!(
+                        "the call from `{}` to `{service}` has no unary node `{service}` in the manifest (a gdl-gen bug)",
+                        node.name
+                    )));
+                };
+                for (ty, port) in [(&unary.req, "Req"), (&unary.resp, "Resp")] {
+                    add(
+                        &ty.name,
+                        format!("{}_calls_{service}_{}", node.name, port.to_lowercase()),
+                        format!("{service} UnaryDecl {port}"),
+                        "calls",
                     );
                 }
             }
@@ -437,8 +476,9 @@ struct Crossing {
     port: String,
     /// The message, as the graph names it.
     message: String,
-    /// The `gdl::__private` function that asserts it: `crosses`, or
-    /// `anchors` for a response an anchor carries inside one segment.
+    /// The `gdl::__private` function that asserts it: `crosses`, `anchors`
+    /// for a response an anchor carries inside one segment, or `calls` for
+    /// a call to a unary node in another segment.
     check: &'static str,
 }
 
@@ -460,12 +500,18 @@ impl Unit<'_> {
     }
 
     /// Hosted nodes that take a binding, in declaration order; validation
-    /// guarantees each has one, and an implementation.
+    /// guarantees each has one, and an implementation. A unary node has a
+    /// binding name but no slot in the contract's `Bindings`, so a segment
+    /// binds no implementation of it.
     fn hosted(&self) -> Vec<Hosted<'_>> {
         self.manifest
             .nodes
             .iter()
-            .filter(|node| node.binding.is_some() && self.nodes.contains(&node.name))
+            .filter(|node| {
+                node.binding.is_some()
+                    && node.role != Role::Unary
+                    && self.nodes.contains(&node.name)
+            })
             .map(|node| {
                 let bind = &self.spec.bind[&node.name];
                 Hosted {
@@ -803,6 +849,8 @@ mod tests {
             name: name.into(),
             role,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         };
         let manifest = Manifest {
             name: "tiny".into(),
@@ -849,6 +897,8 @@ mod tests {
             name: name.into(),
             role,
             binding: (role != Role::Source).then(|| name.to_lowercase()),
+            calls: Vec::new(),
+            unary: None,
         };
         let ty = |name: &str| TypeInfo::new(name, true, Default::default());
         let manifest = Manifest {

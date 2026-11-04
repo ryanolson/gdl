@@ -3,7 +3,8 @@
 //!
 //! - `contract`, `SEGMENT`, `SEGMENTS`, and `PLACEMENT`;
 //! - one type alias and one compile-time check per message the segment
-//!   sends or receives across a cut, or that an anchor carries in it. Each
+//!   sends or receives across a cut, that an anchor carries in it, or that
+//!   a call to a unary node in another segment carries. Each
 //!   carries the span of its alias in the call, so that a message that is
 //!   not a wire type fails to build at that line;
 //! - the checks of the types the binary reads or writes as JSON lines;

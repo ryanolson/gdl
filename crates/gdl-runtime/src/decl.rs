@@ -74,6 +74,15 @@ pub trait AroundDecl: NodeDecl {
     type DownItem: Send + 'static;
 }
 
+/// Port types of a unary node: one request in, one response out, apart
+/// from the topology. A node reaches it through its `calls` clause.
+pub trait UnaryDecl: NodeDecl {
+    /// The request a caller sends.
+    type Req: Send + 'static;
+    /// The response the caller receives.
+    type Resp: Send + 'static;
+}
+
 /// The implementation slot of a node that this segment does not host.
 ///
 /// It is parameterized by the node's declaration so that it has exactly that

@@ -219,7 +219,25 @@ pub mod __private {
     #[diagnostic::do_not_recommend]
     impl<T: serde::Serialize + serde::de::DeserializeOwned> Anchored for T {}
 
-    /// The seal on [`Crossing`] and [`Anchored`]: a module that no other
+    /// A unary node's request or response on a call from one segment to
+    /// another: the call encodes both, so each must be a wire type.
+    /// Asserted as [`Crossing`] is, in the caller's segment and in the
+    /// service's, with advice that fits a call.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` is carried by a call to another segment but is not a wire type",
+        label = "this call carries `{Self}`",
+        note = "a call to a unary node in another segment encodes its request and its response, which need `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or list the unary node in the caller's segment"
+    )]
+    pub trait Called: seal::Wire {}
+
+    // Not recommended, as for `Crossing`.
+    #[diagnostic::do_not_recommend]
+    impl<T: serde::Serialize + serde::de::DeserializeOwned> Called for T {}
+
+    /// Compiles only for a [`Called`]: what a segment's assertion calls.
+    pub const fn calls<T: Called>() {}
+
+    /// The seal on [`Crossing`], [`Anchored`] and [`Called`]: a module that no other
     /// crate can name, so that only their blanket impls implement them. A
     /// hand impl for a type that is not a wire type would pass the check
     /// that a segment's build makes, and fail at run time instead.

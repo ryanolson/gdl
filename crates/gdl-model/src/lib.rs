@@ -10,6 +10,7 @@
 //! `gdl` re-exports the configuration and metric metadata, and
 //! `gdl-runtime` the placement types it reads; the rest is here.
 
+mod calls;
 mod config;
 mod deployment;
 mod diagram;
@@ -28,6 +29,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub use calls::check_calls;
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
@@ -40,7 +42,9 @@ pub use fleet::{
     FleetMetrics, FleetTable, HUB, PoolDgd, PoolResources, Quantities, Quantity, Resources,
     Toleration,
 };
-pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo};
+pub use manifest::{
+    HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo, UnaryInfo,
+};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
     RUNTIME_METRICS, VELO_METRICS, WORKER_LABEL,
@@ -85,6 +89,9 @@ pub enum Role {
     /// A forward half and a backward half in one hop, with a value kept
     /// between them for the same attempt.
     Around,
+    /// One request in, one response out, apart from the topology: a node
+    /// reaches it through its `calls` clause.
+    Unary,
 }
 
 impl Role {
@@ -97,6 +104,7 @@ impl Role {
             Self::Sink => "sink",
             Self::Backward => "backward",
             Self::Around => "around",
+            Self::Unary => "unary",
         }
     }
 
@@ -108,6 +116,7 @@ impl Role {
             Self::Operator | Self::Around => &["UpReq", "UpItem", "DownReq", "DownItem"],
             Self::Forward | Self::Backward => &["In", "Out"],
             Self::Sink => &["Req", "Item"],
+            Self::Unary => &["Req", "Resp"],
         }
     }
 }

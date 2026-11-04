@@ -50,6 +50,10 @@ pub struct Node {
     /// The property kinds it reads, each with the class whose pools it
     /// reads them from: `needs model from sets`.
     pub needs: Vec<(Ident, Ident)>,
+    /// The unary nodes it calls: `calls Tok, Overlap`.
+    pub calls: Vec<Ident>,
+    /// Whether a unary node is marked `idempotent`.
+    pub idempotent: bool,
 }
 
 /// One hop: outer end, forward chain, inner end, backward chain.
@@ -85,14 +89,19 @@ pub struct Edge<'a, T> {
 impl Node {
     /// The node's role, from its signature.
     pub fn role(&self) -> Role {
-        match self.sig {
-            Sig::Source { .. } => Role::Source,
-            Sig::Operator { .. } => Role::Operator,
-            Sig::Forward { .. } => Role::Forward,
-            Sig::Sink { .. } => Role::Sink,
-            Sig::Backward { .. } => Role::Backward,
-            Sig::Around { .. } => Role::Around,
-        }
+        role_of(&self.sig)
+    }
+}
+
+fn role_of(sig: &Sig) -> Role {
+    match sig {
+        Sig::Source { .. } => Role::Source,
+        Sig::Operator { .. } => Role::Operator,
+        Sig::Forward { .. } => Role::Forward,
+        Sig::Sink { .. } => Role::Sink,
+        Sig::Backward { .. } => Role::Backward,
+        Sig::Around { .. } => Role::Around,
+        Sig::Unary { .. } => Role::Unary,
     }
 }
 
@@ -124,6 +133,7 @@ impl Graph {
         let mut nodes: Vec<Node> = Vec::with_capacity(input.nodes.len());
         for decl in input.nodes {
             declared_uses(&decl, &properties)?;
+            declared_calls(&decl)?;
             // The name goes into the manifest and the generated segment
             // code as written; `r#` would have to be stripped in one and
             // kept in the other.
@@ -144,8 +154,11 @@ impl Graph {
                 binding,
                 provides: decl.provides,
                 needs: decl.needs,
+                calls: decl.calls,
+                idempotent: decl.idempotent.is_some(),
             });
         }
+        calls(&nodes)?;
         let sources: Vec<&Node> = nodes.iter().filter(|n| n.role() == Role::Source).collect();
         if sources.is_empty() {
             return Err(syn::Error::new(
@@ -161,6 +174,9 @@ impl Graph {
             hops: Vec::new(),
             streaming: None,
         };
+        for topology in &input.topology {
+            off_topology(topology, &nodes, &by_name)?;
+        }
         for topology in input.topology {
             let mut list = topology.into_iter();
             let first = list
@@ -176,7 +192,7 @@ impl Graph {
             builder.hop(first.ident, list.collect(), input.topology_span)?;
         }
 
-        for node in &nodes {
+        for node in nodes.iter().filter(|n| n.role() != Role::Unary) {
             if !builder.used.contains(&node.ident.to_string()) {
                 return Err(syn::Error::new(
                     node.ident.span(),
@@ -212,7 +228,7 @@ impl Graph {
                     Sig::Operator { down_req, .. } => down_req,
                     Sig::Forward { output, .. } => output,
                     Sig::Around { down_req, .. } => down_req,
-                    Sig::Sink { .. } | Sig::Backward { .. } => {
+                    Sig::Sink { .. } | Sig::Backward { .. } | Sig::Unary { .. } => {
                         unreachable!("checked: a request leaves a source, operator, or forward")
                     }
                 };
@@ -220,7 +236,7 @@ impl Graph {
                     Sig::Forward { input, .. } => input,
                     Sig::Sink { req, .. } => req,
                     Sig::Operator { up_req, .. } | Sig::Around { up_req, .. } => up_req,
-                    Sig::Source { .. } | Sig::Backward { .. } => {
+                    Sig::Source { .. } | Sig::Backward { .. } | Sig::Unary { .. } => {
                         unreachable!("checked: a request reaches a forward, sink, or operator")
                     }
                 };
@@ -250,7 +266,7 @@ impl Graph {
                     Sig::Operator { up_item, .. } => up_item,
                     Sig::Backward { output, .. } => output,
                     Sig::Around { up_item, .. } => up_item,
-                    Sig::Source { .. } | Sig::Forward { .. } => {
+                    Sig::Source { .. } | Sig::Forward { .. } | Sig::Unary { .. } => {
                         unreachable!("checked: a response leaves a sink, operator, or backward")
                     }
                 };
@@ -258,7 +274,7 @@ impl Graph {
                     Sig::Backward { input, .. } => input,
                     Sig::Source { item, .. } => item,
                     Sig::Operator { down_item, .. } | Sig::Around { down_item, .. } => down_item,
-                    Sig::Sink { .. } | Sig::Forward { .. } => {
+                    Sig::Sink { .. } | Sig::Forward { .. } | Sig::Unary { .. } => {
                         unreachable!("checked: a response reaches a backward, source, or operator")
                     }
                 };
@@ -320,6 +336,23 @@ fn declared_uses(decl: &crate::parse::NodeDecl, properties: &[Property]) -> syn:
             "a built-in identity has no implementation, so it provides and needs no property",
         ));
     }
+    // The property checks find a node's segment, and a unary node may be
+    // in several.
+    if role_of(&decl.sig) == Role::Unary {
+        let provides = decl
+            .provides
+            .iter()
+            .map(|kind| (kind, format!("provides {kind}")));
+        let needs =
+            (decl.needs.iter()).map(|(kind, class)| (kind, format!("needs {kind} from {class}")));
+        if let Some((kind, clause)) = provides.chain(needs).next() {
+            let error = gdl_model::PlacementError::UnaryProperty {
+                node: node.to_string(),
+                clause,
+            };
+            return Err(syn::Error::new(kind.span(), error.to_string()));
+        }
+    }
     let declared = |kind: &Ident| -> syn::Result<()> {
         if properties.iter().any(|p| p.kind == *kind) {
             return Ok(());
@@ -349,6 +382,105 @@ fn declared_uses(decl: &crate::parse::NodeDecl, properties: &[Property]) -> syn:
                 kind.span(),
                 format!("node `{node}` needs property kind `{kind}` from class `{class}` twice"),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// What a node says about calls: `idempotent` only on a unary node, no
+/// `calls` on a built-in identity, which has no implementation to make
+/// them, and each name in `calls` once.
+fn declared_calls(decl: &crate::parse::NodeDecl) -> syn::Result<()> {
+    let node = &decl.ident;
+    let role = role_of(&decl.sig);
+    if let Some(span) = decl.idempotent
+        && role != Role::Unary
+    {
+        return Err(syn::Error::new(
+            span,
+            format!("node `{node}` is a {role}; only a unary node is `idempotent`"),
+        ));
+    }
+    if decl.builtin
+        && let Some(first) = decl.calls.first()
+    {
+        return Err(syn::Error::new(
+            first.span(),
+            "a built-in identity has no implementation, so it calls no unary node",
+        ));
+    }
+    for (index, service) in decl.calls.iter().enumerate() {
+        if decl.calls[..index].contains(service) {
+            return Err(syn::Error::new(
+                service.span(),
+                format!("node `{node}` has `calls {service}` twice"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The graph's rules for `calls`, from `gdl-model`, so that a graph and a
+/// manifest are held to one copy of them. Each error is spanned at the
+/// name in `calls` it is about.
+fn calls(nodes: &[Node]) -> syn::Result<()> {
+    let owned: Vec<(String, Role, Vec<String>)> = nodes
+        .iter()
+        .map(|node| {
+            let calls = node.calls.iter().map(ToString::to_string).collect();
+            (node.ident.to_string(), node.role(), calls)
+        })
+        .collect();
+    let borrowed: Vec<(&str, Role, &[String])> = owned
+        .iter()
+        .map(|(name, role, calls)| (name.as_str(), *role, calls.as_slice()))
+        .collect();
+    let span = |node: &str, service: &str| -> Span {
+        nodes
+            .iter()
+            .find(|n| n.ident == node)
+            .and_then(|n| n.calls.iter().find(|s| *s == service))
+            .map_or_else(Span::call_site, Ident::span)
+    };
+    let mut found: Option<syn::Error> = None;
+    for error in gdl_model::check_calls(&borrowed) {
+        let at = match &error {
+            gdl_model::PlacementError::UnknownService { node, service }
+            | gdl_model::PlacementError::CallsPipelineNode { node, service, .. } => {
+                span(node, service)
+            }
+            gdl_model::PlacementError::CallCycle { nodes } => {
+                span(&nodes[0], &nodes[1 % nodes.len()])
+            }
+            _ => Span::call_site(),
+        };
+        let error = syn::Error::new(at, error.to_string());
+        match &mut found {
+            Some(first) => first.combine(error),
+            None => found = Some(error),
+        }
+    }
+    found.map_or(Ok(()), Err)
+}
+
+/// Refuse a unary node anywhere in a topology list, before the topology is
+/// built: a unary node is on no hop.
+fn off_topology(
+    list: &[Element],
+    nodes: &[Node],
+    by_name: &BTreeMap<String, usize>,
+) -> syn::Result<()> {
+    for element in list {
+        if let Some(&index) = by_name.get(&element.ident.to_string())
+            && nodes[index].role() == Role::Unary
+        {
+            let error = gdl_model::PlacementError::UnaryInTopology {
+                node: element.ident.to_string(),
+            };
+            return Err(syn::Error::new(element.ident.span(), error.to_string()));
+        }
+        if let Some(nested) = &element.nested {
+            off_topology(nested, nodes, by_name)?;
         }
     }
     Ok(())
@@ -578,6 +710,7 @@ impl Builder<'_> {
                 .next()
                 .ok_or_else(|| syn::Error::new(span, "a hop needs a sink or an operator"))?;
             match self.node(&element.ident)?.role() {
+                Role::Unary => unreachable!("checked before the topology is built"),
                 Role::Forward if element.nested.is_none() => forward.push(element.ident),
                 Role::Around => {
                     let Some(nested) = element.nested else {

@@ -176,9 +176,15 @@ fn expand_edges(graph: &Graph) -> TokenStream {
     }
 }
 
-/// Nodes that take an implementation binding, in declaration order.
+/// Nodes that take an implementation binding, in declaration order. A
+/// unary node has a binding name, which keeps the names unique, but no
+/// slot: `Bindings` has no setter for the unary role, so a graph that
+/// declares unary nodes builds, and its segments run its topology.
 fn bound_nodes(graph: &Graph) -> impl Iterator<Item = &Node> {
-    graph.nodes.iter().filter(|n| n.binding.is_some())
+    graph
+        .nodes
+        .iter()
+        .filter(|n| n.binding.is_some() && n.role() != Role::Unary)
 }
 
 /// The type parameter for a node's slot.
@@ -244,7 +250,9 @@ fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
                 #krate::gdl::Around<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
             }
         }
-        Sig::Source { .. } => unreachable!("the source takes no binding"),
+        Sig::Source { .. } | Sig::Unary { .. } => {
+            unreachable!("the source and unary nodes take no binding")
+        }
     }
 }
 
@@ -325,6 +333,10 @@ fn expand_nodes(graph: &Graph, krate: &TokenStream) -> TokenStream {
                     },
                 )
             }
+            Sig::Unary { req, resp } => (
+                quote!(Unary),
+                quote! { impl #krate::UnaryDecl for nodes::#ident { type Req = #req; type Resp = #resp; } },
+            ),
         };
         quote! {
             impl #krate::NodeDecl for nodes::#ident {
@@ -453,6 +465,7 @@ fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
             Role::Sink => quote!(Sink),
             Role::Backward => quote!(Backward),
             Role::Around => quote!(Around),
+            Role::Unary => quote!(Unary),
         };
         let binding = match &node.binding {
             None => quote!(::core::option::Option::None),
@@ -461,11 +474,31 @@ fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
                 quote!(::core::option::Option::Some(#binding))
             }
         };
+        let calls = node
+            .calls
+            .iter()
+            .map(|service| string(&service.to_string()));
+        let unary = match &node.sig {
+            Sig::Unary { req, resp } => {
+                let (req, resp) = (type_info(req, krate), type_info(resp, krate));
+                let idempotent = node.idempotent;
+                quote! {
+                    ::core::option::Option::Some(#krate::UnaryInfo {
+                        req: #req,
+                        resp: #resp,
+                        idempotent: #idempotent,
+                    })
+                }
+            }
+            _ => quote!(::core::option::Option::None),
+        };
         quote! {
             #krate::NodeInfo {
                 name: #name,
                 role: #krate::Role::#role,
                 binding: #binding,
+                calls: ::std::vec![#(#calls),*],
+                unary: #unary,
             }
         }
     });

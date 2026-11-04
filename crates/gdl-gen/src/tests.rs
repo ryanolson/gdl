@@ -8,6 +8,8 @@ fn manifest() -> Manifest {
         name: name.into(),
         role,
         binding: binding.map(str::to_string),
+        calls: Vec::new(),
+        unary: None,
     };
     Manifest {
         name: "tiny".into(),
@@ -208,6 +210,7 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         root.join("tests/fixtures/compose/streamed.toml"),
         root.join("tests/fixtures/compose/facade.toml"),
         root.join("tests/fixtures/compose/properties.toml"),
+        root.join("tests/fixtures/compose/unary.toml"),
     ] {
         let spec = Spec::load(&spec).expect("spec");
         let built = prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
@@ -240,6 +243,24 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
             assert_eq!(
                 compiled.hops[0].forward_types[0].encoding,
                 gdl_model::Encoding::Json
+            );
+        } else if spec.file.ends_with("unary.toml") {
+            // The compiled contract probed each type, so the equality above
+            // holds the built manifest to the compiler's answer.
+            let unary = |name: &str| compiled.node(name).and_then(|n| n.unary.clone());
+            let tokenize = unary("Tokenize").expect("Tokenize");
+            assert!(tokenize.idempotent);
+            assert_eq!(tokenize.resp.encoding, gdl_model::Encoding::Json);
+            let overlap = unary("Overlap").expect("Overlap");
+            assert!(!overlap.idempotent);
+            assert!(!overlap.resp.wire, "`Piece` is not a wire type");
+            assert_eq!(
+                compiled.node("R").expect("R").calls,
+                ["Tokenize", "Overlap"]
+            );
+            assert_eq!(
+                compiled.node("Overlap").expect("Overlap").calls,
+                ["Tokenize"]
             );
         }
     }
@@ -619,6 +640,8 @@ fn a_package_bound_from_two_paths_is_refused() {
         name: "F".into(),
         role: Role::Backward,
         binding: Some("f".into()),
+        calls: Vec::new(),
+        unary: None,
     });
     manifest.hops[0].backward.push("F".into());
     manifest.hops[0]
@@ -1005,6 +1028,8 @@ fn multiple_roots_require_a_service_for_a_hosted_frontend() {
         name: "T".into(),
         role: Role::Source,
         binding: None,
+        calls: Vec::new(),
+        unary: None,
     });
     let mut hop = manifest.hops[0].clone();
     hop.outer = "T".into();
@@ -1025,6 +1050,8 @@ fn two_roots() -> Manifest {
         name: "T".into(),
         role: Role::Source,
         binding: None,
+        calls: Vec::new(),
+        unary: None,
     });
     manifest.hops.push(HopInfo {
         outer: "T".into(),
@@ -1359,6 +1386,8 @@ fn a_policy_two_classes_share_is_registered_once() {
         name: name.into(),
         role,
         binding: binding.map(str::to_string),
+        calls: Vec::new(),
+        unary: None,
     };
     let hop = |outer: &str, inner: &str| HopInfo {
         outer: outer.into(),
@@ -1513,6 +1542,8 @@ fn chain(into_f: &str, into_d: &str) -> (Manifest, gdl_model::Placement) {
         name: name.into(),
         role,
         binding: binding.map(str::to_string),
+        calls: Vec::new(),
+        unary: None,
     };
     let manifest = Manifest {
         name: "tiny".into(),

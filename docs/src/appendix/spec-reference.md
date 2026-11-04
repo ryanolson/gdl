@@ -45,8 +45,8 @@ A spec of one layout has these tables at its top level. A spec with `[layout.<na
 
 | Key | Meaning | Default |
 |---|---|---|
-| `[segment.<name>] nodes` | the nodes the segment hosts | required |
-| `[routing] <Node>` | the router of the boundary that enters the node: `"round_robin"`, `"random"`, or `{ selector = "<name>" }` | `"round_robin"` |
+| `[segment.<name>] nodes` | the nodes the segment hosts. A node of the topology is in exactly one segment; a unary node may be in several | required |
+| `[routing] <Node>` | the router of the boundary that enters the node, or of the calls to a unary node from other segments: `"round_robin"`, `"random"`, or `{ selector = "<name>" }` | `"round_robin"` |
 | `[class.<name>] segments` | the segments that deploy together | no classes |
 | `[pools.<class>] policy` | how a chooser picks a pool of the class | `"round_robin"` |
 | `[pools.<class>] provides` | the property kinds the class's pools serve from their settings (`[pool.properties]`), not from a node; each must be declared in the graph | none |

@@ -6,6 +6,7 @@ use crate::hash::Fnv;
 use crate::{Encoding, Role};
 
 mod properties;
+mod unary;
 
 /// The shape of a graph as data: its nodes, hops, and typed edges.
 ///
@@ -75,6 +76,30 @@ pub struct NodeInfo {
     /// than repeating the macro's naming rule.
     #[serde(default)]
     pub binding: Option<String>,
+    /// The unary nodes it calls (`calls A, B`), in the order the graph
+    /// writes them. Left out when there are none, so a manifest without
+    /// calls reads and writes as it did before unary nodes existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
+    /// A unary node's request and response, and whether it is idempotent:
+    /// `Some` exactly when the role is [`Role::Unary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unary: Option<UnaryInfo>,
+}
+
+/// What a unary node takes and returns: `unary Tok: Text -> Tokens
+/// idempotent;`. Neither type is streamed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnaryInfo {
+    /// The request a caller sends.
+    pub req: TypeInfo,
+    /// The response the caller receives.
+    pub resp: TypeInfo,
+    /// Whether the graph marks it `idempotent`: the service's author
+    /// promises that it is safe to run twice, also at the same time, so a
+    /// remote call whose outcome is unknown may be sent again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
 }
 
 impl NodeInfo {
@@ -195,7 +220,10 @@ impl Manifest {
     /// The contract hash: changes when the name, schema, nodes, roles,
     /// topology, or edge types and encodings (including which requests are streamed,
     /// and their item types) change, and when a declared property kind, its
-    /// type and encoding, or a node that provides or needs it changes.
+    /// type and encoding, or a node that provides or needs it changes. It
+    /// changes too when a unary node, its request, response or
+    /// `idempotent`, or a node's `calls` change; the order they are written
+    /// in does not matter.
     /// Deployments check it so that segments built from different
     /// contracts never exchange traffic, and pools whose graphs declare
     /// different properties never follow or offer to each other.
@@ -203,7 +231,9 @@ impl Manifest {
         let mut h = Fnv::new();
         h.str(&self.name);
         h.u64(u64::from(self.schema));
-        for node in &self.nodes {
+        // Unary nodes are hashed apart, in name order: they are not in the
+        // topology, so where the graph declares them means nothing.
+        for node in self.nodes.iter().filter(|node| node.role != Role::Unary) {
             h.str(&node.name);
             h.str(node.role.name());
         }
@@ -213,21 +243,11 @@ impl Manifest {
             h.str(&hop.inner);
             h.strs(&hop.backward);
             for ty in hop.forward_types.iter().chain(&hop.backward_types) {
-                h.str(&ty.name);
-                h.str(ty.encoding.name());
-                h.u64(u64::from(ty.encoding.version()));
-                match &ty.stream {
-                    None => h.u64(0),
-                    Some(item) => {
-                        h.u64(1);
-                        h.str(&item.name);
-                        h.str(item.encoding.name());
-                        h.u64(u64::from(item.encoding.version()));
-                    }
-                }
+                hash_type(&mut h, ty);
             }
         }
         properties::hash(&mut h, &self.properties);
+        unary::hash(&mut h, &self.nodes);
         h.finish()
     }
 
@@ -253,5 +273,22 @@ impl Manifest {
     /// Read a manifest written by [`Manifest::to_toml`].
     pub fn from_toml(text: &str) -> Result<Self, crate::Error> {
         toml::from_str(text).map_err(|e| crate::Error::new(e.to_string()))
+    }
+}
+
+/// A message type's part of the contract hash: its name, its encoding and
+/// the encoding's wire revision, and a streamed request's item type.
+fn hash_type(h: &mut Fnv, ty: &TypeInfo) {
+    h.str(&ty.name);
+    h.str(ty.encoding.name());
+    h.u64(u64::from(ty.encoding.version()));
+    match &ty.stream {
+        None => h.u64(0),
+        Some(item) => {
+            h.u64(1);
+            h.str(&item.name);
+            h.str(item.encoding.name());
+            h.u64(u64::from(item.encoding.version()));
+        }
     }
 }

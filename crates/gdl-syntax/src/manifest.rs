@@ -4,11 +4,12 @@
 
 use gdl_model::{
     Encoding, HopInfo, ItemInfo, Manifest, NodeInfo, PropertyInfo, PropertyNeed, TypeInfo,
+    UnaryInfo,
 };
 use syn::Type;
 
 use crate::model::{Graph, identifier, message_name};
-use crate::parse::Request;
+use crate::parse::{Request, Sig};
 
 /// A message's path (`crate::module::Name`, without `r#`) as a graph
 /// file's manifest spells it: `:: crate :: module :: Name`.
@@ -53,15 +54,24 @@ impl Graph {
             }
             Ok(head)
         };
-        let nodes = self
-            .nodes
-            .iter()
-            .map(|node| NodeInfo {
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let unary = match &node.sig {
+                Sig::Unary { req, resp } => Some(UnaryInfo {
+                    req: one(req)?,
+                    resp: one(resp)?,
+                    idempotent: node.idempotent,
+                }),
+                _ => None,
+            };
+            nodes.push(NodeInfo {
                 name: node.ident.to_string(),
                 role: node.role(),
                 binding: node.binding.as_ref().map(ToString::to_string),
-            })
-            .collect();
+                calls: node.calls.iter().map(ToString::to_string).collect(),
+                unary,
+            });
+        }
         let mut hops = Vec::with_capacity(self.hops.len());
         for hop in &self.hops {
             hops.push(HopInfo {

@@ -21,6 +21,8 @@ fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
                 name: name.into(),
                 role,
                 binding: (role != Role::Source).then(|| name.to_lowercase()),
+                calls: Vec::new(),
+                unary: None,
             })
             .collect(),
         hops: hops
@@ -412,7 +414,7 @@ fn a_boundary_problem_is_reported_with_every_other_problem() {
         assert_all(
             refusals(&graph, &placement),
             &[
-                "request router `Http` must target a request boundary",
+                "request router `Http` must target a request boundary or a unary node",
                 POST_IN_B,
             ],
         );
@@ -536,11 +538,15 @@ fn an_assignment_problem_does_not_hide_a_boundary_problem() {
         name: "T".into(),
         role: Role::Source,
         binding: None,
+        calls: Vec::new(),
+        unary: None,
     });
     two.nodes.push(NodeInfo {
         name: "U".into(),
         role: Role::Sink,
         binding: Some("u".into()),
+        calls: Vec::new(),
+        unary: None,
     });
     two.hops
         .push(manifest(&[], &[("T", &[], "U", &[])]).hops.remove(0));

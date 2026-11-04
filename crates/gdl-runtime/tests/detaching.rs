@@ -809,11 +809,15 @@ async fn a_drained_source_still_keeps_the_requests_its_segment_forwards() {
             name: "X".into(),
             role: Role::Source,
             binding: None,
+            calls: Vec::new(),
+            unary: None,
         },
         NodeInfo {
             name: "Y".into(),
             role: Role::Sink,
             binding: Some("y".into()),
+            calls: Vec::new(),
+            unary: None,
         },
     ]);
     graph.hops.push(HopInfo {

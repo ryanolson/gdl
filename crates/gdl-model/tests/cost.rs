@@ -121,6 +121,8 @@ fn work_cost<T>(work: impl FnOnce() -> T) -> (u64, u64) {
 fn roots(n: usize) -> (Manifest, Placement) {
     let node = |name: String, role| NodeInfo {
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
         name,
         role,
     };

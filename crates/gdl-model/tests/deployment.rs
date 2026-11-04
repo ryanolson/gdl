@@ -42,11 +42,15 @@ fn registration_must_match_graph_placement_and_segment() {
                 name: "Source".into(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "Echo".into(),
                 role: Role::Sink,
                 binding: Some("echo".into()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {

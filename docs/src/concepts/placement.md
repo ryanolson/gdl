@@ -4,7 +4,7 @@ A graph says what the nodes are. A placement says where they run. The spec file,
 
 ## Segments
 
-A segment is a set of nodes that deploy as one program. Every node is in exactly one segment. A segment runs as many instances as the deployment wants. A `[segment.<name>]` table lists its `nodes`. Cutting an edge between two nodes in different segments makes it a crossing: the request leaves the program and travels over velo. [Crossing segments](crossings.md) says how.
+A segment is a set of nodes that deploy as one program. Every node of the topology is in exactly one segment. A unary node may be in several ([Unary nodes](#unary-nodes)). A segment runs as many instances as the deployment wants. A `[segment.<name>]` table lists its `nodes`. Cutting an edge between two nodes in different segments makes it a crossing: the request leaves the program and travels over velo. [Crossing segments](crossings.md) says how.
 
 A segment name is lowercase letters, digits, `-`, and `_`, at most 58 characters. The limit is there because a segment is named in settings keys, where an environment variable arrives lowercased, and in the hub's service names, which are the name in hex under velo-hub's 128-character limit. Each segment becomes a package named `<graph>-<segment>`. A segment cannot take the name of the generated contract crate.
 
@@ -22,12 +22,12 @@ A deployment is identified by two hashes. Every envelope carries both, and an in
 
 | Hash | Covers |
 |---|---|
-| contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision; each declared property kind, with its type, encoding, and revision, and the nodes that provide and need it |
-| placement hash | each segment's name and node set; the non-default `[routing]` entries; the classes and their segment sets; each class's effective pool policy; the property kinds each class's `[pools.<class>] provides` names |
+| contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision; each declared property kind, with its type, encoding, and revision, and the nodes that provide and need it; each unary node, with its role, its request and response with their encodings and revisions, and `idempotent`; each node's `calls` |
+| placement hash | each segment's name and node set, unary nodes included; the non-default `[routing]` entries, a unary node's included; the classes and their segment sets; each class's effective pool policy; the property kinds each class's `[pools.<class>] provides` names |
 
-- Order does not matter. Node order inside a segment and segment order inside a class do not change a hash.
+- Order does not matter. Node order inside a segment and segment order inside a class do not change a hash. Neither do the order of unary nodes among the nodes, nor the order of a `calls` list.
 - Defaults are not recorded. A placement that spells out `round_robin` for a boundary has the hash of one that leaves it unsaid. For pool policies the exception is deliberate: each class's effective policy is hashed, default included, so that a future change of default changes the hash and not what a placement means.
-- A placement without classes keeps the hash it had before classes existed. A graph without property declarations, and a placement whose tables provide nothing, keep theirs too.
+- A placement without classes keeps the hash it had before classes existed. A graph without property declarations, and a placement whose tables provide nothing, keep theirs too. So do a graph and a placement without unary nodes.
 - Pools whose graphs declare other properties, or the same kind with another type, have different contract hashes, so they never follow or offer to each other. A property's value is never in a hash.
 - A segment's binary carries the hashes of the placement it was generated for. A hub admits only registrations whose hashes match its deployment: [The hub](hub.md).
 - Pools are runtime topology and are not part of the placement. [Classes and pools](pools.md) covers them.
@@ -39,15 +39,18 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | Check | When it fails |
 |---|---|
 | Names agree on every edge of the graph file, and each name resolves to one message | `check`, `generate` |
-| Every node is in one segment; no segment is empty; no segment names an unknown node | `check`, `generate`, and segment start |
+| Every node of the topology is in one segment, and every unary node in one or more; no segment is empty; no segment names an unknown node | `check`, `generate`, and segment start |
 | Segment names, and package and library names do not collide | `check`, `generate` |
 | An implementation has its node's role and port types | the segment's build, naming the node |
 | Every cut edge, and every anchor-carried edge, has a codec | `check`, `generate`, and segment start |
 | Both halves of an around node run in one task: in the outer end's runs (the forward run it starts and the backward run it ends), or in the inner end's runs when the forward path leaves the outer end's segment. A middle forward run, a backward run the outer end opens, and the inner end's run when the forward path never leaves are each a task of their own, so a pair there is refused, even when both halves are in one segment | `check`, `generate`, and segment start |
-| Every cut or anchor-carried message is a wire type | the segment's build ([assertions](generation.md#the-crossing-assertions)) |
-| A `[routing]` key names a node that starts a remote request run | `check`, `generate`, and segment start |
+| Every cut or anchor-carried message, and the request and response of every call to another segment, is a wire type | the segment's build ([assertions](generation.md#the-crossing-assertions)) |
+| A `[routing]` key names a node that starts a remote request run, or a unary node | `check`, `generate`, and segment start |
 | Classes: each segment in exactly one, the boundary rule, no cycle, a pool policy only for a class a boundary enters | `check`, `generate`, and segment start |
 | A property kind is declared once, with a wire type; a node provides and needs only declared kinds | `check`, `generate`, and `graph!` |
+| Each name in `calls` is a unary node, once in its list; no unary node is in the topology; no chain of `calls` leads back to its start | `check`, `generate`, `graph!`, and segment start |
+| A unary node provides and needs no property | `check`, `generate`, `graph!`, and segment start |
+| A caller with no copy of a service in its own segment finds one in exactly one other segment, of its own class, and the call's request and response are wire types | `check`, `generate`, and segment start |
 | A property's key type implements `Serialize`, `DeserializeOwned`, `Ord`, `Send`, and `Sync` | the contract's build, at the declaration |
 | Each kind a node, an entry adapter, a pool policy, or a selector needs from a class is declared, the class is in the layout and chosen where the reader runs, and an entry segment of it provides the kind, or `[pools.<class>] provides` names it | `check`, `generate`, `build`, and a pool instance's launch |
 | A node sets and wants only a kind its segment's nodes provide, reads only a kind its segment's nodes or entry adapters need, and sets and reads each kind with its declared type | the node's build, at segment start, and `assemble` |
@@ -59,6 +62,14 @@ The checks live in `gdl-model`, so the generator, the composer, and the runtime 
 | The envelope's hashes match the receiver's | every request |
 
 The checks report every problem they find, each with the file, the table, and the key, and the line when the parser has one. The codec rule that decides which edges need a codec, including the edge whose items return through an anchor although both its ends share a segment, is stated once, in [Crossing segments](crossings.md).
+
+## Unary nodes
+
+A unary node is not on a hop, so no run holds it. A segment lists it as it lists any node, and several segments may list it. Copies share no state. A caller uses the copy in its own segment when the segment lists one. Otherwise it uses the copy in the one other segment that lists the service.
+
+- A caller with no copy in its segment, when copies sit in more than one other segment, is refused. It would have to choose a segment, and nothing in the placement says which.
+- A call to another segment encodes its request and its response, so both must be wire types. A local call encodes nothing.
+- A call stays in its class. A caller whose only copy of the service is in another class is refused ([Known limitations](../operations/limitations.md#a-call-stays-in-its-class)).
 
 ## Runs, hops, and the crossing report
 
@@ -84,7 +95,7 @@ Engine = "random"                        # "round_robin" (the default) or "rando
 Detokenize = { selector = "affinity" }   # a named selector
 ```
 
-The key must be the first stage of a remote forward run. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`. The spec can bind others from their crates, or the sending segment can register them in code. [Routing](routing.md) covers selectors and offers.
+The key must be the first stage of a remote forward run, or a unary node: its entry applies to every call to it from another segment. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`. The spec can bind others from their crates, or the sending segment can register them in code. [Routing](routing.md) covers selectors and offers.
 
 ## Classes
 

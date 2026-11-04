@@ -28,6 +28,16 @@
 //! property model: Model;
 //! sink Engine: Req -> stream Item provides model;
 //! ```
+//!
+//! A unary node takes one request and returns one response, apart from
+//! the topology: `unary Tok: Text -> Tokens;`, with `idempotent` after its
+//! signature when it is safe to run twice. After its signature, any node
+//! names the unary nodes it calls, `calls Tok, Overlap`:
+//!
+//! ```text
+//! unary    Tok: Text -> Tokens idempotent;
+//! operator Route: (Req -> stream Chunk) over (Req -> stream Chunk) calls Tok;
+//! ```
 
 use syn::ext::IdentExt as _;
 use syn::parse::{Parse, ParseStream};
@@ -52,6 +62,9 @@ mod kw {
     syn::custom_keyword!(provides);
     syn::custom_keyword!(needs);
     syn::custom_keyword!(from);
+    syn::custom_keyword!(unary);
+    syn::custom_keyword!(calls);
+    syn::custom_keyword!(idempotent);
 }
 
 pub(crate) struct GraphInput {
@@ -71,6 +84,10 @@ pub(crate) struct NodeDecl {
     pub(crate) provides: Vec<Ident>,
     /// Each kind and class after `needs`: `model from sets`.
     pub(crate) needs: Needs,
+    /// The unary nodes after `calls`.
+    pub(crate) calls: Vec<Ident>,
+    /// Where `idempotent` was said, if it was.
+    pub(crate) idempotent: Option<proc_macro2::Span>,
 }
 
 /// Each kind a node needs, and the class it reads the kind from.
@@ -126,6 +143,13 @@ pub enum Sig {
         input: Type,
         /// The response item it passes on.
         output: Type,
+    },
+    /// `unary T: Req -> Resp;`
+    Unary {
+        /// The request a caller sends.
+        req: Type,
+        /// The response the caller receives.
+        resp: Type,
     },
     /// `around P: (UpReq -> stream UpItem) over (DownReq -> stream DownItem);`
     Around {
@@ -220,6 +244,9 @@ impl Parse for NodeDecl {
         } else if lookahead.peek(kw::around) {
             input.parse::<kw::around>()?;
             6
+        } else if lookahead.peek(kw::unary) {
+            input.parse::<kw::unary>()?;
+            7
         } else {
             return Err(lookahead.error());
         };
@@ -288,6 +315,12 @@ impl Parse for NodeDecl {
                     output,
                 }
             }
+            7 => {
+                let req = unary_type(input)?;
+                input.parse::<Token![->]>()?;
+                let resp = unary_type(input)?;
+                Sig::Unary { req, resp }
+            }
             4 => {
                 let input_ty = item_type(input)?;
                 input.parse::<Token![->]>()?;
@@ -302,7 +335,12 @@ impl Parse for NodeDecl {
                 Sig::Sink { req, item }
             }
         };
-        let (provides, needs) = clauses(input)?;
+        let Clauses {
+            provides,
+            needs,
+            calls,
+            idempotent,
+        } = clauses(input)?;
         input.parse::<Token![;]>()?;
         Ok(Self {
             ident,
@@ -310,6 +348,8 @@ impl Parse for NodeDecl {
             builtin: sig_kind == 5,
             provides,
             needs,
+            calls,
+            idempotent,
         })
     }
 }
@@ -327,10 +367,19 @@ impl Parse for PropertyDecl {
     }
 }
 
-/// `provides a, b` and `needs a from x, b from y`, each at most once, in
-/// either order, after a node's signature.
-fn clauses(input: ParseStream<'_>) -> syn::Result<(Vec<Ident>, Needs)> {
-    let (mut provides, mut needs) = (None, None);
+/// What a node says after its signature.
+struct Clauses {
+    provides: Vec<Ident>,
+    needs: Needs,
+    calls: Vec<Ident>,
+    idempotent: Option<proc_macro2::Span>,
+}
+
+/// `provides a, b`, `needs a from x, b from y`, `calls A, B`, and
+/// `idempotent`, each at most once, in any order, after a node's
+/// signature.
+fn clauses(input: ParseStream<'_>) -> syn::Result<Clauses> {
+    let (mut provides, mut needs, mut calls, mut idempotent) = (None, None, None, None);
     loop {
         if input.peek(kw::provides) {
             let said = input.parse::<kw::provides>()?;
@@ -365,8 +414,33 @@ fn clauses(input: ParseStream<'_>) -> syn::Result<(Vec<Ident>, Needs)> {
                 input.parse::<Token![,]>()?;
             }
             needs = Some(kinds);
+        } else if input.peek(kw::calls) {
+            let said = input.parse::<kw::calls>()?;
+            if calls.is_some() {
+                return Err(syn::Error::new(
+                    said.span,
+                    "`calls` is said once: list its unary nodes after it, `calls A, B`",
+                ));
+            }
+            let mut services = vec![input.parse::<Ident>()?];
+            while input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+                services.push(input.parse::<Ident>()?);
+            }
+            calls = Some(services);
+        } else if input.peek(kw::idempotent) {
+            let said = input.parse::<kw::idempotent>()?;
+            if idempotent.is_some() {
+                return Err(syn::Error::new(said.span, "`idempotent` is said once"));
+            }
+            idempotent = Some(said.span);
         } else {
-            return Ok((provides.unwrap_or_default(), needs.unwrap_or_default()));
+            return Ok(Clauses {
+                provides: provides.unwrap_or_default(),
+                needs: needs.unwrap_or_default(),
+                calls: calls.unwrap_or_default(),
+                idempotent,
+            });
         }
     }
 }
@@ -378,6 +452,20 @@ fn streaming(input: ParseStream<'_>) -> syn::Result<(Request, Type)> {
     input.parse::<kw::stream>()?;
     let item: Type = input.parse()?;
     Ok((req, item))
+}
+
+/// A unary node's request or response: one value, never streamed.
+fn unary_type(input: ParseStream<'_>) -> syn::Result<Type> {
+    const ONE: &str =
+        "a unary node takes one request and returns one response; neither is streamed";
+    if input.peek(kw::stream) {
+        return Err(input.error(ONE));
+    }
+    let ty = Type::without_plus(input)?;
+    if input.peek(Token![+]) {
+        return Err(input.error(ONE));
+    }
+    Ok(ty)
 }
 
 /// A backward node's type: an item, which cannot itself be streamed.

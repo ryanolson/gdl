@@ -14,6 +14,8 @@ fn graph(before: bool) -> Manifest {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let mut forward = vec!["Pair".to_string()];
     let mut nodes = vec![
@@ -131,6 +133,8 @@ fn around_nodes_that_cross_are_an_invalid_manifest() {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     let manifest = Manifest {
         name: "crossed".into(),

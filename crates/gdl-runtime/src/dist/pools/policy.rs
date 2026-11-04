@@ -76,11 +76,15 @@ mod tests {
                     name: "S".into(),
                     role: gdl_model::Role::Source,
                     binding: None,
+                    calls: Vec::new(),
+                    unary: None,
                 },
                 gdl_model::NodeInfo {
                     name: "D".into(),
                     role: gdl_model::Role::Sink,
                     binding: Some("d".into()),
+                    calls: Vec::new(),
+                    unary: None,
                 },
             ],
             hops: vec![gdl_model::HopInfo {

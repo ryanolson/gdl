@@ -523,6 +523,7 @@ impl Draft {
                 Role::Sink => format!("{} -> stream {}", req("Req"), item("Item")),
                 Role::Forward => format!("{} -> {}", req("In"), req("Out")),
                 Role::Backward => format!("{} -> {}", item("In"), item("Out")),
+                Role::Unary => format!("{} -> {}", item("Req"), item("Resp")),
                 Role::Operator | Role::Around => format!(
                     "({} -> stream {}) over ({} -> stream {})",
                     req("UpReq"),

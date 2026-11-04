@@ -301,7 +301,7 @@ fn a_default_for_a_name_the_spec_lacks_is_refused() {
     for (extra, expected, unlaid) in [
         (
             "[routing]\nGhost = \"round_robin\"\n",
-            "[routing] Ghost: request router `Ghost` must target a request boundary",
+            "[routing] Ghost: request router `Ghost` must target a request boundary or a unary node",
             true,
         ),
         (

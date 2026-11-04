@@ -27,11 +27,15 @@ fn spec() -> DeploymentSpec {
                 name: "S".into(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "F".into(),
                 role: Role::Sink,
                 binding: Some("f".into()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {

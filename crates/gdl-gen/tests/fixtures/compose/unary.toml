@@ -1,0 +1,9 @@
+# A graph that declares unary nodes, and nodes that call them.
+[graph]
+path = "unary.gdl"
+
+[messages]
+crates = ["chat-protocols"]
+
+[gdl]
+path = "../../../../gdl-runtime"

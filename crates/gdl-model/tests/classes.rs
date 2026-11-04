@@ -14,6 +14,8 @@ fn manifest() -> Manifest {
         name: name.into(),
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
+        calls: Vec::new(),
+        unary: None,
     };
     Manifest {
         name: "classed".into(),
@@ -318,7 +320,7 @@ fn a_class_problem_does_not_hide_a_routing_problem() {
     let errors = refused(&routed).to_string();
     for expected in [
         "class `global` lists unknown segment `zz`",
-        "request router `S` must target a request boundary",
+        "request router `S` must target a request boundary or a unary node",
     ] {
         assert!(errors.contains(expected), "{expected} in: {errors}");
     }

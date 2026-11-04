@@ -1,0 +1,10 @@
+// Unary nodes and calls: the manifest built without compiling must match
+// the compiled contract's, each unary node's types and every `calls`
+// included. `Piece` is not a wire type.
+name = "unary", schema = 1;
+unary    Tokenize: Text -> Words idempotent;
+source   A: Prompt -> stream Chunk;
+operator R: (Prompt -> stream Chunk) over (Prompt -> stream Chunk) calls Tokenize, Overlap;
+unary    Overlap: Words -> Piece calls Tokenize;
+sink     B: Prompt -> stream Chunk calls Overlap;
+topology: A => R { B };

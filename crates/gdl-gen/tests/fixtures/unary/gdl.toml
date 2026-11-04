@@ -1,0 +1,19 @@
+# `Tok` beside its caller, the sink in another segment. Uses the around
+# fixture's crates.
+[graph]
+path = "unary.gdl"
+
+[messages]
+crates = ["../around/protocols"]
+
+[nodes]
+crates = ["../around/nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Keep", "Tok"]
+
+[segment.back]
+nodes = ["Echo"]

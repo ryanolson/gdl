@@ -8,6 +8,7 @@ use crate::manifest::{HopInfo, Manifest, TypeInfo};
 use crate::{Problem, Problems, read_toml};
 
 mod boundary;
+mod calls;
 mod classes;
 mod errors;
 mod layouts;
@@ -16,6 +17,7 @@ mod report;
 mod spelled;
 
 use boundary::bound;
+use calls::Services;
 use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use layouts::{Placements, check_layout_name};
@@ -388,11 +390,13 @@ pub struct Layout {
     contract_hash: u64,
     placement_hash: u64,
     segment_of: BTreeMap<String, String>,
+    services: BTreeMap<String, BTreeSet<String>>,
     class_of: BTreeMap<String, String>,
     boundaries: Vec<ClassBoundary>,
     pool_policies: BTreeMap<String, PoolPolicy>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
+    call_routing: BTreeMap<String, RequestRouter>,
 }
 
 /// A hop that crosses from one class into another. Under the boundary rule
@@ -543,9 +547,19 @@ impl Layout {
         self.placement_hash
     }
 
-    /// The segment a node is placed in.
+    /// The segment a node of the topology is placed in. A unary node may be
+    /// in several, so it has none here: see [`Layout::service_segments`].
     pub fn segment_of(&self, node: &str) -> Option<&str> {
         self.segment_of.get(node).map(String::as_str)
+    }
+
+    /// The segments that list unary node `node`, in name order: empty for
+    /// any other node.
+    pub fn service_segments(&self, node: &str) -> Vec<&str> {
+        self.services
+            .get(node)
+            .map(|segments| segments.iter().map(String::as_str).collect())
+            .unwrap_or_default()
     }
 
     /// The class a segment is in: `None` when the placement has no classes.
@@ -619,6 +633,13 @@ impl Layout {
     pub fn request_router(&self, hop: usize, position: usize) -> &RequestRouter {
         static DEFAULT: RequestRouter = RequestRouter::RoundRobin;
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
+    }
+
+    /// How a caller picks an instance of unary node `service` in another
+    /// segment: its `[routing]` entry, or round robin.
+    pub fn call_router(&self, service: &str) -> &RequestRouter {
+        static DEFAULT: RequestRouter = RequestRouter::RoundRobin;
+        self.call_routing.get(service).unwrap_or(&DEFAULT)
     }
 
     /// How a chooser picks a pool of `class`, defaults applied: `None`
@@ -717,7 +738,8 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
     // A node in no segment, or in several, is judged nowhere, but the
     // boundary rule still judges every hop of the nodes that are placed.
-    let segment_of = assign(manifest, placement, &mut errors);
+    let (segment_of, services) = assign(manifest, placement, &mut errors);
+    calls::judge(manifest, &segment_of, &services, &class_of, &mut errors);
     let boundaries = if placement.classes.is_empty() {
         Vec::new()
     } else {
@@ -729,7 +751,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
         errors.append(&mut class_errors);
         return Err(PlacementErrors(errors));
     }
-    match place(manifest, placement, segment_of) {
+    match place(manifest, placement, segment_of, services) {
         Ok(layout) if class_errors.is_empty() => Ok(Layout {
             class_of,
             boundaries,
@@ -744,13 +766,14 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
 }
 
-/// The segment of each node that is in exactly one, checking that every
-/// node of a sound manifest is.
+/// The segment of each node of the topology that is in exactly one, and
+/// the segments of each unary node, checking that every node of a sound
+/// manifest is in one, and that only a unary node is in several.
 fn assign(
     manifest: &Manifest,
     placement: &Placement,
     errors: &mut Vec<PlacementError>,
-) -> BTreeMap<String, String> {
+) -> (BTreeMap<String, String>, Services) {
     let mut where_placed: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (segment, nodes) in placement.segments() {
         if nodes.is_empty() {
@@ -769,12 +792,16 @@ fn assign(
             where_placed.entry(node).or_default().push(segment);
         }
     }
-    let mut segment_of = BTreeMap::new();
+    let (mut segment_of, mut services) = (BTreeMap::new(), Services::new());
     for node in &manifest.nodes {
         match where_placed.get(node.name.as_str()).map(Vec::as_slice) {
             None | Some([]) => errors.push(PlacementError::Unplaced {
                 node: node.name.clone(),
             }),
+            Some(segments) if node.role == Role::Unary => {
+                let segments = segments.iter().map(ToString::to_string).collect();
+                services.insert(node.name.clone(), segments);
+            }
             Some([segment]) => {
                 segment_of.insert(node.name.clone(), segment.to_string());
             }
@@ -784,7 +811,7 @@ fn assign(
             }),
         }
     }
-    segment_of
+    (segment_of, services)
 }
 
 /// Every check that needs the nodes' segments but not their classes, and
@@ -793,6 +820,7 @@ fn place(
     manifest: &Manifest,
     placement: &Placement,
     segment_of: BTreeMap<String, String>,
+    services: Services,
 ) -> Result<Layout, PlacementErrors> {
     let mut errors = Vec::new();
     let hops: Vec<HopLayout> = manifest
@@ -804,7 +832,8 @@ fn place(
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
-    let mut routing = BTreeMap::new();
+    let (mut routing, mut call_routing) = (BTreeMap::new(), BTreeMap::new());
+    let unary = |node: &str| manifest.node(node).is_some_and(|n| n.role == Role::Unary);
     for (node, router) in &placement.routing {
         if let RequestRouter::Selector(name) = router
             && let Err(reason) = check_selector_name(name)
@@ -813,6 +842,10 @@ fn place(
                 node: node.clone(),
                 reason,
             });
+            continue;
+        }
+        if unary(node) {
+            call_routing.insert(node.clone(), router.clone());
             continue;
         }
         let mut found = false;
@@ -830,12 +863,13 @@ fn place(
     }
     // A default router names a boundary as any other router does.
     for node in &placement.spelled.routing {
-        let found = hops.iter().any(|hop| {
-            hop.forward_runs
-                .iter()
-                .skip(1)
-                .any(|run| run.stages.first() == Some(node))
-        });
+        let found = unary(node)
+            || hops.iter().any(|hop| {
+                hop.forward_runs
+                    .iter()
+                    .skip(1)
+                    .any(|run| run.stages.first() == Some(node))
+            });
         if !found {
             errors.push(PlacementError::InvalidRouter(node.clone()));
         }
@@ -850,9 +884,11 @@ fn place(
             .filter(|n| n.role == Role::Source)
             .count(),
         routing,
+        call_routing,
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,
+        services,
         class_of: BTreeMap::new(),
         boundaries: Vec::new(),
         pool_policies: BTreeMap::new(),
@@ -1030,7 +1066,23 @@ fn require_wire(
 /// Structural checks on a manifest. `graph!` emits consistent manifests; a
 /// hand-written or corrupted one is caught here instead of panicking later.
 pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
-    let mut errors = Vec::new();
+    let mut errors = calls::check_graph(manifest);
+    // A unary node on a hop is refused once, by name; the rules below for
+    // the role at each place pass over it.
+    let unary = |name: &str| manifest.node(name).is_some_and(|n| n.role == Role::Unary);
+    let mut on_hops = BTreeSet::new();
+    for hop in &manifest.hops {
+        for node in hop
+            .forward_path()
+            .chain(hop.backward.iter().map(String::as_str))
+        {
+            if unary(node) && on_hops.insert(node) {
+                errors.push(PlacementError::UnaryInTopology {
+                    node: node.to_string(),
+                });
+            }
+        }
+    }
     let mut bad = |why: String| errors.push(PlacementError::InvalidManifest(why));
 
     let mut seen = BTreeSet::new();
@@ -1045,12 +1097,18 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
     }
     let role = |name: &str| manifest.node(name).map(|n| n.role);
     for (index, hop) in manifest.hops.iter().enumerate() {
-        if !matches!(role(&hop.outer), Some(Role::Source | Role::Operator)) {
+        if !matches!(
+            role(&hop.outer),
+            Some(Role::Source | Role::Operator | Role::Unary)
+        ) {
             bad(format!(
                 "hop {index}: its outer end must be a Source or Operator"
             ));
         }
-        if !matches!(role(&hop.inner), Some(Role::Sink | Role::Operator)) {
+        if !matches!(
+            role(&hop.inner),
+            Some(Role::Sink | Role::Operator | Role::Unary)
+        ) {
             bad(format!(
                 "hop {index}: its inner end must be a Sink or Operator"
             ));
@@ -1069,12 +1127,15 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
             bad(format!("hop {index}: operator must own the next hop"));
         }
         for node in &hop.forward {
-            if !matches!(role(node), Some(Role::Forward | Role::Around)) {
+            if !matches!(role(node), Some(Role::Forward | Role::Around | Role::Unary)) {
                 bad(format!("hop {index}: `{node}` must be a Forward"));
             }
         }
         for node in &hop.backward {
-            if !matches!(role(node), Some(Role::Backward | Role::Around)) {
+            if !matches!(
+                role(node),
+                Some(Role::Backward | Role::Around | Role::Unary)
+            ) {
                 bad(format!("hop {index}: `{node}` must be a Backward"));
             }
         }
@@ -1160,7 +1221,7 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
             *places.entry(node.as_str()).or_default() += 1;
         }
     }
-    for node in &manifest.nodes {
+    for node in manifest.nodes.iter().filter(|n| n.role != Role::Unary) {
         let expected = if matches!(node.role, Role::Operator | Role::Around) {
             2
         } else {
@@ -1174,7 +1235,7 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
             ));
         }
     }
-    for node in &manifest.nodes {
+    for node in manifest.nodes.iter().filter(|n| n.role != Role::Unary) {
         let in_topology = manifest.hops.iter().any(|hop| {
             hop.outer == node.name
                 || hop.inner == node.name

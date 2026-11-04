@@ -356,6 +356,8 @@ fn an_operator_may_own_only_one_downstream_hop() {
         name: "X".into(),
         role: Role::Operator,
         binding: Some("x".into()),
+        calls: Vec::new(),
+        unary: None,
     });
     let hop = |outer: &str, inner: &str| gdl_runtime::HopInfo {
         outer: outer.into(),

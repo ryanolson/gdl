@@ -11,11 +11,15 @@ fn manifest() -> Manifest {
                 name: "S".into(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "D".into(),
                 role: Role::Sink,
                 binding: Some("d".into()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {
@@ -106,21 +110,29 @@ fn a_segment_sends_to_the_next_run_and_the_runs_it_opens() {
                 name: "S".into(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "F".into(),
                 role: Role::Forward,
                 binding: Some("f".into()),
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "D".into(),
                 role: Role::Sink,
                 binding: Some("d".into()),
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "B".into(),
                 role: Role::Backward,
                 binding: Some("b".into()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {
@@ -172,16 +184,22 @@ fn a_forward_path_that_returns_sends_both_ways() {
                 name: "S".into(),
                 role: Role::Source,
                 binding: None,
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "F".into(),
                 role: Role::Forward,
                 binding: Some("f".into()),
+                calls: Vec::new(),
+                unary: None,
             },
             NodeInfo {
                 name: "D".into(),
                 role: Role::Sink,
                 binding: Some("d".into()),
+                calls: Vec::new(),
+                unary: None,
             },
         ],
         hops: vec![HopInfo {
@@ -319,6 +337,8 @@ fn a_segment_sends_through_the_selectors_of_the_crossings_it_sends() {
         name: name.into(),
         role,
         binding: binding.map(str::to_string),
+        calls: Vec::new(),
+        unary: None,
     };
     let graph = Manifest {
         name: "chain".into(),
