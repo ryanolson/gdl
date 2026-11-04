@@ -4,7 +4,8 @@
 //! only gdl.
 
 use gdl::{
-    Backward, Catalogue, Cx, Error, Forward, Items, Next, Operator, Result, Sink, Streamed, items,
+    Backward, Catalogue, Cx, Error, Forward, Items, Next, Operator, Result, Sink, Streamed, Unary,
+    items,
 };
 
 /// Words.
@@ -102,6 +103,19 @@ impl Backward for Both {
 
     fn backward(&self, _cx: &Cx, input: Items<Token>) -> Items<Token> {
         input
+    }
+}
+
+/// A unary service.
+#[derive(gdl::Node)]
+pub struct Lookup;
+
+impl Unary for Lookup {
+    type Req = Words;
+    type Resp = Token;
+
+    async fn call(&self, _cx: &Cx, _req: Words) -> Result<Token> {
+        Err(Error::node("a fixture"))
     }
 }
 
@@ -280,6 +294,7 @@ fn a_node_registers_its_roles_and_ports() {
             "Detokenize node::Detokenize: backward(In=Token, Out=Piece)",
             "Engine node::Engine: sink(Req=Words, Item=Token)",
             "Gate node::Gate: operator(UpReq=Words, UpItem=Piece, DownReq=Words, DownItem=Token)",
+            "Lookup node::Lookup: unary(Req=Words, Resp=Token)",
             "Measured node::Measured: sink(Req=Words, Item=Token)",
             "Nested node::Nested: sink(Req=Words + stream Token nested, Item=Token)",
             "Plain node::Plain: ",

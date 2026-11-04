@@ -146,6 +146,31 @@ pub trait Around: Send + Sync + 'static {
     ) -> Items<Self::UpItem>;
 }
 
+/// A unary service: one request in, one response out. It is not in the
+/// topology. A node calls it through a [`UnaryClient`](crate::UnaryClient),
+/// whose call costs about what a direct call costs when the service is in
+/// the caller's segment.
+///
+/// A sync service writes an `async fn` with no `.await`: its future is
+/// ready at the first poll. A future of up to 256 bytes, aligned to 8 or
+/// less, is built inside the call's own future, so a local call makes no
+/// allocation of its own; a larger future is boxed.
+pub trait Unary: Send + Sync + 'static {
+    /// The request type.
+    type Req: Send + 'static;
+    /// The response type.
+    type Resp: Send + 'static;
+
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
+    #[doc(hidden)]
+    const ABSENT: bool = false;
+
+    /// Answer one request.
+    fn call(&self, cx: &Cx, req: Self::Req) -> impl Future<Output = Result<Self::Resp>> + Send;
+}
+
 /// The downstream part of a graph as an operator sees it.
 ///
 /// Each call is one attempt with its own cancellation scope below `cx`.

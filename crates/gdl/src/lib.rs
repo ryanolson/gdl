@@ -40,6 +40,7 @@ mod role;
 mod select;
 mod service;
 mod streamed;
+mod unary;
 
 pub use compose::{
     BackwardChain, BackwardHalf, ForwardChain, ForwardHalf, Hop, Inner, Join, Kept, OperatorStage,
@@ -76,7 +77,7 @@ pub use records::{
 };
 #[doc(hidden)]
 pub use records::{RecordAnswer, RecordLink, RecordOp, RecordReply};
-pub use role::{Around, Backward, Build, Forward, Frontend, Next, Operator, Sink};
+pub use role::{Around, Backward, Build, Forward, Frontend, Next, Operator, Sink, Unary};
 #[doc(hidden)]
 pub use select::JoinStamps;
 pub use select::{
@@ -85,6 +86,7 @@ pub use select::{
 };
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
+pub use unary::UnaryClient;
 
 #[doc(hidden)]
 pub use gdl_message::message_encoding;
@@ -177,7 +179,7 @@ pub mod __private {
     pub use gdl_model::__private::*;
     pub use gdl_model::ENDPOINT_LABEL;
 
-    use crate::{Around, Backward, Forward, Frontend, Operator, Sink};
+    use crate::{Around, Backward, Forward, Frontend, Operator, Sink, Unary};
 
     /// A message a generated segment sends or receives across a cut: a
     /// wire type. Each segment asserts it of every message that crosses
@@ -384,4 +386,5 @@ pub mod __private {
         "operator",
         [UpReq, UpItem, DownReq, DownItem]
     );
+    probe!(UnaryYes, UnaryNo, __gdl_unary, Unary, "unary", [Req, Resp]);
 }

@@ -97,6 +97,7 @@ pub(crate) fn roles(root: &TokenStream, ty: &TokenStream) -> TokenStream {
             ForwardYes as _,
             OperatorNo as _, OperatorYes as _, SinkNo as _, SinkYes as _,
             FrontendNo as _, FrontendYes as _, ServiceNo as _, ServiceYes as _,
+            UnaryNo as _, UnaryYes as _,
         };
         let probe = #root::RoleProbe::<#ty>::new();
         let mut roles = ::std::vec::Vec::new();
@@ -107,6 +108,7 @@ pub(crate) fn roles(root: &TokenStream, ty: &TokenStream) -> TokenStream {
         roles.extend((&probe).__gdl_backward());
         roles.extend((&probe).__gdl_operator());
         roles.extend((&probe).__gdl_around());
+        roles.extend((&probe).__gdl_unary());
         roles
     } }
 }

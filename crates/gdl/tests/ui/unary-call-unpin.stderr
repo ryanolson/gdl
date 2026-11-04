@@ -1,0 +1,37 @@
+error[E0277]: `PhantomPinned` cannot be unpinned
+  --> tests/ui/unary-call-unpin.rs:24:11
+   |
+24 |     unpin(&client.call(&cx, 1));
+   |     ----- ^^^^^^^^^^^^^^^^^^^^ within `gdl::unary::_::__Origin<'_, '_, u64, u64>`, the trait `Unpin` is not implemented for `PhantomPinned`
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = note: consider using the `pin!` macro
+           consider using `Box::pin` if you need to access the pinned value outside of the current scope
+note: required because it appears within the type `gdl::unary::placed::Slot<'_, Result<u64, gdl::Error>>`
+  --> src/unary/placed.rs
+   |
+   | pub(super) struct Slot<'a, T> {
+   |                   ^^^^
+note: required because it appears within the type `gdl::unary::_::__Origin<'_, '_, u64, u64>`
+  --> src/unary.rs
+   |
+   | / pin_project! {
+   | |     /// One call: the request until the first poll, then the service's
+   | |     /// future, in the slot.
+   | |     struct Call<'a, Req, Resp> {
+...  |
+   | | }
+   | |_^
+   = note: required for `gdl::unary::Call<'_, u64, u64>` to implement `Unpin`
+note: required because it appears within the type `impl Future<Output = Result<u64, gdl::Error>> + Send + '_`
+  --> src/unary.rs
+   |
+   |     ) -> impl Future<Output = Result<Resp>> + Send + 'a {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `unpin`
+  --> tests/ui/unary-call-unpin.rs:19:13
+   |
+19 | fn unpin<T: Unpin>(_: &T) {}
+   |             ^^^^^ required by this bound in `unpin`
+   = note: this error originates in the macro `$crate::__pin_project_make_unpin_impl` which comes from the expansion of the macro `pin_project` (in Nightly builds, run with -Z macro-backtrace for more info)

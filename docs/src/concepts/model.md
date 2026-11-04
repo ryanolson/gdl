@@ -4,7 +4,7 @@ A gdl graph is a set of typed nodes joined into nested hops. The graph fixes eac
 
 ## Roles
 
-Each node has one of six roles:
+Each node has one of seven roles:
 
 | Role | Sees | Does |
 |---|---|---|
@@ -14,6 +14,7 @@ Each node has one of six roles:
 | sink | the request | Produces the item stream. |
 | backward | the response stream only | Changes the item stream on its way out. |
 | around | the request, then the response stream | A forward half and a backward half in one hop, with a value kept from one to the other for each attempt. See [Around nodes](#around-nodes). |
+| unary | one request, then one response | Answers a request with one value. It is not in a hop: another node calls it through a `UnaryClient`. See [Unary services](#unary-services). |
 
 An operator and a source keep per-request state across both directions in one task. So each of them is placed whole, in one segment. An around node keeps a value across directions too, and both its halves must run in one task: with the hop's outer end, or with its inner end ([Specs, segments, and layouts](placement.md#what-is-checked-and-when)). A forward or backward node holds no state across directions, so a placement can put it anywhere.
 
@@ -48,7 +49,7 @@ So the graph says two things on two axes: what a request and its response carry 
 
 ## Role traits
 
-A node implementation implements one role trait from the `gdl` crate. Each method returns `impl Future + Send`. On the local path, only a node's output stream and a streamed request's items are boxed.
+A node implementation implements one role trait from the `gdl` crate. Each method returns `impl Future + Send`. On the local path, only a node's output stream and a streamed request's items are boxed, and a unary service's future when it does not fit its call's buffer ([Unary services](#unary-services)).
 
 ```rust,ignore
 pub type Items<T> = Pin<Box<dyn Stream<Item = Result<T>> + Send>>;
@@ -80,6 +81,10 @@ pub trait Around: Send + Sync + 'static {
     fn forward(&self, cx: &Cx, req: Self::UpReq) -> impl Future<Output = Result<(Self::DownReq, Self::State)>> + Send;
     fn backward(&self, cx: &Cx, state: Self::State, input: Items<Self::DownItem>) -> Items<Self::UpItem>;
 }
+pub trait Unary: Send + Sync + 'static {
+    type Req: Send + 'static; type Resp: Send + 'static;
+    fn call(&self, cx: &Cx, req: Self::Req) -> impl Future<Output = Result<Self::Resp>> + Send;
+}
 pub trait Frontend: Build {
     type Req: Send + 'static; type Item: Send + 'static;
     fn serve<N>(self, next: N, shutdown: impl Future<Output = ()> + Send + 'static) -> impl Future<Output = Result<()>> + Send
@@ -106,6 +111,24 @@ let hop = Hop::new((ahead, ()), engine, (behind, ()));
 - **If `forward` fails, the call fails.** A failure in `backward` is an error item in the stream. A check that only needs the request belongs in `forward`, so that it keeps its kind and its place as the call's error.
 
 A generated segment binary builds each implementation through `Build`, from that node's section of the segment settings. `build` gets the node's configuration and its metrics, already registered. It must return quickly, because the segment registers with its deployment only after every node is built. `ready` resolves when the node can take work, for example when a model is loaded. It resolves at once by default. A node without metrics writes `type Metrics = ();`. [Write nodes](../guides/write-nodes.md) shows each trait in use, and [Segment lifecycle](lifecycle.md) shows where `build` and `ready` run.
+
+### Unary services
+
+A unary node answers one request with one value. It is not part of a hop. Another node calls it through a `gdl::UnaryClient<Req, Resp>`, which the node keeps and calls per request:
+
+```rust,ignore
+let tokens = self.tokenize.call(&cx, text).await?;
+```
+
+- **A client is one `Arc`.** A node clones it into a stream it returns, with a clone of its context, and calls it per item.
+- **A call borrows the context.** The service reads the deadline, the request id, and the metadata from it. The call makes no child context and checks no deadline itself. Dropping the call's future cancels the call.
+- **The service's future is built inside the call's future.** The call's future has one size for every service, with a buffer of 256 bytes aligned to 8. At its first poll, it builds the service's future in that buffer and polls it there. A future that is larger, or aligned to more than 8, is boxed. So a call makes no allocation of its own for a future that fits: a sync service's future of 56 bytes, or a lookup behind a tokio mutex of 160 bytes ([Feature costs](../operations/feature-costs.md#a-local-unary-call)).
+- **The call's future is not `Unpin`.** After its first poll, the service's future lives inside it and must not move. Await the call, or pin it.
+- **A service's error is the call's error**, with its kind and its source.
+
+A boxed future was rejected: it costs an allocation and about 140 more instructions per call. So was a buffer returned by value, as the `stackfuture` crate does: the whole buffer then moves into the caller's future on every call. A client generic over the service would cost what a direct call costs, but it makes every caller generic.
+
+A client calls a service in the same process only ([Known limitations](../operations/limitations.md#a-unary-service-is-called-only-in-its-callers-process)).
 
 ## Streams and errors
 

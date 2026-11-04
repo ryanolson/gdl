@@ -32,6 +32,7 @@ Each port type must be a message that derives `Message`, `()`, or `gdl::Streamed
 | `Backward` | the response stream only | `In`, `Out` | `backward(&self, &cx, items)` |
 | `Operator` | both, and calls the rest of the graph through `Next` | `UpReq`, `UpItem`, `DownReq`, `DownItem` | `generate(&self, cx, req, next)` |
 | `Around` | both, as a forward half and a backward half of one hop, with a value kept between them | `UpReq`, `UpItem`, `DownReq`, `DownItem`, `State` | `forward(&self, &cx, req)` and `backward(&self, &cx, state, items)` |
+| `Unary` | one request, and answers one value. It is not in a hop: a node calls it through a `UnaryClient` | `Req`, `Resp` | `call(&self, &cx, req)` |
 | `Frontend`, `Service` | hosts a service that calls the graph | see [Hosted frontends](frontends.md) | `serve(self, ..)` |
 
 [The graph model](../concepts/model.md) explains hops, inner ends, and edge nodes. Two rules apply to every role:
@@ -47,6 +48,39 @@ Use an `Around` instead of an `Operator` when the node would call `next` exactly
 - Box a large value (`type State = Box<...>`). The value travels down the hop's forward chain inside the futures of the forward halves, by value, and the compiler may copy it more than once on the way: a 512 B value was copied 2.6 times per around node per request ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
 - Make the checks that only need the request in `forward`. An `Err` there is the call's error. In `backward`, the same failure is an error item in the stream.
 - A node may hold any value its constructor builds, such as a handle to the hop below that hand-written composition code builds. Work sent through it runs outside the attempt ([Known limitations](../operations/limitations.md#work-sent-through-a-handle-a-node-holds-runs-outside-the-attempt)).
+
+## Write a unary service
+
+A unary service answers one request with one value. Write a sync service as an `async fn` with no `.await`: its future is ready at the first poll.
+
+```rust
+#[derive(gdl::Node)]
+pub struct Tokenize { /* .. */ }
+
+impl gdl::Unary for Tokenize {
+    type Req = Text;
+    type Resp = Tokens;
+    async fn call(&self, cx: &Cx, req: Text) -> Result<Tokens> { /* .. */ }
+}
+```
+
+- Keep the service's future to 256 bytes or less, aligned to 8 or less. A call builds such a future inside its own and makes no allocation of its own. A larger future is boxed, one allocation per call ([The graph model](../concepts/model.md#unary-services)).
+- Box a large value that the service holds across an `.await`. It is part of the future's size.
+- A caller keeps its `UnaryClient` on the node and calls `self.tokenize.call(&cx, text).await` per request.
+- A `Backward` node's stream must own what it uses. Move a clone of the client and of the context into the stream once, and call per item:
+
+```rust
+fn backward(&self, cx: &Cx, input: Items<Token>) -> Items<Text> {
+    let state = (input, self.detok.clone(), cx.clone());
+    gdl::items(futures::stream::unfold(state, |(mut input, detok, cx)| async move {
+        let item = match input.next().await? {
+            Ok(token) => detok.call(&cx, token).await,
+            Err(e) => Err(e),
+        };
+        Some((item, (input, detok, cx)))
+    }))
+}
+```
 
 ## Box a large request
 

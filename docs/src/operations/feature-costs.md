@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors and a session's cutoff, registered pool policies, KV numbers and a view on an offer, and a pool's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, velo's own metrics, an instance's drain gauges, live rosters, routing selectors and a session's cutoff, registered pool policies, KV numbers and a view on an offer, and a pool's count of what may still send add to a request, what a local hop costs, and what a local unary call costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1, unless a section names another host. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -955,3 +955,28 @@ LD_PRELOAD=<memcpy interposer> target/release/examples/stages <hop|around|operat
 - **gdl does not box a request for its nodes.** A node takes its request by value, so a box inside the chain would be copied out into every node and boxed again after it, and a small request would pay an allocation for nothing. The message type is the node author's choice ([Write nodes](../guides/write-nodes.md#box-a-large-request)).
 - **Rejected: an in-place node form.** A trait whose node edits `&mut Req`, with `Forward` given by a blanket impl, let a run of such nodes copy the request once. At 5 nodes and 2 KiB it was 5 copies and 9,026 Ir, where a box was 0 and 8,036. It helps only a node whose request type is the same in and out, and it cost a `u64` request about 40 Ir per run. A default `forward_in_place` on `Forward` that calls `forward` cannot be written without `unsafe`: it would move the request out of a `&mut`.
 - **Rejected: pinning the inner end's call where it is built.** It removed the 2 moves of the inner end's future, about 565 Ir per hop at 2 KiB, but cost a `u64` request 2 to 7 Ir per hop. Three other forms of the forward chain's code moved none of a node's 3 copies.
+
+## A local unary call
+
+What a call through a `UnaryClient` costs over a direct call of the same service on its `Arc`, when the service is in the caller's process. The call's future holds a buffer of 256 bytes, aligned to 8, and builds the service's future in it at its first poll ([Unary services](../concepts/model.md#unary-services)). The code is `crates/gdl/src/unary.rs`, and its `unsafe` is in `crates/gdl/src/unary/placed.rs`.
+
+Measured with callgrind 3.28.0 on a shared aarch64 Linux host (20 cores), load average 34 to 40, rustc 1.93.1, under the release profile (fat LTO, one codegen unit), rustix on its libc backend. `crates/gdl/examples/unary.rs` makes its calls in one task on a current-thread tokio runtime, and awaits each. Instructions are callgrind Ir per call, (Ir at 20,000 calls − Ir at 10,000) / 10,000, two rounds:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example unary
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/unary <direct|placed|boxed>[-pending|-locked] <10000|20000>
+target/release/examples/unary sizes
+```
+
+| Callgrind Ir per call | Direct | `UnaryClient`, in place | Boxed future | In place − direct |
+|---|---|---|---|---|
+| a sync service (a 56-byte future), ready | 46.0 | 101.0 | 239.0 | +55.0 |
+| the same, pending once | 601.2 | 668.2 | 799.2 | +67.0 |
+| a lookup behind a tokio mutex (a 160-byte future) | 360.8 to 362.5 | 427.4 to 429.8 | 565.6 to 567.2 | +65 to +68 |
+
+- **A call in place makes no allocation of its own** for a future of 256 bytes or less, aligned to 8 or less. A boxed future makes one per call. `a_local_call_allocates_nothing_for_a_future_that_fits` in `crates/gdl/tests/allocations.rs` counts 0 for the sync service and the mutex lookup, and 1 for a future of more than 512 bytes.
+- **The in-place call costs 55 to 68 Ir over a direct call, and a boxed future 193 to 205.** The ready and pending rows repeat exactly. The mutex rows move by about 2 Ir, from the map's random hash keys.
+- **Where the ready call's 101 Ir go** (callgrind self Ir, at 20,000 calls): 56 in the caller's loop with the call's own poll inlined into it, 23 in building the service's future in the buffer, 20 in the service's future, and 1 in dropping it. The call future is 312 bytes.
+- **Rejected: a box per call.** It is the boxed column. **Rejected: a buffer returned by value**, as the `stackfuture` crate does. Its whole buffer moves into the caller's future on each call, so its cost grows with the buffer.
+
+The `unsafe` code is checked by Miri, under Stacked Borrows with and without `-Zmiri-strict-provenance`, and under Tree Borrows, on the module's tests: `cargo +nightly miri test -p gdl --lib unary::`, with `-Zmiri-disable-isolation` because a context reads the clock. The tests cover futures of 0, 256, and 257 bytes, futures aligned to 16, 64, and 512, a drop on each path, also when the future panics in `poll` or in `Drop`, and two futures that hold a borrow of their own local across a pending poll, one of which reads it in its destructor. With the buffer's address taken through a `&mut` to the buffer, Miri reports both as undefined behavior. Wall time is not measured here.

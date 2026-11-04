@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use gdl::{Cx, Hop, Items, Next, Result, Sink, SinkStage, Source, items};
+use gdl::{Cx, Hop, Items, Next, Result, Sink, SinkStage, Source, Unary, UnaryClient, items};
 
 struct Counting;
 
@@ -371,4 +371,74 @@ async fn an_err_item_adds_the_documented_allocations_with_the_same_consumer() {
         2,
         "the same count consumer made {ok} allocations for Ok and {err} for Err"
     );
+}
+
+/// Adds one to its request.
+struct AddOne;
+
+impl Unary for AddOne {
+    type Req = u64;
+    type Resp = u64;
+
+    async fn call(&self, _cx: &Cx, n: u64) -> Result<u64> {
+        Ok(n + 1)
+    }
+}
+
+/// Reads a map behind a tokio mutex: a future of about 160 bytes, as a
+/// real service's is.
+struct Locked(tokio::sync::Mutex<std::collections::HashMap<u64, u64>>);
+
+impl Unary for Locked {
+    type Req = u64;
+    type Resp = u64;
+
+    async fn call(&self, _cx: &Cx, n: u64) -> Result<u64> {
+        Ok(self.0.lock().await.get(&n).copied().unwrap_or(n))
+    }
+}
+
+/// Holds 512 bytes across a wait: a future larger than the call's buffer.
+struct Large;
+
+impl Unary for Large {
+    type Req = u64;
+    type Resp = u64;
+
+    async fn call(&self, _cx: &Cx, n: u64) -> Result<u64> {
+        let local = [n; 64];
+        tokio::task::yield_now().await;
+        Ok(local[63])
+    }
+}
+
+/// The allocations this thread makes in one call through `client`, polled
+/// by hand until it is ready, with the context made before the count.
+fn call_allocations(client: &UnaryClient<u64, u64>) -> u64 {
+    let cx = Cx::new();
+    let task = &mut std::task::Context::from_waker(std::task::Waker::noop());
+    COUNTED.with(|counted| counted.set(0));
+    COUNTING.with(|counting| counting.set(true));
+    let mut call = std::pin::pin!(client.call(&cx, 1));
+    let answer = loop {
+        if let std::task::Poll::Ready(answer) = call.as_mut().poll(task) {
+            break answer;
+        }
+    };
+    COUNTING.with(|counting| counting.set(false));
+    assert!(answer.is_ok());
+    COUNTED.with(Cell::get)
+}
+
+/// A local call builds the service's future inside its own, so it makes no
+/// allocation of its own for a future that fits, and one, its box, for a
+/// future that does not.
+#[test]
+fn a_local_call_allocates_nothing_for_a_future_that_fits() {
+    let ready = UnaryClient::local(Arc::new(AddOne));
+    let locked = UnaryClient::local(Arc::new(Locked(Default::default())));
+    let large = UnaryClient::local(Arc::new(Large));
+    assert_eq!(call_allocations(&ready), 0);
+    assert_eq!(call_allocations(&locked), 0);
+    assert_eq!(call_allocations(&large), 1);
 }

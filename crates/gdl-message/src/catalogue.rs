@@ -134,8 +134,8 @@ pub struct RoleInfo {
     /// Named public entries of a hosted service.
     #[serde(default)]
     pub entries: Vec<EndpointInfo>,
-    /// `sink`, `forward`, `backward`, `operator`, or `source` (a hosted
-    /// frontend or service).
+    /// `sink`, `forward`, `backward`, `operator`, `around`, `unary`, or
+    /// `source` (a hosted frontend or service).
     pub role: String,
     /// Its ports, in the order the role trait declares them.
     pub ports: Vec<PortInfo>,

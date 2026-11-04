@@ -125,6 +125,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the input pump and the local inner end are both producers, and each takes its own permit. See [Admission and egress](../concepts/admission.md#egress).
 - **Test:** `egress_hold_and_wait_at_the_limit_is_refused_not_hung` in `crates/gdl-runtime/tests/inputs.rs`.
 
+### A unary service is called only in its caller's process
+- **What:** a `UnaryClient` calls a service that runs in the caller's process. A graph file cannot declare a unary node or a node's calls, and a generated segment gives its nodes no client.
+- **When:** always. A node gets a client only in local composition, where the code that builds the nodes makes it from the service.
+- **Why:** the client's call to another segment, and the graph's declaration of services and their callers, are not built. See [Unary services](../concepts/model.md#unary-services).
+- **Workaround:** build the service and its callers in one place, and give each caller a client of that service.
+
 ## Bring-up, shutdown, and membership
 
 ### Only a hub lets an instance join
