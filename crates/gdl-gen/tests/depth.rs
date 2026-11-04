@@ -7,8 +7,9 @@
 //! node's own depth added up: a node that compiled alone failed in its
 //! segment, and each scope the builder gained took depth from every node.
 //!
-//! The request path nests in the same way, with one layer per stage, and
-//! each rustc release moves its depth. So a generated crate root raises the
+//! The request path nests in the same way, one layer per forward node of
+//! the source's hop (an operator's call of `next` is boxed, so a chain of
+//! operators does not), and each rustc release moves its depth. So a generated crate root raises the
 //! limit, and the second test proves it with a chain past the default.
 //!
 //! The tests build generated segments in a nested cargo run that shares the
@@ -75,10 +76,9 @@ fn a_node_that_builds_alone_builds_in_its_segment() {
     assert!(built.status.success(), "{stderr}");
 }
 
-/// The front's request path is deeper than the default limit, as the
-/// global router's is on later toolchains: the handler of its hop for an
-/// arriving request lays out a `HopCore` over nested `DOperator` and `DHop`
-/// layers. It builds because the generated crate roots raise the limit.
+/// The front's request path is deeper than the default limit: the handler
+/// of its hop for an arriving request lays out the hop's forward walk, one
+/// layer per forward node. It builds because the generated crate roots raise the limit.
 /// Taken out, the same item overflows, so the build cannot pass for want of
 /// depth.
 ///

@@ -13,7 +13,9 @@ use crate::meter::{Ending, Owner, ended};
 
 /// A stream of items: a response, or a streamed request's items. Every
 /// response in gdl is a stream; a unary response is a stream of one item. An
-/// `Err` item is terminal.
+/// `Err` item is terminal: the request's edge and every attempt end the
+/// stream at it. A node that reads the stream of a call under the request
+/// scope sees what the producer sends.
 pub type Items<T> = Pin<Box<dyn Stream<Item = Result<T>> + Send>>;
 
 /// Box a stream as [`Items`].
@@ -73,6 +75,46 @@ impl<T> Stream for UntilError<T> {
                 self.inner = None;
                 return Poll::Ready(error.map(Err));
             }
+        }
+        polled
+    }
+}
+
+/// The empty stream a call under the request scope returns when it finds
+/// its request over: the request's edge reports why.
+pub fn quiet<T: Send + 'static>() -> Items<T> {
+    Box::pin(futures::stream::empty())
+}
+
+/// The stream, yielding every `YIELD_INTERVAL` consecutive ready items and
+/// doing nothing else: the fairness of a node boundary, for the input of a
+/// node that filters (`Backward::FILTERS`) under the request scope.
+pub fn yielding<T: Send + 'static>(inner: Items<T>) -> Items<T> {
+    Box::pin(Yielding {
+        inner,
+        ready_run: 0,
+    })
+}
+
+struct Yielding<T> {
+    inner: Items<T>,
+    ready_run: u16,
+}
+
+impl<T> Stream for Yielding<T> {
+    type Item = Result<T>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.ready_run >= YIELD_INTERVAL {
+            self.ready_run = 0;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let polled = self.inner.as_mut().poll_next(cx);
+        match polled {
+            Poll::Ready(Some(_)) => self.ready_run += 1,
+            Poll::Pending => self.ready_run = 0,
+            Poll::Ready(None) => {}
         }
         polled
     }
@@ -190,11 +232,12 @@ impl<T> Stream for Fuse<T> {
             Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
             Poll::Pending => this.ready_run = 0,
             Poll::Ready(Some(Err(_)) | None) => {
-                // A clean end is checked before ending: ending cancels the
-                // scope itself.
-                let error =
-                    error_of(polled).or_else(|| interrupted(this.token.as_ref(), this.deadline_at));
-                end(&mut this.inner, &mut this.token);
+                let error = fuse_end(
+                    &mut this.inner,
+                    &mut this.token,
+                    this.deadline_at,
+                    error_of(polled),
+                );
                 return Poll::Ready(error.map(Err));
             }
         }
@@ -540,6 +583,29 @@ fn interrupted(token: Option<&Scope>, deadline_at: Option<Instant>) -> Option<Er
     } else {
         None
     }
+}
+
+/// A node boundary's ending: drop the producer's stream, then check a clean
+/// end against the producer's scope, then cancel that scope. The check comes
+/// after the drop, so that a producer whose cleanup cancels its scope (or
+/// the request scope it shares) is reported as interrupted, as an attempt
+/// boundary reports it; it comes before the cancel, which would otherwise
+/// always be seen. The guard is made first, so a panic in the drop still
+/// cancels. Out of line: it runs once per stream.
+#[cold]
+#[inline(never)]
+fn fuse_end<S>(
+    inner: &mut Option<S>,
+    token: &mut Option<Scope>,
+    deadline_at: Option<Instant>,
+    error: Option<Error>,
+) -> Option<Error> {
+    let cancel = token.take().map(Scope::drop_guard);
+    *inner = None;
+    let error =
+        error.or_else(|| interrupted(cancel.as_ref().map(CancelOnDrop::scope), deadline_at));
+    drop(cancel);
+    error
 }
 
 /// Drop the producer's stream, then cancel its scope, in the order a

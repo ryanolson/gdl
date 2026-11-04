@@ -22,7 +22,7 @@ use crate::meter::Visit;
 
 /// The per-request context every node receives.
 ///
-/// Cloning is cheap. [`Cx::child`] makes the context for one attempt: it
+/// Cloning is cheap. [`Cx::child`] makes a context below this one: it
 /// shares the identity, metadata, deadline, and extensions, and gets its
 /// own stop and cancel scope below the parent's.
 #[derive(Clone)]
@@ -95,8 +95,10 @@ impl Cx {
         self.ext.insert(value);
     }
 
-    /// The context for one attempt below this one. Cancelling or stopping this
-    /// context reaches the child; cancelling the child does not reach this one.
+    /// A context below this one, with its own stop and cancel scope: for an
+    /// attempt, or for a call an operator wants to cancel alone (a call of
+    /// `next` with it is an attempt). Cancelling or stopping this context
+    /// reaches the child; cancelling the child does not reach this one.
     pub fn child(&self) -> Self {
         Self {
             id: self.id,
@@ -182,6 +184,32 @@ impl Cx {
     #[doc(hidden)]
     pub fn cancel_token(&self) -> Scope {
         self.scope.clone()
+    }
+
+    /// [`Cx::done`] with this context's deadline and the cancel of `below`.
+    #[doc(hidden)]
+    pub async fn done_below(&self, below: &Scope) -> Error {
+        match self.deadline {
+            Some(deadline) => tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline.instant()) => Error::deadline_exceeded(),
+                () = below.wait(CANCEL) => if deadline.is_expired() {
+                    Error::deadline_exceeded()
+                } else {
+                    Error::cancelled()
+                },
+            },
+            None => {
+                below.wait(CANCEL).await;
+                Error::cancelled()
+            }
+        }
+    }
+
+    /// Whether this context's scope is `scope` itself.
+    #[doc(hidden)]
+    pub fn scope_is(&self, scope: &Scope) -> bool {
+        self.scope.same(scope)
     }
 
     /// Whether a waiter has ever registered on this context's scope: a

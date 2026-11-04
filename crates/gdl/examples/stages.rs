@@ -8,7 +8,10 @@
 //! requests, per request.
 //!
 //! - `<shape>`: `operator`, nested hops, each with an `OperatorStage` that
-//!   maps its stream; `hop`, one hop with `<stages>` forward nodes and
+//!   maps its stream (`scoped`: the same, with `CALL_SCOPE` set;
+//!   `backward`: each hop also has a backward node that maps its stream;
+//!   `scoped-backward`: that with `CALL_SCOPE`; `filtering`: the backward
+//!   node declares `FILTERS`); `hop`, one hop with `<stages>` forward nodes and
 //!   `<stages>` backward nodes that map their stream; `around`, one hop
 //!   with `<stages>` nested `Around` nodes that keep a `u64` and whose
 //!   backward halves map their stream; `around-wide`, the same keeping
@@ -228,32 +231,13 @@ async fn shaped<T: Item, Q: Request>(shape: &str, stages: usize, run: Run) -> u6
     let sink = || SinkStage::new(Arc::new(Burst::<T, Q>::new(run.pending)));
     let fwd = || Arc::new(Pass::<T, Q>(PhantomData));
     let bwd = || Arc::new(Pass::<T, Q>(PhantomData));
-    // `T` named once: an operator over a hop does not pin down its own item type.
-    macro_rules! op {
-        ($next:expr) => {
-            op::<T, Q, _>($next)
-        };
-    }
     match (shape, stages) {
         ("plain", _) => measure(&Plain::<T, Q>(stages, run.pending, PhantomData), run).await,
-        ("operator", 0) => measure(&Source::new(hop(sink())), run).await,
-        ("operator", 1) => measure(&Source::new(hop(op!(hop(sink())))), run).await,
-        ("operator", 2) => {
-            let h = hop(op!(hop(op!(hop(sink())))));
-            measure(&Source::new(h), run).await
-        }
-        ("operator", 3) => {
-            let h = hop(op!(hop(op!(hop(op!(hop(sink())))))));
-            measure(&Source::new(h), run).await
-        }
-        ("operator", 4) => {
-            let h = hop(op!(hop(op!(hop(op!(hop(op!(hop(sink())))))))));
-            measure(&Source::new(h), run).await
-        }
-        ("operator", 5) => {
-            let h = hop(op!(hop(op!(hop(op!(hop(op!(hop(op!(hop(sink())))))))))));
-            measure(&Source::new(h), run).await
-        }
+        ("operator", n) => operators::<T, Q, false>(sink(), n, run).await,
+        ("scoped", n) => operators::<T, Q, true>(sink(), n, run).await,
+        ("backward", n) => backwards::<T, Q, false, false>(sink(), n, run).await,
+        ("scoped-backward", n) => backwards::<T, Q, true, false>(sink(), n, run).await,
+        ("filtering", n) => backwards::<T, Q, false, true>(sink(), n, run).await,
         ("hop", 0) => measure(&Source::new(hop(sink())), run).await,
         ("hop", 1) => {
             let h = Hop::new((fwd(), ()), sink(), (bwd(), ()));
@@ -333,9 +317,82 @@ fn hop<I>(inner: I) -> Hop<(), I, ()> {
     Hop::new((), inner, ())
 }
 
-/// A pass-through operator over `next`.
-fn op<T, Q, H>(next: H) -> OperatorStage<Pass<T, Q>, H> {
-    OperatorStage::new(Arc::new(Pass(PhantomData)), next)
+/// `stages` nested hops, each with an operator whose `CALL_SCOPE` is `S`.
+async fn operators<T: Item, Q: Request, const S: bool>(
+    sink: SinkStage<Burst<T, Q>>,
+    stages: usize,
+    run: Run,
+) -> u64 {
+    let sink = || sink.clone();
+    macro_rules! op {
+        ($next:expr) => {
+            OperatorStage::new(Arc::new(Pass::<T, Q, S>(PhantomData)), $next)
+        };
+    }
+    match stages {
+        0 => measure(&Source::new(hop(sink())), run).await,
+        1 => measure(&Source::new(hop(op!(hop(sink())))), run).await,
+        2 => {
+            let h = hop(op!(hop(op!(hop(sink())))));
+            measure(&Source::new(h), run).await
+        }
+        3 => {
+            let h = hop(op!(hop(op!(hop(op!(hop(sink())))))));
+            measure(&Source::new(h), run).await
+        }
+        4 => {
+            let h = hop(op!(hop(op!(hop(op!(hop(op!(hop(sink())))))))));
+            measure(&Source::new(h), run).await
+        }
+        5 => {
+            let h = hop(op!(hop(op!(hop(op!(hop(op!(hop(op!(hop(sink())))))))))));
+            measure(&Source::new(h), run).await
+        }
+        n => panic!("no operator shape with {n} stages: 0 to 5"),
+    }
+}
+
+/// `stages` nested hops under an operator each, every hop with one
+/// backward node that maps its stream and declares `FILTERS` as `F`, under
+/// operators whose `CALL_SCOPE` is `S`.
+async fn backwards<T: Item, Q: Request, const S: bool, const F: bool>(
+    sink: SinkStage<Burst<T, Q>>,
+    stages: usize,
+    run: Run,
+) -> u64 {
+    let sink = || sink.clone();
+    macro_rules! op {
+        ($next:expr) => {
+            OperatorStage::new(Arc::new(Pass::<T, Q, S>(PhantomData)), $next)
+        };
+    }
+    macro_rules! bh {
+        ($inner:expr) => {
+            Hop::new((), $inner, (Arc::new(Map::<T, F>(PhantomData)), ()))
+        };
+    }
+    match stages {
+        0 => measure(&Source::new(bh!(sink())), run).await,
+        1 => measure(&Source::new(bh!(op!(bh!(sink())))), run).await,
+        5 => {
+            let h = bh!(op!(bh!(op!(bh!(op!(bh!(op!(bh!(op!(bh!(sink())))))))))));
+            measure(&Source::new(h), run).await
+        }
+        n => panic!("no backward shape with {n} stages: 0, 1 or 5"),
+    }
+}
+
+/// A backward node that maps its stream, declaring `FILTERS` as `F`.
+struct Map<T, const F: bool>(PhantomData<fn() -> T>);
+
+impl<T: Item, const F: bool> Backward for Map<T, F> {
+    type In = T;
+    type Out = T;
+    const FILTERS: bool = F;
+
+    fn backward(&self, _cx: &Cx, input: Items<T>) -> Items<T> {
+        items(input.map(|item| item))
+    }
 }
 
 /// Warm up with one-item requests, then count the allocations of
@@ -432,13 +489,14 @@ impl<T: Item, Q: Request> Sink for Burst<T, Q> {
 }
 
 /// A pass-through stage in each role.
-struct Pass<T, Q>(PhantomData<fn() -> (T, Q)>);
+struct Pass<T, Q, const S: bool = false>(PhantomData<fn() -> (T, Q)>);
 
-impl<T: Item, Q: Request> Operator for Pass<T, Q> {
+impl<T: Item, Q: Request, const S: bool> Operator for Pass<T, Q, S> {
     type UpReq = Q;
     type UpItem = T;
     type DownReq = Q;
     type DownItem = T;
+    const CALL_SCOPE: bool = S;
 
     async fn generate<N: Next<Q, T>>(&self, cx: Cx, req: Q, next: N) -> Result<Items<T>> {
         let below = next.generate(cx, req).await?;

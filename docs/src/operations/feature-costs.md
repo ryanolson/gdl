@@ -858,6 +858,39 @@ The bench's process runs a multi-threaded runtime, so its rounds spread further 
 - **An around node with a large state costs more per request.** With a 512 B state, an `around-wide` stage costs 312 Ir more per request (349 at 512 B items), though 17 Ir less per `u64` item. The state is moved down the hop's forward chain by value, inside the futures of the forward halves, and the compiler now copies it 2.6 times per stage per request, where it copied it once: callgrind counts the `memcpy` calls at the forward half's push of the state (`compose.rs`). Building the next future inside the match on `forward`'s result moved it more, not less. A node with a large state boxes it ([Write nodes](../guides/write-nodes.md)), as any large value a future holds.
 - **Code size:** `.text` grows by 10,832 B in the `stages` example, which now has the around shapes.
 
+
+**The request scope.** An operator's call of `next` with its own context runs under the request's scope, and the hop below passes it through: no scope, guard, race, or boundary ([Requests](../concepts/requests.md#calls-and-attempts)). The bench has three more shapes for it: `scoped`, the `operator` shape with `CALL_SCOPE` set, so that every call is an attempt as before; `backward`, nested hops under an operator each, every hop with one backward node that maps its stream; and `filtering`, the same with that node declaring `FILTERS`. Base (`e5155ee8`) and change were built in one target directory, base with the bench file's new shapes and without the two constants, on the same shared 20-core aarch64 host, valgrind 3.28.0, one run each; the counts are deterministic.
+
+```bash
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <operator|scoped|backward|filtering|hop|around|plain> u64 <0|5> 1 <200|400> [large-request] [deadline|pending]
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/stages <shape> u64 <0|5> <10000|20000> 1 [deadline|pending]
+```
+
+| Per stage, `u64` items | Base: Ir per item | Change: Ir per item | Base: Ir per request | Change: Ir per request | Base: allocations per request | Change: allocations per request |
+|---|---|---|---|---|---|---|
+| `operator` | 55.78 | 7.00 | 2,440 | 821 | 5.04 | 2.00 |
+| `operator`, with a deadline | 59.17 | 7.00 | 2,878 | 894 | 5.04 | 2.00 |
+| `operator`, `pending` | 55.78 | 7.00 | 5,472 | 813 | 7.40 | 2.00 |
+| `backward` | 83.97 | 14.00 | 3,028 | 1,211 | 7.04 | 3.00 |
+| `backward`, `pending` | 83.97 | 14.00 | 6,189 | 1,210 | 9.40 | 3.00 |
+| `operator`, a 2 KiB request (`large-request`) | 55.78 | 6.99 | 4,613 | 3,522 | 5.04 | 2.00 |
+| `backward`, a 2 KiB request | 83.97 | 13.99 | 5,504 | 4,298 | 7.04 | 3.00 |
+| `filtering` (change only) | | 33.76 | | 1,479 | | 4.00 |
+| `scoped` (change only; base's is `operator`) | | 55.78 | | 2,802 | | 6.05 |
+| `scoped`, `pending` | | 55.78 | | 5,823 | | 8.40 |
+| `scoped`, a 2 KiB request | | 55.79 | | 6,076 | | 6.05 |
+| `hop` | 37.40 | 29.38 | 913 | 926 | 2.80 | 2.80 |
+| `around` | 46.43 | 38.41 | 938 | 953 | 2.80 | 2.80 |
+| `plain` (control) | 7.00 | 7.00 | 204 | 204 | 1.00 | 1.00 |
+| the edge (`operator` at 0 stages), per request | | | 2,880 | 2,940 | 7 | 7 |
+
+- **A stage under the request scope costs what the control costs per item.** It saves 48.78 Ir per item, and 1,619 Ir and 3.04 allocations per request, at each nested operator stage. When the request waits (`pending`), it saves 4,659 Ir and 5.4 allocations, because no scope below the edge registers a waiter. With one mapping backward node in each hop, it saves 69.97 Ir per item and 1,817 Ir and 4.04 allocations per request.
+- **A node that declares `FILTERS` costs 19.76 Ir per item, and 268 Ir and an allocation per request:** the yield in front of its input, which is boxed.
+- **The scoped form costs what an attempt cost per item, and 362 Ir and an allocation more per request.** The allocation is the boxed attempt in `Called`, built in its box. Unboxed, the attempt's arm sized every operator's boxed future for it: the box outgrew the allocator's small-size cache, the profile showed the difference in `_int_malloc` and the free paths with the same number of allocations, and a stage under the request scope cost 1,131 Ir per request instead of 821. Built with `Box::pin` rather than in place, the boxed attempt cost 144 Ir more per request in `memcpy`.
+- **With a 2 KiB request,** a stage under the request scope saves 1,090 Ir per request, and the scoped form costs 1,463 Ir more than an attempt did. That difference was not profiled.
+- **The edge costs 60 Ir more per request:** the inner end's scope made before the race, and the race on it.
+- **A node boundary's ending runs out of line,** since it checks after it drops the producer's stream. Each node boundary inside an attempt costs 8 Ir less per item (`hop` and `around`, and the scoped `backward` shape), and a hop's request 13 to 15 Ir more.
+- **A distributed hop whose plan is local** passes through in the same way, behind one box that keeps it out of the front's call future (`the_front_call_future_stays_under_its_ceiling`). No bench builds a `DHop` yet.
 ### Copies of an item
 
 A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.

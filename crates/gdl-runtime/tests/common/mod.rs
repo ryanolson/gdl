@@ -90,6 +90,9 @@ pub struct Plan {
     pub helper: bool,
     /// D's `generate` waits for a stop, then returns its tail.
     pub stop_aware_start: bool,
+    /// D's `generate` waits for its context to end, and records
+    /// `D:generate-ended` however it ends, dropped included.
+    pub hold_in_generate: bool,
     /// How B calls its `next`.
     pub mode: Mode,
 }
@@ -266,6 +269,10 @@ impl Operator for NodeB {
     type UpItem = Chunk;
     type DownReq = Pre;
     type DownItem = Out;
+    // B hedges, retries and abandons calls, and its tests read each
+    // call's own cancel: it needs a scope per call. `tests/scope.rs` has an
+    // unscoped B of its own for the request scope.
+    const CALL_SCOPE: bool = true;
 
     async fn generate<N>(&self, cx: Cx, req: Prompt, next: N) -> Result<Items<Chunk>>
     where
@@ -432,6 +439,10 @@ impl Sink for NodeD {
         if plan.fail_generate {
             events.record(format!("D:generate-failed:{key}"));
             return Err(Error::node("generate failed"));
+        }
+        if plan.hold_in_generate {
+            let _ended = OnDrop::new(Arc::clone(&events), format!("D:generate-ended:{key}"));
+            return Err(cx.done().await);
         }
         if plan.stop_aware_start {
             tokio::select! {
@@ -938,6 +949,44 @@ pub fn reference_graph(
     deployment: &Deployment,
     events: &Arc<Events>,
 ) -> gdl::Result<impl Next<Prompt, Chunk> + Register + use<>> {
+    reference_graph_with(
+        deployment,
+        events,
+        Arc::new(NodeB {
+            events: Arc::clone(events),
+        }),
+    )
+}
+
+/// B as the reference graph has it, without its scope per call: its calls
+/// of `next` run under the request scope.
+pub struct UnscopedB(pub NodeB);
+
+impl Operator for UnscopedB {
+    type UpReq = Prompt;
+    type UpItem = Chunk;
+    type DownReq = Pre;
+    type DownItem = Out;
+
+    async fn generate<N: Next<Pre, Out>>(
+        &self,
+        cx: Cx,
+        req: Prompt,
+        next: N,
+    ) -> Result<Items<Chunk>> {
+        self.0.generate(cx, req, next).await
+    }
+}
+
+/// The reference graph with `b` for B.
+pub fn reference_graph_with<O>(
+    deployment: &Deployment,
+    events: &Arc<Events>,
+    b: Arc<O>,
+) -> gdl::Result<impl Next<Prompt, Chunk> + Register + use<O>>
+where
+    O: Operator<UpReq = Prompt, UpItem = Chunk, DownReq = Pre, DownItem = Out>,
+{
     let hop1 = deployment.hop(
         1,
         FwdStep::new(
@@ -963,12 +1012,7 @@ pub fn reference_graph(
     deployment.hop(
         0,
         FwdEnd::new(wire_codec!(Prompt)),
-        DOperator::new(
-            Arc::new(NodeB {
-                events: Arc::clone(events),
-            }),
-            hop1,
-        ),
+        DOperator::new(b, hop1),
         BwdStep::new(
             Arc::new(NodeG),
             wire_codec!(Chunk),
@@ -1031,6 +1075,24 @@ pub fn deploy_configured(
     events: &Arc<Events>,
     config: &dyn Fn(&str) -> RuntimeConfig,
 ) -> Cluster<impl Next<Prompt, Chunk> + Register + use<>> {
+    deploy_with(instances, placement, events, config, &|events| {
+        Arc::new(NodeB {
+            events: Arc::clone(events),
+        })
+    })
+}
+
+/// Deploy the reference graph with `b` for B in every segment.
+pub fn deploy_with<O>(
+    instances: &[(String, velo::Velo)],
+    placement: &gdl_runtime::Placement,
+    events: &Arc<Events>,
+    config: &dyn Fn(&str) -> RuntimeConfig,
+    b: &dyn Fn(&Arc<Events>) -> Arc<O>,
+) -> Cluster<impl Next<Prompt, Chunk> + Register + use<O>>
+where
+    O: Operator<UpReq = Prompt, UpItem = Chunk, DownReq = Pre, DownItem = Out>,
+{
     let manifest = reference_manifest(|_| true);
     let mut roster = Roster::new();
     for (name, node) in instances {
@@ -1048,7 +1110,7 @@ pub fn deploy_configured(
                 config(name),
             )
             .expect("deployment");
-            let root = reference_graph(&deployment, events).expect("graph");
+            let root = reference_graph_with(&deployment, events, b(events)).expect("graph");
             (name.clone(), deployment.start(root).expect("start"))
         })
         .collect();

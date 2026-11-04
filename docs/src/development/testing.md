@@ -83,6 +83,10 @@ The feature also records when two steps happened. `Segment::promised_to_avoid` s
 
 The pool plane runs in one process. A test starts a hub for each pool, with `PoolTiming` shortened so that heartbeats and leases pass in milliseconds, a `MemoryDirectory` or a `dir` directory, and instances that register as segments register. `crates/gdl-hub/tests/common/mod.rs` and `crates/gdl-runtime/tests/common/{pools,boundary}.rs` hold the fixtures: a deployment of two classes, `global` (the chooser) and `model_x` (the pool entry and its inner node). The tests cover quorum, follow, relay, failover, retirement across pools, drain, caps, and watch limits. `crates/gdl-pools/tests/` runs the same conformance suite against each directory backend, and `faults/` wraps a backend to inject failures.
 
+## Both forms of a call
+
+A call that an operator makes with its own context runs under the request's scope, and an operator that sets `CALL_SCOPE` gets an attempt ([Requests](../concepts/requests.md#calls-and-attempts)). The tests that tell the two forms apart are `crates/gdl/tests/scope.rs`, `edge.rs` and `filters.rs`, and `crates/gdl-runtime/tests/scope.rs`, which runs the same graph locally and in one segment. Built with `RUSTFLAGS="--cfg gdl_scoped_calls"`, every call is an attempt. In that build, exactly the tests that assert the request scope's own outcome fail, and every other test passes: a check that the attempt is the code it was before the request scope.
+
 ## Compile-fail and dependency tests
 
 - `trybuild` cases in `crates/gdl/tests/compile.rs`, `crates/gdl-message/tests/compile.rs`, and `crates/gdl-runtime/tests/compile.rs` hold the compile errors that the derives and `graph!` promise.

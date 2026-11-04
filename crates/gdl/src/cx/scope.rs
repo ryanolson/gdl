@@ -54,6 +54,11 @@ impl Scope {
         }))
     }
 
+    /// Whether `other` is this scope itself.
+    pub fn same(&self, other: &Scope) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Cancel this scope and every scope below it.
     pub fn cancel(&self) {
         self.0.set(CANCEL);
@@ -103,6 +108,13 @@ impl CancelOnDrop {
     pub fn disarm(mut self) -> Scope {
         self.0
             .take()
+            .expect("a guard holds its scope until disarmed")
+    }
+
+    /// The scope the guard will cancel.
+    pub fn scope(&self) -> &Scope {
+        self.0
+            .as_ref()
             .expect("a guard holds its scope until disarmed")
     }
 }

@@ -89,6 +89,14 @@ pub trait Backward: Send + Sync + 'static {
     #[doc(hidden)]
     const ABSENT: bool = false;
 
+    /// Whether the node can take items without passing one on (a filter, a
+    /// batcher). Such a node loops over its input inside one poll; under the
+    /// request scope nothing else below the request's edge returns to it,
+    /// so its input then yields every 1,024 ready items, and a cancel or a
+    /// client's detach reaches the edge. A node that passes each item on
+    /// leaves it `false` and pays nothing.
+    const FILTERS: bool = false;
+
     /// Transform one response stream. The returned stream must own what it
     /// uses: it outlives this call.
     fn backward(&self, cx: &Cx, input: Items<Self::In>) -> Items<Self::Out>;
@@ -100,9 +108,9 @@ pub trait Backward: Send + Sync + 'static {
 ///
 /// It is an operator that calls the rest of the hop exactly once, folded
 /// into the hop: it costs what a forward and a backward node cost, not an
-/// operator's hop of its own. Each attempt runs `forward` once and then,
-/// unless the attempt ends first, `backward` once, with the value that
-/// attempt's `forward` kept. A retry is a new attempt with a new value.
+/// operator's hop of its own. Each call runs `forward` once and then,
+/// unless the call ends first, `backward` once, with the value that call's
+/// `forward` kept. A retry is a new call with a new value.
 ///
 /// An `Err` from `forward` is the call's error. A failure in `backward`
 /// is an error item in the stream, so a check that only needs the request
@@ -120,6 +128,14 @@ pub trait Around: Send + Sync + 'static {
     /// attempt. It moves a few times on each request, so a large value is
     /// better behind a box the node makes.
     type State: Send + 'static;
+
+    /// Whether the node can take items without passing one on (a filter, a
+    /// batcher). Such a node loops over its input inside one poll; under the
+    /// request scope nothing else below the request's edge returns to it,
+    /// so its input then yields every 1,024 ready items, and a cancel or a
+    /// client's detach reaches the edge. A node that passes each item on
+    /// leaves it `false` and pays nothing.
+    const FILTERS: bool = false;
 
     /// Whether this is the `Absent` placeholder: a segment refuses to
     /// assemble with a placeholder in a slot it hosts, so the placeholder's
@@ -173,13 +189,28 @@ pub trait Unary: Send + Sync + 'static {
 
 /// The downstream part of a graph as an operator sees it.
 ///
-/// Each call is one attempt with its own cancellation scope below `cx`.
-/// Dropping the returned stream, or the pending future, cancels that attempt
-/// only. A `Next` may be cloned, kept, and called again (retry, migration);
-/// once `cx` is cancelled or past its deadline, calls fail at once.
+/// A call made with the operator's own context runs under the request's
+/// scope: the hop below adds no scope of its own, its nodes share the
+/// request's, and a call that finds its request over ends quietly, with an
+/// empty stream, while the request's edge reports why. A call is an attempt,
+/// with its own cancellation scope below `cx`, when the operator sets
+/// [`Operator::CALL_SCOPE`], when it calls with a context it derived (a
+/// child scope or another deadline), or when the hop below is remote; once
+/// its `cx` is cancelled or past its deadline, it fails at once. Either way,
+/// dropping the returned stream, or the pending future, ends that call, and
+/// a `Next` may be cloned, kept, and called again (retry, migration). See
+/// docs/src/concepts/requests.md.
 pub trait Next<Req, Item>: Clone + Send + Sync + 'static {
-    /// Start one attempt.
+    /// Start one call.
     fn generate(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send;
+
+    /// Start one call under the caller's own scope: no scope, guard, race,
+    /// or boundary of its own. A hop overrides it; any other `Next` calls
+    /// `generate`.
+    #[doc(hidden)]
+    fn pass(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
+        self.generate(cx, req)
+    }
 }
 
 /// A node that sees both the request and the response: it receives the
@@ -200,6 +231,23 @@ pub trait Operator: Send + Sync + 'static {
     /// methods are never called.
     #[doc(hidden)]
     const ABSENT: bool = false;
+
+    /// Whether each call of `next` is an attempt, with a scope of its own:
+    /// a cancel of that call alone, which its nodes see at once; checks of
+    /// its cancel and deadline every 64 items; its own `Cancelled`, rather
+    /// than a quiet end, when its request is cancelled; and a clean end
+    /// after a cancel reported as `Cancelled`. Without it, a call of `next`
+    /// with the operator's own context runs under the request's scope, which
+    /// costs about 49 Ir less per item and 1,600 Ir and three allocations
+    /// less per request (docs/src/operations/feature-costs.md).
+    ///
+    /// Set it if the operator hedges or abandons calls and expects the
+    /// dropped call's nodes to see a cancel, turns its `next`'s end into
+    /// output and must tell a cancel from a clean end, filters or batches
+    /// an always-ready local source, or calls `next` from a task it spawned.
+    /// A call with a context the operator derived is an attempt whatever
+    /// this says.
+    const CALL_SCOPE: bool = false;
 
     /// Handle one upstream request.
     fn generate<N>(

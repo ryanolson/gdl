@@ -16,7 +16,7 @@ use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit, HeadInfo};
 use crate::zstd::Compression;
 use gdl::__runtime as meter;
-use gdl::__runtime::{CHECK_INTERVAL, bound_measured, race_done};
+use gdl::__runtime::{CHECK_INTERVAL, bound_measured, race_below};
 use gdl::__runtime::{END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
 use gdl::__runtime::{Presence, Want};
 use gdl::Decline;
@@ -588,8 +588,13 @@ where
             // finishes at once registers no waiter on its scope. A cancel
             // that came first still wins, through the checks `run_local`
             // makes before each stage.
-            let run = std::pin::pin!(core.run_local(&attempt, req));
-            let items = meter::note(root.as_ref(), race_done(&attempt, run).await)?;
+            // As in local composition: the race and the boundary watch the
+            // inner end's scope, which every call under it shares unless it
+            // has a scope of its own.
+            let scope = attempt.child();
+            let below = scope.cancel_token();
+            let run = std::pin::pin!(core.run_local(&attempt, scope, req));
+            let items = meter::note(root.as_ref(), race_below(&attempt, &below, run).await)?;
             meter::note(root.as_ref(), attempt.check())?;
             return Ok(bound_measured(&attempt, guard, items, root));
         }
@@ -608,6 +613,51 @@ where
         // wrapper.
         let items = items_holding(items, (slot, lease));
         Ok(bound_measured(&attempt, guard, items, root))
+    }
+
+    // On the heap, built there: `DOperator::call` holds its operator's
+    // future inline, and the front's call future holds every one of them, so
+    // the pass-through's walk would grow it whole
+    // (`the_front_call_future_stays_under_its_ceiling`).
+    fn pass(&self, cx: Cx, req: F::In) -> impl Future<Output = Result<Items<B::Out>>> + Send {
+        gdl::__runtime::boxed(move || self.pass_here(cx, req))
+    }
+}
+
+impl<F, I, B> DHop<F, I, B>
+where
+    F: DForward,
+    I: DInner<Req = F::Out>,
+    B: DBackward<F::Stack, In = I::Item>,
+{
+    /// A local plan under its caller's scope. A remote attempt keeps its
+    /// own: its watcher cancels the attempt, and ends only when the attempt
+    /// does. The source's hop keeps its own too: its boundary records the
+    /// root's visit.
+    async fn pass_here(&self, cx: Cx, req: F::In) -> Result<Items<B::Out>> {
+        let core = &self.0;
+        if !core.plan.local || core.figures.source.is_some() {
+            return self.generate(cx, req).await;
+        }
+        tokio::task::coop::consume_budget().await;
+        // As `Hop::pass`: no scope or node boundary, and a call that finds
+        // its request over ends quietly.
+        if cx.check().is_err() {
+            return Ok(gdl::__runtime::quiet());
+        }
+        let run = async {
+            let (value, stack) = match core.fwd.walk(1, usize::MAX, &cx, req, ()).await? {
+                (FwdExit::Here(value), stack) => (value, stack),
+                (FwdExit::Leave { .. }, _) => return Err(internal("a local hop left its segment")),
+            };
+            cx.check()?;
+            let items = core.inner.pass(&cx, value).await?;
+            Ok(core.bwd.pass(&cx, items, stack))
+        };
+        match run.await {
+            Err(_) if cx.check().is_err() => Ok(gdl::__runtime::quiet()),
+            run => run,
+        }
     }
 }
 
@@ -694,13 +744,12 @@ where
 {
     /// Every stage is in this segment: a nested call, as in local
     /// composition.
-    async fn run_local(&self, attempt: &Cx, req: F::In) -> Result<B::Answer> {
+    async fn run_local(&self, attempt: &Cx, scope: Cx, req: F::In) -> Result<B::Answer> {
         let (value, stack) = match self.fwd.walk(1, usize::MAX, attempt, req, ()).await? {
             (FwdExit::Here(value), stack) => (value, stack),
             (FwdExit::Leave { .. }, _) => return Err(internal("a local hop left its segment")),
         };
         attempt.check()?;
-        let scope = attempt.child();
         let items = self.inner.call(&scope, value).await?;
         attempt.check()?;
         self.bwd
@@ -1449,6 +1498,7 @@ where
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let scope = cx.child();
+        let below = scope.cancel_token();
         // Armed before the node runs: an early exit (failure, interruption)
         // cancels whatever the node started under its context.
         let armed = scope.cancel_on_drop();
@@ -1465,7 +1515,9 @@ where
                     stopped = true;
                     cx.request_stop();
                 }
-                reason = cx.done() => return failed(out, reason, owner.as_ref()).await,
+                // The inner end's scope: every call under it without a scope
+                // of its own shares it, so its cancel is the request's.
+                reason = cx.done_below(&below) => return failed(out, reason, owner.as_ref()).await,
                 produced = &mut call => break produced,
             }
         };

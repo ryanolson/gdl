@@ -90,8 +90,50 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** decide by `Error::kind`, and put what the consumer needs in the kind or in the message. A recoverable application error belongs in the stream's item type.
 
 ### A ready producer can overrun a cancel or a deadline by 64 items
-- **What:** after a cancel or a deadline, a producer whose stream is always ready can yield up to 64 more items before its attempt ends. A pending producer is interrupted at once.
+- **What:** after a cancel or a deadline, a producer whose stream is always ready can yield up to 64 more items before its attempt ends. A pending producer is interrupted at once. Below the request's edge, under the request scope, the edge counts those items: the bound is 64 of the items the edge passes.
 - **Why:** an attempt boundary polls the cancel and deadline futures only while its producer is pending. For a ready producer, it checks the cancel flag and the clock every 64 items (`CHECK_INTERVAL`, in `crates/gdl/src/items.rs`). See [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked).
+
+### A filter that does not declare `FILTERS` can keep a cancel from its request's edge
+- **What:** a backward node or an around node that takes items without passing one on, over an always-ready local source, reads that source until it emits, and no cancel, deadline, or client's detach reaches the request until it does. Over an endless source, the request never ends. An operator that filters its `next`'s stream does the same.
+- **When:** the node runs under the request scope, the default for a call an operator makes with its own context, and does not set `Backward::FILTERS` or `Around::FILTERS`; or the filtering operator does not set `Operator::CALL_SCOPE`.
+- **Why:** under the request scope no boundary sits between the node and the request's edge, so nothing returns `Pending` to the edge while the node loops. A yield in every hop would cost every node that never filters 19.76 Ir per item and an allocation per request. See [Requests, attempts, and deadlines](../concepts/requests.md#calls-and-attempts).
+- **Workaround:** the node sets `FILTERS`, or the operator sets `CALL_SCOPE`.
+
+### A node's own cancel reaches every node under its request's edge
+- **What:** under the request scope, a node that cancels or stops its own context cancels or stops every node below the request's edge, not only its own call. While the request streams, the edge treats such a cancel as cooperative, and reports it when the stream ends.
+- **When:** the node runs under the request scope.
+- **Why:** the calls under the edge share one scope, which is what makes them cheap. The edge's boundary watches its attempt while the stream runs, because the inner end's own boundary cancels the shared scope as cleanup while backward nodes may still pass items on. See [Runtime design](../development/runtime-design.md#node-contexts).
+- **Workaround:** a node that needs a private scope makes `cx.child()`, and calls `next` with it, which makes the call an attempt.
+
+### Work an operator spawns is not ended by a client's detach under the request scope
+- **What:** a call of `next` from a task that an operator spawned keeps running after the client detaches until it ends on its own, if its nodes do not read their context. The edge drops only what is nested in its own future and stream.
+- **When:** the operator does not set `CALL_SCOPE`.
+- **Why:** a call under the request scope is not raced. Its nodes see the cancel only through their contexts.
+- **Workaround:** the operator sets `CALL_SCOPE`: the hop's race in the spawned task then ends the call at once.
+
+### An operator that relies on a call's own scope and does not ask for one is not caught
+- **What:** an operator that expects a call's own cancel, `Cancelled` from a call that was running when its request was cancelled, a clean end after a cancel reported as `Cancelled`, or a node's `cx.cancelled()` at the end of its own call, gets the request scope instead, with no error at build or run time.
+- **When:** the operator calls `next` with its own context and does not set `CALL_SCOPE`.
+- **Why:** whether a call needs its own scope depends on the operator's code, which neither the composer nor the generator sees.
+- **Workaround:** the operator sets `CALL_SCOPE`.
+
+### Scope depends on placement
+- **What:** a call over a remote hop always has a scope of its own, where the same call over a local hop runs under the request scope. An operator written for the request scope can then get `Cancelled` from a remote call after its request was cancelled.
+- **When:** the hop below the operator is remote.
+- **Why:** a remote attempt's watcher cancels the attempt and ends only with it, and its admission slot and default deadline belong to it.
+- **Workaround:** an operator that may run over a remote hop treats `Cancelled` after `cx.is_cancelled()` as the end of its request.
+
+### Under the request scope, a call whose request is over ends quietly
+- **What:** a call that finds its request cancelled or past its deadline returns an empty stream, and a stream that ends cleanly after a cancel reaches the operator as a clean end. The edge reports the cause after anything the operator sends. An operator that turns a clean end into output, such as closing replies, can send it before the edge's `Cancelled`.
+- **When:** the operator calls `next` with its own context and does not set `CALL_SCOPE`.
+- **Why:** an error would let a retry or a migration send the failure that caused it after the request was cancelled.
+- **Workaround:** an operator that must tell a cancel from a clean end sets `CALL_SCOPE`.
+
+### Under the request scope, a producer's items after an `Err` reach a nested operator
+- **What:** a producer that sends items after an `Err` hands them on to the operator above it. The request's edge ends the stream at the first `Err` that reaches it.
+- **When:** the operator calls `next` with its own context and does not set `CALL_SCOPE`.
+- **Why:** only the edge and an attempt end a stream at its first `Err`; a call under the request scope has no boundary of its own.
+- **Workaround:** an operator that relies on its `next`'s stream ending at the first `Err` sets `CALL_SCOPE`. See [The graph model](../concepts/model.md#streams-and-errors).
 
 ### Under an allocator the compiler does not know, a nested hop's future is copied into its box
 - **What:** each call of an operator or a join that is a hop's inner end builds its future on the stack and copies it whole into its box: one copy per call, as large as the future. With the system allocator, the future is built in its box and nothing is copied.

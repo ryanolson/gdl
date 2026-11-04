@@ -49,7 +49,7 @@ impl Build for Deep {
 }
 
 /// Hands each request to the next stage, and its answers back. `chain.gdl`
-/// places it at every level of the chain.
+/// places it over the sink.
 #[derive(gdl::Node)]
 pub struct Pass;
 
@@ -98,6 +98,28 @@ impl Frontend for Door {
 }
 
 impl Build for Door {
+    type Config = NoSettings;
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Hands each request on unchanged. `chain.gdl` places it at every
+/// forward position of the chain.
+#[derive(gdl::Node)]
+pub struct Step;
+
+impl gdl::Forward for Step {
+    type In = Ask;
+    type Out = Ask;
+
+    async fn forward(&self, _cx: &Cx, req: Ask) -> Result<Ask> {
+        Ok(req)
+    }
+}
+
+impl Build for Step {
     type Config = NoSettings;
     type Metrics = ();
     async fn build(_: NoSettings, (): ()) -> Result<Self> {

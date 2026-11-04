@@ -458,6 +458,12 @@ pub trait DBackward<Stack = ()>: sealed::Sealed + Send + Sync + 'static {
     /// boundary, with the slots of its around nodes.
     #[doc(hidden)]
     fn answer(&self, attempt: &Cx, fused: Fuse<Self::In>, stack: Stack) -> Option<Self::Answer>;
+
+    /// The whole chain under its caller's scope, as `BackwardChain::pass`
+    /// in local composition: every node gets `cx`, no node's stream is
+    /// fused, and a request that is over ends the rest quietly.
+    #[doc(hidden)]
+    fn pass(&self, cx: &Cx, items: Items<Self::In>, stack: Stack) -> Items<Self::Out>;
 }
 
 /// One backward node of a distributed hop.
@@ -560,6 +566,18 @@ where
             BwdExit::Here(items) => Some(items),
             BwdExit::Leave { .. } => None,
         }
+    }
+
+    fn pass(&self, cx: &Cx, items: Items<B::In>, stack: S) -> Items<R::Out> {
+        if cx.check().is_err() {
+            return self.rest.pass(cx, gdl::__runtime::quiet(), stack);
+        }
+        let items = if B::FILTERS {
+            gdl::__runtime::yielding(items)
+        } else {
+            items
+        };
+        self.rest.pass(cx, self.node.backward(cx, items), stack)
     }
 }
 
@@ -669,6 +687,32 @@ where
             BwdExit::Leave { .. } => None,
         }
     }
+
+    fn pass(
+        &self,
+        cx: &Cx,
+        items: Items<P::DownItem>,
+        (Slot(state), rest): (Slot<P>, Rest),
+    ) -> Items<R::Out> {
+        if cx.check().is_err() {
+            drop(state);
+            return self.rest.pass(cx, gdl::__runtime::quiet(), rest);
+        }
+        let Some(state) = state else {
+            let failed = gdl::__runtime::failed(Error::new(
+                ErrorKind::Placement,
+                "an around node's backward half ran where its forward half did not",
+            ));
+            return self.rest.pass(cx, failed, rest);
+        };
+        let items = if P::FILTERS {
+            gdl::__runtime::yielding(items)
+        } else {
+            items
+        };
+        self.rest
+            .pass(cx, self.node.backward(cx, state, items), rest)
+    }
 }
 
 impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
@@ -716,6 +760,10 @@ impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
     fn answer(&self, _attempt: &Cx, fused: Fuse<T>, (): ()) -> Option<Fuse<T>> {
         Some(fused)
     }
+
+    fn pass(&self, _cx: &Cx, items: Items<T>, (): ()) -> Items<T> {
+        items
+    }
 }
 
 /// The inner end of a distributed hop: a sink, or an operator with its own
@@ -739,6 +787,14 @@ pub trait DInner: sealed::Sealed + Send + Sync + 'static {
         scope: &Cx,
         req: Self::Req,
     ) -> impl Future<Output = Result<Fuse<Self::Item>>> + Send;
+
+    /// Call the inner end under its caller's scope, with no node boundary.
+    #[doc(hidden)]
+    fn pass(
+        &self,
+        cx: &Cx,
+        req: Self::Req,
+    ) -> impl Future<Output = Result<Items<Self::Item>>> + Send;
 
     #[doc(hidden)]
     fn register(&self, entries: &mut super::runtime::Entries);
@@ -774,6 +830,14 @@ impl<S: Sink> DInner for DSink<S> {
         Ok(fused(items, scope))
     }
 
+    async fn pass(&self, cx: &Cx, req: S::Req) -> Result<Items<S::Item>> {
+        let items = self.sink.generate(cx.clone(), req).await?;
+        if let Some(visit) = cx.visit() {
+            visit.producing();
+        }
+        Ok(items)
+    }
+
     fn register(&self, _entries: &mut super::runtime::Entries) {}
 }
 
@@ -806,11 +870,14 @@ where
     /// An operator's return does not end the request path: it may return
     /// its stream before it calls `next`, and the hop it calls ends it.
     async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Fuse<O::UpItem>> {
-        let items = self
-            .op
-            .generate(scope.clone(), req, self.next.for_request(scope))
-            .await?;
+        let next = gdl::__runtime::Called::of::<O>(self.next.for_request(scope), scope);
+        let items = self.op.generate(scope.clone(), req, next).await?;
         Ok(fused(items, scope))
+    }
+
+    async fn pass(&self, cx: &Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
+        let next = gdl::__runtime::Called::of::<O>(self.next.for_request(cx), cx);
+        self.op.generate(cx.clone(), req, next).await
     }
 
     fn register(&self, entries: &mut super::runtime::Entries) {

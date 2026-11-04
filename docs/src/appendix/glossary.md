@@ -17,7 +17,8 @@
 | Wire type | A message that can cross segments: it implements serde's `Serialize` and `DeserializeOwned` |
 | Contract | The generated crate that holds a graph's types and `manifest()`. Its hash is part of a deployment's identity |
 | `Cx` | The request context: id, deadline, metadata, and the cancel and stop signals. See [Requests, attempts, and deadlines](../concepts/requests.md) |
-| Attempt | One call of `next.generate`, with its own cancellation scope |
+| Attempt | A call of `next.generate` with its own cancellation scope: the request's edge, a call over a remote hop, and a call from an operator that sets `CALL_SCOPE` or passes a context it derived. See [Calls and attempts](../concepts/requests.md#calls-and-attempts) |
+| Request scope | The scope that the request's edge hands the stage below it, which every call under the edge shares unless it is an attempt. See [Calls and attempts](../concepts/requests.md#calls-and-attempts) |
 
 ## Placement and the wire
 

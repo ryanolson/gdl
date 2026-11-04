@@ -13,7 +13,7 @@ Each node has one of seven roles:
 | forward | the request only | Changes the request on its way in. |
 | sink | the request | Produces the item stream. |
 | backward | the response stream only | Changes the item stream on its way out. |
-| around | the request, then the response stream | A forward half and a backward half in one hop, with a value kept from one to the other for each attempt. See [Around nodes](#around-nodes). |
+| around | the request, then the response stream | A forward half and a backward half in one hop, with a value kept from one to the other for each call. See [Around nodes](#around-nodes). |
 | unary | one request, then one response | Answers a request with one value. It is not in a hop: another node calls it through a `UnaryClient`. See [Unary services](#unary-services). The graph declares it with `unary`, and each caller says `calls` ([Declare unary nodes](../guides/define-a-graph.md#declare-unary-nodes)). |
 
 An operator and a source keep per-request state across both directions in one task. So each of them is placed whole, in one segment. An around node keeps a value across directions too, and both its halves must run in one task: with the hop's outer end, or with its inner end ([Specs, segments, and layouts](placement.md#what-is-checked-and-when)). A forward or backward node holds no state across directions, so a placement can put it anywhere.
@@ -92,11 +92,13 @@ pub trait Frontend: Build {
 }
 ```
 
-A returned stream is `'static`. It owns what it uses and cannot borrow `&self` or `&Cx`. Each call of `Next::generate` is one attempt. [Requests, attempts, and deadlines](requests.md) gives the attempt rules.
+A returned stream is `'static`. It owns what it uses and cannot borrow `&self` or `&Cx`.
+
+A call of `Next::generate` that an operator makes with its own context runs under the request's scope. The hop below adds no scope, check, or boundary of its own, and every node under the request's edge shares one scope. Its nodes see the request's stop and cancel at once, through their contexts, and the edge drops the whole request on a cancel. An operator that needs a call's own scope sets `Operator::CALL_SCOPE`. Each call is then an attempt: it can be cancelled alone, it is checked every 64 items, it ends at its first `Err`, and it reports a clean end after a cancel as `Cancelled`. A call with a context the operator derived (`cx.child()`, or another deadline) is an attempt anyway, and so is a call over a remote hop. [Calls and attempts](requests.md#calls-and-attempts) gives the rules, and when an operator needs the constant.
 
 ### Around nodes
 
-An `Around` node is an operator that calls the rest of its hop exactly once, folded into the hop. It has a forward half and a backward half. The forward half changes the request and keeps a value, its `State`. The backward half of the same attempt receives that value by value, with the response stream. So a stage whose response side needs what its request side computed, such as a tokenizer's state, costs what a forward node and a backward node cost, not an operator's hop of its own ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
+An `Around` node is an operator that calls the rest of its hop exactly once, folded into the hop. It has a forward half and a backward half. The forward half changes the request and keeps a value, its `State`. The backward half of the same call receives that value by value, with the response stream. So a stage whose response side needs what its request side computed, such as a tokenizer's state, costs what a forward node and a backward node cost, not an operator's hop of its own ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
 
 In a graph file, an around node takes an operator's signature and braces around the rest of its hop ([Define a graph](../guides/define-a-graph.md#write-a-graph-file)). In local composition, `gdl::around(node)` returns the two halves, `ForwardHalf` and `BackwardHalf`. The first goes in a hop's forward chain and the second in the same hop's backward chain:
 
@@ -105,9 +107,9 @@ let (ahead, behind) = gdl::around(Arc::new(backend));
 let hop = Hop::new((ahead, ()), engine, (behind, ()));
 ```
 
-- **The value belongs to one attempt.** It moves down the forward chain with the request, then into the stream the backward half returns. It is never stored where another attempt could reach it, and nothing looks it up. A retry is a new attempt with a new value.
+- **The value belongs to one call.** It moves down the forward chain with the request, then into the stream the backward half returns. It is never stored where another call could reach it, and nothing looks it up. A retry is a new call with a new value.
 - **Halves pair by nesting, as brackets do.** The forward chain pushes each value on a typed stack, and the backward chain takes them in the reverse order. A half with no partner, or two pairs of different node types that cross, do not compile. Two pairs of the same node type that cross are not caught ([Known limitations](../operations/limitations.md#two-around-nodes-of-one-type-can-cross-in-a-hand-built-hop)).
-- **The halves get a forward node's and a backward node's contexts.** The forward half gets the attempt's context. A backward half that is the last node of a local backward chain gets the attempt's own context, so its stop reaches the inner end. Any other backward half gets a scope of its own below the attempt.
+- **The halves get a forward node's and a backward node's contexts.** In an attempt, the forward half gets the attempt's context. A backward half that is the last node of a local backward chain gets the attempt's own context, so its stop reaches the inner end. Any other backward half gets a scope of its own below the attempt. Under the request scope, every half and every forward and backward node gets the request scope, the context the operator above passed on, and no backward output is fused. A backward half that may take items without passing one on declares `Around::FILTERS`, as a backward node declares `Backward::FILTERS`, so that its input yields to the edge.
 - **If `forward` fails, the call fails.** A failure in `backward` is an error item in the stream. A check that only needs the request belongs in `forward`, so that it keeps its kind and its place as the call's error.
 
 A generated segment binary builds each implementation through `Build`, from that node's section of the segment settings. `build` gets the node's configuration and its metrics, already registered. It must return quickly, because the segment registers with its deployment only after every node is built. `ready` resolves when the node can take work, for example when a model is loaded. It resolves at once by default. A node without metrics writes `type Metrics = ();`. [Write nodes](../guides/write-nodes.md) shows each trait in use, and [Segment lifecycle](lifecycle.md) shows where `build` and `ready` run.
@@ -133,9 +135,9 @@ A client calls a service in the same process only ([Known limitations](../operat
 ## Streams and errors
 
 - **Every response is a stream.** A unary response is a stream of one item.
-- **Errors are terminal.** A stream item is `Result<T, gdl::Error>`. Every runtime boundary delivers the first `Err`, then ends the stream and cancels its upstream. A recoverable application error belongs inside `T`.
+- **Errors are terminal.** A stream item is `Result<T, gdl::Error>`. The request's edge and every attempt deliver the first `Err`, then end the stream and cancel its upstream. Under the request scope, nothing between a nested operator and its producer does that: a producer that sends items after an `Err` reaches the operator with them, and the edge ends the stream at the first `Err` that reaches it. An operator that relies on its `next`'s stream ending at the first `Err` sets `CALL_SCOPE`. A recoverable application error belongs inside `T`.
 - **Success needs an explicit end.** A stream that crossed a segment ends successfully only if its producer finished it. Any other ending (the producer detached, was dropped, stopped responding, or the stream just ended) becomes a terminal `Err` of kind `Truncated`.
-- **A node reports failure with an `Err` item.** Its context is how the runtime stops it. A node that cancels its own context must still end its stream, and the runtime reports that ending as `Cancelled`.
+- **A node reports failure with an `Err` item.** Its context is how the runtime stops it. A node that cancels its own context must still end its stream, and the runtime reports that ending as `Cancelled`: the request's edge, or the attempt the node runs in. Under the request scope, a node's own cancel reaches every node under the edge.
 
 `gdl::Error` is serializable: a kind and a message. The kinds are `Node`, `Cancelled`, `DeadlineExceeded`, `Truncated`, `NotHosted` (placement checks prevent it), `Overloaded` ([Admission and egress](admission.md)), `Transport`, `Codec`, `Placement`, `Routing`, and `OutcomeUnknown` ([Routing, selectors, and offers](routing.md)). An error that arrives from a peer with a kind this build does not know reads as `Transport`. The rustdoc of `gdl::ErrorKind` describes each kind.
 

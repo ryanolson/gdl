@@ -9,13 +9,13 @@ crates = ["messages"]
 
 [nodes]
 crates = ["nodes"]
-pin = { Front = "depth_nodes::Door", Pass1 = "depth_nodes::Pass", Pass2 = "depth_nodes::Pass", Pass3 = "depth_nodes::Pass", Pass4 = "depth_nodes::Pass", Pass5 = "depth_nodes::Pass", Pass6 = "depth_nodes::Pass", Pass7 = "depth_nodes::Pass", Pass8 = "depth_nodes::Pass", Pass9 = "depth_nodes::Pass", Pass10 = "depth_nodes::Pass", Deep = "depth_nodes::Deep" }
+pin = { Front = "depth_nodes::Door", Pass1 = "depth_nodes::Pass", Step1 = "depth_nodes::Step", Step2 = "depth_nodes::Step", Step3 = "depth_nodes::Step", Step4 = "depth_nodes::Step", Step5 = "depth_nodes::Step", Step6 = "depth_nodes::Step", Step7 = "depth_nodes::Step", Step8 = "depth_nodes::Step", Step9 = "depth_nodes::Step", Step10 = "depth_nodes::Step", Step11 = "depth_nodes::Step", Step12 = "depth_nodes::Step", Step13 = "depth_nodes::Step", Step14 = "depth_nodes::Step", Step15 = "depth_nodes::Step", Step16 = "depth_nodes::Step", Step17 = "depth_nodes::Step", Step18 = "depth_nodes::Step", Step19 = "depth_nodes::Step", Step20 = "depth_nodes::Step", Step21 = "depth_nodes::Step", Step22 = "depth_nodes::Step", Step23 = "depth_nodes::Step", Step24 = "depth_nodes::Step", Step25 = "depth_nodes::Step", Step26 = "depth_nodes::Step", Step27 = "depth_nodes::Step", Step28 = "depth_nodes::Step", Step29 = "depth_nodes::Step", Step30 = "depth_nodes::Step", Step31 = "depth_nodes::Step", Step32 = "depth_nodes::Step", Step33 = "depth_nodes::Step", Step34 = "depth_nodes::Step", Step35 = "depth_nodes::Step", Step36 = "depth_nodes::Step", Step37 = "depth_nodes::Step", Step38 = "depth_nodes::Step", Step39 = "depth_nodes::Step", Step40 = "depth_nodes::Step", Step41 = "depth_nodes::Step", Step42 = "depth_nodes::Step", Step43 = "depth_nodes::Step", Step44 = "depth_nodes::Step", Deep = "depth_nodes::Deep" }
 
 [gdl]
 path = "../../../../gdl-runtime"
 
 [segment.front]
-nodes = ["Front", "Pass1", "Pass2", "Pass3", "Pass4", "Pass5", "Pass6", "Pass7", "Pass8", "Pass9", "Pass10"]
+nodes = ["Front", "Pass1", "Step1", "Step2", "Step3", "Step4", "Step5", "Step6", "Step7", "Step8", "Step9", "Step10", "Step11", "Step12", "Step13", "Step14", "Step15", "Step16", "Step17", "Step18", "Step19", "Step20", "Step21", "Step22", "Step23", "Step24", "Step25", "Step26", "Step27", "Step28", "Step29", "Step30", "Step31", "Step32", "Step33", "Step34", "Step35", "Step36", "Step37", "Step38", "Step39", "Step40", "Step41", "Step42", "Step43", "Step44"]
 
 [segment.pool]
 nodes = ["Deep"]

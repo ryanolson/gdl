@@ -12,6 +12,7 @@ use futures::Stream;
 use crate::Cx;
 use crate::Items;
 use crate::Result;
+use crate::cx::Scope;
 use crate::items::{Fuse, Producer, bound, fuse};
 use crate::{Around, Backward, Forward, Next, Operator, Sink};
 
@@ -53,6 +54,12 @@ where
             // the attempt; on success the guard moves into the response stream,
             // which cancels the attempt when the stream ends or is dropped.
             let guard = attempt.cancel_on_drop();
+            // The inner end's scope, made before the race so that the race
+            // watches it: every call the inner end makes without a scope of
+            // its own runs under it, so its cancel is the request's. A child
+            // sees its parent's cancel, so the race still sees the attempt's.
+            let scope = attempt.child();
+            let below = scope.cancel_token();
             // Built where it is pinned, so it is not moved there. The forward
             // chain hands the request on to the inner end, not back here: each
             // return would move the whole request once more.
@@ -68,7 +75,6 @@ where
                 // a terminal item from it stops it even while a backward node
                 // still holds that item, and a node that cancels its own context
                 // gets the same outcome whether or not backward nodes follow.
-                let scope = attempt.child();
                 let producer = Producer::of(&scope);
                 let items = self.inner.call(scope, req).await?;
                 let items = producer.fused(items);
@@ -79,11 +85,37 @@ where
             }));
             // The checks inside `run` give a cancel that came first its
             // precedence; the race only waits.
-            let items = race_done(at, run).await?;
+            let items = race_below(at, &below, run).await?;
             // Success is reported only for a live attempt; dropping `items` on
             // the error path ends whatever the inner end started.
             attempt.check()?;
             Ok(bound(&attempt, guard, items))
+        }
+    }
+
+    // The same work under the caller's scope: no attempt, guard, race, or
+    // boundary. The checks stay, so nothing starts for a dead request, but a
+    // call that finds its request over ends quietly: the request's edge
+    // reports why, once (docs/src/concepts/requests.md).
+    #[allow(clippy::manual_async_fn)]
+    fn pass(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<B::Out>>> + Send {
+        async move {
+            tokio::task::coop::consume_budget().await;
+            if cx.check().is_err() {
+                return Ok(crate::items::quiet());
+            }
+            let at = &cx;
+            let run = self.fwd.run(at, req, (), move |req, kept| async move {
+                if !F::EMPTY {
+                    at.check()?;
+                }
+                let items = self.inner.call(at.clone(), req).await?;
+                Ok(self.bwd.pass(at, items, kept))
+            });
+            match run.await {
+                Err(_) if cx.check().is_err() => Ok(crate::items::quiet()),
+                run => run,
+            }
         }
     }
 }
@@ -157,8 +189,61 @@ where
         // less than the moves it saves (docs/src/operations/feature-costs.md).
         // Cloned first: a clone that writes into the future as it is built
         // keeps the compiler from building it in place.
-        let next = self.next.clone();
+        let next = Called::of::<O>(self.next.clone(), &cx);
         boxed(|| self.op.generate(cx, req, next))
+    }
+}
+
+/// The `next` an operator receives: its hop, and the context the operator
+/// was called with when it did not ask for a scope per call. A call with
+/// that context unchanged passes through, under the request scope; a call
+/// with a child scope or another deadline gets the hop's own attempt, as
+/// every call does when the operator sets `CALL_SCOPE`.
+#[doc(hidden)]
+pub struct Called<H> {
+    next: H,
+    own: Option<(Scope, Option<crate::Deadline>)>,
+}
+
+impl<H> Called<H> {
+    /// `next` for one call of operator `O` under `cx`.
+    pub fn of<O: Operator>(next: H, cx: &Cx) -> Self {
+        let own = (!O::CALL_SCOPE).then(|| (cx.cancel_token(), cx.deadline()));
+        // Every call scoped, as before the request scope: the suite run so
+        // fails exactly where the two forms differ (docs/src/development/testing.md).
+        #[cfg(gdl_scoped_calls)]
+        let own = own.and(None);
+        Self { next, own }
+    }
+}
+
+impl<H: Clone> Clone for Called<H> {
+    fn clone(&self) -> Self {
+        Self {
+            next: self.next.clone(),
+            own: self.own.clone(),
+        }
+    }
+}
+
+impl<Req, Item, H> Next<Req, Item> for Called<H>
+where
+    Req: Send + 'static,
+    Item: Send + 'static,
+    H: Next<Req, Item>,
+{
+    fn generate(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
+        use futures::future::Either;
+        match &self.own {
+            Some((scope, deadline)) if cx.scope_is(scope) && cx.deadline() == *deadline => {
+                Either::Left(self.next.pass(cx, req))
+            }
+            // Boxed: the pass-through arm is the common one, and an unboxed
+            // scoped arm sized every operator's boxed future for it, past the
+            // allocator's small-size cache (docs/src/operations/feature-costs.md).
+            // Built in its box, as an operator's future is.
+            _ => Either::Right(boxed(|| self.next.generate(cx, req))),
+        }
     }
 }
 
@@ -172,6 +257,9 @@ where
 pub trait ForwardChain<In, Below = ()>: Clone + Send + Sync + 'static {
     /// The request type after the whole chain.
     type Out: Send + 'static;
+    /// Whether the chain has no nodes.
+    #[doc(hidden)]
+    const EMPTY: bool = false;
     /// `Below` with the value of each around node in the chain pushed on.
     type Stack: Send + 'static;
 
@@ -194,6 +282,7 @@ pub trait ForwardChain<In, Below = ()>: Clone + Send + Sync + 'static {
 
 impl<In: Send + 'static, Below: Send + 'static> ForwardChain<In, Below> for () {
     type Out = In;
+    const EMPTY: bool = true;
     type Stack = Below;
 
     fn run<T, K, Fut>(
@@ -322,9 +411,11 @@ where
 /// `(BackwardHalf<P>, Rest)` applies the backward half of an [`Around`] node
 /// `P` first, with the value on top of `Stack`.
 ///
-/// Every node output is fused exactly once: each node but the last runs in
-/// its own scope below the attempt and its output is fused against that
-/// scope; the last node's output is fused by the hop's attempt boundary.
+/// In an attempt, every node output is fused exactly once: each node but
+/// the last runs in its own scope below the attempt and its output is fused
+/// against that scope; the last node's output is fused by the hop's
+/// attempt boundary. Under the request scope, no output is fused
+/// ([`BackwardChain::pass`]).
 ///
 /// The empty chain takes only an empty stack, so a hop whose around halves
 /// do not pair is not a `Next`.
@@ -350,6 +441,12 @@ pub trait BackwardChain<In, Stack = ()>: Clone + Send + Sync + 'static {
     /// boundary.
     #[doc(hidden)]
     fn answer(&self, attempt: &Cx, fused: Fuse<In>, stack: Stack) -> Self::Answer;
+
+    /// The chain under its caller's scope: every node gets `cx`, no node's
+    /// stream is fused, and a node that filters gets its input behind a
+    /// yield. A request that is over builds no further node.
+    #[doc(hidden)]
+    fn pass(&self, cx: &Cx, items: Items<In>, stack: Stack) -> Items<Self::Out>;
 }
 
 impl<In: Send + 'static> BackwardChain<In, ()> for () {
@@ -368,6 +465,10 @@ impl<In: Send + 'static> BackwardChain<In, ()> for () {
 
     fn answer(&self, _attempt: &Cx, fused: Fuse<In>, (): ()) -> Fuse<In> {
         fused
+    }
+
+    fn pass(&self, _cx: &Cx, items: Items<In>, (): ()) -> Items<In> {
+        items
     }
 }
 
@@ -401,6 +502,20 @@ where
 
     fn answer(&self, attempt: &Cx, fused: Fuse<B::In>, stack: S) -> Items<R::Out> {
         self.apply(attempt, Box::pin(fused), stack)
+    }
+
+    fn pass(&self, cx: &Cx, items: Items<B::In>, stack: S) -> Items<R::Out> {
+        // As in `apply`: a constructor may have side effects, and none runs
+        // for a request that is over; the rest of the chain ends quietly.
+        if cx.check().is_err() {
+            return self.1.pass(cx, crate::items::quiet(), stack);
+        }
+        let items = if B::FILTERS {
+            crate::items::yielding(items)
+        } else {
+            items
+        };
+        self.1.pass(cx, self.0.backward(cx, items), stack)
     }
 }
 
@@ -448,6 +563,24 @@ where
     ) -> Items<R::Out> {
         self.apply(attempt, Box::pin(fused), stack)
     }
+
+    fn pass(
+        &self,
+        cx: &Cx,
+        items: Items<P::DownItem>,
+        (Kept(state), rest): (Kept<P>, Rest),
+    ) -> Items<R::Out> {
+        if cx.check().is_err() {
+            drop(state);
+            return self.1.pass(cx, crate::items::quiet(), rest);
+        }
+        let items = if P::FILTERS {
+            crate::items::yielding(items)
+        } else {
+            items
+        };
+        self.1.pass(cx, self.0.0.backward(cx, state, items), rest)
+    }
 }
 
 /// The entry point of a graph: the source and the hop below it.
@@ -486,6 +619,12 @@ where
     fn generate(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
         self.call(cx, req)
     }
+
+    // A source nested as an operator's `next` is its hop: a hand-built
+    // graph then gets what the generated one does.
+    fn pass(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
+        self.0.pass(cx, req)
+    }
 }
 
 /// A typed join from an entry arm into a shared pipeline.
@@ -520,8 +659,9 @@ impl<Req: Send + 'static, Item: Send + 'static, N: Next<Req, Item>> Inner<Req> f
 /// A future on the heap, built there. `Box::pin(make())` builds the future
 /// on the stack and then copies it whole into its box. Here the allocation
 /// comes first, and `build` writes the future into it.
+#[doc(hidden)]
 #[inline(always)]
-fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+pub fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
     let slot = Box::new_uninit();
     Box::into_pin(Box::write(slot, build(make)))
 }
@@ -535,7 +675,10 @@ fn build<F>(make: impl FnOnce() -> F) -> F {
     make()
 }
 
-/// Run an attempt's work against the attempt's cancel and deadline.
+/// Run an attempt's work against the attempt's deadline and the cancel of
+/// `below`: the scope the attempt hands the stage under it, the request
+/// scope that every call below shares unless it has a scope of its own. A
+/// child sees its parent's cancel, so the race sees the attempt's too.
 ///
 /// The first pass polls `run` before the cancel, so an attempt that
 /// finishes at once registers no waiter. Later passes poll the cancel
@@ -549,11 +692,11 @@ fn build<F>(make: impl FnOnce() -> F) -> F {
 /// inner end do. `run` is pinned by the caller, where it was built: moved
 /// in here, a hop's future would copy its request once more.
 #[doc(hidden)]
-pub async fn race_done<T, F>(attempt: &Cx, mut run: Pin<&mut F>) -> Result<T>
+pub async fn race_below<T, F>(attempt: &Cx, below: &Scope, mut run: Pin<&mut F>) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
-    let mut done = pin!(attempt.done());
+    let mut done = pin!(attempt.done_below(below));
     let mut first = true;
     poll_fn(|task| {
         if !tokio::task::coop::has_budget_remaining() {

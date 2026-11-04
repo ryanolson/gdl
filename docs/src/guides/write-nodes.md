@@ -40,9 +40,18 @@ Each port type must be a message that derives `Message`, `()`, or `gdl::Streamed
 - Report a failure as an `Err` item, or as the call's `Err`. Do not cancel your own `Cx` to fail.
 - End your work and your stream when the `Cx` is cancelled or asked to stop. The context is how the runtime stops a node.
 
-A `Backward` node's returned stream must own what it uses, because it outlives the call. An `Operator` may call `next` zero or more times. Each call is one attempt with its own cancel scope.
+A `Backward` node's returned stream must own what it uses, because it outlives the call. A `Backward` node that may take items without passing one on (a filter, a batcher) sets `const FILTERS: bool = true`, so that a cancel or a client's detach reaches the request's edge while it reads ([Calls and attempts](../concepts/requests.md#calls-and-attempts)).
 
-Use an `Around` instead of an `Operator` when the node would call `next` exactly once, and every value its response side needs from its request side belongs to that attempt. It costs what a forward node and a backward node cost ([The graph model](../concepts/model.md#around-nodes)):
+An `Operator` may call `next` zero or more times. A call with the operator's own context runs under the request's scope: it is cheap, its nodes see the request's stop and cancel through their contexts, and the request's edge drops the whole request on a cancel. But the call has no scope of its own. Set `const CALL_SCOPE: bool = true` on the operator when it needs one:
+
+- It hedges or abandons calls, and expects a dropped call's nodes to see a cancel while the request goes on. Under the request scope, a dropped loser's `cx.cancelled()` resolves only when the whole request ends, so an operator, or a sink below it, that waits on it to clean up must set the constant.
+- It relies on its `next`'s stream ending at the first `Err`. Under the request scope, a producer's items after an `Err` reach the operator.
+- It turns its `next`'s end into output, such as closing replies, and must tell a cancel from a clean end. Under the request scope, a call whose request is over ends quietly, with an empty stream.
+- It filters or batches an always-ready local source, or calls `next` from a task it spawned.
+
+A call that passes a context the operator derived, `cx.child()` or another deadline, gets its own scope without the constant.
+
+Use an `Around` instead of an `Operator` when the node would call `next` exactly once, and every value its response side needs from its request side belongs to that call. It costs what a forward node and a backward node cost ([The graph model](../concepts/model.md#around-nodes)):
 
 - Return the value its backward half needs beside the request: `Ok((req, state))`. A retry runs `forward` again, with a new value.
 - Box a large value (`type State = Box<...>`). The value travels down the hop's forward chain inside the futures of the forward halves, by value, and the compiler may copy it more than once on the way: a 512 B value was copied 2.6 times per around node per request ([Feature costs](../operations/feature-costs.md#stages-in-callgrind-ir)).
@@ -67,6 +76,7 @@ impl gdl::Unary for Tokenize {
 - Keep the service's future to 256 bytes or less, aligned to 8 or less. A call builds such a future inside its own and makes no allocation of its own. A larger future is boxed, one allocation per call ([The graph model](../concepts/model.md#unary-services)).
 - Box a large value that the service holds across an `.await`. It is part of the future's size.
 - A caller keeps its `UnaryClient` on the node and calls `self.tokenize.call(&cx, text).await` per request.
+- A unary call has no hop and no `CALL_SCOPE`: it runs under its caller's context. A caller that wants a private scope for one call passes `cx.child()`; the service sees that scope's cancel cooperatively, with no race, and dropping the call's future ends it.
 - A `Backward` node's stream must own what it uses. Move a clone of the client and of the context into the stream once, and call per item:
 
 ```rust

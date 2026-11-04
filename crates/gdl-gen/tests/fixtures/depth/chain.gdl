@@ -1,19 +1,56 @@
-// A chain of operators over one sink: each stage nests the type of the
-// request path one layer deeper, about 17 query levels on the pinned
-// toolchain. Ten stages need a limit of 194, near midway between the default and
-// the 256 of the generated crates, so a few levels either way keep the
-// test's meaning.
+// A chain of forward nodes in the source's hop, then one operator over a
+// sink in another segment. Each forward node nests the hop's walk one layer
+// deeper in the handler of an arriving request (`accept_forward`), about 4.4
+// query levels on the pinned toolchain: 31 nodes pass the default limit, and
+// under the 256 of the generated crates 60 build where 75 do not. 44 is near
+// midway, so a few levels either way keep the test's meaning. An operator's
+// call of `next` is boxed, so a chain of operators would not nest.
 name = "chain", schema = 1;
 source   Front: Ask -> stream Answer;
+forward  Step1: Ask -> Ask;
+forward  Step2: Ask -> Ask;
+forward  Step3: Ask -> Ask;
+forward  Step4: Ask -> Ask;
+forward  Step5: Ask -> Ask;
+forward  Step6: Ask -> Ask;
+forward  Step7: Ask -> Ask;
+forward  Step8: Ask -> Ask;
+forward  Step9: Ask -> Ask;
+forward  Step10: Ask -> Ask;
+forward  Step11: Ask -> Ask;
+forward  Step12: Ask -> Ask;
+forward  Step13: Ask -> Ask;
+forward  Step14: Ask -> Ask;
+forward  Step15: Ask -> Ask;
+forward  Step16: Ask -> Ask;
+forward  Step17: Ask -> Ask;
+forward  Step18: Ask -> Ask;
+forward  Step19: Ask -> Ask;
+forward  Step20: Ask -> Ask;
+forward  Step21: Ask -> Ask;
+forward  Step22: Ask -> Ask;
+forward  Step23: Ask -> Ask;
+forward  Step24: Ask -> Ask;
+forward  Step25: Ask -> Ask;
+forward  Step26: Ask -> Ask;
+forward  Step27: Ask -> Ask;
+forward  Step28: Ask -> Ask;
+forward  Step29: Ask -> Ask;
+forward  Step30: Ask -> Ask;
+forward  Step31: Ask -> Ask;
+forward  Step32: Ask -> Ask;
+forward  Step33: Ask -> Ask;
+forward  Step34: Ask -> Ask;
+forward  Step35: Ask -> Ask;
+forward  Step36: Ask -> Ask;
+forward  Step37: Ask -> Ask;
+forward  Step38: Ask -> Ask;
+forward  Step39: Ask -> Ask;
+forward  Step40: Ask -> Ask;
+forward  Step41: Ask -> Ask;
+forward  Step42: Ask -> Ask;
+forward  Step43: Ask -> Ask;
+forward  Step44: Ask -> Ask;
 operator Pass1: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass2: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass3: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass4: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass5: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass6: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass7: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass8: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass9: (Ask -> stream Answer) over (Ask -> stream Answer);
-operator Pass10: (Ask -> stream Answer) over (Ask -> stream Answer);
 sink     Deep: Ask -> stream Answer;
-topology: Front => Pass1 { Pass2 { Pass3 { Pass4 { Pass5 { Pass6 { Pass7 { Pass8 { Pass9 { Pass10 { Deep } } } } } } } } } };
+topology: Front => Step1 => Step2 => Step3 => Step4 => Step5 => Step6 => Step7 => Step8 => Step9 => Step10 => Step11 => Step12 => Step13 => Step14 => Step15 => Step16 => Step17 => Step18 => Step19 => Step20 => Step21 => Step22 => Step23 => Step24 => Step25 => Step26 => Step27 => Step28 => Step29 => Step30 => Step31 => Step32 => Step33 => Step34 => Step35 => Step36 => Step37 => Step38 => Step39 => Step40 => Step41 => Step42 => Step43 => Step44 => Pass1 { Deep };
