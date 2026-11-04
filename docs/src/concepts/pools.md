@@ -120,7 +120,9 @@ An instance sends its first report as soon as it is ready, not a period later. T
 
 Once a period, the hub sums the latest report of each usable entry instance into the pool's load summary, and drops a report older than three periods. `admitted`, `limit`, and `refusals` are summed over the counted reports. `instances` is the number of usable entry instances. `period_ms` is the summary period, so that a reader can tell when the summary is stale.
 
-There is no summary while no report counts, and none for a class that no hop enters. When the hub takes a report while the pool has no summary, it makes one at once, and the next one a period later. This is the first summary of a new hub, and of a pool whose entry instances had all gone. It counts only the reports the hub has taken by then, and takes the next number ([The summary's number](#the-summarys-number)). So a new pool's first summary reaches a chooser one report and one relay after its instance is ready, not one or two periods later, and `home_first` can choose the pool from then on.
+There is no summary while no report counts, and none for a class that no hop enters. When the hub takes a report while the pool has no summary, it makes one at once. The next one comes at the hub's next tick: the early summary does not move the hub's period. This is the first summary of a new hub, and of a pool whose entry instances had all gone. It counts only the reports the hub has taken by then, and takes the next number ([The summary's number](#the-summarys-number)). So a new pool's first summary reaches a chooser one report and one relay after its instance is ready, not one or two periods later, and `home_first` can choose the pool from then on.
+
+A later report is counted at the hub's next tick. The instance and the hub keep their periods on their own clocks. So a report waits between 0 and one period to be counted, and half a period on average over instances ([An early summary does not move the hub's period](../development/pools-design.md#an-early-summary-does-not-move-the-hubs-period)).
 
 #### KV numbers
 

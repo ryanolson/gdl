@@ -4,9 +4,10 @@
 //! hub keeps each one's latest report, and once a period sums the reports
 //! it counts: those of instances still usable, and no older than three
 //! periods. A report taken while the pool has no summary is summarized at
-//! once, and the next summary is a period later. That report is the first
-//! of a new hub, or of a pool whose entry instances had all gone, and a
-//! chooser does not wait a period for the pool's first summary. The instance and the hub keep
+//! once, and the next summary comes at the period's next tick, which the
+//! early one does not move. That report is the first of a new hub, or of a
+//! pool whose entry instances had all gone, and a chooser does not wait a
+//! period for the pool's first summary. The instance and the hub keep
 //! their periods on their own clocks, so two reports can arrive between
 //! two summaries: the later one's admission stands, and the refusals of
 //! the earlier one, which no summary counted, are carried into it. Taking
@@ -162,7 +163,7 @@ struct Report {
 
 /// Make the pool's summary once a `period` until `cancel`, starting one
 /// period from now, and at once when the feed takes a report while the
-/// pool has no summary, the next one then a period later: each one goes
+/// pool has no summary, the next one then at the period's next tick: each one goes
 /// to the feed's watchers (every period while there is one), and to
 /// `loads`, which the record is written from when it changed.
 pub(super) async fn run(
@@ -177,13 +178,16 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 _ = ticks.tick() => {}
+                // The period is not started again here: an instance starts
+                // its own at the hub's answer to its first report, so its
+                // later reports would reach the hub just after each tick,
+                // and wait nearly a period to be summarized.
                 () = feed.unsummarized() => {
                     // A wake left from before a tick that made the summary
                     // is not a first report.
                     if feed.summary().is_some() {
                         continue;
                     }
-                    ticks.reset();
                 }
             }
             let summary = feed.summarize(Instant::now());
@@ -599,10 +603,12 @@ mod first {
 
     /// A hub whose pool has no summary makes one at the first report it
     /// takes, not at the next period, numbered as any summary is; then it
-    /// makes one each period from that one.
+    /// makes one at each of its period's ticks, which the early one did
+    /// not move.
     #[tokio::test(start_paused = true)]
-    async fn a_first_report_is_summarized_at_once_then_once_a_period() {
+    async fn a_first_report_is_summarized_at_once_then_at_the_periods_ticks() {
         let (feed, mut watch, cancel) = pool().await;
+        let start = Instant::now();
         tokio::time::sleep(PERIOD / 2).await;
         let (a, lease) = ready(&feed);
         let reported = Instant::now();
@@ -619,7 +625,9 @@ mod first {
             next.map(|load| (load.admitted, load.sequence)),
             Some((3, 2))
         );
-        assert_eq!(then - at, PERIOD, "a period after the first");
+        assert_eq!(then - start, PERIOD, "at the period's first tick");
+        let (_, after) = summary(&mut watch, PERIOD * 2).await;
+        assert_eq!(after - start, PERIOD * 2, "and at its next");
         cancel.cancel();
     }
 
@@ -654,5 +662,100 @@ mod first {
         );
         assert!(at - reported < SOON, "at once: {:?}", at - reported);
         cancel.cancel();
+    }
+
+    /// One way between an instance and its hub.
+    const HOP: Duration = Duration::from_millis(5);
+
+    /// How many reports each instance sends.
+    const REPORTS: u64 = 5;
+
+    /// An entry instance's reports as the runtime sends them
+    /// (`crates/gdl-runtime/src/dist/fabric/hub/load.rs`): the first at
+    /// once, then once a period, each a [`HOP`] to the hub and its answer a
+    /// [`HOP`] back. A new instance (`fresh`) starts its period again at
+    /// the answer to its first report; one that was reporting to a hub that
+    /// restarted keeps its period. Report `k` carries `k` admitted. When
+    /// each one reached the hub.
+    async fn instance(feed: Arc<Feed>, id: InstanceId, lease: Lease, fresh: bool) -> Vec<Instant> {
+        let mut ticks = tokio::time::interval(PERIOD);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut arrived = Vec::new();
+        for admitted in 1..=REPORTS {
+            ticks.tick().await;
+            tokio::time::sleep(HOP).await;
+            arrived.push(Instant::now());
+            feed.report(id, lease, report(admitted), std::time::Instant::now())
+                .expect("taken");
+            tokio::time::sleep(HOP).await;
+            if fresh && admitted == 1 {
+                ticks.reset();
+            }
+        }
+        arrived
+    }
+
+    /// For an instance ready `phase` into its hub's first period, how long
+    /// each of its reports after the first waited, from reaching the hub
+    /// to the first summary that counts it.
+    async fn waits(phase: Duration, fresh: bool) -> Vec<Duration> {
+        let (feed, mut watch, cancel) = pool().await;
+        tokio::time::sleep(phase).await;
+        let (a, lease) = ready(&feed);
+        let reporting = tokio::spawn(instance(Arc::clone(&feed), a, lease, fresh));
+        let mut summaries = Vec::new();
+        while summaries
+            .last()
+            .is_none_or(|(admitted, _)| *admitted < REPORTS)
+        {
+            let (load, at) = summary(&mut watch, PERIOD * 2).await;
+            summaries.push((load.map_or(0, |load| load.admitted), at));
+        }
+        let arrived = reporting.await.expect("the reports");
+        cancel.cancel();
+        arrived
+            .iter()
+            .zip(1..)
+            .skip(1)
+            .map(|(at, k)| {
+                let (_, counted) = summaries
+                    .iter()
+                    .find(|(admitted, then)| *admitted >= k && then >= at)
+                    .expect("a summary counts it");
+                *counted - *at
+            })
+            .collect()
+    }
+
+    /// A report after the first waits for the hub's next tick, at a time
+    /// set by the instance's phase in the hub's period, not by the summary
+    /// made at its first report. An instance ready at the middle of each
+    /// tenth of the hub's first period, new or reporting to a hub that
+    /// restarted, has each later report summarized within a period, and
+    /// the mean wait over the ten is half a period less a few hops. Had
+    /// the early summary started the hub's period again, a new instance,
+    /// which starts its own at the hub's answer, would reach the hub a
+    /// round trip after each tick and wait a period less that, at every
+    /// phase; one already reporting would reach it on the tick. The bound
+    /// of six tenths of a period lies between the two, and paused time
+    /// makes each wait exact.
+    #[tokio::test(start_paused = true)]
+    async fn later_reports_wait_half_a_period_on_average_over_phases() {
+        for fresh in [true, false] {
+            let mut all = Vec::new();
+            for tenth in 0..10 {
+                all.extend(waits(PERIOD * (2 * tenth + 1) / 20, fresh).await);
+            }
+            let mean = all.iter().sum::<Duration>() / u32::try_from(all.len()).expect("few");
+            let worst = all.iter().max().expect("waits");
+            assert!(
+                *worst < PERIOD,
+                "fresh {fresh}: a later report waited {worst:?}"
+            );
+            assert!(
+                mean < PERIOD * 6 / 10,
+                "fresh {fresh}: later reports waited {mean:?} on average: {all:?}"
+            );
+        }
     }
 }
