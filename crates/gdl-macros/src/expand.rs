@@ -422,7 +422,10 @@ fn string(text: &str) -> TokenStream {
 
 fn type_info(ty: &Type, krate: &TokenStream) -> TokenStream {
     let name = quote!(#ty).to_string();
-    quote! { #krate::TypeInfo::new(#name, #krate::wire_codec!(#ty).is_some(), #krate::message_encoding!(#ty)) }
+    quote! {
+        #krate::TypeInfo::new(#name, #krate::wire_codec!(#ty).is_some(), #krate::message_encoding!(#ty))
+            .pin(#krate::message_pinned!(#ty), false)
+    }
 }
 
 fn request_info(req: &Request, krate: &TokenStream) -> TokenStream {
@@ -440,6 +443,7 @@ fn request_info(req: &Request, krate: &TokenStream) -> TokenStream {
             #krate::wire_codec!(#item).is_some(),
             #krate::message_encoding!(#item),
         )
+        .pin(#krate::message_pinned!(#head), #krate::message_pinned!(#item))
     }
 }
 

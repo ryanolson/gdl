@@ -12,6 +12,7 @@ use gdl::{Items, items};
 use gdl_model::Encoding;
 
 use crate::dist::{EncodedItem, Head};
+use crate::zstd::{self, Compression};
 
 /// How one edge's message type crosses a segment boundary.
 ///
@@ -31,6 +32,10 @@ pub struct Codec<T> {
     encode_sized: fn(&T, &mut Vec<u8>) -> Result<()>,
     decode: fn(&[u8]) -> Result<T>,
     encoding: Encoding,
+    /// How a stream item on the edge is compressed, when a `[codec]` entry
+    /// names the edge. A request's head is compressed by its offer, after
+    /// routing has read it (`Forward::wire`).
+    compression: Option<Compression>,
 }
 
 impl<T> Codec<T> {
@@ -43,11 +48,43 @@ impl<T> Codec<T> {
     }
 
     /// Encode one value of a stream into the frame that carries it, sized
-    /// by the stream's `hint`.
-    pub(crate) fn encode_item(&self, value: &T, hint: &mut SizeHint) -> Result<EncodedItem> {
-        let item = EncodedItem::encode(value, self.encode, hint.next())?;
-        hint.record(item.payload().len());
+    /// by the stream's `hint`, and compressed through the stream's
+    /// `scratch` when the edge compresses and the value is long enough.
+    pub(crate) fn encode_item(
+        &self,
+        value: &T,
+        hint: &mut SizeHint,
+        scratch: &mut Vec<u8>,
+    ) -> Result<EncodedItem> {
+        let (item, plain) = EncodedItem::encode_compressed(
+            value,
+            self.encode,
+            hint.next(),
+            self.compression,
+            scratch,
+        )?;
+        // The plain size: a compressed one would reserve too little for the
+        // next item, whose frame would then grow.
+        hint.record(plain);
         Ok(item)
+    }
+
+    /// Decode one item of a stream. A compressed one is decompressed into
+    /// the stream's `scratch` first: the decoder needs the plain bytes, so
+    /// it cannot read velo's buffer in place.
+    pub(crate) fn decode_item(&self, bytes: &[u8], scratch: &mut Vec<u8>) -> Result<T> {
+        match self.compression {
+            Some(compression) if zstd::is_frame(bytes) => {
+                zstd::decompress_into(bytes, compression.limit(), scratch)?;
+                (self.decode)(scratch)
+            }
+            _ => (self.decode)(bytes),
+        }
+    }
+
+    /// Compress the edge's stream items as `compression` says.
+    pub(crate) fn compress(&mut self, compression: Option<Compression>) {
+        self.compression = compression;
     }
 
     /// Encode a request's head into the buffer its envelope is sent from.
@@ -74,6 +111,7 @@ impl<T> Codec<T> {
             encode_sized: encode,
             decode,
             encoding: Encoding::default(),
+            compression: None,
         }
     }
 }
@@ -86,6 +124,7 @@ impl<T: Serialize + DeserializeOwned> Codec<T> {
             encode_sized: gdl::__runtime::encoder_sized::<T>(encoding),
             decode: gdl::__runtime::decoder::<T>(encoding),
             encoding,
+            compression: None,
         }
     }
 }
@@ -103,6 +142,7 @@ impl<T> fmt::Debug for Codec<T> {
         f.debug_struct("Codec")
             .field("type", &std::any::type_name::<T>())
             .field("encoding", &self.encoding)
+            .field("compression", &self.compression)
             .finish()
     }
 }
@@ -130,6 +170,10 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
     /// Rebuild a request from its head's bytes and, for a streamed request,
     /// its encoded items as they arrived.
     fn join(&self, head: &[u8], input: Option<Items<Bytes>>) -> Result<Self::Value>;
+
+    /// Compress a streamed request's items as `items` says. A request's
+    /// head is compressed by its offer, so a value's codec ignores it.
+    fn compress_items(&mut self, items: Option<Compression>);
 }
 
 /// A request as it crosses: its head's bytes, and for a streamed request its
@@ -165,6 +209,8 @@ impl<T: Send + 'static> RequestCodec for Codec<T> {
             Some(_) => Err(mismatch()),
         }
     }
+
+    fn compress_items(&mut self, _: Option<Compression>) {}
 }
 
 /// The codec of a streamed request: one for its head and one for its items.
@@ -217,7 +263,9 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         let (head, input) = value.into_parts();
         let item = self.item;
         let mut hint = SizeHint::default();
-        let encoded = items(input.map(move |value| item.encode_item(&value?, &mut hint)));
+        let mut scratch = Vec::new();
+        let encoded =
+            items(input.map(move |value| item.encode_item(&value?, &mut hint, &mut scratch)));
         Ok(Split {
             head: self.head.encode_head(&head)?,
             input: Some(encoded),
@@ -227,9 +275,14 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
     fn join(&self, head: &[u8], input: Option<Items<Bytes>>) -> Result<Streamed<H, T>> {
         let input = input.ok_or_else(mismatch)?;
         let item = self.item;
+        let mut scratch = Vec::new();
         // `Streamed::new` fuses the decoded items: nothing follows a bad one.
-        let decoded = items(input.map(move |bytes| item.decode(&bytes?)));
+        let decoded = items(input.map(move |bytes| item.decode_item(&bytes?, &mut scratch)));
         Ok(Streamed::new(self.head.decode(head)?, decoded))
+    }
+
+    fn compress_items(&mut self, items: Option<Compression>) {
+        self.item.compress(items);
     }
 }
 
@@ -359,5 +412,133 @@ pub mod probe {
         fn __gdl_codec(&self, _: Encoding) -> Option<Codec<T>> {
             None
         }
+    }
+}
+
+#[cfg(all(test, feature = "zstd"))]
+mod tests {
+    use super::*;
+    use gdl::ErrorKind;
+
+    fn compressing(floor: u32, limit: usize) -> Codec<String> {
+        let mut codec = Codec::<String>::new(Encoding::Msgpack);
+        codec.compress(Some(Compression::new(floor, limit)));
+        codec
+    }
+
+    /// One item under the floor is the plain encoding, byte for byte; one
+    /// at the floor is a frame that decodes to the same value. The size
+    /// hint keeps the plain size, so the next frame needs no growth.
+    #[test]
+    fn an_item_crosses_compressed_from_its_floor() {
+        let text = crate::zstd::words(20_000, 5);
+        let plain = Codec::<String>::new(Encoding::Msgpack)
+            .encode(&text)
+            .expect("plain");
+        let floor = u32::try_from(plain.len()).expect("small");
+        let codec = compressing(floor, 1 << 30);
+        let (mut hint, mut scratch) = (SizeHint::default(), Vec::new());
+        let under = text[..text.len() - 1].to_string();
+        let item = codec
+            .encode_item(&under, &mut hint, &mut scratch)
+            .expect("encoded");
+        let plain_under = Codec::<String>::new(Encoding::Msgpack)
+            .encode(&under)
+            .expect("plain");
+        assert_eq!(item.payload(), &plain_under[..]);
+        let item = codec
+            .encode_item(&text, &mut hint, &mut scratch)
+            .expect("encoded");
+        assert!(zstd::is_frame(item.payload()));
+        assert!(item.payload().len() < plain.len() / 2);
+        assert_eq!(hint.next(), plain_under.len().min(plain.len()));
+        let mut read = Vec::new();
+        assert_eq!(
+            codec
+                .decode_item(item.payload(), &mut read)
+                .expect("decoded"),
+            text
+        );
+        // A plain item on the edge still decodes in place.
+        assert_eq!(
+            codec.decode_item(&plain_under, &mut read).expect("decoded"),
+            under
+        );
+    }
+
+    /// After a stream's first compressed item, which grows its two scratch
+    /// buffers, an item takes the allocations a plain one does: its frame
+    /// to send, and its decoded value. libzstd keeps one context per
+    /// thread, made at first use.
+    #[test]
+    fn a_compressed_item_allocates_as_a_plain_one_after_the_first() {
+        use crate::dist::counting::{counted, counting};
+        let text = crate::zstd::words(32 * 1024, 11);
+        let plain = Codec::<String>::new(Encoding::Msgpack);
+        let codec = compressing(4096, 1 << 30);
+        let round =
+            |codec: &Codec<String>, hint: &mut SizeHint, sent: &mut Vec<u8>, read: &mut Vec<u8>| {
+                counting(true);
+                let before = counted();
+                let item = codec.encode_item(&text, hint, sent).expect("encoded");
+                let value = codec.decode_item(item.payload(), read).expect("decoded");
+                let made = counted() - before;
+                counting(false);
+                assert_eq!(value, text);
+                made
+            };
+        let (mut hint, mut sent, mut read) = (SizeHint::default(), Vec::new(), Vec::new());
+        round(&codec, &mut hint, &mut sent, &mut read);
+        let compressed = round(&codec, &mut hint, &mut sent, &mut read);
+        let (mut hint, mut sent, mut read) = (SizeHint::default(), Vec::new(), Vec::new());
+        round(&plain, &mut hint, &mut sent, &mut read);
+        let uncompressed = round(&plain, &mut hint, &mut sent, &mut read);
+        assert_eq!(compressed, uncompressed);
+    }
+
+    /// An item that does not shrink crosses plain.
+    #[test]
+    fn an_item_that_does_not_shrink_crosses_plain() {
+        let mut codec = Codec::<serde_bytes::ByteBuf>::new(Encoding::Msgpack);
+        codec.compress(Some(Compression::new(1024, 1 << 30)));
+        let noise = serde_bytes::ByteBuf::from(zstd::noise(64 * 1024, 9));
+        let item = codec
+            .encode_item(&noise, &mut SizeHint::default(), &mut Vec::new())
+            .expect("encoded");
+        assert!(!zstd::is_frame(item.payload()));
+        assert_eq!(item.payload(), &codec.encode(&noise).expect("plain")[..]);
+    }
+
+    /// The split-MessagePack regression for a stream item, read into a
+    /// buffer the stream reuses, whose capacity is over the limit: two
+    /// frames are refused, and the frame at the limit reads.
+    #[test]
+    fn an_item_of_two_frames_is_refused_in_a_reused_buffer() {
+        let codec = compressing(0, 1024);
+        let value = rmp_serde::to_vec_named(&"x".repeat(1024)).expect("encoded");
+        let frame = |src: &[u8]| {
+            let mut out = Vec::new();
+            zstd::compress_into(src, &mut out).expect("compressed");
+            out
+        };
+        let mut two = frame(&value[..1024]);
+        two.extend_from_slice(&frame(&value[1024..]));
+        let mut scratch = Vec::with_capacity(8192);
+        let refused = codec
+            .decode_item(&two, &mut scratch)
+            .expect_err("two frames");
+        assert_eq!(refused.kind(), ErrorKind::Codec);
+        let whole = frame(&value);
+        assert!(
+            codec.decode_item(&whole, &mut scratch).is_err(),
+            "over the limit"
+        );
+        let short = rmp_serde::to_vec_named(&"y".repeat(1000)).expect("encoded");
+        assert_eq!(
+            codec
+                .decode_item(&frame(&short), &mut scratch)
+                .expect("read"),
+            "y".repeat(1000)
+        );
     }
 }

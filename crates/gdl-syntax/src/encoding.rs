@@ -2,8 +2,11 @@ use gdl_model::Encoding;
 use proc_macro2::TokenTree;
 use syn::Meta;
 
-/// Read a message's encoding with the same rules in the derive and source reader.
-pub fn message_encoding(attrs: &[Meta]) -> syn::Result<Encoding> {
+/// Read a message's declared codec with the same rules in the derive and
+/// source reader: `None` when it declares none, and takes the default.
+/// A declared codec, `msgpack` included, is a pin: an edge codec does not
+/// apply to the message.
+pub fn message_codec(attrs: &[Meta]) -> syn::Result<Option<Encoding>> {
     let mut encoding = None;
     for attr in attrs.iter().filter(|a| a.path().is_ident("gdl")) {
         let Meta::List(list) = attr else {
@@ -35,7 +38,7 @@ pub fn message_encoding(attrs: &[Meta]) -> syn::Result<Encoding> {
             Ok(())
         })?;
     }
-    Ok(encoding.unwrap_or_default())
+    Ok(encoding)
 }
 
 fn choices() -> String {

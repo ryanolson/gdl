@@ -14,6 +14,7 @@ use super::fabric::{Canceller, EncodedItem, Frame, Inbound, Outbound, Outgoing, 
 use super::offers::{Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit, HeadInfo};
+use crate::zstd::Compression;
 use gdl::__runtime as meter;
 use gdl::__runtime::{CHECK_INTERVAL, bound_measured, race_done};
 use gdl::__runtime::{END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
@@ -371,7 +372,13 @@ fn run_end(segments: &[String], pos: usize) -> usize {
 }
 
 impl<F: DForward, I: DInner, B: DBackward<F::Stack>> DHop<F, I, B> {
-    pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
+    pub(crate) fn new(
+        rt: Arc<Runtime>,
+        index: u16,
+        mut fwd: F,
+        inner: I,
+        mut bwd: B,
+    ) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
                 ErrorKind::Placement,
@@ -428,6 +435,27 @@ impl<F: DForward, I: DInner, B: DBackward<F::Stack>> DHop<F, I, B> {
                 ),
             ));
         }
+        // Stream items on an edge that a `[codec]` entry compresses: a
+        // streamed request's on the forward path, every item on the
+        // backward one. A head is compressed by its offer.
+        let items = |leg, len: usize, part: fn(&gdl_model::EdgeCompression) -> bool| {
+            (0..len)
+                .map(|pos| {
+                    rt.layout
+                        .compression(usize::from(index), leg, pos)
+                        .filter(|edge| part(edge))
+                        .map(|edge| Compression::new(edge.floor, rt.config.decompressed_max))
+                })
+                .collect::<Vec<_>>()
+        };
+        fwd.compress(
+            1,
+            &items(gdl_model::Leg::Forward, forward.len(), |e| e.item),
+        );
+        bwd.compress(
+            1,
+            &items(gdl_model::Leg::Backward, backward.len(), |e| e.head),
+        );
         let mut plan = HopPlan::new(hop);
         // A selector that reads the head as a type must be given that
         // type: each crossing this segment sends is checked against its
@@ -606,6 +634,9 @@ where
         // position strictly between the inner and the outer end.
         for pos in 1..core.plan.fwd_segments.len() {
             if core.plan.fwd_segments[pos] == here {
+                if let Some(head) = core.rt.head_compression(core.index, pos as u16) {
+                    entries.add_compressed(core.index, pos as u16, head.compression);
+                }
                 let hop = Arc::clone(core);
                 entries.add_forward(
                     core.index,

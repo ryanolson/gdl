@@ -8,6 +8,20 @@ use std::process::Command;
 /// segment.
 #[test]
 fn defining_nodes_does_not_link_velo() {
+    let velo = linked("velo");
+    assert!(velo.is_empty(), "gdl links {velo:?}");
+}
+
+/// An edge codec's compression is the runtime's, behind its `zstd`
+/// feature: a node crate never builds libzstd.
+#[test]
+fn defining_nodes_does_not_link_zstd() {
+    let zstd = linked("zstd");
+    assert!(zstd.is_empty(), "gdl links {zstd:?}");
+}
+
+/// The packages `gdl` links whose names start with `prefix`.
+fn linked(prefix: &str) -> Vec<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(cargo)
         .args([
@@ -29,9 +43,8 @@ fn defining_nodes_does_not_link_velo() {
         String::from_utf8_lossy(&output.stderr)
     );
     let tree = String::from_utf8(output.stdout).expect("utf-8");
-    let velo: Vec<&str> = tree
-        .lines()
-        .filter(|line| line.starts_with("velo"))
-        .collect();
-    assert!(velo.is_empty(), "gdl links {velo:?}");
+    tree.lines()
+        .filter(|line| line.starts_with(prefix))
+        .map(str::to_string)
+        .collect()
 }

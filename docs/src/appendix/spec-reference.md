@@ -50,7 +50,8 @@ A spec of one layout has these tables at its top level. A spec with `[layout.<na
 | `[class.<name>] segments` | the segments that deploy together | no classes |
 | `[pools.<class>] policy` | how a chooser picks a pool of the class | `"round_robin"` |
 | `[pools.<class>] provides` | the property kinds the class's pools serve from their settings (`[pool.properties]`), not from a node; each must be declared in the graph | none |
-| `[layout.<name>.segment\|routing\|class\|pools]` | the same tables, for one layout | one layout, `default` |
+| `[codec] "<from> -> <to>"` | the codec of the edge from `<from>` to `<to>`, in the direction its data flows, for the messages on it that pin none: `"msgpack_zstd"`, or a table of `codec` (every message on the edge), or `head` and `item` (a streamed request's parts), and `floor` (bytes) | no codec |
+| `[layout.<name>.segment\|routing\|class\|pools\|codec]` | the same tables, for one layout | one layout, `default` |
 
 | Name | Rule |
 |---|---|
@@ -59,7 +60,16 @@ A spec of one layout has these tables at its top level. A spec with `[layout.<na
 | selector | never `round_robin` or `random` |
 | registered pool policy | never `home_first` or `round_robin` |
 
-A value equal to its default is not recorded. The placement hash covers each class's effective pool policy, the default included, and each class's `provides`.
+A value equal to its default is not recorded. The placement hash covers each class's effective pool policy, the default included, each class's `provides`, and each `[codec]` entry without its `floor`.
+
+A `[codec]` entry names one edge, and each direction of a pair of nodes is its own edge: `"Engine -> Detokenize"` carries the engine's items, and `"Truncate -> Engine"` its request. `msgpack_zstd` sends a message as named MessagePack, and one at least `floor` bytes long (16 KiB by default) as one zstd frame at level 1, when that is smaller. `check` refuses an entry:
+
+- on a message that pins its codec with `#[gdl(codec = "...")]`, `msgpack` included, naming the edge, the message, and the pin;
+- in string form on a streamed request whose head or items are pinned: name the other part alone, `{ item = "msgpack_zstd" }`;
+- with `head` or `item` on an edge whose request is not streamed;
+- whose key names no edge of the graph, or an edge that the layout does not encode, because it does not cross segments and is not carried by an anchor ([The codec rule](../concepts/crossings.md#the-codec-rule)).
+
+[Edge codecs](../concepts/crossings.md#edge-codecs) says how a compressed message crosses.
 
 ### Configuration and deployment
 
@@ -217,6 +227,7 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 |---|---|---|
 | spec `[routing] <node>` | `"round_robin"` | `RequestRouter::DEFAULT` |
 | spec `[pools.<class>] policy` | `"round_robin"` | `PoolPolicy::DEFAULT_POLICY` |
+| spec `[codec] "<from> -> <to>"` `floor` | `16384` | `EdgeCodec::DEFAULT_FLOOR` |
 | spec `[deployment] base_image` | `"gcr.io/distroless/cc-debian12:nonroot"` | `DEFAULT_BASE_IMAGE` |
 | spec `[deployment] build_image` | `"rust:1.93.1-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
 | spec `[binary] allocator` | `"system"` | `Allocator::DEFAULT` |

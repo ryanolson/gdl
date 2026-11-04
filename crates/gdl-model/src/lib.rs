@@ -50,10 +50,10 @@ pub use metrics::{
     RUNTIME_METRICS, VELO_METRICS, WORKER_LABEL,
 };
 pub use placement::{
-    ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
-    PlacementErrors, Placements, PoolPolicy, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge,
-    WireReason, check_class_name, check_layout_name, check_pool_policy_name, check_selector_name,
-    layout,
+    ClassBoundary, CodecEntry, CrossingReport, EdgeCodec, EdgeCompression, HopLayout, Layout, Leg,
+    Placement, PlacementError, PlacementErrors, Placements, PoolPolicy, RequestRouter, Run,
+    SELECTORS, SelectorInfo, WireEdge, WireReason, check_class_name, check_layout_name,
+    check_pool_policy_name, check_selector_name, layout,
 };
 pub use pool::{
     DirectoryBackend, HubTiming, Parent, PoolSettings, WatchCaps, check_hub_address,

@@ -241,6 +241,7 @@ mod tests {
                 path: "renamed::Words".into(),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
             }],
             exports: Vec::new(),

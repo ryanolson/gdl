@@ -40,6 +40,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** the composer offers no around node when it builds a graph.
 - **Workaround:** write the graph file by hand ([Define a graph](../guides/define-a-graph.md#write-a-graph-file)).
 
+### The composer does not write a `[codec]` table
+- **What:** a spec that the composer writes names no edge codec.
+- **Why:** the composer's draft holds segments and routers, not edge codecs. See [Edge codecs](../concepts/crossings.md#edge-codecs).
+- **Workaround:** add the `[codec]` table to the spec after the composer writes it.
+
 ### Work sent through a handle a node holds runs outside the attempt
 - **What:** a node can hold a handle that hand-written composition code builds over the hop below, for example for a warmup request after the response. The request it sends through that handle is not part of the attempt: the attempt's cancel, deadline, and stop do not reach it, and the attempt's figures do not count it.
 - **Why:** the handle is the node's own value, built once, and the attempt's scope is not below it. A node gets the attempt's downstream only as an operator does, through `next`.
@@ -259,6 +264,16 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** an array keeps values in order but does not say which field is missing. The derive sees only the attributes of the type it derives, and the wire probe checks serde trait bounds, not the behavior of each value. See [Messages and encodings](../concepts/messages.md#encodings).
 - **Over-refusal:** the check also refuses a last field with `skip_serializing_if` and a serde default, which decodes, because the rule does not read field order or defaults. It refuses a field whose skip serde ignores because the container converts through another type (`#[serde(from = "..", into = "..")]`), too; remove the unused attribute there.
 - **Workaround:** use the default `msgpack` codec, which writes field names, or `json`.
+
+### One edge codec, at one level, for unpinned messages only
+- **What:** a `[codec]` entry names `msgpack_zstd`, named MessagePack and zstd at level 1, and nothing else. It applies only to a message with no `#[gdl(codec = "...")]`, and `check` refuses it on a pinned one. Its floor is a fixed size per edge, and does not adapt to the link or the ratio.
+- **Why:** no other edge codec is built, and a pinned message has chosen its bytes itself. See [Edge codecs](../concepts/crossings.md#edge-codecs).
+- **Workaround:** set a floor per edge, or leave the entry out on a fast link.
+
+### A compressed item is decoded from a copy, and a compressed head is decompressed before the gate
+- **What:** an item that crosses compressed is decompressed into a buffer its stream keeps and decoded from there, not in velo's buffer. A head that crosses compressed is decompressed when it arrives, before the entry's gate and property checks, so an offer they decline has paid to decompress: 14 M instructions for the 2.2 MB turn in [Edge codecs](crossing-performance.md#edge-codecs).
+- **Why:** the decoder needs the plain bytes, and the gate and the property checks read the head.
+- **Workaround:** a floor above the values the edge carries keeps them on the path without compression.
 
 ### JSON cannot preserve every serde value
 - **What:** `#[gdl(codec = "json")]` writes NaN and infinities as `null`. A required float then fails to decode, and an optional float changes from `Some` to `None`. JSON rejects map keys such as tuples at the sender. String and integer keys work.

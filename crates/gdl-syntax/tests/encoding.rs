@@ -2,9 +2,9 @@
 
 use gdl_model::Encoding;
 
-fn encoding(input: &str) -> syn::Result<Encoding> {
+fn codec(input: &str) -> syn::Result<Option<Encoding>> {
     let input: syn::DeriveInput = syn::parse_str(input)?;
-    gdl_syntax::message_encoding(
+    gdl_syntax::message_codec(
         &input
             .attrs
             .iter()
@@ -13,18 +13,16 @@ fn encoding(input: &str) -> syn::Result<Encoding> {
     )
 }
 
+/// No attribute declares no codec, and the message takes the default. Any
+/// attribute is a pin, `msgpack` included: an edge codec does not apply.
 #[test]
 fn message_codecs_have_one_default_and_explicit_variants() {
-    assert_eq!(
-        encoding("struct A;").expect("valid codec declaration"),
-        Encoding::Msgpack
-    );
+    assert_eq!(codec("struct A;").expect("valid codec declaration"), None);
     for expected in Encoding::ALL {
         let name = expected.name();
         assert_eq!(
-            encoding(&format!("#[gdl(codec = {name:?})] struct A;"))
-                .expect("valid codec declaration"),
-            expected
+            codec(&format!("#[gdl(codec = {name:?})] struct A;")).expect("valid codec declaration"),
+            Some(expected)
         );
     }
 }
@@ -39,7 +37,7 @@ fn invalid_or_duplicate_codec_declarations_are_errors() {
         "#[gdl(codec = \"json\", codec = \"msgpack\")] struct A;",
         "#[gdl(codec = \"json\")] #[gdl(codec = \"json\")] struct A;",
     ] {
-        assert!(encoding(input).is_err(), "accepted {input}");
+        assert!(codec(input).is_err(), "accepted {input}");
     }
 }
 

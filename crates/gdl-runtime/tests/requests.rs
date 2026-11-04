@@ -66,6 +66,7 @@ fn the_stream_marker_and_the_item_type_change_the_contract_hash() {
         name: "Token".to_string(),
         wire: true,
         encoding: Default::default(),
+        pinned: false,
     });
     assert_ne!(base.contract_hash(), other_item.contract_hash());
 }
@@ -106,6 +107,7 @@ fn a_streamed_response_type_is_refused() {
         name: "Word".to_string(),
         wire: true,
         encoding: Default::default(),
+        pinned: false,
     });
     let placement = Placement::new().segment("all", ["A", "B", "C", "D", "E", "F", "G"]);
     let errors = layout(&manifest, &placement).expect_err("invalid").0;

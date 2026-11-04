@@ -32,6 +32,28 @@ fn message_codecs_survive_source_reading_and_exports() {
     assert_eq!(encoding("Words"), gdl_model::Encoding::MsgpackArray);
     assert_eq!(encoding("Session"), gdl_model::Encoding::Json);
     assert_eq!(encoding("Token"), gdl_model::Encoding::Msgpack);
+    // A declared codec is a pin, which an edge codec does not apply to.
+    let pinned = |name: &str| {
+        protocols
+            .offer
+            .messages
+            .iter()
+            .find(|m| m.name == name)
+            .expect("message found")
+            .pinned
+    };
+    assert!(pinned("Words") && pinned("Session"));
+    assert!(!pinned("Token"), "a message with no codec attribute");
+    assert!(
+        protocols
+            .offer
+            .exports
+            .iter()
+            .find(|e| e.name == "Session")
+            .expect("message found")
+            .pinned,
+        "an export carries its message's pin"
+    );
     assert_eq!(
         protocols
             .offer

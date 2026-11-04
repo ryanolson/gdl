@@ -10,6 +10,7 @@ use crate::{Problem, Problems, read_toml};
 mod boundary;
 mod calls;
 mod classes;
+mod codecs;
 mod errors;
 mod layouts;
 mod pools;
@@ -19,6 +20,7 @@ mod spelled;
 use boundary::bound;
 use calls::Services;
 use classes::classify;
+pub use codecs::{CodecEntry, EdgeCodec, EdgeCompression};
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use layouts::{Placements, check_layout_name};
 pub use pools::PoolPolicy;
@@ -30,9 +32,10 @@ use spelled::Spelled;
 ///
 /// A placement file contains `[segment.<name>]` tables, optional `[routing]`
 /// policies, optional `[class.<name>]` tables that group the segments into
-/// classes that deploy together, and optional `[pools.<class>]` tables that
-/// say how a chooser picks a pool of a class it sends to. Other deployment
-/// tables are ignored here.
+/// classes that deploy together, optional `[pools.<class>]` tables that
+/// say how a chooser picks a pool of a class it sends to, and an optional
+/// `[codec]` table that names an edge's codec. Other deployment tables are
+/// ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     #[serde(rename = "segment", default)]
@@ -51,6 +54,10 @@ pub struct Placement {
         deserialize_with = "pools::recorded"
     )]
     pools: BTreeMap<String, PoolPolicy>,
+    // Skipped when empty, so that a placement without codecs writes the
+    // text, and the hub reads the JSON, that it did before codecs existed.
+    #[serde(rename = "codec", default, skip_serializing_if = "BTreeMap::is_empty")]
+    codecs: BTreeMap<String, CodecEntry>,
     #[serde(skip)]
     spelled: Spelled,
 }
@@ -275,6 +282,15 @@ impl Placement {
         self
     }
 
+    /// Name the codec of the edge `<from> -> <to>`, for the messages on it
+    /// that pin none. The layout check refuses an edge the graph does not
+    /// have, or one that is not encoded under the placement.
+    pub fn codec(mut self, edge: &str, entry: CodecEntry) -> Self {
+        let key = codecs::edge_key(edge).unwrap_or_else(|_| edge.to_string());
+        self.codecs.insert(key, entry);
+        self
+    }
+
     /// Parse segment placement, request routing, classes, and pool policies
     /// from a deployment file. Every problem with the names is reported,
     /// each where it is; a file that does not parse is one problem.
@@ -293,6 +309,7 @@ impl Placement {
             .retain(|_, router| *router != RequestRouter::default());
         placement.spelled = Spelled::read(written, &placement.routing, &placement.pools);
         let mut problems = Vec::new();
+        placement.codecs = codecs::keyed(std::mem::take(&mut placement.codecs), &mut problems);
         for (node, router) in &placement.routing {
             if let RequestRouter::Selector(name) = router
                 && let Err(why) = check_selector_name(name)
@@ -345,8 +362,9 @@ impl Placement {
     /// The placement hash changes with node placement, segment names,
     /// request routing policies, classes, each class's effective pool
     /// policy, a default one included, and the property kinds each class's
-    /// pools serve from their settings (`[pools.<class>] provides`). Node order inside a segment, and
-    /// segment order inside a class, do not matter.
+    /// pools serve from their settings (`[pools.<class>] provides`), and
+    /// each `[codec]` entry without its floor. Node order inside a segment,
+    /// and segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();
         for (name, spec) in &self.segments {
@@ -379,6 +397,7 @@ impl Placement {
             }
         }
         pools::hash(&mut h, self.classes.keys(), &self.pools);
+        codecs::hash(&mut h, &self.codecs);
         h.finish()
     }
 }
@@ -397,6 +416,9 @@ pub struct Layout {
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
     call_routing: BTreeMap<String, RequestRouter>,
+    /// The edges a `[codec]` entry compresses, by hop, path, and the
+    /// position each enters.
+    compression: BTreeMap<(usize, Leg, usize), EdgeCompression>,
 }
 
 /// A hop that crosses from one class into another. Under the boundary rule
@@ -445,7 +467,7 @@ pub struct Run {
 
 /// A path of a hop: the forward one, from the outer end to the inner end,
 /// or the backward one, back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Leg {
     /// [`HopInfo::forward_path`], whose edges carry
     /// [`HopInfo::forward_types`].
@@ -545,6 +567,33 @@ impl Layout {
     /// The hash of the placement this layout was built from.
     pub fn placement_hash(&self) -> u64 {
         self.placement_hash
+    }
+
+    /// What a `[codec]` entry compresses on the edge of hop `hop` that
+    /// enters position `pos` of its `leg`: `None` for an edge without one.
+    pub fn compression(&self, hop: usize, leg: Leg, pos: usize) -> Option<&EdgeCompression> {
+        self.compression.get(&(hop, leg, pos))
+    }
+
+    /// The segments at either end of an edge that a `[codec]` entry
+    /// compresses: each sends or receives a compressed value.
+    pub fn compressing_segments(&self) -> BTreeSet<&str> {
+        let mut segments = BTreeSet::new();
+        for &(hop, leg, pos) in self.compression.keys() {
+            let hop = &self.hops[hop];
+            let runs = match leg {
+                Leg::Forward => &hop.forward_runs,
+                Leg::Backward => &hop.backward_runs,
+            };
+            let segment_at = |at: usize| {
+                runs.iter()
+                    .find(|run| (run.start..run.start + run.stages.len()).contains(&at))
+                    .map(|run| run.segment.as_str())
+            };
+            segments.extend(segment_at(pos - 1));
+            segments.extend(segment_at(pos));
+        }
+        segments
     }
 
     /// The segment a node of the topology is placed in. A unary node may be
@@ -874,10 +923,12 @@ fn place(
             errors.push(PlacementError::InvalidRouter(node.clone()));
         }
     }
+    let compression = codecs::resolve(&placement.codecs, &manifest.hops, &hops, &mut errors);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
     Ok(Layout {
+        compression,
         roots: manifest
             .nodes
             .iter()

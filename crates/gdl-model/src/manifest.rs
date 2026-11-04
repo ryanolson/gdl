@@ -141,6 +141,12 @@ pub struct TypeInfo {
     pub wire: bool,
     /// The encoding declared by the message, or named MessagePack by default.
     pub encoding: Encoding,
+    /// Whether the message declares its codec with `#[gdl(codec = "...")]`,
+    /// `codec = "msgpack"` included. An edge codec applies only to a
+    /// message that does not ([`TypeInfo::is_pinned`]). Not in the contract
+    /// hash: a pinned `msgpack` message writes the bytes an unpinned one does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// The item type of a streamed request. `None` for any other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<ItemInfo>,
@@ -155,17 +161,47 @@ pub struct ItemInfo {
     pub wire: bool,
     /// The encoding of each input stream item.
     pub encoding: Encoding,
+    /// Whether the item's message declares its codec, as
+    /// [`TypeInfo::pinned`] says of the head.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+impl ItemInfo {
+    /// Whether the item's message declares its codec: any encoding but the
+    /// default is declared.
+    pub fn is_pinned(&self) -> bool {
+        self.pinned || self.encoding != Encoding::default()
+    }
 }
 
 impl TypeInfo {
-    /// A type entry.
+    /// A type entry. An encoding other than the default is pinned; mark a
+    /// declared `codec = "msgpack"` with [`TypeInfo::pin`].
     pub fn new(name: impl Into<String>, wire: bool, encoding: Encoding) -> Self {
         Self {
             name: name.into(),
             wire,
             encoding,
+            pinned: encoding != Encoding::default(),
             stream: None,
         }
+    }
+
+    /// The entry with the head's message, and a streamed request's item's,
+    /// marked pinned where `head` and `item` say; a pin already set stays.
+    pub fn pin(mut self, head: bool, item: bool) -> Self {
+        self.pinned |= head;
+        if let Some(stream) = &mut self.stream {
+            stream.pinned |= item;
+        }
+        self
+    }
+
+    /// Whether the head's message declares its codec: any encoding but the
+    /// default is declared.
+    pub fn is_pinned(&self) -> bool {
+        self.pinned || self.encoding != Encoding::default()
     }
 
     /// A streamed request's entry: its head type and its item type.
@@ -181,10 +217,12 @@ impl TypeInfo {
             name: head.into(),
             wire: head_wire,
             encoding: head_encoding,
+            pinned: head_encoding != Encoding::default(),
             stream: Some(ItemInfo {
                 name: item.into(),
                 wire: item_wire,
                 encoding: item_encoding,
+                pinned: item_encoding != Encoding::default(),
             }),
         }
     }

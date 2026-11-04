@@ -41,6 +41,10 @@ pub struct MessageInfo {
     pub wire: bool,
     /// The encoding declared on the message type.
     pub encoding: gdl_model::Encoding,
+    /// Whether the type declares its codec, `msgpack` included: an edge
+    /// codec does not apply to it. A catalogue without it reads as unpinned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 /// A message's identity, as a catalogue holds it.
@@ -99,6 +103,9 @@ pub struct ExportInfo {
     pub wire: bool,
     /// The encoding the message declares.
     pub encoding: gdl_model::Encoding,
+    /// Whether the message declares its codec, as [`MessageInfo::pinned`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 /// A type that derives `Node`, or an instantiation of a generic one that
@@ -244,6 +251,7 @@ pub mod registry {
         pub name: &'static str,
         pub module: &'static str,
         pub encoding: gdl_model::Encoding,
+        pub pinned: bool,
         /// Expanded where the type is concrete, as the wire probe must be.
         pub wire: fn() -> bool,
     }
@@ -258,6 +266,7 @@ pub mod registry {
                 path: super::plain(&format!("{}::{}", self.module, self.name)),
                 wire: (self.wire)(),
                 encoding: self.encoding,
+                pinned: self.pinned,
             }
         }
     }
@@ -276,6 +285,7 @@ pub mod registry {
         /// constant identity.
         pub origin: fn() -> Identity,
         pub encoding: gdl_model::Encoding,
+        pub pinned: bool,
         /// Probed where the export is, as the derive's wire probe is.
         pub wire: fn() -> bool,
     }
@@ -291,6 +301,7 @@ pub mod registry {
                 origin: (self.origin)().into(),
                 wire: (self.wire)(),
                 encoding: self.encoding,
+                pinned: self.pinned,
             }
         }
     }
@@ -328,7 +339,11 @@ pub mod registry {
     impl Alias {
         pub(super) fn info(&self) -> Aliased {
             match (self.instantiation)() {
-                Instantiation::Message { identity, encoding } => Aliased::Message(ExportInfo {
+                Instantiation::Message {
+                    identity,
+                    encoding,
+                    pinned,
+                } => Aliased::Message(ExportInfo {
                     package: self.package.to_string(),
                     version: self.version.to_string(),
                     dir: self.dir.to_string(),
@@ -337,6 +352,7 @@ pub mod registry {
                     origin: identity.into(),
                     wire: (self.wire)(),
                     encoding,
+                    pinned,
                 }),
                 Instantiation::Node { config } => Aliased::Node(
                     Node {

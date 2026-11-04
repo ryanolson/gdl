@@ -55,6 +55,52 @@ mod selected {
     }
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
+/// A message that declares no codec.
+pub struct Unmarked {
+    n: u32,
+}
+
+/// A serde type that is not a message.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bare {
+    n: u32,
+}
+
+mod pins {
+    use super::{Bare, Named, Unmarked};
+
+    gdl_runtime::graph! {
+        name = "pins", schema = 1;
+        source A: Named + stream Unmarked -> stream Bare;
+        sink B: Named + stream Unmarked -> stream Bare;
+        topology: A => B;
+    }
+}
+
+/// `codec = "msgpack"` pins a message as any codec does; no attribute,
+/// and an unmarked serde type, pin none. The pin is not in the contract
+/// hash: the bytes are the same.
+#[test]
+fn the_manifest_records_which_messages_pin_their_codec() {
+    let manifest = pins::manifest();
+    let request = &manifest.hops[0].forward_types[0];
+    assert!(request.is_pinned(), "explicit msgpack");
+    let item = request.stream.as_ref().expect("streamed input");
+    assert!(!item.is_pinned(), "a derive with no codec");
+    assert!(
+        !manifest.hops[0].backward_types[0].is_pinned(),
+        "a serde type"
+    );
+    assert_eq!(
+        gdl_runtime::Manifest::from_toml(&manifest.to_toml()).expect("parse"),
+        manifest
+    );
+    let mut unpinned = manifest.clone();
+    unpinned.hops[0].forward_types[0].pinned = false;
+    assert_eq!(manifest.contract_hash(), unpinned.contract_hash());
+}
+
 #[test]
 fn the_manifest_records_each_parts_codec_and_hashes_every_choice() {
     use gdl_runtime::Encoding;

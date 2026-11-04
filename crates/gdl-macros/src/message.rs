@@ -21,7 +21,9 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
         .iter()
         .map(|a| a.meta.clone())
         .collect::<Vec<_>>();
-    let encoding = match gdl_syntax::message_encoding(&attrs)? {
+    let pin = gdl_syntax::message_codec(&attrs)?;
+    let pinned = pin.is_some();
+    let encoding = match pin.unwrap_or_default() {
         gdl_model::Encoding::Msgpack => quote!(#root::Encoding::Msgpack),
         gdl_model::Encoding::MsgpackArray => {
             positional(input, &attrs, &name)?;
@@ -30,7 +32,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
         gdl_model::Encoding::Json => quote!(#root::Encoding::Json),
     };
     if !input.generics.params.is_empty() {
-        return generic(input, root, &encoding);
+        return generic(input, root, &encoding, pinned);
     }
     // `Message: Send + 'static`: every port type crosses tasks. The impl is
     // spanned at the type, so a type that is not `Send` is reported at its
@@ -56,6 +58,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
 
         impl #root::Offered for #ident {
             const ENCODING: #root::Encoding = #encoding;
+            const PINNED: bool = #pinned;
             fn identity() -> #root::Identity {
                 <#ident as #root::MessageTrait>::IDENTITY
             }
@@ -82,6 +85,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
                 name: #name,
                 module: ::core::module_path!(),
                 encoding: #encoding,
+                pinned: #pinned,
                 wire: #wire,
             };
         };
@@ -150,6 +154,7 @@ fn generic(
     input: &DeriveInput,
     root: &TokenStream,
     encoding: &TokenStream,
+    pinned: bool,
 ) -> syn::Result<TokenStream> {
     crate::type_parameters_only(&input.generics, "message")?;
     let ident = &input.ident;
@@ -173,6 +178,7 @@ fn generic(
     Ok(quote! {
         impl #impl_generics #root::Offered for #ident #ty_generics #clause {
             const ENCODING: #root::Encoding = #encoding;
+            const PINNED: bool = #pinned;
             fn identity() -> #root::Identity {
                 #identity
             }
@@ -195,6 +201,7 @@ fn generic(
                 #root::Instantiation::Message {
                     identity: <Self as #root::Offered>::identity(),
                     encoding: #encoding,
+                    pinned: #pinned,
                 }
             }
         }

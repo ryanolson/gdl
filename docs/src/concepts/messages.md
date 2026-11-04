@@ -43,6 +43,7 @@ A message selects its encoding with `#[gdl(codec = "...")]`. The default is `msg
 | `codec = "json"` | JSON |
 
 - The annotation applies to the complete value, nested fields included. A nested type's own annotation does not change how it serializes inside its parent.
+- A message with the annotation pins its codec, `codec = "msgpack"` included. A message without it, and a serde type that does not derive `Message`, pin none. Only a message that pins none takes an edge codec, which the spec names for one edge ([Edge codecs](#edge-codecs)).
 - A streamed request selects the head's and the item's codecs separately, because they are two messages.
 - Named fields keep an omitted optional field in nested structs. Positional arrays are smaller for a fixed layout, and break when a field is skipped. JSON writes a non-finite float as `null` and refuses a map key such as a tuple. Use `msgpack` for those values.
 - `msgpack_array` refuses a message with a field that serde can omit in one direction: `skip_serializing_if`, or `skip_serializing` or `skip_deserializing` alone. An array has no field names, so the fields after it would shift, and the value would fail to decode or decode into the wrong fields. `skip`, or both one-sided skips, omits the field in both directions and is accepted. So is the field of a newtype struct or a `transparent` struct, whose skips serde ignores; `skip_serializing_if` on a newtype variant's field, which serde also ignores; and a field of a variant that serde skips, which serde refuses before it reads the fields. `derive(Message)` refuses at compile time, and the source reader refuses the same message, so `cargo gdl check` reports it with the field's name before a build. The check runs once per message type, so encoding a value costs nothing more. It does not look inside a field's type: [Known limitations](../operations/limitations.md#positional-messagepack-checks-only-the-messages-own-fields-for-omissions).
@@ -50,7 +51,23 @@ A message selects its encoding with `#[gdl(codec = "...")]`. The default is `msg
 - The envelope and control frames use their own encoding. The codec here is for application messages only. See [Crossing segments](crossings.md) for where the codec applies and for the rule that decides which edges need one.
 - A sender and a typed routing selector use the same dispatch. The edge picks monomorphized function pointers once. Each item calls them without a lookup or a boxed value.
 
-The contract hash covers each message's encoding and the encoding's wire revision (1 today). A codec change therefore changes the deployment's identity without a `schema` bump, and an instance rejects an envelope from a build with another codec. A change to a message's serde representation still needs a `schema` bump, because Rust type names cannot fingerprint a serde form. [Cost of each codec](../operations/crossing-performance.md) has the measurements.
+The contract hash covers each message's encoding and the encoding's wire revision (1 today). A codec change therefore changes the deployment's identity without a `schema` bump, and an instance rejects an envelope from a build with another codec. Whether a message pins its codec is not in the hash: a message that writes `codec = "msgpack"` writes the bytes that one without the annotation writes. A change to a message's serde representation still needs a `schema` bump, because Rust type names cannot fingerprint a serde form. [Cost of each codec](../operations/crossing-performance.md) has the measurements.
+
+## Edge codecs
+
+A spec can name the codec of one edge in its `[codec]` table, for the messages on the edge that pin none. The first edge codec is `msgpack_zstd`: named MessagePack, and a value of at least the edge's floor (16 KiB by default) compressed into one zstd frame.
+
+```toml
+[codec]
+"Engine -> Detokenize" = "msgpack_zstd"
+"Truncate -> Engine" = { codec = "msgpack_zstd", floor = 4096 }
+```
+
+- The codec is the spec's, not the message's: one message can cross a slow link compressed and a fast one as it is. So a message's annotation and an edge codec do not mix, and `cargo gdl check` refuses an entry on a pinned message, naming the edge, the message, and its pin.
+- The entry is in the placement hash, not the contract hash. Every layout of a spec shares one contract, and each layout has its own `[codec]` table.
+- zstd is in `gdl-runtime` only, behind its `zstd` feature, which the generator turns on for a segment at either end of a codec edge. A node crate never links it (`crates/gdl/tests/dependencies.rs`).
+
+[Crossing segments](crossings.md#edge-codecs) says what crosses, and what it costs. The [spec reference](../appendix/spec-reference.md#placement) lists the keys.
 
 ## Naming a message in a graph file
 

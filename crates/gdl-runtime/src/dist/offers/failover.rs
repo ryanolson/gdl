@@ -684,7 +684,7 @@ fn called<'a>(
             panic!("these hand-offs route in the roster");
         };
         let (instance, _held) = rt.choose("d", within, &cx, &mut envelope, &[]).await?;
-        let bytes = envelope.wire()?;
+        let bytes = envelope.wire(None)?;
         let reply = rt
             .fabric
             .call(
@@ -750,6 +750,12 @@ async fn an_accepted_first_offer_allocates_what_a_call_did() {
 /// at the outer end and at each stage that hands a request on.
 const SEND_FORWARD_BEFORE: usize = 912;
 
+/// What the future grew by since: a request's head holds a pointer to its
+/// compressed frame, for an edge whose `[codec]` entry compresses it
+/// (docs/src/concepts/crossings.md#edge-codecs), and the future grows by 16
+/// bytes with it.
+const COMPRESSED_HEAD: usize = 16;
+
 /// The first offer's future is no larger than a hand-off's was: what a
 /// failover keeps lives in the boxed call a miss makes, and the envelope
 /// is not held twice.
@@ -763,8 +769,8 @@ async fn a_first_offer_is_no_larger_than_a_hand_off_was() {
             .send_forward("d", &ROUND_ROBIN, &cx, hand_off(&fixture.rt, &cx), false);
     let size = std::mem::size_of_val(&sending);
     assert!(
-        size <= SEND_FORWARD_BEFORE,
-        "send_forward's future is {size} bytes, against {SEND_FORWARD_BEFORE} before offers"
+        size <= SEND_FORWARD_BEFORE + COMPRESSED_HEAD,
+        "send_forward's future is {size} bytes, against {SEND_FORWARD_BEFORE} before offers and {COMPRESSED_HEAD} for a compressed head"
     );
 }
 

@@ -56,8 +56,8 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             if let Some(origin) = message(&mut resolver, Def::Type(krate, module, index)) {
                 let wire = plain_wire(&mut resolver, &mut impls, Def::Type(krate, module, index));
                 let ty = &resolver.crates[krate].modules[module].types[index];
-                let encoding = match gdl_syntax::message_encoding(&ty.attrs) {
-                    Ok(encoding) => encoding,
+                let pin = match gdl_syntax::message_codec(&ty.attrs) {
+                    Ok(pin) => pin,
                     Err(error) => {
                         problems.push(format!("{}: {error}", ty.at));
                         continue;
@@ -71,7 +71,8 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                     name: ty.name.clone(),
                     path: origin.path,
                     wire,
-                    encoding,
+                    encoding: pin.unwrap_or_default(),
+                    pinned: pin.is_some(),
                     public: ty.vis == Vis::Public && public(&resolver, krate, module),
                 });
             }
@@ -128,6 +129,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                             _ => ty_wire(&mut resolver, &mut impls, &ty),
                         },
                         encoding: message.encoding,
+                        pinned: message.pinned,
                         public,
                         probed: None,
                     }),
@@ -663,6 +665,7 @@ fn message_type(
 pub(crate) struct Offered {
     pub(crate) origin: Origin,
     encoding: gdl_model::Encoding,
+    pinned: bool,
     /// The type that derives `Message`: an export reads whether it is
     /// refused ([`refused`]). A port names the message by identity alone,
     /// and is not refused for it.
@@ -680,7 +683,7 @@ pub(crate) fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Off
     if !derives(definition, "Message") {
         return Ok(None);
     }
-    let encoding = gdl_syntax::message_encoding(&definition.attrs)
+    let pin = gdl_syntax::message_codec(&definition.attrs)
         .map_err(|error| format!("{}: {error}", definition.at))?;
     let origin = if args.is_empty() {
         let Some(origin) = message(resolver, *def) else {
@@ -703,7 +706,8 @@ pub(crate) fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Off
     };
     Ok(Some(Offered {
         origin,
-        encoding,
+        encoding: pin.unwrap_or_default(),
+        pinned: pin.is_some(),
         def: *def,
     }))
 }
@@ -882,6 +886,7 @@ fn alias(
         origin: message.origin,
         wire: ty_wire(resolver, impls, &ty),
         encoding: message.encoding,
+        pinned: message.pinned,
         public: reachable,
         probed: None,
     }))

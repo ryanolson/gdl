@@ -50,6 +50,7 @@ impl Graph {
                     name: item.name,
                     wire: item.wire,
                     encoding: item.encoding,
+                    pinned: item.pinned,
                 });
             }
             Ok(head)

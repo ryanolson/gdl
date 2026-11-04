@@ -35,6 +35,8 @@
 | Ticket | A token that lets a remote producer open an anchor's stream without an attach round trip |
 | Visit | One request's pass through one segment. Metrics count visits |
 | Encoding | The codec of a message on the wire: `msgpack` (the default), `msgpack_array`, or `json` |
+| Pinned codec | A message's `#[gdl(codec = "...")]`, `msgpack` included. A pinned message takes no edge codec |
+| Edge codec | A codec that a spec's `[codec]` table names for one edge, for its messages that pin none: `msgpack_zstd`. See [Edge codecs](../concepts/crossings.md#edge-codecs) |
 
 ## Running
 

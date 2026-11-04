@@ -137,6 +137,7 @@ pub(crate) fn files(
             fed: Vec::new(),
             policies: crate::policies::registered(spec, layout, segment),
             selectors: crate::selectors::registered(spec, layout, segment),
+            compresses: layout.compressing_segments().contains(segment),
         };
         unit.crossings = crossings(manifest, layout, segment)?;
         // The source's request and item the binary reads and writes as
@@ -460,6 +461,9 @@ struct Unit<'a> {
     /// The bound selectors it builds and registers, by name: those of the
     /// crossings it sends.
     selectors: Vec<(&'a str, &'a crate::spec::Bind)>,
+    /// Whether it sends or receives on an edge that a `[codec]` entry
+    /// compresses, and so builds the runtime with libzstd.
+    compresses: bool,
     crate_dir: &'a Path,
     out: &'a Path,
     deps: Deps,
@@ -606,10 +610,12 @@ impl Unit<'_> {
         let _ = writeln!(text, "[dependencies]");
         let source = self.spec.gdl.source(&|path| self.path_to(path));
         // Hub discovery brings the hub client and its HTTP stack; only a
-        // spec that deploys asks for it.
+        // spec that deploys asks for it. libzstd is C: only a segment at an
+        // end of a compressed edge builds it.
         let features: Vec<&str> = [
             ("json-lines", self.serves()),
             ("hub", self.spec.deployment.is_some()),
+            ("zstd", self.compresses),
         ]
         .into_iter()
         .filter_map(|(feature, wanted)| wanted.then_some(feature))

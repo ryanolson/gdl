@@ -22,6 +22,60 @@ pub fn blob(size: usize) -> Blob {
     Blob(vec![7; size])
 }
 
+/// `size` bytes of words, which compress as a conversation's text does:
+/// one blob of a single byte would compress far better than any request.
+/// Cut from one text made once, so a blob costs what [`blob`] does.
+pub fn words(size: usize) -> Blob {
+    super::produced();
+    static TEXT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let text = TEXT.get_or_init(|| {
+        const WORDS: [&str; 16] = [
+            "the",
+            "model",
+            "returned",
+            "a",
+            "tool",
+            "call",
+            "with",
+            "its",
+            "arguments",
+            "and",
+            "user",
+            "asked",
+            "for",
+            "more",
+            "context",
+            "again",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut text = Vec::with_capacity(4 << 20);
+        while text.len() < 4 << 20 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            text.extend_from_slice(WORDS[(state % 16) as usize].as_bytes());
+            text.push(if state.is_multiple_of(7) { b'\n' } else { b' ' });
+        }
+        text
+    });
+    Blob(text[..size.min(text.len())].to_vec())
+}
+
+/// The lean or heads graph in two segments, with an edge codec on `edge`
+/// when it is `Some`, at its default floor.
+pub fn split(edge: Option<&str>) -> Placement {
+    let placement = Placement::new()
+        .segment("front", ["S"])
+        .segment("engine", ["D"]);
+    match edge {
+        Some(edge) => placement.codec(
+            edge,
+            gdl_runtime::CodecEntry::every(gdl_runtime::EdgeCodec::MsgpackZstd),
+        ),
+        None => placement,
+    }
+}
+
 /// An [`Ask`] size that asks for items of mixed sizes: 16 KiB and 16 B in
 /// turn, so a large item is followed by a small one.
 pub const MIXED: u32 = 0;
@@ -77,15 +131,35 @@ pub async fn lean_front() -> LeanCaller {
     lean_front_with(Emit).await
 }
 
+/// Like [`Emit`], with [`words`] for blobs.
+pub struct EmitWords;
+
+impl gdl::Sink for EmitWords {
+    type Req = Ask;
+    type Item = Blob;
+
+    async fn generate(&self, _cx: Cx, ask: Ask) -> gdl::Result<Items<Blob>> {
+        let size = ask.size;
+        Ok(gdl::items(futures::stream::iter(
+            (0..ask.items).map(move |index| Ok(words(item_len(size, index)))),
+        )))
+    }
+}
+
 /// The lean graph with `sink` as its `D`.
 pub async fn lean_front_with<D>(sink: D) -> LeanCaller
 where
     D: gdl::Sink<Req = Ask, Item = Blob>,
 {
+    lean_front_placed(sink, split(None)).await
+}
+
+/// [`lean_front_with`], placed as `placement` says.
+pub async fn lean_front_placed<D>(sink: D, placement: Placement) -> LeanCaller
+where
+    D: gdl::Sink<Req = Ask, Item = Blob>,
+{
     let nodes = [super::node().await, super::node().await];
-    let placement = Placement::new()
-        .segment("front", ["S"])
-        .segment("engine", ["D"]);
     let manifest = lean::manifest();
     let mut roster = Roster::new();
     for (name, node) in ["front", "engine"].iter().zip(&nodes) {
@@ -570,10 +644,12 @@ pub type HeadsCaller =
     Box<dyn Fn(Cx, Padded) -> BoxFuture<'static, gdl::Result<Items<Blob>>> + Send + Sync>;
 
 pub async fn heads_front() -> HeadsCaller {
+    heads_front_placed(split(None)).await
+}
+
+/// [`heads_front`], placed as `placement` says.
+pub async fn heads_front_placed(placement: Placement) -> HeadsCaller {
     let nodes = [super::node().await, super::node().await];
-    let placement = Placement::new()
-        .segment("front", ["S"])
-        .segment("engine", ["D"]);
     let manifest = heads::manifest();
     let mut roster = Roster::new();
     for (name, node) in ["front", "engine"].iter().zip(&nodes) {
@@ -609,6 +685,17 @@ pub async fn heads_front() -> HeadsCaller {
 pub async fn head(source: &HeadsCaller, size: usize) {
     let padded = Padded {
         pad: blob(size),
+        words: Vec::new(),
+    };
+    let out = source(Cx::new(), padded).await.expect("call");
+    drain(out, 1, |_| {}).await;
+}
+
+/// One request whose head carries `size` bytes of [`words`], read to its
+/// one item.
+pub async fn head_words(source: &HeadsCaller, size: usize) {
+    let padded = Padded {
+        pad: words(size),
         words: Vec::new(),
     };
     let out = source(Cx::new(), padded).await.expect("call");

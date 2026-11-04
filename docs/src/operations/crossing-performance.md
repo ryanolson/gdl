@@ -252,3 +252,42 @@ timeout 60 cargo nextest run -p gdl-runtime --test allocs --test wire
 ```
 
 The runner alternates the order, records binary hashes and load, and keeps each criterion result.
+
+## Edge codecs
+
+An edge with a `[codec]` entry ([Edge codecs](../concepts/crossings.md#edge-codecs)) costs nothing measurable below its floor. From the floor on, compressing and decompressing cost far more than the crossing. An item costs 28 to 35 times the instructions of one sent without the entry, and a request with a compressed head 14 to 37 times. It buys bytes: zstd at level 1 writes a quarter of the bench's text at 16 KiB and a fifth at 2.2 MB.
+
+**Setup.** A shared 20-core aarch64 host, load average 23 to 60, valgrind 3.28.0, rustc 1.93.1, gdl at `a82ab1b7` (base) and the change on it. The `requests` bench, built under the bench profile with thin LTO and one codegen unit, both ends in one process ([Callgrind Ir](benchmarking.md#callgrind-ir)). `words-<size>` sends a stream of items of `size` bytes of text, which the bench makes from 16 words in an order a seed fixes. `zstd-<size>` sends the same items over an edge with a `[codec]` entry at the default floor, 16 KiB. `head-words-<size>` and `head-zstd-<size>` send one request whose head carries that text, with one 16 B item back. The bench's one-byte blobs would compress far better than any request does, so the codec rows use text.
+
+```bash
+export RUSTFLAGS="--cfg rustix_use_libc" CARGO_PROFILE_BENCH_LTO=thin CARGO_PROFILE_BENCH_CODEGEN_UNITS=1
+cargo bench -p gdl-runtime --bench requests --no-run
+valgrind --tool=callgrind --callgrind-out-file=/dev/null <requests binary> zstd-16384 1000
+# per item: (Ir at 1000 - Ir at 500) / 500 above the floor, (Ir at 2000 - Ir at 1000) / 1000 below
+# per request: (Ir at 400 - Ir at 200) / 200; at 2,223,687 B, (Ir at 20 - Ir at 10) / 10
+```
+
+Below the floor, three rounds each:
+
+| Shape | Without the entry | With it |
+|---|---|---|
+| item, 1 KiB | 9,364 to 10,631 | 8,410 to 8,961 |
+| item, 4 KiB | 13,029 to 14,757 | 13,356 to 13,967 |
+| request, 1 KiB head | 175,173 to 183,813 | 174,985 to 184,486 |
+
+The code adds one compare of the length on send and, on a codec edge, one of four bytes on receive. On this host the rows spread by about ±8%, so a change under that cannot show. At 1 KiB the rows with the entry were the lower ones in these rounds, and the higher ones in three rounds of a build before it: that order is the host's.
+
+From the floor on, one round each:
+
+| Shape | Without the entry | With it | Times | zstd 1 of the text |
+|---|---|---|---|---|
+| item, 16 KiB | 27,782 | 789,833 | 28 | 4,150 B (25%) |
+| item, 64 KiB | 81,416 | 2,889,064 | 35 | 15,287 B (23%) |
+| request, 64 KiB head | 219,365 | 3,063,361 | 14 | 15,287 B (23%) |
+| request, 2,223,687 B head | 2,269,328 | 83,342,042 | 37 | 480,899 B (22%) |
+
+- **Where it goes.** The frame's compression and decompression, which the crossing without the entry does not do at all: it copies the value's bytes. On a real 1,812-message conversation of 2,223,687 B of MessagePack, zstd at level 1 wrote 465,826 B, and took 35.0 M instructions to compress and 14.0 M to decompress.
+- **Allocations.** After a stream's first compressed item, an item takes the allocations a plain one does (`a_compressed_item_allocates_as_a_plain_one_after_the_first` in `wire.rs`). A head takes two more on its first offer, its frame's buffer and the box that holds it, and none more where it arrives (`a_compressed_head_allocates_twice_more_to_send_and_no_more_to_read` in `envelope.rs`). libzstd keeps one context of each kind per thread.
+- **The guard.** With no `[codec]` entry, the `lean-<size>` rows of [Instructions per item](#instructions-per-item) are inside the spread of the base's at 16 B, 1 KiB, and 16 KiB: 6,840 to 7,716 against 6,907 to 8,041, 7,877 to 9,342 against 7,657 to 9,276, and 27,213 to 28,332 against 27,000 to 28,027.
+- **The floor.** At level 1, on slices of the same conversation, each byte saved cost 236 instructions at 1 KiB, 112 at 4 KiB, 94 at 16 KiB, 62 at 64 KiB, and 28 for the whole of it. The 16 KiB default keeps a message of a few KiB on the path without the codec.
+- **A compressed head is still large.** The 2.2 MB conversation compresses to 466 KB, which is over velo's 256 KiB eager budget, so velo still stages it.

@@ -23,6 +23,9 @@ pub struct Resolved {
     pub wire: bool,
     /// The encoding declared by the defining message.
     pub encoding: gdl_model::Encoding,
+    /// Whether the defining message declares its codec: an edge codec does
+    /// not apply to it.
+    pub pinned: bool,
 }
 
 /// One way a listed crate offers a message.
@@ -36,6 +39,7 @@ struct Candidate {
     /// catalogue entry holds a probe of it.
     probed: Option<bool>,
     encoding: gdl_model::Encoding,
+    pinned: bool,
     /// Whether it is an export, and whether its own package exports it:
     /// what decides the path the contract names it by.
     export: Option<bool>,
@@ -76,6 +80,7 @@ pub(crate) fn resolve(
                 wire: m.wire,
                 probed: None,
                 encoding: m.encoding,
+                pinned: m.pinned,
                 export: None,
                 public: m.public,
             });
@@ -88,6 +93,7 @@ pub(crate) fn resolve(
                 wire: e.wire,
                 probed: e.probed,
                 encoding: e.encoding,
+                pinned: e.pinned,
                 export: Some(e.origin.package == offer.package),
                 public: e.public,
             });
@@ -135,6 +141,7 @@ pub(crate) fn resolve(
                     path: pinned.path.clone(),
                     wire: wire(pinned),
                     encoding: pinned.encoding,
+                    pinned: pinned.pinned,
                 },
             );
             continue;
@@ -189,6 +196,7 @@ pub(crate) fn resolve(
                         path: best.path.clone(),
                         wire: wire(best),
                         encoding: best.encoding,
+                        pinned: best.pinned,
                     },
                 );
             }
@@ -300,6 +308,7 @@ pub(crate) mod tests {
                     path: (*path).to_string(),
                     wire: true,
                     encoding: Default::default(),
+                    pinned: false,
                     public: true,
                 })
                 .collect(),
@@ -317,6 +326,7 @@ pub(crate) mod tests {
                     },
                     wire: true,
                     encoding: Default::default(),
+                    pinned: false,
                     public: true,
                     probed: None,
                 })

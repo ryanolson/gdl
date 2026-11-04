@@ -207,6 +207,7 @@ fn a_derived_message_is_registered_with_its_definition_path() {
             path: "catalogue::Prompt".into(),
             wire: true,
             encoding: Default::default(),
+            pinned: false,
         }]
     );
     let words = find(&catalogue, "Words");

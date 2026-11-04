@@ -61,7 +61,7 @@ async fn node() -> velo::Velo {
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics | -velo] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct | single>-<size> <count> | head-<size> <count> | fields-<words> <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics | -velo] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct | single>-<size> <count> | head-<size> <count> | head-<words | zstd>-<size> <count> | <words | zstd>-<size> <count> | fields-<words> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -73,6 +73,17 @@ fn main() {
         // Only the setup measured: every velo node running in the process
         // does work of its own while the requests run, which a count per
         // request would take for theirs.
+        // Words in the head, and with `zstd` an edge codec on its edge.
+        for (prefix, edge) in [("head-words-", None), ("head-zstd-", Some("S -> D"))] {
+            if let Some(size) = which.strip_prefix(prefix) {
+                let size: usize = size.parse().expect(usage);
+                let heads = heads_front_placed(split(edge)).await;
+                for _ in 0..count {
+                    head_words(&heads, size).await;
+                }
+                std::process::exit(0);
+            }
+        }
         if let Some(size) = which.strip_prefix("head-") {
             let size: usize = size.parse().expect(usage);
             let heads = heads_front().await;
@@ -80,6 +91,20 @@ fn main() {
                 head(&heads, size).await;
             }
             std::process::exit(0);
+        }
+        // Items of words, and with `zstd` an edge codec on their edge.
+        for (prefix, edge) in [("words-", None), ("zstd-", Some("D -> S"))] {
+            if let Some(size) = which.strip_prefix(prefix) {
+                let size: u32 = size.parse().expect(usage);
+                let lean = lean_front_placed(EmitWords, split(edge)).await;
+                let ask = Ask { items: count, size };
+                let out = lean(Cx::new(), ask).await.expect("call");
+                drain(out, count, |blob| {
+                    assert_eq!(blob.0.len(), size as usize, "gdl: item size");
+                })
+                .await;
+                std::process::exit(0);
+            }
         }
         if let Some(words) = which.strip_prefix("fields-") {
             let words: usize = words.parse().expect(usage);

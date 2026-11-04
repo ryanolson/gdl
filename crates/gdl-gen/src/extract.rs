@@ -425,7 +425,7 @@ fn differences(
                 "message `{}` at `{}`, {}",
                 m.name,
                 m.path,
-                wire(m.wire, m.encoding)
+                wire(m.wire, m.encoding, m.pinned)
             )
         })
         .chain(
@@ -441,7 +441,7 @@ fn differences(
                         e.origin.path,
                         e.origin.package,
                         e.origin.version,
-                        wire(e.wire, e.encoding)
+                        wire(e.wire, e.encoding, e.pinned)
                     )
                 }),
         )
@@ -521,7 +521,7 @@ fn differences(
                 "message `{}` at `{}`, {}",
                 m.name,
                 m.path,
-                wire(m.wire, m.encoding)
+                wire(m.wire, m.encoding, m.pinned)
             )
         })
         .chain(offer.exports.iter().map(|e| {
@@ -532,7 +532,7 @@ fn differences(
                 e.origin.path,
                 e.origin.package,
                 e.origin.version,
-                wire(e.wire, e.encoding)
+                wire(e.wire, e.encoding, e.pinned)
             )
         }))
         .chain(offer.nodes.iter().map(|n| {
@@ -643,11 +643,12 @@ fn node_of(s: &Skipped, n: &gdl_message::NodeInfo) -> bool {
     s.path.as_deref() == Some(n.path.as_str())
 }
 
-fn wire(wire: bool, encoding: gdl_model::Encoding) -> String {
+fn wire(wire: bool, encoding: gdl_model::Encoding, pinned: bool) -> String {
     format!(
-        "{} (codec {})",
+        "{} (codec {}{})",
         if wire { "wire" } else { "local" },
-        encoding.name()
+        encoding.name(),
+        if pinned { ", pinned" } else { "" }
     )
 }
 
@@ -766,6 +767,7 @@ mod tests {
                 path: "protocols::Words".into(),
                 wire: words_wire,
                 encoding: Default::default(),
+                pinned: false,
             }],
             exports: vec![ExportInfo {
                 package: "facade".into(),
@@ -776,6 +778,7 @@ mod tests {
                 origin: built_origin("protocols::Words"),
                 wire: words_wire,
                 encoding: Default::default(),
+                pinned: false,
             }],
             nodes: vec![NodeInfo {
                 config: Vec::new(),
@@ -822,6 +825,7 @@ mod tests {
                 origin: read_origin("protocols::Words"),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
                 probed: None,
             }],

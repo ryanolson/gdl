@@ -65,8 +65,8 @@ fn offer(rt: &crate::dist::runtime::Runtime, text: &str, view: Option<OfferView>
         payload,
     };
     forward.set_view(view);
-    let bytes = forward.wire().expect("wire");
-    Forward::read(&bytes).expect("read")
+    let bytes = forward.wire(None).expect("wire");
+    Forward::read(&bytes, |_, _| None).expect("read")
 }
 
 const WAIT: Duration = Duration::from_secs(5);

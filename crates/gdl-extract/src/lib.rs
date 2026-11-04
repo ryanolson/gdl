@@ -496,6 +496,10 @@ pub struct MessageEntry {
     pub wire: bool,
     /// The declared wire encoding, also read for messages without serde impls.
     pub encoding: gdl_model::Encoding,
+    /// Whether the type declares its codec, `msgpack` included: an edge
+    /// codec does not apply to it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// Whether its definition path is public: the type and every module
     /// above it are `pub`. Code outside the crate can name it there only
     /// if so; an export gives it another path.
@@ -515,6 +519,9 @@ pub struct ExportEntry {
     pub wire: bool,
     /// The encoding declared at the message's definition.
     pub encoding: gdl_model::Encoding,
+    /// Whether the message's definition declares its codec.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// Whether the public path is public: every module above the `pub use`
     /// is `pub`.
     pub public: bool,

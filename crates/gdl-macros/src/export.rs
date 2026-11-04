@@ -76,6 +76,7 @@ fn uses(item: ItemUse, root: &TokenStream) -> syn::Result<TokenStream> {
                 module: ::core::module_path!(),
                 origin: <#ident as #root::Offered>::identity,
                 encoding: <#ident as #root::Offered>::ENCODING,
+                pinned: <#ident as #root::Offered>::PINNED,
                 wire: #wire,
             };
         }

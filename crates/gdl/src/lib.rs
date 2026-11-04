@@ -88,11 +88,11 @@ pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
 pub use unary::UnaryClient;
 
-#[doc(hidden)]
-pub use gdl_message::message_encoding;
 /// Message types, from `gdl-message`. A protocols crate depends on that
 /// crate alone; a node crate can reach the same items here.
 pub use gdl_message::{Catalogue, Identity, MessageInfo, Shape};
+#[doc(hidden)]
+pub use gdl_message::{message_encoding, message_pinned};
 
 /// The `Message` trait, and the derive of the same name: offer a type to
 /// graphs by its name. This derive names gdl in its expansion, so a crate

@@ -943,6 +943,29 @@ fn a_dependency_may_not_take_the_chosen_allocators_name() {
     );
 }
 
+/// A segment at either end of an edge that a `[codec]` entry compresses
+/// builds the runtime with libzstd; without the entry, none does.
+#[test]
+fn a_segment_on_a_compressed_edge_builds_the_runtime_with_zstd() {
+    let out = std::path::Path::new("/work/segments");
+    let coded = split().codec(
+        "D -> S",
+        gdl_model::CodecEntry::every(gdl_model::EdgeCodec::MsgpackZstd),
+    );
+    let files =
+        rendered(&spec(coded, &[("D", "tiny_nodes::D")]), &manifest(), out).expect("render");
+    for segment in ["front", "engine"] {
+        let cargo = &files[&PathBuf::from(format!("{segment}/Cargo.toml"))];
+        assert!(cargo.contains("\"zstd\""), "{segment}: {cargo}");
+    }
+    let files =
+        rendered(&spec(split(), &[("D", "tiny_nodes::D")]), &manifest(), out).expect("render");
+    for segment in ["front", "engine"] {
+        let cargo = &files[&PathBuf::from(format!("{segment}/Cargo.toml"))];
+        assert!(!cargo.contains("zstd"), "{segment}: {cargo}");
+    }
+}
+
 #[test]
 fn only_the_source_segment_serves_json_lines() {
     let out = std::path::Path::new("/work/segments");
@@ -1155,6 +1178,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "PoolPolicy::DEFAULT_POLICY",
             format!("{:?}", PoolPolicy::DEFAULT_POLICY),
+        ),
+        (
+            "EdgeCodec::DEFAULT_FLOOR",
+            gdl_model::EdgeCodec::DEFAULT_FLOOR.to_string(),
         ),
         (
             "DEFAULT_BASE_IMAGE",

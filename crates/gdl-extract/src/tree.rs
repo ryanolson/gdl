@@ -893,7 +893,7 @@ impl Reader<'_> {
 /// Whether a type's attributes, `attrs`, select `msgpack_array`. A codec
 /// that does not read is reported where the message is offered.
 fn positional(attrs: &[Meta]) -> bool {
-    gdl_syntax::message_encoding(attrs).ok() == Some(gdl_model::Encoding::MsgpackArray)
+    gdl_syntax::message_codec(attrs).ok() == Some(Some(gdl_model::Encoding::MsgpackArray))
 }
 
 fn item_attrs(item: &Item) -> &[syn::Attribute] {

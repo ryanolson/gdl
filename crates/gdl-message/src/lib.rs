@@ -97,6 +97,9 @@ pub mod __private {
     pub trait Offered {
         /// The declared encoding.
         const ENCODING: Encoding;
+        /// Whether the type declares its codec, `msgpack` included: an edge
+        /// codec does not apply to it.
+        const PINNED: bool;
         /// The message's identity.
         fn identity() -> Identity;
     }
@@ -142,6 +145,8 @@ pub mod __private {
             identity: Identity,
             /// The declared encoding.
             encoding: Encoding,
+            /// Whether the generic type declares its codec.
+            pinned: bool,
         },
         /// `derive(gdl::Node)`: its graph configuration fields.
         Node {
@@ -191,21 +196,30 @@ pub mod __private {
 
     pub trait DeclaredEncoding {
         fn __gdl_encoding(&self) -> Encoding;
+        fn __gdl_pinned(&self) -> bool;
     }
 
     impl<T: Offered> DeclaredEncoding for WireProbe<T> {
         fn __gdl_encoding(&self) -> Encoding {
             T::ENCODING
         }
+        fn __gdl_pinned(&self) -> bool {
+            T::PINNED
+        }
     }
 
     pub trait DefaultEncoding {
         fn __gdl_encoding(&self) -> Encoding;
+        fn __gdl_pinned(&self) -> bool;
     }
 
     impl<T> DefaultEncoding for &WireProbe<T> {
         fn __gdl_encoding(&self) -> Encoding {
             Encoding::default()
+        }
+        // An unmarked serde type declares no codec.
+        fn __gdl_pinned(&self) -> bool {
+            false
         }
     }
 }
@@ -218,5 +232,17 @@ macro_rules! message_encoding {
         #[allow(unused_imports)]
         use $crate::__private::{DeclaredEncoding as _, DefaultEncoding as _};
         (&$crate::__private::WireProbe::<$ty>::new()).__gdl_encoding()
+    }};
+}
+
+/// Whether a concrete message type declares its codec: `false` for an
+/// unmarked serde type.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! message_pinned {
+    ($ty:ty) => {{
+        #[allow(unused_imports)]
+        use $crate::__private::{DeclaredEncoding as _, DefaultEncoding as _};
+        (&$crate::__private::WireProbe::<$ty>::new()).__gdl_pinned()
     }};
 }

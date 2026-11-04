@@ -384,6 +384,8 @@ struct Raw {
     class: toml::Table,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pools: toml::Table,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    codec: toml::Table,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bind: BTreeMap<String, RawBind>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

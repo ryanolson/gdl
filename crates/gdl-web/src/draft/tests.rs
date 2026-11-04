@@ -96,6 +96,7 @@ fn catalog(dir: &std::path::Path) -> Catalog {
         path: path.into(),
         wire: true,
         encoding: Default::default(),
+        pinned: false,
         public: true,
     };
     for offer in [
@@ -267,6 +268,7 @@ fn two_messages_of_one_name_are_named_apart_and_pinned() {
                 path: format!("{package}::Token"),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
             }],
             exports: Vec::new(),
@@ -457,6 +459,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
         path: path.into(),
         wire: true,
         encoding: Default::default(),
+        pinned: false,
         public,
     };
     let offer = |package: &str, messages, exports, nodes| Offer {
@@ -491,6 +494,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
                 origin: origin("proto::inner::Words"),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
                 probed: None,
             }],
@@ -618,6 +622,7 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
                 path: "proto::Token".into(),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
             }],
             Vec::new(),
@@ -632,6 +637,7 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
                 origin: carried.clone(),
                 wire: true,
                 encoding: gdl_model::Encoding::Json,
+                pinned: true,
                 public: true,
                 probed: None,
             }],
@@ -763,6 +769,7 @@ fn a_message_no_crate_defines_or_exports_is_named() {
                 path: "proto::Token".into(),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
             }],
             Vec::new(),
@@ -866,6 +873,7 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
                 path: "proto::Words".into(),
                 wire: true,
                 encoding: Default::default(),
+                pinned: false,
                 public: true,
             }],
             exports: Vec::new(),

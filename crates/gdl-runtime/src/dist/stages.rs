@@ -15,6 +15,7 @@ use futures::StreamExt;
 
 use super::{EncodedItem, Head};
 use crate::wire::{Codec, RequestCodec, SizeHint};
+use crate::zstd::Compression;
 use gdl::__runtime::{Fuse, fuse, fused, until_error};
 use gdl::Cx;
 use gdl::{Around, Backward, Forward, Next, Operator, Sink};
@@ -82,6 +83,12 @@ pub trait DForward<Below = ()>: sealed::Sealed + Send + Sync + 'static {
     /// head type, its name, and its encoding.
     #[doc(hidden)]
     fn heads(&self, out: &mut Vec<HeadInfo>);
+
+    /// Compress the stream items of each forward edge from this part of
+    /// the hop on, from `pos`, as `items[pos]` says: the edge that enters
+    /// position `pos`.
+    #[doc(hidden)]
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]);
 
     #[doc(hidden)]
     fn walk(
@@ -197,6 +204,13 @@ where
         self.rest.heads(out);
     }
 
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress_items(items.get(pos).copied().flatten());
+        }
+        self.rest.compress(pos + 1, items);
+    }
+
     async fn walk(
         &self,
         pos: usize,
@@ -286,6 +300,13 @@ where
         self.rest.heads(out);
     }
 
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress_items(items.get(pos).copied().flatten());
+        }
+        self.rest.compress(pos + 1, items);
+    }
+
     async fn walk(
         &self,
         pos: usize,
@@ -345,6 +366,12 @@ impl<C: RequestCodec, Below: Send + 'static> DForward<Below> for FwdEnd<C> {
         out.push(HeadInfo::new(self.codec));
     }
 
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress_items(items.get(pos).copied().flatten());
+        }
+    }
+
     async fn walk(
         &self,
         pos: usize,
@@ -392,6 +419,12 @@ pub trait DBackward<Stack = ()>: sealed::Sealed + Send + Sync + 'static {
     /// slot is `Absent`.
     #[doc(hidden)]
     fn absent(&self, pos: usize, out: &mut Vec<usize>);
+
+    /// Compress the items of each backward edge from this part of the hop
+    /// on, from `pos`, as `items[pos]` says: the edge that enters position
+    /// `pos`.
+    #[doc(hidden)]
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]);
 
     #[doc(hidden)]
     fn walk(
@@ -467,6 +500,13 @@ where
             out.push(pos);
         }
         self.rest.absent(pos + 1, out);
+    }
+
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress(items.get(pos).copied().flatten());
+        }
+        self.rest.compress(pos + 1, items);
     }
 
     fn walk(
@@ -554,6 +594,13 @@ where
         self.rest.absent(pos + 1, out);
     }
 
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress(items.get(pos).copied().flatten());
+        }
+        self.rest.compress(pos + 1, items);
+    }
+
     fn walk(
         &self,
         pos: usize,
@@ -629,6 +676,12 @@ impl<T: Send + 'static> DBackward<()> for BwdEnd<T> {
     type Out = T;
 
     fn absent(&self, _pos: usize, _out: &mut Vec<usize>) {}
+
+    fn compress(&mut self, pos: usize, items: &[Option<Compression>]) {
+        if let Some(codec) = &mut self.codec {
+            codec.compress(items.get(pos).copied().flatten());
+        }
+    }
 
     fn walk(&self, pos: usize, end: usize, _attempt: &Cx, items: Items<T>, (): ()) -> BwdExit<T> {
         if pos >= end {
@@ -789,7 +842,8 @@ fn encode_stream<T: Send + 'static>(
     match codec {
         Some(codec) => {
             let mut hint = SizeHint::default();
-            items(input.map(move |item| codec.encode_item(&item?, &mut hint)))
+            let mut scratch = Vec::new();
+            items(input.map(move |item| codec.encode_item(&item?, &mut hint, &mut scratch)))
         }
         None => items(futures::stream::once(async { Err(not_wire()) })),
     }
@@ -798,7 +852,14 @@ fn encode_stream<T: Send + 'static>(
 fn decode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<Bytes>) -> Items<T> {
     match codec {
         // A crossing is a boundary like any other: nothing follows an error.
-        Some(codec) => until_error(items(input.map(move |bytes| codec.decode(&bytes?)))),
+        Some(codec) => {
+            // The stream's own buffer for compressed items: one allocation
+            // for its first, none for the rest.
+            let mut scratch = Vec::new();
+            until_error(items(
+                input.map(move |bytes| codec.decode_item(&bytes?, &mut scratch)),
+            ))
+        }
         None => items(futures::stream::once(async { Err(not_wire()) })),
     }
 }

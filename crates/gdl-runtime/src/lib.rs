@@ -17,6 +17,7 @@ mod dist;
 mod json;
 mod process;
 mod wire;
+mod zstd;
 
 pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use config::build_node;
@@ -44,11 +45,11 @@ pub use figment;
 /// one depends on `gdl` itself, as node crates do.
 pub use gdl;
 #[doc(hidden)]
-pub use gdl::message_encoding;
+pub use gdl::{message_encoding, message_pinned};
 pub use gdl_model::{
-    CrossingReport, DeploymentSpec, Direction, DirectoryBackend, Encoding, GraphConfig,
-    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
-    Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed,
+    CodecEntry, CrossingReport, DeploymentSpec, Direction, DirectoryBackend, EdgeCodec, Encoding,
+    GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest,
+    NodeInfo, Placement, PlacementError, PlacementErrors, PoolSettings, PropertyInfo, PropertyNeed,
     RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, UnaryInfo,
     WireReason, layout, resolve_config,
 };
@@ -136,5 +137,7 @@ macro_rules! segment {
 #[doc(hidden)]
 pub mod __private {
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
+    #[cfg(feature = "fault-injection")]
+    pub use crate::zstd::frames as zstd_frames;
     pub use gdl_macros::{graph, segment};
 }

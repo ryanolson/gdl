@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::{ClassSpec, Placement, PlacementError, PlacementErrors, PoolPolicy, RequestRouter};
+use super::{
+    ClassSpec, CodecEntry, Placement, PlacementError, PlacementErrors, PoolPolicy, RequestRouter,
+};
 use super::{SegmentSpec, check_name_shape, pools};
 use crate::{Problem, Problems, read_toml};
 
@@ -11,9 +13,9 @@ use crate::{Problem, Problems, read_toml};
 ///
 /// A spec without `[layout]` tables has one layout, [`Placements::DEFAULT`],
 /// whose placement is its top-level `[segment]`, `[routing]`, `[class]`,
-/// and `[pools]` tables, read as [`Placement::from_toml`] reads them. A
+/// `[pools]`, and `[codec]` tables, read as [`Placement::from_toml`] reads them. A
 /// spec with `[layout.<name>]` tables has one layout for each, holding
-/// those four tables, and none at the top level:
+/// those tables, and none at the top level:
 ///
 /// ```toml
 /// [layout.regional.segment.front]
@@ -48,6 +50,8 @@ struct Tables {
     classes: BTreeMap<String, ClassSpec>,
     #[serde(default, deserialize_with = "pools::recorded")]
     pools: BTreeMap<String, PoolPolicy>,
+    #[serde(rename = "codec", default)]
+    codecs: BTreeMap<String, CodecEntry>,
 }
 
 /// The `[layout]` table of a spec, the one key this reader needs.
@@ -59,7 +63,7 @@ struct Written {
 
 /// The tables of a placement, which a spec with `[layout]` tables holds in
 /// them rather than at its top level.
-const PLACEMENT_TABLES: [&str; 4] = ["segment", "routing", "class", "pools"];
+const PLACEMENT_TABLES: [&str; 5] = ["segment", "routing", "class", "pools", "codec"];
 
 impl Placements {
     /// The name of the one layout of a spec without `[layout]` tables, by
@@ -109,6 +113,7 @@ impl Placements {
                 routing: tables.routing,
                 classes: tables.classes,
                 pools: tables.pools,
+                codecs: tables.codecs,
                 spelled: Default::default(),
             };
             match placement.finish(&own) {

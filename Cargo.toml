@@ -26,6 +26,8 @@ pin-project-lite = "0.2"
 # The version dynamo pins; without protobuf, which the text format does not need.
 prometheus = { version = "0.14", default-features = false }
 rmp-serde = "1"
+# Without its defaults: no legacy decoders, no dictionary builder.
+zstd-safe = { version = "8.2.0", default-features = false, features = ["std"] }
 rustix = { version = "1", default-features = false, features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"

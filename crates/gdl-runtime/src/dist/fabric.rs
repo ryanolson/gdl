@@ -588,16 +588,32 @@ pub struct EncodedItem(ByteItemFrame);
 
 impl EncodedItem {
     /// Encode `value` with `encode` into a new frame with room for
-    /// `capacity` bytes of payload.
-    pub(crate) fn encode<T: ?Sized>(
+    /// `capacity` bytes of payload; then, when `compression` applies to the
+    /// payload's length, its frame in the payload's place if that is
+    /// shorter. The frame is written to `scratch` and copied back into the
+    /// frame velo sends, which already has room for it. Gives the payload's
+    /// plain length too.
+    pub(crate) fn encode_compressed<T: ?Sized>(
         value: &T,
         encode: fn(&T, &mut Vec<u8>) -> Result<()>,
         capacity: usize,
-    ) -> Result<Self> {
+        compression: Option<crate::zstd::Compression>,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(Self, usize)> {
         let mut item = ByteItemBuilder::with_capacity(capacity);
         encode(value, item.buffer())?;
+        let plain = item.payload().len();
+        if compression.is_some_and(|c| c.applies(plain)) {
+            scratch.clear();
+            crate::zstd::compress_into(item.payload(), scratch)?;
+            if scratch.len() < plain {
+                let header = item.buffer().len() - plain;
+                item.buffer().truncate(header);
+                item.buffer().extend_from_slice(scratch);
+            }
+        }
         item.finish()
-            .map(Self)
+            .map(|frame| (Self(frame), plain))
             .map_err(|error| Error::new(ErrorKind::Codec, error.to_string()))
     }
 
@@ -609,15 +625,18 @@ impl EncodedItem {
     /// An item whose encoded bytes are `payload`.
     #[cfg(test)]
     pub(crate) fn of(payload: &[u8]) -> Self {
-        Self::encode(
+        Self::encode_compressed(
             payload,
             |payload, buffer| {
                 buffer.extend_from_slice(payload);
                 Ok(())
             },
             payload.len(),
+            None,
+            &mut Vec::new(),
         )
         .expect("a payload under 4 GiB")
+        .0
     }
 }
 

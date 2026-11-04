@@ -2,7 +2,7 @@
 
 mod admission;
 #[cfg(test)]
-mod counting;
+pub(crate) mod counting;
 mod envelope;
 mod fabric;
 mod held;

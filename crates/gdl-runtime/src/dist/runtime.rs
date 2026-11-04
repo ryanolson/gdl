@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::hash::RandomState;
 use std::sync::Arc;
+
+use crate::zstd::{Compression, HeadCompression};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -79,6 +81,10 @@ pub struct RuntimeConfig {
     /// hand-off a policy or a selector routes. The same instance may be
     /// chosen again. 0 makes each refusal final.
     pub instance_failovers: usize,
+    /// The most bytes one compressed value that arrives on an edge with a
+    /// `[codec]` entry may decompress into. A frame that states more, or
+    /// none, is refused before anything is allocated.
+    pub decompressed_max: usize,
     /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
     pub anchor_timeout: Option<Duration>,
     /// Cadence for batching held reply reservations. Defaults to 30 seconds.
@@ -243,6 +249,7 @@ impl Default for RuntimeConfig {
             pool_fresh_periods: gdl::Load::FRESH_PERIODS,
             home_first: HomeFirstAt::DEFAULT,
             instance_failovers: 2,
+            decompressed_max: Self::DEFAULT_DECOMPRESSED_MAX,
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
@@ -284,6 +291,7 @@ struct Settings {
     home_first_saturated_percent: u64,
     home_first_spill_percent: u64,
     instance_failovers: usize,
+    decompressed_max: usize,
     anchor_timeout_ms: Option<u64>,
     reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
@@ -313,6 +321,7 @@ impl Default for Settings {
             home_first_saturated_percent: config.home_first.saturated_percent,
             home_first_spill_percent: config.home_first.spill_percent,
             instance_failovers: config.instance_failovers,
+            decompressed_max: config.decompressed_max,
             anchor_timeout_ms: config.anchor_timeout.map(ms),
             reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
@@ -346,6 +355,7 @@ impl TryFrom<Settings> for RuntimeConfig {
                 spill_percent: s.home_first_spill_percent,
             },
             instance_failovers: s.instance_failovers,
+            decompressed_max: s.decompressed_max,
             anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
             reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
@@ -429,6 +439,10 @@ impl RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// The most bytes a compressed value may decompress into, unless
+    /// `decompressed_max` is set: 256 MiB.
+    pub const DEFAULT_DECOMPRESSED_MAX: usize = 256 << 20;
+
     /// The damping window after a pool's first decline, unless
     /// `pool_damping_first_ms` is set: 1 s.
     pub(crate) const DEFAULT_POOL_DAMPING_FIRST: Duration = Duration::from_secs(1);
@@ -532,6 +546,9 @@ pub(crate) type OpenEntry = Arc<dyn Fn(Open) -> BoxFuture<'static, Result<ReplyT
 pub struct Entries {
     forward: BTreeMap<(u16, u16), ForwardEntry>,
     open: BTreeMap<(u16, u16), OpenEntry>,
+    /// The forward entries whose edge compresses its head, by hop and
+    /// position: what a frame that arrives there may decompress into.
+    compressed: BTreeMap<(u16, u16), Compression>,
 }
 
 impl Entries {
@@ -541,6 +558,18 @@ impl Entries {
 
     pub(crate) fn add_open(&mut self, hop: u16, pos: u16, entry: OpenEntry) {
         self.open.insert((hop, pos), entry);
+    }
+
+    /// Read a frame that arrives at forward entry `hop`, `pos`, as
+    /// `compression` says.
+    pub(crate) fn add_compressed(&mut self, hop: u16, pos: u16, compression: Compression) {
+        self.compressed.insert((hop, pos), compression);
+    }
+
+    /// How a head that arrives at forward entry `hop`, `pos` is
+    /// compressed: `None` where its edge does not compress.
+    pub(crate) fn compressed(&self, hop: u16, pos: u16) -> Option<Compression> {
+        self.compressed.get(&(hop, pos)).copied()
     }
 
     pub(crate) fn forward(&self, hop: u16, pos: u16) -> Result<&ForwardEntry> {
@@ -567,6 +596,10 @@ fn no_entry(kind: &str, hop: u16, pos: u16) -> Error {
 pub(crate) struct Runtime {
     pub(crate) fabric: Fabric,
     pub(crate) layout: Layout,
+    /// How each forward edge this segment can send on compresses its
+    /// head, by hop and the position the edge enters: empty unless a
+    /// `[codec]` entry names one.
+    heads: BTreeMap<(u16, u16), HeadCompression>,
     pub(crate) segment: String,
     pub(crate) config: RuntimeConfig,
     pub(crate) admission: Admission,
@@ -637,7 +670,69 @@ pub(crate) struct Names {
     pub(crate) open: String,
 }
 
+/// Refuse a segment that sends or receives on an edge that a `[codec]`
+/// entry compresses, when it was not `built` with the `zstd` feature: the
+/// generator turns the feature on for each such segment, so this is a
+/// build that did not come from it.
+pub(crate) fn compresses(layout: &Layout, segment: &str, built: bool) -> Result<()> {
+    if built || !layout.compressing_segments().contains(segment) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::Placement,
+        format!(
+            "segment `{segment}` sends or receives on an edge that a `[codec]` entry compresses, but was built without gdl-runtime's `zstd` feature"
+        ),
+    ))
+}
+
+/// How each forward edge compresses its head, by hop and the position it
+/// enters, reading frames of up to `limit` bytes. The sender keeps the
+/// plain head after compressing it only where routing reads it again: a
+/// selector, `affinity` among them, or the pool policy of a crossing that
+/// `pooled` says chooses pools ([`HeadCompression`]).
+pub(crate) fn compressed_heads(
+    layout: &Layout,
+    limit: usize,
+    pooled: impl Fn(usize, usize) -> bool,
+) -> BTreeMap<(u16, u16), HeadCompression> {
+    let mut heads = BTreeMap::new();
+    for (hop, plan) in layout.hops().iter().enumerate() {
+        let len: usize = plan.forward_runs.iter().map(|run| run.stages.len()).sum();
+        for pos in 1..len {
+            let Some(edge) = layout
+                .compression(hop, gdl_model::Leg::Forward, pos)
+                .filter(|edge| edge.head)
+            else {
+                continue;
+            };
+            let reads = !matches!(
+                layout.request_router(hop, pos),
+                RequestRouter::RoundRobin | RequestRouter::Random
+            ) || pooled(hop, pos);
+            if let (Ok(hop), Ok(pos)) = (u16::try_from(hop), u16::try_from(pos)) {
+                let head = HeadCompression {
+                    compression: Compression::new(edge.floor, limit),
+                    keeps_plain: reads,
+                };
+                heads.insert((hop, pos), head);
+            }
+        }
+    }
+    heads
+}
+
 impl Runtime {
+    /// How the head that a hand-off sends into position `pos` of hop `hop`
+    /// is compressed: `None` where the edge does not compress, and at once
+    /// for a layout with no `[codec]` entry.
+    pub(crate) fn head_compression(&self, hop: u16, pos: u16) -> Option<HeadCompression> {
+        if self.heads.is_empty() {
+            return None;
+        }
+        self.heads.get(&(hop, pos)).copied()
+    }
+
     pub(crate) fn new(
         fabric: Fabric,
         layout: Layout,
@@ -697,7 +792,14 @@ impl Runtime {
         let counts_senders = layout
             .class_of(&segment)
             .is_some_and(|class| !layout.entry_segments(class).is_empty());
+        compresses(&layout, &segment, cfg!(feature = "zstd"))?;
+        #[cfg(feature = "hub")]
+        let pooled = |hop: usize, pos: usize| crossings.contains_key(&(hop, pos));
+        #[cfg(not(feature = "hub"))]
+        let pooled = |_: usize, _: usize| false;
+        let heads = compressed_heads(&layout, config.decompressed_max, pooled);
         Ok(Self {
+            heads,
             counts_senders,
             admission: Admission::new(
                 config.admission_limit,
@@ -1332,6 +1434,200 @@ impl Served {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `S => D` in two segments, with an edge codec on `S -> D` routed by
+    /// `router`, and `G` in a third.
+    fn routed(router: RequestRouter) -> Layout {
+        coded_with(true, Some(router))
+    }
+
+    /// The sender keeps a compressed head's plain bytes only where routing
+    /// reads the head again: a selector, `affinity` among them, or a pool
+    /// policy. `round_robin` and `random` read nothing.
+    #[test]
+    fn the_plain_head_is_kept_only_where_routing_reads_it() {
+        let keeps = |layout: &Layout, pooled: bool| {
+            let heads = compressed_heads(layout, 1 << 20, |_, _| pooled);
+            heads[&(0, 1)].keeps_plain
+        };
+        assert!(!keeps(&routed(RequestRouter::RoundRobin), false));
+        assert!(!keeps(&routed(RequestRouter::Random), false));
+        assert!(keeps(
+            &routed(RequestRouter::Selector("affinity".into())),
+            false
+        ));
+        assert!(keeps(
+            &routed(RequestRouter::Selector("by_head".into())),
+            false
+        ));
+        assert!(
+            keeps(&routed(RequestRouter::RoundRobin), true),
+            "a pool policy"
+        );
+    }
+
+    #[cfg(feature = "zstd")]
+    async fn local_offer_bounds(check_over: bool) {
+        use crate::dist::envelope::{VERSION, WireCx};
+        use crate::dist::fabric::bind_node;
+        use crate::wire::Codec;
+
+        const LIMIT: usize = 16 * 1024;
+        let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
+        let rt = Runtime::new(
+            Fabric::new(node, None, None, Duration::from_secs(30)),
+            coded(true),
+            "front".into(),
+            &Roster::new(),
+            RuntimeConfig {
+                decompressed_max: LIMIT,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .expect("runtime");
+        let called = Arc::new(AtomicUsize::new(0));
+        let mut entries = Entries::default();
+        entries.add_forward(0, 1, {
+            let called = Arc::clone(&called);
+            Arc::new(move |forward| {
+                Codec::<String>::new(Default::default())
+                    .decode(&forward.payload)
+                    .expect("the local entry receives plain MessagePack");
+                called.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(None) })
+            })
+        });
+        let entries = Arc::new(entries);
+        rt.set_entries(&entries);
+        let offered = |text_len| {
+            let mut forward = Forward {
+                version: VERSION,
+                identity: rt.identity,
+                hop: 0,
+                pos: 1,
+                cx: WireCx::of(&Cx::new()),
+                reply: ReplyTo::test_value(7),
+                payload: Codec::<String>::new(Default::default())
+                    .encode_head(&"x".repeat(text_len))
+                    .expect("head"),
+            };
+            forward
+                .wire(rt.head_compression(0, 1))
+                .expect("remote offer");
+            assert!(forward.payload.is_empty(), "the plain head was released");
+            forward
+        };
+        let accepted = rt.enter(offered(LIMIT - 3)).expect("frame at the limit");
+        tokio::time::timeout(Duration::from_secs(1), accepted)
+            .await
+            .expect("bounded local entry")
+            .unwrap_or_else(|refused| panic!("{}", refused.error));
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            1,
+            "the control reaches the entry"
+        );
+        if !check_over {
+            return;
+        }
+        let error = match rt.enter(offered(LIMIT * 2)) {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "a 32771-byte frame bypassed decompressed_max={LIMIT}; the local entry ran {} times",
+                called.load(Ordering::SeqCst)
+            ),
+        };
+        assert_eq!(error.kind(), ErrorKind::Codec);
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[tokio::test]
+    async fn a_local_offer_accepts_a_frame_at_the_decompressed_limit() {
+        local_offer_bounds(false).await;
+    }
+
+    /// A local re-offer must enforce the same frame limit as a remote arrival.
+    #[cfg(feature = "zstd")]
+    #[tokio::test]
+    async fn a_local_offer_enforces_the_decompressed_limit() {
+        local_offer_bounds(true).await;
+    }
+
+    /// `S => D` in two segments, with an edge codec on `D -> S` when
+    /// `coded`, and a third segment, `idle`, that holds `G`, a backward node
+    /// on no compressed edge.
+    fn coded(coded: bool) -> Layout {
+        coded_with(coded, None)
+    }
+
+    fn coded_with(coded: bool, router: Option<RequestRouter>) -> Layout {
+        use gdl_model::{
+            CodecEntry, EdgeCodec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo,
+        };
+        let node = |name: &str, role| NodeInfo {
+            name: name.into(),
+            role,
+            binding: (role != Role::Source).then(|| name.to_lowercase()),
+            calls: Vec::new(),
+            unary: None,
+        };
+        let ty = |name: &str| TypeInfo::new(name, true, Default::default());
+        let manifest = Manifest {
+            name: "coded".into(),
+            schema: 1,
+            nodes: vec![
+                node("S", Role::Source),
+                node("D", Role::Sink),
+                node("G", Role::Backward),
+            ],
+            hops: vec![HopInfo {
+                outer: "S".into(),
+                forward: vec![],
+                inner: "D".into(),
+                backward: vec!["G".into()],
+                forward_types: vec![ty("Ask")],
+                backward_types: vec![ty("Token"), ty("Text")],
+            }],
+            properties: Vec::new(),
+        };
+        let mut placement = Placement::new()
+            .segment("front", ["S"])
+            .segment("engine", ["D"])
+            .segment("idle", ["G"]);
+        if coded {
+            placement = placement.codec("S -> D", CodecEntry::every(EdgeCodec::MsgpackZstd));
+        }
+        if let Some(router) = router {
+            placement = placement.route("D", router);
+        }
+        gdl_model::layout(&manifest, &placement).expect("a layout")
+    }
+
+    /// A segment at either end of a compressed edge needs the `zstd`
+    /// feature; one at neither end, and every segment of a layout without
+    /// an entry, does not.
+    #[test]
+    fn a_segment_on_a_compressed_edge_needs_the_zstd_feature() {
+        let layout = coded(true);
+        for segment in ["front", "engine"] {
+            let refused = compresses(&layout, segment, false).expect_err(segment);
+            assert_eq!(refused.kind(), ErrorKind::Placement);
+            assert!(refused.to_string().contains("`zstd` feature"), "{refused}");
+            compresses(&layout, segment, true).expect(segment);
+        }
+        compresses(&layout, "idle", false).expect("on no compressed edge");
+        compresses(&coded(false), "front", false).expect("no entry");
+    }
+
+    #[test]
+    fn decompressed_max_is_256_mib_by_default_and_may_be_set() {
+        let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
+        assert_eq!(defaults.decompressed_max, 256 << 20);
+        let set: RuntimeConfig = toml::from_str("decompressed_max = 1024\n").expect("set");
+        assert_eq!(set.decompressed_max, 1024);
+    }
 
     #[test]
     fn renewal_cadence_belongs_to_runtime_config() {

@@ -164,8 +164,9 @@ async fn forward(
     entries: &Weak<Entries>,
     bytes: &[u8],
 ) -> std::result::Result<super::envelope::Accepted, Refusal> {
-    let envelope = Forward::read(bytes)?;
-    let entry = Arc::clone(upgrade(entries)?.forward(envelope.hop, envelope.pos)?);
+    let entries = upgrade(entries)?;
+    let envelope = Forward::read(bytes, |hop, pos| entries.compressed(hop, pos))?;
+    let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
     entry(envelope).await.map_err(|refused| Refusal {
         error: refused.error,
         decline: refused.decline,

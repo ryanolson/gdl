@@ -216,7 +216,7 @@ impl Fleet {
                         };
                         return Box::pin(async move { reply });
                     }
-                    let forward = Forward::read(&message).expect("a forward hand-off");
+                    let forward = Forward::read(&message, |_, _| None).expect("a forward hand-off");
                     let stale = newer_than.load(Ordering::SeqCst);
                     let view = forward.payload.view();
                     let pinned = view.is_none() && takes_pinned.load(Ordering::SeqCst);

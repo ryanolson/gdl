@@ -284,8 +284,14 @@ impl Runtime {
     /// an entry that declines gives it back.
     pub(crate) fn enter(
         &self,
-        envelope: Forward,
+        mut envelope: Forward,
     ) -> Result<BoxFuture<'static, std::result::Result<Accepted, Refused>>> {
+        // An earlier offer to another instance may have released the plain
+        // head for its frame; the entry reads the plain head, decoded as a
+        // remote one would be.
+        envelope
+            .payload
+            .offered_local(self.config.decompressed_max)?;
         let entries = self.entries()?;
         let entry = entries.forward(envelope.hop, envelope.pos)?;
         Ok(entry(envelope))
@@ -304,7 +310,7 @@ impl Runtime {
         impl Future<Output = Offered> + Send + '_,
         Option<tokio::time::Instant>,
     )> {
-        let bytes = envelope.wire()?;
+        let bytes = envelope.wire(self.head_compression(envelope.hop, envelope.pos))?;
         let sent = timed.then(tokio::time::Instant::now);
         let offered = self.fabric.offer(
             instance,

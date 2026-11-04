@@ -17,6 +17,9 @@ hub = ["dep:velo-hub", "dep:gdl-pools", "dep:gdl-watch", "tokio/net"]
 # `serve_json_lines`: a graph's source served as JSON lines, for the binary
 # of a segment that hosts the source.
 json-lines = ["tokio/io-util"]
+# Edge codecs that compress (`msgpack_zstd`): libzstd, built from C. The
+# generator turns it on for a segment at either end of such an edge.
+zstd = ["dep:zstd-safe"]
 
 [dependencies]
 tracing = "0.1"
@@ -44,11 +47,12 @@ toml = { workspace = true }
 velo = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
+zstd-safe = { workspace = true, optional = true }
 
 [dev-dependencies]
 gdl-pools = { path = "../gdl-pools" }
 gdl-hub = { path = "../gdl-hub" }
-gdl-runtime = { path = ".", features = ["fault-injection", "hub", "json-lines"] }
+gdl-runtime = { path = ".", features = ["fault-injection", "hub", "json-lines", "zstd"] }
 gdl-syntax = { path = "../gdl-syntax" }
 figment = { workspace = true, features = ["test"] }
 criterion = { workspace = true }

@@ -253,6 +253,46 @@ pub enum PlacementError {
         /// Every segment that lists the service.
         segments: Vec<String>,
     },
+    /// A `[codec]` key names no edge of the graph.
+    UnknownCodecEdge {
+        /// The key.
+        edge: String,
+        /// The graph's edges, as a key writes them.
+        edges: Vec<String>,
+    },
+    /// A `[codec]` key names more than one edge.
+    AmbiguousCodecEdge {
+        /// The key.
+        edge: String,
+        /// How many edges it names.
+        count: usize,
+    },
+    /// A `[codec]` key names an edge that the placement does not encode.
+    LocalCodecEdge {
+        /// The key.
+        edge: String,
+    },
+    /// A `[codec]` entry names parts its edge does not carry.
+    CodecParts {
+        /// The key.
+        edge: String,
+        /// Why the parts are refused.
+        reason: String,
+    },
+    /// A `[codec]` entry names a part whose message pins its codec.
+    PinnedCodec {
+        /// The key.
+        edge: String,
+        /// `value`, or a streamed request's `head` or `item`.
+        part: &'static str,
+        /// The message, as the graph names it.
+        message: String,
+        /// The codec it pins.
+        pin: crate::Encoding,
+        /// The other part of a streamed request, which an entry could name
+        /// alone.
+        other: Option<&'static str>,
+    },
 }
 
 /// Why an edge must be encoded.
@@ -323,6 +363,11 @@ impl PlacementError {
             Self::PoolPolicyWithoutClasses { class }
             | Self::PoolPolicyUnknownClass { class }
             | Self::PoolPolicyNotEntered { class } => at(format!("pools.{class}"), None),
+            Self::UnknownCodecEdge { edge, .. }
+            | Self::AmbiguousCodecEdge { edge, .. }
+            | Self::LocalCodecEdge { edge }
+            | Self::CodecParts { edge, .. }
+            | Self::PinnedCodec { edge, .. } => at("codec".into(), Some(edge)),
         };
         Problem::at(table, key, self.to_string())
     }
@@ -506,6 +551,46 @@ impl fmt::Display for PlacementError {
                 f,
                 "node `{node}` in segment `{segment}` has `calls {service}`, but `{segment}` lists no copy of `{service}`, and copies sit in several segments: {segments:?}; list `{service}` in `{segment}`, or in only one other segment"
             ),
+            Self::UnknownCodecEdge { edge, edges } => write!(
+                f,
+                "codec `{edge}`: the graph has no such edge; its edges are {}",
+                edges
+                    .iter()
+                    .map(|e| format!("`{e}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::AmbiguousCodecEdge { edge, count } => write!(
+                f,
+                "codec `{edge}`: the key names {count} edges, and must name one"
+            ),
+            Self::LocalCodecEdge { edge } => write!(
+                f,
+                "codec `{edge}`: the placement does not encode this edge; a codec applies to an edge that crosses segments or is carried by an anchor"
+            ),
+            Self::CodecParts { edge, reason } => write!(f, "codec `{edge}`: {reason}"),
+            Self::PinnedCodec {
+                edge,
+                part,
+                message,
+                pin,
+                other,
+            } => {
+                // A type as a token stream writes it has spaces: `:: a :: B`.
+                let message: String = message.split_whitespace().collect();
+                write!(
+                    f,
+                    "codec `{edge}`: the {part}'s message `{message}` has `{}`; an edge codec applies only to a message with no pinned codec. Remove the pin, or the entry",
+                    super::codecs::attribute(*pin)
+                )?;
+                match other {
+                    Some(other) => write!(
+                        f,
+                        ", or name the {other} alone: `{{ {other} = \"msgpack_zstd\" }}`"
+                    ),
+                    None => Ok(()),
+                }
+            }
         }
     }
 }
