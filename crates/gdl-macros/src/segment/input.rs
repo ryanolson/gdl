@@ -10,7 +10,7 @@
 //! roots: [Frontend];
 //! crossings: [crosses Truncate_to_Engine = Engine SinkDecl Req; ...];
 //! feeds: [reads_json, writes_json];
-//! nodes: [Preprocess preprocess = ::chat_front_nodes::Preprocess; ...];
+//! nodes: [unary Tokenize tokenize = ::nodes::Tokenize; Preprocess preprocess = ::chat_front_nodes::Preprocess; ...];
 //! policies: ["by_model" = ::policy_router::ByModel; ...];
 //! selectors: ["by_length" = ::routers::ByLength; ...];
 //! serve: json_lines;
@@ -64,11 +64,13 @@ pub(crate) struct Crossing {
     pub(crate) part: Option<Ident>,
 }
 
-/// A hosted node: its name in the graph, its binding, and its type.
+/// A hosted node: its name in the graph, its binding, and its type, and
+/// whether it is a unary node, which is written `unary Name binding = path;`.
 pub(crate) struct Node {
     pub(crate) name: Ident,
     pub(crate) binding: Ident,
     pub(crate) ty: Path,
+    pub(crate) unary: bool,
 }
 
 /// What the binary serves once its segments are ready.
@@ -218,11 +220,21 @@ impl Parse for Segment {
         end()?;
         field("nodes")?;
         let nodes = entries(input, |input| {
-            let name = input.parse()?;
+            let mut name: Ident = input.parse()?;
+            // `unary Name binding`: three names before the `=`.
+            let unary = name == "unary" && input.peek(Ident) && input.peek2(Ident);
+            if unary {
+                name = input.parse()?;
+            }
             let binding = input.parse()?;
             input.parse::<Token![=]>()?;
             let ty = input.parse()?;
-            Ok(Node { name, binding, ty })
+            Ok(Node {
+                name,
+                binding,
+                ty,
+                unary,
+            })
         })?;
         end()?;
         let named = |input: ParseStream<'_>| -> syn::Result<(LitStr, Path)> {

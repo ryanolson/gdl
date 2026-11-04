@@ -5,7 +5,7 @@ use gdl_model::Role;
 
 use gdl::Cx;
 use gdl::Items;
-use gdl::{Around, Backward, Forward, Next, Operator, Sink};
+use gdl::{Around, Backward, Forward, Next, Operator, Sink, Unary};
 use gdl::{Error, Result};
 
 /// A node declaration: the marker type a graph definition creates for each
@@ -185,6 +185,16 @@ impl<D: OperatorDecl> Operator for Absent<D> {
     where
         N: Next<Self::DownReq, Self::DownItem>,
     {
+        Err(Error::not_hosted(D::NAME))
+    }
+}
+
+impl<D: UnaryDecl> Unary for Absent<D> {
+    type Req = D::Req;
+    type Resp = D::Resp;
+    const ABSENT: bool = true;
+
+    async fn call(&self, _cx: &Cx, _req: Self::Req) -> Result<Self::Resp> {
         Err(Error::not_hosted(D::NAME))
     }
 }

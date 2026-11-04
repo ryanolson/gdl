@@ -1,6 +1,7 @@
 //! Standing up one segment instance.
 
-use std::sync::{Arc, Weak};
+use std::any::Any;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use velo::Velo;
 
@@ -17,6 +18,7 @@ use gdl::Cx;
 use gdl::Decline;
 use gdl::Items;
 use gdl::Next;
+use gdl::Unary;
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Manifest;
 use gdl_model::{Placement, layout};
@@ -27,6 +29,9 @@ use gdl_model::{Placement, layout};
 /// peers, and hands out the runtime that the hops of this segment share.
 pub struct Deployment {
     rt: Arc<Runtime>,
+    /// The unary services this instance hosts, by name: the segment owns
+    /// them until it is dropped, so that no client decides their lifetime.
+    hosted: Mutex<Vec<(String, Arc<dyn Any + Send + Sync>)>>,
 }
 
 impl Deployment {
@@ -63,7 +68,10 @@ impl Deployment {
         if let Some(registry) = &rt.config.metrics {
             Held::register(registry, Arc::downgrade(&rt))?;
         }
-        Ok(Self { rt })
+        Ok(Self {
+            rt,
+            hosted: Mutex::new(Vec::new()),
+        })
     }
 
     /// Fail unless this deployment was made for the contract whose manifest
@@ -105,6 +113,29 @@ impl Deployment {
             &self.rt.config.properties,
             &self.rt.config.followed,
         )
+    }
+
+    /// Host `service` as unary node `name` for as long as the segment runs: a
+    /// generated `assemble` gives it every unary node's slot. A slot left
+    /// `Absent` is refused when the segment hosts the node, as a pipeline
+    /// node's is, and is not held otherwise.
+    pub fn unary<S: Unary>(&self, name: &str, service: Arc<S>) -> Result<()> {
+        let segment = self.rt.segment.as_str();
+        let hosts = self.rt.layout.service_segments(name).contains(&segment);
+        if S::ABSENT {
+            return match hosts {
+                true => Err(Error::new(
+                    ErrorKind::Placement,
+                    format!("segment `{segment}` hosts node `{name}`, but its binding is absent"),
+                )),
+                false => Ok(()),
+            };
+        }
+        self.hosted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((name.to_string(), service));
+        Ok(())
     }
 
     /// Assemble hop `index` from its stages. Slots of nodes this segment does
@@ -155,6 +186,9 @@ impl Deployment {
         Ok(Segment {
             rt: self.rt,
             _entries: entries,
+            _hosted: std::mem::take(
+                &mut *self.hosted.lock().unwrap_or_else(PoisonError::into_inner),
+            ),
             root,
         })
     }
@@ -229,6 +263,8 @@ pub struct SegmentLoad {
 pub struct Segment<H> {
     rt: Arc<Runtime>,
     _entries: Arc<Entries>,
+    /// The unary services it hosts, owned until it is dropped.
+    _hosted: Vec<(String, Arc<dyn Any + Send + Sync>)>,
     root: H,
 }
 

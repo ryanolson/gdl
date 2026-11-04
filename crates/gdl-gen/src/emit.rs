@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use gdl_model::{Layout, Leg, Manifest, Role, WireReason};
 
 mod binary;
+mod order;
 
 use crate::Error;
 use crate::laid::Laid;
@@ -492,6 +493,9 @@ struct Hosted<'a> {
     binding: &'a str,
     package: &'a str,
     ty: &'a str,
+    /// Whether it is a unary node, which the segment builds before the
+    /// nodes that call it.
+    unary: bool,
 }
 
 impl Unit<'_> {
@@ -503,19 +507,13 @@ impl Unit<'_> {
         self.package().replace('-', "_")
     }
 
-    /// Hosted nodes that take a binding, in declaration order; validation
-    /// guarantees each has one, and an implementation. A unary node has a
-    /// binding name but no slot in the contract's `Bindings`, so a segment
-    /// binds no implementation of it.
+    /// Hosted nodes that take a binding; validation guarantees each has
+    /// one, and an implementation. The unary nodes come first, each after
+    /// the hosted services it calls, so that a node takes its clients of
+    /// services already built; then the others, in declaration order.
     fn hosted(&self) -> Vec<Hosted<'_>> {
-        self.manifest
-            .nodes
-            .iter()
-            .filter(|node| {
-                node.binding.is_some()
-                    && node.role != Role::Unary
-                    && self.nodes.contains(&node.name)
-            })
+        self.build_order()
+            .into_iter()
             .map(|node| {
                 let bind = &self.spec.bind[&node.name];
                 Hosted {
@@ -525,9 +523,16 @@ impl Unit<'_> {
                     // `::crate::Type` and `crate::Type` are one path; the
                     // emitted code adds the root itself.
                     ty: bind.ty.trim().trim_start_matches("::"),
+                    unary: node.role == Role::Unary,
                 }
             })
             .collect()
+    }
+
+    /// The hosted nodes that take a binding, in the order the segment
+    /// builds them ([`Unit::hosted`]).
+    fn build_order(&self) -> Vec<&gdl_model::NodeInfo> {
+        order::build_order(self.manifest, self.nodes)
     }
 
     /// The source that hosts the frontend: the one the spec pins, which
@@ -756,7 +761,10 @@ impl Unit<'_> {
         let nodes: Vec<String> = self
             .hosted()
             .iter()
-            .map(|n| format!("{} {} = ::{};", n.name, n.binding, n.ty))
+            .map(|n| {
+                let unary = if n.unary { "unary " } else { "" };
+                format!("{unary}{} {} = ::{};", n.name, n.binding, n.ty)
+            })
             .collect();
         block(&mut text, "nodes", &nodes);
         let policies: Vec<String> = self

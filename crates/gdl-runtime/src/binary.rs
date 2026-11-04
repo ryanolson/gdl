@@ -24,7 +24,7 @@ use gdl::Metrics;
 use gdl::Result;
 use gdl::{
     Affinity, FollowedPools, HubRecords, InstanceKv, InstanceProperties, LeastLoaded, Lifecycle,
-    OfferGate, PoolPolicies, PoolPolicy, PropertyType, Selector, Selectors,
+    OfferGate, PoolPolicies, PoolPolicy, PropertyType, Selector, Selectors, Unary, UnaryServices,
 };
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
@@ -132,6 +132,7 @@ pub async fn run_segment<B: SegmentBinary>(
     let registry = process.registry(&deployment, B::SEGMENT)?;
     let builder = Builder::new(
         B::GRAPH_CONFIG,
+        &deployment.graph,
         registry.clone(),
         process.reserved(),
         config.selector_tables().clone(),
@@ -149,6 +150,9 @@ pub async fn run_segment<B: SegmentBinary>(
         &builder.followed,
     )?;
     let hosts = B::build(settings, &builder).await?;
+    // From here a call to a hosted unary service waits for its `ready`
+    // rather than failing: every node is built.
+    builder.services.built();
     // gdl's own selectors, configured in the settings and not registered
     // by the binary; a table for anything else is a mistake.
     for name in config.selector_tables().keys() {
@@ -266,6 +270,9 @@ pub struct Builder {
     /// Where every node it builds registers its leave hooks
     /// ([`Lifecycle::current`]).
     lifecycle: Lifecycle,
+    /// The unary services the segment hosts, and what every node it builds
+    /// takes its clients of them from ([`gdl::UnaryClient::current`]).
+    services: UnaryServices,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -274,6 +281,7 @@ type Readiness = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Send>;
 impl Builder {
     fn new(
         graph: &str,
+        manifest: &gdl_model::Manifest,
         registry: prometheus::Registry,
         reserved: Reserved,
         tables: BTreeMap<String, toml::Table>,
@@ -294,6 +302,12 @@ impl Builder {
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
             lifecycle: Lifecycle::new(),
+            services: UnaryServices::new(
+                manifest
+                    .nodes
+                    .iter()
+                    .map(|node| (node.name.clone(), node.calls.clone())),
+            ),
         })
     }
 
@@ -400,13 +414,14 @@ impl Builder {
         selectors.contains(name)
     }
 
-    /// Resolve once every selector and pool policy it built is ready.
+    /// Resolve once every selector, pool policy, and unary service it
+    /// built is ready.
     async fn ready(&self) -> Result<()> {
         let waits: Vec<_> = {
             let readiness = self.readiness.lock().unwrap_or_else(|e| e.into_inner());
             readiness.iter().map(|ready| ready()).collect()
         };
-        futures::future::try_join_all(waits).await?;
+        tokio::try_join!(futures::future::try_join_all(waits), self.services.ready())?;
         Ok(())
     }
 
@@ -430,6 +445,25 @@ impl Builder {
             .await
     }
 
+    /// Build `T`, the implementation of unary node `node`, as
+    /// [`Builder::build`] builds a node, and host it: a node built after it
+    /// whose `calls` names `node` takes its client with
+    /// [`gdl::UnaryClient::current`]. Its [`Build::ready`] runs once, in
+    /// the segment's readiness phase, shared with the calls that another
+    /// node's `ready` makes; a call made during the build fails. A segment
+    /// builds its unary nodes before the nodes that call them.
+    pub async fn unary<T: Build + Unary>(
+        &self,
+        node: &str,
+        table: Option<toml::Table>,
+    ) -> std::result::Result<Arc<T>, Failure> {
+        let built = Arc::new(self.build::<T>(node, table).await?);
+        self.services
+            .serve(node, Arc::clone(&built))
+            .map_err(|e| format!("building {node}: {e}"))?;
+        Ok(built)
+    }
+
     /// [`Builder::build`], with `followed` as the build's handle.
     async fn build_under<T: Build>(
         &self,
@@ -443,19 +477,25 @@ impl Builder {
         let none = GraphConfig::new();
         let graph = self.graph.get(node).unwrap_or(&none);
         let providers = Figment::from(Serialized::defaults(table.unwrap_or_default()));
-        followed
-            .scope(
-                self.records.scope(
-                    self.properties.scope(
-                        self.kv.scope(
-                            self.gate.scope(
-                                self.lifecycle
-                                    .scope(build_node::<T>(&providers, graph, metrics)),
+        // Boxed: each scope wraps the build's future in one of its own, and
+        // unboxed the future that runs the segment holds them all, on the
+        // stack of whatever polls it: a test that runs segments on its own
+        // thread overflowed its stack. A build runs once per node.
+        let scoped = followed.scope(
+            self.records.scope(
+                self.properties.scope(
+                    self.kv.scope(
+                        self.gate.scope(
+                            self.lifecycle.scope(
+                                self.services
+                                    .scope(node, build_node::<T>(&providers, graph, metrics)),
                             ),
                         ),
                     ),
                 ),
-            )
+            ),
+        );
+        Box::pin(scoped)
             .await
             .map_err(|e| format!("building {node}: {e}").into())
     }

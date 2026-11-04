@@ -124,6 +124,12 @@ fn nodes(segment: &Segment) -> TokenStream {
     let fields = segment.nodes.iter().map(|node| {
         let field_doc = doc(&format!("Node `{}`.", node.name));
         let (binding, ty) = (&node.binding, &node.ty);
+        // A unary node is shared with the clients its callers took.
+        let ty = if node.unary {
+            quote!(::std::sync::Arc<#ty>)
+        } else {
+            quote!(#ty)
+        };
         quote! {
             #field_doc
             pub #binding: #ty,
@@ -236,9 +242,12 @@ impl Built {
         } else {
             quote!(hosts.nodes)
         };
+        // A unary node's readiness is the builder's, shared with the calls
+        // made from other nodes' `ready` (`Builder::unary`).
         let mut ready: Vec<TokenStream> = segment
             .nodes
             .iter()
+            .filter(|node| !node.unary)
             .map(|node| {
                 let binding = &node.binding;
                 quote!(#krate::gdl::Build::ready(&#nodes.#binding))
@@ -449,7 +458,11 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
         let built = segment.nodes.iter().map(|node| {
             let (binding, ty) = (&node.binding, &node.ty);
             let name = node.name.to_string();
-            quote!(#binding: builder.build::<#ty>(#name, node.#binding).await?,)
+            if node.unary {
+                quote!(#binding: builder.unary::<#ty>(#name, node.#binding).await?,)
+            } else {
+                quote!(#binding: builder.build::<#ty>(#name, node.#binding).await?,)
+            }
         });
         quote!(let nodes = Nodes { #(#built)* };)
     };

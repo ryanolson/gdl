@@ -997,7 +997,7 @@ Measured with callgrind 3.28.0 on a shared aarch64 Linux host (20 cores), load a
 
 ```bash
 RUSTFLAGS="--cfg rustix_use_libc" cargo build --release -p gdl --example unary
-valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/unary <direct|placed|boxed>[-pending|-locked] <10000|20000>
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples/unary <direct|placed|hosted|boxed>[-pending|-locked] <10000|20000>
 target/release/examples/unary sizes
 ```
 
@@ -1006,6 +1006,17 @@ target/release/examples/unary sizes
 | a sync service (a 56-byte future), ready | 46.0 | 101.0 | 239.0 | +55.0 |
 | the same, pending once | 601.2 | 668.2 | 799.2 | +67.0 |
 | a lookup behind a tokio mutex (a 160-byte future) | 360.8 to 362.5 | 427.4 to 429.8 | 565.6 to 567.2 | +65 to +68 |
+
+**Through the client a build takes.** A node in a generated segment takes its client with `UnaryClient::current` ([Unary services](../concepts/unary.md)). For a service its segment hosts, that client reads the service's readiness once per call, then calls as the in-place client does. The `hosted` shape of the same example calls through it, after the service is ready. Measured on the same host at load 2 to 11, two rounds; the build differs from the table above, so its direct and in-place rows are 1 Ir higher. The ready and pending rows repeat exactly:
+
+| Callgrind Ir per call | Direct | `UnaryClient`, in place | Hosted | Hosted − in place |
+|---|---|---|---|---|
+| a sync service, ready | 47.0 | 102.0 | 108.0 | +6.0 |
+| the same, pending once | 607.2 | 672.2 | 678.2 | +6.0 |
+| a lookup behind a tokio mutex | 361.5 to 362.5 | 429.1 to 429.9 | 436.2 to 437.9 | +7 to +8 |
+
+It makes no allocation of its own either: `a_hosted_services_call_allocates_nothing_once_the_service_is_ready` in `crates/gdl/tests/allocations.rs` counts 0 for both services, and `a_local_call_through_the_generated_segment_allocates_nothing` in `crates/gdl-gen/tests/unary.rs` counts 0 for three calls through a generated segment, under a counting global allocator.
+
 
 - **A call in place makes no allocation of its own** for a future of 256 bytes or less, aligned to 8 or less. A boxed future makes one per call. `a_local_call_allocates_nothing_for_a_future_that_fits` in `crates/gdl/tests/allocations.rs` counts 0 for the sync service and the mutex lookup, and 1 for a future of more than 512 bytes.
 - **The in-place call costs 55 to 68 Ir over a direct call, and a boxed future 193 to 205.** The ready and pending rows repeat exactly. The mutex rows move by about 2 Ir, from the map's random hash keys.

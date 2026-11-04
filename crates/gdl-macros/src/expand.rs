@@ -176,15 +176,9 @@ fn expand_edges(graph: &Graph) -> TokenStream {
     }
 }
 
-/// Nodes that take an implementation binding, in declaration order. A
-/// unary node has a binding name, which keeps the names unique, but no
-/// slot: `Bindings` has no setter for the unary role, so a graph that
-/// declares unary nodes builds, and its segments run its topology.
+/// Nodes that take an implementation binding, in declaration order.
 fn bound_nodes(graph: &Graph) -> impl Iterator<Item = &Node> {
-    graph
-        .nodes
-        .iter()
-        .filter(|n| n.binding.is_some() && n.role() != Role::Unary)
+    graph.nodes.iter().filter(|n| n.binding.is_some())
 }
 
 /// The type parameter for a node's slot.
@@ -250,9 +244,8 @@ fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
                 #krate::gdl::Around<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
             }
         }
-        Sig::Source { .. } | Sig::Unary { .. } => {
-            unreachable!("the source and unary nodes take no binding")
-        }
+        Sig::Unary { req, resp } => quote! { #krate::gdl::Unary<Req = #req, Resp = #resp> },
+        Sig::Source { .. } => unreachable!("the source takes no binding"),
     }
 }
 
@@ -375,16 +368,26 @@ fn expand_bindings(graph: &Graph, krate: &TokenStream) -> TokenStream {
                 quote!(#g)
             }
         });
+        // A unary node is shared: the segment hosts it for its callers, and
+        // the slot holds the same `Arc`.
+        let unary = node.role() == Role::Unary;
         let moves = fields.iter().enumerate().map(|(i, f)| {
-            if i == index {
+            if i == index && unary {
+                quote! { #f: __gdl_implementation }
+            } else if i == index {
                 quote! { #f: ::std::sync::Arc::new(__gdl_implementation) }
             } else {
                 quote! { #f: self.#f }
             }
         });
+        let taken = if unary {
+            quote!(::std::sync::Arc<__GdlImpl>)
+        } else {
+            quote!(__GdlImpl)
+        };
         quote! {
             #[doc = #doc]
-            pub fn #setter<__GdlImpl: #bound>(self, __gdl_implementation: __GdlImpl) -> Bindings<#(#out_generics),*> {
+            pub fn #setter<__GdlImpl: #bound>(self, __gdl_implementation: #taken) -> Bindings<#(#out_generics),*> {
                 Bindings { #(#moves),* }
             }
         }
@@ -676,6 +679,14 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         unpack,
     } = signature(graph, krate);
     let (result_type, result_value) = root_result(graph, krate, &generics, true);
+    // No hop runs a unary node: the deployment holds it for as long as the
+    // segment runs, whatever its callers' clients do.
+    let services = bound_nodes(graph)
+        .filter(|node| node.role() == Role::Unary)
+        .map(|node| {
+            let (name, local) = (node.ident.to_string(), local_var(node));
+            quote! { __gdl_deployment.unary(#name, #local)?; }
+        });
     // Innermost hop first, so each operator can take the hop below it.
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_hop_{}", index);
@@ -708,6 +719,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
             __gdl_deployment.check_contract(manifest().contract_hash())?;
             __gdl_deployment.declare_properties(&manifest(), &property_types())?;
             #unpack
+            #(#services)*
             #(#hops)*
             ::core::result::Result::Ok(#result_value)
         }
@@ -759,6 +771,10 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         unpack,
     } = signature(graph, krate);
     let (result_type, result_value) = root_result(graph, krate, &generics, false);
+    // A caller in one process takes its client from the service itself.
+    let unused = bound_nodes(graph)
+        .filter(|node| node.role() == Role::Unary)
+        .map(local_var);
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_local_{}", index);
         // An around node's halves, each made by `around` from the node's `Arc`.
@@ -815,6 +831,7 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
             #(#bounds,)*
         {
             #unpack
+            #(let _ = #unused;)*
             #(#hops)*
             #result_value
         }

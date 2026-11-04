@@ -88,7 +88,7 @@ topology: Front => Router { Engine };
 - a name twice in one `calls` list.
 - `provides` or `needs` on a unary node.
 
-The contract hash covers each unary node, with its types and `idempotent`, and each node's `calls`, in any order they are written. Where a unary node may run is the placement's to say ([Unary nodes](../concepts/placement.md#unary-nodes)). A generated segment does not host a unary node's implementation: the contract's `Bindings` has no slot for one ([Known limitations](../operations/limitations.md#a-generated-segment-hosts-no-unary-node)).
+The contract hash covers each unary node, with its types and `idempotent`, and each node's `calls`, in any order they are written. Where a unary node may run is the placement's to say ([Unary nodes](../concepts/placement.md#unary-nodes)). A generated segment builds each unary node it lists before the nodes that call it ([Unary services](../concepts/unary.md#build-order-and-readiness)). The spec binds a unary node's implementation as it binds any node's.
 
 ## Offer the messages
 

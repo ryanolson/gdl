@@ -315,10 +315,10 @@ fn a_graph_with_a_unary_node_generates_segments_that_build() {
     );
 }
 
-/// A generated segment binds no implementation of a unary node, so a pin
-/// that would choose one is refused rather than dropped.
+/// A pin chooses a unary node's implementation as it does any node's, and
+/// is held to the node's role.
 #[test]
-fn a_pin_for_a_unary_node_is_refused() {
+fn a_pin_for_a_unary_node_is_held_to_its_role() {
     let files = Files::new(
         None,
         &format!("[nodes.pin]\nTok = \"around_nodes::Keep\"\n{LOCAL}"),
@@ -326,7 +326,7 @@ fn a_pin_for_a_unary_node_is_refused() {
     let problems = files.problems();
     assert!(
         problems.iter().any(|(_, _, message)| message.contains(
-            "[nodes] pin.Tok: unary node `Tok` takes no implementation in a generated segment"
+            "node `Tok`: the graph declares a unary, but `around_nodes::Keep` is a around"
         )),
         "{problems:#?}"
     );
@@ -364,6 +364,39 @@ fn remote_call_types_are_asserted_by_the_generated_segments() {
             "crates = [{:?}, {:?}]",
             around.display().to_string(),
             protocols.display().to_string()
+        ),
+    );
+    // `Tok` of the call's own types, beside the around fixture's `Tok`.
+    let nodes = files.dir.path().join("nodes");
+    std::fs::create_dir_all(nodes.join("src")).expect("node sources");
+    std::fs::write(
+        nodes.join("Cargo.toml"),
+        format!(
+            "[package]\nname = 'call-nodes'\nversion = '0.0.0'\nedition = '2024'\n\
+             [workspace]\n[dependencies]\ncall-protocols = {{ path = {:?} }}\n\
+             gdl = {{ path = {:?} }}\n",
+            protocols,
+            root().join("crates/gdl")
+        ),
+    )
+    .expect("node manifest");
+    std::fs::write(
+        nodes.join("src/lib.rs"),
+        "use call_protocols::CallOnly;\n\
+         #[derive(gdl::Node)]\npub struct Tok;\n\
+         impl gdl::Build for Tok {\n    type Config = ();\n    type Metrics = ();\n    \
+         async fn build((): (), (): ()) -> gdl::Result<Self> { Ok(Self) }\n}\n\
+         impl gdl::Unary for Tok {\n    type Req = CallOnly;\n    type Resp = CallOnly;\n    \
+         async fn call(&self, _cx: &gdl::Cx, req: CallOnly) -> gdl::Result<CallOnly> { Ok(req) }\n}\n",
+    )
+    .expect("node source");
+    let around_nodes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/around/nodes");
+    let spec = spec.replace(
+        &format!("crates = [{:?}]", around_nodes.display().to_string()),
+        &format!(
+            "crates = [{:?}, {:?}]\npin = {{ Tok = \"call_nodes::Tok\" }}",
+            around_nodes.display().to_string(),
+            nodes.display().to_string()
         ),
     );
     std::fs::write(files.spec(), spec).expect("spec with call protocols");
@@ -424,4 +457,318 @@ fn remote_call_types_are_asserted_by_the_generated_segments() {
         "{stderr}"
     );
     assert!(stderr.contains("Keep_calls_Tok_req"), "{stderr}");
+}
+
+/// A contract spec's binding of a unary node reaches the segment that
+/// hosts it, as any node's binding does, rather than being dropped: a type
+/// that does not exist fails that segment's build at the binding. As for
+/// every node of a contract spec, `check` does not read the bound crate.
+#[test]
+fn a_contract_specs_binding_of_a_unary_node_reaches_its_segment() {
+    let files = Files::new(None, LOCAL);
+    let out = files.dir.path().join("segments");
+    let graph_spec = gdl_gen::Spec::load(&files.spec()).expect("graph spec");
+    let generated = gdl_gen::render(&graph_spec, &out, &target("gdl-gen-tests")).expect("render");
+    gdl_gen::write(&out, &generated).expect("write");
+    std::fs::write(
+        out.join("Cargo.toml"),
+        "[workspace]\nmembers = ['back', 'contract', 'front']\nresolver = '3'\n",
+    )
+    .expect("generated workspace");
+    std::fs::copy(root().join("Cargo.lock"), out.join("Cargo.lock")).expect("lockfile");
+
+    let nodes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/around/nodes");
+    let mut text = format!(
+        "[contract]\npath = {:?}\n[gdl]\npath = {:?}\n{LOCAL}",
+        out.join("contract"),
+        root().join("crates/gdl-runtime")
+    );
+    for (node, ty) in [("Keep", "Keep"), ("Echo", "Echo"), ("Tok", "MissingUnary")] {
+        text.push_str(&format!(
+            "[bind.{node}]\ncrate = 'around-nodes'\npath = {nodes:?}\ntype = 'around_nodes::{ty}'\n"
+        ));
+    }
+    let spec_path = files.dir.path().join("contract.toml");
+    std::fs::write(&spec_path, text).expect("contract spec");
+    let spec = gdl_gen::Spec::load(&spec_path).expect("contract spec");
+    let bound = files.dir.path().join("bound");
+    let rendered = gdl_gen::render(&spec, &bound, &target("examples")).expect("rendered");
+    let front = &rendered[&PathBuf::from("front/src/lib.rs")];
+    assert!(
+        front.contains("unary Tok tok = ::around_nodes::MissingUnary;"),
+        "{front}"
+    );
+    gdl_gen::write(&bound, &rendered).expect("contract spec output");
+    std::fs::write(
+        bound.join("Cargo.toml"),
+        "[workspace]\nmembers = ['back', 'front']\nresolver = '3'\n",
+    )
+    .expect("bound workspace");
+    std::fs::copy(root().join("Cargo.lock"), bound.join("Cargo.lock")).expect("lockfile");
+    let built = std::process::Command::new("timeout")
+        .arg("300")
+        .arg(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["build", "--bins", "--manifest-path"])
+        .arg(bound.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", target("examples"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("bounded segment build");
+    assert_ne!(built.status.code(), Some(124), "the build timed out");
+    assert!(!built.status.success(), "the front built without `Tok`");
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    assert!(stderr.contains("MissingUnary"), "{stderr}");
+}
+
+/// The `calls` fixture: a router that calls a tokenizer, in one spec with
+/// two layouts.
+fn calls() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/calls")
+}
+
+#[test]
+fn the_reader_finds_a_unary_nodes_role_and_ports() {
+    let krate = gdl_gen::Crate::Path(calls().join("nodes"));
+    let read = gdl_gen::extract(
+        &krate,
+        &target("gdl-gen-tests"),
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("extracted");
+    let tokenize = read
+        .offer
+        .nodes
+        .iter()
+        .find(|node| node.name == "Tokenize")
+        .expect("Tokenize");
+    assert_eq!(tokenize.role, gdl_model::Role::Unary);
+    let ports: Vec<&str> = tokenize
+        .ports
+        .iter()
+        .map(|port| port.port.as_str())
+        .collect();
+    assert_eq!(ports, ["Req", "Resp"]);
+    gdl_gen::verify(&read, &target("gdl-gen-tests")).expect("the build agrees");
+}
+
+/// A workspace in the target directory with the `calls` fixture's
+/// generated crates, both layouts, and the demo that runs the compact
+/// layout's segment under a counting allocator; and the lock that keeps
+/// another test process out of it while held. Files are written only when
+/// they change, so Cargo rebuilds only what changed since the last run.
+/// The first build takes as long as the examples' target directory needs;
+/// later ones a few seconds.
+struct Workspace {
+    _lock: std::fs::File,
+    dir: PathBuf,
+}
+
+impl Workspace {
+    fn built() -> Self {
+        let dir = target("calls-workspace");
+        std::fs::create_dir_all(&dir).expect("the workspace's directory");
+        let lock = std::fs::File::create(target("calls-workspace.lock")).expect("the lock");
+        lock.lock().expect("hold the lock");
+        let spec = gdl_gen::Spec::load(&calls().join("gdl.toml")).expect("spec");
+        let segments = dir.join("segments");
+        let files = gdl_gen::render(&spec, &segments, &target("gdl-gen-tests")).expect("render");
+        for (path, text) in &files {
+            write(&segments.join(path), text);
+        }
+        let quoted = |p: &Path| toml::Value::String(p.display().to_string());
+        let demo = std::fs::read_to_string(calls().join("demo/main.rs")).expect("the demo");
+        write(&dir.join("demo/src/main.rs"), &demo);
+        write(
+            &dir.join("demo/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"calls-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+                 [dependencies]\n\
+                 calls-compact-front = {{ path = \"../segments/compact/front\" }}\n\
+                 calls-nodes = {{ path = {} }}\n\
+                 gdl-runtime = {{ path = {} }}\n",
+                quoted(&calls().join("nodes")),
+                quoted(&root().join("crates/gdl-runtime")),
+            ),
+        );
+        write(
+            &dir.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"demo\", \"segments/contract\", \"segments/compact/front\"]\n",
+        );
+        if !dir.join("Cargo.lock").exists() {
+            std::fs::copy(root().join("Cargo.lock"), dir.join("Cargo.lock")).expect("the seed");
+        }
+        let build = std::process::Command::new("timeout")
+            .arg("600")
+            .arg(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "--bins", "--manifest-path"])
+            .arg(dir.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", target("examples"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("cargo build");
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        Self { _lock: lock, dir }
+    }
+
+    /// The path of built binary `name`.
+    fn bin(&self, name: &str) -> PathBuf {
+        let _ = &self.dir;
+        target("examples").join("debug").join(name)
+    }
+}
+
+/// Write `text` to `path` unless it already holds it, so that its time,
+/// and Cargo's fingerprint, stays.
+fn write(path: &Path, text: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|existing| existing == text) {
+        return;
+    }
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+    std::fs::write(path, text).expect("a file");
+}
+
+/// The requests each layout answers, and the answers.
+const ASKED: [&str; 3] = [
+    r#"{"text": "hi"}"#,
+    r#"{"text": "hi there"}"#,
+    r#"{"text": "one two three"}"#,
+];
+const ANSWERED: [&str; 6] = [
+    r#"{"item":{"text":"echo hi [1 words]"}}"#,
+    r#"{"done":null}"#,
+    r#"{"item":{"text":"echo hi there [2 words]"}}"#,
+    r#"{"done":null}"#,
+    r#"{"item":{"text":"echo one two three [3 words]"}}"#,
+    r#"{"done":null}"#,
+];
+
+/// One run of segment binary `front` with the other segments in `others`,
+/// each with `settings` after its roster: the front's answer to each line
+/// of `asked`, and its exit status and stderr.
+struct Run {
+    lines: Vec<String>,
+    status: std::process::ExitStatus,
+    stderr: String,
+}
+
+fn run(front: &Path, others: &[PathBuf], settings: &str, asked: &[&str]) -> Run {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-calls-")
+        .tempdir()
+        .expect("scratch");
+    let roster = temp.path().join("roster");
+    std::fs::create_dir_all(&roster).expect("roster");
+    let config = |name: &str| {
+        let path = temp.path().join(format!("{name}.toml"));
+        let text = format!(
+            "listen = \"127.0.0.1:0\"\nroster = {}\n{settings}",
+            toml::Value::String(roster.display().to_string())
+        );
+        std::fs::write(&path, text).expect("config");
+        path
+    };
+    let _others: Vec<common::Running> = others
+        .iter()
+        .enumerate()
+        .map(|(index, bin)| {
+            common::Running(
+                common::generated(bin)
+                    .arg(config(&format!("other-{index}")))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("a segment"),
+            )
+        })
+        .collect();
+    let mut front = common::Running(
+        common::generated(front)
+            .arg(config("front"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the front"),
+    );
+    let mut stdin = front.0.stdin.take().expect("stdin");
+    for request in asked {
+        writeln!(stdin, "{request}").expect("request");
+    }
+    // End of input: the front answers what it has read, then exits.
+    drop(stdin);
+    let stderr = front.stderr();
+    let lines = front.stdout().rest(Duration::from_secs(60));
+    let status = front.exits_within(Duration::from_secs(10));
+    let stderr = stderr.rest(Duration::from_secs(5)).join("\n");
+    Run {
+        lines,
+        status,
+        stderr,
+    }
+}
+
+/// The compact layout's front answers each request through the tokenizer
+/// in its own segment.
+#[test]
+fn the_compact_layout_calls_the_service_in_the_routers_segment() {
+    let workspace = Workspace::built();
+    let ran = run(&workspace.bin("calls-compact-front"), &[], "", &ASKED);
+    assert!(ran.status.success(), "the front failed: {}", ran.stderr);
+    assert_eq!(ran.lines, ANSWERED, "front stderr: {}", ran.stderr);
+}
+
+/// A call from the router's build fails the build: the service is built,
+/// but not ready.
+#[test]
+fn a_call_during_the_build_fails_the_segment_with_routing() {
+    let workspace = Workspace::built();
+    let ran = run(
+        &workspace.bin("calls-compact-front"),
+        &[],
+        "[node.Router]\ncall_in_build = true\n",
+        &[],
+    );
+    assert!(!ran.status.success(), "the front served: {:?}", ran.lines);
+    assert!(
+        ran.stderr
+            .contains("front: building Router: routing error: called during build"),
+        "{}",
+        ran.stderr
+    );
+}
+
+/// A call from the router's `ready` waits for the tokenizer's own `ready`,
+/// which runs once: the tokenizer answers only once it has run.
+#[test]
+fn a_call_from_ready_waits_for_the_services_ready() {
+    let workspace = Workspace::built();
+    let ran = run(
+        &workspace.bin("calls-compact-front"),
+        &[],
+        "[node.Router]\ncall_in_ready = true\n",
+        &ASKED,
+    );
+    assert!(ran.status.success(), "the front failed: {}", ran.stderr);
+    assert_eq!(ran.lines, ANSWERED, "front stderr: {}", ran.stderr);
+}
+
+/// The compact layout's segment, under an allocator that counts: a call
+/// to the service in the router's own segment allocates nothing of its
+/// own, through the client the router took in its build.
+#[test]
+fn a_local_call_through_the_generated_segment_allocates_nothing() {
+    let workspace = Workspace::built();
+    let ran = run(&workspace.bin("calls-demo"), &[], "", &ASKED);
+    assert!(ran.status.success(), "the demo failed: {}", ran.stderr);
+    assert_eq!(ran.lines, ANSWERED, "demo stderr: {}", ran.stderr);
+    assert!(ran.stderr.contains("calls 3 allocated 0"), "{}", ran.stderr);
 }

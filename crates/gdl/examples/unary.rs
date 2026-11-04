@@ -4,10 +4,12 @@
 //! setup cancels. Each shape runs a direct call beside it, so a call's own
 //! cost is the shape less its direct row.
 //!
-//! - `direct`, `placed`, `boxed`: a service that adds one to its request,
-//!   called on its `Arc` and awaited; through a `UnaryClient`, its future
-//!   built in the call's own; and through a boxed future behind a trait
-//!   object, as an erased call costs without the in-place buffer.
+//! - `direct`, `placed`, `hosted`, `boxed`: a service that adds one to its
+//!   request, called on its `Arc` and awaited; through a `UnaryClient`, its
+//!   future built in the call's own; through the client a node takes in its
+//!   build of a service its segment hosts, which reads the service's
+//!   readiness first; and through a boxed future behind a trait object, as
+//!   an erased call costs without the in-place buffer.
 //! - `<shape>-pending`: the same service, which waits once before it
 //!   answers.
 //! - `<shape>-locked`: a service that reads a map behind a tokio mutex, a
@@ -27,7 +29,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use gdl::{Cx, Result, Unary, UnaryClient};
+use gdl::{Build, Cx, Result, Unary, UnaryClient, UnaryServices};
 
 /// Adds one to its request, after one wait when `pending`.
 struct AddOne {
@@ -46,6 +48,15 @@ impl Unary for AddOne {
     }
 }
 
+impl Build for AddOne {
+    type Config = ();
+    type Metrics = ();
+
+    async fn build((): (), (): ()) -> Result<Self> {
+        Ok(Self { pending: false })
+    }
+}
+
 /// Reads a map behind a tokio mutex.
 struct Locked(tokio::sync::Mutex<HashMap<u64, u64>>);
 
@@ -55,6 +66,15 @@ impl Unary for Locked {
 
     async fn call(&self, _cx: &Cx, n: u64) -> Result<u64> {
         Ok(self.0.lock().await.get(&n).copied().unwrap_or(n) + 1)
+    }
+}
+
+impl Build for Locked {
+    type Config = ();
+    type Metrics = ();
+
+    async fn build((): (), (): ()) -> Result<Self> {
+        Ok(Self(tokio::sync::Mutex::new(HashMap::new())))
     }
 }
 
@@ -100,7 +120,7 @@ fn main() {
     black_box(sum);
 }
 
-fn run<S: Unary<Req = u64, Resp = u64>>(
+fn run<S: Unary<Req = u64, Resp = u64> + Build>(
     how: &str,
     service: S,
     calls: u64,
@@ -119,6 +139,25 @@ fn run<S: Unary<Req = u64, Resp = u64>>(
             }
             "placed" => {
                 let client = UnaryClient::local(Arc::clone(&service));
+                let client = black_box(&client);
+                for n in 0..calls {
+                    sum = sum.wrapping_add(client.call(&cx, black_box(n)).await.unwrap_or(0));
+                }
+            }
+            "hosted" => {
+                let services =
+                    UnaryServices::new([("Caller".to_string(), vec!["Service".to_string()])]);
+                services
+                    .serve("Service", Arc::clone(&service))
+                    .expect("served");
+                let client = services
+                    .scope("Caller", async {
+                        UnaryClient::<u64, u64>::current("Service")
+                    })
+                    .await
+                    .expect("a client");
+                services.built();
+                services.ready().await.expect("ready");
                 let client = black_box(&client);
                 for n in 0..calls {
                     sum = sum.wrapping_add(client.call(&cx, black_box(n)).await.unwrap_or(0));

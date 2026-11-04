@@ -7,8 +7,10 @@ use pin_project_lite::pin_project;
 
 use crate::{Cx, Result, Unary};
 
+mod bound;
 mod placed;
 
+pub use bound::UnaryServices;
 use placed::Slot;
 
 /// A client of a [`Unary`] service, taken once in a node's build and called
@@ -55,6 +57,17 @@ impl<Req, Resp> Clone for UnaryClient<Req, Resp> {
         Self {
             service: Arc::clone(&self.service),
         }
+    }
+}
+
+impl<Req, Resp> std::fmt::Debug for UnaryClient<Req, Resp> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "UnaryClient<{}, {}>",
+            std::any::type_name::<Req>(),
+            std::any::type_name::<Resp>()
+        )
     }
 }
 

@@ -172,11 +172,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the input pump and the local inner end are both producers, and each takes its own permit. See [Admission and egress](../concepts/admission.md#egress).
 - **Test:** `egress_hold_and_wait_at_the_limit_is_refused_not_hung` in `crates/gdl-runtime/tests/inputs.rs`.
 
-### A unary service is called only in its caller's process
-- **What:** a `UnaryClient` calls a service that runs in the caller's process. A graph can declare unary nodes and calls, but a generated segment gives its nodes no client ([A generated segment hosts no unary node](#a-generated-segment-hosts-no-unary-node)).
-- **When:** always. A node gets a client only in local composition, where the code that builds the nodes makes it from the service.
-- **Why:** the client's call to another segment is not built. See [Unary services](../concepts/model.md#unary-services).
-- **Workaround:** build the service and its callers in one place, and give each caller a client of that service.
+### A unary service is called only from its own segment
+- **What:** a node gets a client only of a service that its own segment lists. A caller whose segment does not list the service fails its build: its segment has no copy of the service and no link to one.
+- **When:** a placement that puts a unary node in another segment than a node that calls it. `check` and `generate` accept such a placement.
+- **Why:** the call to another segment is not built yet. See [Unary services](../concepts/unary.md).
+- **Workaround:** list the unary node in each segment whose nodes call it. Copies share no state.
 
 ## Bring-up, shutdown, and membership
 
@@ -425,10 +425,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** `check` and `generate` refuse a caller whose segment has no copy of a unary node it calls, when the one copy it would call is in another class.
 - **Why:** an instance in a pool waits for, and routes to, only its own class's segments. The class boundary rule covers hops, not calls. See [Specs, segments, and layouts](../concepts/placement.md#unary-nodes).
 - **Workaround:** list the unary node in a segment of the caller's class. Copies share no state.
-
-### A generated segment hosts no unary node
-- **What:** a graph may declare unary nodes and `calls`, and a placement may list them, but a generated segment binds no implementation of a unary node, and no node can call one. The contract's `Bindings` has no slot for a unary node.
-- **Workaround:** none in a generated segment. Call the service's code as a plain Rust type from the caller's node.
 
 ### A unary node cannot provide or need a property yet
 - **What:** `check`, `generate`, and `graph!` refuse `provides` or `needs` on a unary node, naming the node and the clause.

@@ -442,3 +442,46 @@ fn a_local_call_allocates_nothing_for_a_future_that_fits() {
     assert_eq!(call_allocations(&locked), 0);
     assert_eq!(call_allocations(&large), 1);
 }
+
+impl gdl::Build for AddOne {
+    type Config = ();
+    type Metrics = ();
+
+    async fn build((): (), (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl gdl::Build for Locked {
+    type Config = ();
+    type Metrics = ();
+
+    async fn build((): (), (): ()) -> Result<Self> {
+        Ok(Self(Default::default()))
+    }
+}
+
+/// The client a build takes of a service its segment hosts reads the
+/// service's readiness once, and then builds the service's future as a
+/// local client does: no allocation of its own once the service is ready.
+#[test]
+fn a_hosted_services_call_allocates_nothing_once_the_service_is_ready() {
+    let services = gdl::UnaryServices::new([(
+        "Caller".to_string(),
+        vec!["AddOne".to_string(), "Locked".to_string()],
+    )]);
+    services.serve("AddOne", Arc::new(AddOne)).expect("served");
+    services
+        .serve("Locked", Arc::new(Locked(Default::default())))
+        .expect("served");
+    let (ready, locked) = futures::executor::block_on(services.scope("Caller", async {
+        (
+            UnaryClient::<u64, u64>::current("AddOne").expect("a client"),
+            UnaryClient::<u64, u64>::current("Locked").expect("a client"),
+        )
+    }));
+    services.built();
+    futures::executor::block_on(services.ready()).expect("ready");
+    assert_eq!(call_allocations(&ready), 0);
+    assert_eq!(call_allocations(&locked), 0);
+}

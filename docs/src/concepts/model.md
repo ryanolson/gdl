@@ -130,7 +130,7 @@ let tokens = self.tokenize.call(&cx, text).await?;
 
 A boxed future was rejected: it costs an allocation and about 140 more instructions per call. So was a buffer returned by value, as the `stackfuture` crate does: the whole buffer then moves into the caller's future on every call. A client generic over the service would cost what a direct call costs, but it makes every caller generic.
 
-A client calls a service in the same process only ([Known limitations](../operations/limitations.md#a-unary-service-is-called-only-in-its-callers-process)).
+A node takes its client in its build, with `UnaryClient::current`. [Unary services](unary.md) describes how a segment builds its services and when a call may be made.
 
 ## Streams and errors
 

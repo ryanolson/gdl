@@ -1,0 +1,8 @@
+# A router that calls a unary node, read, checked, generated, built, and
+# run with the service in the router's segment and in a segment of its
+# own. Its own workspace: read and built by `tests/unary.rs`, never by the
+# repository's. The demo is built only beside the generated segments.
+[workspace]
+members = ["nodes", "protocols"]
+exclude = ["demo"]
+resolver = "3"

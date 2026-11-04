@@ -6,6 +6,7 @@
 # Concepts
 
 - [The graph model](concepts/model.md)
+- [Unary services](concepts/unary.md)
 - [Requests, attempts, and deadlines](concepts/requests.md)
 - [Streamed requests](concepts/streamed-requests.md)
 - [Messages and encodings](concepts/messages.md)

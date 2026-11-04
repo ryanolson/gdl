@@ -86,7 +86,7 @@ pub use select::{
 };
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
-pub use unary::UnaryClient;
+pub use unary::{UnaryClient, UnaryServices};
 
 /// Message types, from `gdl-message`. A protocols crate depends on that
 /// crate alone; a node crate can reach the same items here.

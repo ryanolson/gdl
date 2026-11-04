@@ -67,3 +67,26 @@ impl Sink for Echo {
         })])))
     }
 }
+
+/// Answers with its request: the unary fixture's `Tok`, which no around
+/// graph declares.
+#[derive(gdl::Node)]
+pub struct Tok;
+
+impl Build for Tok {
+    type Config = NoSettings;
+    type Metrics = ();
+
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl gdl::Unary for Tok {
+    type Req = Text;
+    type Resp = Text;
+
+    async fn call(&self, _cx: &Cx, req: Text) -> Result<Text> {
+        Ok(req)
+    }
+}
