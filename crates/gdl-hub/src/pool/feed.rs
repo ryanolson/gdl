@@ -49,7 +49,7 @@ use futures::stream::BoxStream;
 use gdl_model::{EntryState, PropertyKey, PropertyLists};
 use gdl_pools::{LoadSummary, PoolState};
 use gdl_watch::{InstanceLoad, LoadReport};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 use velo_hub::Lease;
 use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::store::{Incarnation, Removal};
@@ -75,6 +75,9 @@ pub(super) struct Feed {
     /// The pool's property entries, as they change.
     properties: watch::Sender<Arc<PropertyList>>,
     watchers: Watchers,
+    /// Woken when a report is taken while the pool has no summary, so that
+    /// the summary is made at once rather than at the next period.
+    unsummarized: Notify,
 }
 
 impl Feed {
@@ -115,6 +118,7 @@ impl Feed {
             epoch: watch::Sender::new(None),
             properties: watch::Sender::new(Arc::default()),
             watchers: Watchers::new(),
+            unsummarized: Notify::new(),
         }
     }
 
@@ -504,11 +508,15 @@ impl Feed {
                         refusals: 0,
                         ..load.clone()
                     };
-                    shared.loads.put(owner, lease.epoch, admission, now);
+                    if shared.loads.put(owner, lease.epoch, admission, now) {
+                        self.unsummarized.notify_one();
+                    }
                     let version = shared.properties.settled(&draining);
                     return Ok(Taken::Draining { version, load });
                 }
-                shared.loads.put(owner, lease.epoch, load, now);
+                if shared.loads.put(owner, lease.epoch, load, now) {
+                    self.unsummarized.notify_one();
+                }
                 Ok(Taken::Counted)
             }
             Some(_) => Err(format!(
@@ -530,8 +538,9 @@ impl Feed {
             .entries
             .get(&owner)
             .is_some_and(|entry| entry.epoch == lease.epoch && entry.usable())
+            && shared.loads.put(owner, lease.epoch, load, now)
         {
-            shared.loads.put(owner, lease.epoch, load, now);
+            self.unsummarized.notify_one();
         }
     }
 
@@ -564,6 +573,12 @@ impl Feed {
         // release, and sends nothing.
         shared.followers.expire(now);
         load
+    }
+
+    /// Wait for a report taken while the pool had no summary: the first of
+    /// a new hub, or of a pool whose entry instances had all gone.
+    pub(super) async fn unsummarized(&self) {
+        self.unsummarized.notified().await;
     }
 
     /// The load summary last made, as the watch last sent it.

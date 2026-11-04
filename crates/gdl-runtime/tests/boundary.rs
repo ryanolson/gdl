@@ -198,8 +198,8 @@ async fn a_ready_pool_before_a_degraded_one_and_never_an_unavailable_one() {
 
 /// Under `home_first`, a ready pool whose hub has made no load summary yet
 /// is followed, with its entry instance, but not chosen: with no other
-/// pool, a request fails at once with `Routing`. Its hub's summary period
-/// is 10 s, which the test does not wait out.
+/// pool, a request fails at once with `Routing`. Its instances' load
+/// reports never reach its hub ([`model_unsummarized`]).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pool_without_a_load_summary_is_not_chosen() {
     let spec = spec_of(home_first());

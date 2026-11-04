@@ -149,7 +149,8 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// of its record. A record that expires or is withdrawn ends no follow.
 ///
 /// Each usable entry instance of the pool reports its admission to the
-/// hub once a load summary period (`[pool] summary_ms`), on the control
+/// hub once a load summary period (`[pool] summary_ms`), the first as soon
+/// as the hub takes it, on the control
 /// listener: `POST instances/{instance_id}/load` with a
 /// [`gdl_watch::LoadReport`], authenticated as the instance it names by
 /// velo-hub's credential check ([`velo_hub::Authority::authorize`]). A
@@ -163,7 +164,9 @@ pub use timing::{PoolTiming, RefusedWatches};
 /// older than three periods, into the pool's [`LoadSummary`]: the roots
 /// admitted and the admission limits summed, the usable entry instances
 /// counted, and the refusals of each report's period summed; `None` while
-/// no report is counted, and always for a class that no hop enters. The
+/// no report is counted, and always for a class that no hop enters. A
+/// report taken while there is none is summed at once, and the next
+/// summary comes a period later. The
 /// watch sends it as a `load` event every period while there is one,
 /// changed or not, so that a watcher's age of it says how fresh it is,
 /// and once when there is none; the record carries it on its next write.

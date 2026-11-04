@@ -116,9 +116,11 @@ Each field that a build adds to the record is optional on the wire, and a reader
 
 Each usable entry instance reports its admission to its hub once a summary period: the roots it holds admitted, its admission limit, and the hand-offs it declined since its last report, except those it declined as its own ([An instance that cannot serve the request](pool-routing.md#an-instance-that-cannot-serve-the-request)), and its properties when its nodes set them ([Properties](#properties)) (`POST /v1/ext/gdl-pool/instances/{id}/load`, with its own credential). A report from any other instance is refused with 409. The period is `summary_ms`: 10 s by default, at least 1 s. The hub and its instances read the same setting.
 
+An instance sends its first report as soon as it is ready, not a period later. The hub refuses a report until it has seen the instance ready, which can take a few milliseconds after the instance announces it. So until the hub takes a report, the instance tries again after 50 ms, then waits twice as long each time, up to the period. From the first report the hub takes, it reports once a period. The instance cannot see when the hub will take its report, so it tries again. With the default period, the wait reaches 10 s after nine tries, so a hub that keeps refusing gets few extra reports.
+
 Once a period, the hub sums the latest report of each usable entry instance into the pool's load summary, and drops a report older than three periods. `admitted`, `limit`, and `refusals` are summed over the counted reports. `instances` is the number of usable entry instances. `period_ms` is the summary period, so that a reader can tell when the summary is stale.
 
-There is no summary while no report counts, and none for a class that no hop enters.
+There is no summary while no report counts, and none for a class that no hop enters. When the hub takes a report while the pool has no summary, it makes one at once, and the next one a period later. This is the first summary of a new hub, and of a pool whose entry instances had all gone. It counts only the reports the hub has taken by then, and takes the next number ([The summary's number](#the-summarys-number)). So a new pool's first summary reaches a chooser one report and one relay after its instance is ready, not one or two periods later, and `home_first` can choose the pool from then on.
 
 #### KV numbers
 

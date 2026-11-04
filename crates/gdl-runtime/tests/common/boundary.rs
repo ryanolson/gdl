@@ -317,9 +317,10 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
     model_summarized(spec, directory, pool, RUNTIME, entry, assemble).await
 }
 
-/// [`property`] with the default load summary period, 10 s, so that its
-/// hub makes no summary within a test, and a chooser has none to choose
-/// it by.
+/// [`property`] whose hub makes no load summary, so that a chooser has
+/// none to choose it by: its instances reach the hub's control listener
+/// through a proxy that refuses every load report, as a hub refuses one
+/// it cannot take, so the hub takes none.
 pub async fn model_unsummarized(
     spec: &DeploymentSpec,
     directory: &Resolving,
@@ -340,13 +341,18 @@ pub async fn model_changed(
 ) -> ModelPool<impl Next<Prompt, Chunk> + Register + use<>> {
     let hub = change(model_hub_needing(pool.name, pool.hub, pool.quorum));
     let extra = format!("{}{RUNTIME}", model_pool(pool.name));
-    start_model(
+    let hub = pool_hub_timed(spec, hub, directory, timing()).await;
+    // The proxy serves until the test's runtime ends, its handle dropped
+    // or not.
+    let control = Proxy::new(hub.0.control_addr()).await;
+    control.refuse(b"/load HTTP/");
+    instances(
         spec,
-        directory,
+        hub,
+        (None, Some(control.port)),
         pool,
-        (hub, timing()),
         &extra,
-        &|runtime| runtime,
+        &|_, runtime| runtime,
         &|deployment| reference_graph(deployment, events),
     )
     .await
@@ -414,7 +420,21 @@ pub async fn model_summarized<H: Register + Send + Sync + 'static>(
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelPool<H> {
-    let (hub, timing, extra) = summarized(pool, runtime);
+    model_paced(spec, directory, pool, SUMMARY, runtime, entry, assemble).await
+}
+
+/// [`model_summarized`], with the load summary period `period` for the
+/// pool's hub and its instances, and a heartbeat as long.
+pub async fn model_paced<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    pool: Model<'_>,
+    period: Duration,
+    runtime: &str,
+    entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelPool<H> {
+    let (hub, timing, extra) = paced(pool, runtime, period);
     start_model(
         spec,
         directory,
@@ -455,7 +475,7 @@ pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
     let pool = instances(
         spec,
         (hub, readiness),
-        None,
+        (None, None),
         pool,
         &extra,
         &|_, r| r,
@@ -481,7 +501,7 @@ pub async fn model_proxied_configured<H: Register + Send + Sync + 'static>(
     let pool = instances(
         spec,
         (hub, readiness),
-        None,
+        (None, None),
         pool,
         &extra,
         configure,
@@ -518,19 +538,24 @@ pub async fn instance_of<H: Register + Send + Sync + 'static>(
 /// The settings of [`model_summarized`]'s hub, its timing, and what it
 /// adds to every instance's settings.
 fn summarized(pool: Model<'_>, runtime: &str) -> (PoolSettings, PoolTiming, String) {
+    paced(pool, runtime, SUMMARY)
+}
+
+/// [`summarized`], with the load summary period `period`.
+fn paced(pool: Model<'_>, runtime: &str, period: Duration) -> (PoolSettings, PoolTiming, String) {
     let hub = PoolSettings {
         layout: None,
-        summary: SUMMARY,
+        summary: period,
         ..model_hub_needing(pool.name, pool.hub, pool.quorum)
     };
     let timing = PoolTiming {
-        heartbeat: SUMMARY,
+        heartbeat: period,
         ..timing()
     };
     let extra = format!(
         "{}summary_ms = {}\n{runtime}",
         model_pool(pool.name),
-        SUMMARY.as_millis()
+        period.as_millis()
     );
     (hub, timing, extra)
 }
@@ -551,7 +576,7 @@ async fn start_model<H: Register + Send + Sync + 'static>(
         "f" => entry(runtime),
         _ => runtime,
     };
-    instances(spec, hub, None, pool, extra, &configure, assemble).await
+    instances(spec, hub, (None, None), pool, extra, &configure, assemble).await
 }
 
 /// [`model_summarized`] with [`RUNTIME`], each instance's runtime
@@ -565,7 +590,7 @@ pub async fn model_configured<H: Register + Send + Sync + 'static>(
 ) -> ModelPool<H> {
     let (settings_of_hub, timing, extra) = summarized(pool, RUNTIME);
     let hub = pool_hub_timed(spec, settings_of_hub, directory, timing).await;
-    instances(spec, hub, None, pool, &extra, configure, assemble).await
+    instances(spec, hub, (None, None), pool, &extra, configure, assemble).await
 }
 
 /// [`model_summarized`], whose instances reach their hub's public
@@ -596,7 +621,7 @@ pub async fn model_fronted_configured<H: Register + Send + Sync + 'static>(
     let pool = instances(
         spec,
         hub,
-        Some(proxy.port),
+        (Some(proxy.port), None),
         pool,
         &extra,
         configure,
@@ -607,11 +632,12 @@ pub async fn model_fronted_configured<H: Register + Send + Sync + 'static>(
 }
 
 /// Start `pool`'s instances at its hub, each with `extra` added to its
-/// settings, reaching the hub's public listener on `public` if given.
+/// settings, reaching the hub's public listener on `public` and its
+/// control listener on `control`, each if given.
 async fn instances<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     (hub, readiness): (Hub, Arc<PoolReadiness<Resolving>>),
-    public: Option<u16>,
+    (public, control): (Option<u16>, Option<u16>),
     pool: Model<'_>,
     extra: &str,
     configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
@@ -620,7 +646,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
     let entries = pool.entries;
     let (public, control) = (
         public.unwrap_or(hub.public_addr().port()),
-        hub.control_addr().port(),
+        control.unwrap_or(hub.control_addr().port()),
     );
     // Each instance's launch waits for the others of its class.
     let mut segments = vec!["d"];

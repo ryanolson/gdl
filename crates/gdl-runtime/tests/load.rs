@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::boundary::{
-    Model, ModelPool, RUNTIME, Running, SUMMARY, ask, model_proxied, model_summarized, placement,
-    run_graph, spec_of,
+    Model, ModelPool, RUNTIME, Running, SUMMARY, ask, model_paced, model_proxied, model_summarized,
+    placement, run_graph, spec_of,
 };
 use common::pools::{Resolving, followed, global_hub, global_pool, pool_hub_of, settings, until};
 use common::proxy::{Mode, Proxy};
@@ -282,6 +282,52 @@ async fn the_entry_instances_load_reaches_the_choosers_table() {
     let idle = summary(0, 2, 0);
     load(&mut watch, idle).await;
     table_holds(&pools, idle).await;
+    drop(chooser);
+    shut([global_hub, m1.hub]).await;
+}
+
+/// A new pool's first summary reaches the chooser's table as soon as its
+/// entry instance is ready, not a period or two later: the instance
+/// reports at once, and its hub summarizes the first report at once. The
+/// period here is 30 s; the summary is in the table within [`WAIT`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_pools_first_summary_reaches_the_choosers_table_at_once() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (global_hub, _, chooser) = chooser(&spec, &directory).await;
+    let pool = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let quiet = Events::quiet();
+    let period = Duration::from_secs(30);
+    let m1 = model_paced(
+        &spec,
+        &directory,
+        pool,
+        period,
+        RUNTIME,
+        &limited,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let serving = std::time::Instant::now();
+    let pools = tables(&chooser);
+    until(
+        &pools,
+        "M1's first summary in the chooser's table",
+        |pools| followed(pools, "f", M1).is_some_and(|m| m.load.is_some()),
+    )
+    .await;
+    let waited = serving.elapsed();
+    let load = followed(&pools, "f", M1).and_then(|m| m.load);
+    assert_eq!(
+        load.map(|load| (load.instances, load.period_ms)),
+        Some((1, 30_000))
+    );
+    assert!(waited < period / 10, "the first summary took {waited:?}");
     drop(chooser);
     shut([global_hub, m1.hub]).await;
 }

@@ -174,6 +174,36 @@ async fn the_summary_sums_the_reports_of_the_entry_instances() {
     hub.shutdown().await.expect("the hub stops");
 }
 
+/// A hub with no summary makes one at the first report it takes, not a
+/// period after it starts: here the period is 30 s, and the summary comes
+/// in a few seconds at most.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_report_is_summarized_at_once() {
+    let period = Duration::from_secs(30);
+    let (hub, readiness) = hub_of(
+        PoolSettings {
+            summary: period,
+            ..pool(common::POOL, "model-x-01-hub:1337")
+        },
+        MemoryDirectory::new(),
+        timing(),
+    )
+    .await;
+    let mut watch = watch(&readiness).await;
+    let a = join_ready(&hub, "f").await;
+    ready(&mut watch, 1).await;
+    a.report(report(3, 8, 0)).await.expect("the hub takes it");
+    let first = Some(LoadSummary {
+        admitted: 3,
+        limit: 8,
+        instances: 1,
+        period_ms: 30_000,
+        ..Default::default()
+    });
+    load(&mut watch, first, WAIT).await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
 /// An entry instance that retires stops counting at once, its admitted
 /// roots with it, and the hub takes no report from it; one that leaves
 /// stops counting too. With no report counted, there is no summary.

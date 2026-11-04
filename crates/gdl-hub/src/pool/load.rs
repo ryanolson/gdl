@@ -3,14 +3,18 @@
 //! Each usable entry instance reports its admission once a period; the
 //! hub keeps each one's latest report, and once a period sums the reports
 //! it counts: those of instances still usable, and no older than three
-//! periods. The instance and the hub keep their periods on their own
-//! clocks, so two reports can arrive between two summaries: the later
-//! one's admission stands, and the refusals of the earlier one, which no
-//! summary counted, are carried into it. Taking a report and making a summary each cost the work of
-//! one instance and of the pool's entry instances, once a period, never
-//! per request. The reports are kept under the feed's lock, with the entry
-//! instances they belong to, so that whether an instance is usable is
-//! judged with its report.
+//! periods. A report taken while the pool has no summary is summarized at
+//! once, and the next summary is a period later. That report is the first
+//! of a new hub, or of a pool whose entry instances had all gone, and a
+//! chooser does not wait a period for the pool's first summary. The instance and the hub keep
+//! their periods on their own clocks, so two reports can arrive between
+//! two summaries: the later one's admission stands, and the refusals of
+//! the earlier one, which no summary counted, are carried into it. Taking
+//! a report and making a summary each cost the work of one instance and
+//! of the pool's entry instances, once a period, never per request. The
+//! reports are kept under the feed's lock, with the entry instances they
+//! belong to, so that whether an instance is usable is judged with its
+//! report.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,14 +65,15 @@ impl Reports {
     /// report's; its refusals are added to the earlier report's when no
     /// summary has counted those yet and both are of one registration, so
     /// that a summary's refusals are every refusal reported in its period,
-    /// even when two reports of the instance fall in one period.
+    /// even when two reports of the instance fall in one period. Whether
+    /// the pool has no summary, so that one should be made at once.
     pub(super) fn put(
         &mut self,
         instance: InstanceId,
         epoch: RegistrationEpoch,
         mut load: LoadReport,
         now: Instant,
-    ) {
+    ) -> bool {
         if let Some(earlier) = self.reports.get(&instance)
             && !earlier.summarized
             && earlier.epoch == epoch
@@ -82,6 +87,7 @@ impl Reports {
             summarized: false,
         };
         self.reports.insert(instance, report);
+        self.summary.is_none()
     }
 
     /// The latest report `instance` made in its registration `epoch`, and
@@ -155,8 +161,9 @@ struct Report {
 }
 
 /// Make the pool's summary once a `period` until `cancel`, starting one
-/// period from now, when the first reports can have arrived: each one
-/// goes to the feed's watchers (every period while there is one), and to
+/// period from now, and at once when the feed takes a report while the
+/// pool has no summary, the next one then a period later: each one goes
+/// to the feed's watchers (every period while there is one), and to
 /// `loads`, which the record is written from when it changed.
 pub(super) async fn run(
     feed: Arc<Feed>,
@@ -168,7 +175,17 @@ pub(super) async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let summarizing = async {
         loop {
-            ticks.tick().await;
+            tokio::select! {
+                _ = ticks.tick() => {}
+                () = feed.unsummarized() => {
+                    // A wake left from before a tick that made the summary
+                    // is not a first report.
+                    if feed.summary().is_some() {
+                        continue;
+                    }
+                    ticks.reset();
+                }
+            }
             let summary = feed.summarize(Instant::now());
             loads.send_if_modified(|load| {
                 let changed = *load != summary;
@@ -487,5 +504,155 @@ mod kv {
         assert_eq!(summary.instances, 2);
         assert_eq!(summary.kv.capacity(), Some(1_000));
         assert_eq!(summary.kv, kv);
+    }
+}
+
+#[cfg(test)]
+mod first {
+    use super::{LoadReport, LoadSummary, run};
+    use crate::pool::count::Watched;
+    use crate::pool::feed::Feed;
+    use futures::StreamExt;
+    use gdl_watch::PoolWatchEvent;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::watch;
+    use tokio::time::Instant;
+    use tokio_util::sync::CancellationToken;
+    use velo_hub::Lease;
+    use velo_hub::protocol::RegistrationEpoch;
+    use velo_hub::store::{Incarnation, Removal};
+    use velo_hub::velo::discovery::ServiceEvent;
+    use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
+
+    const PERIOD: Duration = Duration::from_secs(10);
+
+    /// Well within a period: a summary made at a report comes in this, one
+    /// made at the next period's tick does not.
+    const SOON: Duration = Duration::from_secs(1);
+
+    /// The feed of a pool whose entry segment is `f`, its last record
+    /// read, so that it takes reports, with its summaries made by `run`:
+    /// the feed, a watch of it past its snapshot, and the token that stops
+    /// the summaries.
+    async fn pool() -> (Arc<Feed>, crate::pool::PoolWatch, CancellationToken) {
+        let feed = Arc::new(Feed::new(
+            "pool".into(),
+            "class".into(),
+            vec![("f".into(), true)],
+            PERIOD,
+            64,
+            Duration::from_secs(30),
+            Vec::new(),
+        ));
+        feed.settle(1);
+        feed.restore(None, 0);
+        let mut watch = feed.watch().await.expect("the hub runs");
+        while watch.next().await.expect("the snapshot") != PoolWatchEvent::Synced {}
+        let cancel = CancellationToken::new();
+        let (loads, _) = watch::channel(None);
+        tokio::spawn(run(Arc::clone(&feed), PERIOD, loads, cancel.clone()));
+        (feed, watch, cancel)
+    }
+
+    /// A ready entry instance of `feed`, registered once: its id and the
+    /// lease its reports carry.
+    fn ready(feed: &Feed) -> (InstanceId, Lease) {
+        let peer = PeerInfo::new(
+            InstanceId::new_v4(),
+            WorkerAddress::from_encoded(b"tcp://test".to_vec()),
+        );
+        let id = peer.instance_id();
+        let epoch = RegistrationEpoch::new();
+        feed.joined("f", Incarnation::from_u64(1), epoch, peer);
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+        let lease = Lease {
+            incarnation: Incarnation::from_u64(1),
+            epoch,
+        };
+        (id, lease)
+    }
+
+    fn report(admitted: u64) -> LoadReport {
+        LoadReport {
+            admitted,
+            limit: 8,
+            ..Default::default()
+        }
+    }
+
+    /// The next load summary `watch` sends within `bound`, and when.
+    async fn summary(
+        watch: &mut crate::pool::PoolWatch,
+        bound: Duration,
+    ) -> (Option<LoadSummary>, Instant) {
+        tokio::time::timeout(bound, async {
+            loop {
+                if let PoolWatchEvent::Load { load } = watch.next().await.expect("the watch") {
+                    return (load, Instant::now());
+                }
+            }
+        })
+        .await
+        .expect("a summary in time")
+    }
+
+    /// A hub whose pool has no summary makes one at the first report it
+    /// takes, not at the next period, numbered as any summary is; then it
+    /// makes one each period from that one.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_report_is_summarized_at_once_then_once_a_period() {
+        let (feed, mut watch, cancel) = pool().await;
+        tokio::time::sleep(PERIOD / 2).await;
+        let (a, lease) = ready(&feed);
+        let reported = Instant::now();
+        feed.report(a, lease, report(3), std::time::Instant::now())
+            .expect("taken");
+        let (first, at) = summary(&mut watch, SOON).await;
+        assert_eq!(
+            first.map(|load| (load.admitted, load.sequence)),
+            Some((3, 1))
+        );
+        assert!(at - reported < SOON, "at once: {:?}", at - reported);
+        let (next, then) = summary(&mut watch, PERIOD * 2).await;
+        assert_eq!(
+            next.map(|load| (load.admitted, load.sequence)),
+            Some((3, 2))
+        );
+        assert_eq!(then - at, PERIOD, "a period after the first");
+        cancel.cancel();
+    }
+
+    /// A pool whose entry instances have all gone has no summary; the first
+    /// report of one that comes back is summarized at once, numbered one
+    /// past the last summary.
+    #[tokio::test(start_paused = true)]
+    async fn a_pool_back_from_no_instance_is_summarized_at_its_first_report() {
+        let (feed, mut watch, cancel) = pool().await;
+        let (a, lease) = ready(&feed);
+        feed.report(a, lease, report(3), std::time::Instant::now())
+            .expect("taken");
+        let (first, _) = summary(&mut watch, PERIOD * 2).await;
+        assert_eq!(first.map(|load| load.sequence), Some(1));
+        feed.removed(Removal {
+            id: a,
+            incarnation: Incarnation::from_u64(1),
+        });
+        feed.observe(0, Watched::Ready, &ServiceEvent::Removed(a));
+        let (gone, _) = summary(&mut watch, PERIOD * 2).await;
+        assert_eq!(gone, None, "no instance, no summary");
+
+        tokio::time::sleep(PERIOD / 2).await;
+        let (b, lease) = ready(&feed);
+        let reported = Instant::now();
+        feed.report(b, lease, report(1), std::time::Instant::now())
+            .expect("taken");
+        let (back, at) = summary(&mut watch, SOON).await;
+        assert_eq!(
+            back.map(|load| (load.admitted, load.sequence)),
+            Some((1, 2))
+        );
+        assert!(at - reported < SOON, "at once: {:?}", at - reported);
+        cancel.cancel();
     }
 }

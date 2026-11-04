@@ -1,10 +1,10 @@
-//! An entry instance's load reports to its own pool's hub: once a summary
-//! period, what its admission holds, through velo-hub's extension client
-//! with the instance's own credential, with the properties its nodes say it
-//! has, and the KV numbers they set; and at once when the properties
-//! change. A report reads counters the
-//! admission and the forward entries already keep, so a request's path
-//! gains nothing.
+//! An entry instance's load reports to its own pool's hub: the first as
+//! soon as the hub takes it, then once a summary period, what its admission
+//! holds, through velo-hub's extension client with the instance's own
+//! credential, with the properties its nodes say it has, and the KV numbers
+//! they set; and at once when the properties change. A report reads
+//! counters the admission and the forward entries already keep, so a
+//! request's path gains nothing.
 
 use std::time::Duration;
 
@@ -19,9 +19,10 @@ use crate::dist::SegmentLoad;
 
 impl HubSession {
     /// Report what `read` gives, as the instance `instance` this session
-    /// registered, once every `period`, starting one period from now,
-    /// until the handle is aborted: by then the hub has seen the instance
-    /// ready, and takes its report. Each report's refusals are the
+    /// registered, until the handle is aborted: the first report at once,
+    /// and again soon while the hub refuses it, as it does until it has
+    /// seen the instance ready; from the first report it takes, once every
+    /// `period`. Each report's refusals are the
     /// hand-offs declined since the last report the hub took, or since the
     /// instance started for the first report, so a report it refused, or
     /// that went unanswered, loses none. A refusal is no failure of the
@@ -96,9 +97,21 @@ async fn report<F, Fut>(
     F: FnMut(LoadReport) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    let start = tokio::time::Instant::now() + period;
-    let mut ticks = tokio::time::interval_at(start, period);
+    // The first tick is at once.
+    let mut ticks = tokio::time::interval(period);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Until the hub takes a report, the next try comes after this, doubled
+    // each time up to the period. A poll, not a wake: the hub refuses a
+    // report until its loopback shows the instance ready, which the
+    // instance cannot see. And `read` says nothing of when it will give a
+    // load.
+    let mut retry = Some(FIRST_RETRY.min(period));
+    let again = |ticks: &mut tokio::time::Interval, retry: &mut Option<Duration>| {
+        if let Some(after) = retry {
+            ticks.reset_after(*after);
+            *after = (*after * 2).min(period);
+        }
+    };
     // No report has been sent, so every decline since the instance
     // started is the first report's.
     let mut taken = 0;
@@ -110,6 +123,7 @@ async fn report<F, Fut>(
             Ok(()) = said.changed() => {}
         }
         let Some(load) = read() else {
+            again(&mut ticks, &mut retry);
             continue;
         };
         let carried = said.borrow_and_update().clone();
@@ -131,11 +145,16 @@ async fn report<F, Fut>(
             Ok(()) => {
                 taken = load.declined;
                 properties.taken(&carried);
+                // From the first report taken, once a period.
+                if retry.take().is_some() {
+                    ticks.reset();
+                }
                 if refused.take().is_some() {
                     tracing::info!("the pool's hub takes this instance's load reports again");
                 }
             }
             Err(error) => {
+                again(&mut ticks, &mut retry);
                 if refused.as_deref() != Some(error.as_str()) {
                     tracing::warn!(%error, "a load report was not taken");
                     refused = Some(error);
@@ -145,14 +164,19 @@ async fn report<F, Fut>(
     }
 }
 
+/// How long an instance waits to try its first report again, at first.
+const FIRST_RETRY: Duration = Duration::from_millis(50);
+
 fn wide(count: usize) -> u64 {
     u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadReport, SegmentLoad, report};
+    use super::{FIRST_RETRY, LoadReport, SegmentLoad, report};
     use gdl::{InstanceKv, InstanceProperties, KvLoad};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -265,11 +289,116 @@ mod tests {
         assert_eq!(next(&mut reports).await.kv, set);
         task.abort();
     }
+
+    /// Run the reports of an instance whose admission `read` gives, each
+    /// answered by `answer`, given how many were sent before it: what it
+    /// sends, each with when it was sent.
+    fn timed(
+        read: impl Fn() -> Option<SegmentLoad> + Send + 'static,
+        answer: impl Fn(usize) -> bool + Send + 'static,
+    ) -> (
+        mpsc::UnboundedReceiver<(LoadReport, tokio::time::Instant)>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sent, reports) = mpsc::unbounded_channel();
+        let mut count = 0;
+        let task = tokio::spawn(report(
+            PERIOD,
+            read,
+            InstanceProperties::new(),
+            InstanceKv::new(),
+            move |report| {
+                let _ = sent.send((report, tokio::time::Instant::now()));
+                let taken = answer(count);
+                count += 1;
+                async move {
+                    if taken {
+                        Ok(())
+                    } else {
+                        Err("not usable yet".to_string())
+                    }
+                }
+            },
+        ));
+        (reports, task)
+    }
+
+    /// An instance reports as soon as it is ready, not a period later: the
+    /// first report goes at once, and one its hub refuses, as the hub does
+    /// until it has seen the instance ready, goes again soon. Once one is
+    /// taken, it reports once a period, whatever the hub answers.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_report_goes_at_once_and_again_soon_until_taken() {
+        let load = SegmentLoad {
+            admitted: 0,
+            limit: 4,
+            declined: 0,
+        };
+        let start = tokio::time::Instant::now();
+        let (mut reports, task) = timed(move || Some(load), |sent| sent == 2);
+        let mut at = Vec::new();
+        for _ in 0..5 {
+            let (_, sent) = tokio::time::timeout(PERIOD * 2, reports.recv())
+                .await
+                .expect("a report in time")
+                .expect("the reports go on");
+            at.push(sent - start);
+        }
+        assert_eq!(at[0], Duration::ZERO, "the first at once");
+        assert!(
+            at[2] < PERIOD / 4,
+            "the third, which the hub takes, well within the period: {at:?}"
+        );
+        assert_eq!(at[3] - at[2], PERIOD, "then once a period");
+        assert_eq!(at[4] - at[3], PERIOD, "refused or not");
+        task.abort();
+    }
+
+    /// An instance whose admission is not ready to read sends nothing, and
+    /// sends its first report soon after it is: the wait doubles from
+    /// [`FIRST_RETRY`] while it is not, so the report comes no later after
+    /// readiness than the instance had waited before it, plus the first
+    /// wait. Ready a tenth of a period in, it reports well within the
+    /// period.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_report_goes_soon_after_the_instance_is_ready() {
+        let load = SegmentLoad {
+            admitted: 0,
+            limit: 4,
+            declined: 0,
+        };
+        let start = tokio::time::Instant::now();
+        let ready = Arc::new(AtomicBool::new(false));
+        let readable = Arc::clone(&ready);
+        let (mut reports, task) = timed(
+            move || readable.load(Ordering::SeqCst).then_some(load),
+            |_| true,
+        );
+        tokio::time::sleep(PERIOD / 10).await;
+        assert!(reports.try_recv().is_err(), "nothing to report yet");
+        ready.store(true, Ordering::SeqCst);
+        let readied = tokio::time::Instant::now();
+        let (_, sent) = tokio::time::timeout(PERIOD * 2, reports.recv())
+            .await
+            .expect("a report in time")
+            .expect("the reports go on");
+        assert!(
+            sent - readied <= readied - start + FIRST_RETRY,
+            "the first report {:?} after readiness",
+            sent - readied
+        );
+        assert!(
+            sent - start < PERIOD / 4,
+            "the first report well within the period: {:?}",
+            sent - start
+        );
+        task.abort();
+    }
 }
 
 #[cfg(test)]
 mod properties {
-    use super::{LoadReport, Reporter, SegmentLoad, report};
+    use super::{FIRST_RETRY, LoadReport, Reporter, SegmentLoad, report};
     use gdl::{EntryState, InstanceKv, InstanceProperties, PropertyEntry};
     use gdl_model::PropertyLists;
     use std::sync::Arc;
@@ -322,7 +451,7 @@ mod properties {
         };
         let (first, at) = next().await;
         assert!(first.properties.is_empty());
-        assert_eq!(at - start, PERIOD);
+        assert_eq!(at - start, Duration::ZERO, "the first report at once");
 
         tokio::time::advance(PERIOD / 2).await;
         properties
@@ -330,7 +459,7 @@ mod properties {
             .expect("a list");
         let (changed, at) = next().await;
         assert_eq!(changed.properties, lists(vec![ready("m")]));
-        assert_eq!(at - start, PERIOD + PERIOD / 2, "at once");
+        assert_eq!(at - start, PERIOD / 2, "at once");
         let (later, _) = next().await;
         assert_eq!(later.properties, lists(vec![ready("m")]));
         task.abort();
@@ -403,7 +532,7 @@ mod properties {
             .expect("the node drops the property");
         assert_eq!(
             stop(&properties, 2).await,
-            (PERIOD * 3, vec![true; 3]),
+            (FIRST_RETRY + FIRST_RETRY * 2, vec![true; 3]),
             "answered at the third"
         );
 
