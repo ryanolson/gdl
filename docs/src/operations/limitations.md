@@ -190,6 +190,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** keep the hubs of pools that jobs join on the default ports, or give the segment the control port in its own settings (`[hub] control_port`). See [Joining a running pool](../concepts/hub.md#joining-a-running-pool).
 - **Lifts:** a record that also names the hub's control listener.
 
+### The hub binary listens on IPv4 only
+- **What:** the `gdl-hub` binary binds its public and control listeners to `0.0.0.0`, so a node with only IPv6 cannot run it, and a segment cannot reach it at an IPv6 address.
+- **Why:** the binary keeps velo-hub's default bind address, and takes no setting for another one.
+- **Workaround:** run the hub on a node with IPv4. A program that builds the hub itself (`gdl_hub::hub_builder`) can set `HubConfig`'s `server.bind_addr` to an IPv6 address: a segment then reaches it there, and `gdl-hub --resolve` writes its IPv6 host.
+- **Lifts:** a setting for the binary's bind address.
+
 ### Under a hub, an unspecified `listen` needs `HOSTNAME`
 - **What:** when `listen` is `0.0.0.0:<port>`, a segment binds the IPv4 address its `HOSTNAME` resolves to. The launch fails if `HOSTNAME` is unset or has no IPv4 address.
 - **When:** a native run under a hub outside a container.
