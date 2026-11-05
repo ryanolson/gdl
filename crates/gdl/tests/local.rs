@@ -225,6 +225,77 @@ fn a_source_adds_nothing_to_its_hops_future() {
     assert_eq!(generated, alone, "Source::generate");
 }
 
+/// Answers a number with itself, as the `stages` bench's sink does.
+struct Echo;
+
+impl Sink for Echo {
+    type Req = u64;
+    type Item = u64;
+
+    async fn generate(&self, _cx: Cx, req: u64) -> Result<Items<u64>> {
+        Ok(items(stream::iter([Ok(req)])))
+    }
+}
+
+/// Passes a number on, as a forward node.
+struct Ahead;
+
+impl Forward for Ahead {
+    type In = u64;
+    type Out = u64;
+
+    async fn forward(&self, _cx: &Cx, req: u64) -> Result<u64> {
+        Ok(req)
+    }
+}
+
+/// Passes a stream of numbers on, as a backward node.
+struct Behind;
+
+impl Backward for Behind {
+    type In = u64;
+    type Out = u64;
+
+    fn backward(&self, _cx: &Cx, input: Items<u64>) -> Items<u64> {
+        input
+    }
+}
+
+/// The edge's future, in bytes, over a sink of `u64`s: 768 with no stages
+/// and 832 with a forward and a backward node, on aarch64 with the pinned
+/// toolchain, in a test build and a release build. That is the inner end's
+/// scope, which the race watches, and a reference to it in the race and in
+/// the work it polls. A context is 80 bytes, so the margin, 16 bytes, takes
+/// a reference or two but not a context held across the race: the inner
+/// end's context, made before the race, once held it there, at 832 and 960
+/// bytes. The future is moved whole on every request, so a raise of either
+/// bound is a cost to measure first (docs/src/operations/feature-costs.md).
+const EDGE_FUTURE_CEILING: usize = 784;
+const EDGE_WITH_STAGES_FUTURE_CEILING: usize = 848;
+
+/// The edge's future holds the attempt's context and the scope of its
+/// inner end across its race, and nothing larger: the inner end's context
+/// is made in the work the race polls.
+#[test]
+fn an_edge_holds_no_context_across_its_race() {
+    let edge = Source::new(Hop::new((), SinkStage::new(Arc::new(Echo)), ()));
+    let size = std::mem::size_of_val(&edge.generate(Cx::new(), 1));
+    assert!(
+        size <= EDGE_FUTURE_CEILING,
+        "the edge's future is {size} bytes, over its ceiling of {EDGE_FUTURE_CEILING}"
+    );
+    let staged = Source::new(Hop::new(
+        (Arc::new(Ahead), ()),
+        SinkStage::new(Arc::new(Echo)),
+        (Arc::new(Behind), ()),
+    ));
+    let size = std::mem::size_of_val(&staged.generate(Cx::new(), 1));
+    assert!(
+        size <= EDGE_WITH_STAGES_FUTURE_CEILING,
+        "the edge's future with stages is {size} bytes, over its ceiling of {EDGE_WITH_STAGES_FUTURE_CEILING}"
+    );
+}
+
 /// Waits once, then answers like `Spell`; counts how often it is polled.
 struct Once(Arc<std::sync::atomic::AtomicUsize>);
 

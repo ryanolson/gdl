@@ -58,12 +58,15 @@ where
             // watches it: every call the inner end makes without a scope of
             // its own runs under it, so its cancel is the request's. A child
             // sees its parent's cancel, so the race still sees the attempt's.
-            let scope = attempt.child();
-            let below = scope.cancel_token();
+            // Only the scope is held here; its context is made in `run`. A
+            // context held across the race would be moved with this future
+            // on every request (`an_edge_holds_no_context_across_its_race`).
+            let below = attempt.child_scope();
             // Built where it is pinned, so it is not moved there. The forward
             // chain hands the request on to the inner end, not back here: each
             // return would move the whole request once more.
             let at = &attempt;
+            let under = &below;
             // What the chain's around nodes kept travels with the request, to
             // the backward chain of this attempt alone.
             let run = pin!(self.fwd.run(at, req, (), move |req, kept| async move {
@@ -75,6 +78,7 @@ where
                 // a terminal item from it stops it even while a backward node
                 // still holds that item, and a node that cancels its own context
                 // gets the same outcome whether or not backward nodes follow.
+                let scope = attempt.child_in(under.clone());
                 let producer = Producer::of(&scope);
                 let items = self.inner.call(scope, req).await?;
                 let items = producer.fused(items);

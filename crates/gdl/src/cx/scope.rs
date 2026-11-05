@@ -54,6 +54,14 @@ impl Scope {
         }))
     }
 
+    /// Whether `parent` is this scope's parent.
+    pub(crate) fn is_child_of(&self, parent: &Scope) -> bool {
+        self.0
+            .parent
+            .as_ref()
+            .is_some_and(|node| Arc::ptr_eq(node, &parent.0))
+    }
+
     /// Whether `other` is this scope itself.
     pub fn same(&self, other: &Scope) -> bool {
         Arc::ptr_eq(&self.0, &other.0)

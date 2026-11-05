@@ -888,9 +888,24 @@ valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/examples
 - **A node that declares `FILTERS` costs 19.76 Ir per item, and 268 Ir and an allocation per request:** the yield in front of its input, which is boxed.
 - **The scoped form costs what an attempt cost per item, and 362 Ir and an allocation more per request.** The allocation is the boxed attempt in `Called`, built in its box. Unboxed, the attempt's arm sized every operator's boxed future for it: the box outgrew the allocator's small-size cache, the profile showed the difference in `_int_malloc` and the free paths with the same number of allocations, and a stage under the request scope cost 1,131 Ir per request instead of 821. Built with `Box::pin` rather than in place, the boxed attempt cost 144 Ir more per request in `memcpy`.
 - **With a 2 KiB request,** a stage under the request scope saves 1,090 Ir per request, and the scoped form costs 1,463 Ir more than an attempt did. That difference was not profiled.
-- **The edge costs 60 Ir more per request:** the inner end's scope made before the race, and the race on it.
+- **The edge costs 60 Ir more per request.** About 16 of it is the node boundary's ending out of line, the next point (`fuse_end` and `end`, against `end` and `interrupted`). The rest was the inner end's context, made before the race so that the race could watch its scope. "The inner end's context in the race's work", below, wins most of it back.
 - **A node boundary's ending runs out of line,** since it checks after it drops the producer's stream. Each node boundary inside an attempt costs 8 Ir less per item (`hop` and `around`, and the scoped `backward` shape), and a hop's request 13 to 15 Ir more.
 - **A distributed hop whose plan is local** passes through in the same way, behind one box that keeps it out of the front's call future (`the_front_call_future_stays_under_its_ceiling`). No bench builds a `DHop` yet.
+
+**The inner end's context in the race's work.** The race of a hop's attempt watches the scope it hands its inner end. The hop once made the inner end's whole context before the race, and held it, and a clone of its scope, across the race. Now it makes only the scope there (`Cx::child_scope`), and the work that the race polls wraps it in the context (`Cx::child_in`), where the context was made before the request scope. The race still watches that scope from its first poll. A local `DHop` does the same, and the received run's select borrows its inner end's scope instead of cloning it. Base `e95cdb7a` and the change were built in one target directory, with the same commands as "The request scope" above and binaries at paths of the same length, two rounds each. They agreed within 0.4 Ir, except in `deadline pending`, where the timer moved a round by up to 22 Ir per request.
+
+| `u64` items | Base: Ir per request | Change: Ir per request |
+|---|---|---|
+| the edge (`operator` at 0 stages) | 2,940.0 | 2,903.0 |
+| the edge, with a deadline | 3,530.8 | 3,492.8 |
+| the edge, `pending` | 4,257.2 | 4,219.2 |
+| `hop`, per stage at 5 stages | 925.6 | 916.2 |
+| `around`, per stage at 5 stages | 953.2 | 943.3 |
+| `hop`, per stage, `pending` | 945.3 | 936.0 |
+
+- **The edge costs 37 Ir less per request,** and a `hop` or `around` stage 9 to 10 less. Nothing moves per item or in allocations, and the `operator` rows move by less than 1 Ir. Against the base before the request scope (`e5155ee8`, 2,880 Ir), the edge still costs 23 Ir more. In callgrind's functions, the node boundary's ending out of line is 16 Ir of that. The one more reference to the inner end's scope, which the race holds, is 10: an atomic increment and decrement. The other functions net 3 Ir less. Removing that reference would need the context to borrow its scope.
+- **The futures are smaller.** Over a `u64` sink, the edge's future goes from 832 B to 768 B (720 B before the request scope), and with a forward and a backward node from 960 B to 832 B (768 B). The 64 B over the base before the request scope is the scope held across the race, a reference to it in the race and in its work, and alignment. `an_edge_holds_no_context_across_its_race` (`crates/gdl/tests/local.rs`) holds both sizes. The front's call future goes from 9,088 B to 8,848 B, and `DHop::generate` by 176 B to 240 B, where the local plan's race was the largest state of the future.
+- **`stages` shows no change in `memcpy`,** with `u64` or 2 KiB requests: its edge awaits the hop's future where it was built. A caller that moves the future, as a pipeline engine that holds it does, copies 64 B or 128 B less per move.
 ### Copies of an item
 
 A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.

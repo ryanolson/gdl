@@ -100,11 +100,28 @@ impl Cx {
     /// `next` with it is an attempt). Cancelling or stopping this context
     /// reaches the child; cancelling the child does not reach this one.
     pub fn child(&self) -> Self {
+        self.child_in(self.scope.child())
+    }
+
+    /// The scope of a context that [`Cx::child_in`] makes later: a race
+    /// can watch it before that context exists, and a future that holds
+    /// only the scope across its race does not hold a whole context there
+    /// too (docs/src/operations/feature-costs.md).
+    #[doc(hidden)]
+    pub fn child_scope(&self) -> Scope {
+        self.scope.child()
+    }
+
+    /// [`Cx::child`] with `scope`, which [`Cx::child_scope`] made from
+    /// this context.
+    #[doc(hidden)]
+    pub fn child_in(&self, scope: Scope) -> Self {
+        debug_assert!(scope.is_child_of(&self.scope), "a scope from `child_scope`");
         Self {
             id: self.id,
             meta: Arc::clone(&self.meta),
             deadline: self.deadline,
-            scope: self.scope.child(),
+            scope,
             ext: self.ext.clone(),
             visit: self.visit.clone(),
         }
@@ -184,6 +201,13 @@ impl Cx {
     #[doc(hidden)]
     pub fn cancel_token(&self) -> Scope {
         self.scope.clone()
+    }
+
+    /// This context's scope, borrowed: for a wait on it beside the context,
+    /// with no clone to make and drop.
+    #[doc(hidden)]
+    pub fn scope(&self) -> &Scope {
+        &self.scope
     }
 
     /// [`Cx::done`] with this context's deadline and the cancel of `below`.
