@@ -429,6 +429,21 @@ fn commit(context: &Context, top: &Path) -> Result<OsString, Error> {
             )));
         }
     };
+    // `git stash create` first asks whether tracked files changed without
+    // refreshing the index, so a file whose stat changed and whose content
+    // did not, as after a copy that stamps every file with a new time,
+    // counts as changed. It then refreshes, finds nothing to save, and
+    // exits 1 with no word on either stream. Refreshed first, the copy
+    // answers the first question as the second does. `--unmerged` leaves
+    // a conflict for `stash create` to report; `-q` reports no change.
+    if let Some(copied) = copied {
+        run(
+            context,
+            top,
+            Some(copied),
+            &["update-index", "-q", "--unmerged", "--refresh"],
+        )?;
+    }
     // The commit is never stored under a ref, so whose it is and whether
     // it is signed do not matter; the host's settings for them must not
     // stop the build.
@@ -740,10 +755,42 @@ fn run<S: AsRef<OsStr>>(
         return Err(Error::new(format!(
             "{prefix}: git cannot archive the sources in {}, and `--local` builds only what Git holds: {}",
             dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            failure(dir, index, args, &output)
         )));
     }
     Ok(output.stdout)
+}
+
+/// Which Git command failed, how it ended, and what it wrote to stderr,
+/// "(empty)" when nothing: Git can fail without a word, and Git's words
+/// alone then say nothing.
+fn failure<S: AsRef<OsStr>>(
+    dir: &Path,
+    index: Option<&Path>,
+    args: &[S],
+    output: &std::process::Output,
+) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    let command = [OsStr::new("-C"), dir.as_os_str()]
+        .into_iter()
+        .chain(args.iter().map(AsRef::as_ref))
+        .map(OsStr::to_string_lossy)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let index = index
+        .map(|index| format!(" with GIT_INDEX_FILE={}", index.display()))
+        .unwrap_or_default();
+    let ended = match (output.status.code(), output.status.signal()) {
+        (Some(code), _) => format!("exited with code {code}"),
+        (None, Some(signal)) => format!("was killed by signal {signal}"),
+        (None, None) => output.status.to_string(),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = match stderr.trim() {
+        "" => "(empty)",
+        stderr => stderr,
+    };
+    format!("`git {command}`{index} {ended}, stderr: {stderr}")
 }
 
 /// `bytes` without the line break Git ends its output with.
@@ -903,5 +950,249 @@ mod tests {
         assert!(found.is_empty(), "{found:?} hold an ignored file");
         let error = built.expect_err("Git's refusal stops the build");
         assert!(error.to_string().contains("dubious ownership"), "{error}");
+    }
+
+    /// Git in `dir`, as the fixtures run it: with an identity, unsigned,
+    /// and asserted to succeed.
+    fn fixture_git(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=gdl", "-c", "user.email=gdl@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        output.stdout
+    }
+
+    /// A context in `root` whose one source is the crate `root/node`, a
+    /// Git checkout of one commit, and the bundle files that name it.
+    fn fixture(root: &Path) -> (Context, Files) {
+        let node = root.join("node");
+        std::fs::create_dir_all(node.join("src")).expect("a crate");
+        std::fs::write(node.join("src/lib.rs"), "pub fn f() {}\n").expect("a library");
+        std::fs::write(
+            node.join("Cargo.toml"),
+            "[package]\nname = \"node\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("a manifest");
+        fixture_git(&node, &["init", "-q"]);
+        fixture_git(&node, &["add", "-A"]);
+        fixture_git(&node, &["commit", "-q", "-m", "node"]);
+        let files = Files::from([(
+            PathBuf::from("main/Cargo.toml"),
+            "[package]\nname = \"segment\"\nversion = \"1.0.0\"\n\
+             [dependencies]\nnode = { path = \"../../node\" }\n"
+                .to_string(),
+        )]);
+        let context =
+            Context::find(&root.join("bundle"), &files, None, Mode::Image).expect("the context");
+        (context, files)
+    }
+
+    /// Set the modification time of every file Git tracks in `dir` to
+    /// `when`, as a copy that stamps each file with the time of the copy
+    /// does: no content changes, but the index's record of each file's
+    /// stat no longer matches.
+    fn touch(dir: &Path, when: std::time::SystemTime) {
+        let listed = fixture_git(dir, &["ls-files", "-z"]);
+        for name in listed.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(OsStr::from_bytes(name)))
+                .and_then(|file| file.set_modified(when))
+                .expect("a tracked file");
+        }
+    }
+
+    /// A git failure names the command, how it ended, and its stderr, even
+    /// when Git wrote none: a bare "Git holds:" followed by nothing told no
+    /// one which step failed or why.
+    ///
+    /// The stand-in `git` is found through `PATH`, which reaches every
+    /// test of this binary if set here, so the case runs again as a child
+    /// that has it.
+    #[test]
+    fn a_silent_git_failure_names_its_command_exit_and_empty_stderr() {
+        const WORKER: &str = "GDL_TREE_SILENT_GIT_WORKER";
+        let Some(stand_in) = std::env::var_os(WORKER) else {
+            let temp = tempfile::Builder::new()
+                .prefix("gdl-tree-silent-")
+                .tempdir()
+                .expect("a directory");
+            let bin = temp.path().join("bin");
+            std::fs::create_dir(&bin).expect("a directory");
+            // Silent: no output on either stream, exit 1, or a signal when
+            // asked for one.
+            std::fs::write(
+                bin.join("git"),
+                "#!/bin/sh\ncase \"$*\" in *signal*) kill -TERM $$ ;; esac\nexit 1\n",
+            )
+            .expect("a stand-in git");
+            std::fs::set_permissions(
+                bin.join("git"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            )
+            .expect("an executable");
+            let mut path = std::ffi::OsString::from(&bin);
+            path.push(":");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            let output = std::process::Command::new("timeout")
+                .arg("10")
+                .arg(std::env::current_exe().expect("the test binary"))
+                .args([
+                    "--exact",
+                    "deployment::tree::tests::a_silent_git_failure_names_its_command_exit_and_empty_stderr",
+                    "--nocapture",
+                ])
+                .env(WORKER, temp.path())
+                .env("PATH", path)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("a child with the stand-in git");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        };
+        let dir = PathBuf::from(stand_in);
+        let files = Files::from([(
+            PathBuf::from("main/Cargo.toml"),
+            "[package]\nname = \"segment\"\nversion = \"1.0.0\"\n".to_string(),
+        )]);
+        let context =
+            Context::find(&dir.join("bundle"), &files, None, Mode::Image).expect("the context");
+        let error = git(&context, &dir, &["rev-parse", "--show-toplevel"])
+            .expect_err("the stand-in fails")
+            .to_string();
+        let command = format!("`git -C {} rev-parse --show-toplevel`", dir.display());
+        assert!(error.contains(&command), "{error}");
+        assert!(error.contains("exited with code 1"), "{error}");
+        assert!(error.ends_with("stderr: (empty)"), "{error}");
+        let error = run(&context, &dir, Some(Path::new("/i")), &["signal"])
+            .expect_err("the stand-in is killed")
+            .to_string();
+        assert!(error.contains("with GIT_INDEX_FILE=/i"), "{error}");
+        assert!(error.contains("killed by signal 15"), "{error}");
+    }
+
+    /// A checkout whose tracked files were all stamped with a new time,
+    /// and none changed, archives `HEAD`; one whose file changed too
+    /// archives the change. The checkout's own index is never written.
+    ///
+    /// Before the copy of the index was refreshed, `git stash create`
+    /// failed here every time, with exit 1 and nothing on either stream:
+    /// it first asks, without a refresh, whether tracked files changed,
+    /// and stat alone says yes; it then refreshes and asks again, finds
+    /// nothing to save, and exits 1.
+    #[test]
+    fn a_checkout_with_every_file_touched_archives() {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-tree-touched-")
+            .tempdir()
+            .expect("a directory");
+        let root = temp.path().canonicalize().expect("the path");
+        let (context, files) = fixture(&root);
+        let node = root.join("node");
+        let index = node.join(".git/index");
+        let before = std::fs::read(&index).expect("the index");
+        touch(
+            &node,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+        );
+        let tree = root.join("tree");
+        std::fs::create_dir(&tree).expect("a tree");
+        build(&tree, &context, &files, &[]).expect("the touched checkout archives");
+        assert_eq!(
+            std::fs::read_to_string(tree.join("node/src/lib.rs")).expect("the library"),
+            "pub fn f() {}\n"
+        );
+        std::fs::write(node.join("src/lib.rs"), "pub fn g() {}\n").expect("a change");
+        let changed = root.join("changed");
+        std::fs::create_dir(&changed).expect("a tree");
+        build(&changed, &context, &files, &[]).expect("the changed checkout archives");
+        assert_eq!(
+            std::fs::read_to_string(changed.join("node/src/lib.rs")).expect("the library"),
+            "pub fn g() {}\n"
+        );
+        assert_eq!(std::fs::read(&index).expect("the index"), before);
+    }
+
+    /// The capture holds while another process refreshes the checkout's
+    /// index, which takes `index.lock`, as an editor's `git status` does:
+    /// the capture reads the index once, through a copy, and takes no lock
+    /// of the checkout's. Each round stamps every tracked file anew, so
+    /// the copy is stale whenever the refresher has not caught up.
+    ///
+    /// Rounds run until about two seconds have passed, and at least ten:
+    /// the refresher must overlap many captures for the absence of a race
+    /// to mean anything.
+    #[test]
+    fn a_capture_holds_under_a_concurrent_index_refresh() {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-tree-refresh-")
+            .tempdir()
+            .expect("a directory");
+        let root = temp.path().canonicalize().expect("the path");
+        let (context, files) = fixture(&root);
+        let node = root.join("node");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let (rounds, refreshes) = std::thread::scope(|scope| {
+            let refresher = scope.spawn(|| {
+                let mut refreshes = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let args: &[&str] = match refreshes % 2 {
+                        0 => &["update-index", "-q", "--refresh"],
+                        _ => &["status", "--porcelain"],
+                    };
+                    // Either may lose the lock to the other's last run.
+                    let _ = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&node)
+                        .args(args)
+                        .stdin(std::process::Stdio::null())
+                        .output();
+                    refreshes += 1;
+                }
+                refreshes
+            });
+            // Stops the refresher on any exit, a panic included, so that
+            // the scope's join cannot wait on it forever.
+            struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for Stop<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let guard = Stop(&stop);
+            let started = std::time::Instant::now();
+            let mut rounds = 0u32;
+            let outcome = loop {
+                if rounds >= 10 && started.elapsed() > std::time::Duration::from_secs(2) {
+                    break Ok(rounds);
+                }
+                touch(
+                    &node,
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(rounds.into()),
+                );
+                let tree = root.join(format!("tree-{rounds}"));
+                std::fs::create_dir(&tree).expect("a tree");
+                if let Err(error) = build(&tree, &context, &files, &[]) {
+                    break Err(format!("round {rounds}: {error}"));
+                }
+                rounds += 1;
+            };
+            drop(guard);
+            let refreshes = refresher.join().expect("the refresher");
+            (outcome.unwrap_or_else(|e| panic!("{e}")), refreshes)
+        });
+        assert!(rounds >= 10 && refreshes > 0, "{rounds} {refreshes}");
     }
 }
