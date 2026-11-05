@@ -235,6 +235,17 @@ A hub that restarts ends every watch, so the epoch does not change within one. T
 
 `POST /v1/ext/gdl-pool/drain` on the control listener starts the pool's drain. The pool is `draining` on its health endpoint (503), its record, and its watch by the time the hub answers. The answer is 202 with the health body. It waits up to 5 s for the directory to store the draining record. A second drain is answered the same way. A pool whose class no hop enters, such as a global pool, is refused with 409. [Draining a pool](pool-routing.md#draining-a-pool) describes what the instances do. A parent's hub lists the pool as draining from its watch or its record, and a node reads that with `ClassPools::is_draining`, also after the parent has dropped its follow and until the pool withdraws its record ([What a node reads](pool-routing.md#what-a-node-reads)). A drain does not change the pool's property list, and lasts for the life of the hub's process: the pool's hub started again, of a later epoch, is not draining.
 
+### Draining when the hub stops
+
+By default a pool's hub stops at its first SIGTERM or SIGINT. A batch system can signal every process of a job at once, before a time limit or on preemption. A hub that stops then takes the registrations of instances that still serve. With `[pool] drain_on_stop = true` (`GDL_POOL__DRAIN_ON_STOP=true`), the first signal stops the pool first, and the hub stops after that:
+
+- A pool that a hop enters drains, by the code that the drain request runs. The hub serves until the directory has stored the drained pool's withdrawal.
+- A pool whose class no hop enters, such as a global pool, cannot drain, and its instances follow no pool drain. The hub serves until no instance of its class is a member or registering. It does not stop when they announce `drained`: an instance that hosts a source announces that as soon as it is stopped, while it still serves the requests it admitted. The hub does not withdraw the record, which lapses on its readers' clocks.
+
+Each wait is bounded by `stop_wait_ms`, 660 s by default (`PoolSettings::DEFAULT_STOP_WAIT`): an instance's default drain bound of 600 s, and a minute more. The hub writes on stderr how the stop ended: withdrawn, left, or at its wait with the number of instances still there. A second signal stops the hub at once. Once the hub has shut down, the process waits at most 1 s more for a directory call that does not return, such as a read of a `dir` mount that does not answer, and then exits. Compose and Kubernetes objects leave the setting off.
+
+Code in the hub's process can start the same stop: `GraphAdmission::pool_stop()` returns it as a `PoolStop`, whose `run(wait)` returns a `Stopped`. The stop does not shut the hub down.
+
 ### A pool whose hub is gone
 
 A pool whose hub is gone cannot drain or say that it was scaled to 0, and silence never does either. An operator says it on the parent pool's hub, which reads its children's records:

@@ -35,6 +35,8 @@ use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 /// watch_buffer = 1024          # optional, the hub's alone: events a watcher may fall behind by
 /// lost_chooser_ms = 30000      # optional, the hub's alone: how long it waits for a chooser with no watch of its relay
 /// keyed_capacity = 1000000     # optional, the hub's alone: keyed records its table holds
+/// drain_on_stop = false        # optional, the hub's alone: drain the pool on the first SIGTERM or SIGINT
+/// # stop_wait_ms = 660000      # with drain_on_stop, and only with it: how long the hub waits for the drain
 /// [watch_caps]                 # optional, the hub's alone: watches each route serves at once
 /// relay = 2048
 /// [ready]                      # optional: the quorum of each segment of the class
@@ -113,6 +115,15 @@ pub struct PoolSettings {
     /// the kind's. Sorted by kind, then in the order written. Only the
     /// pool's hub reads it.
     pub properties: Vec<PropertyKey>,
+    /// Whether the pool's hub drains the pool when it is first signalled
+    /// to stop (SIGTERM or SIGINT), and how long it waits for that before
+    /// it stops (`drain_on_stop = true`, with `stop_wait_ms`, by default
+    /// [`PoolSettings::DEFAULT_STOP_WAIT`]). The hub waits for the drained
+    /// pool's record to be withdrawn, or, for a pool whose class no hop
+    /// enters, which cannot drain, for its instances to leave. A second
+    /// signal stops it at once. `None`, the default, stops the hub at its
+    /// first signal. Only the pool's hub reads it.
+    pub drain_on_stop: Option<Duration>,
 }
 
 /// How a pool's hub paces its judgment, its record, and its watches, and
@@ -457,6 +468,12 @@ impl PoolSettings {
     /// The ready pools of each class its class sends to that a pool's
     /// health requires when `requires` is unsaid.
     pub const DEFAULT_REQUIRES: u32 = 1;
+
+    /// How long a hub that drains on stop waits when `stop_wait_ms` is not
+    /// set: 660 s, an instance's default drain bound (the request
+    /// deadline, 600 s) and a minute for the waits before its drain, so
+    /// that the hub outlasts instances stopped by the same signal.
+    pub const DEFAULT_STOP_WAIT: Duration = Duration::from_secs(660);
 
     /// The usable instances `segment` needs for the pool to be ready: its
     /// `ready` entry, else [`PoolSettings::DEFAULT_QUORUM`]. The fleet file
@@ -963,6 +980,10 @@ struct Table {
     keyed_capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     properties: BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    drain_on_stop: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_wait_ms: Option<u64>,
 }
 
 /// The `[watch_caps]` table as written: each cap that is set.
@@ -1074,6 +1095,25 @@ impl TryFrom<Table> for PoolSettings {
             }
         }
         let timing = hub_timing(&table)?;
+        let drain_on_stop = match (table.drain_on_stop, table.stop_wait_ms) {
+            (false, None) => None,
+            (false, Some(ms)) => {
+                return Err(at(
+                    "stop_wait_ms",
+                    format!(
+                        "{ms} is read only by a hub that drains on stop, and `drain_on_stop` is not true"
+                    ),
+                ));
+            }
+            (true, Some(0)) => {
+                return Err(at(
+                    "stop_wait_ms",
+                    "is 0, which would stop the hub before its pool drains; it is at least 1"
+                        .into(),
+                ));
+            }
+            (true, wait) => Some(wait.map_or(Self::DEFAULT_STOP_WAIT, Duration::from_millis)),
+        };
         let parent =
             Parent::from_keys(table.home, table.parents).map_err(|(key, why)| at(key, why))?;
         let directory = match (table.directory, table.dir) {
@@ -1166,6 +1206,7 @@ impl TryFrom<Table> for PoolSettings {
             summary,
             timing,
             properties,
+            drain_on_stop,
         })
     }
 }
@@ -1355,6 +1396,11 @@ impl From<PoolSettings> for Table {
                     kinds
                 },
             ),
+            drain_on_stop: settings.drain_on_stop.is_some(),
+            stop_wait_ms: settings
+                .drain_on_stop
+                .and_then(|wait| set(wait, PoolSettings::DEFAULT_STOP_WAIT))
+                .map(millis),
         }
     }
 }

@@ -852,6 +852,9 @@ impl Fleet {
             hub: None,
             summary: PoolSettings::DEFAULT_SUMMARY,
             timing: Default::default(),
+            // Compose and Kubernetes stop a hub at once; a site that drains
+            // pools on stop sets it in its own render.
+            drain_on_stop: None,
         })
     }
 

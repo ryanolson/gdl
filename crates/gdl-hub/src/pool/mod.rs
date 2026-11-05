@@ -48,6 +48,7 @@ mod properties;
 mod publish;
 mod retire;
 mod retiring;
+mod stop;
 mod timing;
 
 #[cfg(test)]
@@ -55,6 +56,7 @@ mod tests;
 
 pub use feed::PoolWatch;
 pub use health::{PoolHealth, RequiredHealth, SegmentHealth, Waiting};
+pub use stop::{PoolStop, Stopped};
 pub use timing::{PoolTiming, RefusedWatches};
 
 /// Whether a pool can take work, judged and published by the pool's own
@@ -579,32 +581,17 @@ impl<D: PoolDirectory> PoolReadiness<D> {
     /// class no hop enters, which has no entry instances to stop taking
     /// work at.
     pub async fn drain(&self) -> Result<PoolHealth, PoolError> {
-        if self.summary.is_none() {
-            return Err(PoolError::new(
-                "a pool whose class no hop enters cannot be drained",
-            ));
-        }
-        self.drain.start();
-        let (mut shown, mut stored) = (self.health.subscribe(), self.stored.subscribe());
-        // The judgment takes the drain at once, and the writer writes it
-        // next; the bound is for a hub whose judgment has ended, or a
-        // directory that does not answer, and the drain is answered with
-        // what the hub shows then.
-        let _ = tokio::time::timeout(SETTLE, async {
-            let _ = shown
-                .wait_for(|health| health.state == PoolState::Draining)
-                .await;
-            let _ = stored
-                .wait_for(|stored| {
-                    stored
-                        .as_ref()
-                        .is_some_and(|stored| stored.state == PoolState::Draining)
-                })
-                .await;
-        })
-        .await;
-        let health = shown.borrow().clone();
-        Ok(health)
+        self.stopper().drain().await
+    }
+
+    /// The pool's stop, apart from the directory's type.
+    fn stopper(&self) -> PoolStop {
+        PoolStop::new(
+            Arc::clone(&self.drain),
+            self.health.clone(),
+            self.stored.clone(),
+            self.summary.is_some(),
+        )
     }
 
     /// Say whether the pool serves, or is scaled to 0 on purpose, as
@@ -868,7 +855,11 @@ impl<D: PoolDirectory> Extension for PoolReadiness<D> {
     }
 
     async fn attach(&self, ctx: &AttachContext<'_>) -> anyhow::Result<()> {
-        let _ = self.admission.set(ctx.extension::<GraphAdmission>()?);
+        let admission = ctx.extension::<GraphAdmission>()?;
+        // Left with admission, which every gdl hub runs and any program
+        // can name, for one that cannot name this extension's type.
+        admission.hold_pool_stop(self.stopper());
+        let _ = self.admission.set(admission);
         Ok(())
     }
 

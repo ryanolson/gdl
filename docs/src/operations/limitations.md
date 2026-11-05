@@ -221,6 +221,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **When:** a hook that hands off state such as a KV cache. A hook that flushes or cleans up is not affected.
 - **Workaround:** accept the cold request, or have the hook choose the destination and make the router follow it.
 
+### A hub that drains on stop waits for an instance that does not leave
+- **What:** with `[pool] drain_on_stop`, a hub serves after its first signal until its pool's record is withdrawn or, for a pool whose class no hop enters, until every instance of its class has left. An instance that was not signalled, or that holds work past its own drain bound, keeps the hub serving until `stop_wait_ms` passes. The hub then stops and takes that instance's registration.
+- **When:** an instance in another job, started without a deadline that makes it leave first.
+- **Workaround:** stop the pool's instances by the same signal or earlier, or set `stop_wait_ms` to the time the batch system allows. See [Draining when the hub stops](../concepts/pools.md#draining-when-the-hub-stops).
+
 ### The last instance of a segment is not avoided
 - **What:** when every instance of a segment stops, or the only one does, its peers keep routing to it, since nothing else serves. It drains once the sources that can reach it have drained, or at the drain's bound.
 - **Workaround:** start a new instance first. Once it is ready, the peers avoid the retired one, which then leaves.

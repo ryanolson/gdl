@@ -33,7 +33,7 @@ gdl-hub --resolve model_x/model-x-01 --write hub.toml   # write `[hub]` of a run
 
 `deployment.json` holds the graph's manifest and the placement (`gdl_model::DeploymentSpec`). `cargo gdl compose` writes it ([Deploy with Docker Compose](../guides/compose-deploy.md)). The binary reads no settings file. It serves on `gdl_model::HUB_PUBLIC_PORT` (1337) and `HUB_CONTROL_PORT` (8337), unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. A segment reads the same variables for where its hub is. Port 0 lets the OS choose. Once it serves, the binary prints the addresses it bound on stderr (`gdl-hub: serving, public ..., control ...`).
 
-The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, and the hub is the first process of its container. The kernel ignores a signal that such a process does not handle. So a hub that handled only SIGINT ran until Docker killed it, 10 s later. A pool's hub takes its pool's settings from `GDL_POOL__*` variables ([Classes and pools](pools.md)).
+The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, and the hub is the first process of its container. The kernel ignores a signal that such a process does not handle. So a hub that handled only SIGINT ran until Docker killed it, 10 s later. A pool's hub takes its pool's settings from `GDL_POOL__*` variables ([Classes and pools](pools.md)). With `GDL_POOL__DRAIN_ON_STOP=true`, the first signal stops the pool before the hub, and a second stops the hub at once ([Draining when the hub stops](pools.md#draining-when-the-hub-stops)).
 
 ### Admission
 

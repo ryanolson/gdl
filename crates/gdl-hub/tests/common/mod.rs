@@ -180,6 +180,18 @@ impl Instance {
         spec: &DeploymentSpec,
         segment: &'static str,
     ) -> Result<Self, ClientError> {
+        let ports = (hub.public_addr().port(), hub.control_addr().port());
+        Self::try_join_at(ports, spec, segment).await
+    }
+
+    /// [`Instance::try_join`] at the hub on loopback whose public and
+    /// control listeners have the ports `(public, control)`: a hub in
+    /// another process.
+    pub async fn try_join_at(
+        (public, control): (u16, u16),
+        spec: &DeploymentSpec,
+        segment: &'static str,
+    ) -> Result<Self, ClientError> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let listening = listener.local_addr().expect("a bound port");
         let tcp = velo_hub::velo::transports::tcp::TcpTransportBuilder::new()
@@ -197,8 +209,8 @@ impl Instance {
             .expect("a velo node");
         let client = HubClient::builder()
             .host("127.0.0.1")
-            .public_port(hub.public_addr().port())
-            .control_port(hub.control_addr().port())
+            .public_port(public)
+            .control_port(control)
             .build()
             .expect("valid test fixture");
         let registration = spec.registration(segment).expect("valid test fixture");

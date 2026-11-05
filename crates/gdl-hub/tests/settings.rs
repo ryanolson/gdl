@@ -101,6 +101,8 @@ fn a_pools_settings_are_read_from_the_environment() {
         model_pool(jail, "/srv/pools");
         jail.set_env("GDL_POOL__READY__D", "2");
         jail.set_env("GDL_POOL__SUMMARY_MS", "2500");
+        jail.set_env("GDL_POOL__DRAIN_ON_STOP", "true");
+        jail.set_env("GDL_POOL__STOP_WAIT_MS", "90000");
         assert_eq!(
             pool_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(PoolSettings {
@@ -118,6 +120,7 @@ fn a_pools_settings_are_read_from_the_environment() {
                 hub: Some("model-x-01-hub:1337".into()),
                 summary: Duration::from_millis(2500),
                 timing: Default::default(),
+                drain_on_stop: Some(Duration::from_secs(90)),
             })
         );
         Ok(())
@@ -323,6 +326,16 @@ fn a_misspelled_or_malformed_pool_variable_is_refused_by_name() {
             "GDL_POOL__LEASE_MS: is 10000; it must be longer than the heartbeat",
         ),
         (
+            "GDL_POOL__STOP_WAIT_MS",
+            "5000",
+            "GDL_POOL__STOP_WAIT_MS: 5000 is read only by a hub that drains on stop",
+        ),
+        (
+            "GDL_POOL__DRAIN_ON_STOP",
+            "soon",
+            "GDL_POOL__DRAIN_ON_STOP: invalid type",
+        ),
+        (
             "GDL_POOL__KEYED_CAPACITY",
             "0",
             "GDL_POOL__KEYED_CAPACITY: is 0, which holds no record",
@@ -436,6 +449,7 @@ fn settings(directory: DirectoryBackend) -> PoolSettings {
         hub: Some("model-x-01-hub:1337".into()),
         summary: PoolSettings::DEFAULT_SUMMARY,
         timing: Default::default(),
+        drain_on_stop: None,
     }
 }
 

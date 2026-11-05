@@ -127,6 +127,21 @@ impl Drain {
         }
     }
 
+    /// How many instances of the pool's class are members of the hub or
+    /// joining it.
+    pub(super) fn present(&self) -> usize {
+        *self.present.borrow()
+    }
+
+    /// Resolves once no instance of the pool's class is a member of the
+    /// hub or joining it, drain or no drain; it refuses no registration,
+    /// so one that comes after it has resolved is not waited for.
+    pub(super) async fn left(&self) {
+        let mut present = self.present.subscribe();
+        // The sender lives as long as the drain, which outlives this.
+        let _ = present.wait_for(|present| *present == 0).await;
+    }
+
     /// Resolves once the drain has started and no instance of the pool's
     /// class is a member of the hub or joining it; from then every
     /// registration is refused.
@@ -192,6 +207,25 @@ mod tests {
         );
         drain.removed(&removal(interior, second));
         assert!(drain.ended().now_or_never().is_some(), "not ended");
+    }
+
+    /// `left` resolves once no member of the class is left or joining,
+    /// without a drain, and leaves later registrations free.
+    #[test]
+    fn left_resolves_with_no_member_and_refuses_nothing() {
+        let drain = Arc::new(Drain::new(["a".to_string()]));
+        assert!(drain.left().now_or_never().is_some(), "no member yet");
+        let joining = drain.join().expect("a registration");
+        assert!(drain.left().now_or_never().is_none(), "one joining");
+        let id = InstanceId::new_v4();
+        drain.joined("a", id, Incarnation::from_u64(1));
+        drop(joining);
+        drain.joined("b", InstanceId::new_v4(), Incarnation::from_u64(1));
+        assert_eq!(drain.present(), 1, "a member of another segment counted");
+        assert!(drain.left().now_or_never().is_none(), "one member");
+        drain.removed(&removal(id, Incarnation::from_u64(1)));
+        assert!(drain.left().now_or_never().is_some(), "the member left");
+        assert!(drain.join().is_ok(), "a registration after it");
     }
 
     /// A drain of a hub with no member ends as it starts.

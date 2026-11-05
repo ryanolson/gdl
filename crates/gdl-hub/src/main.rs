@@ -6,6 +6,13 @@
 //! prints the addresses it bound on stderr. Log events go to stderr, at
 //! the level `RUST_LOG` sets (`warn` by default).
 //!
+//! The hub stops on its first SIGTERM or SIGINT. With
+//! `GDL_POOL__DRAIN_ON_STOP=true`, it first stops its pool
+//! ([`gdl_hub::PoolStop::run`]), for at most `GDL_POOL__STOP_WAIT_MS`,
+//! and says on stderr how that ended; a second signal cuts that short.
+//! Once the hub has shut down, the process exits within
+//! `BLOCKING_GRACE` even when a directory call has not returned.
+//!
 //! `gdl-hub --tables`, in a build with the `dynamodb` feature, is the
 //! DynamoDB directory's tables step, which a deployment runs once before
 //! its hubs: it makes the tables that are absent and checks the keys of
@@ -33,8 +40,21 @@ fn port(name: &str, default: u16) -> Result<u16, String> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// How long the hub's runtime waits, once the hub has shut down, for
+/// the blocking calls still running, such as a `dir` directory's read of
+/// a mount that does not answer. Such a call cannot be cancelled, and a
+/// runtime that waited for it would keep the process alive past its stop
+/// and past a second signal.
+const BLOCKING_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let served = runtime.block_on(serve());
+    runtime.shutdown_timeout(BLOCKING_GRACE);
+    served
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The binary, not the `gdl-hub` library, installs the subscriber: a
     // program that serves the hub through the library keeps its own.
     // Colour off, though another crate may turn on the `ansi` feature:
@@ -78,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
     let pool = gdl_hub::pool_from_env(&spec)?;
+    let drain_on_stop = pool.as_ref().and_then(|pool| pool.drain_on_stop);
     let mut config = HubConfig::default();
     config.server.public_port = port("GDL_HUB__PUBLIC_PORT", HUB_PUBLIC_PORT)?;
     config.server.control_port = port("GDL_HUB__CONTROL_PORT", HUB_CONTROL_PORT)?;
@@ -99,6 +120,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::select! {
         _ = terminate.recv() => {}
         _ = interrupt.recv() => {}
+    }
+    let stop = hub
+        .extension::<gdl_hub::GraphAdmission>()
+        .and_then(|admission| admission.pool_stop());
+    match (drain_on_stop, stop) {
+        (Some(wait), Some(stop)) => {
+            eprintln!(
+                "gdl-hub: stopping: stopping the pool, for at most {wait:?}; a second signal stops the hub at once"
+            );
+            tokio::select! {
+                stopped = stop.run(wait) => eprintln!("gdl-hub: stopped: {stopped}"),
+                _ = terminate.recv() => eprintln!("gdl-hub: a second signal cut the pool's stop"),
+                _ = interrupt.recv() => eprintln!("gdl-hub: a second signal cut the pool's stop"),
+            }
+        }
+        (Some(_), None) => eprintln!("gdl-hub: stopping at once: the hub runs no pool to stop"),
+        (None, _) => {}
     }
     hub.shutdown().await?;
     Ok(())

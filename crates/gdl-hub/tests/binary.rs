@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 
 use gdl_model::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
 
+mod common;
+#[path = "binary/stop.rs"]
+mod stop;
+
 fn spec() -> DeploymentSpec {
     let graph = Manifest {
         name: "pools".into(),
@@ -181,6 +185,8 @@ struct Serving {
     /// The lines before the one that says it serves, which a task the
     /// hub starts before it serves can write.
     before: Vec<String>,
+    /// The port of the public listener.
+    public: u16,
     /// The port of the control listener.
     control: u16,
 }
@@ -223,6 +229,7 @@ impl Serving {
             child,
             lines,
             before: Vec::new(),
+            public: 0,
             control: 0,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -234,11 +241,17 @@ impl Serving {
                     panic!("the hub says that it serves; it wrote {:?}", serving.before)
                 });
             if line.starts_with("gdl-hub: serving") {
-                serving.control = line
-                    .rsplit(':')
-                    .next()
-                    .and_then(|port| port.parse().ok())
-                    .unwrap_or_else(|| panic!("a control port in {line:?}"));
+                // `gdl-hub: serving, public <ip:port>, control <ip:port>`.
+                let port = |part: &str| {
+                    part.rsplit(':')
+                        .next()
+                        .and_then(|port| port.parse().ok())
+                        .unwrap_or_else(|| panic!("a port in {line:?}"))
+                };
+                let (public, control) = line
+                    .split_once(", control ")
+                    .unwrap_or_else(|| panic!("both listeners in {line:?}"));
+                (serving.public, serving.control) = (port(public), port(control));
                 return serving;
             }
             serving.before.push(line);
@@ -273,23 +286,43 @@ impl Serving {
     /// Send `signal` (`TERM`, `INT`), and the hub's exit status within
     /// `within`.
     fn stop(&mut self, signal: &str, within: Duration) -> ExitStatus {
+        self.signal(signal);
+        self.exit_within(within)
+            .unwrap_or_else(|| panic!("the hub runs {within:?} after SIG{signal}"))
+    }
+
+    /// Send `signal` (`TERM`, `INT`).
+    fn signal(&self, signal: &str) {
         let sent = Command::new("kill")
             .arg(format!("-{signal}"))
             .arg(self.child.id().to_string())
             .status()
             .expect("kill");
         assert!(sent.success(), "kill -{signal}");
+    }
+
+    /// The hub's exit status within `within`, or None while it runs.
+    fn exit_within(&mut self, within: Duration) -> Option<ExitStatus> {
         let started = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().expect("the hub's state") {
-                return status;
+                return Some(status);
             }
-            assert!(
-                started.elapsed() < within,
-                "the hub runs {within:?} after SIG{signal}"
-            );
+            if started.elapsed() >= within {
+                return None;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Whether the hub still runs.
+    fn running(&mut self) -> bool {
+        self.child.try_wait().expect("the hub's state").is_none()
+    }
+
+    /// The listeners' ports, `(public, control)`.
+    fn ports(&self) -> (u16, u16) {
+        (self.public, self.control)
     }
 }
 

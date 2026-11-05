@@ -23,6 +23,8 @@ mod calls;
 mod common;
 #[path = "detaching/lease.rs"]
 mod lease;
+#[path = "detaching/stop.rs"]
+mod stop;
 
 use std::sync::Arc;
 use std::time::Duration;

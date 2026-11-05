@@ -60,8 +60,8 @@ pub use dynamodb::ensure_tables_from_vars;
 pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
 pub use pool::{
-    PoolError, PoolHealth, PoolReadiness, PoolTiming, PoolWatch, RefusedWatches, RequiredHealth,
-    SegmentHealth, Waiting,
+    PoolError, PoolHealth, PoolReadiness, PoolStop, PoolTiming, PoolWatch, RefusedWatches,
+    RequiredHealth, SegmentHealth, Stopped, Waiting,
 };
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
@@ -76,7 +76,7 @@ use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use velo_hub::{
     axum::{Json, Router, routing::get},
@@ -88,6 +88,9 @@ use velo_hub::{
 pub struct GraphAdmission {
     spec: DeploymentSpec,
     members: Mutex<HashMap<InstanceId, (Incarnation, Member)>>,
+    /// The stop of the pool whose extension runs beside this admission,
+    /// once the hub has attached it.
+    pool_stop: OnceLock<PoolStop>,
 }
 #[derive(Clone, serde::Serialize)]
 struct Member {
@@ -105,7 +108,23 @@ impl GraphAdmission {
         Self {
             spec,
             members: Mutex::default(),
+            pool_stop: OnceLock::new(),
         }
+    }
+
+    /// The stop of the pool whose [`PoolReadiness`] runs beside this
+    /// admission, once the hub has attached it; None for a hub without
+    /// one. The pool's extension is generic in its directory, so a
+    /// program that chose the directory from its settings, as the hub
+    /// binary does, finds the stop here, through the one extension every
+    /// gdl hub runs.
+    pub fn pool_stop(&self) -> Option<PoolStop> {
+        self.pool_stop.get().cloned()
+    }
+
+    /// Hold the stop of the pool's extension; the first one held stays.
+    pub(crate) fn hold_pool_stop(&self, stop: PoolStop) {
+        let _ = self.pool_stop.set(stop);
     }
 
     /// The segment and the peer of the member `id`, as `/members` shows

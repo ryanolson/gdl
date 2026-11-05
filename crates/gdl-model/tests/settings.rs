@@ -89,6 +89,7 @@ fn a_pools_settings_are_read_whole() {
             summary: Duration::from_secs(10),
             timing: Default::default(),
             properties: Vec::new(),
+            drain_on_stop: None,
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -997,4 +998,56 @@ fn a_shared_pools_hub_refuses_relay() {
         .expect("an instance publishes nothing");
     pool.check_hub_given_directory(&classed())
         .expect("a hub given its directory");
+}
+
+/// A pool's hub drains its pool when it is stopped only when its settings
+/// ask (`drain_on_stop = true`), and waits for the drain up to
+/// `stop_wait_ms`, by default 660 s. Off, nothing is written out, so a
+/// generated `[pool]` table stays as it was. A wait without the drain is
+/// refused, since nothing would read it, and so is a wait of zero, which
+/// would stop the hub as at once while the pool is still draining.
+#[test]
+fn a_pools_hub_drains_on_stop_only_when_asked() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let off = settings(LEAST);
+    assert_eq!(off.drain_on_stop, None);
+    let text = toml::to_string(&off).expect("toml");
+    for key in ["drain_on_stop", "stop_wait_ms"] {
+        assert!(!text.contains(key), "{key} in {text}");
+    }
+    let on = settings(&format!("{LEAST}drain_on_stop = true\n"));
+    assert_eq!(on.drain_on_stop, Some(PoolSettings::DEFAULT_STOP_WAIT));
+    assert_eq!(PoolSettings::DEFAULT_STOP_WAIT, Duration::from_secs(660));
+    let text = toml::to_string(&on).expect("toml");
+    assert!(!text.contains("stop_wait_ms"), "{text}");
+    assert_eq!(settings(&text), on, "{text}");
+    let bounded = settings(&format!(
+        "{LEAST}drain_on_stop = true\nstop_wait_ms = 5000\n"
+    ));
+    assert_eq!(bounded.drain_on_stop, Some(Duration::from_secs(5)));
+    let text = toml::to_string(&bounded).expect("toml");
+    assert_eq!(settings(&text), bounded, "{text}");
+    assert_eq!(
+        settings(&format!("{LEAST}drain_on_stop = false\n")).drain_on_stop,
+        None
+    );
+    for (bad, says) in [
+        ("stop_wait_ms = 5000\n", "drain_on_stop"),
+        (
+            "drain_on_stop = false\nstop_wait_ms = 5000\n",
+            "drain_on_stop",
+        ),
+        ("drain_on_stop = true\nstop_wait_ms = 0\n", "at least 1"),
+    ] {
+        let value: toml::Value = toml::from_str(&format!("{LEAST}{bad}")).expect("toml");
+        let problems = PoolSettings::read(value).expect_err(bad);
+        assert_eq!(problems.0.len(), 1, "{bad}: {problems}");
+        let problem = &problems.0[0];
+        assert_eq!(
+            (problem.table.as_deref(), problem.key.as_deref()),
+            (Some("pool"), Some("stop_wait_ms")),
+            "{bad}: {problem}"
+        );
+        assert!(problem.message.contains(says), "{bad}: {problem}");
+    }
 }

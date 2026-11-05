@@ -16,7 +16,7 @@ A pool's hub serves the `gdl-pool` extension's routes under `/v1/ext/gdl-pool`. 
 | `POST /avoided` | public | none | `Avoided` | 204; counted only from a watch that counted when the instance retired |
 | `POST /report` | public | none | `Report`: a child's record or withdrawal. The query `after=<epoch>.<seq>` or `after=none` names the last write the child read before a record: the parent writes it only while that is still the child's last write, or it holds none | 200 with a `ReportReply` (`interval_ms`, when the parent expects the next report); 400 with a `ReportRefusal` for a malformed one, or a malformed `after`; 409 with a `ReportRefusal` for one the parent refuses, a record after a read of a write since replaced among them. Served only by a hub under the `relay` backend, whether or not its pool is healthy |
 | `GET /report/{class}/{pool}` | public | none | none | 200 with the `PoolRecord` the parent holds for that child, expired or not; 404 when it holds none, with the child's `Withdrawal` as the body when it holds its tombstone. Served only by a hub under the `relay` backend. A restarted child's hub reads it before its first report |
-| `POST /drain` | control | none | none | 202 with the health body; 409 for a pool whose class no hop enters |
+| `POST /drain` | control | none | none | 202 with the health body; 409 for a pool whose class no hop enters. A hub with `[pool] drain_on_stop` runs the same drain on its first SIGTERM or SIGINT ([Draining when the hub stops](../concepts/pools.md#draining-when-the-hub-stops)) |
 | `POST /presence` | control | none | `SetPresence`: `{"presence": "serving"}` or `{"presence": "scaled_to_zero"}` | 204 once the directory has stored a record written after the request with that presence; 503 when it has not within 5 s, or a later request replaced it |
 | `POST /properties/revoke` | control | none | a property's kind and key: `{"kind": "shard", "key": {"name": "a"}}`, the key's fields in any order | 204 once the directory has stored a record that leaves the property out; 400 for a malformed property (a kind that is not a settings key, or a key that is not an object or holds a float); 503 when it has not within 5 s, or a later request lifted it, and at once, with `{"waiting": "directory"}`, until the hub has stored its first write |
 | `POST /properties/lift` | control | none | a property's kind and key | 204 once the directory has stored a record that no longer revokes the property; 400 and 503 as for `revoke` |
@@ -79,6 +79,7 @@ A retire request rides on `state` for the same reason `unfollowed` does: it is f
 | Load summary period | 10 s by default, at least 1 s | `[pool] summary_ms` |
 | Keyed records the table holds | 1,000,000 by default, at least 1 | `[pool] keyed_capacity` |
 | Drain answer wait | up to 5 s | the hub |
+| Hub stop wait, with `drain_on_stop` | 660 s by default, at least 1 ms | `[pool] stop_wait_ms` ([Draining when the hub stops](../concepts/pools.md#draining-when-the-hub-stops)) |
 | Chooser acknowledgement poll, resend | 50 ms, 500 ms | the runtime |
 | Wait for a chooser with no relay watch | 30 s by default | `[pool] lost_chooser_ms` |
 

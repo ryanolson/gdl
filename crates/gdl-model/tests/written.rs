@@ -89,6 +89,7 @@ fn a_pools_settings_read_back_what_they_write() {
         hub: Some("model-x-01-hub:1337".into()),
         summary: Duration::from_millis(2500),
         timing: Default::default(),
+        drain_on_stop: Some(Duration::from_secs(90)),
     };
     let text = toml::to_string(&every).expect("toml");
     let value: toml::Value = toml::from_str(&text).expect("toml");
@@ -101,10 +102,20 @@ fn a_pools_settings_read_back_what_they_write() {
         requires: BTreeMap::new(),
         hub: None,
         summary: PoolSettings::DEFAULT_SUMMARY,
+        drain_on_stop: None,
         ..every
     };
     let text = toml::to_string(&least).expect("toml");
-    for unsaid in ["layout", "home", "dir =", "ready", "requires", "hub"] {
+    for unsaid in [
+        "layout",
+        "home",
+        "dir =",
+        "ready",
+        "requires",
+        "hub",
+        "drain_on_stop",
+        "stop_wait_ms",
+    ] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }
     let value: toml::Value = toml::from_str(&text).expect("toml");
