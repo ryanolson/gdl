@@ -21,7 +21,7 @@ The port types are the caller's tokens, so a name the expansion adds could captu
 - Every other path is rooted: `::std`, `::core`, or the path `graph!` passes as `$crate`.
 - The wire probe's method is `__gdl_codec`, not `codec`. The probe call sits in the caller's scope, and a caller's trait with a `codec` method made the call ambiguous.
 - The probe runs only at concrete types. Inside a generic helper, autoref selection would always take the fallback.
-- A diagram uses generated identifiers (`n0`, `s0`) and puts names only in labels. A node may be named like a keyword of either format (`end` in Mermaid), and a segment name may hold any character. In DOT the edge back into each hop's outer end has `constraint=false`, so the response path does not decide the ranks. Mermaid styles a link by its position, so one `linkStyle` line lists the positions of the crossing links.
+- A diagram uses generated identifiers (`n0`, `s0`) and puts names only in labels. A unary node's copy in a segment is `n3_s1`: the separator keeps node 3 in segment 11 apart from node 31 in segment 1. A node may be named like a keyword of either format (`end` in Mermaid), and a segment name may hold any character. In DOT the edge back into each hop's outer end has `constraint=false`, so the response path does not decide the ranks. Mermaid styles a link by its position, so one `linkStyle` line lists the positions of the crossing links.
 
 ## A portable model
 

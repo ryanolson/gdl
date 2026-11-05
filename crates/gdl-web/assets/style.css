@@ -811,6 +811,10 @@ dialog .node-config label {margin:0}
 #shared-contract {display:none}
 #sink-nodes {display:flex;justify-content:center;align-items:center;gap:80px;margin-top:60px;position:relative;z-index:1}
 .sink-node {width:180px;min-height:48px;border-top:2px solid var(--purple);background:var(--panel)}
+#service-nodes {display:flex;flex-wrap:wrap;justify-content:center;gap:24px;margin-top:40px;position:relative;z-index:1}
+#service-nodes:empty {display:none}
+.service-node {width:180px;min-height:40px;border-style:dashed;background:var(--panel)}
+.service-placement {display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .sink-join {min-height:10px;display:flex;justify-content:center;position:relative}
 .disconnect-sink {border:0;background:none;color:var(--muted);padding:0;width:18px;height:18px;font-size:12px}
 .join-node,.join-node.joined {width:auto;height:auto;min-width:0;border:0;background:none;padding:0;display:flex;align-items:center;gap:4px}

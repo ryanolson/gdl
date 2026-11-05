@@ -25,7 +25,7 @@ pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use layouts::{Placements, check_layout_name};
 pub use pools::PoolPolicy;
 pub use report::CrossingReport;
-use report::hop_lines;
+use report::{call_lines, hop_lines};
 use spelled::Spelled;
 
 /// Which nodes live in which segment.
@@ -421,6 +421,8 @@ pub struct Layout {
     compression: BTreeMap<(usize, Leg, usize), EdgeCompression>,
     /// Each segment's calls to a copy of a unary node in another segment.
     remote_calls: calls::Remote,
+    /// Every call of every copy of each caller, for the crossing report.
+    call_sites: Vec<calls::Site>,
 }
 
 /// A hop that crosses from one class into another. Under the boundary rule
@@ -809,12 +811,14 @@ impl Layout {
 
     /// Crossings and anchors for one request through each root and, when
     /// the placement has classes, the WAN round trips each class boundary
-    /// adds when the request spills to a pool in another region.
+    /// adds when the request spills to a pool in another region. Apart
+    /// from those, each caller's calls to a service in another segment.
     pub fn report(&self) -> CrossingReport {
         CrossingReport {
             roots: self.roots,
             hops: hop_lines(&self.hops, &self.boundaries),
             classed: !self.class_of.is_empty(),
+            calls: call_lines(&self.call_sites),
         }
     }
 }
@@ -980,6 +984,7 @@ fn place(
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
+    let call_sites = calls::sites(manifest, &segment_of, &services);
     Ok(Layout {
         compression,
         roots: manifest
@@ -989,7 +994,8 @@ fn place(
             .count(),
         routing,
         call_routing,
-        remote_calls: calls::remote(manifest, &segment_of, &services),
+        remote_calls: calls::remote(&call_sites),
+        call_sites,
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,

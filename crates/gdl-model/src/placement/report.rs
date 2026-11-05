@@ -1,6 +1,8 @@
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::fmt;
 
+use super::calls::Site;
 use super::{ClassBoundary, HopLayout};
 
 #[cfg(test)]
@@ -8,7 +10,9 @@ mod tests;
 
 /// Aggregate segment crossings and anchors for one request through each
 /// root and, when the placement has classes, the WAN round trips its class
-/// boundaries add to a request that spills to another region.
+/// boundaries add to a request that spills to another region. Apart from
+/// the hops, each caller's calls: the services it calls in another
+/// segment, and how many it calls in its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrossingReport {
     pub(super) roots: usize,
@@ -16,6 +20,8 @@ pub struct CrossingReport {
     // Without classes the report reads as it did before classes existed,
     // so that the generated `crossings.txt` of every such spec is unchanged.
     pub(super) classed: bool,
+    // A graph without callers writes no call line, for the same reason.
+    pub(super) calls: Vec<CallLine>,
 }
 
 impl CrossingReport {
@@ -34,6 +40,14 @@ impl CrossingReport {
     /// one region a boundary adds none. Zero without classes.
     pub fn wan_round_trips(&self) -> usize {
         self.hops.iter().map(|hop| hop.wan_round_trips).sum()
+    }
+
+    /// The `calls` entries, over every copy of every caller, that call a
+    /// copy of the service in another segment. A node may make any number
+    /// of calls per request, so this counts what may be called, not calls
+    /// per request. A remote call is not a crossing.
+    pub fn remote_calls(&self) -> usize {
+        self.calls.iter().map(|line| line.remote.len()).sum()
     }
 }
 
@@ -67,8 +81,59 @@ impl fmt::Display for CrossingReport {
         if self.classed {
             write!(f, ", {} WAN round trips", self.wan_round_trips())?;
         }
+        for line in &self.calls {
+            write!(
+                f,
+                "\ncalls from {} in {}: {} remote",
+                line.caller,
+                line.segment,
+                line.remote.len()
+            )?;
+            if !line.remote.is_empty() {
+                let called: Vec<String> = line
+                    .remote
+                    .iter()
+                    .map(|(service, to)| format!("{service} in {to}"))
+                    .collect();
+                write!(f, " ({})", called.join(", "))?;
+            }
+            write!(f, ", {} local", line.local)?;
+        }
         Ok(())
     }
+}
+
+/// One caller's line of a [`CrossingReport`], for one segment it is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CallLine {
+    caller: String,
+    segment: String,
+    /// Each service it calls in another segment, with that segment, in the
+    /// order its `calls` lists them.
+    remote: Vec<(String, String)>,
+    /// How many services it calls in its own segment.
+    local: usize,
+}
+
+/// A line for each caller and each segment it is in, in name order.
+pub(super) fn call_lines(sites: &[Site]) -> Vec<CallLine> {
+    let mut lines: BTreeMap<(&str, &str), CallLine> = BTreeMap::new();
+    for site in sites {
+        let line = lines
+            .entry((&site.caller, &site.segment))
+            .or_insert_with(|| CallLine {
+                caller: site.caller.clone(),
+                segment: site.segment.clone(),
+                remote: Vec::new(),
+                local: 0,
+            });
+        if site.remote() {
+            line.remote.push((site.service.clone(), site.to.clone()));
+        } else {
+            line.local += 1;
+        }
+    }
+    lines.into_values().collect()
 }
 
 /// One hop's line of a [`CrossingReport`].

@@ -1,8 +1,12 @@
 //! A manifest drawn as a Graphviz DOT graph or a Mermaid flowchart.
 //!
 //! Request edges are solid and response edges dashed, each labeled with its
-//! message type. With a layout, each segment is a cluster and every edge
-//! that crosses segments is drawn thick and red. An edge whose type has no
+//! message type. A unary node is drawn beside the topology, and each
+//! `calls` clause is a dashed edge labeled `calls` and the service's types.
+//! With a layout, each segment is a cluster and every edge that crosses
+//! segments is drawn thick and red. A unary node is drawn in each segment
+//! that lists it, and each copy of a caller has an edge to the copy it
+//! calls: the one in its own segment, or the one other segment's. An edge whose type has no
 //! codec says so in its label: no placement can cut it. A node's label says
 //! which property kinds it provides and needs, with the class of each
 //! need, and the title says each declared kind's type: a property is on no
@@ -59,7 +63,7 @@ impl Manifest {
                 dot_string(&self.declarations().join("\n"))
             );
         }
-        let node = |out: &mut String, indent: &str, index: usize| {
+        let node = |out: &mut String, indent: &str, index: usize, copy: Option<usize>| {
             let info = &self.nodes[index];
             let mut label = format!("{}\n{}", info.name, info.role.name());
             for clause in self.clauses(&info.name) {
@@ -68,23 +72,28 @@ impl Manifest {
             }
             let _ = writeln!(
                 out,
-                "{indent}n{index} [label={}, {}];",
+                "{indent}{} [label={}, {}];",
+                node_id(index, copy),
                 dot_string(&label),
                 dot_shape(info.role)
             );
         };
-        match layout {
+        let segments = layout.map(|layout| self.segments(layout));
+        match &segments {
             None => {
                 for index in 0..self.nodes.len() {
-                    node(&mut out, "    ", index);
+                    node(&mut out, "    ", index, None);
                 }
             }
-            Some(layout) => {
-                for (s, (segment, members)) in self.segments(layout).into_iter().enumerate() {
+            Some(segments) => {
+                for (s, cluster) in segments.iter().enumerate() {
                     let _ = writeln!(out, "    subgraph cluster_s{s} {{");
-                    let _ = writeln!(out, "        label={};", dot_string(segment));
-                    for index in members {
-                        node(&mut out, "        ", index);
+                    let _ = writeln!(out, "        label={};", dot_string(cluster.name));
+                    for &index in &cluster.topology {
+                        node(&mut out, "        ", index, None);
+                    }
+                    for &index in &cluster.unary {
+                        node(&mut out, "        ", index, Some(s));
                     }
                     let _ = writeln!(out, "    }}");
                 }
@@ -110,6 +119,23 @@ impl Manifest {
                 "    n{} -> n{} [{}];",
                 edge.from,
                 edge.to,
+                attrs.join(", ")
+            );
+        }
+        for call in self.calls(layout, segments.as_deref()) {
+            let mut attrs = vec![
+                format!("label={}", dot_string(&call.label)),
+                "style=dashed".to_string(),
+            ];
+            if call.crosses {
+                attrs.push(format!("color={}", dot_string(CROSSING)));
+                attrs.push("penwidth=2".to_string());
+            }
+            let _ = writeln!(
+                out,
+                "    {} -> {} [{}];",
+                call.from,
+                call.to,
                 attrs.join(", ")
             );
         }
@@ -139,7 +165,7 @@ impl Manifest {
         let _ = writeln!(out, "title: {}", yaml_string(&title));
         let _ = writeln!(out, "---");
         let _ = writeln!(out, "flowchart {}", direction.rank());
-        let node = |out: &mut String, indent: &str, index: usize| {
+        let node = |out: &mut String, indent: &str, index: usize, copy: Option<usize>| {
             let info = &self.nodes[index];
             let mut label = format!("\"{}<br/>{}", mermaid_text(&info.name), info.role.name());
             for clause in self.clauses(&info.name) {
@@ -148,19 +174,24 @@ impl Manifest {
             }
             label.push('"');
             let (open, close) = mermaid_shape(info.role);
-            let _ = writeln!(out, "{indent}n{index}{open}{label}{close}");
+            let id = node_id(index, copy);
+            let _ = writeln!(out, "{indent}{id}{open}{label}{close}");
         };
-        match layout {
+        let segments = layout.map(|layout| self.segments(layout));
+        match &segments {
             None => {
                 for index in 0..self.nodes.len() {
-                    node(&mut out, "    ", index);
+                    node(&mut out, "    ", index, None);
                 }
             }
-            Some(layout) => {
-                for (s, (segment, members)) in self.segments(layout).into_iter().enumerate() {
-                    let _ = writeln!(out, "    subgraph s{s}[\"{}\"]", mermaid_text(segment));
-                    for index in members {
-                        node(&mut out, "        ", index);
+            Some(segments) => {
+                for (s, cluster) in segments.iter().enumerate() {
+                    let _ = writeln!(out, "    subgraph s{s}[\"{}\"]", mermaid_text(cluster.name));
+                    for &index in &cluster.topology {
+                        node(&mut out, "        ", index, None);
+                    }
+                    for &index in &cluster.unary {
+                        node(&mut out, "        ", index, Some(s));
                     }
                     let _ = writeln!(out, "    end");
                 }
@@ -169,7 +200,9 @@ impl Manifest {
         // Mermaid styles a link by its position among all links, so the
         // crossings are collected by position as the links are written.
         let mut crossing = Vec::new();
-        for (position, edge) in self.edges(layout).into_iter().enumerate() {
+        let edges = self.edges(layout);
+        let hops = edges.len();
+        for (position, edge) in edges.into_iter().enumerate() {
             let arrow = if edge.backward { "-.->" } else { "-->" };
             let _ = writeln!(
                 out,
@@ -180,6 +213,24 @@ impl Manifest {
             );
             if edge.crosses {
                 crossing.push(position.to_string());
+            }
+        }
+        // The calls are written after the hops' edges, so their positions
+        // follow on.
+        for (position, call) in self
+            .calls(layout, segments.as_deref())
+            .into_iter()
+            .enumerate()
+        {
+            let _ = writeln!(
+                out,
+                "    {} -.->|\"{}\"| {}",
+                call.from,
+                mermaid_text(&call.label),
+                call.to
+            );
+            if call.crosses {
+                crossing.push((hops + position).to_string());
             }
         }
         if !crossing.is_empty() {
@@ -249,22 +300,93 @@ impl Manifest {
     }
 
     /// Each segment of `layout`, in name order, with the indexes of its
-    /// nodes in declaration order.
-    fn segments<'a>(&self, layout: &'a Layout) -> Vec<(&'a str, Vec<usize>)> {
-        let names: BTreeSet<&str> = self
-            .nodes
-            .iter()
-            .filter_map(|node| layout.segment_of(&node.name))
-            .collect();
+    /// topology nodes and of the unary nodes it lists, each in declaration
+    /// order. A segment may list only unary nodes.
+    fn segments<'a>(&self, layout: &'a Layout) -> Vec<Cluster<'a>> {
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for node in &self.nodes {
+            names.extend(layout.segment_of(&node.name));
+            names.extend(layout.service_segments(&node.name));
+        }
         names
             .into_iter()
-            .map(|segment| {
-                let members = (0..self.nodes.len())
+            .map(|segment| Cluster {
+                name: segment,
+                topology: (0..self.nodes.len())
                     .filter(|&i| layout.segment_of(&self.nodes[i].name) == Some(segment))
-                    .collect();
-                (segment, members)
+                    .collect(),
+                unary: (0..self.nodes.len())
+                    .filter(|&i| {
+                        layout
+                            .service_segments(&self.nodes[i].name)
+                            .contains(&segment)
+                    })
+                    .collect(),
             })
             .collect()
+    }
+
+    /// Every `calls` edge, callers in declaration order and each caller's
+    /// services in the order it lists them. With a layout, one edge from
+    /// each copy of the caller to the copy it calls: the one in its own
+    /// segment, or else the one other segment that lists the service.
+    fn calls(&self, layout: Option<&Layout>, segments: Option<&[Cluster<'_>]>) -> Vec<Call> {
+        let index = |name: &str| {
+            self.nodes
+                .iter()
+                .position(|node| node.name == name)
+                .expect("a `calls` clause names only declared nodes")
+        };
+        let label = |service: usize| match &self.nodes[service].unary {
+            Some(unary) => format!(
+                "calls {} -> {}",
+                type_label(&unary.req),
+                type_label(&unary.resp)
+            ),
+            None => "calls".to_string(),
+        };
+        let mut calls = Vec::new();
+        for (from, caller) in self.nodes.iter().enumerate() {
+            for service in &caller.calls {
+                let to = index(service);
+                let (Some(layout), Some(segments)) = (layout, segments) else {
+                    calls.push(Call {
+                        from: node_id(from, None),
+                        to: node_id(to, None),
+                        label: label(to),
+                        crosses: false,
+                    });
+                    continue;
+                };
+                let position = |segment: &str| segments.iter().position(|c| c.name == segment);
+                // A unary caller has one copy per segment that lists it.
+                let copies: Vec<(Option<usize>, &str)> = match layout.segment_of(&caller.name) {
+                    Some(segment) => vec![(None, segment)],
+                    None => layout
+                        .service_segments(&caller.name)
+                        .into_iter()
+                        .map(|segment| (position(segment), segment))
+                        .collect(),
+                };
+                for (copy, segment) in copies {
+                    let (called, crosses) = if layout.service_segments(service).contains(&segment) {
+                        (segment, false)
+                    } else {
+                        match layout.calls_from(segment).find(|(name, _)| name == service) {
+                            Some((_, other)) => (other, true),
+                            None => continue,
+                        }
+                    };
+                    calls.push(Call {
+                        from: node_id(from, copy),
+                        to: node_id(to, position(called)),
+                        label: label(to),
+                        crosses,
+                    });
+                }
+            }
+        }
+        calls
     }
 
     /// Every edge, hop by hop from the outermost: the request path, then the
@@ -307,6 +429,34 @@ impl Manifest {
             }
         }
         edges
+    }
+}
+
+/// One segment of a layout as a diagram draws it.
+struct Cluster<'a> {
+    name: &'a str,
+    /// The indexes of its nodes of the topology.
+    topology: Vec<usize>,
+    /// The indexes of the unary nodes it lists.
+    unary: Vec<usize>,
+}
+
+/// A `calls` edge, between the drawn identifiers of a caller and the copy
+/// of the service it calls.
+struct Call {
+    from: String,
+    to: String,
+    label: String,
+    crosses: bool,
+}
+
+/// A node's identifier: `n3`, or `n3_s1` for a unary node's copy in the
+/// layout's second segment. The separator keeps `n3` in `s11` apart from
+/// `n31` in `s1`.
+fn node_id(index: usize, copy: Option<usize>) -> String {
+    match copy {
+        None => format!("n{index}"),
+        Some(segment) => format!("n{index}_s{segment}"),
     }
 }
 

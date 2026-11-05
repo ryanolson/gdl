@@ -96,6 +96,16 @@ per request: 3 crossings, 2 anchors
 
 A streamed request adds one anchor at each forward crossing it passes, for the receiver's input anchor. `cargo gdl diagram` draws the same placement with its crossing edges marked.
 
+A graph with unary nodes adds a line for each caller and each segment it is in, after the hops. The line counts the services the caller calls in another segment, and names each with the segment of the copy it calls, then counts those it calls in its own segment. For `Front => Keep { Echo }`, where `Keep` has `calls Tok`, with `Echo` in `back` and `Tok` in a segment of its own:
+
+```text
+hop 0: 2 crossings, 1 anchors
+per request: 2 crossings, 1 anchors
+calls from Keep in front: 1 remote (Tok in tok), 0 local
+```
+
+A remote call is one velo unary call, not a crossing, so the totals leave it out. A node may call a service any number of times per request, so the line counts the caller's `calls` entries, not calls per request. `CrossingReport::remote_calls` is the sum of the remote counts. A graph without unary nodes has no call lines.
+
 ## Routing a boundary
 
 A crossing into a segment with several instances picks one. `[routing]` names the policy for the boundary that enters a node:

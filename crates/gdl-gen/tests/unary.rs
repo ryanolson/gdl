@@ -315,6 +315,86 @@ fn a_graph_with_a_unary_node_generates_segments_that_build() {
     );
 }
 
+/// `cargo gdl diagram` draws `Tok` beside the topology, in the segment
+/// that lists it, and `Keep`'s `calls Tok` as a dashed edge: a crossing
+/// only when `Tok` is in a segment of its own. The crossing report counts
+/// the call apart from the hops' crossings.
+#[test]
+fn the_diagram_and_the_crossing_report_show_each_call() {
+    let target = target("gdl-gen-tests");
+    let call = "-.->|\"calls Text -#gt; Text\"|";
+    for (placement, tok_segment, crosses, line) in [
+        (
+            LOCAL,
+            "front",
+            false,
+            "calls from Keep in front: 0 remote, 1 local",
+        ),
+        (
+            SPLIT,
+            "tok",
+            true,
+            "calls from Keep in front: 1 remote (Tok in tok), 0 local",
+        ),
+    ] {
+        let files = Files::new(None, placement);
+        let spec = gdl_gen::Spec::load(&files.spec()).expect("spec");
+        let drawn = gdl_gen::diagram(
+            &spec,
+            &target,
+            gdl_gen::Format::Mermaid,
+            gdl_gen::Direction::LeftToRight,
+        )
+        .expect("diagram");
+        // The cluster that holds `Tok`: from its `subgraph` line to its `end`.
+        let start = drawn
+            .find(&format!("[\"{tok_segment}\"]"))
+            .unwrap_or_else(|| panic!("no segment {tok_segment}: {drawn}"));
+        let cluster = &drawn[start..start + drawn[start..].find("    end").expect("end")];
+        assert!(cluster.contains("{{\"Tok<br/>unary\"}}"), "{drawn}");
+        let lines: Vec<&str> = drawn
+            .lines()
+            .filter(|line| line.contains("-->") || line.contains("-.->"))
+            .collect();
+        let position = lines
+            .iter()
+            .position(|line| line.contains(call))
+            .unwrap_or_else(|| panic!("no call edge: {drawn}"));
+        let styled = drawn
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("linkStyle "))
+            .map(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .any(|p| p == position.to_string())
+            })
+            .unwrap_or(false);
+        assert_eq!(styled, crosses, "{drawn}");
+
+        let dot = gdl_gen::diagram(
+            &spec,
+            &target,
+            gdl_gen::Format::Dot,
+            gdl_gen::Direction::LeftToRight,
+        )
+        .expect("diagram");
+        let edge = dot
+            .lines()
+            .find(|line| line.contains("label=\"calls Text -> Text\""))
+            .unwrap_or_else(|| panic!("no call edge: {dot}"));
+        assert!(edge.contains("style=dashed"), "{edge}");
+        assert_eq!(edge.contains("penwidth=2"), crosses, "{edge}");
+
+        let out = files.dir.path().join("out");
+        let rendered = gdl_gen::render(&spec, &out, &target).expect("render");
+        let report = &rendered[&std::path::PathBuf::from("crossings.txt")];
+        assert!(report.contains(&format!("{line}\n")), "{report}");
+        assert!(report.contains("per request: "), "{report}");
+    }
+}
+
 /// A pin chooses a unary node's implementation as it does any node's, and
 /// is held to the node's role.
 #[test]

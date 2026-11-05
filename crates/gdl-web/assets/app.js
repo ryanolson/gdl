@@ -27,6 +27,8 @@ const state = {
   segmentNames: Object.create(null),
   // The graph's property kinds: each a kind name and its key's message.
   properties: [],
+  // Unary nodes: in no hop, each listed in the segments it is in.
+  services: [],
 };
 
 function newHop() {
@@ -81,6 +83,7 @@ async function load() {
   fillMessages($("source-request"), "Choose input message…");
   fillMessages($("source-header"), "No header");
   fillMessages($("source-response"), "Choose output message…");
+  refreshNodes();
   fillFrontends();
   if (state.frontend) selectFrontend(state.frontend);
   else render();
@@ -92,7 +95,6 @@ function fillFrontends() {
   select.add(new Option("Programmatic source · choose messages", ""));
   const available = nodes().filter(candidate => candidate.node.role === "source");
   for (const candidate of available) select.add(new Option(`${candidate.node.name} (${candidate.entry})`, `${candidate.entry} ${candidate.node.name}`));
-  if (state.frontend) { const current = available.find(candidate => candidate.source === state.frontend.source && candidate.node.name === state.frontend.node.name); state.frontend = current ? {...current, config:state.frontend.config,arms:state.frontend.arms} : null; }
   select.value = state.frontend ? `${state.frontend.entry} ${state.frontend.node.name}` : "";
   select.onchange = () => selectFrontend(available.find(candidate => `${candidate.entry} ${candidate.node.name}` === select.value) || null);
 }
@@ -126,7 +128,9 @@ function configControls(instance) {
       const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
       if (input.type === "number" && !Number.isSafeInteger(value)) {input.setCustomValidity("Enter a safe integer"); input.reportValidity(); return;}
       input.setCustomValidity("");
-      instance.config = {...graphConfig(instance), [field.name]:value};
+      // Only the value the user set: the others stay the catalogue's
+      // defaults, read through the node's reference.
+      instance.config = {...(instance.config || {}), [field.name]:value};
       render();
     };
     label.append(input);
@@ -157,13 +161,14 @@ function propertyClauses(instance) {
   const clauses = [];
   if (instance?.provides?.length) clauses.push(`provides ${instance.provides.join(", ")}`);
   if (instance?.needs?.length) clauses.push(`needs ${instance.needs.map((need) => `${need.kind} from ${need.class}`).join(", ")}`);
+  if (instance?.calls?.length) clauses.push(`calls ${instance.calls.join(", ")}`);
   return clauses.join(" · ");
 }
 
 function propertyControls(instance) {
   const container = document.createElement("div");
   container.className = "node-config";
-  const field = (labelText, value, parse, set) => {
+  const field = (labelText, value, parse, set, invalid = "Write each as `kind from class`, separated by commas") => {
     const label = textElement("label", "", "setting-field");
     label.append(textElement("span", labelText, "setting-copy"));
     const input = document.createElement("input");
@@ -172,7 +177,7 @@ function propertyControls(instance) {
     input.disabled = state.mode === "segments";
     input.onchange = () => {
       const parsed = parse(input.value);
-      if (parsed === null) {input.setCustomValidity("Write each as `kind from class`, separated by commas"); input.reportValidity(); return;}
+      if (parsed === null) {input.setCustomValidity(invalid); input.reportValidity(); return;}
       input.setCustomValidity("");
       set(parsed);
       render();
@@ -182,7 +187,194 @@ function propertyControls(instance) {
   };
   field("Provides", (instance.provides || []).join(", "), parseKinds, (kinds) => { instance.provides = kinds; });
   field("Needs", (instance.needs || []).map((need) => `${need.kind} from ${need.class}`).join(", "), parseNeeds, (needs) => { instance.needs = needs; });
+  field("Calls", (instance.calls || []).join(", "), parseCalls, (calls) => { instance.calls = calls; }, "Name unary nodes the graph has, separated by commas");
   return container;
+}
+
+// `null` for text that names a node that is not one of the graph's unary
+// nodes: a caller calls only those.
+function parseCalls(text) {
+  const names = text.split(",").map((name) => name.trim()).filter(Boolean);
+  return names.every((name) => serviceNames().includes(name)) ? names : null;
+}
+
+// Every node the graph holds, each object once: the source's frontend,
+// each node of every hop (the pipelines' and every endpoint arm's, enabled
+// or not, identities included), and each unary node. Each refresh, removal,
+// and name check walks this list, so that none skips a kind of node. Each
+// listed node is bound to the catalogue (`bindNode`).
+function nodeHolders() {
+  const found = new Set();
+  const visit = (hop) => {
+    if (!hop) return;
+    for (const n of [...hop.forward, hop.inner, ...hop.backward]) if (n) found.add(n);
+    visit(hop.nested);
+  };
+  if (state.frontend) found.add(state.frontend);
+  visit(state.hop);
+  state.pipelines.forEach((pipeline) => visit(pipeline.hop));
+  Object.values(state.frontend?.arms || {}).forEach(visit);
+  state.services.forEach((service) => found.add(service));
+  return [...found].map(bindNode);
+}
+
+// What the draft declares: its roots (the source, each further pipeline,
+// and each generated entry root such as `Source_entry_responses`) and the
+// nodes it holds, with the root each endpoint would get when enabled.
+// `draft()` builds its declarations from this, and `nodeNames()` reserves
+// names from it, so the two cannot disagree.
+function declarations() {
+  return {roots: deployedRoots(), holders: nodeHolders(), endpoints: (state.frontend?.node.entries || []).map((entry) => entryRoot(entry))};
+}
+
+// The names the draft declares now, or would when an endpoint is enabled,
+// but `except`'s.
+function nodeNames(except) {
+  const {roots, holders, endpoints} = declarations();
+  return new Set([$("source-name").value, ...pipelineRoots().map((p) => p.root), ...roots.map((r) => r.root), ...endpoints,
+    ...holders.filter((n) => n !== except).map((n) => n.instanceName).filter(Boolean)]);
+}
+
+// The package, its source, and the node's name: what identifies a node's
+// catalogue entry across versions. A unary node holds only this.
+function refOf(n) {
+  if (n.ref) return n.ref;
+  return {source: n.source, package: n.entry?.slice(0, n.entry.lastIndexOf("@")), node: n.node.name};
+}
+
+// The catalogue entries `ref` names: matched by source, package, and node
+// name, never by the node's name alone.
+function resolve(ref) {
+  return state.entries
+    .filter((e) => e.source === ref.source && e.package === ref.package)
+    .flatMap((e) => (e.nodes || []).filter((n) => n.name === ref.node).map((node) => ({entry: `${e.package}@${e.version}`, source: e.source, node})));
+}
+
+// The one catalogue entry `ref` names now, or `null` for none or several.
+function single(ref) {
+  const found = resolve(ref);
+  return found.length === 1 ? found[0] : null;
+}
+
+// Bind a node to the catalogue: it keeps only its reference and what the
+// user set (its name, configuration, clauses, and placement), and reads its
+// entry, version, ports, defaults, and endpoints through the reference
+// each time. A copy of catalogue data is never read, so a re-import, an
+// undo, or a reload cannot pair one version's entry with another's
+// defaults. `node` and `entry` are getters that are not enumerable, so a
+// history snapshot holds no catalogue data. Its `role` is the one thing
+// of its structure it keeps: an enumerable field, set while the reference
+// names one version, so a snapshot holds it. While the reference names
+// several versions the node is ambiguous: it keeps that role, it is drawn
+// with it, and nothing reshapes it or its nested hop (`prune`), while
+// `draftProblems()` holds the draft back by name. Only a node whose package
+// no longer has it is dropped. An identity node is the user's own, and is
+// not bound.
+function bindNode(n) {
+  if (!n || Object.getOwnPropertyDescriptor(n, "node")?.get || n.node?.identity) return n;
+  if (!n.ref) n.ref = refOf(n);
+  if (!n.role && n.node?.role) n.role = n.node.role;
+  let seen = n.node || null;
+  delete n.node; delete n.entry; delete n.source;
+  const placeholder = () => ({name: n.ref.node, role: n.role, ports: [], config: []});
+  Object.defineProperty(n, "node", {configurable: true, enumerable: false, get: () => {
+    const found = resolve(n.ref);
+    if (found.length === 1) {
+      seen = found[0].node;
+      n.role = seen.role;
+      return seen;
+    }
+    // Ambiguous, or gone: drawn with the role it keeps, from the version
+    // last seen with that role, or one the catalogue has with it.
+    const kept = [seen, ...found.map((f) => f.node)].find((node) => node && node.role === n.role);
+    return kept || {...placeholder(), role: n.role};
+  }});
+  Object.defineProperty(n, "entry", {configurable: true, enumerable: false, get: () => single(n.ref)?.entry});
+  Object.defineProperty(n, "source", {configurable: true, enumerable: false, get: () => n.ref.source});
+  return n;
+}
+
+// A copy of a node for a list of choices: its reference and settings,
+// bound like the node.
+function copyNode(n, extra = {}) {
+  return bindNode({...n, ...extra});
+}
+
+// Why a node's reference names no single catalogue entry.
+function referenceProblem(n) {
+  if (n.node.identity) return null;
+  const found = resolve(n.ref);
+  if (found.length === 1) return null;
+  const what = state.services.includes(n) ? "unary node" : "node";
+  const name = n === state.frontend ? $("source-name").value : n.instanceName;
+  const {package: pkg, node} = n.ref;
+  if (!found.length) return `${what} \`${name}\`: the catalogue has no \`${pkg}\` node \`${node}\``;
+  return `${what} \`${name}\`: the catalogue has \`${pkg}\` node \`${node}\` in ${found.map((f) => f.entry).join(" and ")}; remove all but one`;
+}
+
+// The problems the page finds in the draft before the server sees it: each
+// node the draft holds whose reference names no single catalogue entry.
+function draftProblems() {
+  nodeHolders();
+  const held = [state.frontend, ...instances().keys(), ...state.services].filter(Boolean);
+  return held.map(referenceProblem).filter(Boolean);
+}
+
+// Every node reads the catalogue through its reference, so a refresh only
+// removes a frontend whose package no longer has it. A hop drops such a
+// node when it is drawn (`prune`); a unary node is reported instead.
+function refreshNodes() {
+  nodeHolders();
+  if (state.frontend && !now(state.frontend)) state.frontend = null;
+}
+
+function serviceNames() {
+  return state.services.map((service) => service.instanceName);
+}
+
+// A unary node of `entry`, listed at first in the source's segment, under
+// a name no other node has.
+function addService(entry, node) {
+  const taken = new Set([...nodeNames(), ...state.usedNames]);
+  let name = node.name;
+  for (let i = 2; taken.has(name); i++) name = `${node.name}${i}`;
+  state.usedNames.push(name);
+  const home = Object.entries(segments(instances())).find(([, members]) => members.includes($("source-name").value))?.[0] || "s1";
+  const offered = state.entries.find((e) => `${e.package}@${e.version}` === entry);
+  // A reference, not a copy: the catalogue entry is resolved when the node
+  // is drawn and when the draft is built, so no version is kept.
+  const service = {instanceName: name, ref: {source: offered?.source, package: offered?.package, node: node.name}, role: node.role, segments: [home], calls: []};
+  state.services.push(service);
+  return service;
+}
+
+// List or unlist a unary node in `segment`. False, and no change, when it
+// would leave the node in no segment: the check would refuse it as
+// unplaced.
+function placeService(name, segment, on) {
+  const service = state.services.find((s) => s.instanceName === name);
+  if (!service) return false;
+  if (on) {
+    if (!service.segments.includes(segment)) service.segments.push(segment);
+    return true;
+  }
+  if (service.segments.length === 1 && service.segments[0] === segment) return false;
+  service.segments = service.segments.filter((s) => s !== segment);
+  return true;
+}
+
+// Remove a unary node, and its name from every caller's `calls`.
+function removeService(name) {
+  state.services = state.services.filter((s) => s.instanceName !== name);
+  const uncall = (instance) => { if (instance?.calls) instance.calls = instance.calls.filter((called) => called !== name); };
+  // The arms of disabled endpoints too: enabling one again must not bring
+  // back a call to a node that is gone.
+  nodeHolders().forEach(uncall);
+}
+
+// A unary node is listed by segment name, so it follows a rename.
+function renameSegment(from, to) {
+  for (const service of state.services) service.segments = service.segments.map((s) => (s === from ? to : s));
 }
 
 // The declared kinds whose message is chosen, as the draft carries them.
@@ -255,10 +447,12 @@ function deployedRoots() {
     if(!target) return {...arm,inner:null};
     return {...target.hop,forward:[...arm.forward,...target.hop.forward],backward:[...target.hop.backward,...arm.backward]};
   };
-  return enabledEntries().map((entry,index)=>({root:index===0?$('source-name').value:`${$('source-name').value}_entry_${entry.name}`,
+  return enabledEntries().map((entry,index)=>({root:index===0?$('source-name').value:entryRoot(entry),
     name:entryLabel(entry),entry:entry.name,request:portOf(entry.request),response:entry.response.head,
     hop:expand(state.frontend.arms?.[entry.name] || newHop())}));
 }
+// The root an endpoint after the first enabled one is generated as.
+function entryRoot(entry, source=$('source-name').value) { return `${source}_entry_${entry.name}`; }
 function pipelineTarget(hop) { return hop.target == null ? undefined : pipelineRoots().find(p=>p.id===hop.target); }
 function armResponse(hop) {
   let item = hop.inner ? port(hop.inner.node,"UpItem").head : pipelineTarget(hop)?.response;
@@ -295,7 +489,7 @@ function directSink(pipeline) {
   return !hop.forward.length && !hop.backward.length && !hop.nested && hop.inner?.node.role==='sink' ? hop.inner : null;
 }
 function sinkChoices(request,response) {
-  return [...nodes(),...[...instances().keys()].filter(n=>n.node.role==='sink').map(n=>({...n,existing:true}))]
+  return [...nodes(),...[...instances().keys()].filter(n=>n.node.role==='sink').map(n=>copyNode(n,{existing:true}))]
     .filter(c=>c.node.role==='sink' && samePort(portOf(port(c.node,'Req')),request) && same(port(c.node,'Item').head,response));
 }
 function connectSink(arm,request,response,sink) {
@@ -305,8 +499,8 @@ function connectSink(arm,request,response,sink) {
 }
 function connectDestination(arm,request,response,node) {
   const hop=newHop();
-  if(node.node.role==='forward') hop.forward.push({...node});
-  else {hop.inner={...node};if(node.node.role==='operator') hop.nested=newHop();}
+  if(node.node.role==='forward') hop.forward.push(copyNode(node));
+  else {hop.inner=copyNode(node);if(node.node.role==='operator') hop.nested=newHop();}
   const id=Math.max(0,...state.pipelines.map(p=>p.id))+1;
   let name=`${node.instanceName || node.node.name} connection ${id}`;
   while(state.pipelines.some(p=>p.name===name)) name+=' connection';
@@ -547,6 +741,7 @@ function catalogContracts() {
 function catalogNodeCompatible(node, slots=catalogContracts()) {
   if(state.mode!=='graph') return false;
   if(node.role==='source') return !state.frontend;
+  if(node.role==='unary') return true;
   const input={forward:'In',backward:'In',operator:'UpReq',sink:'Req'}[node.role];
   return !!input && slots.some(slot=>slot.roles.includes(node.role) && samePort(slot.request,portOf(port(node,slot.port || input))) && (node.role!=='sink' || !slot.response || same(port(node,'Item').head,slot.response)));
 }
@@ -627,6 +822,12 @@ function renderCatalog() {
           for (const p of resource.ports) detail.append(textElement("p", `${p.port}: ${carried(portOf(p))}`));
           for (const endpoint of resource.entries || []) detail.append(textElement("p", `${endpoint.path}: ${carried(portOf(endpoint.request))} → stream ${short(endpoint.response.head)} · ${endpoint.enabled}`));
           for (const field of resource.config || []) detail.append(textElement("p", `${field.name}: ${JSON.stringify(field.default)} · ${field.description}`));
+        }
+        if (kind === "node" && resource.role === "unary" && state.mode === "graph") {
+          const add = textElement("button", "Add unary node", "pipeline-choice");
+          add.setAttribute("aria-label", `Add unary node ${resource.name}`);
+          add.onclick = () => { addService(`${entry.package}@${entry.version}`, resource); render(); };
+          detail.append(add);
         }
         if (compatible && (kind === "node" || resource.public)) makeDraggable(detail, kind === "message"
           ? {kind, key: key({package:entry.package, version:entry.version, path:resource.path})}
@@ -750,8 +951,8 @@ function openIdentity(instance,choose,choices=[instance]) {
   $('identity-form').onsubmit=event=>{
     event.preventDefault();
     if(state.mode==='segments') {$('identity-dialog').close();return;}
-    const name=$('identity-name').value.trim();const used=[...instances()].some(([n,id])=>n!==instance && id===name);
-    if(used || pipelineRoots().some(p=>p.root===name)) {$('identity-name').setCustomValidity('Choose a unique node name.');$('identity-name').reportValidity();return;}
+    const name=$('identity-name').value.trim();
+    if(nodeNames(instance).has(name)) {$('identity-name').setCustomValidity('Choose a unique node name.');$('identity-name').reportValidity();return;}
     const selected=chosenMessage($('identity-request'));
     const req=$('identity-mode').value==='stream'?{head:chosenMessage($('identity-header')),item:selected}:{head:selected,item:null};
     const item=chosenMessage($('identity-response'));
@@ -801,7 +1002,7 @@ function slot(label, candidates, choose, edge) {
       for(const candidate of options) {
         const button = textElement("button",candidate.existing ? `Connect ${candidate.instanceName}` : candidate.node.name,"node-choice");
         button.append(textElement("small",candidate.specializations ? "Choose message types and node/operator kind" : candidate.existing ? "existing sink · graph" : `${candidate.node.role} · ${candidate.entry}`,"muted"));
-        button.onclick=()=>{$("node-dialog").close();if(candidate.node.identity) openIdentity(candidate.specializations?.[0] || candidate,choose,candidate.specializations || [candidate]);else {choose({...candidate});render();}};
+        button.onclick=()=>{$("node-dialog").close();if(candidate.node.identity) openIdentity(candidate.specializations?.[0] || candidate,choose,candidate.specializations || [candidate]);else {choose(copyNode(candidate));render();}};
         $("node-options").append(button);
       }
       if(!options.length) $("node-options").append(textElement("p","No matching nodes in the catalog.","muted"));
@@ -813,7 +1014,7 @@ function slot(label, candidates, choose, edge) {
     const candidate = candidates.find(c => data.kind === "node" && c.entry === data.entry && c.node.name === data.name);
     if (!candidate) return false;
     if(candidate.node.identity) openIdentity(candidate,choose);
-    else {choose({...candidate});render();}
+    else {choose(copyNode(candidate));render();}
     return true;
   });
   div.append(add);
@@ -954,7 +1155,8 @@ function box(text, remove, instance) {
     const clauses = propertyClauses(instance);
     if (clauses) div.append(textElement("small", clauses, "property-badge"));
     div.append(settingsButton(instance));
-    if(state.mode==='segments') {
+    // A unary node may be in several segments: its box lists them.
+    if(state.mode==='segments' && !instance.ref) {
       const name=instances().get(instance) || $('source-name').value;
       const group=Object.entries(segments(instances())).find(([,members])=>members.includes(name))?.[0];
       div.append(textElement('small',group,'segment-badge'));
@@ -985,9 +1187,14 @@ function lane(title) {
 
 // Refresh implementations without discarding an unfinished type conversion chain.
 function now(n) {
+  bindNode(n);
   if(n.node.identity) return n;
-  const current = nodes().find((c) => c.source === n.source && c.node.name === n.node.name);
-  return current ? Object.assign(n, current) : null;
+  return resolve(n.ref).length ? n : null;
+}
+
+// Whether a node's reference names several catalogue versions.
+function ambiguous(n) {
+  return !!n.ref && resolve(n.ref).length > 1;
 }
 
 function prune(hop, request) {
@@ -996,7 +1203,8 @@ function prune(hop, request) {
   const gone = forward.indexOf(null);
   hop.forward = gone === -1 ? forward : forward.slice(0, gone);
   hop.inner = gone === -1 && hop.inner ? now(hop.inner) : null;
-  if (hop.inner) {
+  // An ambiguous node keeps its hop as it is: see `bindNode`.
+  if (hop.inner && !ambiguous(hop.inner)) {
     const operator = hop.inner.node.role === "operator";
     if (operator && !hop.nested) hop.nested = newHop();
     if (!operator) hop.nested = null;
@@ -1015,7 +1223,7 @@ function prune(hop, request) {
 // that arrives from `outer`.
 function hopEditor(hop, request, into, outer, names, response = chosenMessage($("source-response"))) {
   prune(hop, request);
-  const all = [...nodes(), ...[...names.keys()].filter(n=>n.node.role==='sink').map(n=>({...n,existing:true}))];
+  const all = [...nodes(), ...[...names.keys()].filter(n=>n.node.role==='sink').map(n=>copyNode(n,{existing:true}))];
   const grid = document.createElement("div");
   grid.className = "hop";
   const down = lane("request ↓");
@@ -1105,7 +1313,7 @@ function hopEditor(hop, request, into, outer, names, response = chosenMessage($(
 function instances() {
   const names = new Map();
   const canonical = new Map();
-  const taken = new Set([...pipelineRoots().map(p=>p.root),...state.usedNames]);
+  const taken = new Set([...nodeNames(),...state.usedNames]);
   const visit = (hop) => {
     if(hop.inner?.instanceName && canonical.has(hop.inner.instanceName)) hop.inner=canonical.get(hop.inner.instanceName);
     for (const n of [...hop.forward, hop.inner, ...hop.backward].filter(Boolean)) {
@@ -1151,6 +1359,11 @@ function segments(names) {
     while (name in result) name = `${name}-${i + 1}`;
     result[name] = members;
   });
+  // A unary node may be in several segments, and in one of its own: it is
+  // listed by segment name, after the pipeline's segments are named.
+  for (const service of state.services) {
+    for (const segment of service.segments) (result[segment] ||= []).push(service.instanceName);
+  }
   return result;
 }
 
@@ -1174,8 +1387,9 @@ function placeDownstream(node,destination) {
 }
 function placeNode(node, destination, names) {
   const placement = Object.create(null);
+  const services = serviceNames();
   for (const [name, members] of Object.entries(segments(names))) {
-    for (const member of members) placement[member] = name;
+    for (const member of members) if (!services.includes(member)) placement[member] = name;
   }
   placement[node] = destination;
   state.placement = placement;
@@ -1190,6 +1404,7 @@ function placementControls(names) {
   for (const [name, members] of Object.entries(groups)) {
     for (const member of members) {
       if(deployedRoots().some(p=>p.root===member) && member!==$("source-name").value) continue;
+      if(serviceNames().includes(member)) continue;
       const row = textElement("label", member, "placement-row");
       const select = document.createElement("select");
       select.setAttribute("aria-label", `Place ${member} in segment`);
@@ -1211,12 +1426,72 @@ function placementControls(names) {
       panel.append(row);
     }
   }
+  for (const service of state.services) panel.append(serviceControls(service, groups));
   const segmentOf = member => Object.keys(groups).find(group => groups[group].includes(member));
   const crossings = networkEdges().filter(e => segmentOf(e.from) !== segmentOf(e.to));
   $("placement-summary").textContent = `${Object.keys(groups).length} segment${Object.keys(groups).length === 1 ? "" : "s"} · ${crossings.length} network crossings`;
 }
 
+// A unary node's segments: a box for each segment, and a new segment of
+// its own. The last box cannot be cleared.
+function serviceControls(service, groups) {
+  const row = textElement("fieldset", "", "placement-row service-placement");
+  row.append(textElement("legend", `${service.instanceName} (unary)`));
+  for (const group of [...new Set([...Object.keys(groups), ...service.segments])]) {
+    const label = textElement("label", group);
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = service.segments.includes(group);
+    box.setAttribute("aria-label", `List ${service.instanceName} in segment ${group}`);
+    box.onchange = () => {
+      if (!placeService(service.instanceName, group, box.checked)) {
+        box.checked = true;
+        $("placement-summary").textContent = `${service.instanceName} must stay in at least one segment`;
+        return;
+      }
+      render();
+    };
+    label.append(box);
+    row.append(label);
+  }
+  const own = textElement("button", "New segment…", "pipeline-choice");
+  own.setAttribute("aria-label", `List ${service.instanceName} in a new segment`);
+  own.onclick = () => {
+    let segment = `${service.instanceName.toLowerCase()}-segment`;
+    while (groups[segment]) segment += "-new";
+    placeService(service.instanceName, segment, true);
+    render();
+  };
+  row.append(own);
+  return row;
+}
+
+// The graph's unary nodes, beside the pipelines: each with its settings
+// and, while drawing, a remove button; while placing, its segments.
+function renderServices() {
+  const list = $("service-nodes");
+  list.replaceChildren();
+  if (list.dataset) dropTarget(list, (data) => {
+    const found = data.kind === "node" && nodes().find((c) => c.entry === data.entry && c.node.name === data.name && c.node.role === "unary");
+    if (!found) return false;
+    addService(found.entry, found.node);
+    render();
+    return true;
+  });
+  for (const service of state.services) {
+    const name = service.instanceName;
+    const problem = referenceProblem(service);
+    const shown = box(`unary ${name}${problem ? " (not in the catalogue)" : ""}`, () => removeService(name), service);
+    if (problem) shown.title = problem;
+    shown.className += " service-node";
+    shown.dataset.service = name;
+    if (state.mode === "segments") shown.append(textElement("small", service.segments.join(", "), "segment-badge service-segments"));
+    list.append(shown);
+  }
+}
+
 function render(validate = true) {
+  acceptedSourceName = $("source-name").value;
   $("source-config").replaceChildren(configControls(state.frontend));
   if (state.frontend) $("source-config").append(propertyControls(state.frontend));
   renderProperties();
@@ -1235,7 +1510,8 @@ function render(validate = true) {
   const request = sourcePort();
   const ready = chosenMessage($("source-request")) && chosenMessage($("source-response"));
   renderPipelines(hop,names);
-  const count = names.size + 1;
+  renderServices();
+  const count = names.size + state.services.length + 1;
   $("node-count").textContent = `${count} node${count === 1 ? "" : "s"}`;
 
   const groups = $("groups");
@@ -1246,14 +1522,19 @@ function render(validate = true) {
     const input = document.createElement("input");
     input.value = name;
     input.size = 12;
+    let current = name;
     input.oninput = () => {
       // A name another segment has is refused: the two would be one.
-      if (Object.entries(segments(names)).some(([other, them]) => other === input.value && them[0] !== members[0])) {
-        input.value = state.segmentNames[members[0]] || name;
+      // Compared by name: two segments that list only one unary node have
+      // the same first member.
+      if (input.value !== current && input.value in segments(names)) {
+        input.value = current;
         input.title = "another segment has that name";
         return;
       }
       state.segmentNames[members[0]] = input.value;
+      renameSegment(current, input.value);
+      current = input.value;
       if (state.mode === "segments") {
         placementControls(names);
         hop.innerHTML = "";
@@ -1283,7 +1564,7 @@ function draft() {
     nested: hop.nested ? toHop(hop.nested) : null,
     backward: hop.backward.map((n) => names.get(n)),
   });
-  const roots=deployedRoots();
+  const {roots}=declarations();
   const first=roots[0];
   return {
     name: $("name").value,
@@ -1294,8 +1575,11 @@ function draft() {
       response: first?.response || chosenMessage($("source-response")),
     },
     nodes: [
-      ...(state.frontend ? [{name:$("source-name").value,entry:state.frontend.entry,node:state.frontend.node.name,config:graphConfig(state.frontend),provides:state.frontend.provides||[],needs:state.frontend.needs||[]}] : []),
-      ...[...names.entries()].filter(([n])=>!n.node.identity).map(([n, name]) => ({ name, entry: n.entry, node: n.node.name, config:graphConfig(n), provides:n.provides||[], needs:n.needs||[] })),
+      ...(state.frontend ? [{name:$("source-name").value,entry:state.frontend.entry,node:state.frontend.node.name,config:graphConfig(state.frontend),provides:state.frontend.provides||[],needs:state.frontend.needs||[],calls:state.frontend.calls||[]}] : []),
+      ...[...names.entries()].filter(([n])=>!n.node.identity).map(([n, name]) => ({ name, entry: n.entry, node: n.node.name, config:graphConfig(n), provides:n.provides||[], needs:n.needs||[], calls:n.calls||[] })),
+      // A unary node whose reference names no single entry is left out:
+      // `draftProblems()` reports it, and the page sends no such draft.
+      ...state.services.filter(s => !referenceProblem(s)).map(s => ({ name: s.instanceName, entry: s.entry, node: s.node.name, config:graphConfig(s), provides:s.provides||[], needs:s.needs||[], calls:s.calls||[] })),
     ],
     properties: propertyDraft(),
     hop: toHop(first?.hop || newHop()),
@@ -1386,6 +1670,14 @@ async function validateGraph() {
   state.validated = false;
   updateMode();
   try {
+    const problems = draftProblems();
+    if (problems.length) {
+      show({problems});
+      $("flow-status").textContent = "Graph needs attention. See validation details.";
+      $("validation-status").textContent = "Needs attention";
+      updateMode();
+      return;
+    }
     const payload = draft();
     if (state.mode === "graph") Object.assign(payload,{segments:{s1:[payload.source.name, ...(payload.pipelines || []).map(p=>p.source.name), ...Object.keys(payload.identities || {}), ...payload.nodes.map(n => n.name).filter(name => name !== payload.source.name)]},routing:{}});
     const response = await fetch("/api/check", {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(payload)});
@@ -1417,6 +1709,8 @@ $("segments-tab").onclick = () => {
 $("export").onclick = async () => {
   $("export").disabled = true;
   try {
+    const problems = draftProblems();
+    if (problems.length) { show({problems}); return; }
     const payload = draft();
     if (state.mode === "graph") Object.assign(payload,{segments:{s1:[payload.source.name, ...(payload.pipelines || []).map(p=>p.source.name), ...Object.keys(payload.identities || {}), ...payload.nodes.map(n => n.name).filter(name => name !== payload.source.name)]},routing:{}});
     const response = await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
@@ -1544,7 +1838,25 @@ $("add").onsubmit = async event => {
 };
 
 for (const id of ["source-request", "source-header", "source-response", "input-mode"]) $(id).onchange = () => render();
-$("source-name").oninput = () => render();
+// The source's name was accepted at the last render; a rename that would
+// give the source, or the root generated for an endpoint, a name a node
+// already has is refused, as an identity's name is.
+let acceptedSourceName = null;
+$("source-name").oninput = () => {
+  const input = $("source-name");
+  const {holders} = declarations();
+  const held = new Set(holders.filter((n) => n !== state.frontend).map((n) => n.instanceName).filter(Boolean));
+  const roots = [input.value, ...(state.frontend?.node.entries || []).map((entry) => entryRoot(entry, input.value))];
+  const taken = roots.find((root) => held.has(root));
+  if (taken && acceptedSourceName !== null) {
+    input.value = acceptedSourceName;
+    input.setCustomValidity?.(`Choose another source name: the node \`${taken}\` has the name its endpoint would get.`);
+    input.reportValidity?.();
+    return;
+  }
+  input.setCustomValidity?.("");
+  render();
+};
 let nameBeforeEdit = null;
 function finishNameEdit(save = true) {
   if (nameBeforeEdit === null) return;
@@ -1758,7 +2070,8 @@ const historyFields=['name','source-name','source-request','source-header','sour
 const editHistory=[];
 let historyIndex=-1;
 function recordHistory() {
-  const snapshot=JSON.stringify({hop:state.hop,pipelines:state.pipelines,usedNames:state.usedNames,frontend:state.frontend,placement:state.placement,routing:state.routing,segmentNames:state.segmentNames,properties:state.properties,fields:Object.fromEntries(historyFields.map(id=>[id,$(id).value]))});
+  nodeHolders();
+  const snapshot=JSON.stringify({hop:state.hop,pipelines:state.pipelines,usedNames:state.usedNames,frontend:state.frontend,placement:state.placement,routing:state.routing,segmentNames:state.segmentNames,properties:state.properties,services:state.services,fields:Object.fromEntries(historyFields.map(id=>[id,$(id).value]))});
   if(editHistory[historyIndex]!==snapshot) {
     editHistory.splice(historyIndex+1); editHistory.push(snapshot);
     if(editHistory.length>100) editHistory.shift();
@@ -1773,7 +2086,8 @@ function restoreEdit(index) {
   if(index<0 || index>=editHistory.length) return;
   historyIndex=index;
   const snapshot=JSON.parse(editHistory[index]);
-  Object.assign(state,{hop:snapshot.hop,pipelines:snapshot.pipelines || [],usedNames:snapshot.usedNames || [],frontend:snapshot.frontend,placement:snapshot.placement,routing:snapshot.routing,segmentNames:snapshot.segmentNames,properties:snapshot.properties || []});
+  Object.assign(state,{hop:snapshot.hop,pipelines:snapshot.pipelines || [],usedNames:snapshot.usedNames || [],frontend:snapshot.frontend,placement:snapshot.placement,routing:snapshot.routing,segmentNames:snapshot.segmentNames,properties:snapshot.properties || [],services:snapshot.services || []});
+  nodeHolders();
   for(const [id,value] of Object.entries(snapshot.fields)) $(id).value=value;
   $('name-display').textContent=$('name').value;
   $('source-frontend').value=state.frontend?`${state.frontend.entry} ${state.frontend.node.name}`:'';
@@ -1783,7 +2097,7 @@ function restoreEdit(index) {
 function clearGraph() {
   recordHistory();
   Object.assign(state,{mode:'graph',validated:false,hop:newHop(),pipelines:[],usedNames:[],frontend:null,
-    placement:Object.create(null),routing:Object.create(null),segmentNames:Object.create(null),properties:[]});
+    placement:Object.create(null),routing:Object.create(null),segmentNames:Object.create(null),properties:[],services:[]});
   for(const id of ['source-request','source-header','source-response','source-frontend']) $(id).value='';
   $('source-name').value='Source';$('input-mode').value='single';
   $('name').value='composed';$('name-display').textContent='composed';
@@ -1845,7 +2159,7 @@ function deploymentNodeLayout(members, connections, roots) {
 function renderDeployment(board) {
   const names=instances(), roots=deployedRoots(), connections=networkEdges();
   const view=deploymentView(segments(names),connections);
-  const instancesByName=new Map([...names].map(([instance,name])=>[name,instance]));
+  const instancesByName=new Map([...[...names].map(([instance,name])=>[name,instance]),...state.services.map(s=>[s.instanceName,s])]);
   const label=name=>roots.find(root=>root.root===name)?.name || name;
   const container=textElement('div','','deployment-view');
   container.dataset.layout=workspaceLayout;
@@ -1873,7 +2187,14 @@ function renderDeployment(board) {
       node.style.gridColumn=String(layout[member.name].column+1);node.style.gridRow=String(layout[member.name].row+1);
       const title=textElement('div','','deployment-node-title');
       title.append(textElement('strong',label(member.name)),textElement('small',root?'frontend endpoint':instance?.node.role || 'source'));
-      if(instance) {
+      if(instance?.ref) {
+        title.append(settingsButton(instance));
+        const where=textElement('button','Segments','deployment-move');
+        where.setAttribute('aria-label',`Segments of ${member.name}`);
+        where.title=`Listed in ${instance.segments.join(', ')}. Choose its segments under Node placement.`;
+        where.onclick=()=>{const placement=document.querySelector('#segments details');if(placement){placement.open=true;placement.scrollIntoView?.({block:'nearest'});}};
+        title.append(where);
+      } else if(instance) {
         title.append(settingsButton(instance));
         const move=textElement('button','Move','deployment-move');
         move.setAttribute('aria-label',`Move ${member.name} to segment`);
@@ -2178,6 +2499,8 @@ async function generateDeployment() {
   updateApply();
   $('deploy-status').textContent='Generating files from Git and registry dependencies…';
   try {
+    const problems=draftProblems();
+    if(problems.length) {$('deploy-status').textContent=problems.join('\n');return;}
     const payload=draft();
     payload.deployment_config=Object.fromEntries(Object.keys(payload.segments).filter(name=>deploymentConfigText[name]?.trim()).map(name=>[name,deploymentConfigText[name]]));
     const response=await fetch('/api/deploy',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});

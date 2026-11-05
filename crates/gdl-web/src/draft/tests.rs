@@ -195,6 +195,7 @@ fn a_keyword_message_is_written_raw() {
             node: "Engine".into(),
             provides: Vec::new(),
             needs: Default::default(),
+            calls: Vec::new(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -409,6 +410,7 @@ fn a_node_two_crates_offer_is_pinned() {
                 node: "Engine".into(),
                 provides: Vec::new(),
                 needs: Default::default(),
+                calls: Vec::new(),
             },
             Instance {
                 config: Default::default(),
@@ -417,6 +419,7 @@ fn a_node_two_crates_offer_is_pinned() {
                 node: "Engine".into(),
                 provides: Vec::new(),
                 needs: Default::default(),
+                calls: Vec::new(),
             },
         ],
         hop: Hop {
@@ -559,6 +562,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
             node: "Engine".into(),
             provides: Vec::new(),
             needs: Default::default(),
+            calls: Vec::new(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -696,6 +700,7 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
             node: "Engine".into(),
             provides: Vec::new(),
             needs: Default::default(),
+            calls: Vec::new(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -821,6 +826,7 @@ fn a_message_no_crate_defines_or_exports_is_named() {
             node: "Engine".into(),
             provides: Vec::new(),
             needs: Default::default(),
+            calls: Vec::new(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -950,6 +956,7 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
             node: "Engine".into(),
             provides: Vec::new(),
             needs: Default::default(),
+            calls: Vec::new(),
         }],
         hop: Hop {
             forward: Vec::new(),
@@ -968,5 +975,91 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
         [
             "message `proto::Words` (proto 0.1.0): it was read from proto@0.1.0, and the catalogue now holds that directory as proto@0.2.0: add again the crates that use it"
         ]
+    );
+}
+
+/// A unary node is an instance outside every hop. The draft writes its
+/// signature and each caller's `calls`, and lists it in each segment the
+/// page placed it in.
+#[test]
+fn a_unary_node_is_written_with_its_callers_and_in_each_of_its_segments() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-unary-")
+        .tempdir()
+        .expect("catalogue directory");
+    let mut catalog = catalog(temp.path());
+    let engine = catalog
+        .entries()
+        .flat_map(|entry| &entry.offer.nodes)
+        .find(|node| node.name == "Engine")
+        .expect("sink")
+        .clone();
+    let port = |port: &str| PortEntry {
+        port: port.into(),
+        head: Some(origin("proto::Token")),
+        item: None,
+    };
+    catalog
+        .add(Entry {
+            added: "2026-11-04T00:00:00Z".into(),
+            checksum: None,
+            offer: Offer {
+                package: "services".into(),
+                version: "0.1.0".into(),
+                source: REGISTRY.into(),
+                messages: Vec::new(),
+                exports: Vec::new(),
+                nodes: vec![NodeEntry {
+                    name: "Tok".into(),
+                    role: Role::Unary,
+                    ty: "services::Tok".into(),
+                    ports: vec![port("Req"), port("Resp")],
+                    ..engine
+                }],
+                policies: Vec::new(),
+                selectors: Vec::new(),
+                skipped: Vec::new(),
+                skipped_policies: Vec::new(),
+                skipped_selectors: Vec::new(),
+            },
+        })
+        .expect("service entry");
+    let draft: Draft = serde_json::from_value(serde_json::json!({
+        "name": "called",
+        "source": {
+            "name": "A",
+            "request": {"head": origin("proto::match")},
+            "response": origin("proto::Token")
+        },
+        "nodes": [
+            {"name": "Engine", "entry": "nodes@0.1.0", "node": "Engine", "calls": ["Tok"]},
+            {"name": "Tok", "entry": "services@0.1.0", "node": "Tok"}
+        ],
+        "hop": {"inner": "Engine"},
+        "segments": {"front": ["A", "Engine", "Tok"], "side": ["Tok"]}
+    }))
+    .expect("draft");
+    let rendered = draft
+        .render(&catalog, &Gdl::Path("/gdl".into()))
+        .expect("rendered");
+    for line in [
+        "sink Engine: r#match -> stream Token calls Tok;",
+        "unary Tok: Token -> Token;",
+    ] {
+        assert!(rendered.graph.contains(line), "{line}\n{}", rendered.graph);
+    }
+    let spec: toml::Table = toml::from_str(&rendered.spec).expect("spec");
+    let nodes = |segment: &str| spec["segment"][segment]["nodes"].clone();
+    assert_eq!(
+        nodes("front"),
+        toml::Value::from(vec!["A", "Engine", "Tok"]),
+        "{}",
+        rendered.spec
+    );
+    assert_eq!(
+        nodes("side"),
+        toml::Value::from(vec!["Tok"]),
+        "{}",
+        rendered.spec
     );
 }

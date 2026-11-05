@@ -157,6 +157,9 @@ pub struct Instance {
     /// The property kinds the node reads: `needs <kind> from <class>`.
     #[serde(default)]
     pub needs: Vec<Need>,
+    /// The unary nodes it calls: `calls <name>, ...`.
+    #[serde(default)]
+    pub calls: Vec<String>,
 }
 
 /// A hop: forward nodes, the inner end, and backward nodes in the order
@@ -176,8 +179,8 @@ pub struct Hop {
     pub backward: Vec<String>,
 }
 
-/// What a node provides and needs, as the graph file writes it after the
-/// node's signature.
+/// What a node provides, needs, and calls, as the graph file writes it
+/// after the node's signature.
 fn clauses(instance: &Instance) -> String {
     let mut text = String::new();
     if !instance.provides.is_empty() {
@@ -190,6 +193,9 @@ fn clauses(instance: &Instance) -> String {
             .map(|need| format!("{} from {}", need.kind, need.class))
             .collect();
         text.push_str(&format!(" needs {}", needs.join(", ")));
+    }
+    if !instance.calls.is_empty() {
+        text.push_str(&format!(" calls {}", instance.calls.join(", ")));
     }
     text
 }
@@ -407,12 +413,31 @@ impl Draft {
                     problems.push(format!("node `{}`: {why}", instance.name));
                 }
             }
+            // A called name is written into the graph file as it is.
+            for called in &instance.calls {
+                if !identifier(called) {
+                    problems.push(format!(
+                        "node `{}`: {}",
+                        instance.name,
+                        refusal("called node", called)
+                    ));
+                }
+            }
         }
         for instance in self.entries.values().flat_map(arm_instances) {
             if !instance.provides.is_empty() || !instance.needs.is_empty() {
                 problems.push(format!(
                     "entry node `{}`: an entry adapter provides no property, and reads the kinds its entry's `needs` names",
                     instance.name
+                ));
+            }
+            // An entry adapter is written into the spec's entry table, which
+            // has no `calls`: a call would be dropped without a word.
+            if !instance.calls.is_empty() {
+                problems.push(format!(
+                    "entry node `{}`: an entry adapter calls no unary node, but it has `calls {}`",
+                    instance.name,
+                    instance.calls.join(", ")
                 ));
             }
         }

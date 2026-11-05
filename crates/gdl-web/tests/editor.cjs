@@ -95,8 +95,8 @@ test('catalog refresh preserves distinct repeated node instances', () => {
   const run = editor();
   run(`const node = {name:'Repeat',role:'forward',ports:[]};
     state.entries = [{package:'p', version:'1', source:'local', nodes:[node]}];
-    const first = {source:'local',node:{...node}};
-    const second = {source:'local',node:{...node}};`);
+    const first = {entry:'p@1',source:'local',node:{...node}};
+    const second = {entry:'p@1',source:'local',node:{...node}};`);
   assert.equal(run('now(first) === first'), true);
   assert.equal(run('now(second) === second'), true);
   assert.equal(run('now(first) === now(second)'), false);
@@ -744,9 +744,9 @@ test('endpoint adapters participate in the deployed graph and independent placem
 test('inserting a type-changing chain preserves its downstream endpoint while incomplete', () => {
   const run=editor();
   run(`const m=path=>({path});const req={head:m('X'),item:null};
-    const node=(name,input,output)=>({source:'test',node:{name,role:'forward',ports:[{port:'In',head:m(input)},{port:'Out',head:m(output)}]}});
+    const node=(name,input,output)=>({entry:'p@1',source:'test',node:{name,role:'forward',ports:[{port:'In',head:m(input)},{port:'Out',head:m(output)}]}});
     const c=node('C','X','Y'),d=node('D','Y','Z'),e=node('E','Z','X');
-    const sink={source:'test',node:{name:'B',role:'sink',ports:[{port:'Req',head:m('X')},{port:'Item',head:m('Reply')}]}};
+    const sink={entry:'p@1',source:'test',node:{name:'B',role:'sink',ports:[{port:'Req',head:m('X')},{port:'Item',head:m('Reply')}]}};
     state.entries=[{package:'p',version:'1',source:'test',nodes:[c.node,d.node,e.node,sink.node]}];
     const hop={...newHop(),forward:[c],inner:sink};prune(hop,req);`);
   assert.equal(run('hop.inner.node.name'),'B');
@@ -1044,4 +1044,217 @@ test('property declarations follow undo, redo, and Clear graph as graph nodes do
   assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), []);
   run('undoEdit();');
   assert.deepEqual(JSON.parse(run('JSON.stringify(state.properties)')), declared);
+});
+
+// A unary node is in no hop: the page keeps it apart, with the segments it
+// is listed in, and a caller names it in `calls`.
+function withService(run) {
+  run(`$('source-name').value = 'Source';
+    const tok = {name:'Tok', role:'unary', ports:[{port:'Req',head:{path:'p::Text'}},{port:'Resp',head:{path:'p::Tokens'}}]};
+    const engineNode = {name:'Engine', role:'sink', ports:[]};
+    state.entries = [{package:'p', version:'1', source:'local', nodes:[tok, engineNode]}];
+    const engine = {entry:'p@1', source:'local', node:engineNode, calls:['Tok']};
+    state.hop.inner = engine;
+    placeNode('Engine', 'engine', instances());
+    addService('p@1', tok);`);
+}
+const placed = (run) => JSON.parse(run('JSON.stringify(segments(instances()))'));
+
+test('a unary node is placed in one segment or several, and the draft lists it in each', () => {
+  const run = editor();
+  withService(run);
+  assert.deepEqual(placed(run), {s1:['Source','Tok'], engine:['Engine']}, 'a new service starts beside the source');
+  assert.equal(run("placeService('Tok', 'engine', true)"), true);
+  assert.deepEqual(placed(run), {s1:['Source','Tok'], engine:['Engine','Tok']});
+  run('const output = draft();');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(output.segments)')), {s1:['Source','Tok'], engine:['Engine','Tok']});
+  assert.deepEqual(JSON.parse(run('JSON.stringify(output.nodes.find(n=>n.name==="Tok"))')), {name:'Tok', entry:'p@1', node:'Tok', config:{}, provides:[], needs:[], calls:[]});
+  assert.deepEqual(JSON.parse(run('JSON.stringify(output.nodes.find(n=>n.name==="Engine").calls)')), ['Tok']);
+  // The last copy stays: a unary node in no segment would not check.
+  assert.equal(run("placeService('Tok', 's1', false)"), true);
+  assert.equal(run("placeService('Tok', 'engine', false)"), false);
+  assert.deepEqual(placed(run), {s1:['Source'], engine:['Engine','Tok']});
+  // A segment of its own.
+  assert.equal(run("placeService('Tok', 'tok', true)"), true);
+  assert.equal(run("placeService('Tok', 'engine', false)"), true);
+  assert.deepEqual(placed(run), {s1:['Source'], engine:['Engine'], tok:['Tok']});
+});
+
+test('a unary node keeps its segments when nodes move and segments are renamed', () => {
+  const run = editor();
+  withService(run);
+  run("placeService('Tok', 'engine', true)");
+  run("placeNode('Engine', 's1', instances())");
+  assert.deepEqual(placed(run), {s1:['Source','Engine','Tok'], engine:['Tok']}, 'a segment that lists only a service stays');
+  run("renameSegment('engine', 'tok')");
+  assert.deepEqual(placed(run), {s1:['Source','Engine','Tok'], tok:['Tok']});
+});
+
+test('a removed unary node leaves every caller, and services follow undo and Clear graph', () => {
+  const run = editor();
+  run('render = () => recordHistory(); graphComplete = () => false; recordHistory();');
+  withService(run);
+  run('recordHistory();');
+  assert.equal(run('state.services.length'), 1);
+  run('undoEdit();');
+  assert.equal(run('state.services.length'), 0);
+  run('redoEdit();');
+  assert.equal(run('state.services[0].instanceName'), 'Tok');
+  // The page renders after a removal, and a render records it.
+  run("removeService('Tok'); render();");
+  assert.equal(run('state.services.length'), 0);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(draft().nodes.find(n=>n.name==="Engine").calls)')), []);
+  run('undoEdit();');
+  assert.equal(run('state.services.length'), 1);
+  run('clearGraph();');
+  assert.equal(run('state.services.length'), 0);
+});
+
+test('a second unary node of one kind takes a name no node has', () => {
+  const run = editor();
+  withService(run);
+  run("addService('p@1', tok)");
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.services.map(s=>s.instanceName))')), ['Tok','Tok2']);
+  assert.equal(run("JSON.stringify(parseCalls('Tok, Tok2'))"), '["Tok","Tok2"]');
+  assert.equal(run("parseCalls('Tok, Missing')"), null, 'a caller calls only a unary node the graph has');
+});
+
+test('every node holder is listed once, the arms of disabled endpoints and unary nodes included', () => {
+  const run = editor();
+  run(`$('source-name').value = 'Source';
+    const node = (name, role) => ({entry:'p@1', node:{name, role, ports:[]}, instanceName:name});
+    const pass = {...identityNode('forward', {head:null,item:null}), instanceName:'Pass'};
+    state.frontend = {entry:'p@1', node:{name:'Api', role:'source', entries:[{name:'chat', enabled:'chat'}, {name:'off', enabled:'off'}]},
+      config:{chat:true, off:false},
+      arms:{chat:{...newHop(), forward:[pass], inner:node('Echo','sink')}, off:{...newHop(), forward:[node('Hidden','forward')]}}};
+    state.pipelines = [{id:1, name:'p1', hop:{...newHop(), inner:node('Engine','sink')}}];
+    state.services = [{...node('Tok','unary'), segments:['s1'], calls:[]}];`);
+  const listed = JSON.parse(run('JSON.stringify(nodeHolders().map(n => n.instanceName || n.node.name))')).sort();
+  assert.deepEqual(listed, ['Api', 'Echo', 'Engine', 'Hidden', 'Pass', 'Tok']);
+  assert.equal(run("nodeNames().has('Hidden')"), true, 'a node of a disabled endpoint keeps its name');
+  assert.equal(run("nodeNames(state.services[0]).has('Tok')"), false);
+});
+
+test('a unary node holds only a reference, and one that names no single entry is reported, never sent', async () => {
+  const run = editor();
+  withService(run);
+  // Bound, as every walk of the graph binds it: its reference, its role,
+  // and what the user set; no catalogue entry.
+  run('nodeHolders();');
+  assert.deepEqual(Object.keys(JSON.parse(run('JSON.stringify(state.services[0])'))).sort(), ['calls', 'instanceName', 'ref', 'role', 'segments']);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(state.services[0].ref)')), {source:'local', package:'p', node:'Tok'});
+  assert.equal(run('JSON.stringify(draftProblems())'), '[]');
+  // Two versions of the package: the reference names both, and is refused.
+  run(`state.entries.push({...state.entries[0], version:'2'});`);
+  assert.equal(run('JSON.stringify(draftProblems())'), JSON.stringify(['node `Engine`: the catalogue has `p` node `Engine` in p@1 and p@2; remove all but one', 'unary node `Tok`: the catalogue has `p` node `Tok` in p@1 and p@2; remove all but one']));
+  // No version of it.
+  run(`state.entries = [];`);
+  assert.equal(run('JSON.stringify(draftProblems())'), JSON.stringify(['node `Engine`: the catalogue has no `p` node `Engine`', 'unary node `Tok`: the catalogue has no `p` node `Tok`']));
+  assert.equal(run('draft().nodes.some(n => n.name === "Tok")'), false, 'no stale version is emitted');
+  run(`sent = 0; fetch = async () => { sent++; return {ok:true, json:async () => ({ok:true})}; }; show = () => {}; graphComplete = () => true;`);
+  await run('validateGraph()');
+  assert.equal(run('sent'), 0, 'the page reports the reference instead of checking');
+});
+
+// The frontend and the nodes of the endpoint arms hold copies of their
+// catalogue entries. After a re-import and an undo, the draft still names
+// the entries the catalogue has now.
+test('undo after a re-import keeps the frontend and the pipeline nodes on the current catalogue', async () => {
+  const run = editor();
+  run(`document.createElement = tag => ({tag, children:[], dataset:{}, style:{setProperty(){}}, className:'',
+      append(...children){this.children.push(...children);}, setAttribute(){}, classList:{add(){},toggle(){}}, add(){}, querySelector(){ return {}; }});
+    Option = function(){}; setTimeout = () => 0; clearTimeout = () => {};
+    const element = document.getElementById;
+    document.getElementById = id => { const e = element(id); e.append ||= () => {}; e.add ||= () => {}; return e; };
+    renderCatalog=()=>{};
+    const local='path+file:///nodes';
+    const m=path=>({package:'proto',version:'1',source:local,path});
+    const req={head:m('proto::Prompt'),item:null}, reply=m('proto::Chunk');
+    const engine={name:'Engine',role:'sink',ports:[{port:'Req',...req},{port:'Item',head:reply}]};
+    const api={name:'Api',role:'source',ports:[],config:[{name:'chat',default:true}],entries:[{name:'chat',enabled:'chat',request:req,response:{head:reply}}]};
+    let version=1;
+    const catalogue=()=>[{package:'proto',version:'1',source:local,nodes:[],messages:[{name:'Prompt',path:'proto::Prompt',public:true},{name:'Chunk',path:'proto::Chunk',public:true}]},
+      {package:'p',version:String(version),source:local,nodes:[api,engine],messages:[]}];
+    fetch=async()=>({ok:true,json:async()=>({entries:catalogue()})});
+    state.entries=catalogue(); $('source-name').value='Source';
+    state.frontend={...nodes().find(n=>n.node.role==='source'),arms:{chat:newHop()}};
+    connectSink(state.frontend.arms.chat,req,reply,nodes().find(n=>n.node.role==='sink'));
+    render();
+    reimport=()=>{version=2;};`);
+  run('reimport();');
+  await run('load()');
+  run('undoEdit();');
+  const output = JSON.parse(run('JSON.stringify(draft())'));
+  assert.deepEqual(output.nodes.map(n => [n.name, n.entry]), [['Source', 'p@2'], ['Engine', 'p@2']]);
+});
+
+// A node whose reference names two versions for a while is reported, not
+// rebuilt: it keeps its role and its nested hop, and removing the second
+// version gives back the graph as it was.
+test('an operator restored while its package is at two versions keeps its role and its nested hop', async () => {
+  const run = editor();
+  run(`document.createElement = tag => ({tag, children:[], dataset:{}, style:{setProperty(){}}, className:'',
+      append(...children){this.children.push(...children);}, setAttribute(){}, setCustomValidity(){}, reportValidity(){}, classList:{add(){},toggle(){}}, add(){}, querySelector(){ return {}; }});
+    Option = function(){}; setTimeout = () => 0; clearTimeout = () => {};
+    const element = document.getElementById;
+    document.getElementById = id => { const e = element(id); e.append ||= () => {}; e.add ||= () => {}; e.querySelectorAll ||= undefined; return e; };
+    renderCatalog=()=>{};
+    const local='path+file:///nodes';
+    const m=path=>({package:'proto',version:'1',source:local,path});
+    const req={head:m('proto::Prompt'),item:null}, reply=m('proto::Chunk');
+    const op={name:'Op',role:'operator',ports:[{port:'UpReq',...req},{port:'UpItem',head:reply},{port:'DownReq',...req},{port:'DownItem',head:reply}]};
+    const engine={name:'Engine',role:'sink',ports:[{port:'Req',...req},{port:'Item',head:reply}]};
+    const proto={package:'proto',version:'1',source:local,nodes:[],messages:[{name:'Prompt',path:'proto::Prompt',public:true},{name:'Chunk',path:'proto::Chunk',public:true}]};
+    const p=version=>({package:'p',version,source:local,nodes:[op,engine],messages:[]});
+    let catalogue=[proto,p('1')];
+    fetch=async()=>({ok:true,json:async()=>({entries:catalogue})});
+    state.entries=catalogue; $('source-name').value='Source'; $('name').value='composed';
+    $('source-request').value=key(req.head); $('source-response').value=key(reply); $('input-mode').value='single';
+    state.hop.inner=copyNode(nodes().find(n=>n.node.name==='Op'));
+    state.hop.nested={...newHop(), inner:copyNode(nodes().find(n=>n.node.name==='Engine'))};
+    render();
+    rename=()=>{$('name').value='renamed';render();};
+    twin=on=>{catalogue=on?[proto,p('1'),p('2')]:[proto,p('1')];};`);
+  assert.equal(run('graphComplete()'), true);
+  run('rename();');
+  run('twin(true);');
+  await run('load()');
+  run('undoEdit();');
+  assert.equal(run('state.hop.inner.node.role'), 'operator', 'the operator keeps its role');
+  assert.equal(run('state.hop.nested?.inner?.instanceName'), 'Engine', 'and its nested hop');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(draftProblems())')), [
+    'node `Op`: the catalogue has `p` node `Op` in p@1 and p@2; remove all but one',
+    'node `Engine`: the catalogue has `p` node `Engine` in p@1 and p@2; remove all but one',
+  ]);
+  run('twin(false);');
+  await run('load()');
+  assert.equal(run('graphComplete()'), true, 'removing the second version gives back the graph');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(draft().nodes.map(n => [n.name, n.entry]))')), [['Op', 'p@1'], ['Engine', 'p@1']]);
+  assert.equal(run('JSON.stringify(draftProblems())'), '[]');
+});
+
+const {draftRuleBreaks, chosen, staleDefaults, prepare, runSequences} = require('./sequences.cjs');
+
+test('500 seeded sequences of page edits never break a draft rule behind the user, nor name a removed version or its defaults', async () => {
+  const run = editor();
+  prepare(run);
+  let checked = 0;
+  await runSequences(run, Array.from({length: 500}, (_, i) => i + 1), 12, ({seed, done, output, entries, complete, problems, twin, lost}) => {
+    checked++;
+    assert.deepEqual(lost, [], `seed ${seed}, after: ${done.join(', ')}: an operator lost its nested hop`);
+    // A placement the user chose may still be refused, by name.
+    let breaks = [...draftRuleBreaks(output, entries).filter(rule => !chosen(rule)), ...staleDefaults(output, entries)];
+    if (twin) {
+      // Two versions of a package: the page names the nodes and sends
+      // nothing. What it keeps is checked once the second version goes.
+      assert.equal(complete && problems.length === 0, false, `seed ${seed}: two versions, and no problem named`);
+      return;
+    }
+    // The page checks and sends only a complete graph. An incomplete one
+    // must still name only entries the catalogue has.
+    if (!complete) breaks = breaks.filter(b => b.includes('catalogue') || b.includes('default'));
+    else assert.deepEqual(problems, [], `seed ${seed}: a reference names no single entry`);
+    assert.deepEqual(breaks, [], `seed ${seed}, after: ${done.join(', ')}`);
+  });
+  assert.equal(checked, 6000);
 });

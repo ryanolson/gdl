@@ -522,9 +522,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the composer fills these controls from public `messages` entries, without `exports` entries and their canonical identities.
 - **Lifts:** marked exports in the message controls, with their original message identities. See [Compose in the browser](../guides/composer.md).
 
-### A diagram draws no `calls`, and with a layout no unary node
-- **What:** `cargo gdl diagram` draws a unary node only without a layout, and draws no edge for a `calls` clause. With a layout, it draws each segment's nodes of the topology.
-- **Workaround:** read the `calls` clauses in the graph file.
+### The composer refuses a package it has at two versions
+- **What:** a node names its package, the package's source, and its node name, not a version. When the catalogue holds the package at two versions, the page names each such node and does not check, download, or deploy the graph. Each such node keeps its place, its role, and an operator's nested hop, and removing the second version gives the graph back.
+- **Why:** the page never picks a version for the user, and never moves a node to another one behind the user's back. See [Compose in the browser](../guides/composer.md#catalogue-versions).
+- **Workaround:** remove the versions you do not use from the catalogue.
+- **Lifts:** a version the user picks for each package, kept with the graph.
 
 ### The composer's server cannot build crates that need CUDA
 - **What:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages cannot be built on a server without CUDA. With `--docker`, **Build and apply** builds every segment in the deployment's one build image (`build_image`). A segment whose crates need CUDA builds only if that image has the CUDA toolkit.

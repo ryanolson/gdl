@@ -54,6 +54,14 @@ For a `Service` frontend, each enabled endpoint gets its own arm. A dangling **+
 
 Open **Property kinds** under the canvas heading to declare a kind and the message of its keys, with **Add kind**. In a node's settings, **Provides** lists the kinds its instance has, `model, region`, and **Needs** the kinds it reads, `model from sets`. The source card has the same fields once a frontend hosts the source. Each node's box shows them, and the diagram draws them on the node and in its title. The draft writes them into the graph file ([Declare properties](define-a-graph.md#declare-properties)). The composer places no classes, so the check refuses a need: the graph file and the diagram still show it, and a spec with the class's tables can take the exported graph.
 
+### Add a unary node
+
+A unary node is in no hop ([Unary services](../concepts/unary.md)). In the catalogue, expand the node and press **Add unary node**, or drag it onto the list of unary nodes under the pipelines. A second node of one kind gets a number, `Tok2`. In a caller's settings, **Calls** lists the unary nodes it calls, `Tok`. It takes only names of the graph's unary nodes. The caller's box shows the clause, and the draft writes it into the graph file. The diagram draws each unary node as a hexagon, and each call as a dashed edge labeled `calls`. Removing a unary node removes it from every **Calls**.
+
+### Catalogue versions
+
+Each node keeps its package, the package's source, its node name, and the settings you changed, not a copy of its catalogue entry. The page reads the entry, its version, its ports, and its defaults from the catalogue each time it draws the node or builds the draft. So a node follows a re-imported package to the new version and its new defaults, also after **Undo**. When the catalogue has no such node, or has it at two versions, the page names the node and does not check, download, or deploy the graph ([Known limitations](../operations/limitations.md#the-composer-refuses-a-package-it-has-at-two-versions)). A source name is refused when it, or the root an endpoint would get (`Next_entry_responses` for a source `Next`), is a node's name.
+
 ## Cut it into segments
 
 **Segments** opens once the graph passes.
@@ -62,6 +70,8 @@ Open **Property kinds** under the canvas heading to declare a kind and the messa
 2. Expand **Rename segments**. Name the groups `front`, `engine`, and `post`.
 
 The summary shows three segments and three network crossings. A move changes a node's request and response boundaries together. Clicking an edge opens a placement dialog for a connected node. On a scissors edge, choose **Only this node** or **Downstream chain**, which moves the chain down to the next existing boundary. An edge whose message has no codec stays local, and a cut on it is refused. Blue arrows are requests, and purple dashed arrows are responses.
+
+A unary node starts in the source's segment. Under **Node placement**, its row has a box for each segment and **New segment…** for one of its own. Check two boxes to list it in two segments: a caller calls the copy in its own segment, or else the one other segment's ([Specs, segments, and layouts](../concepts/placement.md#unary-nodes)). The last box cannot be cleared. Each segment's card shows the unary node, and the crossings name each call to another segment. Renaming a segment keeps its unary nodes.
 
 A cut request edge has a router control. It offers **Round robin**, **Random**, and gdl's selectors, `affinity` and `least_loaded`. A choice writes `[routing]` in the spec. A selector from another crate is written in the spec by hand. [Write a selector](write-a-selector.md) and [Routing](../concepts/routing.md) cover both.
 

@@ -155,18 +155,32 @@ fn require_wire(caller: &str, service: &str, ty: &TypeInfo, found: &mut Vec<Plac
     }
 }
 
-/// Each segment's calls to a service in another segment: by the caller's
-/// segment, each service it calls remotely and the one segment that hosts
-/// the copy it calls. A call to the copy in the caller's own segment is not
-/// here. [`judge`] has refused every call this cannot resolve.
-pub(super) type Remote = BTreeMap<String, BTreeMap<String, String>>;
+/// One `calls` entry of one copy of a caller, resolved: the caller in
+/// `segment` calls the copy of `service` in segment `to`, which is
+/// `segment` itself for a local call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Site {
+    pub(super) caller: String,
+    pub(super) segment: String,
+    pub(super) service: String,
+    pub(super) to: String,
+}
 
-pub(super) fn remote(
+impl Site {
+    pub(super) fn remote(&self) -> bool {
+        self.to != self.segment
+    }
+}
+
+/// Every call resolved from each segment that holds its caller, callers in
+/// declaration order. [`judge`] has refused every call this cannot
+/// resolve.
+pub(super) fn sites(
     manifest: &Manifest,
     segment_of: &BTreeMap<String, String>,
     services: &Services,
-) -> Remote {
-    let mut remote = Remote::new();
+) -> Vec<Site> {
+    let mut sites = Vec::new();
     for node in manifest.nodes.iter().filter(|node| !node.calls.is_empty()) {
         let segments: Vec<&String> = match services.get(&node.name) {
             Some(segments) => segments.iter().collect(),
@@ -177,17 +191,38 @@ pub(super) fn remote(
                 let Some(copies) = services.get(service) else {
                     continue;
                 };
-                if copies.contains(segment) {
+                let to = if copies.contains(segment) {
+                    segment
+                } else if let [other] = copies.iter().collect::<Vec<_>>()[..] {
+                    other
+                } else {
                     continue;
-                }
-                if let [other] = copies.iter().collect::<Vec<_>>()[..] {
-                    remote
-                        .entry(segment.clone())
-                        .or_default()
-                        .insert(service.clone(), other.clone());
-                }
+                };
+                sites.push(Site {
+                    caller: node.name.clone(),
+                    segment: segment.clone(),
+                    service: service.clone(),
+                    to: to.clone(),
+                });
             }
         }
+    }
+    sites
+}
+
+/// Each segment's calls to a service in another segment: by the caller's
+/// segment, each service it calls remotely and the one segment that hosts
+/// the copy it calls. A call to the copy in the caller's own segment is not
+/// here.
+pub(super) type Remote = BTreeMap<String, BTreeMap<String, String>>;
+
+pub(super) fn remote(sites: &[Site]) -> Remote {
+    let mut remote = Remote::new();
+    for site in sites.iter().filter(|site| site.remote()) {
+        remote
+            .entry(site.segment.clone())
+            .or_default()
+            .insert(site.service.clone(), site.to.clone());
     }
     remote
 }

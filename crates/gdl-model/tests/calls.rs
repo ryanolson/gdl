@@ -442,9 +442,9 @@ fn a_manifest_with_calls_reads_back_and_one_without_writes_none() {
     assert_eq!(Manifest::from_toml(&text).expect("read back"), plain);
 }
 
-/// A diagram of a graph with unary nodes fails on nothing. Without a
-/// layout it draws every node; with one, each segment's nodes of the
-/// topology, and no unary node, which may be in several segments.
+/// A diagram of a graph with unary nodes fails on nothing, and draws each
+/// unary node with and without a layout. `tests/diagram.rs` has the
+/// drawings.
 #[test]
 fn a_graph_with_unary_nodes_draws() {
     let manifest = manifest(nodes());
@@ -459,11 +459,11 @@ fn a_graph_with_unary_nodes_draws() {
         let dot = manifest
             .to_dot(layout, gdl_model::Direction::LeftToRight)
             .expect("DOT");
-        assert_eq!(dot.contains("Tok"), layout.is_none(), "{dot}");
+        assert!(dot.contains("Tok"), "{dot}");
         let mermaid = manifest
             .to_mermaid(layout, gdl_model::Direction::LeftToRight)
             .expect("Mermaid");
-        assert_eq!(mermaid.contains("Tok"), layout.is_none(), "{mermaid}");
+        assert!(mermaid.contains("Tok"), "{mermaid}");
     }
 }
 
@@ -579,4 +579,70 @@ fn a_selector_on_calls_reads_its_kinds_from_the_called_copys_class() {
         ]
     );
     assert!(gdl_model::selector_consumers(&laid, "other", &["load"]).is_empty());
+}
+
+/// The crossing report counts each caller's calls apart from the hops'
+/// crossings: for each caller and each segment it is in, the services it
+/// calls in another segment, and how many it calls beside it. A node may
+/// call a service any number of times per request, so these are the
+/// callers' `calls` entries, not calls per request. A graph without
+/// callers writes no call line.
+#[test]
+fn the_crossing_report_counts_each_callers_remote_calls() {
+    let report = |text: &str| {
+        layout(&manifest(nodes()), &placement(text))
+            .expect("laid out")
+            .report()
+    };
+    let compact = report(ONE);
+    assert_eq!(compact.remote_calls(), 0);
+    assert_eq!(compact.crossings(), 0);
+    assert_eq!(
+        compact.to_string(),
+        "hop 0: 0 crossings, 0 anchors\n\
+         hop 1: 0 crossings, 0 anchors\n\
+         per request: 0 crossings, 0 anchors\n\
+         calls from Ov in all: 0 remote, 1 local\n\
+         calls from R in all: 0 remote, 1 local"
+    );
+
+    let split =
+        report("[segment.front]\nnodes = ['S', 'R', 'D', 'Ov']\n[segment.tok]\nnodes = ['Tok']\n");
+    assert_eq!(split.remote_calls(), 2);
+    // The hops stay in one segment: the calls are not crossings.
+    assert_eq!(split.crossings(), 0);
+    assert_eq!(
+        split.to_string(),
+        "hop 0: 0 crossings, 0 anchors\n\
+         hop 1: 0 crossings, 0 anchors\n\
+         per request: 0 crossings, 0 anchors\n\
+         calls from Ov in front: 1 remote (Tok in tok), 0 local\n\
+         calls from R in front: 1 remote (Tok in tok), 0 local"
+    );
+
+    // A caller in two segments has a line for each.
+    let copies = report(
+        "[segment.front]\nnodes = ['S', 'R', 'D']\n\
+         [segment.side]\nnodes = ['Ov', 'Tok']\n\
+         [segment.lone]\nnodes = ['Ov']\n",
+    );
+    assert_eq!(copies.remote_calls(), 2);
+    assert!(
+        copies.to_string().ends_with(
+            "calls from Ov in lone: 1 remote (Tok in side), 0 local\n\
+             calls from Ov in side: 0 remote, 1 local\n\
+             calls from R in front: 1 remote (Tok in side), 0 local"
+        ),
+        "{copies}"
+    );
+
+    // Without callers the report is as it was before calls existed.
+    let mut plain = nodes();
+    plain[1].calls.clear();
+    plain[4].calls.clear();
+    let plain = layout(&manifest(plain), &placement(ONE))
+        .expect("laid out")
+        .report();
+    assert_eq!(plain.remote_calls(), 0);
+    assert!(!plain.to_string().contains("calls"), "{plain}");
 }

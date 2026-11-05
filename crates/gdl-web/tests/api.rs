@@ -1918,3 +1918,224 @@ async fn the_example_follows_the_configured_gdl_revision() {
         json!({"source": "git", "url": "https://example.com/gdl", "revision": "abc123", "path": "examples/api"})
     );
 }
+
+/// The fixture catalogue, copied into `dir`, with a unary node `Tok` of
+/// `regproto::Words` in `regnodes` beside its sinks.
+fn catalog_with_unary_node(dir: &Path) -> PathBuf {
+    let catalog = dir.join("catalog");
+    for package in ["regnodes", "regproto"] {
+        std::fs::create_dir_all(catalog.join(package)).expect("dir");
+        std::fs::copy(
+            fixture_catalog().join(package).join("0.1.0.toml"),
+            catalog.join(package).join("0.1.0.toml"),
+        )
+        .expect("entry");
+    }
+    let port = |port: &str| {
+        format!(
+            "[[nodes.ports]]\nport = \"{port}\"\n\n[nodes.ports.head]\npackage = \"regproto\"\nversion = \"0.1.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\npath = \"regproto::Words\"\n\n"
+        )
+    };
+    let entry = catalog.join("regnodes/0.1.0.toml");
+    let mut text = std::fs::read_to_string(&entry).expect("entry");
+    text.push_str(&format!(
+        "\n[[nodes]]\nname = \"Tok\"\nrole = \"unary\"\ntype = \"regnodes::Tok\"\n\n{}{}",
+        port("Req"),
+        port("Resp")
+    ));
+    std::fs::write(&entry, text).expect("entry");
+    catalog
+}
+
+/// A draft with a unary node that the sink calls checks as its spec would
+/// generate, wherever the node is listed. The composer's diagram draws the
+/// node in each of its segments and the call as an edge, and its crossing
+/// report counts a call to another segment apart from the crossings.
+#[tokio::test]
+async fn a_drafts_unary_node_is_checked_and_drawn_in_each_of_its_segments() {
+    let temp = scratch("unary");
+    let router = router(temp.path(), catalog_with_unary_node(temp.path()));
+    let with = |segments: Value| {
+        let mut called = draft("regproto::Words", "Engine", segments);
+        called["nodes"][0]["calls"] = json!(["Tok"]);
+        called["nodes"]
+            .as_array_mut()
+            .expect("nodes")
+            .push(json!({ "name": "Tok", "entry": "regnodes@0.1.0", "node": "Tok" }));
+        called
+    };
+    let (_, body) = json_call(
+        &router,
+        "POST",
+        "/api/check",
+        Some(with(json!({ "front": ["A", "Engine"], "tok": ["Tok"] }))),
+    )
+    .await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    let graph = body["graph"].as_str().expect("graph");
+    assert!(
+        graph.contains("sink Engine: Words -> stream Token calls Tok;"),
+        "{graph}"
+    );
+    assert!(graph.contains("unary Tok: Words -> Words;"), "{graph}");
+    let crossings = body["crossings"].as_str().expect("crossings");
+    assert!(
+        crossings.contains("calls from Engine in front: 1 remote (Tok in tok), 0 local"),
+        "{crossings}"
+    );
+    let mermaid = body["mermaid"].as_str().expect("mermaid");
+    assert!(
+        mermaid.contains("-.->|\"calls Words -#gt; Words\"|"),
+        "{mermaid}"
+    );
+    assert!(mermaid.contains("linkStyle"), "the call crosses: {mermaid}");
+
+    // Listed beside its caller and in a segment of its own: two copies,
+    // and the caller calls the one beside it.
+    let (_, body) = json_call(
+        &router,
+        "POST",
+        "/api/check",
+        Some(with(
+            json!({ "front": ["A", "Engine", "Tok"], "tok": ["Tok"] }),
+        )),
+    )
+    .await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    let mermaid = body["mermaid"].as_str().expect("mermaid");
+    assert_eq!(
+        mermaid.matches("{{\"Tok<br/>unary\"}}").count(),
+        2,
+        "{mermaid}"
+    );
+    assert!(!mermaid.contains("linkStyle"), "no edge crosses: {mermaid}");
+    let crossings = body["crossings"].as_str().expect("crossings");
+    assert!(
+        crossings.contains("calls from Engine in front: 0 remote, 1 local"),
+        "{crossings}"
+    );
+}
+
+#[tokio::test]
+async fn entry_adapter_calls_cannot_disappear_from_a_checked_draft() {
+    let temp = scratch("entry-calls");
+    let app = local_router(temp.path(), &crates().join(".."));
+    let (status, body) = json_call(
+        &app,
+        "POST",
+        "/api/catalog",
+        Some(json!({"source":"local","path":"examples/api"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let (_, catalog) = json_call(&app, "GET", "/api/catalog", None).await;
+    let entry = &catalog["entries"][0];
+    let message = |name: &str| json!({"package":"api-frontend","version":"0.1.0","source":entry["source"],"path":format!("api_frontend::{name}")});
+    let adapter = |name: &str| json!({"operator":{"name":name,"entry":"api-frontend@0.1.0","node":name},"nested":{"target":"Http"}});
+    let mut draft = json!({"name":"api","source":{"name":"Http","request":{"head":message("Prompt")},"response":message("Chunk")},"nodes":[
+        {"name":"Http","entry":"api-frontend@0.1.0","node":"ApiFrontend"},
+        {"name":"Engine","entry":"api-frontend@0.1.0","node":"Echo"}
+    ],"hop":{"inner":"Engine"},"segments":{"front":["Http"],"engine":["Engine"]},"entries":{
+        "chat":adapter("ChatAdapter"),"responses":adapter("ResponsesAdapter"),"anthropic":adapter("AnthropicAdapter")
+    }});
+    let (_, before) = json_call(&app, "POST", "/api/check", Some(draft.clone())).await;
+    assert_eq!(before["ok"], true, "{before:#}");
+    draft["entries"]["chat"]["operator"]["calls"] = json!(["Missing"]);
+    let (_, after) = json_call(&app, "POST", "/api/check", Some(draft)).await;
+    assert_eq!(
+        after["ok"], false,
+        "a call to an undeclared unary node must be refused, not dropped: {after:#}"
+    );
+    // The entry table, where an adapter is written, has no `calls`: the
+    // draft is refused, naming the adapter and its clause.
+    assert!(
+        after["problems"]
+            .as_array()
+            .expect("problems")
+            .iter()
+            .any(|p| p == "entry node `ChatAdapter`: an entry adapter calls no unary node, but it has `calls Missing`"),
+        "{after:#}"
+    );
+}
+
+/// The page holds each draft to a copy of the server's rules
+/// (`draftRuleBreaks` in `tests/sequences.cjs`) over 500 seeded sequences
+/// of edits. Here each sequence sends its last complete draft through the
+/// server's check, with a catalogue of the page's entries at that step,
+/// and the copy and the server must agree on every one. The page runs in
+/// Node, as `tests/editor.cjs` runs it. About 4 seconds: a server and a
+/// catalogue per draft. One sequence in 25 was not enough: it missed the
+/// remote-call ambiguity rule, which six of the 500 drafts reach.
+#[tokio::test]
+async fn the_server_and_the_pages_copy_of_its_rules_agree_on_the_sequence_drafts() {
+    let harness = include_str!("editor.cjs")
+        .split("\ntest(")
+        .next()
+        .expect("page harness");
+    let script = format!(
+        "{harness}\nconst {{draftRuleBreaks, prepare, runSequences}} = require('./sequences.cjs');\n\
+         (async () => {{\n\
+           const run = editor(); prepare(run);\n\
+           const seeds = Array.from({{length: 500}}, (_, i) => i + 1);\n\
+           const last = new Map();\n\
+           await runSequences(run, seeds, 12, step => {{\n\
+             if (!step.complete || step.problems.length) return;\n\
+             last.set(step.seed, {{seed: step.seed, done: step.done.slice(), draft: step.output, entries: step.entries,\n\
+               breaks: [...draftRuleBreaks(step.output, step.entries), ...step.problems]}});\n\
+           }});\n\
+           process.stdout.write(JSON.stringify([...last.values()]));\n\
+         }})().catch(error => {{ console.error(error); process.exitCode = 1; }});\n"
+    );
+    let output = std::process::Command::new("node")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
+        .args(["-e", &script])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("node");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let samples: Vec<Value> = serde_json::from_slice(&output.stdout).expect("samples");
+    assert!(
+        samples.len() >= 400,
+        "only {} complete drafts",
+        samples.len()
+    );
+    let mut disagreements = Vec::new();
+    for sample in &samples {
+        let temp = scratch("sequence");
+        let catalog = temp.path().join("catalog");
+        for entry in sample["entries"].as_array().expect("entries") {
+            let entry: gdl_extract::Entry =
+                serde_json::from_value(entry.clone()).expect("a catalogue entry");
+            let dir = catalog.join(&entry.offer.package);
+            std::fs::create_dir_all(&dir).expect("dir");
+            std::fs::write(
+                dir.join(format!("{}.toml", entry.offer.version)),
+                toml::to_string(&entry).expect("toml"),
+            )
+            .expect("entry");
+        }
+        let router = router(temp.path(), catalog);
+        let (_, body) =
+            json_call(&router, "POST", "/api/check", Some(sample["draft"].clone())).await;
+        let copy = sample["breaks"].as_array().expect("breaks");
+        if (body["ok"] == true) != copy.is_empty() {
+            disagreements.push(format!(
+                "seed {} after {}: the server says {}, the copy {:?}",
+                sample["seed"],
+                sample["done"],
+                if body["ok"] == true {
+                    "ok".to_string()
+                } else {
+                    body["problems"].to_string()
+                },
+                copy
+            ));
+        }
+    }
+    assert!(disagreements.is_empty(), "{}", disagreements.join("\n"));
+}
