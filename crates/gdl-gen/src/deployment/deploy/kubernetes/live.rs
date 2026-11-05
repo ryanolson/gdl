@@ -1,13 +1,17 @@
 //! The fleet's objects as a cluster holds them: what `deploy` prunes, and
 //! `down` deletes. Each is read for its kind, its name, its uid, and the labels the
-//! render gives it, by their whole values ([`super::super::k8s`] labels a
+//! render gives it, by their whole values (`crate::deployment::k8s` labels a
 //! long value by its start and a hash, and keeps it whole in an
 //! annotation). A hub's Deployment is also read for the pool's parent and
 //! its segments' Deployments for how long their pods may take to stop:
 //! nothing else is read.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
+use super::super::order::{Note, Parentage};
+use super::super::site::{Driven, Stopping};
 use crate::Error;
 
 /// One object of the fleet in a cluster.
@@ -131,43 +135,52 @@ impl Live {
     }
 }
 
-/// A pool that `deploy` removes or `down` stops, as its cluster holds it:
-/// drained first when it has a parent, since the drain is what withdraws
-/// its record from its parent, and a pool deleted without it stays held
-/// there, missing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Stopping {
-    pub(super) pool: String,
-    pub(super) class: String,
-    /// Its parent pool, whose hub's Service is named for it: none for a
-    /// shared pool under the DynamoDB directory.
-    pub(super) home: Option<String>,
-    /// The longest stop grace of its Deployments, in seconds.
-    pub(super) grace: u64,
-    /// Whether its hub's Deployment is there to drain it. A pool whose hub
-    /// is gone cannot drain: only its parent can show that it withdrew.
-    pub(super) hub: bool,
-    /// Whether it publishes to the DynamoDB directory, where its parent's
-    /// hub holds no record of it to show that it withdrew.
-    pub(super) dynamodb: bool,
+/// The pools of `objects`, as the stop order reads them: each Deployment
+/// of a pool names its class and its parent, `home` or, for a shared pool,
+/// `parents`.
+pub(super) fn notes(objects: &[Live]) -> impl Iterator<Item = Note> + '_ {
+    objects
+        .iter()
+        .filter(|object| object.kind == "Deployment")
+        .filter_map(|object| {
+            let (Some(pool), Some(class)) = (&object.pool, &object.class) else {
+                return None;
+            };
+            let parent = match (&object.home, &object.parents) {
+                (Some(home), _) => Some(Parentage::Home(home.clone())),
+                (None, Some(class)) => Some(Parentage::Parents(class.clone())),
+                (None, None) => None,
+            };
+            Some(Note {
+                pool: pool.clone(),
+                class: class.clone(),
+                parent,
+            })
+        })
 }
 
-impl Stopping {
-    /// The pools of `objects` that have a Deployment there and a parent,
-    /// `home` or, for a shared pool, `parents`, in name order: every
-    /// Deployment of a pool names its parent, so a pool whose hub's
-    /// Deployment is gone is still found by its segments'. A pool with no
-    /// parent, such as a global pool, cannot drain: its hub refuses it.
-    pub(super) fn of(objects: &[&Live]) -> Vec<Self> {
-        let mut pools: std::collections::BTreeMap<String, Self> = Default::default();
-        for deployment in objects.iter().filter(|object| object.kind == "Deployment") {
-            let (Some(pool), Some(class)) = (&deployment.pool, &deployment.class) else {
-                continue;
-            };
-            if deployment.home.is_none() && deployment.parents.is_none() {
-                continue;
-            }
-            let stopping = pools.entry(pool.clone()).or_insert_with(|| Self {
+/// The pools of `objects`, in name order, each with how it drains when it
+/// has a Deployment there and a parent: every Deployment of a pool names
+/// its parent, so a pool whose hub's Deployment is gone is still found by
+/// its segments'. A pool with no parent, such as a global pool, cannot
+/// drain: its hub refuses it.
+pub(super) fn driven(objects: &[Live]) -> Vec<Driven> {
+    let mut pools: BTreeMap<String, Option<Stopping>> = objects
+        .iter()
+        .filter_map(|object| object.pool.clone())
+        .map(|pool| (pool, None))
+        .collect();
+    for deployment in objects.iter().filter(|object| object.kind == "Deployment") {
+        let (Some(pool), Some(class)) = (&deployment.pool, &deployment.class) else {
+            continue;
+        };
+        if deployment.home.is_none() && deployment.parents.is_none() {
+            continue;
+        }
+        let stopping = pools
+            .get_mut(pool)
+            .expect("each pool of the objects")
+            .get_or_insert_with(|| Stopping {
                 pool: pool.clone(),
                 class: class.clone(),
                 home: deployment.home.clone(),
@@ -175,10 +188,12 @@ impl Stopping {
                 hub: false,
                 dynamodb: false,
             });
-            stopping.grace = stopping.grace.max(deployment.grace.unwrap_or_default());
-            stopping.hub |= deployment.is_hub();
-            stopping.dynamodb |= deployment.dynamodb;
-        }
-        pools.into_values().collect()
+        stopping.grace = stopping.grace.max(deployment.grace.unwrap_or_default());
+        stopping.hub |= deployment.is_hub();
+        stopping.dynamodb |= deployment.dynamodb;
     }
+    pools
+        .into_iter()
+        .map(|(pool, drain)| Driven { pool, drain })
+        .collect()
 }

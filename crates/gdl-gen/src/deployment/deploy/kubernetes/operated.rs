@@ -7,17 +7,18 @@
 //! acted on its generation and its hub is healthy.
 //!
 //! Pools stop children first, across the whole fleet, whatever kind of
-//! cluster each runs in ([`Order`]): a child's drain needs its parent's
-//! hub.
+//! cluster each runs in (`super::super::order`): a child's drain needs its
+//! parent's hub.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::kube::{POOLS, bounded};
+use super::super::order::{Note, Parentage};
+use super::cluster::Cluster;
+use super::kube::{Kube, POOLS, bounded};
 use super::live::Live;
-use super::{Cluster, Kube, Waits, run};
+use super::{Waits, run};
 use crate::Error;
 
 /// The manager that owns a segment Deployment's `replicas` under the
@@ -44,13 +45,6 @@ pub(super) struct Operated {
     grace: u64,
 }
 
-/// A pool's parent: one pool, or every pool of a class.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Parentage {
-    Home(String),
-    Parents(String),
-}
-
 impl Operated {
     /// The `GdlPool`s of a `kubectl get --output json` list, or one.
     pub(super) fn list(text: &str) -> Result<Vec<Self>, Error> {
@@ -61,6 +55,15 @@ impl Operated {
             None => vec![list],
         };
         items.iter().map(Self::of).collect()
+    }
+
+    /// The pool, as the stop order reads it.
+    pub(super) fn note(&self) -> Note {
+        Note {
+            pool: self.name.clone(),
+            class: self.class.clone(),
+            parent: self.parent.clone(),
+        }
     }
 
     fn of(object: &Value) -> Result<Self, Error> {
@@ -465,86 +468,4 @@ pub(super) fn refuse_opted_in(cluster: &Cluster, live: &[Live]) -> Result<(), Er
         cluster.name,
         plain.join(", ")
     )))
-}
-
-/// The fleet's pools, each with its parents, from the fleet file and from
-/// what every cluster holds: the order in which pools stop, children
-/// first.
-#[derive(Debug, Default)]
-pub(super) struct Order {
-    /// Each pool's class.
-    class: BTreeMap<String, String>,
-    /// Each pool's parent.
-    parent: BTreeMap<String, Parentage>,
-}
-
-impl Order {
-    /// Note `pool` of `class`, whose parent is `parent`.
-    pub(super) fn add(&mut self, pool: &str, class: &str, parent: Option<Parentage>) {
-        self.class.insert(pool.to_string(), class.to_string());
-        if let Some(parent) = parent {
-            self.parent.entry(pool.to_string()).or_insert(parent);
-        }
-    }
-
-    /// Note the pools of `fleet`.
-    pub(super) fn fleet(&mut self, fleet: &gdl_model::Fleet) {
-        for pool in fleet.pools() {
-            let parent = pool.parent.as_ref().map(|parent| match parent {
-                gdl_model::Parent::Pool(home) => Parentage::Home(home.clone()),
-                gdl_model::Parent::Class(class) => Parentage::Parents(class.clone()),
-            });
-            self.add(&pool.name, &pool.class, parent);
-        }
-    }
-
-    /// Note the pools of `live`, a plain cluster's objects.
-    pub(super) fn live(&mut self, live: &[Live]) {
-        for object in live.iter().filter(|o| o.kind == "Deployment") {
-            let (Some(pool), Some(class)) = (&object.pool, &object.class) else {
-                continue;
-            };
-            let parent = match (&object.home, &object.parents) {
-                (Some(home), _) => Some(Parentage::Home(home.clone())),
-                (None, Some(class)) => Some(Parentage::Parents(class.clone())),
-                (None, None) => None,
-            };
-            self.add(pool, class, parent);
-        }
-    }
-
-    /// Note `pools`, an operated cluster's.
-    pub(super) fn operated(&mut self, pools: &[Operated]) {
-        for pool in pools {
-            self.add(&pool.name, &pool.class, pool.parent.clone());
-        }
-    }
-
-    /// How deep `pool` is: 0 for a pool with no parent, else one more than
-    /// its deepest parent. A pool not known is a top pool.
-    pub(super) fn depth(&self, pool: &str) -> usize {
-        self.depth_of(pool, &mut BTreeSet::new())
-    }
-
-    fn depth_of(&self, pool: &str, seen: &mut BTreeSet<String>) -> usize {
-        // A cycle, which a checked fleet never has, ends at the pool seen.
-        if !seen.insert(pool.to_string()) {
-            return 0;
-        }
-        let parents: Vec<&String> = match self.parent.get(pool) {
-            None => Vec::new(),
-            Some(Parentage::Home(home)) => vec![home],
-            Some(Parentage::Parents(class)) => self
-                .class
-                .iter()
-                .filter(|(_, c)| *c == class)
-                .map(|(name, _)| name)
-                .collect(),
-        };
-        let deepest = parents
-            .into_iter()
-            .map(|parent| self.depth_of(parent, &mut seen.clone()))
-            .max();
-        deepest.map_or(0, |depth| depth + 1)
-    }
 }

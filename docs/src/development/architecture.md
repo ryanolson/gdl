@@ -35,6 +35,12 @@ The runtime calls velo in one place: `crates/gdl-runtime/src/dist/fabric.rs` and
 
 `gdl-model` and `gdl-syntax` stay portable. `crates/gdl-model/tests/portable.rs` checks that they and the generator do not depend on the runtime, and that they build for `wasm32-unknown-unknown`, so the same rules can run in a browser. Today the composer's page checks a draft on its server (`/api/check`), which runs those rules natively.
 
+## How `deploy` and `down` reach a site
+
+`cargo gdl deploy` and `down` are one driver over a site: a kind of place that runs pools. The driver is `crates/gdl-gen/src/deployment/deploy.rs`. It runs the steps in order and stops at the first failure: check, images, render, apply, prune, and the wait for health. It stops pools children first across the fleet, drains each pool it removes through the pool's hub, and waits until the pool's record is withdrawn. The site is the `Site` trait in `deploy/site.rs`, private to `gdl-gen`. It does each step where the pools run: what to check, what to render and apply, what runs, how to remove it, and how to reach a pool's hub (`HubRoutes`: health, drain, withdrawn, and a relay parent's report of a child). Today Kubernetes is the one site (`deploy/kubernetes.rs`), through `kubectl` and the user's kube contexts. Its namespace, base objects, DynamoDB Local, tables Job, and the gdl operator's `GdlPool`s stay inside it: the driver hands a pool the operator runs to the site, which deletes its `GdlPool` and waits for the operator to stop it.
+
+A new site is one more implementation of the trait, with no change to the driver. The alternative, a copy of the driver for each site, would let the order of the stop and the drain drift apart between sites. Compose is not a site: `cargo gdl compose` writes a bundle and runs nothing, so it has no apply, prune, or hub to reach. `HubRoutes` holds only the routes the driver calls; a site that needs another route adds it with its first caller.
+
 ## Features of `gdl-runtime`
 
 | Feature | Enables |
