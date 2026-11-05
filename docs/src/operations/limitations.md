@@ -184,6 +184,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** in a roster directory, `[instances]` gives exact counts, and an extra instance fails its launch. Retiring one works there. Adding one does not.
 - **Workaround:** use a hub (`[hub]`). An instance that starts while the others serve joins once it is ready. See [Discovery](../concepts/hub.md) and [Segment lifecycle](../concepts/lifecycle.md).
 
+### A job that joins a pool finds only a hub on the default control port
+- **What:** `gdl-hub --resolve` writes `[hub]` with the `host` and `public_port` from the pool's record, and no `control_port`, so the joining segment uses 8337. A pool's hub on another control port is not reached. The resolver reads the `dir` and `dynamodb` directories only, and refuses `relay`.
+- **Why:** a pool's record names only its hub's public listener (`gdl_pools::PoolRecord::hub`), which is all that a follower needs. Under `relay`, the records are held in a parent pool's hub, not in a store a job can read.
+- **Workaround:** keep the hubs of pools that jobs join on the default ports, or give the segment the control port in its own settings (`[hub] control_port`). See [Joining a running pool](../concepts/hub.md#joining-a-running-pool).
+- **Lifts:** a record that also names the hub's control listener.
+
 ### Under a hub, an unspecified `listen` needs `HOSTNAME`
 - **What:** when `listen` is `0.0.0.0:<port>`, a segment binds the IPv4 address its `HOSTNAME` resolves to. The launch fails if `HOSTNAME` is unset or has no IPv4 address.
 - **When:** a native run under a hub outside a container.

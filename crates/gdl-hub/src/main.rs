@@ -11,6 +11,13 @@
 //! its hubs: it makes the tables that are absent and checks the keys of
 //! those that exist, from the `GDL_POOL__*` variables of the `dynamodb`
 //! backend, and exits.
+//!
+//! `gdl-hub --resolve <class>/<pool> --write <file>` is for a job that
+//! joins a running pool: it reads the pool's record from the directory the
+//! `GDL_POOL__*` variables name (`dir` or `dynamodb`), waits for the
+//! record's heartbeat, and writes `[hub]` with its `host` and
+//! `public_port`, which the segment takes as an override file. A pool it
+//! cannot join writes nothing, and exits non-zero with one line.
 use gdl_model::{DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT};
 use tokio::signal::unix::{SignalKind, signal};
 use velo_hub::HubConfig;
@@ -65,6 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if path == "--tables" {
         return tables().await;
     }
+    if path == "--resolve" {
+        return resolve().await;
+    }
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
     let pool = gdl_hub::pool_from_env(&spec)?;
@@ -105,4 +115,18 @@ async fn tables() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 #[cfg(not(feature = "dynamodb"))]
 async fn tables() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("gdl-hub --tables: this gdl-hub is built without its `dynamodb` feature, which links the AWS SDK; install it with `cargo install gdl-hub --features dynamodb`".into())
+}
+
+/// `--resolve`: one line on stderr, and exit 1 when nothing was written.
+async fn resolve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match gdl_hub::resolve_from_args(std::env::args_os().skip(2), std::env::vars_os()).await {
+        Ok(line) => {
+            eprintln!("{line}");
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("gdl-hub --resolve: {error}");
+            std::process::exit(1);
+        }
+    }
 }

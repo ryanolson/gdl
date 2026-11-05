@@ -5,6 +5,7 @@ A segment binary takes its settings from TOML files (`segment config.toml [overr
 ## Where settings come from
 
 - **Files** are read in order. Each file overrides the ones before it. A file's keys are matched as spelled.
+- An override file can hold as little as one table. A job that joins a running pool starts its segment as `segment config.toml hub.toml`, where `hub.toml` holds only `[hub]` (`host` and `public_port`), which `gdl-hub --resolve <class>/<pool> --write hub.toml` wrote from the pool's record when the job started ([Joining a running pool](../concepts/hub.md#joining-a-running-pool)). A table that two files set is merged key by key, so `config.toml` keeps its own `[hub] heartbeat_ms`.
 - **Environment variables** override the files. `GDL_` is followed by the key path, with `__` between nested keys: `GDL_RUNTIME__ADMISSION_LIMIT=64`, or `GDL_NODE__TRUNCATE__MAX=3` for `[node.Truncate] max = 3`.
 - An environment key is matched without regard to case. A node or adapter name is matched to the graph's spelling of it, so `TRUNCATE` finds `[node.Truncate]`.
 - Only variables whose first key is a settings key are read. Any other `GDL_` variable is ignored without a word, so `GDL_PROFILE` and `GDL_IMAGE_PREFIX` do not stop a segment. A misspelled first key (`GDL_RUNTIM__DRAIN_MS`) is ignored the same way.

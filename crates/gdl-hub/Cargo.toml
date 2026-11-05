@@ -26,6 +26,8 @@ tracing = "0.1"
 # has no colour, and nothing in the hub uses `log`.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 serde.workspace = true
+# `--resolve` writes its file beside the path, then renames it over it.
+tempfile.workspace = true
 # The `dynamodb` feature's: the DynamoDB pool directory, and what a hub
 # needs to reach AWS that the directory's crate leaves to its caller, a
 # credential chain and an HTTPS client.
@@ -57,6 +59,9 @@ tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
 # Proves that a verified report cannot be built outside verification.
 trybuild = { workspace = true }
+# A segment that joins a pool through the file `--resolve` writes, run as
+# a segment binary runs.
+gdl-runtime = { path = "../gdl-runtime", features = ["hub"] }
 
 # The keyed record service's round trip and rate: a load run that prints
 # its quantiles, not a criterion bench.

@@ -3,8 +3,9 @@
 # default suite: start DynamoDB Local in Docker on a free loopback port, run
 # the `local` test target of gdl-pools-dynamodb and the `dynamodb` test target
 # of gdl-hub against it, and stop it. The gdl-hub target runs the stock hub
-# binary, built with its `dynamodb` feature: the tables step, and a parent
-# pool's hub that finds two child pools in two regions.
+# binary, built with its `dynamodb` feature: the tables step, a parent
+# pool's hub that finds two child pools in two regions, and `--resolve`,
+# which reads a running pool's hub from the tables.
 #
 # DynamoDB Local runs with -sharedDb: without it, Local keeps a database for
 # each region and access key, and hubs of two regions would see two

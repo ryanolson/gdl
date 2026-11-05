@@ -27,6 +27,8 @@ The hub is velo's hub ([velo-hub](https://github.com/ai-dynamo/velo)) with one e
 ```bash
 gdl-hub deployment.json          # serve the deployment's hub
 gdl-hub --healthcheck            # exit 0 if the local hub answers GET /v1/health with 200
+gdl-hub --tables                 # make the DynamoDB directory's tables (`dynamodb` feature)
+gdl-hub --resolve model_x/model-x-01 --write hub.toml   # write `[hub]` of a running pool
 ```
 
 `deployment.json` holds the graph's manifest and the placement (`gdl_model::DeploymentSpec`). `cargo gdl compose` writes it ([Deploy with Docker Compose](../guides/compose-deploy.md)). The binary reads no settings file. It serves on `gdl_model::HUB_PUBLIC_PORT` (1337) and `HUB_CONTROL_PORT` (8337), unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. A segment reads the same variables for where its hub is. Port 0 lets the OS choose. Once it serves, the binary prints the addresses it bound on stderr (`gdl-hub: serving, public ..., control ...`).
@@ -61,6 +63,18 @@ A `ready` instance is registered with velo before it is added to the routing tab
 ### Peers that the follower has not seen
 
 Under a hub, the instance's velo node resolves an unknown peer through the hub. velo does this for messages addressed to a worker: an attach to an anchor, a ticket open, a mux batch, and a reservation renewal. So an engine can attach to an anchor that a joiner minted before the engine's follower has seen the joiner. velo does not resolve a unary call addressed to an instance. gdl's hand-offs (`gdl.fwd` and `gdl.open`) are such calls, so they go only to instances that were registered with velo before they joined the routing table.
+
+### Joining a running pool
+
+A job that adds instances to a running pool, but that the deployment did not start, finds the pool's hub with `gdl-hub --resolve <class>/<pool> --write <file>` when it starts. It writes a settings file that holds only `[hub]`, with the `host` and `public_port` from the pool's record. The job then starts the segment with that file as an override (`segment config.toml <file>`, [Segment settings](../operations/configuration.md)). The address is read when the job starts, not when it is submitted, because a queued job can outlive the hub it was submitted for. The segment never reads the directory itself: the hub's address stays a setting that its launcher gives it, as under Kubernetes.
+
+The resolver reads the directory that the `GDL_POOL__*` variables name, as a pool's hub reads them: `dir` with `GDL_POOL__DIR`, or `dynamodb` with its tables, region, and endpoint. It ignores the other `GDL_POOL__` variables, so a joining job can share its pool's. It only reads the directory. It refuses `relay`, whose records are held in a parent pool's hub.
+
+A record holds no time, because clocks across hosts differ. A reader that sees a record once cannot tell a live hub's record from one that a dead hub left. So the resolver does what every reader does ([The record](pools.md#the-record)): it measures the lease on its own clock. It writes the file only after the record changes, by the hub's heartbeat, within the record's lease from when the resolver first saw it. The answer is the pool's state as of the last change the resolver read. No reader can see a drain that its directory has not delivered yet, so a pool that starts to drain just as the resolver reads it can still be joined. That is harmless: an instance of a draining pool stops with the pool ([Pools](lifecycle.md#pools)), and the job that started it then ends. A live hub is found within one heartbeat (`[pool] heartbeat_ms`, 10 s by default). A pool in any state but `draining` is joined, since a joiner is what makes an `unavailable` pool ready.
+
+The resolver writes nothing, and exits with status 1 and one line on stderr, when the pool is not in the directory, was withdrawn, is `draining`, or was scaled to 0; when the lease passes with no heartbeat; and when the directory cannot be read. It writes the file beside its path and renames it into place, so a reader that waits for the file never reads part of it.
+
+The record names only the hub's public listener, so the file names no `control_port`, and the segment uses the default, 8337 ([Known limitations](../operations/limitations.md#a-job-that-joins-a-pool-finds-only-a-hub-on-the-default-control-port)).
 
 ### Addresses in a container
 

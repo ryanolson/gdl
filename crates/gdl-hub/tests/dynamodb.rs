@@ -1,7 +1,8 @@
 //! The stock hub binary on the DynamoDB pool directory, against DynamoDB
 //! Local: the tables step makes the tables and keeps them on a second run,
-//! and a parent pool's hub finds two child pools in two regions through
-//! the tables: its relay lists each, with its region.
+//! a parent pool's hub finds two child pools in two regions through the
+//! tables, and its relay lists each with its region; and `--resolve` reads
+//! a running pool's hub from them.
 //!
 //! Outside the default suite: the target needs the `dynamodb-local`
 //! feature and a DynamoDB Local at `GDL_DYNAMODB_LOCAL`, started with
@@ -291,4 +292,68 @@ async fn the_tables_step_refuses_a_table_with_other_keys() {
         )),
         "{said}"
     );
+}
+
+/// `gdl-hub --resolve` reads a running pool's hub from the tables, as a
+/// job that joins the pool does, and writes `[hub]` from its record; a
+/// pool the tables do not hold writes nothing. The pool's hub beats every
+/// 200 ms, so the resolver sees its record change within one or two of
+/// its client's queries, a second apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_resolver_reads_a_pools_hub_from_dynamodb() {
+    let run = format!("{}-resolve", std::process::id());
+    let env = directory(&run, "us-east-1");
+    let (made, said) = tables(&env);
+    assert!(made, "{said}");
+
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-dynamodb-")
+        .tempdir()
+        .expect("a directory");
+    let deployment = dir.path().join("deployment.json");
+    std::fs::write(
+        &deployment,
+        serde_json::to_vec(&spec()).expect("valid test fixture"),
+    )
+    .expect("written");
+    let port = free_port();
+    let mut pool = env.clone();
+    pool.extend(
+        [
+            ("GDL_POOL__NAME", "model-x-use1"),
+            ("GDL_POOL__CLASS", "model_x"),
+            ("GDL_POOL__REGION", "us-east-1"),
+            ("GDL_POOL__HOME", "global-us"),
+            ("GDL_POOL__HUB", &format!("127.0.0.1:{port}")),
+            ("GDL_POOL__HEARTBEAT_MS", "200"),
+            ("GDL_POOL__LEASE_MS", "5000"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string())),
+    );
+    let _hub = serve(&deployment, &pool, port);
+
+    let resolve = |target: &str, file: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+            .args(["--resolve", target, "--write"])
+            .arg(file)
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::null())
+            .output()
+            .expect("the binary runs")
+    };
+    let file = dir.path().join("gdl-hub.toml");
+    let output = resolve("model_x/model-x-use1", &file);
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the file"),
+        format!("[hub]\nhost = \"127.0.0.1\"\npublic_port = {port}\n")
+    );
+
+    let missing = dir.path().join("missing.toml");
+    let output = resolve("model_x/model-x-nowhere", &missing);
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("not in the directory"), "{said}");
+    assert!(!missing.exists());
 }

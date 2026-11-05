@@ -1462,6 +1462,7 @@ dependencies = [
  "gdl-model",
  "gdl-pools",
  "gdl-pools-dynamodb",
+ "gdl-runtime",
  "gdl-watch",
  "lru",
  "prometheus",

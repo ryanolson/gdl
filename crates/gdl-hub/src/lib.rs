@@ -52,6 +52,7 @@ mod keyed;
 mod pool;
 mod quorum;
 mod report;
+mod resolve;
 mod setup;
 
 #[cfg(feature = "dynamodb")]
@@ -64,6 +65,7 @@ pub use pool::{
 };
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
+pub use resolve::{ResolvedHub, resolve_from_args, resolve_hub};
 pub use setup::{
     directory_from_vars, hub_builder, hub_builder_with, pool_from_env, pool_from_vars,
 };
