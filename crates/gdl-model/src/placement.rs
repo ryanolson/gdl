@@ -419,6 +419,8 @@ pub struct Layout {
     /// The edges a `[codec]` entry compresses, by hop, path, and the
     /// position each enters.
     compression: BTreeMap<(usize, Leg, usize), EdgeCompression>,
+    /// Each segment's calls to a copy of a unary node in another segment.
+    remote_calls: calls::Remote,
 }
 
 /// A hop that crosses from one class into another. Under the boundary rule
@@ -627,7 +629,9 @@ impl Layout {
     }
 
     /// The segments `segment` sends to: the next run of each forward path
-    /// it holds a run of, and the backward runs it opens as an outer end.
+    /// it holds a run of, the backward runs it opens as an outer end, and
+    /// the segment of each service it calls in another segment
+    /// ([`Layout::calls_from`]).
     /// Replies ride stream anchors back and are not sends. A forward path
     /// that leaves a segment and comes back makes two segments send to each
     /// other, so this relation can have cycles.
@@ -651,6 +655,7 @@ impl Layout {
                 }
             }
         }
+        targets.extend(self.calls_from(segment).map(|(_, to)| to.to_string()));
         targets.remove(segment);
         targets
     }
@@ -682,6 +687,28 @@ impl Layout {
     pub fn request_router(&self, hop: usize, position: usize) -> &RequestRouter {
         static DEFAULT: RequestRouter = RequestRouter::RoundRobin;
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
+    }
+
+    /// The services that nodes of `segment` call in another segment, in name
+    /// order, each with the one segment that hosts the copy they call. A
+    /// call to the copy in `segment` itself is not among them.
+    pub fn calls_from<'a>(
+        &'a self,
+        segment: &str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        self.remote_calls
+            .get(segment)
+            .into_iter()
+            .flatten()
+            .map(|(service, to)| (service.as_str(), to.as_str()))
+    }
+
+    /// Whether a node in another segment calls the copy of unary node
+    /// `service` in `segment`.
+    pub fn called_in(&self, service: &str, segment: &str) -> bool {
+        self.remote_calls
+            .values()
+            .any(|calls| calls.get(service).is_some_and(|to| to == segment))
     }
 
     /// How a caller picks an instance of unary node `service` in another
@@ -936,6 +963,7 @@ fn place(
             .count(),
         routing,
         call_routing,
+        remote_calls: calls::remote(manifest, &segment_of, &services),
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,

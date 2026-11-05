@@ -29,9 +29,9 @@ pub use declared::{EntryNeed, declare_properties};
 #[doc(hidden)]
 pub use dist::EncodedItem;
 pub use dist::{
-    BwdAround, BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment,
-    Entries, FwdAround, FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad,
-    Served, bind_node,
+    BwdAround, BwdEnd, BwdStep, Calls, DBackward, DForward, DHop, DInner, DOperator, DSink,
+    Deployment, Entries, FwdAround, FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment,
+    SegmentLoad, Served, bind_node,
 };
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};

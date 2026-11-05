@@ -11,7 +11,7 @@ use gdl::{Error, ErrorKind, Result};
 use gdl::{Items, items};
 use gdl_model::Encoding;
 
-use crate::dist::{EncodedItem, Head};
+use crate::dist::{CallHead, EncodedItem, Head};
 use crate::zstd::{self, Compression};
 
 /// How one edge's message type crosses a segment boundary.
@@ -90,6 +90,17 @@ impl<T> Codec<T> {
     /// Encode a request's head into the buffer its envelope is sent from.
     pub(crate) fn encode_head(&self, value: &T) -> Result<Head> {
         Head::encode(value, self.encode_sized)
+    }
+
+    /// Encode a call's request into the buffer its envelope is sent from:
+    /// plain, as a call's request always is.
+    pub(crate) fn encode_call(&self, value: &T) -> Result<CallHead> {
+        CallHead::encode(value, self.encode_sized)
+    }
+
+    /// Append the encoding of `value` to `out`.
+    pub(crate) fn encode_into(&self, value: &T, out: &mut Vec<u8>) -> Result<()> {
+        (self.encode)(value, out)
     }
 
     /// Decode one value.

@@ -88,6 +88,16 @@ impl WireCx {
         ))
     }
 
+    /// The context `cx` crosses with, its deadline `bound`: a call to a
+    /// unary service in another segment always carries one.
+    pub(crate) fn bounded(cx: &Cx, bound: Deadline) -> Self {
+        Self {
+            id: cx.id().as_u128(),
+            meta: cx.meta().clone(),
+            deadline: Some(bound.unix_nanos()),
+        }
+    }
+
     pub(crate) fn root(&self) -> u128 {
         self.id
     }
@@ -369,23 +379,28 @@ impl Header<'_> {
         write(out, &self.pos)?;
         write(out, self.cx)?;
         write(out, self.reply)?;
-        let len = self.len;
-        let marker = if let Ok(len) = u8::try_from(len) {
-            out.write_all(&[0xc4, len])
-        } else if let Ok(len) = u16::try_from(len) {
-            out.write_all(&[0xc5])
-                .and_then(|()| out.write_all(&len.to_be_bytes()))
-        } else if let Ok(len) = u32::try_from(len) {
-            out.write_all(&[0xc6])
-                .and_then(|()| out.write_all(&len.to_be_bytes()))
-        } else {
-            return Err(Error::new(
-                ErrorKind::Codec,
-                format!("a request head of {len} bytes is over msgpack's 4 GiB"),
-            ));
-        };
-        marker.map_err(codec)
+        write_bin_len(out, self.len)
     }
+}
+
+/// Write msgpack's marker of a binary of `len` bytes: what comes before the
+/// bytes of a head that an envelope carries.
+fn write_bin_len(out: &mut impl std::io::Write, len: usize) -> Result<()> {
+    let marker = if let Ok(len) = u8::try_from(len) {
+        out.write_all(&[0xc4, len])
+    } else if let Ok(len) = u16::try_from(len) {
+        out.write_all(&[0xc5])
+            .and_then(|()| out.write_all(&len.to_be_bytes()))
+    } else if let Ok(len) = u32::try_from(len) {
+        out.write_all(&[0xc6])
+            .and_then(|()| out.write_all(&len.to_be_bytes()))
+    } else {
+        return Err(Error::new(
+            ErrorKind::Codec,
+            format!("a request head of {len} bytes is over msgpack's 4 GiB"),
+        ));
+    };
+    marker.map_err(codec)
 }
 
 /// A request's encoded head, behind room for the rest of the envelope that
@@ -785,6 +800,115 @@ pub(crate) struct Open {
     pub(crate) cx: WireCx,
     /// Where the run delivers its output.
     pub(crate) reply: ReplyTo,
+}
+
+/// A call to a unary service in another segment, as the `gdl.call`
+/// handler receives it: the deployment's identity, the service's index
+/// among the unary nodes in name order, the context with the call's bound as its
+/// deadline, and the request, encoded behind the room the envelope's other
+/// fields are written into (docs/src/concepts/crossings.md).
+pub(crate) struct Call {
+    pub(crate) identity: Identity,
+    pub(crate) service: u16,
+    pub(crate) cx: WireCx,
+    pub(crate) payload: CallHead,
+}
+
+/// A call's request, encoded plain behind room for the rest of its
+/// envelope. Not a [`Head`]: a head may be compressed, or shared with a
+/// send, and a call's request is neither, so [`Call::wire`] has no such
+/// case to meet. A `[codec]` entry for a unary node is read, but not
+/// applied to its calls yet.
+pub(crate) struct CallHead(Vec<u8>);
+
+impl CallHead {
+    /// Encode `value` behind [`HEADER_ROOM`] with `encode`, as
+    /// [`Head::encode`] does.
+    pub(crate) fn encode<T: ?Sized>(
+        value: &T,
+        encode: fn(&T, &mut Vec<u8>) -> Result<()>,
+    ) -> Result<Self> {
+        let mut buffer = Vec::with_capacity(FIRST_BUFFER);
+        buffer.resize(HEADER_ROOM, 0);
+        encode(value, &mut buffer)?;
+        Ok(Self(buffer))
+    }
+}
+
+/// `rmp_serde`'s encoding of a [`Call`] starts with this: an array of its
+/// five fields, the version first.
+const CALL_FIELDS: u8 = 0x95;
+
+/// A [`Call`] as it arrives, its request borrowed from the bytes.
+#[derive(Deserialize)]
+pub(crate) struct CallArrived<'a> {
+    pub(crate) version: u8,
+    pub(crate) identity: Identity,
+    pub(crate) service: u16,
+    pub(crate) cx: WireCx,
+    #[serde(borrow)]
+    pub(crate) payload: &'a [u8],
+}
+
+impl Call {
+    /// The envelope's bytes. Its other fields are written into the room in
+    /// front of the request, so the bytes are the request's own buffer. A
+    /// header past the room, as large meta makes, is written with a copy of
+    /// the request after it.
+    pub(crate) fn wire(self) -> Result<Bytes> {
+        let Self {
+            identity,
+            service,
+            cx,
+            payload,
+        } = self;
+        let CallHead(mut buffer) = payload;
+        let (at, len) = (HEADER_ROOM, buffer.len() - HEADER_ROOM);
+        let mut room = [0u8; HEADER_ROOM];
+        let mut free = &mut room[..];
+        let fits = write_call_header(&mut free, &identity, service, &cx, len).is_ok();
+        let header = HEADER_ROOM - free.len();
+        if fits {
+            let start = at - header;
+            buffer[start..at].copy_from_slice(&room[..header]);
+            return Ok(Bytes::from(buffer).slice(start..));
+        }
+        let mut bytes = Vec::with_capacity(header + len);
+        write_call_header(&mut bytes, &identity, service, &cx, len)?;
+        bytes.extend_from_slice(&buffer[at..]);
+        Ok(Bytes::from(bytes))
+    }
+}
+
+#[cfg(test)]
+mod calls;
+
+impl<'a> CallArrived<'a> {
+    /// Read a [`Call`] from `bytes`, its request left where it arrived.
+    pub(crate) fn read(bytes: &'a [u8]) -> Result<Self> {
+        rmp_serde::from_slice(bytes).map_err(codec)
+    }
+}
+
+/// Everything a [`Call`]'s bytes hold before its request's.
+fn write_call_header(
+    out: &mut impl std::io::Write,
+    identity: &Identity,
+    service: u16,
+    cx: &WireCx,
+    len: usize,
+) -> Result<()> {
+    out.write_all(&[CALL_FIELDS]).map_err(codec)?;
+    write(out, &VERSION)?;
+    write(out, identity)?;
+    write(out, &service)?;
+    write(out, cx)?;
+    write_bin_len(out, len)
+}
+
+/// Append `value` as MessagePack, as [`encode`] encodes it.
+pub(crate) fn write_msgpack<T: Serialize>(out: &mut Vec<u8>, value: &T) -> Result<()> {
+    write(out, value)
 }
 
 pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {

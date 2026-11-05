@@ -680,13 +680,17 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
     } = signature(graph, krate);
     let (result_type, result_value) = root_result(graph, krate, &generics, true);
     // No hop runs a unary node: the deployment holds it for as long as the
-    // segment runs, whatever its callers' clients do.
-    let services = bound_nodes(graph)
-        .filter(|node| node.role() == Role::Unary)
-        .map(|node| {
-            let (name, local) = (node.ident.to_string(), local_var(node));
-            quote! { __gdl_deployment.unary(#name, #local)?; }
-        });
+    // segment runs, whatever its callers' clients do, and hosts it for
+    // callers in other segments, when the layout says some call it there.
+    let services = bound_nodes(graph).filter_map(|node| {
+        let Sig::Unary { req, resp } = &node.sig else {
+            return None;
+        };
+        let (name, local) = (node.ident.to_string(), local_var(node));
+        Some(quote! {
+            __gdl_deployment.unary(#name, #local, #krate::wire_codec!(#req), #krate::wire_codec!(#resp))?;
+        })
+    });
     // Innermost hop first, so each operator can take the hop below it.
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_hop_{}", index);

@@ -428,7 +428,8 @@ fn hosts_type(segment: &Segment) -> TokenStream {
 fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStream {
     let (frontend, service) = segment.serve.hosts();
     let policies = &segment.policies;
-    let takes = !segment.nodes.is_empty()
+    let takes = !segment.links.is_empty()
+        || !segment.nodes.is_empty()
         || frontend.is_some()
         || service.is_some()
         || !policies.is_empty()
@@ -466,6 +467,19 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
         });
         quote!(let nodes = Nodes { #(#built)* };)
     };
+    // Before any node is built: a node takes its client of a service in
+    // another segment in its build.
+    let links = segment.links.iter().map(|service| {
+        let name = service.to_string();
+        let port = |port: &str| {
+            let port = format_ident!("{port}");
+            quote!(<contract::nodes::#service as #krate::UnaryDecl>::#port)
+        };
+        let (req, resp) = (port("Req"), port("Resp"));
+        quote! {
+            builder.link::<#req, #resp>(#name, #krate::wire_codec!(#req), #krate::wire_codec!(#resp))?;
+        }
+    });
     let frontend = frontend.map(|(name, ty)| {
         let name = name.to_string();
         quote!(let frontend = builder.build::<#ty>(#name, frontend).await?;)
@@ -512,6 +526,7 @@ fn build_fn(segment: &Segment, krate: &TokenStream, built: &Built) -> TokenStrea
     quote! {
         async fn build(settings: Settings, #builder: &#krate::Builder) -> Result<#ty, #krate::Failure> {
             let Settings { #(#fields),* } = settings;
+            #(#links)*
             #nodes
             #frontend
             #adapters

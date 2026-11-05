@@ -172,12 +172,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the input pump and the local inner end are both producers, and each takes its own permit. See [Admission and egress](../concepts/admission.md#egress).
 - **Test:** `egress_hold_and_wait_at_the_limit_is_refused_not_hung` in `crates/gdl-runtime/tests/inputs.rs`.
 
-### A unary service is called only from its own segment
-- **What:** a node gets a client only of a service that its own segment lists. A caller whose segment does not list the service fails its build: its segment has no copy of the service and no link to one.
-- **When:** a placement that puts a unary node in another segment than a node that calls it. `check` and `generate` accept such a placement.
-- **Why:** the call to another segment is not built yet. See [Unary services](../concepts/unary.md).
-- **Workaround:** list the unary node in each segment whose nodes call it. Copies share no state.
-
 ## Bring-up, shutdown, and membership
 
 ### Only a hub lets an instance join
@@ -275,6 +269,13 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **When:** the drain ends on its bound or on a second stop. A drain that waits for its ledger does not cut output: each stream holds its request's admission share and egress permit until velo reports it retired (`StreamSender::retired()`), so an empty ledger means the output has left the node.
 - **Large items:** an item larger than velo's eager budget (256 KiB by default) leaves the node as a handle, and its bytes stay staged until the consumer pulls them. velo reports such a stream `Sent` before the pull, so a drain can end, and the shutdown cut the item, while it is still staged.
 - **Lifts:** velo waiting for staged payloads at shutdown. See [velo](../development/velo.md).
+
+### A stalled fetch of a large envelope holds a response slot
+- **What:** a call or forward envelope above velo's eager budget (256 KiB by default) is staged, and the receiver fetches its bytes. A stalled fetch holds a response slot on the receiver until it resumes. The caller's bound still holds: the call fails with `DeadlineExceeded` when it passes.
+- **Why:** velo's staged fetch has no deadline. See [velo](../development/velo.md).
+- **Workaround:** keep call requests small, and send large data in a stream.
+- **Lifts:** a deadline on velo's staged fetch.
+- **Test:** `a_remote_requests_fetch_releases_its_response_slot_at_the_calls_bound` in `crates/gdl-runtime/tests/callfetch.rs`, ignored until then, beside its live control.
 
 ### A property type that encodes differently in two builds names two properties
 - **What:** two builds whose property type keeps its name and codec but encodes one value differently, for example one that skips a missing optional field and one that writes it as `null`, report two keys for it. The pool's record lists both, and a reader that asks for one does not find the other.
@@ -425,6 +426,25 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** `check` and `generate` refuse a caller whose segment has no copy of a unary node it calls, when the one copy it would call is in another class.
 - **Why:** an instance in a pool waits for, and routes to, only its own class's segments. The class boundary rule covers hops, not calls. See [Specs, segments, and layouts](../concepts/placement.md#unary-nodes).
 - **Workaround:** list the unary node in a segment of the caller's class. Copies share no state.
+
+### A dropped remote call runs on until its bound
+- **What:** a caller that drops its call to a unary service in another segment tells the service nothing. The service runs on until it answers or the call's bound passes, and the handler cancels the service's context only then. So:
+  - the service's worker time is held until the call ends or its bound passes, even after the caller left;
+  - a caller that calls again after an unknown outcome can run the service twice at the same time, so a service marked `idempotent` must be safe to run twice at once;
+  - the bound in the envelope, the request's deadline or `call_timeout`, is what limits both.
+- **Why:** velo's unary call has no reply anchor and no cancel that reaches its handler. Dropping the call releases only the caller's response slot. See [Unary services](../concepts/unary.md#a-call-to-another-segment).
+- **Workaround:** give a request a deadline, or set a short `call_timeout`, for a service whose work outlives its callers.
+- **Test:** `a_dropped_call_leaves_the_service_running_until_its_bound` in `crates/gdl-runtime/tests/calls.rs`.
+
+### A call is routed only by `round_robin` or `random`
+- **What:** a `[routing]` entry that routes the calls to a unary node through a selector is refused when a segment that calls it from another segment starts, with `Placement`. `check` and `generate` accept it.
+- **Why:** a selector reads a request head that a hop's crossing encodes, and a call is not routed through one yet.
+- **Workaround:** `round_robin`, the default, or `random`.
+
+### A remote call is not retried or admitted
+- **What:** a call refused by an instance of the service's segment fails at once, though another instance might take it. A call takes no admission permit in the service's segment, so a burst of calls is not refused there with `Overloaded`, and the segment's drain does not wait for the calls it is running. velo's own shutdown lets a running handler finish within the drain's bound.
+- **Why:** the call's permit, its retry on another instance, and its share in the drain are not built yet. See [Unary services](../concepts/unary.md#what-the-call-does-not-do-yet).
+- **Workaround:** run enough instances of the service's segment for its callers, and drain the callers' segments first.
 
 ### A unary node cannot provide or need a property yet
 - **What:** `check`, `generate`, and `graph!` refuse `provides` or `needs` on a unary node, naming the node and the clause.

@@ -253,14 +253,15 @@ impl Fabric {
 
     /// Register a raw unary handler. The handler's reply bytes carry gdl's
     /// own result encoding, so velo-level errors mean only transport trouble.
+    /// The handler gets the bytes velo received, uncopied.
     pub(crate) fn register(
         &self,
         name: &str,
-        handler: impl Fn(Vec<u8>) -> BoxFuture<'static, Vec<u8>> + Send + Sync + 'static,
+        handler: impl Fn(Bytes) -> BoxFuture<'static, Vec<u8>> + Send + Sync + 'static,
     ) -> Result<()> {
         let handler = Arc::new(handler);
         let handler = Handler::unary_handler_async(name.to_string(), move |cx: velo::Context| {
-            let reply = handler(cx.payload.to_vec());
+            let reply = handler(cx.payload);
             async move { Ok(Some(reply.await.into())) }
         })
         .build();
@@ -286,6 +287,37 @@ impl Fabric {
             Ok(reply) => reply.map(|bytes| bytes.to_vec()).map_err(transport),
             Err(_) => Err(unanswered(name, instance, timeout)),
         }
+    }
+
+    /// Call a unary handler on `instance`, which answers within `left` or
+    /// not at all: velo's own `.timeout` bounds the wait and releases the
+    /// response slot when it runs out, which ends the call with
+    /// `DeadlineExceeded`. The reply is the bytes velo received, uncopied.
+    pub(crate) async fn call_bounded(
+        &self,
+        instance: InstanceId,
+        name: &str,
+        payload: Bytes,
+        left: Duration,
+    ) -> Result<Bytes> {
+        self.velo
+            .unary(name)
+            .map_err(transport)?
+            .raw_payload(payload)
+            .instance(instance)
+            .timeout(left)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is::<velo::RequestTimeout>() {
+                    Error::new(
+                        ErrorKind::DeadlineExceeded,
+                        format!("`{name}` on {instance} did not answer within the call's bound"),
+                    )
+                } else {
+                    transport(error)
+                }
+            })
     }
 
     /// Offer `payload` to a unary handler on `instance`, as [`Fabric::call`]
@@ -741,7 +773,7 @@ mod tests {
         let node = node().await;
         let probe = probe();
         fabric(&node)
-            .register(&probe, |bytes| Box::pin(async move { bytes }))
+            .register(&probe, |bytes| Box::pin(async move { bytes.to_vec() }))
             .expect("a handler");
         (node, probe)
     }

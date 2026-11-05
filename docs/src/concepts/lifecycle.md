@@ -53,7 +53,7 @@ The steps, in order:
 5. **Loaded.** The instance waits for `Build::ready` of every hosted node. That is immediate by default. A node that loads data after construction resolves it when the data is loaded. Then the instance announces `loaded`.
 6. **Roster.** The instance waits for enough loaded instances of each segment. Under a hub that is at least `[min_replicas]` of each (1 by default), not counting retired ones. In a roster directory it is exactly `[instances]` of each (1 by default). These instances are its roster: the instances it routes to.
 7. **Serving.** The instance starts its segment, installs its handlers, and announces `serving`.
-8. **Barrier.** The instance waits until every instance in its roster of the segments it sends to has announced `serving`. Then it releases the roster.
+8. **Barrier.** The instance waits until every instance in its roster of the segments it sends to has announced `serving`. A segment whose nodes call a unary service in another segment sends to that segment, which registers its `gdl.call` handler before it announces `serving`. Then it releases the roster.
 9. **Ready.** Under a hub, the instance announces `ready`. The instances already serving add it to their routing then. The health probe answers 200 from here.
 
 Each wait (the roster, the barrier, and the `ready` announcement) is bounded by `rendezvous_ms`. A roster wait or a barrier that runs out ends the launch with an error that names what is missing. A `ready` announcement that the hub does not take is printed, and the instance serves on. Instances already serving then never add it.

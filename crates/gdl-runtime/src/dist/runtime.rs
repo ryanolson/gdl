@@ -12,6 +12,7 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 
 use super::admission::{Admission, Egress};
+use super::calls::Calls;
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 #[cfg(feature = "hub")]
@@ -96,6 +97,16 @@ pub struct RuntimeConfig {
     /// still running when its caller gives up) ends only by its deadline, so
     /// no remote work may run without one.
     pub default_deadline: Duration,
+    /// The bound of a call to a unary service in another segment whose
+    /// request has no deadline: the call fails with `DeadlineExceeded` once
+    /// it passes, and the service runs under a context with that deadline.
+    /// A request's own deadline bounds its calls otherwise.
+    pub call_timeout: Duration,
+    /// The largest reply, in bytes, that a unary service in this segment
+    /// sends to a caller in another: a larger one fails the call with
+    /// `Codec`. At most 16 MiB less 64 KiB: velo's 16 MiB frame ends a
+    /// reply, and also carries the reply's tag and velo's header.
+    pub call_reply_max: usize,
     /// Streams one instance may be producing at once.
     pub egress_limit: usize,
     /// How often producers send heartbeats; a dead producer is detected
@@ -170,6 +181,13 @@ pub struct RuntimeConfig {
     /// hooks. Not a setting: a segment binary's `Builder` gives it to the
     /// nodes it builds, and the launch runs what they registered.
     pub lifecycle: Lifecycle,
+    /// The links through which the segment's nodes call unary services in
+    /// other segments, and the services it hosts for callers in others.
+    /// Not a setting: a segment binary's `Builder` makes the links its
+    /// nodes take, and the deployment binds them when it starts. Give each
+    /// instance its own: a clone shares the links, and a deployment binds
+    /// only links to the services its own segment calls.
+    pub calls: Calls,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -254,6 +272,8 @@ impl Default for RuntimeConfig {
             reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
             default_deadline: gdl_model::DEFAULT_DEADLINE,
+            call_timeout: Self::DEFAULT_CALL_TIMEOUT,
+            call_reply_max: Self::DEFAULT_CALL_REPLY_MAX,
             egress_limit: 1024,
             heartbeat_interval: None,
             drain: None,
@@ -269,6 +289,7 @@ impl Default for RuntimeConfig {
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
             lifecycle: Lifecycle::new(),
+            calls: Calls::default(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -296,6 +317,8 @@ struct Settings {
     reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
     default_deadline_ms: u64,
+    call_timeout_ms: u64,
+    call_reply_max: usize,
     egress_limit: usize,
     heartbeat_interval_ms: Option<u64>,
     drain_ms: Option<u64>,
@@ -326,6 +349,8 @@ impl Default for Settings {
             reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
             default_deadline_ms: ms(config.default_deadline),
+            call_timeout_ms: ms(config.call_timeout),
+            call_reply_max: config.call_reply_max,
             egress_limit: config.egress_limit,
             heartbeat_interval_ms: config.heartbeat_interval.map(ms),
             drain_ms: config.drain.map(ms),
@@ -360,6 +385,8 @@ impl TryFrom<Settings> for RuntimeConfig {
             reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
             default_deadline: Duration::from_millis(s.default_deadline_ms),
+            call_timeout: Duration::from_millis(s.call_timeout_ms),
+            call_reply_max: s.call_reply_max,
             egress_limit: s.egress_limit,
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             drain: s.drain_ms.map(Duration::from_millis),
@@ -375,6 +402,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
             lifecycle: Lifecycle::new(),
+            calls: Calls::default(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };
@@ -422,6 +450,23 @@ impl RuntimeConfig {
                 ));
             }
         }
+        if self.call_timeout.is_zero() {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "runtime setting `call_timeout_ms` must be positive",
+            ));
+        }
+        let (least, most) = (Self::CALL_REPLY_MIN, Self::FRAME_MAX - Self::FRAME_ROOM);
+        if !(least..=most).contains(&self.call_reply_max) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "runtime setting `call_reply_max` must be from {least} to {most} bytes: a reply past it is replaced by an error of up to {} bytes, and velo's frame of {} bytes also carries velo's own header",
+                    super::calls::FALLBACK_MAX,
+                    Self::FRAME_MAX
+                ),
+            ));
+        }
         self.validate_pools()?;
         // velo carries the interval in whole milliseconds, so anything
         // shorter becomes zero on the way.
@@ -443,6 +488,28 @@ impl RuntimeConfig {
     /// `decompressed_max` is set: 256 MiB.
     pub const DEFAULT_DECOMPRESSED_MAX: usize = 256 << 20;
 
+    /// A call's bound when its request has no deadline, unless
+    /// `call_timeout_ms` is set: 30 s.
+    pub(crate) const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The largest reply a unary service sends to another segment, unless
+    /// `call_reply_max` is set: 8 MiB.
+    pub(crate) const DEFAULT_CALL_REPLY_MAX: usize = 8 << 20;
+
+    /// velo's TCP frame: a unary reply cannot be larger.
+    pub(crate) const FRAME_MAX: usize = 16 << 20;
+
+    /// What a reply's frame holds besides the response: its tag, one byte,
+    /// and velo's header, which names the call and is far smaller.
+    pub(crate) const FRAME_ROOM: usize = 64 << 10;
+
+    /// The least `call_reply_max` the settings take: room for the error
+    /// that replaces a reply past the limit, whose size has a fixed bound,
+    /// with room to spare, so that the replacement always fits.
+    pub const CALL_REPLY_MIN: usize = 512;
+}
+
+impl RuntimeConfig {
     /// The damping window after a pool's first decline, unless
     /// `pool_damping_first_ms` is set: 1 s.
     pub(crate) const DEFAULT_POOL_DAMPING_FIRST: Duration = Duration::from_secs(1);
@@ -1232,6 +1299,70 @@ impl Runtime {
             )
             .await?;
         super::envelope::decode::<Result<ReplyTo, Error>>(&reply)?
+    }
+
+    /// Call unary node `service`, of index `index` among the unary nodes in
+    /// name order, on an instance of `segment` chosen by `policy`, with
+    /// `payload`, the encoded request behind its envelope's room. The call's
+    /// bound is the request's deadline, or now plus `call_timeout`: the
+    /// envelope carries it, and the call fails with `DeadlineExceeded` once
+    /// it passes. The reply is the handler's, uncopied.
+    pub(crate) async fn call(
+        &self,
+        index: u16,
+        segment: &str,
+        policy: Policy,
+        cx: &Cx,
+        payload: super::envelope::CallHead,
+    ) -> Result<bytes::Bytes> {
+        let bound = cx
+            .deadline()
+            .unwrap_or_else(|| gdl::Deadline::after(self.config.call_timeout));
+        let left = || {
+            bound
+                .instant()
+                .saturating_duration_since(tokio::time::Instant::now())
+        };
+        if left().is_zero() {
+            return Err(Error::deadline_exceeded());
+        }
+        tokio::time::timeout(left(), self.released())
+            .await
+            .map_err(|_| Error::deadline_exceeded())??;
+        let instance = self
+            .routes
+            .pick(segment, Picker::Call, policy, &self.random)?;
+        let envelope = super::envelope::Call {
+            identity: self.identity,
+            service: index,
+            cx: super::envelope::WireCx::bounded(cx, bound),
+            payload,
+        }
+        .wire()?;
+        let left = left();
+        if left.is_zero() {
+            return Err(Error::deadline_exceeded());
+        }
+        self.fabric
+            .call_bounded(instance, super::calls::CALL, envelope, left)
+            .await
+    }
+
+    /// How this segment picks an instance for its calls to unary node
+    /// `service`: `round_robin` or `random`. A selector is refused: a call
+    /// is not routed through one yet.
+    pub(crate) fn call_policy(&self, service: &str) -> Result<Policy> {
+        match self.layout.call_router(service) {
+            RequestRouter::RoundRobin => Ok(Policy::RoundRobin),
+            RequestRouter::Random => Ok(Policy::Random),
+            RequestRouter::Selector(name) => Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{}` calls unary node `{service}` through selector `{name}`, but a call is routed only by `round_robin` or `random`",
+                    self.segment
+                ),
+            )),
+        }
     }
 
     /// This instance's wall clock, in Unix nanoseconds.

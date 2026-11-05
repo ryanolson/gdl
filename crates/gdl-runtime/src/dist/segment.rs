@@ -1,10 +1,12 @@
 //! Standing up one segment instance.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use velo::Velo;
 
+use super::calls::{self, CALL, Hosted, Serve};
 use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::held::Held;
@@ -13,6 +15,7 @@ use super::offers::{Refusal, refusal};
 use super::roster::Roster;
 use super::runtime::{Entries, Runtime, RuntimeConfig};
 use super::stages::{DBackward, DForward, DInner};
+use crate::wire::Codec;
 use gdl::__runtime::Meters;
 use gdl::Cx;
 use gdl::Decline;
@@ -32,6 +35,12 @@ pub struct Deployment {
     /// The unary services this instance hosts, by name: the segment owns
     /// them until it is dropped, so that no client decides their lifetime.
     hosted: Mutex<Vec<(String, Arc<dyn Any + Send + Sync>)>>,
+    /// Each unary node's index among the unary nodes in name order, by its
+    /// name: what a call to it says it calls.
+    indices: BTreeMap<String, u16>,
+    /// The unary services this instance hosts for callers in other
+    /// segments, by their indices.
+    served: Mutex<BTreeMap<u16, Arc<dyn Serve>>>,
 }
 
 impl Deployment {
@@ -64,12 +73,33 @@ impl Deployment {
         );
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config, meters)?;
         rt.check_selector_needs(manifest)?;
+        // Refused before anything starts, rather than at the first call.
+        for (service, _) in rt.layout.calls_from(segment) {
+            rt.call_policy(service)?;
+        }
         let rt = Arc::new(rt);
         if let Some(registry) = &rt.config.metrics {
             Held::register(registry, Arc::downgrade(&rt))?;
         }
+        // By name, not by declaration: the contract hash ignores the order
+        // the graph declares its nodes in, so two ends that agree on the hash
+        // agree on these.
+        let mut names: Vec<&str> = manifest
+            .nodes
+            .iter()
+            .filter(|node| node.role == gdl_model::Role::Unary)
+            .map(|node| node.name.as_str())
+            .collect();
+        names.sort_unstable();
+        let indices = names
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, name)| Some((name.to_string(), u16::try_from(index).ok()?)))
+            .collect();
         Ok(Self {
             rt,
+            indices,
+            served: Mutex::new(BTreeMap::new()),
             hosted: Mutex::new(Vec::new()),
         })
     }
@@ -115,11 +145,20 @@ impl Deployment {
         )
     }
 
-    /// Host `service` as unary node `name` for as long as the segment runs: a
-    /// generated `assemble` gives it every unary node's slot. A slot left
-    /// `Absent` is refused when the segment hosts the node, as a pipeline
-    /// node's is, and is not held otherwise.
-    pub fn unary<S: Unary>(&self, name: &str, service: Arc<S>) -> Result<()> {
+    /// Host `service` as unary node `name` for as long as the segment runs,
+    /// and for the callers in other segments whose calls the layout resolves
+    /// to this segment, its request and response decoded and encoded by
+    /// `req` and `resp`. A generated `assemble` gives it every unary node's
+    /// slot. A slot left `Absent` is refused when the segment hosts the
+    /// node, as a pipeline node's is, and is neither held nor served
+    /// otherwise; one no other segment calls here is held, not served.
+    pub fn unary<S: Unary>(
+        &self,
+        name: &str,
+        service: Arc<S>,
+        req: Option<Codec<S::Req>>,
+        resp: Option<Codec<S::Resp>>,
+    ) -> Result<()> {
         let segment = self.rt.segment.as_str();
         let hosts = self.rt.layout.service_segments(name).contains(&segment);
         if S::ABSENT {
@@ -134,7 +173,31 @@ impl Deployment {
         self.hosted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((name.to_string(), service));
+            .push((
+                name.to_string(),
+                Arc::clone(&service) as Arc<dyn Any + Send + Sync>,
+            ));
+        if !self.rt.layout.called_in(name, &self.rt.segment) {
+            return Ok(());
+        }
+        let (Some(req), Some(resp), Some(&index)) = (req, resp, self.indices.get(name)) else {
+            return Err(Error::new(
+                ErrorKind::Codec,
+                format!(
+                    "unary node `{name}` is called from another segment, which encodes its request and its response, and one is not a wire type"
+                ),
+            ));
+        };
+        let hosted = Hosted {
+            name: name.to_string(),
+            service,
+            req,
+            resp,
+        };
+        self.served
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(index, Arc::new(hosted));
         Ok(())
     }
 
@@ -176,30 +239,51 @@ impl Deployment {
             let weak = Weak::clone(&weak);
             move |bytes| {
                 let weak = Weak::clone(&weak);
-                Box::pin(async move { forward_reply(forward(&weak, &bytes).await) })
+                Box::pin(async move { forward_reply(forward(&weak, bytes).await) })
             }
         })?;
         self.rt.fabric.register(&names.open, move |bytes| {
             let weak = Weak::clone(&weak);
-            Box::pin(async move { encode_reply(open(&weak, &bytes).await) })
+            Box::pin(async move { encode_reply(open(&weak, bytes).await) })
         })?;
+        // Only a segment that hosts a service for callers in other segments
+        // answers calls. The segment holds the services; the handler, which
+        // velo keeps as long as the node runs, holds them and the runtime
+        // weakly, as the others hold the entries.
+        let served = Arc::new(std::mem::take(
+            &mut *self.served.lock().unwrap_or_else(PoisonError::into_inner),
+        ));
+        if !served.is_empty() {
+            let (rt, hosted) = (Arc::downgrade(&self.rt), Arc::downgrade(&served));
+            self.rt.fabric.register(CALL, move |bytes| {
+                let (rt, hosted) = (Weak::clone(&rt), Weak::clone(&hosted));
+                Box::pin(async move { calls::handle(&rt, &hosted, bytes).await })
+            })?;
+        }
+        // Last: a call made through a link from here on is sent.
+        self.rt.config.calls.bind(&self.rt, &self.indices)?;
         Ok(Segment {
             rt: self.rt,
             _entries: entries,
             _hosted: std::mem::take(
                 &mut *self.hosted.lock().unwrap_or_else(PoisonError::into_inner),
             ),
+            _served: served,
             root,
         })
     }
 }
 
+/// The bytes a hand-off or an opening arrived in are a view of velo's read
+/// buffer, which a held view keeps whole: each is read out of them, and
+/// they are let go before its entry runs.
 async fn forward(
     entries: &Weak<Entries>,
-    bytes: &[u8],
+    bytes: bytes::Bytes,
 ) -> std::result::Result<super::envelope::Accepted, Refusal> {
     let entries = upgrade(entries)?;
-    let envelope = Forward::read(bytes, |hop, pos| entries.compressed(hop, pos))?;
+    let envelope = Forward::read(&bytes, |hop, pos| entries.compressed(hop, pos))?;
+    drop(bytes);
     let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
     entry(envelope).await.map_err(|refused| Refusal {
         error: refused.error,
@@ -207,8 +291,9 @@ async fn forward(
     })
 }
 
-async fn open(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::fabric::ReplyTo> {
-    let open: Open = decode(bytes)?;
+async fn open(entries: &Weak<Entries>, bytes: bytes::Bytes) -> Result<super::fabric::ReplyTo> {
+    let open: Open = decode(&bytes)?;
+    drop(bytes);
     let entry = Arc::clone(upgrade(entries)?.open(open.hop, open.pos)?);
     entry(open).await
 }
@@ -265,6 +350,8 @@ pub struct Segment<H> {
     _entries: Arc<Entries>,
     /// The unary services it hosts, owned until it is dropped.
     _hosted: Vec<(String, Arc<dyn Any + Send + Sync>)>,
+    /// The unary services it hosts for callers in other segments.
+    _served: Arc<BTreeMap<u16, Arc<dyn Serve>>>,
     root: H,
 }
 

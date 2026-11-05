@@ -499,3 +499,41 @@ fn a_unary_node_cannot_provide_or_need_a_property() {
         "{errors}"
     );
 }
+
+/// A call to a service in another segment is a send: the caller's segment
+/// sends to the service's, so the caller's serving barrier waits for it,
+/// its retirement counts it, and work reaches through it. A call to the
+/// copy in the caller's own segment is no send.
+#[test]
+fn a_remote_call_is_a_send_from_the_callers_segment_to_the_services() {
+    let split = "[segment.front]\nnodes = ['S', 'R', 'D']\n\
+                 [segment.tok]\nnodes = ['Tok']\n\
+                 [segment.ov]\nnodes = ['Ov']\n";
+    let laid = layout(&manifest(nodes()), &placement(split)).expect("laid out");
+    assert_eq!(
+        laid.sends_to("front").into_iter().collect::<Vec<_>>(),
+        ["tok"]
+    );
+    // A service that calls another sends to it too.
+    assert_eq!(laid.sends_to("ov").into_iter().collect::<Vec<_>>(), ["tok"]);
+    assert!(laid.sends_to("tok").is_empty());
+    assert!(laid.reaches("front", "tok"));
+    assert!(!laid.reaches("tok", "front"));
+    assert_eq!(
+        laid.calls_from("front").collect::<Vec<_>>(),
+        [("Tok", "tok")]
+    );
+    assert_eq!(laid.calls_from("ov").collect::<Vec<_>>(), [("Tok", "tok")]);
+    assert_eq!(laid.calls_from("tok").count(), 0);
+    assert!(laid.called_in("Tok", "tok"));
+    assert!(!laid.called_in("Ov", "ov"));
+    assert!(!laid.called_in("Tok", "front"));
+
+    // With a copy beside each caller, nothing is sent.
+    let beside = "[segment.front]\nnodes = ['S', 'R', 'D', 'Tok']\n\
+                  [segment.ov]\nnodes = ['Ov', 'Tok']\n";
+    let laid = layout(&manifest(nodes()), &placement(beside)).expect("laid out");
+    assert!(laid.sends_to("front").is_empty());
+    assert!(laid.sends_to("ov").is_empty());
+    assert_eq!(laid.calls_from("front").count(), 0);
+}

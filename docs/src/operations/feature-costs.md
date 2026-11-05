@@ -1024,3 +1024,25 @@ It makes no allocation of its own either: `a_hosted_services_call_allocates_noth
 - **Rejected: a box per call.** It is the boxed column. **Rejected: a buffer returned by value**, as the `stackfuture` crate does. Its whole buffer moves into the caller's future on each call, so its cost grows with the buffer.
 
 The `unsafe` code is checked by Miri, under Stacked Borrows with and without `-Zmiri-strict-provenance`, and under Tree Borrows, on the module's tests: `cargo +nightly miri test -p gdl --lib unary::`, with `-Zmiri-disable-isolation` because a context reads the clock. The tests cover futures of 0, 256, and 257 bytes, futures aligned to 16, 64, and 512, a drop on each path, also when the future panics in `poll` or in `Drop`, and two futures that hold a borrow of their own local across a pending poll, one of which reads it in its destructor. With the buffer's address taken through a `&mut` to the buffer, Miri reports both as undefined behavior. Wall time is not measured here.
+
+## A remote unary call
+
+What a call to a unary service in another segment costs: one velo unary call to the service segment's `gdl.call` handler, with the call's bound on both sides ([Unary services](../concepts/unary.md#a-call-to-another-segment)). The control is velo's raw unary call between the same two nodes, to a handler that answers its 8-byte payload, under a timeout: no envelope, no bound on the handler's side, and no service. The service adds one to a number, so the rows are the call's overhead. A call takes no admission permit yet, so the rows have none.
+
+Measured with callgrind 3.28.0 on a shared aarch64 Linux host (20 cores), load average 3 to 7, rustc 1.93.1, under the bench profile, rustix on its libc backend. `crates/gdl-runtime/benches/calls.rs` runs both segments on two velo nodes in one process over loopback TCP, on a four-worker tokio runtime, and makes its calls one at a time after 100 to warm up, under one context. Instructions are callgrind Ir per call, (Ir at 2,000 calls − Ir at 1,000) / 1,000, three rounds. The program counts allocations itself, on every thread, from its first counted call to its last:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench calls --no-run
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/calls-<hash> <local|remote|remote-deadline|raw> <1000|2000>
+target/release/deps/calls-<hash> <local|remote|remote-deadline|raw> 2000    # prints the allocations per call
+```
+
+| Per call | Callgrind Ir | Allocations |
+|---|---|---|
+| `raw`: velo's unary call, with a timeout | 33,255 to 33,442 | 18 |
+| `remote`: a gdl call, its request with no deadline, bound by `call_timeout` | 40,532 to 40,666 | 27 |
+| `remote-deadline`: the same, bound by the request's deadline | 40,438 to 40,602 | 27 |
+| `local`: `UnaryClient::local`, in the same program | 89 | 0 |
+
+- **A remote call costs about 7,200 Ir and 9 allocations over velo's raw call.** The two kinds of bound cost the same within the rounds' spread.
+- **Not split here.** The allocations are not traced to their sites, and the release build has no debug information, so callgrind's split of the instructions among inlined frames is not reported.

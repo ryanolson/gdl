@@ -76,8 +76,8 @@ impl gdl::Unary for Tokenize {
 - Keep the service's future to 256 bytes or less, aligned to 8 or less. A call builds such a future inside its own and makes no allocation of its own. A larger future is boxed, one allocation per call ([The graph model](../concepts/model.md#unary-services)).
 - Box a large value that the service holds across an `.await`. It is part of the future's size.
 - A caller takes its client once in `Build::build`, with `UnaryClient::<Text, Tokens>::current("Tokenize")?`, keeps it on the node, and calls `self.tokenize.call(&cx, text).await` per request. Its `calls` must name the service.
-- Do not call a service in `Build::build`: the call fails with `Routing`, "called during build". A call from `Build::ready` waits for the service's own `ready` ([Unary services](../concepts/unary.md#build-order-and-readiness)).
-- A unary call has no hop and no `CALL_SCOPE`: it runs under its caller's context. A caller that wants a private scope for one call passes `cx.child()`; the service sees that scope's cancel cooperatively, with no race, and dropping the call's future ends it.
+- Do not call a service in `Build::build`: the call fails with `Routing`, "called during build". A call from `Build::ready` to a service in the node's segment waits for the service's own `ready`; one to another segment fails, since the segment has not started ([Unary services](../concepts/unary.md#build-order-and-readiness)).
+- A unary call has no hop and no `CALL_SCOPE`: it runs under its caller's context. A caller that wants a private scope for one call passes `cx.child()`; the service sees that scope's cancel cooperatively, with no race, and dropping the call's future ends it. A call to a service in another segment runs on there until its bound ([Known limitations](../operations/limitations.md#a-dropped-remote-call-runs-on-until-its-bound)).
 - A `Backward` node's stream must own what it uses. Move a clone of the client and of the context into the stream once, and call per item:
 
 ```rust

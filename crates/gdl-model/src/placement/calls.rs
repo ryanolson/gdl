@@ -154,3 +154,40 @@ fn require_wire(caller: &str, service: &str, ty: &TypeInfo, found: &mut Vec<Plac
         });
     }
 }
+
+/// Each segment's calls to a service in another segment: by the caller's
+/// segment, each service it calls remotely and the one segment that hosts
+/// the copy it calls. A call to the copy in the caller's own segment is not
+/// here. [`judge`] has refused every call this cannot resolve.
+pub(super) type Remote = BTreeMap<String, BTreeMap<String, String>>;
+
+pub(super) fn remote(
+    manifest: &Manifest,
+    segment_of: &BTreeMap<String, String>,
+    services: &Services,
+) -> Remote {
+    let mut remote = Remote::new();
+    for node in manifest.nodes.iter().filter(|node| !node.calls.is_empty()) {
+        let segments: Vec<&String> = match services.get(&node.name) {
+            Some(segments) => segments.iter().collect(),
+            None => segment_of.get(&node.name).into_iter().collect(),
+        };
+        for segment in segments {
+            for service in &node.calls {
+                let Some(copies) = services.get(service) else {
+                    continue;
+                };
+                if copies.contains(segment) {
+                    continue;
+                }
+                if let [other] = copies.iter().collect::<Vec<_>>()[..] {
+                    remote
+                        .entry(segment.clone())
+                        .or_default()
+                        .insert(service.clone(), other.clone());
+                }
+            }
+        }
+    }
+    remote
+}

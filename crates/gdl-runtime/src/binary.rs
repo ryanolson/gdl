@@ -14,9 +14,10 @@ use figment::providers::Serialized;
 use futures::future::{BoxFuture, LocalBoxFuture};
 use velo::Velo;
 
+use crate::Codec;
 use crate::EntryNeed;
 use crate::config::build_node;
-use crate::dist::{Roster, RuntimeConfig};
+use crate::dist::{Calls, Roster, RuntimeConfig};
 use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig, Reserved};
 use gdl::Build;
 use gdl::Cx;
@@ -153,6 +154,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // From here a call to a hosted unary service waits for its `ready`
     // rather than failing: every node is built.
     builder.services.built();
+    builder.calls.built();
     // gdl's own selectors, configured in the settings and not registered
     // by the binary; a table for anything else is a mistake.
     for name in config.selector_tables().keys() {
@@ -178,6 +180,7 @@ pub async fn run_segment<B: SegmentBinary>(
     config.runtime.kv = builder.kv.clone();
     config.runtime.gate = builder.gate.clone();
     config.runtime.lifecycle = builder.lifecycle.clone();
+    config.runtime.calls = builder.calls.clone();
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them. Before
     // the launch, where a chooser's follower registers the pools' figures.
@@ -273,6 +276,9 @@ pub struct Builder {
     /// The unary services the segment hosts, and what every node it builds
     /// takes its clients of them from ([`gdl::UnaryClient::current`]).
     services: UnaryServices,
+    /// The links to the unary services its nodes call in other segments,
+    /// which the deployment binds when it starts.
+    calls: Calls,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -302,6 +308,7 @@ impl Builder {
             kv: InstanceKv::new(),
             gate: OfferGate::new(),
             lifecycle: Lifecycle::new(),
+            calls: Calls::default(),
             services: UnaryServices::new(
                 manifest
                     .nodes
@@ -462,6 +469,28 @@ impl Builder {
             .serve(node, Arc::clone(&built))
             .map_err(|e| format!("building {node}: {e}"))?;
         Ok(built)
+    }
+
+    /// Link the nodes it builds from now on to unary node `service` in
+    /// another segment, its request and response encoded by `req` and
+    /// `resp`: a node whose `calls` names `service` takes the link's client
+    /// with [`gdl::UnaryClient::current`]. Its calls are sent once the
+    /// segment has started; one made before fails with `Routing`. Refuses a
+    /// type that is not a wire type.
+    pub fn link<Req: Send + 'static, Resp: Send + 'static>(
+        &self,
+        service: &str,
+        req: Option<Codec<Req>>,
+        resp: Option<Codec<Resp>>,
+    ) -> std::result::Result<(), Failure> {
+        let client = self
+            .calls
+            .link(service, req, resp)
+            .map_err(|e| format!("linking to {service}: {e}"))?;
+        self.services
+            .add(service, client)
+            .map_err(|e| format!("linking to {service}: {e}"))?;
+        Ok(())
     }
 
     /// [`Builder::build`], with `followed` as the build's handle.

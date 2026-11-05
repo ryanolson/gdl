@@ -82,6 +82,8 @@ gdl_runtime::segment! {
 
 `serve` is `json_lines`, `none`, `frontend <Node> = <type>` for a pinned frontend, or `service { ... }` for one with typed entries.
 
+A unary node the segment lists is written `unary <Node> <binding> = <type>;` in `nodes`, before the others, each after the services it calls: the binary builds them in that order, so that a node takes its client of a service already built. A segment whose nodes call a unary node in another segment has `links: [<Node>, ...];` after `nodes`, and its binary links to each before it builds its nodes ([Unary services](unary.md)). A segment with neither keeps the call it had before.
+
 ### The crossing assertions
 
 The generator decides a message is a wire type from what the source reader found. A reader that is wrong must not reach a running graph. Each generated segment therefore asserts, at compile time, that every message it sends or receives across a cut is a wire type. Each crossing in the `segment!` call names a type alias for the crossing, `Truncate_to_Engine`, and the macro checks the alias with the span of that name, so that the error points at the crossing's line in the call:

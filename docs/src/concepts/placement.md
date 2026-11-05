@@ -66,7 +66,7 @@ The checks report every problem they find, each with the file, the table, and th
 
 ## Unary nodes
 
-A unary node is not on a hop, so no run holds it. A segment lists it as it lists any node, and several segments may list it. Copies share no state. A caller uses the copy in its own segment when the segment lists one. Otherwise it uses the copy in the one other segment that lists the service. Today that call is refused when the caller's segment is built ([Known limitations](../operations/limitations.md#a-unary-service-is-called-only-from-its-own-segment)).
+A unary node is not on a hop, so no run holds it. A segment lists it as it lists any node, and several segments may list it. Copies share no state. A caller uses the copy in its own segment when the segment lists one. Otherwise it uses the copy in the one other segment that lists the service. That call is one velo call ([Unary services](unary.md#a-call-to-another-segment)).
 
 - A caller with no copy in its segment, when copies sit in more than one other segment, is refused. It would have to choose a segment, and nothing in the placement says which.
 - A call to another segment encodes its request and its response, so both must be wire types. A local call encodes nothing.

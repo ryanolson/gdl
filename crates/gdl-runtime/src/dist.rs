@@ -1,6 +1,7 @@
 //! The distributed runtime: a graph's segments as velo nodes.
 
 mod admission;
+mod calls;
 #[cfg(test)]
 pub(crate) mod counting;
 mod envelope;
@@ -16,6 +17,8 @@ mod runtime;
 mod segment;
 mod stages;
 
+pub use calls::Calls;
+pub(crate) use envelope::CallHead;
 #[doc(hidden)]
 pub use envelope::Head;
 #[doc(hidden)]

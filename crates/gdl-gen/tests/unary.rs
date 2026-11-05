@@ -592,7 +592,7 @@ impl Workspace {
         );
         write(
             &dir.join("Cargo.toml"),
-            "[workspace]\nresolver = \"3\"\nmembers = [\"demo\", \"segments/contract\", \"segments/compact/front\"]\n",
+            "[workspace]\nresolver = \"3\"\nmembers = [\"demo\", \"segments/contract\", \"segments/compact/front\", \"segments/split/front\", \"segments/split/tok\"]\n",
         );
         if !dir.join("Cargo.lock").exists() {
             std::fs::copy(root().join("Cargo.lock"), dir.join("Cargo.lock")).expect("the seed");
@@ -726,24 +726,48 @@ fn the_compact_layout_calls_the_service_in_the_routers_segment() {
     assert_eq!(ran.lines, ANSWERED, "front stderr: {}", ran.stderr);
 }
 
-/// A call from the router's build fails the build: the service is built,
-/// but not ready.
+/// The split layout's front answers the same requests the same, from the
+/// same node code, through the tokenizer in a segment of its own: each
+/// call is one velo call to its `gdl.call` handler. The front's barrier
+/// waits for the tokenizer's segment, which it sends calls to.
+#[test]
+fn the_split_layout_calls_the_service_in_its_own_segment_and_answers_the_same() {
+    let workspace = Workspace::built();
+    let ran = run(
+        &workspace.bin("calls-split-front"),
+        &[workspace.bin("calls-split-tok")],
+        "",
+        &ASKED,
+    );
+    assert!(ran.status.success(), "the front failed: {}", ran.stderr);
+    assert_eq!(ran.lines, ANSWERED, "front stderr: {}", ran.stderr);
+}
+
+/// A call from the router's build fails the build, whether the service is
+/// in its segment, built but not ready, or in another, whose link binds
+/// only when the segment starts.
 #[test]
 fn a_call_during_the_build_fails_the_segment_with_routing() {
     let workspace = Workspace::built();
-    let ran = run(
-        &workspace.bin("calls-compact-front"),
-        &[],
-        "[node.Router]\ncall_in_build = true\n",
-        &[],
-    );
-    assert!(!ran.status.success(), "the front served: {:?}", ran.lines);
-    assert!(
-        ran.stderr
-            .contains("front: building Router: routing error: called during build"),
-        "{}",
-        ran.stderr
-    );
+    // The same in both layouts: a local copy, and a link to another segment.
+    for (front, others) in [
+        ("calls-compact-front", vec![]),
+        ("calls-split-front", vec![workspace.bin("calls-split-tok")]),
+    ] {
+        let ran = run(
+            &workspace.bin(front),
+            &others,
+            "[node.Router]\ncall_in_build = true\n",
+            &[],
+        );
+        assert!(!ran.status.success(), "{front} served: {:?}", ran.lines);
+        assert!(
+            ran.stderr
+                .contains("front: building Router: routing error: called during build"),
+            "{front}: {}",
+            ran.stderr
+        );
+    }
 }
 
 /// A call from the router's `ready` waits for the tokenizer's own `ready`,

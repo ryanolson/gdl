@@ -58,6 +58,8 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `egress_limit` | 1024 | streams one instance may produce at once. At least 1, at most tokio's `Semaphore::MAX_PERMITS` |
 | `setup_timeout_ms` | 10000 | the longest a setup step may take (a hand-off, a run opening, an attach), on top of the request's deadline. Also the grace after a retirement is acknowledged |
 | `default_deadline_ms` | 600000 (`gdl_model::DEFAULT_DEADLINE`) | the deadline of a request that crosses segments without one |
+| `call_timeout_ms` | 30000 | the bound of a call to a unary service in another segment whose request has no deadline. Positive ([Unary services](../concepts/unary.md#a-call-to-another-segment)) |
+| `call_reply_max` | 8388608 (8 MiB) | the largest reply, in bytes, that a unary service in this segment sends to a caller in another; a larger one fails the call with `Codec`. From 512, which holds the fixed-size error that replaces a larger reply, to 16 MiB less 64 KiB: velo's 16 MiB TCP frame ends a reply, and also carries velo's header |
 | `clock_skew_ms` | 50 | the assumed largest clock difference between segments |
 | `drain_ms` | `default_deadline_ms` | the bound on a stopped instance's drain |
 | `leave_ms` | `drain_ms` | how long a leave hook may run from the stop, within the drain's bound |

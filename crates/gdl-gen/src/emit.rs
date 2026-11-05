@@ -139,6 +139,10 @@ pub(crate) fn files(
             policies: crate::policies::registered(spec, layout, segment),
             selectors: crate::selectors::registered(spec, layout, segment),
             compresses: layout.compressing_segments().contains(segment),
+            links: layout
+                .calls_from(segment)
+                .map(|(service, _)| service)
+                .collect(),
         };
         unit.crossings = crossings(manifest, layout, segment)?;
         // The source's request and item the binary reads and writes as
@@ -465,6 +469,9 @@ struct Unit<'a> {
     /// Whether it sends or receives on an edge that a `[codec]` entry
     /// compresses, and so builds the runtime with libzstd.
     compresses: bool,
+    /// The unary nodes its nodes call in another segment, in name order:
+    /// the binary links to each before it builds its nodes.
+    links: Vec<&'a str>,
     crate_dir: &'a Path,
     out: &'a Path,
     deps: Deps,
@@ -767,6 +774,11 @@ impl Unit<'_> {
             })
             .collect();
         block(&mut text, "nodes", &nodes);
+        // Written only when there is one, so that a segment that calls no
+        // service elsewhere keeps the call it had before.
+        if !self.links.is_empty() {
+            let _ = writeln!(text, "    links: [{}];", self.links.join(", "));
+        }
         let policies: Vec<String> = self
             .policies
             .iter()

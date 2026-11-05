@@ -11,10 +11,15 @@
 //! crossings: [crosses Truncate_to_Engine = Engine SinkDecl Req; ...];
 //! feeds: [reads_json, writes_json];
 //! nodes: [unary Tokenize tokenize = ::nodes::Tokenize; Preprocess preprocess = ::chat_front_nodes::Preprocess; ...];
+//! links: [Overlap];
 //! policies: ["by_model" = ::policy_router::ByModel; ...];
 //! selectors: ["by_length" = ::routers::ByLength; ...];
 //! serve: json_lines;
 //! ```
+//!
+//! `links` is written only when the segment's nodes call a unary node in
+//! another segment: each such service, which the binary links to before it
+//! builds its nodes.
 //!
 //! `selectors` is written only when the segment sends through a selector
 //! that the spec binds, so that a spec that binds none keeps its golden
@@ -45,6 +50,8 @@ pub(crate) struct Segment {
     pub(crate) feeds: Vec<Ident>,
     /// The hosted nodes that take an implementation.
     pub(crate) nodes: Vec<Node>,
+    /// The unary nodes that its nodes call in another segment.
+    pub(crate) links: Vec<Ident>,
     /// The pool policies it builds and registers, by name.
     pub(crate) policies: Vec<(LitStr, Path)>,
     /// The selectors it builds and registers, by name.
@@ -237,6 +244,18 @@ impl Parse for Segment {
             })
         })?;
         end()?;
+        let links = if input
+            .fork()
+            .parse::<Ident>()
+            .is_ok_and(|key| key == "links")
+        {
+            field("links")?;
+            let links = list(input)?;
+            end()?;
+            links
+        } else {
+            Vec::new()
+        };
         let named = |input: ParseStream<'_>| -> syn::Result<(LitStr, Path)> {
             let name = input.parse()?;
             input.parse::<Token![=]>()?;
@@ -271,6 +290,7 @@ impl Parse for Segment {
             crossings,
             feeds,
             nodes,
+            links,
             policies,
             selectors,
             serve,

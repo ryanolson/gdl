@@ -88,6 +88,10 @@ harness = false
 name = "requests"
 harness = false
 
+[[bench]]
+name = "calls"
+harness = false
+
 [[test]]
 name = "hub"
 required-features = ["hub"]

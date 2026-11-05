@@ -82,8 +82,12 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 | its acknowledgement | nothing, or for a streamed request the reply-to of the input anchor that the receiver minted |
 | its refusal | the error, then, when an entry declines an offer from another pool as gone, the string `gone` as a second value, which a build without it does not read ([A pool that is gone](pool-routing.md#a-pool-that-is-gone)) |
 | `Open` | envelope version, deployment identity, hop, the position of the run's first stage, the context's wire part, and reply-to |
+| `Call`, to the `gdl.call` handler | envelope version, deployment identity, the unary node's index among the unary nodes in name order, the context's wire part with the call's bound as its deadline, and the request ([Unary services](unary.md#a-call-to-another-segment)) |
+| its reply | one byte, then the rest: 0 and the response in its message's encoding; 1 and the service's error, when it ran and failed; 2 and the reason, when it never ran |
 
 A request's head crosses in the buffer it was encoded into. The edge codec writes the head behind 256 bytes of room, and the first offer writes the rest of the `Forward` envelope into that room. The envelope is then one byte string that holds the head where the codec wrote it, so the head is not copied. The bytes are the same as `rmp_serde` gives for the whole envelope, and a receiver reads them as before. With no metadata, the rest of the envelope takes about 100 bytes, which leaves about 150 bytes for metadata. An envelope whose metadata does not fit, and each offer after the first, as a failover makes, copies the head after its own header.
+
+A call's request crosses the same way: its codec writes it behind the same room, and the call writes the rest of its envelope into that room. The `gdl.call` handler reads the bytes velo received, without a copy, and decodes the request where it arrived.
 
 The head's first buffer holds 1 KiB, with the room. A head that does not fit is serialized to count its bytes, and then into a buffer of exactly its size. So the buffer never grows past the head: a 4 MiB image takes one buffer of 4 MiB and the room, not one of 8 MiB.
 

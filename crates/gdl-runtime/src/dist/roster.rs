@@ -248,6 +248,7 @@ impl Live {
         let next = match picker {
             Picker::Request => &route.next.request,
             Picker::Open => &route.next.open,
+            Picker::Call => &route.next.call,
         };
         let sequence = next.fetch_add(1, Ordering::Relaxed);
         Ok(route.eligible[turn(policy, sequence, route.eligible.len(), random)])
@@ -361,13 +362,14 @@ pub(crate) enum Policy {
     Random,
 }
 
-/// Which of the two pickers a call uses: hand-offs and backward-run
-/// openings each go round their own sequence, so that provisioning does not
-/// shift the requests' turns.
+/// Which picker a pick uses: hand-offs, backward-run openings, and calls to
+/// unary services each go round their own sequence, so that provisioning
+/// and calls do not shift the requests' turns.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Picker {
     Request,
     Open,
+    Call,
 }
 
 /// Every instance known, by segment, with what is known of it.
@@ -497,6 +499,7 @@ struct Route {
 struct Turns {
     request: AtomicUsize,
     open: AtomicUsize,
+    call: AtomicUsize,
 }
 
 /// Open or closed, read without a lock on the dispatch path.
