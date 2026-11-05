@@ -1048,8 +1048,8 @@ Measured with callgrind 3.28.0 on a shared aarch64 Linux host (20 cores), load a
 
 ```bash
 RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench calls --no-run
-valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/calls-<hash> <local|remote|remote-deadline|raw> <1000|2000>
-target/release/deps/calls-<hash> <local|remote|remote-deadline|raw> 2000    # prints the allocations per call
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/calls-<hash> <local|remote|remote-deadline|remote-affinity|raw> <1000|2000>
+target/release/deps/calls-<hash> <local|remote|remote-deadline|remote-affinity|raw> 2000    # prints the allocations per call
 ```
 
 | Per call | Callgrind Ir | Allocations |
@@ -1060,4 +1060,5 @@ target/release/deps/calls-<hash> <local|remote|remote-deadline|raw> 2000    # pr
 | `local`: `UnaryClient::local`, in the same program | 89 | 0 |
 
 - **A remote call costs about 7,200 Ir and 9 allocations over velo's raw call.** The two kinds of bound cost the same within the rounds' spread.
+- **A selector costs about 1,500 Ir and 3 allocations more per call.** `remote-affinity` routes the same calls through gdl's `affinity`, which hashes the request ([Routing a call](../concepts/routing.md#routing-a-call)). Measured in a later run of three rounds at load average about 12, beside `remote` in the same run: `remote-affinity` 42,568 to 42,695 Ir and 30 allocations, `remote` 41,046 to 41,172 Ir and 27. By the code, the three allocations are the selector path's own boxed future, which keeps its state out of a policy's call, the boxed choice, and the selector's boxed `select`. In that run, `remote` measured 40,991 to 41,346 Ir before a call could name a selector: the same within the rounds' spread.
 - **Not split here.** The allocations are not traced to their sites, and the release build has no debug information, so callgrind's split of the instructions among inlined frames is not reported.

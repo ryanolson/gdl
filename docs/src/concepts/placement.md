@@ -71,6 +71,16 @@ A unary node is not on a hop, so no run holds it. A segment lists it as it lists
 - A caller with no copy in its segment, when copies sit in more than one other segment, is refused. It would have to choose a segment, and nothing in the placement says which.
 - A call to another segment encodes its request and its response, so both must be wire types. A local call encodes nothing.
 - A call stays in its class. A caller whose only copy of the service is in another class is refused ([Known limitations](../operations/limitations.md#a-call-stays-in-its-class)).
+- The `[routing]` entry keyed by the unary node chooses the instance of the other segment that a call goes to, through a policy or a selector ([Routing a call](routing.md#routing-a-call)). A call to the copy in the caller's own segment is not routed.
+
+A spec can put a copy beside each of its callers. Here the router and the engine each call the tokenizer in their own segment:
+
+```toml
+[segment.front]
+nodes = ["Front", "Router", "Tokenize"]
+[segment.pool]
+nodes = ["Engine", "Tokenize"]
+```
 
 ## Runs, hops, and the crossing report
 
@@ -96,7 +106,7 @@ Engine = "random"                        # "round_robin" (the default) or "rando
 Detokenize = { selector = "affinity" }   # a named selector
 ```
 
-The key must be the first stage of a remote forward run, or a unary node: its entry applies to every call to it from another segment. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`. The spec can bind others from their crates, or the sending segment can register them in code. [Routing](routing.md) covers selectors and offers.
+The key must be the first stage of a remote forward run, or a unary node: its entry, a policy or a selector, applies to every call to it from another segment. A selector name has the shape of a settings key and is never `round_robin` or `random`. gdl provides `affinity` and `least_loaded`. The spec can bind others from their crates, or the sending segment can register them in code. [Routing](routing.md) covers selectors and offers.
 
 ## Classes
 

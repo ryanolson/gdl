@@ -3,7 +3,7 @@ use crate::{Layout, Manifest, RequestRouter};
 /// A reader of a property kind that the graph does not draw: an entry
 /// adapter, which runs in the segment that hosts the source, or a pool
 /// policy, which runs wherever its class is chosen, or a selector, which
-/// runs in the segment that sends the crossings it routes. Graph nodes say what
+/// runs in the segment that sends the crossings and calls it routes. Graph nodes say what
 /// they need in the graph ([`crate::PropertyNeed`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyConsumer {
@@ -23,11 +23,26 @@ pub struct PropertyConsumer {
 /// The readers that selector `name`, which needs the kinds `needs`, is in
 /// `layout`: for each crossing it routes, and each kind, one that reads the
 /// kind from the class of the segment the crossing enters, and runs in the
-/// segment that sends it. Each reader once. A placement without classes
+/// segment that sends it; and the same for each call to a unary node in
+/// another segment it routes, from the class of the copy called. Each
+/// reader once. A placement without classes
 /// has no class to read from: each kind is read from class `""` then, which
 /// [`property_supply`] refuses, since no segment follows pools.
 pub fn selector_consumers(layout: &Layout, name: &str, needs: &[&str]) -> Vec<PropertyConsumer> {
     let mut consumers: Vec<PropertyConsumer> = Vec::new();
+    let add = |consumers: &mut Vec<PropertyConsumer>, segment: &str, class: &str| {
+        for kind in needs {
+            let consumer = PropertyConsumer {
+                consumer: format!("selector `{name}`"),
+                kind: (*kind).to_string(),
+                class: class.to_string(),
+                segment: Some(segment.to_string()),
+            };
+            if !consumers.contains(&consumer) {
+                consumers.push(consumer);
+            }
+        }
+    };
     for (hop, plan) in layout.hops().iter().enumerate() {
         for pair in plan.forward_runs.windows(2) {
             let routed = matches!(
@@ -38,17 +53,22 @@ pub fn selector_consumers(layout: &Layout, name: &str, needs: &[&str]) -> Vec<Pr
                 continue;
             }
             let class = layout.class_of(&pair[1].segment).unwrap_or_default();
-            for kind in needs {
-                let consumer = PropertyConsumer {
-                    consumer: format!("selector `{name}`"),
-                    kind: (*kind).to_string(),
-                    class: class.to_string(),
-                    segment: Some(pair[0].segment.clone()),
-                };
-                if !consumers.contains(&consumer) {
-                    consumers.push(consumer);
-                }
-            }
+            add(&mut consumers, &pair[0].segment, class);
+        }
+    }
+    // A call routed through the selector reads the class of the copy it
+    // calls, from the caller's segment, as a crossing does.
+    for (from, service, to) in layout.remote_calls() {
+        let routed = matches!(
+            layout.call_router(service),
+            RequestRouter::Selector(router) if router == name
+        );
+        if routed {
+            add(
+                &mut consumers,
+                from,
+                layout.class_of(to).unwrap_or_default(),
+            );
         }
     }
     consumers

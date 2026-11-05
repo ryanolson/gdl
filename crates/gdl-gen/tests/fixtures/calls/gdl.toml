@@ -1,5 +1,7 @@
-# One graph, two layouts: `compact` puts the tokenizer in the router's
-# segment, `split` in a segment of its own. The node code is the same.
+# One graph, three layouts: `compact` puts the tokenizer in the router's
+# segment, `split` in a segment of its own, and `copies` in both the
+# router's segment and the sink's, so that each calls its own copy. The
+# node code is the same.
 [graph]
 path = "calls.gdl"
 
@@ -20,3 +22,9 @@ nodes = ["Front", "Router", "Echo"]
 
 [layout.split.segment.tok]
 nodes = ["Tokenize"]
+
+[layout.copies.segment.front]
+nodes = ["Front", "Router", "Tokenize"]
+
+[layout.copies.segment.pool]
+nodes = ["Echo", "Tokenize"]

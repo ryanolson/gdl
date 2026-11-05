@@ -718,6 +718,32 @@ impl Layout {
         self.call_routing.get(service).unwrap_or(&DEFAULT)
     }
 
+    /// The selectors `segment` calls through: each unary node its nodes
+    /// call in another segment whose router names a selector, as (service,
+    /// name), in name order. A call to the copy in `segment` itself is
+    /// routed by nothing, so its selector is not here. The segment must
+    /// register each name, or have gdl's own of that name.
+    pub fn call_selectors<'a>(
+        &'a self,
+        segment: &str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        self.calls_from(segment)
+            .filter_map(|(service, _)| match self.call_router(service) {
+                RequestRouter::Selector(name) => Some((service, name.as_str())),
+                _ => None,
+            })
+    }
+
+    /// Every call from one segment to a copy in another, as (the caller's
+    /// segment, the service, the service's segment).
+    pub(crate) fn remote_calls(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.remote_calls.iter().flat_map(|(from, calls)| {
+            calls
+                .iter()
+                .map(move |(service, to)| (from.as_str(), service.as_str(), to.as_str()))
+        })
+    }
+
     /// How a chooser picks a pool of `class`, defaults applied: `None`
     /// unless a class boundary enters `class`.
     pub fn pool_policy(&self, class: &str) -> Option<&PoolPolicy> {

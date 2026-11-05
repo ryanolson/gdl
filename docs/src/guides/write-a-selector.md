@@ -4,7 +4,7 @@ A selector chooses the instance a request goes to when it crosses into another s
 
 ## 1. Implement `gdl::Selector`
 
-Pick the `Head` type. Use the head type of the edge that crosses (`H` for a streamed edge `Streamed<H, T>`) to read the head as a value. Use `gdl::Projected<P>` to read only some of its fields ([Write a pool policy](write-a-pool-policy.md#1-read-only-what-you-route-by)). Use `gdl::Encoded` to read only its bytes, with no decode, on any edge.
+Pick the `Head` type. Use the head type of the edge that crosses (`H` for a streamed edge `Streamed<H, T>`) to read the head as a value. A selector that routes calls to a unary node reads the node's `Req` ([Routing a call](../concepts/routing.md#routing-a-call)). Use `gdl::Projected<P>` to read only some of its fields ([Write a pool policy](write-a-pool-policy.md#1-read-only-what-you-route-by)). Use `gdl::Encoded` to read only its bytes, with no decode, on any edge.
 
 ```rust
 use gdl::{Choice, Instances, Request, Result, Selector};
@@ -107,8 +107,8 @@ type = "my_routers::ByLength"
 ```
 
 - `cargo gdl check` reads the crate and refuses a type that the crate does not offer as a selector. Write the type from the crate's root, as `my_routers::ByLength`, and make it reachable there.
-- `cargo gdl check` compares the selector's `Head` with the request of each crossing that names it, as the sending segment does when it starts. The rules are a pool policy's ([Write a pool policy](write-a-pool-policy.md#4-bind-it-in-the-spec)). A spec with a `[contract]` crate is not checked this way.
-- Each segment that sends through a crossing named `by_length` in `[routing]` depends on the crate, and its `build` registers the selector with one `builder.selector::<my_routers::ByLength>("by_length")` line. No other segment depends on the crate. The emitted line names the type, so the binary links it.
+- `cargo gdl check` compares the selector's `Head` with the request of each crossing that names it, and with the `Req` of each unary node whose calls it routes, as the sending segment does when it starts. The rules are a pool policy's ([Write a pool policy](write-a-pool-policy.md#4-bind-it-in-the-spec)). A spec with a `[contract]` crate is not checked this way.
+- Each segment that sends through a crossing named `by_length` in `[routing]`, or calls a unary node in another segment that `[routing]` routes through it, depends on the crate, and its `build` registers the selector with one `builder.selector::<my_routers::ByLength>("by_length")` line. No other segment depends on the crate. The emitted line names the type, so the binary links it.
 - That segment builds the selector from the `[selector.by_length]` table of its settings file, or `GDL_SELECTOR__BY_LENGTH__<KEY>` variables, registers its metrics with `dynamo_endpoint = "by_length"`, and waits for its `ready` before the instance announces that it is loaded.
 - The name cannot be gdl's own `affinity` or `least_loaded`, nor the name of a node, an entry adapter, a `[config]` key, or a bound pool policy: the segment builds them all under their names.
 - One crate can hold a pool policy and a selector. The segment that uses both depends on it once.

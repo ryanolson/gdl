@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use common::{WAIT, velo_node};
 use futures::StreamExt;
+use gdl::{Affinity, AffinityConfig, Choice, Instances, Projected, Projection, Request, Selector};
 use gdl::{Build, Cx, Deadline, Error, ErrorKind, Items, Next, Operator, Result, Sink, Unary};
 use gdl::{UnaryClient, items};
 use gdl_runtime::{Placement, Roster, RuntimeConfig, Segment, wire_codec};
@@ -67,7 +68,9 @@ enum Seen {
 /// - `big <n>` answers `n` bytes;
 /// - `hold` starts a worker that waits for its context's cancellation,
 ///   and never answers;
-/// - `spawn` starts that worker and answers at once.
+/// - `spawn` starts that worker and answers at once;
+/// - `meta <key>` answers with the value of its context's metadata entry
+///   `key`, or `none`.
 struct Service {
     runs: AtomicUsize,
     seen: mpsc::UnboundedSender<Seen>,
@@ -122,6 +125,13 @@ impl Unary for Service {
                 self.watch(cx);
                 std::future::pending().await
             }
+            "meta" => Ok(Told {
+                text: cx
+                    .meta()
+                    .get(rest)
+                    .cloned()
+                    .unwrap_or_else(|| "none".into()),
+            }),
             "spawn" => {
                 self.watch(cx);
                 Ok(Told {
@@ -562,18 +572,289 @@ fn the_call_settings_default_and_are_bounded() {
     }
 }
 
-/// A call is not routed through a selector yet: a segment whose calls the
-/// placement routes through one is refused when it is made.
+/// The router and the tokenizer's own segment, with calls to `Tok` routed
+/// through selector `name`.
+fn routed(name: &str) -> String {
+    format!("{SPLIT}[routing]\nTok = {{ selector = '{name}' }}\n")
+}
+
+/// Front settings that route through `affinity` keyed on the `session`
+/// metadata entry, as `[selector.affinity] key = "session"` builds it.
+fn by_session() -> RuntimeConfig {
+    let mut config = RuntimeConfig::default();
+    config
+        .selectors
+        .add(
+            "affinity",
+            Affinity::new(AffinityConfig {
+                key: Some("session".to_string()),
+                through: false,
+            }),
+        )
+        .expect("registered");
+    config
+}
+
+/// How many calls each instance of `Tok` ran.
+fn runs<T>(toks: &[Tok<T>]) -> Vec<usize> {
+    toks.iter()
+        .map(|tok| tok.service.runs.load(Ordering::Relaxed))
+        .collect()
+}
+
+/// `affinity` keyed on `session` sends every call of one session to one
+/// instance, whatever its text: the key is the metadata entry the call
+/// carries from the caller's context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn affinity_sends_every_call_of_a_session_to_one_instance() {
+    let deployed = deploy(
+        3,
+        &routed("affinity"),
+        &routed("affinity"),
+        by_session(),
+        RuntimeConfig::default(),
+    )
+    .await;
+    let mut cx = Cx::new();
+    cx.insert_meta("session", "s-1");
+    for n in 0..64 {
+        bounded(deployed.client.call(&cx, ask(&format!("told {n} words"))))
+            .await
+            .expect("answered");
+    }
+    let mut runs = runs(&deployed.toks);
+    runs.sort_unstable();
+    assert_eq!(runs, [0, 0, 64], "one instance ran every call");
+}
+
+/// The control: without the entry, `affinity` hashes the whole encoded
+/// request, so calls with other texts reach other instances.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn affinity_without_the_entry_hashes_the_whole_request() {
+    let deployed = deploy(
+        3,
+        &routed("affinity"),
+        &routed("affinity"),
+        by_session(),
+        RuntimeConfig::default(),
+    )
+    .await;
+    for n in 0..64 {
+        bounded(
+            deployed
+                .client
+                .call(&Cx::new(), ask(&format!("told {n} words"))),
+        )
+        .await
+        .expect("answered");
+    }
+    let runs = runs(&deployed.toks);
+    assert_eq!(runs.iter().sum::<usize>(), 64);
+    assert!(
+        runs.iter().filter(|&&ran| ran > 0).count() > 1,
+        "the calls spread: {runs:?}"
+    );
+}
+
+/// The part of a call's request that [`ByWord`] reads.
+#[derive(Deserialize, Projection)]
+#[gdl(of = Ask)]
+struct Text {
+    text: String,
+}
+
+/// Sends a call whose text starts `told a` to the instance with the lowest
+/// id, and any other to the one with the highest: it reads the call's
+/// request, through a projection of one of its fields.
+struct ByWord;
+
+impl Selector for ByWord {
+    type Head = Projected<Text>;
+
+    async fn select<'a>(
+        &'a self,
+        request: Request<'a, Self::Head>,
+        instances: Instances<'a>,
+    ) -> Result<Choice<'a>> {
+        let low = request.head().text.starts_with("told a");
+        let chosen = if low {
+            instances.iter().min_by_key(|instance| instance.id())
+        } else {
+            instances.iter().max_by_key(|instance| instance.id())
+        };
+        Ok(Choice::new(chosen.expect("an instance")))
+    }
+}
+
+/// A selector sees the call's request as its head: one that reads a field
+/// of it through a projection routes each call by that field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selector_reads_a_field_of_the_calls_request() {
+    let mut front = RuntimeConfig::default();
+    front.selectors.add("by_word", ByWord).expect("registered");
+    let deployed = deploy(
+        2,
+        &routed("by_word"),
+        &routed("by_word"),
+        front,
+        RuntimeConfig::default(),
+    )
+    .await;
+    for word in ["a", "b", "a", "b", "a"] {
+        bounded(
+            deployed
+                .client
+                .call(&Cx::new(), ask(&format!("told {word}"))),
+        )
+        .await
+        .expect("answered");
+    }
+    let mut runs = runs(&deployed.toks);
+    runs.sort_unstable();
+    assert_eq!(runs, [2, 3], "each word went to one instance");
+}
+
+/// Sends every call to the first instance, tells the service `picked = x`,
+/// and leases a [`Held`] for each call.
+struct Tagging(Arc<AtomicUsize>);
+
+/// Counts itself among the leases its selector gave while it lives.
+struct Held(Arc<AtomicUsize>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Selector for Tagging {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        _: Request<'a, Self::Head>,
+        instances: Instances<'a>,
+    ) -> Result<Choice<'a>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Choice::new(instances.get(0).expect("an instance"))
+            .with_meta("picked", "x")
+            .with_lease(Held(Arc::clone(&self.0))))
+    }
+}
+
+/// What a selector's choice adds to a call's metadata reaches the
+/// service's context, and its lease is held while the call runs and
+/// dropped once it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selectors_meta_reaches_the_service_and_its_lease_lasts_the_call() {
+    let held = Arc::new(AtomicUsize::new(0));
+    let mut front = RuntimeConfig::default();
+    front
+        .selectors
+        .add("tagging", Tagging(Arc::clone(&held)))
+        .expect("registered");
+    let mut deployed = deploy(
+        1,
+        &routed("tagging"),
+        &routed("tagging"),
+        front,
+        RuntimeConfig::default(),
+    )
+    .await;
+    let told = bounded(deployed.client.call(&Cx::new(), ask("meta picked")))
+        .await
+        .expect("answered");
+    assert_eq!(told.text, "x", "the service saw the selector's meta");
+    assert_eq!(held.load(Ordering::SeqCst), 0, "dropped with the reply");
+    assert!(matches!(deployed.toks[0].next().await, Seen::Began(_)));
+
+    let cx = Cx::new().with_timeout(Duration::from_millis(500));
+    let call = deployed.client.call(&cx, ask("hold"));
+    let mut call = std::pin::pin!(call);
+    tokio::select! {
+        _ = call.as_mut() => panic!("the call ended"),
+        seen = deployed.toks[0].next() => assert!(matches!(seen, Seen::Began(_))),
+    }
+    assert_eq!(held.load(Ordering::SeqCst), 1, "held while the call runs");
+    let error = bounded(call).await.expect_err("past its bound");
+    assert_eq!(error.kind(), ErrorKind::DeadlineExceeded, "{error}");
+    assert_eq!(
+        held.load(Ordering::SeqCst),
+        0,
+        "dropped when the call ended"
+    );
+}
+
+/// Reads the head as a type other than the call's request.
+struct ByNumber;
+
+impl Selector for ByNumber {
+    type Head = u64;
+
+    async fn select<'a>(
+        &'a self,
+        _: Request<'a, Self::Head>,
+        instances: Instances<'a>,
+    ) -> Result<Choice<'a>> {
+        Ok(Choice::new(instances.get(0).expect("an instance")))
+    }
+}
+
+/// A selector that reads the head as another type than the call's request
+/// is refused when the segment starts, naming both, as a crossing's is.
 #[tokio::test]
-async fn a_selector_on_calls_is_refused() {
-    let routed = format!("{SPLIT}[routing]\nTok = {{ selector = 'by_text' }}\n");
+async fn a_selector_that_reads_another_type_than_the_request_is_refused() {
+    let node = velo_node().await;
+    let mut roster = Roster::new();
+    roster.add("front".to_string(), node.peer_info());
+    let mut config = RuntimeConfig::default();
+    config
+        .selectors
+        .add("by_number", ByNumber)
+        .expect("registered");
+    let link = config
+        .calls
+        .link::<Ask, Told>("Tok", wire_codec!(Ask), wire_codec!(Told))
+        .expect("a link");
+    let deployment = gdl_runtime::Deployment::new(
+        node,
+        &contract::manifest(),
+        &placement(&routed("by_number")),
+        "front",
+        &roster,
+        config,
+    )
+    .expect("the selector resolves");
+    let root = contract::assemble(
+        &deployment,
+        contract::Bindings::new()
+            .router(Router { tok: link })
+            .echo(Echo),
+    )
+    .expect("assembled");
+    let error = deployment.start(root).err().expect("refused");
+    assert_eq!(error.kind(), ErrorKind::Placement, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("selector `by_number` reads the head as `u64`")
+            && error.message().contains("unary node `Tok`"),
+        "{error}"
+    );
+}
+
+/// A segment whose calls the placement routes through a selector that
+/// nothing registers, and gdl does not have, is refused when it is made,
+/// naming the call.
+#[tokio::test]
+async fn a_selector_on_calls_that_nothing_registers_is_refused() {
     let node = velo_node().await;
     let mut roster = Roster::new();
     roster.add("front".to_string(), node.peer_info());
     let error = gdl_runtime::Deployment::new(
         node,
         &contract::manifest(),
-        &placement(&routed),
+        &placement(&routed("by_text")),
         "front",
         &roster,
         RuntimeConfig::default(),
@@ -582,7 +863,9 @@ async fn a_selector_on_calls_is_refused() {
     .expect("refused");
     assert_eq!(error.kind(), ErrorKind::Placement);
     assert!(
-        error.message().contains("through selector `by_text`"),
+        error.message().contains(
+            "segment `front` calls unary node `Tok` through selector `by_text`, which nothing registers and gdl does not have"
+        ),
         "{error}"
     );
 }

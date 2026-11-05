@@ -1,5 +1,7 @@
 //! Routing selectors: a crossing's router that chooses the instance a
-//! request goes to, beside the built-in `round_robin` and `random`.
+//! request goes to, beside the built-in `round_robin` and `random`. The
+//! same router chooses the instance a call to a unary node in another
+//! segment goes to, its request read as the head.
 //!
 //! A selector chooses from the routing table's snapshot of one segment: the
 //! instances that a pick may return, never empty. It returns a [`Choice`]
@@ -44,8 +46,9 @@ pub use affinity::{Affinity, AffinityConfig};
 pub use least::LeastLoaded;
 
 /// Chooses the instance a request goes to when it crosses into another
-/// segment. A crossing names it in the placement's `[routing]` table as
-/// `{ selector = "<name>" }`.
+/// segment, or a call to a unary node in another segment, whose request is
+/// then the head. A crossing, or a unary node, names it in the placement's
+/// `[routing]` table as `{ selector = "<name>" }`.
 ///
 /// A selector is built as a node is, through [`Build`](crate::Build): its
 /// settings table is `[selector.<name>]`, its metrics carry the name as
@@ -66,8 +69,9 @@ pub use least::LeastLoaded;
 /// lease before the next. Nothing else runs for it.
 pub trait Selector: Send + Sync + 'static {
     /// What the selector reads of the request's head: the head's own type,
-    /// which the runtime checks against the crossing's edge when the
-    /// segment starts, or [`Encoded`], the head's bytes on any edge.
+    /// which the runtime checks against the crossing's edge, or a call's
+    /// request, when the segment starts, or [`Encoded`], the head's bytes
+    /// on any edge.
     type Head: Head;
 
     /// The property kinds the selector reads from the pools its segment
@@ -671,7 +675,7 @@ impl Selectors {
         Self::default()
     }
 
-    /// Route the crossings that name `name` through `selector`. Refuses a
+    /// Route the crossings and calls that name `name` through `selector`. Refuses a
     /// name a placement cannot use, and a name already added.
     pub fn add<S: Selector>(&mut self, name: &str, selector: S) -> Result<()> {
         self.add_shared(name, Arc::new(selector))
@@ -699,7 +703,7 @@ impl Selectors {
         self.named.contains_key(name)
     }
 
-    /// The selector a crossing that names `name` routes through: the one
+    /// The selector a crossing or a call that names `name` routes through: the one
     /// registered, or else gdl's own of that name with its defaults.
     #[doc(hidden)]
     pub fn resolve(&self, name: &str) -> Option<Arc<dyn Erased>> {

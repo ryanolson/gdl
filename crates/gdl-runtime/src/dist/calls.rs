@@ -17,10 +17,9 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 
 use super::envelope::CallArrived;
-use super::roster::Policy;
-use super::runtime::Runtime;
 use super::runtime::RuntimeConfig;
-use crate::wire::Codec;
+use super::runtime::{Runtime, Within};
+use crate::wire::{Codec, RequestCodec};
 use gdl::{Cx, Error, ErrorKind, Result, Unary, UnaryClient};
 
 mod reply;
@@ -52,9 +51,12 @@ struct Links {
     targets: Mutex<Vec<Arc<Target>>>,
 }
 
-/// What one link calls: the service, and where it is, once bound.
+/// What one link calls: the service, the type and encoding of its request,
+/// which a selector reads, and where it is, once bound.
 struct Target {
     service: String,
+    req: (std::any::TypeId, &'static str),
+    encoding: gdl_model::Encoding,
     bound: OnceLock<Bound>,
 }
 
@@ -64,7 +66,7 @@ struct Bound {
     rt: Weak<Runtime>,
     index: u16,
     segment: String,
-    policy: Policy,
+    within: Within,
 }
 
 impl Calls {
@@ -97,6 +99,8 @@ impl Calls {
         };
         let target = Arc::new(Target {
             service: service.to_string(),
+            req: Codec::<Req>::head(),
+            encoding: req.head_encoding(),
             bound: OnceLock::new(),
         });
         self.inner
@@ -122,7 +126,10 @@ impl Calls {
 
     /// Bind every link to `rt`, which hosts the caller's segment: each to
     /// the segment the layout resolves its calls to, with its service's
-    /// index among the unary nodes in name order in `indices`.
+    /// index among the unary nodes in name order in `indices`, and its
+    /// router. Refuses a selector that cannot read the call's request: one
+    /// that reads it as another type, or reads its fields by name when its
+    /// encoding names none.
     pub(crate) fn bind(&self, rt: &Arc<Runtime>, indices: &BTreeMap<String, u16>) -> Result<()> {
         let targets = self
             .inner
@@ -145,16 +152,54 @@ impl Calls {
                     ),
                 ));
             };
+            let within = rt.call_router(service, target.encoding);
+            if let Within::Selector { name, selector, .. } = &within {
+                reads(&rt.segment, service, name, &**selector, target)?;
+            }
             let _ = target.bound.set(Bound {
                 rt: Arc::downgrade(rt),
                 index,
                 segment,
-                policy: rt.call_policy(service)?,
+                within,
             });
         }
         self.built();
         Ok(())
     }
+}
+
+/// Refuse selector `name` of `segment`'s calls to `service` when it cannot
+/// read the request `target` sends, as a crossing's is refused for its
+/// head.
+fn reads(
+    segment: &str,
+    service: &str,
+    name: &str,
+    selector: &dyn gdl::__runtime::Erased,
+    target: &Target,
+) -> Result<()> {
+    let (id, carried) = target.req;
+    if let Some((wants, wanted)) = selector.edge()
+        && wants != id
+    {
+        return Err(Error::new(
+            ErrorKind::Placement,
+            format!(
+                "segment `{segment}`: selector `{name}` reads the head as `{wanted}`, but a call to unary node `{service}` carries `{carried}`"
+            ),
+        ));
+    }
+    // A projection reads fields by name, which a positional encoding does
+    // not carry: every read would fail.
+    if selector.by_name() && target.encoding == gdl_model::Encoding::MsgpackArray {
+        return Err(Error::new(
+            ErrorKind::Placement,
+            format!(
+                "segment `{segment}`: selector `{name}` reads the head's fields by name, but a call to unary node `{service}` is encoded as `msgpack_array`, which carries no names"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Calls {
@@ -206,7 +251,7 @@ impl<Req: Send + 'static, Resp: Send + 'static> Unary for Link<Req, Resp> {
         let head = self.req.encode_call(&req)?;
         drop(req);
         let reply = rt
-            .call(bound.index, &bound.segment, bound.policy, cx, head)
+            .call(bound.index, &bound.segment, &bound.within, cx, head)
             .await?;
         self.resp.decode(reply::read(&reply)?)
     }

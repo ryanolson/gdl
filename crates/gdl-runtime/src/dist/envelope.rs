@@ -833,6 +833,12 @@ impl CallHead {
         encode(value, &mut buffer)?;
         Ok(Self(buffer))
     }
+
+    /// The encoded request, without the room in front of it: what a
+    /// selector reads.
+    pub(crate) fn plain(&self) -> &[u8] {
+        &self.0[HEADER_ROOM..]
+    }
 }
 
 /// `rmp_serde`'s encoding of a [`Call`] starts with this: an array of its

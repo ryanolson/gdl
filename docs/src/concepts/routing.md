@@ -1,10 +1,10 @@
 # Routing, selectors, and offers
 
-When a request crosses into another segment, the sending segment chooses one instance of the destination segment. That choice is routing. This chapter covers the routers a crossing can name, the routing table they choose from, selectors, and the offer that every routed hand-off makes. [Routing design](../development/routing-design.md) records why it works this way.
+When a request crosses into another segment, the sending segment chooses one instance of the destination segment. That choice is routing. This chapter covers the routers a crossing can name, the routing table they choose from, selectors, calls to a unary node in another segment, and the offer that every routed hand-off makes. [Routing design](../development/routing-design.md) records why it works this way.
 
 ## Where routing happens
 
-Routing chooses where a forward hand-off goes: the first node of a remote forward run. Responses do not need it. They return through the stream anchors the request carries, so no router chooses their destination. A request's input stream, for a streamed request, stays with the instance its head went to.
+Routing chooses where a forward hand-off goes: the first node of a remote forward run. It also chooses where a call to a unary node in another segment goes ([Routing a call](#routing-a-call)). Responses do not need it. They return through the stream anchors the request carries, so no router chooses their destination. A request's input stream, for a streamed request, stays with the instance its head went to.
 
 The placement's `[routing]` table names a router for each crossing, keyed by the node where the remote forward run begins:
 
@@ -67,7 +67,31 @@ Two selectors come with gdl. A crossing can name them with nothing registered.
 
 After instances decline a request, each one chooses among those that have not declined it: `affinity` the key's next instance, the same from every sender, and `least_loaded` the least loaded one. When every instance has declined, each chooses from all of them again.
 
-A sending process builds one selector per name. Every crossing that names it shares it, so a selector that routes two hops into one segment keeps one view of its load. [Write a selector](../guides/write-a-selector.md) shows how to write one, bind it in the spec, or register it in code.
+A sending process builds one selector per name. Every crossing and every call that names it shares it, so a selector that routes two hops into one segment keeps one view of its load. [Write a selector](../guides/write-a-selector.md) shows how to write one, bind it in the spec, or register it in code.
+
+### Routing a call
+
+A node calls a unary node through its client ([Unary services](unary.md)). When the caller's segment lists the service, the call goes to that copy, and nothing routes it. Otherwise it goes to the one other segment that lists the service, and the `[routing]` entry keyed by the unary node chooses the instance: `round_robin` by default, `random`, or a selector.
+
+```toml
+# The placement:
+[routing]
+Tokenize = { selector = "affinity" }
+
+# The calling segment's settings file:
+[selector.affinity]
+key = "session"
+```
+
+A selector routes a call as it routes a crossing, with these differences:
+
+- **The head is the call's request.** `request.head()` is the unary node's `Req`, and a `gdl::Projected<P>` reads its fields when `P::Of` is `Req`. The start checks the selector's `Head` against `Req`, as it checks a crossing's against its edge, and `cargo gdl check` does the same for a selector the spec binds.
+- **The context is the caller's.** The selector sees the `cx` the caller passed to `call`, with its metadata. What the choice adds with `Choice::with_meta` reaches the service's context.
+- **The lease is held until the reply arrives**, or until the call fails or is dropped.
+- **The call's bound limits the selector's wait**: the request's deadline, or `call_timeout`. A call is cancelled by dropping it, which drops the wait with it; it does not read the context's cancel.
+- **Nothing has declined.** A refused call is not tried on another instance yet, so `request.declined()` is always empty.
+
+`affinity` keys a call on the metadata entry its `key` names, which the call carries from the caller's `cx`. So every call of one session reaches one instance, whatever its request says. A caller whose request does not carry the entry can set it with `cx.insert_meta` on a context of its own. Without the entry, `affinity` hashes the whole encoded request, so calls of one session with different requests reach different instances. A selector that reads a field of `Req` through `gdl::Projected` is the typed way to key on the request itself.
 
 ## Every hand-off is an offer
 

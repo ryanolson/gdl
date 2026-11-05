@@ -1,8 +1,9 @@
 //! Selectors from crates of their own: a spec's `[selector.<name>]`
 //! tables, checked, resolved against what each crate offers, and the
 //! selectors each segment registers. A segment that sends through a
-//! crossing whose `[routing]` router names a bound selector builds it from
-//! its settings and registers it; no other segment depends on the crate.
+//! crossing, or calls a unary node in another segment, whose `[routing]`
+//! router names a bound selector builds it from its settings and registers
+//! it; no other segment depends on the crate.
 //! A segment names the selector's type in its code, so the binary links
 //! it: a registration that the crate made for itself, at link time, would
 //! not be kept by a linker that sees nothing else of the crate used.
@@ -17,7 +18,8 @@ use crate::spec::{Bind, Spec};
 const GDLS: [&str; 2] = ["affinity", "least_loaded"];
 
 /// The bound selectors segment `segment` registers under `layout`, each
-/// once, by name: those of the crossings it sends.
+/// once, by name: those of the crossings it sends and the calls it makes
+/// to another segment.
 pub(crate) fn registered<'s>(
     spec: &'s Spec,
     layout: &gdl_model::Layout,
@@ -26,6 +28,7 @@ pub(crate) fn registered<'s>(
     let names: BTreeSet<&str> = layout
         .sent_selectors(segment)
         .map(|(_, _, name)| name)
+        .chain(layout.call_selectors(segment).map(|(_, name)| name))
         .collect();
     spec.selectors
         .iter()
@@ -74,14 +77,22 @@ pub(crate) fn problems(
         problems.extend(type_problem(bind).map(|problem| format!("{at}: {problem}")));
         // Judged only where every layout fits its graph: one that does not
         // routes no crossing, and is refused for what it is.
+        let router = gdl_model::RequestRouter::Selector(name.clone());
         let named = layouts.values().any(|layout| {
             layout.as_ref().is_none_or(|layout| {
-                (0..layout.hops().len()).any(|hop| {
-                    layout.hops()[hop].forward_runs.iter().skip(1).any(|run| {
-                        *layout.request_router(hop, run.start)
-                            == gdl_model::RequestRouter::Selector(name.clone())
-                    })
-                })
+                let crossings = (0..layout.hops().len()).any(|hop| {
+                    layout.hops()[hop]
+                        .forward_runs
+                        .iter()
+                        .skip(1)
+                        .any(|run| *layout.request_router(hop, run.start) == router)
+                });
+                let calls = manifest
+                    .nodes
+                    .iter()
+                    .filter(|node| node.role == gdl_model::Role::Unary)
+                    .any(|node| *layout.call_router(&node.name) == router);
+                crossings || calls
             })
         });
         if !named {
@@ -146,8 +157,9 @@ pub(crate) fn resolve(
 /// Why selector `name`, which reads `head`, does not fit a request that
 /// crosses through it, in any layout of `spec`: the checks a segment that
 /// sends through it makes when it starts. The request is the edge that
-/// enters the crossing's first stage. Each problem is given once, however
-/// many layouts find it.
+/// enters the crossing's first stage, or the request of a unary node whose
+/// calls it routes. Each problem is given once, however many layouts find
+/// it.
 fn misfits(
     spec: &Spec,
     manifest: &gdl_model::Manifest,
@@ -181,6 +193,26 @@ fn misfits(
                 continue;
             };
             let problem = format!("selector `{name}` of the crossing into node `{node}` {problem}");
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        }
+        let calls = laid
+            .placement
+            .segments()
+            .flat_map(|(segment, _)| layout.call_selectors(segment).collect::<Vec<_>>());
+        for (service, router) in calls {
+            let Some(unary) = manifest.node(service).and_then(|node| node.unary.as_ref()) else {
+                continue;
+            };
+            if router != name {
+                continue;
+            }
+            let Some(problem) = misfit(resolution, &unary.req, head) else {
+                continue;
+            };
+            let problem =
+                format!("selector `{name}` of the calls to unary node `{service}` {problem}");
             if !problems.contains(&problem) {
                 problems.push(problem);
             }

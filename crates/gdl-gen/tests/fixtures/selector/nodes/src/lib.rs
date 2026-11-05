@@ -1,7 +1,8 @@
-//! A step that counts a request's words, and a model that answers it.
+//! A step that counts a request's words, a model that answers it, and a
+//! unary node that a test's graph calls.
 
 use futures::stream;
-use gdl::{Build, Cx, Forward, Items, Result, Sink, items};
+use gdl::{Build, Cx, Forward, Items, Result, Sink, Unary, items};
 use serde::Deserialize;
 use selector_messages::{Answer, Ask, Prepared};
 
@@ -52,6 +53,28 @@ impl Build for Prep {
 }
 
 impl Build for Model {
+    type Config = NoSettings;
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Answers with the request it was given: a unary node for the graphs
+/// that route calls through a selector.
+#[derive(gdl::Node)]
+pub struct Count;
+
+impl Unary for Count {
+    type Req = Prepared;
+    type Resp = Prepared;
+
+    async fn call(&self, _cx: &Cx, req: Prepared) -> Result<Prepared> {
+        Ok(req)
+    }
+}
+
+impl Build for Count {
     type Config = NoSettings;
     type Metrics = ();
     async fn build(_: NoSettings, (): ()) -> Result<Self> {

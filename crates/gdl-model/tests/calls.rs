@@ -537,3 +537,46 @@ fn a_remote_call_is_a_send_from_the_callers_segment_to_the_services() {
     assert!(laid.sends_to("ov").is_empty());
     assert_eq!(laid.calls_from("front").count(), 0);
 }
+
+/// A segment calls through the selector that routes a service only when it
+/// calls the service's copy in another segment: a caller beside its own
+/// copy routes nothing, so it registers nothing.
+#[test]
+fn a_segment_calls_through_a_selector_only_to_a_copy_in_another_segment() {
+    let placed = "[segment.front]\nnodes = ['S', 'R', 'D']\n\
+                  [segment.ov]\nnodes = ['Ov', 'Tok']\n\
+                  [routing]\nTok = { selector = 'affinity' }\n";
+    let laid = layout(&manifest(nodes()), &placement(placed)).expect("laid out");
+    assert_eq!(
+        laid.call_selectors("front").collect::<Vec<_>>(),
+        [("Tok", "affinity")]
+    );
+    assert_eq!(laid.call_selectors("ov").count(), 0);
+}
+
+/// A selector that routes calls reads its property kinds from the class
+/// of the copy it calls, in the caller's segment, as it does for a
+/// crossing: a call stays in its class, whose pools no other class
+/// chooses, so the kind is not supplied there.
+#[test]
+fn a_selector_on_calls_reads_its_kinds_from_the_called_copys_class() {
+    let placed = "[segment.front]\nnodes = ['S', 'R', 'D']\n\
+                  [segment.tok]\nnodes = ['Tok']\n\
+                  [segment.ov]\nnodes = ['Ov']\n\
+                  [class.local]\nsegments = ['front', 'tok', 'ov']\n\
+                  [routing]\nTok = { selector = 'by_load' }\n";
+    let laid = layout(&manifest(nodes()), &placement(placed)).expect("laid out");
+    let consumers = gdl_model::selector_consumers(&laid, "by_load", &["load"]);
+    let read: Vec<(&str, &str, Option<&str>)> = consumers
+        .iter()
+        .map(|c| (c.kind.as_str(), c.class.as_str(), c.segment.as_deref()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("load", "local", Some("front")),
+            ("load", "local", Some("ov"))
+        ]
+    );
+    assert!(gdl_model::selector_consumers(&laid, "other", &["load"]).is_empty());
+}

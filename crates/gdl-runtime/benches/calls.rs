@@ -17,6 +17,9 @@
 //!   request has no deadline, so each call is bound by `call_timeout`, on
 //!   both sides.
 //! - `remote-deadline`: the same, under a request deadline.
+//! - `remote-affinity`: `remote`, with the calls routed through gdl's
+//!   `affinity` selector, which hashes the request: the selector's cost over
+//!   `round_robin`'s.
 //! - `raw`: velo's raw unary call between the same two nodes, to a handler
 //!   that answers its 8-byte payload: the transport's floor, with no
 //!   envelope, bound, or service.
@@ -104,7 +107,7 @@ const SPLIT: &str = "[segment.front]\nnodes = ['S', 'D']\n[segment.add]\nnodes =
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: calls <local | remote | remote-deadline | raw> <count>";
+    let usage = "usage: calls <local | remote | remote-deadline | remote-affinity | raw> <count>";
     let which = args.next().expect(usage);
     let count: u64 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -119,8 +122,8 @@ fn main() {
         }
         let (client, _segments) = match which.as_str() {
             "local" => (UnaryClient::local(Arc::new(Add)), None),
-            "remote" | "remote-deadline" => {
-                let (client, segments) = remote().await;
+            "remote" | "remote-deadline" | "remote-affinity" => {
+                let (client, segments) = remote(which == "remote-affinity").await;
                 (client, Some(segments))
             }
             _ => panic!("{usage}"),
@@ -156,10 +159,14 @@ fn main() {
 }
 
 /// A front and the service's segment on two velo nodes, and the front's
-/// link to the service.
-async fn remote() -> (UnaryClient<Num, Num>, (impl Sized, impl Sized)) {
+/// link to the service, through `affinity` when `routed`.
+async fn remote(routed: bool) -> (UnaryClient<Num, Num>, (impl Sized, impl Sized)) {
     let manifest = contract::manifest();
-    let placement = Placement::from_toml(SPLIT).expect("a placement");
+    let text = match routed {
+        true => format!("{SPLIT}[routing]\nAdd = {{ selector = 'affinity' }}\n"),
+        false => SPLIT.to_string(),
+    };
+    let placement = Placement::from_toml(&text).expect("a placement");
     let local = ([127, 0, 0, 1], 0).into();
     let (front, add) = (
         bind_node(local).await.expect("a node"),

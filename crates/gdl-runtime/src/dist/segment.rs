@@ -73,10 +73,6 @@ impl Deployment {
         );
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config, meters)?;
         rt.check_selector_needs(manifest)?;
-        // Refused before anything starts, rather than at the first call.
-        for (service, _) in rt.layout.calls_from(segment) {
-            rt.call_policy(service)?;
-        }
         let rt = Arc::new(rt);
         if let Some(registry) = &rt.config.metrics {
             Held::register(registry, Arc::downgrade(&rt))?;

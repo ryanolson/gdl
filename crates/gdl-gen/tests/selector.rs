@@ -3,7 +3,7 @@
 //! sends through it builds it from its settings and registers it, and the
 //! crossing it names routes through it. `cargo gdl check` refuses a
 //! selector it cannot resolve, and one whose `Head` does not fit the
-//! crossing it routes.
+//! crossing or the call it routes.
 //!
 //! The end-to-end test builds the generated segments in a nested cargo run
 //! that shares the examples' target directory: a cold build takes minutes,
@@ -248,4 +248,67 @@ fn check_holds_a_selectors_needs_to_its_crossings_class() {
         &graph(""),
     )
     .expect("the model's pools provide it");
+}
+
+/// The fixture's graph with a unary node `Count` of `req`, which `Prep`
+/// calls, and its spec with `Count` in a segment of its own, its calls
+/// routed through `by_text` and the crossing into `Model` by round robin.
+fn called(req: &str) -> (String, String) {
+    let graph = fixture_text("selector.gdl").replace(
+        "forward Prep: Ask -> Prepared;",
+        &format!("unary   Count: {req} -> Prepared;\nforward Prep: Ask -> Prepared calls Count;"),
+    );
+    let spec = fixture_text("gdl.toml")
+        .replace(
+            "[segment.model]\nnodes = [\"Model\"]",
+            "[segment.model]\nnodes = [\"Model\"]\n\n[segment.count]\nnodes = [\"Count\"]",
+        )
+        .replace(
+            "Model = { selector = \"by_text\" }",
+            "Count = { selector = \"by_text\" }",
+        );
+    (spec, graph)
+}
+
+/// A bound selector that routes only a unary node's calls is named by a
+/// router, so it checks, and the segment that calls through it builds and
+/// registers it; the segment that hosts the service does not.
+#[test]
+fn a_bound_selector_routes_the_calls_it_names() {
+    let (text, graph) = called("Prepared");
+    check(&text, &graph).expect("the calls' selector checks");
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &fixture()).expect("spec");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-selector-")
+        .tempdir()
+        .expect("scratch");
+    let out = temp.path().join("segments");
+    let files = gdl_gen::render(&spec, &out, &target("gdl-gen-tests")).expect("render");
+    let file = |path: &str| files.get(Path::new(path)).expect("generated").clone();
+    assert!(
+        file("front/src/lib.rs").contains("\"by_text\" = ::selector_router::ByText;"),
+        "{}",
+        file("front/src/lib.rs")
+    );
+    assert!(file("front/Cargo.toml").contains("selector-router = "));
+    for path in ["model/src/lib.rs", "count/src/lib.rs"] {
+        assert!(!file(path).contains("selector_router"), "{path}");
+    }
+    for path in ["model/Cargo.toml", "count/Cargo.toml"] {
+        assert!(!file(path).contains("selector-router"), "{path}");
+    }
+}
+
+/// `by_text` reads `Prepared`; routing calls whose request is `Ask`
+/// through it is refused, naming the unary node.
+#[test]
+fn check_refuses_a_selector_whose_head_does_not_fit_its_calls() {
+    let (text, graph) = called("Ask");
+    let error = check(&text, &graph).expect_err("a misfit");
+    assert!(
+        error.contains(
+            "[selector.by_text]: selector `by_text` of the calls to unary node `Count` reads the head as `selector_messages::Prepared` (selector-messages 0.0.0), but the request that crosses into it carries `selector_messages::Ask` (selector-messages 0.0.0)"
+        ),
+        "{error}"
+    );
 }

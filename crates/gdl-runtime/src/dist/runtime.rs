@@ -137,7 +137,7 @@ pub struct RuntimeConfig {
     /// setting: a segment binary gives its process's registry when its
     /// system listener can serve it.
     pub metrics: Option<prometheus::Registry>,
-    /// The selectors a crossing's router can name, by name. A name the
+    /// The selectors a crossing's or a call's router can name, by name. A name the
     /// placement uses that is not here is gdl's own selector of that name,
     /// with its defaults. Not a setting: a segment binary registers them
     /// through its `Builder`.
@@ -823,6 +823,20 @@ impl Runtime {
             };
             selectors.insert(name.to_string(), selector);
         }
+        for (service, name) in layout.call_selectors(&segment) {
+            if selectors.contains_key(name) {
+                continue;
+            }
+            let Some(selector) = config.selectors.resolve(name) else {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "segment `{segment}` calls unary node `{service}` through selector `{name}`, which nothing registers and gdl does not have"
+                    ),
+                ));
+            };
+            selectors.insert(name.to_string(), selector);
+        }
         #[cfg(feature = "hub")]
         let crossings = match roster.pools() {
             Some(pools) => super::pools::targets(
@@ -1302,7 +1316,7 @@ impl Runtime {
     }
 
     /// Call unary node `service`, of index `index` among the unary nodes in
-    /// name order, on an instance of `segment` chosen by `policy`, with
+    /// name order, on an instance of `segment` chosen by `within`, with
     /// `payload`, the encoded request behind its envelope's room. The call's
     /// bound is the request's deadline, or now plus `call_timeout`: the
     /// envelope carries it, and the call fails with `DeadlineExceeded` once
@@ -1311,7 +1325,7 @@ impl Runtime {
         &self,
         index: u16,
         segment: &str,
-        policy: Policy,
+        within: &Within,
         cx: &Cx,
         payload: super::envelope::CallHead,
     ) -> Result<bytes::Bytes> {
@@ -1329,39 +1343,113 @@ impl Runtime {
         tokio::time::timeout(left(), self.released())
             .await
             .map_err(|_| Error::deadline_exceeded())??;
+        let policy = match within {
+            Within::Policy(policy) => *policy,
+            Within::Selector {
+                selector, encoding, ..
+            } => {
+                return self
+                    .call_selected(index, segment, &**selector, *encoding, cx, bound, payload)
+                    .await;
+            }
+        };
         let instance = self
             .routes
             .pick(segment, Picker::Call, policy, &self.random)?;
-        let envelope = super::envelope::Call {
-            identity: self.identity,
-            service: index,
-            cx: super::envelope::WireCx::bounded(cx, bound),
+        let (envelope, left) = self.call_envelope(
+            index,
+            super::envelope::WireCx::bounded(cx, bound),
             payload,
-        }
-        .wire()?;
-        let left = left();
-        if left.is_zero() {
-            return Err(Error::deadline_exceeded());
-        }
+            bound,
+        )?;
         self.fabric
             .call_bounded(instance, super::calls::CALL, envelope, left)
             .await
     }
 
+    /// [`Runtime::call`] through a selector: it chooses the instance within
+    /// the call's `bound`, and what it chose to tell the service goes in the
+    /// call's context. Its lease is held until the reply comes back, so that
+    /// a selector that counts what it sent sees the call while it runs.
+    ///
+    /// Boxed, and not `async`: a call's future holds only the box, so the
+    /// selector's state does not grow every call's, a policy's too.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the parts of one call, as `Runtime::call` takes them"
+    )]
+    fn call_selected<'a>(
+        &'a self,
+        index: u16,
+        segment: &'a str,
+        selector: &'a dyn Erased,
+        encoding: gdl_model::Encoding,
+        cx: &'a Cx,
+        bound: gdl::Deadline,
+        payload: super::envelope::CallHead,
+    ) -> futures::future::BoxFuture<'a, Result<bytes::Bytes>> {
+        Box::pin(async move {
+            let left = bound
+                .instant()
+                .saturating_duration_since(tokio::time::Instant::now());
+            let chosen = self
+                .routes
+                .choose(segment, selector, cx, payload.plain(), encoding, &[]);
+            let (instance, picked) = tokio::time::timeout(left, chosen)
+                .await
+                .map_err(|_| Error::deadline_exceeded())??;
+            let mut wire_cx = super::envelope::WireCx::bounded(cx, bound);
+            wire_cx.add_meta(picked.meta);
+            let _lease = picked.lease;
+            let (envelope, left) = self.call_envelope(index, wire_cx, payload, bound)?;
+            self.fabric
+                .call_bounded(instance, super::calls::CALL, envelope, left)
+                .await
+        })
+    }
+
+    /// The envelope of one call, `cx` its context, and the time left to its
+    /// `bound`: refused once the bound has passed.
+    fn call_envelope(
+        &self,
+        index: u16,
+        cx: super::envelope::WireCx,
+        payload: super::envelope::CallHead,
+        bound: gdl::Deadline,
+    ) -> Result<(bytes::Bytes, std::time::Duration)> {
+        let envelope = super::envelope::Call {
+            identity: self.identity,
+            service: index,
+            cx,
+            payload,
+        }
+        .wire()?;
+        let left = bound
+            .instant()
+            .saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(Error::deadline_exceeded());
+        }
+        Ok((envelope, left))
+    }
+
     /// How this segment picks an instance for its calls to unary node
-    /// `service`: `round_robin` or `random`. A selector is refused: a call
-    /// is not routed through one yet.
-    pub(crate) fn call_policy(&self, service: &str) -> Result<Policy> {
+    /// `service`: `round_robin`, `random`, or a selector that `Runtime::new`
+    /// resolved, which reads the call's request in `encoding`, its codec's.
+    pub(crate) fn call_router(&self, service: &str, encoding: gdl_model::Encoding) -> Within {
         match self.layout.call_router(service) {
-            RequestRouter::RoundRobin => Ok(Policy::RoundRobin),
-            RequestRouter::Random => Ok(Policy::Random),
-            RequestRouter::Selector(name) => Err(Error::new(
-                ErrorKind::Placement,
-                format!(
-                    "segment `{}` calls unary node `{service}` through selector `{name}`, but a call is routed only by `round_robin` or `random`",
-                    self.segment
-                ),
-            )),
+            RequestRouter::RoundRobin => Within::Policy(Policy::RoundRobin),
+            RequestRouter::Random => Within::Policy(Policy::Random),
+            RequestRouter::Selector(name) => match self.selectors.get(name) {
+                Some(selector) => Within::Selector {
+                    name: Arc::from(name.as_str()),
+                    selector: Arc::clone(selector),
+                    encoding,
+                },
+                // Resolved for every service this segment calls in another
+                // segment; a call to its own copy is never routed.
+                None => Within::Policy(Policy::RoundRobin),
+            },
         }
     }
 

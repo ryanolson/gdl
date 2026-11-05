@@ -1,7 +1,8 @@
-// A router that calls a unary node on each request, before it routes it.
+// A router that calls a unary node on each request, before it routes it,
+// and a sink that calls it too.
 name = "calls", schema = 1;
 unary    Tokenize: Text -> Tokens;
 source   Front: Text -> stream Text;
 operator Router: (Text -> stream Text) over (Text -> stream Text) calls Tokenize;
-sink     Echo: Text -> stream Text;
+sink     Echo: Text -> stream Text calls Tokenize;
 topology: Front => Router { Echo };

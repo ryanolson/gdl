@@ -552,8 +552,9 @@ fn the_reader_finds_a_unary_nodes_role_and_ports() {
 }
 
 /// A workspace in the target directory with the `calls` fixture's
-/// generated crates, both layouts, and the demo that runs the compact
-/// layout's segment under a counting allocator; and the lock that keeps
+/// generated crates, every layout, and the demos that run the compact
+/// layout's segment and the copies layout's two under a counting
+/// allocator; and the lock that keeps
 /// another test process out of it while held. Files are written only when
 /// they change, so Cargo rebuilds only what changed since the last run.
 /// The first build takes as long as the examples' target directory needs;
@@ -576,14 +577,22 @@ impl Workspace {
             write(&segments.join(path), text);
         }
         let quoted = |p: &Path| toml::Value::String(p.display().to_string());
-        let demo = std::fs::read_to_string(calls().join("demo/main.rs")).expect("the demo");
-        write(&dir.join("demo/src/main.rs"), &demo);
+        for (from, to) in [
+            ("main.rs", "src/main.rs"),
+            ("copies-front.rs", "src/bin/copies-front.rs"),
+            ("copies-pool.rs", "src/bin/copies-pool.rs"),
+        ] {
+            let demo = std::fs::read_to_string(calls().join("demo").join(from)).expect("a demo");
+            write(&dir.join("demo").join(to), &demo);
+        }
         write(
             &dir.join("demo/Cargo.toml"),
             &format!(
                 "[package]\nname = \"calls-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
                  [dependencies]\n\
                  calls-compact-front = {{ path = \"../segments/compact/front\" }}\n\
+                 calls-copies-front = {{ path = \"../segments/copies/front\" }}\n\
+                 calls-copies-pool = {{ path = \"../segments/copies/pool\" }}\n\
                  calls-nodes = {{ path = {} }}\n\
                  gdl-runtime = {{ path = {} }}\n",
                 quoted(&calls().join("nodes")),
@@ -592,7 +601,7 @@ impl Workspace {
         );
         write(
             &dir.join("Cargo.toml"),
-            "[workspace]\nresolver = \"3\"\nmembers = [\"demo\", \"segments/contract\", \"segments/compact/front\", \"segments/split/front\", \"segments/split/tok\"]\n",
+            "[workspace]\nresolver = \"3\"\nmembers = [\"demo\", \"segments/contract\", \"segments/compact/front\", \"segments/split/front\", \"segments/split/tok\", \"segments/copies/front\", \"segments/copies/pool\"]\n",
         );
         if !dir.join("Cargo.lock").exists() {
             std::fs::copy(root().join("Cargo.lock"), dir.join("Cargo.lock")).expect("the seed");
@@ -653,6 +662,10 @@ struct Run {
     lines: Vec<String>,
     status: std::process::ExitStatus,
     stderr: String,
+    /// The other segments, still running, each with its stderr.
+    others: Vec<(common::Running, common::Lines)>,
+    /// Their roster and settings, which they read until they stop.
+    _temp: tempfile::TempDir,
 }
 
 fn run(front: &Path, others: &[PathBuf], settings: &str, asked: &[&str]) -> Run {
@@ -675,19 +688,21 @@ fn run(front: &Path, others: &[PathBuf], settings: &str, asked: &[&str]) -> Run 
         std::fs::write(&path, text).expect("config");
         path
     };
-    let _others: Vec<common::Running> = others
+    let others: Vec<(common::Running, common::Lines)> = others
         .iter()
         .enumerate()
         .map(|(index, bin)| {
-            common::Running(
+            let mut other = common::Running(
                 common::generated(bin)
                     .arg(config(&format!("other-{index}")))
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .spawn()
                     .expect("a segment"),
-            )
+            );
+            let stderr = other.stderr();
+            (other, stderr)
         })
         .collect();
     let mut front = common::Running(
@@ -713,6 +728,8 @@ fn run(front: &Path, others: &[PathBuf], settings: &str, asked: &[&str]) -> Run 
         lines,
         status,
         stderr,
+        others,
+        _temp: temp,
     }
 }
 
@@ -794,5 +811,44 @@ fn a_local_call_through_the_generated_segment_allocates_nothing() {
     let ran = run(&workspace.bin("calls-demo"), &[], "", &ASKED);
     assert!(ran.status.success(), "the demo failed: {}", ran.stderr);
     assert_eq!(ran.lines, ANSWERED, "demo stderr: {}", ran.stderr);
-    assert!(ran.stderr.contains("calls 3 allocated 0"), "{}", ran.stderr);
+    // The router's three calls and the sink's three, all to the one copy.
+    assert!(
+        ran.stderr.contains("calls 6 allocated 0 copies [6]"),
+        "{}",
+        ran.stderr
+    );
+}
+
+/// The copies layout lists the tokenizer in the router's segment and in
+/// the sink's: each calls the copy in its own segment, with no allocation
+/// of its own, and each copy answers only its own segment's calls. A call
+/// to the other segment's copy would show as a count of 6 in one and 0 in
+/// the other.
+#[test]
+fn each_caller_calls_the_copy_in_its_own_segment() {
+    use std::time::Duration;
+
+    let workspace = Workspace::built();
+    let mut ran = run(
+        &workspace.bin("copies-front"),
+        &[workspace.bin("copies-pool")],
+        "",
+        &ASKED,
+    );
+    assert!(ran.status.success(), "the front failed: {}", ran.stderr);
+    assert_eq!(ran.lines, ANSWERED, "front stderr: {}", ran.stderr);
+    assert!(
+        ran.stderr.contains("calls 3 allocated 0 copies [3]"),
+        "{}",
+        ran.stderr
+    );
+    let (pool, stderr) = &mut ran.others[0];
+    pool.signal("-TERM");
+    let status = pool.exits_within(Duration::from_secs(30));
+    let stderr = stderr.rest(Duration::from_secs(5)).join("\n");
+    assert!(status.success(), "the pool failed: {stderr}");
+    assert!(
+        stderr.contains("calls 3 allocated 0 copies [3]"),
+        "{stderr}"
+    );
 }

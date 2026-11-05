@@ -436,11 +436,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** give a request a deadline, or set a short `call_timeout`, for a service whose work outlives its callers.
 - **Test:** `a_dropped_call_leaves_the_service_running_until_its_bound` in `crates/gdl-runtime/tests/calls.rs`.
 
-### A call is routed only by `round_robin` or `random`
-- **What:** a `[routing]` entry that routes the calls to a unary node through a selector is refused when a segment that calls it from another segment starts, with `Placement`. `check` and `generate` accept it.
-- **Why:** a selector reads a request head that a hop's crossing encodes, and a call is not routed through one yet.
-- **Workaround:** `round_robin`, the default, or `random`.
-
 ### A remote call is not retried or admitted
 - **What:** a call refused by an instance of the service's segment fails at once, though another instance might take it. A call takes no admission permit in the service's segment, so a burst of calls is not refused there with `Overloaded`, and the segment's drain does not wait for the calls it is running. velo's own shutdown lets a running handler finish within the drain's bound.
 - **Why:** the call's permit, its retry on another instance, and its share in the drain are not built yet. See [Unary services](../concepts/unary.md#what-the-call-does-not-do-yet).
