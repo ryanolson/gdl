@@ -113,6 +113,33 @@ impl gdl::Forward for Translate {
 - An operator that retries keeps its request and clones it for each attempt. A boxed request clones into a new box: one allocation and one copy.
 - gdl does not box a request for you. A node takes its request by value, so a box inside gdl would be copied out into every node, and a small request would pay an allocation for nothing.
 
+## Return an operator's body future as it is
+
+gdl builds an operator's future in its box, on every request. It can do that only with the future that `generate` returns. When `generate` wraps the future of another `async fn`, the compiler builds that future on the stack and copies it whole:
+
+- A combinator such as `.map(..)` or `.map_err(..)` takes the future by value. It is copied into the box when gdl builds the operator's future.
+- An `async` block or an `async fn generate` that awaits it copies it into its own future when it starts.
+
+The copy includes the room that the future keeps for large values it awaits later, which nothing has written yet. In one dynamo operator that was 9,808 B per request. If the body has a different error type, convert it inside the body, with `.map_err(..)?` or a `match`, and return the body's future itself:
+
+```rust
+impl gdl::Operator for Migrate {
+    // ..
+    fn generate<N: Next<Req, Item>>(&self, cx: Cx, req: Req, next: N) -> impl Future<Output = Result<Items<Item>>> + Send {
+        self.migrate(req, Downstream::new(cx, next))
+    }
+}
+
+impl Migrate {
+    async fn migrate<N: Next<Req, Item>>(&self, req: Req, down: Downstream<N>) -> Result<Items<Item>> {
+        let manager = RetryManager::build(req, down).await.map_err(into_gdl)?;
+        Ok(manager.into_items())
+    }
+}
+```
+
+A large future that the body awaits is still copied once into place when the body starts. gdl cannot reach that copy ([Known limitations](../operations/limitations.md#a-large-future-that-a-nodes-body-awaits-is-copied-when-the-body-starts)). The numbers are in [Feature costs](../operations/feature-costs.md#an-operators-body-future).
+
 ## Build and readiness
 
 A segment binary builds each node it hosts from that node's settings table, `[node.<Name>]`:

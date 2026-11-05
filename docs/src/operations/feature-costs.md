@@ -1004,6 +1004,28 @@ LD_PRELOAD=<memcpy interposer> target/release/examples/stages <hop|around|operat
 - **Rejected: an in-place node form.** A trait whose node edits `&mut Req`, with `Forward` given by a blanket impl, let a run of such nodes copy the request once. At 5 nodes and 2 KiB it was 5 copies and 9,026 Ir, where a box was 0 and 8,036. It helps only a node whose request type is the same in and out, and it cost a `u64` request about 40 Ir per run. A default `forward_in_place` on `Forward` that calls `forward` cannot be written without `unsafe`: it would move the request out of a `&mut`.
 - **Rejected: pinning the inner end's call where it is built.** It removed the 2 moves of the inner end's future, about 565 Ir per hop at 2 KiB, but cost a `u64` request 2 to 7 Ir per hop. Three other forms of the forward chain's code moved none of a node's 3 copies.
 
+### An operator's body future
+
+gdl builds an operator's future in its box ([Node contexts](../development/runtime-design.md#node-contexts)), but only the future that `generate` returns. A test body, an `async fn`, held an 8 KiB awaitee across two waits, so the compiler put the awaitee in front of the body's arguments. Of the body's 16,504 B start state, the first 8,335 B is room that nothing has written. Five operator shapes returned or wrapped that body, with a 4,024 B request. Each shape's awaitee is 64 B larger than the one before, so that its copies can be told apart. The copies of 4,000 B or more were read from the `llvm.memcpy` calls of each function in the release IR (fat LTO, one codegen unit), at `876381ea`, on a shared 20-core aarch64 host. rustc 1.93.1 and 1.99.0 gave the same copies:
+
+| Operator shape | Copied when gdl builds the operator's future | Copied when the body starts |
+|---|---|---|
+| `async fn generate` that awaits the body | the request, 4,024 B | the body's future, 16,506 B |
+| `generate` returns `body(..).map(finish)` | the request, and the body's future, 16,570 B | nothing |
+| `generate` returns `async move { finish(body(..).await) }` | the request | the body's future, 16,634 B |
+| `generate` returns `body(..)` | the request | nothing |
+| gdl maps the output: `Box::write(slot, build(make).map(finish))` | the request | nothing |
+
+```bash
+cargo rustc -p gdl --release --example <example> -- --emit=llvm-ir
+RUSTC_BOOTSTRAP=1 cargo rustc -p gdl --release --example <example> -- -Zprint-type-sizes
+```
+
+- **The copy is the node's, not `build`'s.** `.map(..)` takes the body's future by value. The compiler builds it on the stack and copies it whole, unwritten room too, into the place it returns into: the box. The `awaitees` example and `an_operator_that_returns_its_body_future_builds_it_in_place` in `crates/gdl/tests/codegen.rs` keep the fourth row true, with the second row as the control.
+- **In one dynamo operator the copy was 9,808 B per request**: 9,727 B of room, then the 80 B context. The operator returned `.map(..)` on its body. The compiler wrote the arguments after the context straight into the box, so only the bytes up to the context were copied. On an x86 host that was one `memcpy` and about 9,860 Ir per request under callgrind. Which field comes after the room changed when the request grew by 24 B.
+- **Moving the wrapper into the body only moves the copy.** An `async` block or an `async fn generate` that awaits the body copies the body's future into its own when it starts ([Known limitations](limitations.md#a-large-future-that-a-nodes-body-awaits-is-copied-when-the-body-starts)).
+- **Rejected: gdl maps the output** (the last row). See [Node contexts](../development/runtime-design.md#node-contexts).
+
 ## A local unary call
 
 What a call through a `UnaryClient` costs over a direct call of the same service on its `Arc`, when the service is in the caller's process. The call's future holds a buffer of 256 bytes, aligned to 8, and builds the service's future in it at its first poll ([Unary services](../concepts/model.md#unary-services)). The code is `crates/gdl/src/unary.rs`, and its `unsafe` is in `crates/gdl/src/unary/placed.rs`.

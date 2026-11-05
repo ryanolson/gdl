@@ -94,18 +94,45 @@ fn an_operators_future_is_built_on_the_heap() {
     let ir = release_ir("example", "copies");
     const FUTURE: u64 = 16 * 1024;
     const CONTROL: &str = "6copies5boxed";
-    let copies = |control: bool| -> Vec<u64> {
-        definitions(&ir)
-            .filter(|(signature, _)| signature.contains(CONTROL) == control)
-            .flat_map(|(_, body)| copy_sizes(body))
-            .filter(|size| *size >= FUTURE)
-            .collect()
-    };
     assert!(
-        !copies(true).is_empty(),
+        !large_copies(&ir, FUTURE, CONTROL, true).is_empty(),
         "the boxed control must show a copy of the future"
     );
-    assert_eq!(copies(false), Vec::<u64>::new());
+    assert_eq!(large_copies(&ir, FUTURE, CONTROL, false), Vec::<u64>::new());
+}
+
+/// An operator that returns its body's future as it is gets it built in
+/// its box, even when the future's layout leaves room for large awaitees
+/// in front of the arguments. A node that wraps that future in a
+/// combinator (`.map(..)`) hands it over by value: the whole future, the
+/// unwritten room too, is built on the stack and copied into the box, once
+/// per request (9,808 B in one dynamo operator). The `awaitees` example's
+/// body holds two 8,224 B futures across its waits, which puts more than
+/// 16 KiB in front of its arguments, while a copy of one of them stays
+/// below that. Its `mapped` control builds the body under `.map(..)` with
+/// a `build` of its own, and must show the copy. Every other function is
+/// searched. rustc 1.99.0 gives the same result as 1.93.1. It builds the
+/// example in release, about 25 s cold and 2 s warm.
+#[test]
+fn an_operator_that_returns_its_body_future_builds_it_in_place() {
+    let ir = release_ir("example", "awaitees");
+    const ROOM: u64 = 16 * 1024;
+    const CONTROL: &str = "8awaitees5build";
+    assert!(
+        !large_copies(&ir, ROOM, CONTROL, true).is_empty(),
+        "the mapped control must show a copy of the whole future"
+    );
+    assert_eq!(large_copies(&ir, ROOM, CONTROL, false), Vec::<u64>::new());
+}
+
+/// The constant-size copies of `size` bytes or more, in the functions
+/// whose names contain `control` when `control_side`, else in all others.
+fn large_copies(ir: &str, size: u64, control: &str, control_side: bool) -> Vec<u64> {
+    definitions(ir)
+        .filter(|(signature, _)| signature.contains(control) == control_side)
+        .flat_map(|(_, body)| copy_sizes(body))
+        .filter(|copy| *copy >= size)
+        .collect()
 }
 
 #[test]

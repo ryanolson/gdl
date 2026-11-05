@@ -141,6 +141,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the compiler builds the future in its box only when it knows the box is fresh memory that it may write early. It knows that of the system allocator's `malloc`, not of mimalloc's. Neither a `Box` nor a `&mut` argument says so for a future, which is not `Unpin`. See [Node contexts](../development/runtime-design.md#node-contexts).
 - **Workaround:** the system allocator, where this copy matters more than the allocator's speed. In dynamo-http-endpoints at `89fec72d`, on an 8-core x86_64 EPYC virtual machine in callgrind Ir, the system allocator cut a unary chat request from 44,075 Ir to 40,083, and its `memcpy` from 20,994 Ir to 11,744. A stream of 256 chunks cost 30% more under it, so that pipeline keeps mimalloc.
 
+### A large future that a node's body awaits is copied when the body starts
+- **What:** a node whose body awaits the future of another `async fn` copies that whole future into its own when the body starts, once per request. The copy includes the room that the future keeps for large values it awaits later, which nothing has written yet. In a test body with an 8 KiB awaitee, the first poll copied 16,506 B.
+- **When:** the awaited future is large, or keeps a large value across more than one wait. Which field the compiler puts after the room can change when a type grows by a few bytes.
+- **Why:** the compiler builds the awaited future on the stack and then moves it into its place in the body's future. gdl builds only the future that `generate` returns in its box. It cannot reach a future that the node's own code builds. See [Feature costs](feature-costs.md#an-operators-body-future).
+- **Workaround:** return the body's future from `generate` as it is, so that at least the operator's own future is built in its box ([Write nodes](../guides/write-nodes.md#return-an-operators-body-future-as-it-is)).
+
 ### A request passed by value is copied at every stage of a hop
 - **What:** a hop copies its request 4 times, and each forward node and around node about 3 times more, on every request. With a 2 KiB request, one hop with 5 forward nodes made 19 copies, about 5,600 instructions. A `u64` request makes no copy that calls `memcpy`.
 - **Why:** each stage's future takes the request by value, and the compiler copies it between them. Where the next stage's future overlaps the slot of a node's result, it copies through a stack temporary. See [Feature costs](feature-costs.md#copies-of-a-request).
