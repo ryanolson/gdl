@@ -41,6 +41,7 @@ bash scripts/kubeconform.sh                        # the pinned Kubernetes objec
 bash scripts/kind-fleet.sh                         # cargo gdl deploy and down on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
 LOCAL=1 OPERATOR=1 bash scripts/kind-fleet.sh     # the same, in a cluster the gdl operator runs: prune and down through GdlPool finalizers, under load
 bash scripts/kind-operator.sh                      # the operator's scale-down under load on a kind cluster, outside the default suite (INSTALL_TOOLS=1 fetches kind; TIMEOUT=<limit>)
+bash scripts/qemu-startcheck.sh                    # a segment built with `+lse` under QEMU on a core without LSE and one with it, outside the default suite; rerun on each toolchain update (aarch64 host; INSTALL_TOOLS=1 extracts qemu-user-static; TIMEOUT=<limit>)
 ```
 
 - Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. nextest prints each test's time and the run's (`Summary`).

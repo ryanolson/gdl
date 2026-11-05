@@ -41,6 +41,27 @@ impl Unit<'_> {
             let _ = writeln!(text);
         }
         let _ = writeln!(text, "fn main() -> std::process::ExitCode {{");
+        // First: the comment it carries says why.
+        if self
+            .spec
+            .deployment
+            .as_ref()
+            .is_some_and(|settings| settings.has_codegen())
+        {
+            text.push_str(concat!(
+                "    // First, before any code built with the image's target features:\n",
+                "    // the image builds with thin LTO, so std's start-up keeps std's own\n",
+                "    // build and runs on any core. On a CPU without one of the features,\n",
+                "    // this ends the process with one line, not a SIGILL.\n",
+            ));
+            let _ = writeln!(
+                text,
+                "    if let Err(code) = gdl_runtime::check_cpu_features({:?}) {{",
+                self.segment
+            );
+            let _ = writeln!(text, "        return code;");
+            let _ = writeln!(text, "    }}");
+        }
         // The binary, not the runtime, installs the subscriber: a program
         // that deploys the segment through the library keeps its own. On
         // stderr, since a segment that serves JSON lines answers on stdout.

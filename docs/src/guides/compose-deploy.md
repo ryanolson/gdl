@@ -30,6 +30,8 @@ listen = "0.0.0.0:8082"
 base_image = "nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04"
 ```
 
+Compose refuses a `[deployment.codegen.<arch>]` table: it builds for the Docker host, and only `cargo gdl images` builds with the table ([Target features](kubernetes.md#target-features)).
+
 Each segment serves its metrics and health on its system port, 9090 unless its `config` sets `[system] port`. Compose does not publish it. To reach it from the host, publish it with a host port, as `examples/film/deploy.toml` does: `ports = ["127.0.0.1:9091:9090"]`. `check` refuses the system port bare (`"9090"`): it would publish to a host port that Docker chooses, and on Kubernetes the pod already declares it as `system`.
 
 ### Secrets

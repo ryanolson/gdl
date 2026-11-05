@@ -10,6 +10,7 @@
 
 mod binary;
 mod config;
+mod cpu;
 mod decl;
 mod declared;
 mod dist;
@@ -21,6 +22,7 @@ mod zstd;
 
 pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use config::build_node;
+pub use cpu::check_cpu_features;
 pub use decl::{
     Absent, AroundDecl, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl,
     UnaryDecl,

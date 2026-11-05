@@ -306,7 +306,7 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
             .get(laid.name)
             .and_then(Option::as_ref)
             .ok_or_else(|| Error::new(laid.named("the placement does not fit the graph".into())))?;
-        let mut contexts: BTreeMap<&str, Source> = BTreeMap::new();
+        let mut contexts: BTreeMap<(&str, &str), Source> = BTreeMap::new();
         for pool in pools
             .iter()
             .filter(|pool| pool.layout.as_deref().unwrap_or(laid.name) == laid.name)
@@ -319,16 +319,20 @@ pub(super) fn plan(prepared: &Prepared, fleet: &Fleet) -> Result<Vec<Image>, Err
                 if layout.class_of(segment) != Some(pool.class.as_str()) {
                     continue;
                 }
-                let context = contexts.entry(segment).or_insert_with(|| {
+                // By architecture: `[deployment.codegen.<arch>]` reaches
+                // the Dockerfile of its own architecture's images only.
+                let arch = arch(cluster.platform.as_deref().unwrap_or_default());
+                let context = contexts.entry((segment, arch)).or_insert_with(|| {
                     let package = laid.package(graph, segment);
                     let crate_dir = laid.dir().join(segment);
+                    let codegen = codegen(bundle, segment, arch);
                     match &local {
-                        None => {
-                            Source::Files(Rc::new(segment_context(bundle, &crate_dir, &package)))
-                        }
-                        Some(local) => {
-                            local.source(local.segment_dockerfile(bundle, &crate_dir, &package))
-                        }
+                        None => Source::Files(Rc::new(segment_context(
+                            bundle, &crate_dir, &package, &codegen,
+                        ))),
+                        Some(local) => local.source(
+                            local.segment_dockerfile(bundle, &crate_dir, &package, &codegen),
+                        ),
                     }
                 });
                 let context = context.clone();
@@ -376,7 +380,12 @@ fn tag(platform: &str, context: &Files) -> String {
 /// builds package `package`: the contract crate, the segment's crate
 /// without its settings, each file with no absolute path ([`placeless`]),
 /// and a Dockerfile.
-fn segment_context(bundle: &super::Bundle, crate_dir: &Path, package: &str) -> Files {
+fn segment_context(
+    bundle: &super::Bundle,
+    crate_dir: &Path,
+    package: &str,
+    codegen: &str,
+) -> Files {
     let settings = crate_dir.join("config.toml");
     let mut files: Files = bundle
         .files
@@ -398,7 +407,7 @@ fn segment_context(bundle: &super::Bundle, crate_dir: &Path, package: &str) -> F
         .unwrap_or(&settings.base_image);
     let manifest = format!("/app/{}/Cargo.toml", crate_dir.display());
     let build = format!(
-        "cargo build --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
+        "{codegen}cargo build --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
         quote(&manifest)
     );
     files.insert(
@@ -480,6 +489,7 @@ impl Local {
         bundle: &super::Bundle,
         crate_dir: &Path,
         package: &str,
+        codegen: &str,
     ) -> String {
         let settings = &bundle.settings;
         let segment = crate_dir
@@ -493,7 +503,7 @@ impl Local {
             .unwrap_or(&settings.base_image);
         let manifest = format!("/app/{}/Cargo.toml", self.bundle.join(crate_dir).display());
         let build = format!(
-            "cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
+            "{codegen}cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
             quote(&manifest)
         );
         dockerfile(&settings.build_image, base, true, &build)
@@ -546,6 +556,100 @@ fn dockerfile(builder: &str, base: &str, copies: bool, build: &str) -> String {
          ENTRYPOINT [\"/usr/local/bin/segment\"]\n",
         marker = emit::MARKER,
     )
+}
+
+/// The architecture of `platform`, `<os>/<arch>[/<variant>]`, as Docker
+/// names it in `TARGETARCH`: `arm64` for `linux/arm64/v8`.
+fn arch(platform: &str) -> &str {
+    platform.split('/').nth(1).unwrap_or_default()
+}
+
+/// What the build of segment `segment`'s image for architecture `arch`
+/// runs before cargo, from the spec's `[deployment.codegen.<arch>]`
+/// table: nothing without one, so that a spec without one builds as it
+/// did before the table existed.
+fn codegen(bundle: &super::Bundle, segment: &str, arch: &str) -> String {
+    match bundle.settings.codegen(arch) {
+        None => String::new(),
+        Some(codegen) => codegen_guard(segment, arch, codegen),
+    }
+}
+
+/// The checks and the flags of `codegen`, the table of `arch`, in the
+/// build of segment `segment`'s image, each followed by `&&` and before
+/// cargo, after `/gdl/target.env`. Each check ends the build with one line
+/// that names the table:
+///
+/// - The image's architecture (`TARGETARCH`) must be `arch`: a build of
+///   this Dockerfile for another platform would apply the table to an
+///   image it does not name.
+/// - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` must be empty or unset: a
+///   flag there could set LTO, which rustc reads after the profile's thin
+///   LTO, and fat LTO runs the features before `main`. The step cannot
+///   tell which flags do (`-C`, `--codegen`, `_` for `-`, `@file`), so it
+///   reads none of them. `RUSTC`, `RUSTC_WRAPPER`,
+///   `RUSTC_WORKSPACE_WRAPPER`, and the build image's Cargo configuration
+///   are trusted, as the build image itself is.
+/// - Each feature must be one the build image's rustc knows
+///   for the target: rustc only warns of an unknown one, and builds
+///   without it. A feature counts only in rustc's own list, where a name
+///   matches a whole line as fixed text: as a pattern, `lse.` would match
+///   `lse2`.
+///
+/// `RUSTFLAGS` is then exactly the table's flags. Cargo reads it in place
+/// of rustflags in its configuration or environment (`build.rustflags`,
+/// `CARGO_BUILD_RUSTFLAGS`, and their `target` forms). Cargo builds with
+/// `--target`, so the flags do not reach build scripts and proc macros,
+/// which run on the build host.
+///
+/// The build uses thin LTO, not the profile's fat LTO: fat LTO compiles
+/// std's start-up with the flags too, and it then runs an instruction of
+/// the features before `main`, so a CPU without them faults before the
+/// binary's start check (`gdl_runtime::check_cpu_features`) can refuse
+/// it. See `docs/src/development/codegen-design.md`.
+fn codegen_guard(segment: &str, arch: &str, codegen: &super::Codegen) -> String {
+    let table = format!("[deployment.codegen.{arch}]");
+    let fail = |why: String| format!("{{ echo \"segment {segment}: {why}\" >&2; exit 1; }}");
+    let mut steps = vec![format!(
+        "{{ [ \"$TARGETARCH\" = {arch} ] || {}; }}",
+        fail(format!(
+            "this build applies {table}, but its image is for $TARGETARCH"
+        ))
+    )];
+    // Any flag the build image sets is refused, not read: rustc takes
+    // codegen options in several spellings, with `_` for `-`, and from an
+    // `@file`, so no list of the ones that set LTO is complete. An empty
+    // `CARGO_ENCODED_RUSTFLAGS` is unset, since cargo would read it in
+    // place of `RUSTFLAGS`.
+    for variable in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        steps.push(format!(
+            "{{ [ -z \"${{{variable}:-}}\" ] || {}; }}",
+            fail(format!(
+                "the build image sets {variable}=${variable}, which this build step cannot read safely: an image with {table} builds with exactly the table's flags"
+            ))
+        ));
+    }
+    steps.push("unset CARGO_ENCODED_RUSTFLAGS".to_string());
+    let features: Vec<&str> = codegen.feature_names().collect();
+    if !features.is_empty() {
+        steps.push(
+            "features=$(rustc --print target-features --target \"$GDL_TARGET\" | sed -n '/^Features supported by rustc/,/^$/s/^    \\([^ ]*\\).*/\\1/p')".to_string(),
+        );
+        for feature in features {
+            steps.push(format!(
+                "{{ printf '%s\\n' \"$features\" | grep -qxF -- {feature} || {}; }}",
+                fail(format!(
+                    "{table} names target feature {feature}, which the build image's rustc does not know for $GDL_TARGET"
+                ))
+            ));
+        }
+    }
+    steps.push("export CARGO_PROFILE_RELEASE_LTO=thin".to_string());
+    steps.push(format!("export RUSTFLAGS=\"{}\"", codegen.rustflags()));
+    steps
+        .into_iter()
+        .map(|step| format!("{step} && \\\n    "))
+        .collect()
 }
 
 /// The build stage's toolchain for the image's architecture: its Rust
@@ -669,6 +773,109 @@ mod tests {
         );
         let last = text.split("FROM base\n").nth(1).expect("a final stage");
         assert!(!last.contains("RUN"), "{last}");
+    }
+
+    /// The build stage's checks and flags of a `[deployment.codegen.arm64]`
+    /// table, run with a stand-in `rustc` that knows features `lse` and
+    /// `lse2`, and an LLVM-only feature. A build for another architecture,
+    /// a build image that sets `RUSTFLAGS`, and a name rustc does not know
+    /// each end the build with a line that names the segment and the table.
+    /// A good build sets thin LTO and exactly the table's flags.
+    #[cfg(unix)]
+    #[test]
+    fn the_codegen_guard_refuses_by_name_and_sets_its_flags() {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-codegen-")
+            .tempdir()
+            .expect("a directory");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("a directory");
+        let rustc = bin.join("rustc");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\n\
+             case \"$2\" in\n\
+             target-features) printf 'Features supported by rustc for this target:\\n    lse                 - LSE.\\n    lse2                - LSE2.\\n\\nCode-generation features supported by LLVM for this target:\\n    llvmonly            - LLVM.\\n' ;;\n\
+             esac\n",
+        )
+        .expect("a stand-in");
+        std::fs::set_permissions(&rustc, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("executable");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |table: &str, env: &[(&str, &str)]| {
+            let codegen: super::super::Codegen = toml::from_str(table).expect("a table");
+            let script = format!(
+                "{}printf '%s %s' \"$CARGO_PROFILE_RELEASE_LTO\" \"$RUSTFLAGS\"",
+                codegen_guard("engine", "arm64", &codegen)
+            );
+            let mut command = std::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("PATH", &path)
+                .env("GDL_TARGET", "aarch64-unknown-linux-gnu")
+                .env("TARGETARCH", "arm64");
+            for (key, value) in env {
+                command.env(key, value);
+            }
+            let output = command.output().expect("sh runs");
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        let good = "target_features = [\"+lse\"]\n";
+        assert_eq!(
+            run(good, &[]),
+            (true, "thin -Ctarget-feature=+lse".into(), String::new())
+        );
+        assert_eq!(
+            run("target_features = [\"+lse\", \"-lse2\"]\n", &[]),
+            (
+                true,
+                "thin -Ctarget-feature=+lse,-lse2".into(),
+                String::new()
+            )
+        );
+        for (table, env, line) in [
+            (
+                good,
+                &[("TARGETARCH", "amd64")][..],
+                "segment engine: this build applies [deployment.codegen.arm64], but its image is for amd64",
+            ),
+            (
+                good,
+                &[("RUSTFLAGS", "--cfg rustix_use_libc")][..],
+                "segment engine: the build image sets RUSTFLAGS=--cfg rustix_use_libc, which this build step cannot read safely: an image with [deployment.codegen.arm64] builds with exactly the table's flags",
+            ),
+            (
+                "target_features = [\"+lse128\"]\n",
+                &[][..],
+                "segment engine: [deployment.codegen.arm64] names target feature lse128, which the build image's rustc does not know for aarch64-unknown-linux-gnu",
+            ),
+            (
+                "target_features = [\"+ls\"]\n",
+                &[][..],
+                "segment engine: [deployment.codegen.arm64] names target feature ls, which the build image's rustc does not know for aarch64-unknown-linux-gnu",
+            ),
+            (
+                "target_features = [\"+llvmonly\"]\n",
+                &[][..],
+                "segment engine: [deployment.codegen.arm64] names target feature llvmonly, which the build image's rustc does not know for aarch64-unknown-linux-gnu",
+            ),
+        ] {
+            assert_eq!(
+                run(table, env),
+                (false, String::new(), format!("{line}\n")),
+                "{table} {env:?}"
+            );
+        }
     }
 
     /// The build stage's toolchain script, run on a host of another

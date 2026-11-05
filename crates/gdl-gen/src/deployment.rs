@@ -13,6 +13,8 @@ pub(crate) struct Settings {
     segment: std::collections::BTreeMap<String, Image>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     secrets: std::collections::BTreeMap<String, Secret>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    codegen: std::collections::BTreeMap<String, Codegen>,
 }
 /// `[deployment] base_image` when the spec does not set it: the image a
 /// segment, and the hub unless `hub_image` says otherwise, runs in. It
@@ -78,6 +80,44 @@ impl Settings {
     /// The segments that `[deployment.segment.<name>]` tables name.
     pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
         self.segment.keys().map(String::as_str)
+    }
+
+    /// The `[deployment.codegen.<arch>]` table of image architecture
+    /// `arch`, as Docker names it.
+    pub(crate) fn codegen(&self, arch: &str) -> Option<&Codegen> {
+        self.codegen.get(arch)
+    }
+
+    /// Whether any `[deployment.codegen.<arch>]` table is set: each
+    /// segment binary then checks its CPU first.
+    pub(crate) fn has_codegen(&self) -> bool {
+        !self.codegen.is_empty()
+    }
+
+    /// What is wrong with the `[deployment.codegen.<arch>]` tables.
+    pub(crate) fn codegen_problems(&self) -> Vec<String> {
+        self.codegen
+            .iter()
+            .flat_map(|(arch, codegen)| codegen.problems(arch))
+            .collect()
+    }
+
+    /// Refuse these settings for `command`, which builds images for the
+    /// Docker host, when they set a `[deployment.codegen.<arch>]` table:
+    /// that is `cargo gdl images`'s, which knows each image's architecture.
+    pub(crate) fn refuse_codegen(&self, command: &str) -> Result<(), Error> {
+        if self.codegen.is_empty() {
+            return Ok(());
+        }
+        let tables: Vec<String> = self
+            .codegen
+            .keys()
+            .map(|arch| format!("`[deployment.codegen.{arch}]`"))
+            .collect();
+        Err(Error::new(format!(
+            "{}: {command} builds images for the Docker host's architecture, and does not build with target features; `cargo gdl images` builds segment images with them, for each cluster's platform. Leave the table out of a spec that {command} uses",
+            tables.join(", ")
+        )))
     }
 
     /// The secrets that `[deployment.secrets.<name>]` tables declare.
@@ -195,6 +235,7 @@ impl Default for Settings {
             hub_image: None,
             segment: Default::default(),
             secrets: Default::default(),
+            codegen: Default::default(),
         }
     }
 }
@@ -224,6 +265,97 @@ impl Image {
                 .and_then(|port| u16::try_from(port).ok())
                 .filter(|port| *port > 0),
         }
+    }
+}
+
+/// `[deployment.codegen.<arch>]`: the CPU features that `cargo gdl images`
+/// builds the segment images of one architecture for.
+/// Off unless a spec names it: a binary built for a feature ends with
+/// SIGILL on a CPU without it, so it is chosen per deployment. See
+/// `docs/src/guides/kubernetes.md`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Codegen {
+    /// Each passed as `-C target-feature=<feature>`: `+lse`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    target_features: Vec<String>,
+}
+
+/// The architectures `[deployment.codegen.<arch>]` can name: those
+/// `cargo gdl images` builds for, as Docker names them in `TARGETARCH`.
+pub(crate) const CODEGEN_ARCHES: [&str; 2] = ["amd64", "arm64"];
+
+/// The features a table can name, by architecture: each one that
+/// `scripts/qemu-startcheck.sh` shows a core without it refuses with the
+/// start check, before it runs an instruction of the feature. Not every
+/// feature is: built with `+avx2`, std's start-up runs AVX before `main`,
+/// even with thin LTO. A new entry needs its own row in the script. See
+/// `docs/src/development/codegen-design.md`.
+pub(crate) const PROVEN: [(&str, &str); 1] = [("arm64", "+lse")];
+
+impl Codegen {
+    /// The flags the build adds to `RUSTFLAGS`.
+    pub(crate) fn rustflags(&self) -> String {
+        format!("-Ctarget-feature={}", self.target_features.join(","))
+    }
+
+    /// Each feature's name, without its one `+` or `-`.
+    pub(crate) fn feature_names(&self) -> impl Iterator<Item = &str> {
+        self.target_features
+            .iter()
+            .map(|feature| feature.strip_prefix(['+', '-']).unwrap_or(feature))
+    }
+
+    /// What is wrong with the table of `arch`, each with the table: its
+    /// architecture, the names' shape, and whether [`PROVEN`] holds each
+    /// feature. Whether rustc knows a name is checked in the build too, by
+    /// the build image's own rustc.
+    fn problems(&self, arch: &str) -> Vec<String> {
+        let table = format!("[deployment.codegen.{arch}]");
+        let mut problems = Vec::new();
+        if !CODEGEN_ARCHES.contains(&arch) {
+            let hint = match arch {
+                "aarch64" => " (`aarch64` is `arm64` there)",
+                "x86_64" | "x86-64" => " (`x86_64` is `amd64` there)",
+                _ => "",
+            };
+            problems.push(format!(
+                "{table}: `{arch}` is not an architecture `cargo gdl images` builds for: name {} as a cluster's `platform` names them{hint}",
+                CODEGEN_ARCHES.map(|arch| format!("`{arch}`")).join(" or ")
+            ));
+        }
+        if self.target_features.is_empty() {
+            problems.push(format!("{table}: the table sets no `target_features`"));
+        }
+        // A letter or digit first: `+-lse` is one sign and the name `-lse`,
+        // which rustc only warns of.
+        let name = |name: &str| {
+            name.bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        };
+        for feature in &self.target_features {
+            let bare = feature.strip_prefix(['+', '-']);
+            if !bare.is_some_and(name) {
+                problems.push(format!(
+                    "{table}: target feature `{feature}` is not one `+` or `-` and a name of letters, digits, `.`, `_`, and `-` that starts with a letter or digit, such as `+lse`"
+                ));
+            } else if CODEGEN_ARCHES.contains(&arch) && !PROVEN.contains(&(arch, feature.as_str()))
+            {
+                let proven: Vec<String> = PROVEN
+                    .iter()
+                    .map(|(arch, feature)| format!("`{feature}` for {arch}"))
+                    .collect();
+                problems.push(format!(
+                    "{table}: target feature `{feature}` is not proven to reach the start check: a core without it could fault before the binary checks its CPU. Only {} is, by `scripts/qemu-startcheck.sh` (docs/src/development/codegen-design.md)",
+                    proven.join(", ")
+                ));
+            }
+        }
+        problems
     }
 }
 
@@ -309,6 +441,9 @@ fn bundle_files(
     target: &Path,
     sources: Sources,
 ) -> Result<(Files, Option<context::Context>), Error> {
+    if let Some(settings) = &spec.deployment {
+        settings.refuse_codegen("`cargo gdl compose`")?;
+    }
     // A pool's DGD runs under dynamo's operator, which Compose has no
     // place for.
     if let Some((pool, _)) = fleet.and_then(|fleet| fleet.dgds().next()) {

@@ -904,6 +904,14 @@ test('deployment settings include only current segments and retain per-image ove
   assert.equal(value.hub_image,'ubuntu:24.04');
 });
 
+test('deployment settings keep a codegen table unchanged', () => {
+  const run=editor();
+  const codegen={arm64:{target_features:['+lse']}};
+  run(`deploymentSettings={base_image:'debian:bookworm-slim',build_image:'rust:1.93-slim-bookworm',codegen:${JSON.stringify(codegen)},segment:{s1:{}}};`);
+  const value=JSON.parse(run(`JSON.stringify(deploymentDraft({s1:['Source']}))`));
+  assert.deepEqual(value.codegen,codegen);
+});
+
 test('deployment preview rejects stale generation and disables download during edits', async () => {
   const run=editor();
   run(`const replies=[]; fetch=()=>new Promise(resolve=>replies.push(resolve));

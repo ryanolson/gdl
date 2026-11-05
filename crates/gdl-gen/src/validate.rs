@@ -65,6 +65,7 @@ pub(crate) fn unbound(
         }
     }
     problems.extend(spec.deployment.iter().flat_map(|d| d.secret_problems()));
+    problems.extend(spec.deployment.iter().flat_map(|d| d.codegen_problems()));
     // A segment's own settings can name its system port.
     problems.extend(
         spec.deployment

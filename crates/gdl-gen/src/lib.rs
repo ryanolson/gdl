@@ -257,7 +257,9 @@ pub struct Check {
 
 /// Check `spec` as [`render`] and [`export`] check it, with offers from
 /// `from`, and write nothing. A spec that passes generates and exports, so
-/// a spec of several layouts, which export refuses, is refused.
+/// a spec of several layouts, which export refuses, is refused. The one
+/// exception is a `[deployment.codegen.<arch>]` table, which is checked
+/// here and which only `cargo gdl images` builds with: export refuses it.
 pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
     let Checked {
         manifest,

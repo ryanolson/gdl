@@ -643,6 +643,24 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** the render reads one fleet, and cannot see another fleet's names.
 - **Workaround:** give each fleet a namespace of its own (`[cluster.<name>] namespace`).
 
+### A codegen table can name only `+lse` for arm64
+- **What:** `check`, `images`, and `k8s` refuse a `[deployment.codegen.<arch>]` table that names any feature but `+lse` for `arm64`, such as `+avx2` for `amd64`.
+- **Why:** each feature needs proof that a core without it is refused by the start check before it runs the feature. For `+avx2`, the proof fails: thin LTO still compiles AVX into std's start-up, which runs before `main` ([A table names only proven features](../development/codegen-design.md#a-table-names-only-proven-features)).
+- **Workaround:** none in the generator. Build such an image yourself, for nodes that all have the feature.
+- **Lifts:** for a feature, a row in `scripts/qemu-startcheck.sh` that shows the start check refusing a core without it, and an entry in `PROVEN` (`crates/gdl-gen/src/deployment.rs`).
+
+### `compose` and `export` refuse a `[deployment.codegen]` table
+- **What:** `cargo gdl compose`, the composer's preview, and `cargo gdl export` refuse a spec with a `[deployment.codegen.<arch>]` table, and name `cargo gdl images`.
+- **Why:** they build for the Docker host, so the generator does not know the architecture an image is for, and could not refuse a build that applies a table to an image of another architecture.
+- **Workaround:** give them a copy of the spec without the table.
+- **Lifts:** a Compose build that applies the table of the Docker host's architecture at build time.
+
+### A build image that sets `RUSTFLAGS` cannot use a `[deployment.codegen]` table
+- **What:** the build of an image whose architecture has a table stops when the build image sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` to anything, with one line that gives the variable and its value. The build then sets `RUSTFLAGS` to exactly the table's flags, so `rustflags` in the build image's Cargo configuration (`build.rustflags`, `target.<triple>.rustflags`) or environment (`CARGO_BUILD_RUSTFLAGS`, `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`) are not used either. The default build image sets none of them.
+- **Why:** a flag there could set fat LTO, which rustc reads after the build's thin LTO, and then std's start-up runs the feature before the start check. The build step cannot tell which flags do: rustc takes `-C`, `--codegen`, and `--codegen=` forms, `_` for `-` in a key, and options from an `@file`, and a list of them missed one form after another ([Target features design](../development/codegen-design.md#the-build-of-an-architecture-with-a-table-uses-thin-lto)).
+- **Workaround:** drop the table for that image. Or move the build image's flags into its own `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER`, which the build trusts, as it trusts `RUSTC` and the image's Cargo configuration.
+- **Lifts:** a way to read rustc's flags as rustc does, before the build.
+
 ### Under `--local`, a change to any file of the sources moves every image's tag
 - **What:** `k8s`, `images`, `deploy`, and `compose` with `--local` build every image from one tree: gdl's workspace and each crate the spec names by path, with every crate those reach by path and each one's workspace, as Git holds them. Each image's tag covers the whole tree. A change to any file in it, a document or another crate of the workspace included, moves every tag, so the next run builds and pushes every image again. An untracked file is not built. A directory that Git cannot archive, a submodule, a link to an absolute path or out of the tree, a manifest that names a path absolutely or out of the tree, and any Cargo configuration (`.cargo/config.toml` or `.cargo/config`) that the build would read with a key other than `[net] git-fetch-with-cli` are each refused, naming it. So a project whose build needs Cargo configuration, such as a registry, a source replacement, or another `[net]` key, does not build with `--local`. A file whose only key is `[net] git-fetch-with-cli` is accepted and left out of the tree.
 - **Why:** each image copies the whole tree into its build, and a tag that covered less could name an image built from other sources. Git decides what is in the tree, since a walk of the working tree filtered by hand let files through that Git ignores ([Build from local sources](../guides/kubernetes.md#build-from-local-sources)).

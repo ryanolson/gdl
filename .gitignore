@@ -3,3 +3,4 @@ target/
 agent-docs/
 __pycache__/
 .k8s-tools/
+.qemu-tools/

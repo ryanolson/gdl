@@ -29,6 +29,9 @@ const EXPORT: &str = "`export`";
 /// The spec's crates as a `.tar.gz`, under a directory named for the graph.
 /// The contract's manifest is got as for [`crate::render`].
 pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, Error> {
+    if let Some(settings) = &spec.deployment {
+        settings.refuse_codegen("`cargo gdl export`")?;
+    }
     let laid = spec.only_layout(EXPORT)?;
     // The output's place only decides which paths are inside it; nothing
     // is written there.
@@ -104,7 +107,8 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
 
 /// What an export of `spec`, whose graph is `graph`, refuses beyond what
 /// rendering it does: a check refuses the same, so a spec that checks
-/// exports.
+/// exports, unless it has a `[deployment.codegen.<arch>]` table, which
+/// [`export`] refuses and `cargo gdl images` builds with.
 pub(crate) fn refusals(spec: &Spec, graph: &str) -> Vec<String> {
     let laid = match spec.only_layout(EXPORT) {
         Ok(laid) => laid,

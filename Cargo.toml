@@ -66,7 +66,7 @@ missing_docs = "warn"
 # `--cfg tokio_unstable`, the only way tokio exposes that count.
 # The scope node in `gdl` is model-checked with loom under `--cfg gdl_loom`;
 # a plain `--cfg loom` would switch tokio into its own loom build.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)", "cfg(gdl_loom)", "cfg(gdl_scoped_calls)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)", "cfg(gdl_loom)", "cfg(gdl_scoped_calls)", "cfg(gdl_count_allocations)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

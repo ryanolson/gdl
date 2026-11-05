@@ -48,6 +48,7 @@
 - [Runtime feature costs](operations/feature-costs.md)
 - [Source reader cost](operations/reader-cost.md)
 - [Keyed record service cost](operations/keyed-cost.md)
+- [Target feature costs](operations/target-feature-costs.md)
 
 # Development
 
@@ -61,6 +62,7 @@
 - [Generation design](development/generation-design.md)
 - [Catalogue design](development/catalogue-design.md)
 - [Pools design](development/pools-design.md)
+- [Target features design](development/codegen-design.md)
 - [What gdl relies on in velo](development/velo.md)
 - [Dynamo compatibility](development/dynamo.md)
 

@@ -1643,6 +1643,48 @@ async fn endpoint_nodes_export_as_four_independent_segments() {
     eprintln!("endpoint segments: {}", generated.join("ports").display());
 }
 
+/// A draft's `[deployment.codegen.<arch>]` table, as the Deploy tab keeps
+/// it, reaches the spec the server writes unchanged, and the spec checks.
+/// The Compose preview refuses it, and names `cargo gdl images`, the
+/// command that builds with it. The check reports a feature that is not
+/// proven.
+#[tokio::test]
+async fn a_codegen_table_reaches_the_spec_and_the_preview_refuses_it() {
+    let temp = scratch("codegen");
+    let router = router(temp.path(), fixture_catalog());
+    let codegen = json!({ "arm64": { "target_features": ["+lse"] } });
+    let plain = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "front": ["A"], "engine": ["Engine"] }),
+    );
+    let mut tabled = plain.clone();
+    tabled["deployment"] = json!({ "codegen": codegen });
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(tabled.clone())).await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    let spec: toml::Table = body["spec"].as_str().expect("spec").parse().expect("TOML");
+    let written = serde_json::to_value(&spec["deployment"]["codegen"]).expect("JSON");
+    assert_eq!(written, codegen);
+    let (status, body) = json_call(&router, "POST", "/api/deploy", Some(tabled)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    let problems = body["problems"].to_string();
+    for part in ["`[deployment.codegen.arm64]`", "`cargo gdl images`"] {
+        assert!(problems.contains(part), "{part} in {problems}");
+    }
+    // A feature that is not proven is the check's problem, as the page
+    // shows it.
+    let mut unproven = plain;
+    unproven["deployment"] = json!({ "codegen": { "amd64": { "target_features": ["+avx2"] } } });
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(unproven)).await;
+    assert_eq!(body["ok"], false, "{body:#}");
+    assert!(
+        body["problems"]
+            .to_string()
+            .contains("[deployment.codegen.amd64]: target feature `+avx2` is not proven"),
+        "{body:#}"
+    );
+}
+
 #[tokio::test]
 async fn deployment_rejects_local_packages_without_local_access() {
     let temp = scratch("deploy-access");

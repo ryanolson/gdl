@@ -21,6 +21,8 @@ mod archive;
 mod boundary;
 #[path = "local/bypasses.rs"]
 mod bypasses;
+#[path = "local/codegen.rs"]
+mod codegen;
 #[path = "local/git.rs"]
 mod git;
 #[path = "local/manifests.rs"]

@@ -695,3 +695,6 @@ fn the_directorys_cluster_gets_the_hubs_image_without_a_pool() {
 
 #[path = "images/local.rs"]
 mod local;
+
+#[path = "images/codegen.rs"]
+mod codegen;

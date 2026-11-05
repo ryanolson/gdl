@@ -31,8 +31,49 @@
 //! through a two-segment graph that answers each with one item: the cost of
 //! crossing a request head of that size. `fields-<words>` sends a head of
 //! `<words>` words of 8 bytes instead: the cost per field.
+//!
+//! Built with `RUSTFLAGS="--cfg gdl_count_allocations"`, the reference
+//! setups (`one`, `two`, `three`, and their `-metrics` and `-velo` forms)
+//! also print their allocations per request, counted on every thread over
+//! the measured requests. The count is off by default: it is an atomic add
+//! in each allocation, which costs instructions of its own, and a build
+//! with `-C target-feature=+lse` makes it cheaper, so it would move the
+//! instruction counts it sits beside. Count allocations and instructions
+//! in separate builds.
 
 #![allow(missing_docs)]
+
+/// The system's allocator, counting every allocation on every thread.
+#[cfg(gdl_count_allocations)]
+#[allow(unsafe_code)]
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(crate) static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+    struct Counting;
+
+    // SAFETY: every call is forwarded unchanged to the system allocator.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATED.fetch_add(1, Ordering::Relaxed);
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            ALLOCATED.fetch_add(1, Ordering::Relaxed);
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+}
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -180,8 +221,18 @@ fn main() {
             }
             _ => panic!("{usage}"),
         };
+        #[cfg(gdl_count_allocations)]
+        let before = counting::ALLOCATED.load(std::sync::atomic::Ordering::Relaxed);
         for _ in 0..count {
             reference(&caller, 1).await;
+        }
+        #[cfg(gdl_count_allocations)]
+        {
+            let allocated = counting::ALLOCATED.load(std::sync::atomic::Ordering::Relaxed) - before;
+            println!(
+                "{which}: {count} requests, {:.2} allocations per request",
+                allocated as f64 / f64::from(count)
+            );
         }
     });
     // The setup's velo nodes are leaked on purpose; leave without waiting
