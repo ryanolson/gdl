@@ -1155,8 +1155,10 @@ function box(text, remove, instance) {
     const clauses = propertyClauses(instance);
     if (clauses) div.append(textElement("small", clauses, "property-badge"));
     div.append(settingsButton(instance));
-    // A unary node may be in several segments: its box lists them.
-    if(state.mode==='segments' && !instance.ref) {
+    // A unary node may be in several segments, and its list says which
+    // (`renderServices`); any other node is in one, shown here. A node's
+    // kind is its role: a node of any kind may hold a catalogue reference.
+    if(state.mode==='segments' && instance.node.role!=='unary') {
       const name=instances().get(instance) || $('source-name').value;
       const group=Object.entries(segments(instances())).find(([,members])=>members.includes(name))?.[0];
       div.append(textElement('small',group,'segment-badge'));
@@ -1194,7 +1196,7 @@ function now(n) {
 
 // Whether a node's reference names several catalogue versions.
 function ambiguous(n) {
-  return !!n.ref && resolve(n.ref).length > 1;
+  return !n.node.identity && resolve(refOf(n)).length > 1;
 }
 
 function prune(hop, request) {
@@ -2187,7 +2189,7 @@ function renderDeployment(board) {
       node.style.gridColumn=String(layout[member.name].column+1);node.style.gridRow=String(layout[member.name].row+1);
       const title=textElement('div','','deployment-node-title');
       title.append(textElement('strong',label(member.name)),textElement('small',root?'frontend endpoint':instance?.node.role || 'source'));
-      if(instance?.ref) {
+      if(instance?.node.role==='unary') {
         title.append(settingsButton(instance));
         const where=textElement('button','Segments','deployment-move');
         where.setAttribute('aria-label',`Segments of ${member.name}`);

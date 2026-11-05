@@ -1258,3 +1258,40 @@ test('500 seeded sequences of page edits never break a draft rule behind the use
   });
   assert.equal(checked, 6000);
 });
+
+test('Segments renders catalogue-bound pipeline nodes and their shared sink', () => {
+  const run = editor();
+  prepare(run);
+  run('base();');
+  assert.equal(run('graphComplete()'), true);
+  assert.equal(run('draftProblems().length'), 0);
+  run(`state.mode = 'segments';
+    const board = document.createElement('div');
+    renderDeployment(board);
+    const members = element => [element.dataset?.deploymentMember, ...(element.children || []).flatMap(members)].filter(Boolean);`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(members(board).sort())')), ['Engine', 'Router', 'Source', 'Source_entry_responses', 'Tok']);
+});
+
+test('a node is drawn by its role: Segments, Deploy and the diagram draw catalogue-bound operator, sink and unary nodes', async () => {
+  const run = editor();
+  prepare(run);
+  run(`base();
+    const made = [], create = document.createElement;
+    document.createElement = tag => {const e = create(tag); e.attributes = {}; e.setAttribute = (k, v) => {e.attributes[k] = v;}; made.push(e); return e;};
+    $('deploy-segments').replaceChildren = (...children) => {$('deploy-segments').children = children;};
+    mermaid = {initialize() {}, render: async (id, text) => ({svg: '<svg>' + text + '</svg>'})};
+    state.mode = 'segments'; made.length = 0; render();`);
+  assert.deepEqual(JSON.parse(run(`JSON.stringify([...new Set(made.filter(e => e.attributes['data-member']).map(e => e.attributes['data-member'] + ' ' + e.attributes['data-segment']))].sort())`)),
+    ['Engine s1', 'Router s1'], 'each pipeline node shows its one segment; a unary node shows its list instead');
+  run(`const board = document.createElement('div'); renderDeployment(board);
+    const nodes = element => [element, ...(element.children || []).flatMap(nodes)];
+    const card = name => nodes(board).find(e => e.dataset?.deploymentMember === name);
+    const buttons = name => nodes(card(name)).filter(e => e.tag === 'button').map(e => e.textContent ?? e.text);`);
+  assert.deepEqual(JSON.parse(run(`JSON.stringify(nodes(board).map(e => e.dataset?.deploymentMember).filter(Boolean).sort())`)), ['Engine', 'Router', 'Source', 'Source_entry_responses', 'Tok']);
+  for (const [name, button] of [['Router', 'Move'], ['Engine', 'Move'], ['Tok', 'Segments']]) {
+    assert.ok(JSON.parse(run(`JSON.stringify(buttons('${name}'))`)).includes(button), `${name} offers ${button}`);
+  }
+  run('renderDeploy();');
+  assert.deepEqual(JSON.parse(run(`JSON.stringify($('deploy-segments').children.map(card => card.children[1].textContent ?? card.children[1].text))`)), ['Source · Source_entry_responses · Router · Engine · Tok']);
+  await run(`show({mermaid: 'flowchart LR; Source-->Router'})`);
+});
