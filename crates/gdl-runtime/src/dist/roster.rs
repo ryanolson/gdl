@@ -82,6 +82,14 @@ impl Roster {
         self.segments.entry(segment).or_default().push(peer);
     }
 
+    /// Mark `id`, an instance of `segment`, retired, as its hub's event
+    /// does: it is skipped while its segment has an instance that is not.
+    /// Available only with the `fault-injection` feature.
+    #[cfg(feature = "fault-injection")]
+    pub fn retire(&self, segment: &str, id: InstanceId) {
+        self.live.retire(segment, id);
+    }
+
     /// The instances of `segment`, as met.
     pub fn instances(&self, segment: &str) -> &[PeerInfo] {
         self.segments.get(segment).map_or(&[], Vec::as_slice)

@@ -531,15 +531,29 @@ async fn a_reply_over_call_reply_max_fails_the_call_with_codec() {
 /// 16 MiB frame for the reply's tag and velo's own header: at most 16 MiB
 /// less 64 KiB. It must also hold the error that replaces a reply past it:
 /// at least `CALL_REPLY_MIN`. `call_timeout` is 30 s and must be positive.
+/// `call_limit` is the admission limit unless set, and from 1 to a
+/// semaphore's most; `call_reply_grace` is 1 s.
 #[test]
 fn the_call_settings_default_and_are_bounded() {
     let config = RuntimeConfig::default();
     assert_eq!(config.call_reply_max, 8 << 20);
     assert_eq!(config.call_timeout, Duration::from_secs(30));
+    assert_eq!(config.call_limit, None);
+    assert_eq!(config.call_permits(), config.admission_limit);
+    assert_eq!(config.call_reply_grace, Duration::from_secs(1));
     let read = |text: &str| toml::from_str::<RuntimeConfig>(text);
     let set = read("call_timeout_ms = 500\ncall_reply_max = 4096\n").expect("settings");
     assert_eq!(set.call_timeout, Duration::from_millis(500));
     assert_eq!(set.call_reply_max, 4096);
+    let admitted = read("admission_limit = 7\n").expect("settings");
+    assert_eq!(admitted.call_permits(), 7, "the admission limit, as set");
+    let set =
+        read("admission_limit = 7\ncall_limit = 3\ncall_reply_grace_ms = 250\n").expect("settings");
+    assert_eq!((set.call_limit, set.call_permits()), (Some(3), 3));
+    assert_eq!(set.call_reply_grace, Duration::from_millis(250));
+    for refused in ["call_limit = 0\n", "call_limit = 4611686018427387904\n"] {
+        assert!(read(refused).is_err(), "{refused}");
+    }
     let most = (16 << 20) - (64 << 10);
     assert_eq!(
         read(&format!("call_reply_max = {most}\n"))

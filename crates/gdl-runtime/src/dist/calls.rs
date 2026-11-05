@@ -6,9 +6,11 @@
 //! without one, by `call_timeout`. Its reply is velo's response to it, so
 //! nothing correlates it. The handler answers a call that never reached
 //! the service as refused, and one that did as completed, with the
-//! service's response or its error.
+//! service's response or its error. A call the service may run takes a
+//! permit of `call_limit` first, which its reply holds ([`permit`]); a
+//! refused call is tried on another instance by the caller.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
@@ -22,10 +24,14 @@ use super::runtime::{Runtime, Within};
 use crate::wire::{Codec, RequestCodec};
 use gdl::{Cx, Error, ErrorKind, Result, Unary, UnaryClient};
 
+mod permit;
 mod reply;
 
+pub(crate) use permit::CallLimit;
+use permit::CallPermit;
 pub(crate) use reply::FALLBACK_MAX;
 use reply::Reply;
+pub(crate) use reply::refusal;
 
 /// The name of the velo handler that a segment hosting a unary service
 /// for callers in other segments registers. One name for every deployment:
@@ -64,9 +70,24 @@ struct Target {
 /// hold the links, and the runtime outlives them only while it serves.
 struct Bound {
     rt: Weak<Runtime>,
-    index: u16,
-    segment: String,
-    within: Within,
+    callee: Callee,
+}
+
+/// The service a call goes to, as [`Runtime::call`] reads it: held by the
+/// link, and passed by reference, so that a call's future holds a pointer
+/// to it.
+pub(crate) struct Callee {
+    /// The unary node's name.
+    pub(crate) service: String,
+    /// Its index among the unary nodes in name order.
+    pub(crate) index: u16,
+    /// The segment that hosts the copy called.
+    pub(crate) segment: String,
+    /// How an instance of it is chosen: a policy, or a selector.
+    pub(crate) within: Within,
+    /// Whether the graph marks it `idempotent`: a call that may have run
+    /// is tried again only then.
+    pub(crate) idempotent: bool,
 }
 
 impl Calls {
@@ -126,11 +147,16 @@ impl Calls {
 
     /// Bind every link to `rt`, which hosts the caller's segment: each to
     /// the segment the layout resolves its calls to, with its service's
-    /// index among the unary nodes in name order in `indices`, and its
-    /// router. Refuses a selector that cannot read the call's request: one
-    /// that reads it as another type, or reads its fields by name when its
-    /// encoding names none.
-    pub(crate) fn bind(&self, rt: &Arc<Runtime>, indices: &BTreeMap<String, u16>) -> Result<()> {
+    /// index among the unary nodes in name order in `indices`, its router,
+    /// and whether `idempotent` names it. Refuses a selector that cannot
+    /// read the call's request: one that reads it as another type, or reads
+    /// its fields by name when its encoding names none.
+    pub(crate) fn bind(
+        &self,
+        rt: &Arc<Runtime>,
+        indices: &BTreeMap<String, u16>,
+        idempotent: &BTreeSet<String>,
+    ) -> Result<()> {
         let targets = self
             .inner
             .targets
@@ -158,9 +184,13 @@ impl Calls {
             }
             let _ = target.bound.set(Bound {
                 rt: Arc::downgrade(rt),
-                index,
-                segment,
-                within,
+                callee: Callee {
+                    service: service.to_string(),
+                    index,
+                    segment,
+                    within,
+                    idempotent: idempotent.contains(service),
+                },
             });
         }
         self.built();
@@ -250,9 +280,7 @@ impl<Req: Send + 'static, Resp: Send + 'static> Unary for Link<Req, Resp> {
         };
         let head = self.req.encode_call(&req)?;
         drop(req);
-        let reply = rt
-            .call(bound.index, &bound.segment, &bound.within, cx, head)
-            .await?;
+        let reply = rt.call(&bound.callee, cx, head).await?;
         self.resp.decode(reply::read(&reply)?)
     }
 }
@@ -304,33 +332,75 @@ impl<S: Unary> Serve for Hosted<S> {
 
 /// The `gdl.call` handler of `rt`: the bytes of its reply to one call,
 /// `bytes`, which are written only here, and so held to `call_reply_max`
-/// whatever the reply says ([`Reply::write`]).
+/// whatever the reply says ([`Reply::write`]). A reply to a call the
+/// service may have run holds the call's permit until velo lets its bytes
+/// go, or until the call's bound plus `call_reply_grace`; a refusal holds
+/// none.
 pub(crate) async fn handle(
     rt: &Weak<Runtime>,
     served: &Weak<BTreeMap<u16, Arc<dyn Serve>>>,
     bytes: Bytes,
-) -> Vec<u8> {
-    let max = rt
-        .upgrade()
-        .map_or(RuntimeConfig::DEFAULT_CALL_REPLY_MAX, |rt| {
-            rt.config.call_reply_max
-        });
-    let (service, reply) = answer(rt, served, bytes).await;
-    reply.write(service.as_deref().map(Serve::name), max)
+) -> Bytes {
+    let (max, grace) = rt.upgrade().map_or(
+        (
+            RuntimeConfig::DEFAULT_CALL_REPLY_MAX,
+            RuntimeConfig::DEFAULT_CALL_REPLY_GRACE,
+        ),
+        |rt| (rt.config.call_reply_max, rt.config.call_reply_grace),
+    );
+    let Answered {
+        service,
+        reply,
+        permit,
+    } = answer(rt, served, bytes).await;
+    let refused = reply.is_refused();
+    let written = reply.write(service.as_deref().map(Serve::name), max);
+    match permit {
+        Some((permit, bound)) if !refused => {
+            let bytes = permit.retain(written, bound + grace);
+            #[cfg(feature = "fault-injection")]
+            if let Some(kept) = rt
+                .upgrade()
+                .and_then(|rt| rt.config.faults.retain_call_replies.clone())
+            {
+                kept.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(bytes.clone());
+            }
+            bytes
+        }
+        // A refusal's permit, if it took one, drops here: the service
+        // never ran.
+        _ => Bytes::from(written),
+    }
+}
+
+/// What the handler answers one call with: the service, once known, the
+/// reply, and the call's permit, with the call's bound, once it took one.
+struct Answered {
+    service: Option<Arc<dyn Serve>>,
+    reply: Reply,
+    permit: Option<(CallPermit, tokio::time::Instant)>,
 }
 
 /// Answer one call, `bytes`, that reached the `gdl.call` handler of `rt`,
 /// whose hosted services are `served`, by their indices, while its segment
-/// runs. The service runs
-/// under a context whose deadline is the call's bound, and the handler
-/// stops it there. The context is cancelled however the call ends, so a
-/// worker the service started with a clone of it sees `cancelled()`.
+/// runs. A call takes a permit of `call_limit` before its service runs,
+/// and is refused when none is free or the instance has closed. The
+/// service runs under a context whose deadline is the call's bound, and
+/// the handler stops it there. The context is cancelled however the call
+/// ends, so a worker the service started with a clone of it sees
+/// `cancelled()`.
 async fn answer(
     rt: &Weak<Runtime>,
     served: &Weak<BTreeMap<u16, Arc<dyn Serve>>>,
     bytes: Bytes,
-) -> (Option<Arc<dyn Serve>>, Reply) {
-    let refused = |error: Error| (None, Reply::refused(error));
+) -> Answered {
+    let refused = |error: Error| Answered {
+        service: None,
+        reply: Reply::refused(error),
+        permit: None,
+    };
     let (Some(rt), Some(served)) = (rt.upgrade(), served.upgrade()) else {
         return refused(Error::new(
             ErrorKind::Transport,
@@ -357,6 +427,7 @@ async fn answer(
             ),
         ));
     };
+    let root = call.cx.root();
     let cx = match call.cx.arrive(rt.config.clock_skew, || rt.wall_now()) {
         Ok(cx) => cx,
         Err(error) => return refused(error),
@@ -367,6 +438,21 @@ async fn answer(
             "a call arrived without its bound",
         ));
     };
+    // Counted before the close is read, both `SeqCst`, as the close is
+    // stored before drain reads the count: a call is either counted where
+    // drain waits for it, or refused (`CallLimit`).
+    let Some(permit) = rt.call_limit.take() else {
+        return refused(Error::new(
+            ErrorKind::Overloaded,
+            format!("segment `{}` serves `call_limit` calls already", rt.segment),
+        ));
+    };
+    // A service may call another, so an accepted call may send until it
+    // ends; counted before the close is read, as a request is.
+    let _sending = rt.sends_until_answered.then(|| Sending::new(&rt, root));
+    if let Err(error) = rt.check_open() {
+        return refused(error);
+    }
     let _cancel = cx.cancel_on_drop();
     // Only the request's view goes on, and the service releases it once
     // decoded: the rest of the call is read.
@@ -378,7 +464,33 @@ async fn answer(
         Ok(reply) => reply,
         Err(_) => Reply::failed(Error::deadline_exceeded()),
     };
-    (Some(Arc::clone(service)), reply)
+    Answered {
+        service: Some(Arc::clone(service)),
+        reply,
+        permit: Some((permit, at)),
+    }
+}
+
+/// An accepted call counted as one that may still send work onward
+/// ([`Runtime::senders`]) while it lives.
+struct Sending<'a> {
+    rt: &'a Runtime,
+    sender: super::admission::Sender,
+}
+
+impl<'a> Sending<'a> {
+    fn new(rt: &'a Runtime, root: u128) -> Self {
+        Self {
+            rt,
+            sender: rt.admission.sending(root),
+        }
+    }
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        self.rt.admission.sent(self.sender);
+    }
 }
 
 #[cfg(test)]

@@ -60,12 +60,14 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `default_deadline_ms` | 600000 (`gdl_model::DEFAULT_DEADLINE`) | the deadline of a request that crosses segments without one |
 | `call_timeout_ms` | 30000 | the bound of a call to a unary service in another segment whose request has no deadline. Positive ([Unary services](../concepts/unary.md#a-call-to-another-segment)) |
 | `call_reply_max` | 8388608 (8 MiB) | the largest reply, in bytes, that a unary service in this segment sends to a caller in another; a larger one fails the call with `Codec`. From 512, which holds the fixed-size error that replaces a larger reply, to 16 MiB less 64 KiB: velo's 16 MiB TCP frame ends a reply, and also carries velo's header |
+| `call_limit` | `admission_limit` | calls from other segments to the unary services one instance hosts that it serves at once, apart from the requests' admission. A call that finds none free is refused with `Overloaded`, and its caller tries the next instance. At least 1, at most tokio's `Semaphore::MAX_PERMITS` ([Admission and egress](../concepts/admission.md#calls-from-other-segments)) |
+| `call_reply_grace_ms` | 1000 | how long past its call's bound a reply that velo has not sent may hold its call permit |
 | `clock_skew_ms` | 50 | the assumed largest clock difference between segments |
 | `drain_ms` | `default_deadline_ms` | the bound on a stopped instance's drain |
 | `leave_ms` | `drain_ms` | how long a leave hook may run from the stop, within the drain's bound |
 | `leave_after_ms` | `setup_timeout_ms` + 2 × `summary_ms` | how long after its retirement an instance waits for its peers before its hooks read `Unconfirmed`. Half of `drain_ms` from the stop ends that wait in any case. Without a `[pool]`, `summary_ms` is its default, 10 s |
 | `hold_ms` | `drain_ms` + 30000 | how long after a retire request an instance may stay, once drained, if nothing ends its hold first ([Retired on request](../concepts/lifecycle.md#retired-on-request)). The 30 s are the render's margin on a pod's grace. It outlasts the operator's `drainBound`, which the render sets to `drain_ms`, because a hold that ends by itself exits the process and the pod restarts it |
-| `instance_failovers` | 2 | how many more times a router chooses after a declined hand-off. 0 makes each refusal final |
+| `instance_failovers` | 2 | how many more times a router chooses after a declined hand-off, and how many more instances a refused call to a unary service in another segment is tried on. 0 makes each refusal final |
 | `decompressed_max` | 268435456 (256 MiB) | the most bytes one compressed value that arrives on an edge with a `[codec]` entry may decompress into; a frame that states more, or no size, is refused with `Codec` before anything is allocated ([Edge codecs](../concepts/crossings.md#edge-codecs)) |
 | `pool_failovers` | 2 | how many other pools a chooser offers a request to after the first declines; an instance's own decline, which goes to the pool's other instances, uses none |
 | `pool_damping_first_ms` | 1000 | how long a chooser passes over a pool after its first decline. At least 1 |

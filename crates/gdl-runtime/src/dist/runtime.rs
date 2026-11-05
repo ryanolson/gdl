@@ -12,13 +12,13 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 
 use super::admission::{Admission, Egress};
-use super::calls::Calls;
+use super::calls::{CallLimit, Callee, Calls};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 #[cfg(feature = "hub")]
 use super::offers::Answer;
 use super::offers::{Offer, Refusal, Refused};
-use super::roster::{Live, Picker, Policy, Roster};
+use super::roster::{Live, Picker, Policy, Roster, Unchosen};
 use gdl::__runtime::Meters;
 use gdl::__runtime::Want;
 use gdl::__runtime::{Erased, Lease};
@@ -80,7 +80,8 @@ pub struct RuntimeConfig {
     /// the one it chose declined a hand-off (no room, or retired), or the
     /// hand-off to it provably never left this instance: for every
     /// hand-off a policy or a selector routes. The same instance may be
-    /// chosen again. 0 makes each refusal final.
+    /// chosen again. 0 makes each refusal final. It also bounds the more
+    /// tries of a call to a unary service in another segment.
     pub instance_failovers: usize,
     /// The most bytes one compressed value that arrives on an edge with a
     /// `[codec]` entry may decompress into. A frame that states more, or
@@ -107,6 +108,16 @@ pub struct RuntimeConfig {
     /// `Codec`. At most 16 MiB less 64 KiB: velo's 16 MiB frame ends a
     /// reply, and also carries the reply's tag and velo's header.
     pub call_reply_max: usize,
+    /// Calls from other segments one instance serves at once, each with a
+    /// permit of its own, apart from the requests' admission: a call does
+    /// not join its request's share. A call that finds none free is
+    /// refused before the service runs, and the caller tries another
+    /// instance. `None` is `admission_limit`.
+    pub call_limit: Option<usize>,
+    /// How long past its call's bound a reply may hold its call permit
+    /// while velo has not sent it: a caller that stops reading cannot hold
+    /// `call_limit` for longer.
+    pub call_reply_grace: Duration,
     /// Streams one instance may be producing at once.
     pub egress_limit: usize,
     /// How often producers send heartbeats; a dead producer is detected
@@ -233,6 +244,15 @@ pub struct Faults {
     /// The announcement that the instance detached never gets an answer,
     /// as from a hub that stops answering.
     pub stall_detached: bool,
+    /// Keep a clone of the bytes of each reply to a call that holds a call
+    /// permit, as velo keeps a reply it cannot write to a peer that does
+    /// not read: the permit is then released only at the call's bound plus
+    /// `call_reply_grace`.
+    pub retain_call_replies: Option<Arc<std::sync::Mutex<Vec<bytes::Bytes>>>>,
+    /// Report this many calls this instance makes, answered, as failed
+    /// after their send, as a transport that lost the reply would: the
+    /// service ran.
+    pub lose_call_replies: Option<Arc<AtomicUsize>>,
 }
 
 /// A point a runtime step stops at until a test lets it go. Available only
@@ -250,6 +270,12 @@ impl RuntimeConfig {
     /// How long a stopped instance may drain.
     pub fn drain_bound(&self) -> Duration {
         self.drain.unwrap_or(self.default_deadline)
+    }
+
+    /// How many calls from other segments one instance serves at once:
+    /// `call_limit`, or the admission limit.
+    pub fn call_permits(&self) -> usize {
+        self.call_limit.unwrap_or(self.admission_limit)
     }
 }
 
@@ -274,6 +300,8 @@ impl Default for RuntimeConfig {
             default_deadline: gdl_model::DEFAULT_DEADLINE,
             call_timeout: Self::DEFAULT_CALL_TIMEOUT,
             call_reply_max: Self::DEFAULT_CALL_REPLY_MAX,
+            call_limit: None,
+            call_reply_grace: Self::DEFAULT_CALL_REPLY_GRACE,
             egress_limit: 1024,
             heartbeat_interval: None,
             drain: None,
@@ -319,6 +347,8 @@ struct Settings {
     default_deadline_ms: u64,
     call_timeout_ms: u64,
     call_reply_max: usize,
+    call_limit: Option<usize>,
+    call_reply_grace_ms: u64,
     egress_limit: usize,
     heartbeat_interval_ms: Option<u64>,
     drain_ms: Option<u64>,
@@ -351,6 +381,8 @@ impl Default for Settings {
             default_deadline_ms: ms(config.default_deadline),
             call_timeout_ms: ms(config.call_timeout),
             call_reply_max: config.call_reply_max,
+            call_limit: config.call_limit,
+            call_reply_grace_ms: ms(config.call_reply_grace),
             egress_limit: config.egress_limit,
             heartbeat_interval_ms: config.heartbeat_interval.map(ms),
             drain_ms: config.drain.map(ms),
@@ -387,6 +419,8 @@ impl TryFrom<Settings> for RuntimeConfig {
             default_deadline: Duration::from_millis(s.default_deadline_ms),
             call_timeout: Duration::from_millis(s.call_timeout_ms),
             call_reply_max: s.call_reply_max,
+            call_limit: s.call_limit,
+            call_reply_grace: Duration::from_millis(s.call_reply_grace_ms),
             egress_limit: s.egress_limit,
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             drain: s.drain_ms.map(Duration::from_millis),
@@ -435,10 +469,17 @@ impl RuntimeConfig {
                 ));
             }
         }
-        // Both are semaphore sizes; tokio panics on a larger one.
+        if self.call_limit == Some(0) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "runtime setting `call_limit` must be at least 1",
+            ));
+        }
+        // Each is a semaphore's size; tokio panics on a larger one.
         for (name, limit) in [
             ("admission_limit", self.admission_limit),
             ("egress_limit", self.egress_limit),
+            ("call_limit", self.call_permits()),
         ] {
             if limit > tokio::sync::Semaphore::MAX_PERMITS {
                 return Err(Error::new(
@@ -495,6 +536,10 @@ impl RuntimeConfig {
     /// The largest reply a unary service sends to another segment, unless
     /// `call_reply_max` is set: 8 MiB.
     pub(crate) const DEFAULT_CALL_REPLY_MAX: usize = 8 << 20;
+
+    /// How long past its call's bound a reply holds its permit at most,
+    /// unless `call_reply_grace_ms` is set: 1 s.
+    pub(crate) const DEFAULT_CALL_REPLY_GRACE: Duration = Duration::from_secs(1);
 
     /// velo's TCP frame: a unary reply cannot be larger.
     pub(crate) const FRAME_MAX: usize = 16 << 20;
@@ -670,6 +715,8 @@ pub(crate) struct Runtime {
     pub(crate) segment: String,
     pub(crate) config: RuntimeConfig,
     pub(crate) admission: Admission,
+    /// The calls from other segments this instance serves at once.
+    pub(crate) call_limit: Arc<CallLimit>,
     pub(crate) egress: Egress,
     pub(crate) identity: Identity,
     /// Whom to route to, shared with the roster the instance launched
@@ -707,6 +754,11 @@ pub(crate) struct Runtime {
     /// hop enters, whose pools drain segment by segment. Elsewhere no drain
     /// reads the count, and a request pays nothing for it.
     pub(crate) counts_senders: bool,
+    /// Whether a request the instance holds counts as one that may still
+    /// send until its response stream ends, and a call it accepted until
+    /// the call ends: when it counts senders and its nodes call a unary
+    /// service in another segment, which a returned stream can still do.
+    pub(crate) sends_until_answered: bool,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -879,15 +931,18 @@ impl Runtime {
         #[cfg(not(feature = "hub"))]
         let pooled = |_: usize, _: usize| false;
         let heads = compressed_heads(&layout, config.decompressed_max, pooled);
+        let sends_until_answered = counts_senders && layout.calls_from(&segment).next().is_some();
         Ok(Self {
             heads,
             counts_senders,
+            sends_until_answered,
             admission: Admission::new(
                 config.admission_limit,
                 config.admission_wait,
                 config.attempt_limit,
             ),
             egress: Egress::new(config.egress_limit, config.admission_wait),
+            call_limit: CallLimit::new(config.call_permits(), config.call_reply_grace),
             routes: Arc::clone(roster.live()),
             selectors,
             #[cfg(feature = "hub")]
@@ -1315,73 +1370,117 @@ impl Runtime {
         super::envelope::decode::<Result<ReplyTo, Error>>(&reply)?
     }
 
-    /// Call unary node `service`, of index `index` among the unary nodes in
-    /// name order, on an instance of `segment` chosen by `within`, with
-    /// `payload`, the encoded request behind its envelope's room. The call's
-    /// bound is the request's deadline, or now plus `call_timeout`: the
-    /// envelope carries it, and the call fails with `DeadlineExceeded` once
-    /// it passes. The reply is the handler's, uncopied.
+    /// Call `callee` with `payload`, the encoded request behind its
+    /// envelope's room. The call's bound is the request's deadline, or now
+    /// plus `call_timeout`: the envelope carries it, and the call fails with
+    /// `DeadlineExceeded` once it passes. The reply is the handler's,
+    /// uncopied. A call that an instance refused, or that velo refused to
+    /// send, is tried on the instance the policy picks next, within the
+    /// bound ([`Runtime::call_again`]); the first try is made here, inline,
+    /// so that a call answered at once costs no more than it did. A call
+    /// through a selector goes to [`Runtime::call_selected`].
     pub(crate) async fn call(
         &self,
-        index: u16,
-        segment: &str,
-        within: &Within,
+        callee: &Callee,
         cx: &Cx,
         payload: super::envelope::CallHead,
     ) -> Result<bytes::Bytes> {
         let bound = cx
             .deadline()
             .unwrap_or_else(|| gdl::Deadline::after(self.config.call_timeout));
-        let left = || {
-            bound
-                .instant()
-                .saturating_duration_since(tokio::time::Instant::now())
-        };
-        if left().is_zero() {
+        if left(bound).is_zero() {
             return Err(Error::deadline_exceeded());
         }
-        tokio::time::timeout(left(), self.released())
+        tokio::time::timeout(left(bound), self.released())
             .await
             .map_err(|_| Error::deadline_exceeded())??;
-        let policy = match within {
+        let policy = match &callee.within {
             Within::Policy(policy) => *policy,
             Within::Selector {
                 selector, encoding, ..
             } => {
                 return self
-                    .call_selected(index, segment, &**selector, *encoding, cx, bound, payload)
+                    .call_selected(callee, &**selector, *encoding, cx, bound, payload)
                     .await;
             }
         };
-        let instance = self
-            .routes
-            .pick(segment, Picker::Call, policy, &self.random)?;
+        let instance = self.pick_call(callee, policy)?;
         let (envelope, left) = self.call_envelope(
-            index,
+            callee.index,
             super::envelope::WireCx::bounded(cx, bound),
             payload,
             bound,
         )?;
-        self.fabric
-            .call_bounded(instance, super::calls::CALL, envelope, left)
-            .await
+        // A clone of the envelope is a count: its bytes are shared, and
+        // kept for another try.
+        let called = self
+            .fabric
+            .call_bounded(instance, super::calls::CALL, envelope.clone(), left)
+            .await;
+        #[cfg(feature = "fault-injection")]
+        let called = self.lose(called);
+        match CallMiss::of(called, callee) {
+            Ok(reply) => Ok(reply),
+            Err(missed) => Box::pin(self.call_again(callee, policy, bound, envelope, missed)).await,
+        }
+    }
+
+    /// After a try of `envelope` missed, try it on the instance `policy`
+    /// picks next, as long as `missed` allows another try, the bound has
+    /// not passed, and `instance_failovers` more tries are left. A refusal,
+    /// or a send velo refused, allows one for any service; a call that may
+    /// have run allows one only for an `idempotent` service. The call fails
+    /// with its last refusal, unless a later try may have run, and a send
+    /// that never left never replaces a refusal, as for offers.
+    async fn call_again(
+        &self,
+        callee: &Callee,
+        policy: Policy,
+        bound: gdl::Deadline,
+        envelope: bytes::Bytes,
+        missed: CallMiss,
+    ) -> Result<bytes::Bytes> {
+        let mut missed = missed;
+        for _ in 0..self.config.instance_failovers {
+            if !missed.again(callee) {
+                break;
+            }
+            let left = left(bound);
+            if left.is_zero() {
+                return Err(Error::deadline_exceeded());
+            }
+            // Nothing left to route to: the call fails with its last miss.
+            let Ok(instance) = self.pick_call(callee, policy) else {
+                break;
+            };
+            let called = self
+                .fabric
+                .call_bounded(instance, super::calls::CALL, envelope.clone(), left)
+                .await;
+            #[cfg(feature = "fault-injection")]
+            let called = self.lose(called);
+            match CallMiss::of(called, callee) {
+                Ok(reply) => return Ok(reply),
+                Err(then) => missed = missed.then(then),
+            }
+        }
+        Err(missed.into_error())
     }
 
     /// [`Runtime::call`] through a selector: it chooses the instance within
     /// the call's `bound`, and what it chose to tell the service goes in the
     /// call's context. Its lease is held until the reply comes back, so that
-    /// a selector that counts what it sent sees the call while it runs.
+    /// a selector that counts what it sent sees the call while it runs. A
+    /// try that missed is tried again by the rules of
+    /// [`Runtime::call_again`]: the selector chooses again, told which
+    /// instances refused the call, and the declined choice's lease ends
+    /// first.
     ///
     /// Boxed, and not `async`: a call's future holds only the box, so the
     /// selector's state does not grow every call's, a policy's too.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the parts of one call, as `Runtime::call` takes them"
-    )]
     fn call_selected<'a>(
         &'a self,
-        index: u16,
-        segment: &'a str,
+        callee: &'a Callee,
         selector: &'a dyn Erased,
         encoding: gdl_model::Encoding,
         cx: &'a Cx,
@@ -1389,22 +1488,70 @@ impl Runtime {
         payload: super::envelope::CallHead,
     ) -> futures::future::BoxFuture<'a, Result<bytes::Bytes>> {
         Box::pin(async move {
-            let left = bound
-                .instant()
-                .saturating_duration_since(tokio::time::Instant::now());
-            let chosen = self
-                .routes
-                .choose(segment, selector, cx, payload.plain(), encoding, &[]);
-            let (instance, picked) = tokio::time::timeout(left, chosen)
-                .await
-                .map_err(|_| Error::deadline_exceeded())??;
-            let mut wire_cx = super::envelope::WireCx::bounded(cx, bound);
-            wire_cx.add_meta(picked.meta);
-            let _lease = picked.lease;
-            let (envelope, left) = self.call_envelope(index, wire_cx, payload, bound)?;
-            self.fabric
-                .call_bounded(instance, super::calls::CALL, envelope, left)
-                .await
+            let mut payload = payload;
+            let mut declined = Vec::new();
+            let mut missed: Option<CallMiss> = None;
+            for _ in 0..=self.config.instance_failovers {
+                let left = left(bound);
+                if left.is_zero() {
+                    return Err(Error::deadline_exceeded());
+                }
+                let chosen = self.routes.choose(
+                    &callee.segment,
+                    selector,
+                    cx,
+                    payload.plain(),
+                    encoding,
+                    &declined,
+                );
+                let (instance, picked) = match tokio::time::timeout(left, chosen).await {
+                    Err(_) => return Err(Error::deadline_exceeded()),
+                    Ok(Ok(chosen)) => chosen,
+                    // Nothing left to route to: the call fails with its last
+                    // miss, or, before any, with `Routing`.
+                    Ok(Err(Unchosen::Unroutable(error))) => {
+                        return Err(match missed {
+                            Some(missed) => missed.into_error(),
+                            None => unroutable(callee, &error),
+                        });
+                    }
+                    Ok(Err(Unchosen::Failed(error))) => return Err(error),
+                };
+                let mut wire_cx = super::envelope::WireCx::bounded(cx, bound);
+                wire_cx.add_meta(picked.meta);
+                let lease = picked.lease;
+                let (envelope, left) = self.call_envelope(callee.index, wire_cx, payload, bound)?;
+                let called = self
+                    .fabric
+                    .call_bounded(instance, super::calls::CALL, envelope.clone(), left)
+                    .await;
+                #[cfg(feature = "fault-injection")]
+                let called = self.lose(called);
+                let then = match CallMiss::of(called, callee) {
+                    Ok(reply) => return Ok(reply),
+                    Err(then) => then,
+                };
+                drop(lease);
+                if let CallMiss::Refused(_) = then {
+                    declined.push(super::roster::selector_id(instance));
+                }
+                let now = match missed.take() {
+                    Some(missed) => missed.then(then),
+                    None => then,
+                };
+                if !now.again(callee) {
+                    return Err(now.into_error());
+                }
+                missed = Some(now);
+                // The next try's envelope carries the next choice's meta,
+                // so the request is copied out of this one: on a miss
+                // only.
+                payload = super::envelope::CallHead::sent_in(&envelope)?;
+            }
+            Err(missed.map_or_else(
+                || Error::routing("no try of the call was made"),
+                CallMiss::into_error,
+            ))
         })
     }
 
@@ -1416,7 +1563,7 @@ impl Runtime {
         cx: super::envelope::WireCx,
         payload: super::envelope::CallHead,
         bound: gdl::Deadline,
-    ) -> Result<(bytes::Bytes, std::time::Duration)> {
+    ) -> Result<(bytes::Bytes, Duration)> {
         let envelope = super::envelope::Call {
             identity: self.identity,
             service: index,
@@ -1424,13 +1571,42 @@ impl Runtime {
             payload,
         }
         .wire()?;
-        let left = bound
-            .instant()
-            .saturating_duration_since(tokio::time::Instant::now());
+        let left = left(bound);
         if left.is_zero() {
             return Err(Error::deadline_exceeded());
         }
         Ok((envelope, left))
+    }
+
+    /// `called`, or, while `lose_call_replies` counts, an answer lost after
+    /// its send.
+    #[cfg(feature = "fault-injection")]
+    fn lose(&self, called: super::fabric::Called) -> super::fabric::Called {
+        use super::fabric::Called;
+        let lost = self
+            .config
+            .faults
+            .lose_call_replies
+            .as_ref()
+            .is_some_and(|left| {
+                left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            });
+        match called {
+            Called::Answered(_) if lost => Called::Unknown(Error::new(
+                ErrorKind::Transport,
+                "the reply was lost after the send",
+            )),
+            called => called,
+        }
+    }
+
+    /// An instance of `callee`'s segment, as `policy` picks: `Routing` when
+    /// the routing table has none.
+    fn pick_call(&self, callee: &Callee, policy: Policy) -> Result<velo::InstanceId> {
+        self.routes
+            .pick(&callee.segment, Picker::Call, policy, &self.random)
+            .map_err(|error| unroutable(callee, &error))
     }
 
     /// How this segment picks an instance for its calls to unary node
@@ -1471,6 +1647,92 @@ impl Runtime {
             ));
         }
         Ok(())
+    }
+}
+
+/// The error of a call to `callee` with no instance to route to, as the
+/// routing table said, `error`.
+fn unroutable(callee: &Callee, error: &Error) -> Error {
+    Error::routing(format!(
+        "no instance of segment `{}` to call unary node `{}` on: {}",
+        &callee.segment,
+        &callee.service,
+        error.message()
+    ))
+}
+
+/// The time left until `bound`.
+fn left(bound: gdl::Deadline) -> Duration {
+    bound
+        .instant()
+        .saturating_duration_since(tokio::time::Instant::now())
+}
+
+/// Why one try of a call did not end it, as [`Runtime::call_again`] reads
+/// it.
+enum CallMiss {
+    /// The instance answered that the service never ran.
+    Refused(Error),
+    /// velo refused the send before the transport took it.
+    Unsent(Error),
+    /// The send failed after the transport took it: the service may have
+    /// run, an `OutcomeUnknown` error.
+    Unknown(Error),
+    /// The call's bound passed: never tried again.
+    Expired(Error),
+}
+
+impl CallMiss {
+    /// What one try came to: the reply, unless it was refused, or why not.
+    /// A completed error is the reply's, and reaches the caller as it is.
+    fn of(
+        called: super::fabric::Called,
+        callee: &Callee,
+    ) -> std::result::Result<bytes::Bytes, Self> {
+        use super::fabric::Called;
+        match called {
+            Called::Answered(reply) => match super::calls::refusal(&reply) {
+                Some(error) => Err(Self::Refused(error)),
+                None => Ok(reply),
+            },
+            Called::Unsent(error) => Err(Self::Unsent(error)),
+            Called::Unknown(error) => Err(Self::Unknown(Error::new(
+                ErrorKind::OutcomeUnknown,
+                format!(
+                    "the call to unary node `{}` may have run: {}",
+                    &callee.service,
+                    error.message()
+                ),
+            ))),
+            Called::Expired(error) => Err(Self::Expired(error)),
+        }
+    }
+
+    /// Whether the call may be tried again after this miss.
+    fn again(&self, callee: &Callee) -> bool {
+        match self {
+            Self::Refused(_) | Self::Unsent(_) => true,
+            Self::Unknown(_) => callee.idempotent,
+            Self::Expired(_) => false,
+        }
+    }
+
+    /// The miss a call that missed `self` and then `then` reports: the
+    /// last, unless it never left and an instance had refused.
+    fn then(self, then: CallMiss) -> CallMiss {
+        match (self, then) {
+            (refused @ Self::Refused(_), Self::Unsent(_)) => refused,
+            (_, then) => then,
+        }
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Self::Refused(error)
+            | Self::Unsent(error)
+            | Self::Unknown(error)
+            | Self::Expired(error) => error,
+        }
     }
 }
 

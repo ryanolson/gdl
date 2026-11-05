@@ -664,7 +664,7 @@ pub fn let_go(key: &str) {
 
 /// Wait until the test lets `key` go, or, for a test that never does, a
 /// bound past the test's own waits.
-async fn held(key: &str) {
+pub async fn held(key: &str) {
     let (released, changed) = holds();
     let _ = tokio::time::timeout(WAIT * 6, async {
         loop {

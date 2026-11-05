@@ -74,7 +74,7 @@ topology: Front => Router { Engine };
 ```
 
 - `unary <Name>: <Req> -> <Resp>;` goes among the nodes. Neither type is streamed.
-- `idempotent` after a unary node's signature is the service author's promise: the service is safe to run twice, also at the same time. Only a unary node takes it.
+- `idempotent` after a unary node's signature is the service author's promise: the service is safe to run twice, also at the same time. Only a unary node takes it. A call from another segment whose send failed after it left may have run, and is tried again on another instance only when the service is `idempotent` ([Unary services](../concepts/unary.md#a-call-to-another-segment)).
 - `calls A, B` after any node's signature names the unary nodes it calls. A unary node may call another. A built-in identity calls nothing.
 - `calls`, `idempotent`, `provides`, and `needs` come in any order, and each is said once.
 - A unary node cannot provide or need a property yet ([Known limitations](../operations/limitations.md#a-unary-node-cannot-provide-or-need-a-property-yet)).

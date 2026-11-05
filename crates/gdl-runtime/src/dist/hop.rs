@@ -1302,13 +1302,19 @@ where
         rt.check_identity(open.version, open.identity)?;
         let root = open.cx.root();
         let cx = open.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = setup(
+        let mut share = setup(
             &cx,
             rt.config.setup_timeout,
             "admission",
             rt.admission.admit(root),
         )
         .await?;
+        // A run whose stream may call a service in another segment may
+        // send until it ends; counted before the close is read, as a
+        // forward entry is (`Share::sending`).
+        if rt.sends_until_answered {
+            share.sending();
+        }
         rt.check_open()?;
         let input = self
             .open_run(cx, usize::from(open.pos), open.reply, Some(share))
@@ -1486,7 +1492,9 @@ where
     /// Run the inner end and pump its stream to `out`. `sending`, the
     /// share of the hand-off that reached the inner end, stops counting as
     /// one that may send once the inner end has returned its stream: an
-    /// operator's later attempts are counted by the `next` it keeps.
+    /// operator's later attempts are counted by the `next` it keeps. In a
+    /// segment whose nodes call a unary service in another segment, it
+    /// counts until the stream ends, since the stream can still call.
     async fn produce_inner(
         &self,
         cx: &Cx,
@@ -1522,7 +1530,9 @@ where
                 produced = &mut call => break produced,
             }
         };
-        if let Some(share) = sending {
+        if let Some(share) = sending
+            && !self.rt.sends_until_answered
+        {
             share.sent();
         }
         let items = match produced {

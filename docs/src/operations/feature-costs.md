@@ -1042,7 +1042,7 @@ The `unsafe` code is checked by Miri, under Stacked Borrows with and without `-Z
 
 ## A remote unary call
 
-What a call to a unary service in another segment costs: one velo unary call to the service segment's `gdl.call` handler, with the call's bound on both sides ([Unary services](../concepts/unary.md#a-call-to-another-segment)). The control is velo's raw unary call between the same two nodes, to a handler that answers its 8-byte payload, under a timeout: no envelope, no bound on the handler's side, and no service. The service adds one to a number, so the rows are the call's overhead. A call takes no admission permit yet, so the rows have none.
+What a call to a unary service in another segment costs: one velo unary call to the service segment's `gdl.call` handler, with the call's bound on both sides ([Unary services](../concepts/unary.md#a-call-to-another-segment)). The control is velo's raw unary call between the same two nodes, to a handler that answers its 8-byte payload, under a timeout: no envelope, no bound on the handler's side, and no service. The service adds one to a number, so the rows are the call's overhead. The table was measured before calls took a call permit; [The call permit](#the-call-permit) adds it.
 
 Measured with callgrind 3.28.0 on a shared aarch64 Linux host (20 cores), load average 3 to 7, rustc 1.93.1, under the bench profile, rustix on its libc backend. `crates/gdl-runtime/benches/calls.rs` runs both segments on two velo nodes in one process over loopback TCP, on a four-worker tokio runtime, and makes its calls one at a time after 100 to warm up, under one context. Instructions are callgrind Ir per call, (Ir at 2,000 calls − Ir at 1,000) / 1,000, three rounds. The program counts allocations itself, on every thread, from its first counted call to its last:
 
@@ -1062,3 +1062,30 @@ target/release/deps/calls-<hash> <local|remote|remote-deadline|remote-affinity|r
 - **A remote call costs about 7,200 Ir and 9 allocations over velo's raw call.** The two kinds of bound cost the same within the rounds' spread.
 - **A selector costs about 1,500 Ir and 3 allocations more per call.** `remote-affinity` routes the same calls through gdl's `affinity`, which hashes the request ([Routing a call](../concepts/routing.md#routing-a-call)). Measured in a later run of three rounds at load average about 12, beside `remote` in the same run: `remote-affinity` 42,568 to 42,695 Ir and 30 allocations, `remote` 41,046 to 41,172 Ir and 27. By the code, the three allocations are the selector path's own boxed future, which keeps its state out of a policy's call, the boxed choice, and the selector's boxed `select`. In that run, `remote` measured 40,991 to 41,346 Ir before a call could name a selector: the same within the rounds' spread.
 - **Not split here.** The allocations are not traced to their sites, and the release build has no debug information, so callgrind's split of the instructions among inlined frames is not reported.
+
+### The call permit
+
+What the call permit and the reply's retention add to a remote call ([Admission and egress](../concepts/admission.md#calls-from-other-segments)). Each accepted call takes a permit with one compare and swap, puts its reply's id in a sharded set, and sends the reply's deadline to the instance's one releasing task, which does not wake for it while it is busy. The caller keeps a clone of the envelope's bytes for another try, which is a count. The same bench and command as above, on the same host. Before is the build without the permit; a task per call is the first form of the permit, which spawned a task for each call to release it at its deadline:
+
+| Per call, (Ir at 2,000 − Ir at 1,000) / 1,000, three rounds, load 3 to 13 | Before | A task per call | One task per instance |
+|---|---|---|---|
+| `remote`, Ir | 40,110 to 41,219 | 43,046 to 44,247 | 40,988 to 41,551 |
+| `remote`, allocations | 27.03 | 28.16 to 28.29 | 27.09 |
+| `raw`, Ir | 32,904 to 33,441 | 33,219 to 33,486 | 33,388 to 33,727 |
+| `raw`, allocations | 18.03 | 18.03 | 18.03 |
+| `local`, Ir | 90 | 90 | 90 |
+| `local`, allocations | 0 | 0 | 0 |
+
+The permit's own cost, from five more rounds of `remote` and `raw` before and after, (Ir at 4,000 − Ir at 2,000) / 2,000, at load 3 to 10:
+
+| Per call | Before | After | The permit |
+|---|---|---|---|
+| `remote`, Ir | 40,719 to 41,039, median 40,910 | 41,194 to 41,482, median 41,435 | about +500 (+150 to +760) |
+| `raw`, Ir | 33,213 to 33,578 | 33,011 to 33,499 | none: the same code |
+| allocations | 27.03 | 27.09 | +0.06 |
+
+- **The permit and the reply's retention cost about 500 Ir and 0.06 allocations per call**, under 2% of the call. The allocations are the releasing task's queue, which grows in blocks.
+- **Rejected: a task per call** that sleeps until the deadline, aborted when the bytes drop. It cost about 3,000 Ir and 1.1 allocations per call.
+- **The rounds' spread is about 300 to 500 Ir**, near the permit's cost. `raw` runs the same code in both builds, and differs by as much.
+- **A remote call costs about 8,000 Ir and 9 allocations over velo's raw call** of the same build.
+- **A call in the caller's segment does not change.** The `local` row is the same, and the `hosted` shape of [A local unary call](#a-local-unary-call), measured again on the same host with its command, two rounds, is 108.0 Ir per call, as before.

@@ -253,11 +253,12 @@ impl Fabric {
 
     /// Register a raw unary handler. The handler's reply bytes carry gdl's
     /// own result encoding, so velo-level errors mean only transport trouble.
-    /// The handler gets the bytes velo received, uncopied.
-    pub(crate) fn register(
+    /// The handler gets the bytes velo received, uncopied, and velo holds
+    /// the reply's until it has written them or failed to.
+    pub(crate) fn register<R: Into<Bytes> + 'static>(
         &self,
         name: &str,
-        handler: impl Fn(Bytes) -> BoxFuture<'static, Vec<u8>> + Send + Sync + 'static,
+        handler: impl Fn(Bytes) -> BoxFuture<'static, R> + Send + Sync + 'static,
     ) -> Result<()> {
         let handler = Arc::new(handler);
         let handler = Handler::unary_handler_async(name.to_string(), move |cx: velo::Context| {
@@ -291,33 +292,46 @@ impl Fabric {
 
     /// Call a unary handler on `instance`, which answers within `left` or
     /// not at all: velo's own `.timeout` bounds the wait and releases the
-    /// response slot when it runs out, which ends the call with
-    /// `DeadlineExceeded`. The reply is the bytes velo received, uncopied.
+    /// response slot when it runs out. Tells apart, as [`Fabric::offer`]
+    /// does, a send velo refused before the transport from one that may
+    /// have left. The reply is the bytes velo received, uncopied.
     pub(crate) async fn call_bounded(
         &self,
         instance: InstanceId,
         name: &str,
         payload: Bytes,
         left: Duration,
-    ) -> Result<Bytes> {
-        self.velo
-            .unary(name)
-            .map_err(transport)?
+    ) -> Called {
+        let send = match self.velo.unary(name) {
+            Ok(unary) => unary,
+            Err(error) => return Called::Unsent(transport(error)),
+        };
+        let mut send = send
             .raw_payload(payload)
             .instance(instance)
             .timeout(left)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is::<velo::RequestTimeout>() {
-                    Error::new(
-                        ErrorKind::DeadlineExceeded,
-                        format!("`{name}` on {instance} did not answer within the call's bound"),
-                    )
-                } else {
-                    transport(error)
-                }
-            })
+            .send();
+        let expired = || {
+            Error::new(
+                ErrorKind::DeadlineExceeded,
+                format!("`{name}` on {instance} did not answer within the call's bound"),
+            )
+        };
+        // velo's timeout bounds the wait for the answer; the wait for a free
+        // response slot before it is bounded here.
+        match tokio::time::timeout(left, send.admitted()).await {
+            Err(_) => return Called::Expired(expired()),
+            Ok(Err(error)) if error.is::<velo::RequestTimeout>() => {
+                return Called::Expired(expired());
+            }
+            Ok(Err(error)) => return Called::Unsent(transport(error)),
+            Ok(Ok(())) => {}
+        }
+        match send.await {
+            Ok(reply) => Called::Answered(reply),
+            Err(error) if error.is::<velo::RequestTimeout>() => Called::Expired(expired()),
+            Err(error) => Called::Unknown(transport(error)),
+        }
     }
 
     /// Offer `payload` to a unary handler on `instance`, as [`Fabric::call`]
@@ -385,6 +399,19 @@ pub(crate) enum Offered {
     /// It may have left and been run: no answer came in time, or the send
     /// failed after the transport took it.
     Unknown(Error),
+}
+
+/// What became of a call [`Fabric::call_bounded`] sent.
+pub(crate) enum Called {
+    /// The handler answered, with these bytes, uncopied.
+    Answered(Bytes),
+    /// velo refused the send before the transport took it: it never left.
+    Unsent(Error),
+    /// It may have left and been run: the send failed after the transport
+    /// took it.
+    Unknown(Error),
+    /// The call's bound passed first, a `DeadlineExceeded` error.
+    Expired(Error),
 }
 
 fn unanswered(name: &str, instance: InstanceId, timeout: Duration) -> Error {

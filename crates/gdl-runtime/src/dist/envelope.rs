@@ -839,6 +839,17 @@ impl CallHead {
     pub(crate) fn plain(&self) -> &[u8] {
         &self.0[HEADER_ROOM..]
     }
+
+    /// The request a call's envelope, `sent`, carries, copied behind room
+    /// for another envelope: a call through a selector that is tried again
+    /// carries the next choice's meta.
+    pub(crate) fn sent_in(sent: &[u8]) -> Result<Self> {
+        let request = CallArrived::read(sent)?.payload;
+        let mut buffer = Vec::with_capacity(HEADER_ROOM + request.len());
+        buffer.resize(HEADER_ROOM, 0);
+        buffer.extend_from_slice(request);
+        Ok(Self(buffer))
+    }
 }
 
 /// `rmp_serde`'s encoding of a [`Call`] starts with this: an array of its

@@ -1,7 +1,7 @@
 //! Standing up one segment instance.
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use velo::Velo;
@@ -38,6 +38,9 @@ pub struct Deployment {
     /// Each unary node's index among the unary nodes in name order, by its
     /// name: what a call to it says it calls.
     indices: BTreeMap<String, u16>,
+    /// The unary nodes the graph marks `idempotent`: a call to one that may
+    /// have run is tried again.
+    idempotent: BTreeSet<String>,
     /// The unary services this instance hosts for callers in other
     /// segments, by their indices.
     served: Mutex<BTreeMap<u16, Arc<dyn Serve>>>,
@@ -92,9 +95,16 @@ impl Deployment {
             .enumerate()
             .filter_map(|(index, name)| Some((name.to_string(), u16::try_from(index).ok()?)))
             .collect();
+        let idempotent = manifest
+            .nodes
+            .iter()
+            .filter(|node| node.unary.as_ref().is_some_and(|unary| unary.idempotent))
+            .map(|node| node.name.clone())
+            .collect();
         Ok(Self {
             rt,
             indices,
+            idempotent,
             served: Mutex::new(BTreeMap::new()),
             hosted: Mutex::new(Vec::new()),
         })
@@ -257,7 +267,10 @@ impl Deployment {
             })?;
         }
         // Last: a call made through a link from here on is sent.
-        self.rt.config.calls.bind(&self.rt, &self.indices)?;
+        self.rt
+            .config
+            .calls
+            .bind(&self.rt, &self.indices, &self.idempotent)?;
         Ok(Segment {
             rt: self.rt,
             _entries: entries,
@@ -384,10 +397,13 @@ impl<H> Segment<H> {
         &self.rt
     }
 
-    /// Root requests this instance currently admits. Returns to zero when
-    /// every request it served has finished.
+    /// Root requests this instance currently admits, and calls from other
+    /// segments whose permits it holds. Returns to zero when every request
+    /// and call it served has finished, and the reply to each call has been
+    /// sent or has passed its call's bound and `call_reply_grace`. Drain
+    /// waits for it.
     pub fn admitted(&self) -> usize {
-        self.rt.admission.admitted()
+        self.rt.admission.admitted() + self.rt.call_limit.held()
     }
 
     /// The requests this instance holds that may still send work to

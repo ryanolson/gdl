@@ -429,17 +429,22 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### A dropped remote call runs on until its bound
 - **What:** a caller that drops its call to a unary service in another segment tells the service nothing. The service runs on until it answers or the call's bound passes, and the handler cancels the service's context only then. So:
-  - the service's worker time is held until the call ends or its bound passes, even after the caller left;
+  - the service's call permit and its worker time are held until the call ends or its bound passes, even after the caller left;
   - a caller that calls again after an unknown outcome can run the service twice at the same time, so a service marked `idempotent` must be safe to run twice at once;
   - the bound in the envelope, the request's deadline or `call_timeout`, is what limits both.
 - **Why:** velo's unary call has no reply anchor and no cancel that reaches its handler. Dropping the call releases only the caller's response slot. See [Unary services](../concepts/unary.md#a-call-to-another-segment).
 - **Workaround:** give a request a deadline, or set a short `call_timeout`, for a service whose work outlives its callers.
 - **Test:** `a_dropped_call_leaves_the_service_running_until_its_bound` in `crates/gdl-runtime/tests/calls.rs`.
 
-### A remote call is not retried or admitted
-- **What:** a call refused by an instance of the service's segment fails at once, though another instance might take it. A call takes no admission permit in the service's segment, so a burst of calls is not refused there with `Overloaded`, and the segment's drain does not wait for the calls it is running. velo's own shutdown lets a running handler finish within the drain's bound.
-- **Why:** the call's permit, its retry on another instance, and its share in the drain are not built yet. See [Unary services](../concepts/unary.md#what-the-call-does-not-do-yet).
-- **Workaround:** run enough instances of the service's segment for its callers, and drain the callers' segments first.
+### A drain's figures do not show the calls it waits for
+- **What:** a draining instance waits for the call permits it holds as well as its ledger, but `/metrics` shows only the ledger's roots and the egress permits. An instance can wait for calls with both at 0.
+- **Why:** the call figures are not built yet. See [Segment lifecycle](../concepts/lifecycle.md#stopping).
+- **Workaround:** a call holds its permit for at most its bound plus `call_reply_grace`, so the wait ends by then.
+
+### A call's refusal and a reply past its grace can queue in velo
+- **What:** a service segment's refusal of a call holds no call permit, and a reply whose permit was released at its call's bound plus `call_reply_grace` holds none either. Both still wait in velo's queue to a caller that does not read, and that queue has no bound.
+- **Why:** velo answers every unary request and does not bound its response queue or a peer's receive queue. A refused forward hand-off is answered the same way. See [Admission and egress](../concepts/admission.md#calls-from-other-segments).
+- **Lifts:** a write deadline in velo that discards output to a peer that stops reading.
 
 ### A unary node cannot provide or need a property yet
 - **What:** `check`, `generate`, and `graph!` refuse `provides` or `needs` on a unary node, naming the node and the clause.

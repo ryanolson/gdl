@@ -482,7 +482,7 @@ A drain cannot be cancelled.
 
 ### Each segment leaves when its own part is done
 
-An instance has detached (`gdl-detach-<segment>`) when it takes no more work and no request it holds can send work to another segment. It counts the requests that can: a hand-off it has not yet handed on or run to its inner end's stream, and each `next` an operator holds, with every clone of it. An operator that keeps its `next` may start another attempt at any time, so it counts until it drops that `next`. An entry instance counts from when it declines offers, and only once the segments of its class that send to it have detached. An interior instance counts once it has closed.
+An instance has detached (`gdl-detach-<segment>`) when it takes no more work and no request it holds can send work to another segment. It counts the requests that can: a hand-off it has not yet handed on or run to its inner end's stream, and each `next` an operator holds, with every clone of it. An operator that keeps its `next` may start another attempt at any time, so it counts until it drops that `next`. In a segment whose nodes call a unary service in another segment, a request counts until its response stream ends, and a call the segment accepted counts until it ends, since a stream that holds a client, or a service, may still call ([Unary services](unary.md#a-call-to-another-segment)). An entry instance counts from when it declines offers, and only once the segments of its class that send to it have detached. An interior instance counts once it has closed.
 
 So in the chat graph, with `front` the entry of a pool's class and `Truncate` placed alone, a drain goes like this:
 

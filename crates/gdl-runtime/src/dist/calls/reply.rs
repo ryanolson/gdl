@@ -51,6 +51,12 @@ impl Reply {
         Self(Kind::Refused(error))
     }
 
+    /// Whether the service never ran: a refusal holds no call permit, and
+    /// its caller may try another instance.
+    pub(crate) fn is_refused(&self) -> bool {
+        matches!(self.0, Kind::Refused(_))
+    }
+
     /// The reply's bytes, at most `max` of them, its tag included, for any
     /// reply and any `max`: the one invariant of a reply's size. A reply past
     /// `max`, of any kind, is replaced by a [fallback](fallback) of at most
@@ -120,6 +126,19 @@ fn error_bytes(tag: Tag, error: &Error) -> Vec<u8> {
     // error from the short reply.
     let _ = write_msgpack(&mut bytes, error);
     bytes
+}
+
+/// The error of a reply whose bytes say that the service never ran, so
+/// that the caller may try another instance; `None` for any other reply.
+/// A reply replaced for its size keeps its kind ([`Reply::write`]), so
+/// this holds for every reply written.
+pub(crate) fn refusal(bytes: &[u8]) -> Option<Error> {
+    match bytes.split_first() {
+        Some((&tag, rest)) if tag == Tag::Refused as u8 => {
+            Some(decode::<Error>(rest).unwrap_or_else(|error| error))
+        }
+        _ => None,
+    }
 }
 
 /// A reply, read: the response's bytes, borrowed, or the error.
@@ -199,6 +218,7 @@ mod tests {
                             "{} bytes over {max}, size {size}",
                             bytes.len()
                         );
+                        assert_eq!(refusal(&bytes).is_some(), matches!(kind, Tag::Refused));
                         let read = read(&bytes);
                         match (kind, read) {
                             (Tag::Answered, Ok(body)) => {
@@ -296,6 +316,12 @@ mod tests {
                 )
             };
             assert!(bytes.len() <= max, "past its limit: {}", at());
+            assert_eq!(
+                refusal(&bytes).is_some(),
+                matches!(kind, Tag::Refused),
+                "read as refused or not wrongly: {}",
+                at()
+            );
             let right = match (kind, read(&bytes)) {
                 (Tag::Answered, Ok(body)) => bytes[0] == Tag::Answered as u8 && body.len() == size,
                 (Tag::Answered, Err(error)) => {

@@ -1,6 +1,6 @@
 # Admission and egress
 
-Each segment instance limits how much work it takes. Admission limits the root requests it serves at once. Egress limits the streams it produces at once. A per-root limit bounds the remote attempts of one request. A full instance refuses new work with `Overloaded` instead of buffering for it. [Runtime design](../development/runtime-design.md#admission-and-egress) gives the reasons and a design that was tried and removed. [Segment settings](../operations/configuration.md) gives the settings and their defaults.
+Each segment instance limits how much work it takes. Admission limits the root requests it serves at once. Egress limits the streams it produces at once. A per-root limit bounds the remote attempts of one request. A call limit bounds the calls from other segments it serves at once. A full instance refuses new work with `Overloaded` instead of buffering for it. [Runtime design](../development/runtime-design.md#admission-and-egress) gives the reasons and a design that was tried and removed. [Segment settings](../operations/configuration.md) gives the settings and their defaults.
 
 ## Admission
 
@@ -44,8 +44,18 @@ So, once its source's body has returned, an instance whose ledger is empty has h
 
 Every gdl consumer holds the request's deadline and cancels its anchor when the deadline passes, read or not. That bounds how long a finished stream can hold its permit.
 
+## Calls from other segments
+
+`call_limit` counts the calls to the unary services an instance hosts for callers in other segments ([Unary services](unary.md#a-call-to-another-segment)). It is the admission limit unless set. A call takes its own permit before the service runs, and never joins its request's share: one request that makes 1,000 calls at once takes 1,000 permits. The permits are apart from the ledger, so a burst of calls refuses no pipeline request, and requests that hold every admission permit refuse no call. `calls_at_their_limit_and_requests_at_theirs_do_not_refuse_each_other` covers both.
+
+A call that finds no permit free is refused at once with `Overloaded`, before the service runs, and its caller tries the next instance. An instance that has closed refuses a call the same way. The permit is counted, and then the close is read, both sequentially consistent, and drain closes before it reads the count, so a call is either counted where drain waits for it or refused.
+
+The reply holds the permit. velo sends a reply after the handler returns and keeps a peer's replies in a queue with no bound, so a permit released at the return would let replies pile up behind a caller that does not read. The reply's bytes own the permit, and it returns when velo lets the bytes go, once it has written them to its connection, or when the call's bound plus `call_reply_grace` (1 s) passes, whichever is first. The bytes' drop releases the permit at once. One task per instance releases the rest, from a queue ordered by deadline that each accepted call adds its reply's deadline to, so a call spawns no task and starts no timer of its own. Whichever comes first removes the reply from a sharded set, and only that one releases the permit. The task prunes the entries of replies already dropped once they outnumber the held ones. `a_reply_held_unsent_keeps_its_permit_until_the_bound_and_the_grace` and `the_permit_returns_once_the_reply_is_sent` cover both. A refusal holds no permit.
+
+`Segment::admitted` counts the call permits held with the ledger's roots, so a drain waits for both.
+
 ## Attempts per root
 
 Concurrent attempts each mint anchors and share their root's admission, so admission alone does not bound streams. `attempt_limit` bounds the outstanding remote attempts of one root on one instance. `next.generate` beyond it returns `Err(Overloaded)`. A local attempt does not count.
 
-A zero admission, attempt, or egress limit is refused when the segment starts.
+A zero admission, attempt, egress, or call limit is refused when the segment starts.

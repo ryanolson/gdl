@@ -18,6 +18,8 @@
 
 #[path = "detaching/body.rs"]
 mod body;
+#[path = "detaching/calls.rs"]
+mod calls;
 mod common;
 #[path = "detaching/lease.rs"]
 mod lease;
