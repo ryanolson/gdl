@@ -312,3 +312,24 @@ fn check_refuses_a_selector_whose_head_does_not_fit_its_calls() {
         "{error}"
     );
 }
+
+/// `Count` has a copy in `front` too, so `Prep` calls that copy and no
+/// call crosses: no segment registers `by_text`, and the binding is
+/// refused as one no router uses. Without the copy in `front`, the same
+/// spec checks (`a_bound_selector_routes_the_calls_it_names`).
+#[test]
+fn check_refuses_a_calls_selector_when_every_caller_has_a_copy() {
+    let (text, graph) = called("Prepared");
+    let text = text.replace(
+        "[segment.front]\nnodes = [\"Front\", \"Prep\"]",
+        "[segment.front]\nnodes = [\"Front\", \"Prep\", \"Count\"]",
+    );
+    assert!(text.contains("\"Prep\", \"Count\"]"), "{text}");
+    let error = check(&text, &graph).expect_err("an unused selector");
+    assert!(
+        error.contains(
+            "[selector.by_text]: `[routing]` routes the calls to unary node `Count` through `by_text`, but no call to `Count` leaves its caller's segment, so no segment registers it"
+        ),
+        "{error}"
+    );
+}

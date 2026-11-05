@@ -41,7 +41,8 @@ pub(crate) fn registered<'s>(
 /// none of their crates read: a name a placement cannot use, gdl's own, or
 /// one a node, an entry adapter, a `[config]` key, or a bound pool policy
 /// already has; a type that is not in the table's crate; and a table no
-/// layout's `[routing]` names.
+/// layout's `[routing]` names, or names only for calls that each caller
+/// makes to a copy in its own segment.
 pub(crate) fn problems(
     spec: &Spec,
     manifest: &gdl_model::Manifest,
@@ -76,9 +77,12 @@ pub(crate) fn problems(
         }
         problems.extend(type_problem(bind).map(|problem| format!("{at}: {problem}")));
         // Judged only where every layout fits its graph: one that does not
-        // routes no crossing, and is refused for what it is.
+        // routes no crossing, and is refused for what it is. A call is
+        // routed only where it leaves its caller's segment: a caller with a
+        // copy of the service in its own segment calls that copy.
         let router = gdl_model::RequestRouter::Selector(name.clone());
-        let named = layouts.values().any(|layout| {
+        let mut local = BTreeSet::new();
+        let used = layouts.values().any(|layout| {
             layout.as_ref().is_none_or(|layout| {
                 let crossings = (0..layout.hops().len()).any(|hop| {
                     layout.hops()[hop]
@@ -87,17 +91,37 @@ pub(crate) fn problems(
                         .skip(1)
                         .any(|run| *layout.request_router(hop, run.start) == router)
                 });
-                let calls = manifest
-                    .nodes
-                    .iter()
-                    .filter(|node| node.role == gdl_model::Role::Unary)
-                    .any(|node| *layout.call_router(&node.name) == router);
+                let mut calls = false;
+                for node in &manifest.nodes {
+                    if node.role != gdl_model::Role::Unary
+                        || *layout.call_router(&node.name) != router
+                    {
+                        continue;
+                    }
+                    let remote = layout
+                        .service_segments(&node.name)
+                        .into_iter()
+                        .any(|segment| layout.called_in(&node.name, segment));
+                    if remote {
+                        calls = true;
+                    } else {
+                        local.insert(node.name.as_str());
+                    }
+                }
                 crossings || calls
             })
         });
-        if !named {
+        if used {
+            continue;
+        }
+        if local.is_empty() {
             problems.push(format!(
                 "{at}: no `[routing]` router names `{name}`, so no segment registers it"
+            ));
+        }
+        for service in local {
+            problems.push(format!(
+                "{at}: `[routing]` routes the calls to unary node `{service}` through `{name}`, but no call to `{service}` leaves its caller's segment, so no segment registers it"
             ));
         }
     }

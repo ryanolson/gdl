@@ -26,7 +26,7 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 | `[pool_policy.<name>] git`, `rev` | a repository and a revision. Both are required together. | one source is required |
 | `[pool_policy.<name>] lib` | the crate's library name, with `git` only, when it differs from the package's | optional |
 | `[pool_policy.<name>] type` | the type that implements `gdl::PoolPolicy` and `gdl::Build`, at the root of the crate's library | required |
-| `[selector.<name>] crate` | the package of a selector that a `[routing]` router names | required |
+| `[selector.<name>] crate` | the package of a selector that a `[routing]` router names, for a crossing or for a call that leaves its caller's segment | required |
 | `[selector.<name>] path`, `version`, `git`, `rev`, `lib` | the crate's source, as for `[pool_policy.<name>]` | one source is required |
 | `[selector.<name>] type` | the type that implements `gdl::Selector` and `gdl::Build`, at the root of the crate's library | required |
 | `[gdl] path` | a `gdl-runtime` directory | |

@@ -91,6 +91,8 @@ A selector routes a call as it routes a crossing, with these differences:
 - **The call's bound limits the selector's wait**: the request's deadline, or `call_timeout`. A call is cancelled by dropping it, which drops the wait with it; it does not read the context's cancel.
 - **Nothing has declined.** A refused call is not tried on another instance yet, so `request.declined()` is always empty.
 
+A call's selector is used only by a caller whose segment does not list the service. Only that caller's segment registers the selector. When every caller has a copy of the service in its own segment, no call leaves its segment, and no segment registers the selector. `cargo gdl check` then refuses a `[selector.<name>]` table that only this entry names, as it refuses a table that no router names.
+
 `affinity` keys a call on the metadata entry its `key` names, which the call carries from the caller's `cx`. So every call of one session reaches one instance, whatever its request says. A caller whose request does not carry the entry can set it with `cx.insert_meta` on a context of its own. Without the entry, `affinity` hashes the whole encoded request, so calls of one session with different requests reach different instances. A selector that reads a field of `Req` through `gdl::Projected` is the typed way to key on the request itself.
 
 ## Every hand-off is an offer

@@ -93,8 +93,8 @@ pub struct Spec {
     /// pools of a class whose policy has that name build and register.
     pub(crate) pool_policies: BTreeMap<String, Bind>,
     /// Selector name to implementation: what the segments that send
-    /// through a crossing whose `[routing]` router names it build and
-    /// register.
+    /// through a crossing, or call a unary node in another segment, whose
+    /// `[routing]` router names it build and register.
     pub(crate) selectors: BTreeMap<String, Bind>,
     /// The property kinds each bound pool policy reads, as its `NEEDS`
     /// names them: known once its crate is read, and empty before.
