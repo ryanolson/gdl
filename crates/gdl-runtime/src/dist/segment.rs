@@ -16,7 +16,7 @@ use super::roster::Roster;
 use super::runtime::{Entries, Runtime, RuntimeConfig};
 use super::stages::{DBackward, DForward, DInner};
 use crate::wire::Codec;
-use gdl::__runtime::Meters;
+use gdl::__runtime::{Meters, REQUEST};
 use gdl::Cx;
 use gdl::Decline;
 use gdl::Items;
@@ -203,6 +203,12 @@ impl Deployment {
             resp,
             request,
             reply,
+            // Resolved once: an entry locks the meters' table.
+            figures: self
+                .rt
+                .meters
+                .as_ref()
+                .map(|meters| meters.entry(name, REQUEST)),
         };
         self.served
             .lock()

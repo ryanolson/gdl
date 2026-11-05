@@ -131,14 +131,24 @@ pub async fn run_segment<B: SegmentBinary>(
     // carries the deployment's identity.
     let deployment = B::deployment()?;
     let registry = process.registry(&deployment, B::SEGMENT)?;
+    // The runtime records the segment's figures only where a system
+    // listener can serve them: with none, nobody could read them. Known
+    // before the build: the clients a build takes time their calls only
+    // then.
+    let recording = process.system_address().is_some();
     let builder = Builder::new(
         B::GRAPH_CONFIG,
-        &deployment.graph,
+        &deployment,
+        B::SEGMENT,
         registry.clone(),
         process.reserved(),
         config.selector_tables().clone(),
         config.runtime.records.clone(),
     )?;
+    // Before the build, where the nodes take their clients: the calls'
+    // figures are counted always, and timed only while the segment
+    // records.
+    builder.services.register(&registry, recording)?;
     // Before the build: a node that sets or reads a kind the graph does
     // not give it is refused at the call, and fails its build.
     crate::declare_properties(
@@ -181,10 +191,9 @@ pub async fn run_segment<B: SegmentBinary>(
     config.runtime.gate = builder.gate.clone();
     config.runtime.lifecycle = builder.lifecycle.clone();
     config.runtime.calls = builder.calls.clone();
-    // The runtime records the segment's figures only where a system
-    // listener can serve them: with none, nobody could read them. Before
-    // the launch, where a chooser's follower registers the pools' figures.
-    config.runtime.metrics = process.system_address().map(|_| registry.clone());
+    // Before the launch, where a chooser's follower registers the pools'
+    // figures.
+    config.runtime.metrics = recording.then(|| registry.clone());
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
         Ok(())
@@ -279,6 +288,10 @@ pub struct Builder {
     /// The links to the unary services its nodes call in other segments,
     /// which the deployment binds when it starts.
     calls: Calls,
+    /// The segment that hosts the copy each service its nodes call in
+    /// another segment runs in, by the service's name: the `segment` of
+    /// their call figures.
+    remote: BTreeMap<String, String>,
 }
 
 /// One built selector's or pool policy's [`Build::ready`].
@@ -287,12 +300,26 @@ type Readiness = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Send>;
 impl Builder {
     fn new(
         graph: &str,
-        manifest: &gdl_model::Manifest,
+        deployment: &DeploymentSpec,
+        segment: &str,
         registry: prometheus::Registry,
         reserved: Reserved,
         tables: BTreeMap<String, toml::Table>,
         records: HubRecords,
     ) -> std::result::Result<Self, Failure> {
+        let services = UnaryServices::new(
+            segment,
+            deployment
+                .graph
+                .nodes
+                .iter()
+                .map(|node| (node.name.clone(), node.calls.clone())),
+        );
+        let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
+        let remote = layout
+            .calls_from(segment)
+            .map(|(service, to)| (service.to_string(), to.to_string()))
+            .collect();
         Ok(Self {
             graph: toml::from_str(graph)?,
             registry,
@@ -309,12 +336,8 @@ impl Builder {
             gate: OfferGate::new(),
             lifecycle: Lifecycle::new(),
             calls: Calls::default(),
-            services: UnaryServices::new(
-                manifest
-                    .nodes
-                    .iter()
-                    .map(|node| (node.name.clone(), node.calls.clone())),
-            ),
+            services,
+            remote,
         })
     }
 
@@ -483,12 +506,18 @@ impl Builder {
         req: Option<Codec<Req>>,
         resp: Option<Codec<Resp>>,
     ) -> std::result::Result<(), Failure> {
+        let Some(segment) = self.remote.get(service) else {
+            return Err(format!(
+                "linking to {service}: none of this segment's nodes calls a copy of it in another segment"
+            )
+            .into());
+        };
         let client = self
             .calls
             .link(service, req, resp)
             .map_err(|e| format!("linking to {service}: {e}"))?;
         self.services
-            .add(service, client)
+            .add(service, segment, client)
             .map_err(|e| format!("linking to {service}: {e}"))?;
         Ok(())
     }

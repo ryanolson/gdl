@@ -20,6 +20,9 @@
 //! - `remote-affinity`: `remote`, with the calls routed through gdl's
 //!   `affinity` selector, which hashes the request: the selector's cost over
 //!   `round_robin`'s.
+//! - `remote-metrics`: `remote`, with both segments recording their
+//!   figures: the caller times each call, and the service's segment records
+//!   it as a visit of the service node.
 //! - `raw`: velo's raw unary call between the same two nodes, to a handler
 //!   that answers its 8-byte payload: the transport's floor, with no
 //!   envelope, bound, or service.
@@ -34,7 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gdl::{Cx, Items, Result, Sink, Unary, UnaryClient};
+use gdl::{Cx, Items, Result, Sink, Unary, UnaryClient, UnaryServices};
 use gdl_runtime::{Deployment, Placement, Roster, RuntimeConfig, bind_node, wire_codec};
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +110,7 @@ const SPLIT: &str = "[segment.front]\nnodes = ['S', 'D']\n[segment.add]\nnodes =
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: calls <local | remote | remote-deadline | remote-affinity | raw> <count>";
+    let usage = "usage: calls <local | remote | remote-deadline | remote-affinity | remote-metrics | raw> <count>";
     let which = args.next().expect(usage);
     let count: u64 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -122,8 +125,9 @@ fn main() {
         }
         let (client, _segments) = match which.as_str() {
             "local" => (UnaryClient::local(Arc::new(Add)), None),
-            "remote" | "remote-deadline" | "remote-affinity" => {
-                let (client, segments) = remote(which == "remote-affinity").await;
+            "remote" | "remote-deadline" | "remote-affinity" | "remote-metrics" => {
+                let (client, segments) =
+                    remote(which == "remote-affinity", which == "remote-metrics").await;
                 (client, Some(segments))
             }
             _ => panic!("{usage}"),
@@ -158,9 +162,12 @@ fn main() {
     });
 }
 
-/// A front and the service's segment on two velo nodes, and the front's
-/// link to the service, through `affinity` when `routed`.
-async fn remote(routed: bool) -> (UnaryClient<Num, Num>, (impl Sized, impl Sized)) {
+/// A front and the service's segment on two velo nodes, and the client of
+/// the service that the front's node `D` takes in its build, through
+/// `affinity` when `routed`. When `metrics`, both segments record their
+/// figures: the front times its calls, and the service's segment records
+/// each call as a visit.
+async fn remote(routed: bool, metrics: bool) -> (UnaryClient<Num, Num>, (impl Sized, impl Sized)) {
     let manifest = contract::manifest();
     let text = match routed {
         true => format!("{SPLIT}[routing]\nAdd = {{ selector = 'affinity' }}\n"),
@@ -181,17 +188,34 @@ async fn remote(routed: bool) -> (UnaryClient<Num, Num>, (impl Sized, impl Sized
         &placement,
         "add",
         &roster,
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            metrics: metrics.then(prometheus::Registry::new),
+            ..RuntimeConfig::default()
+        },
     )
     .expect("the service's deployment");
     let root = contract::assemble(&served, contract::Bindings::new().add(Arc::new(Add)))
         .expect("assembled");
     let served = served.start(root).expect("started");
     let config = RuntimeConfig::default();
-    let client = config
+    // As a segment binary's builder gives `D` its client: through the
+    // segment's services, which count each call.
+    let services = UnaryServices::new("front", [("D".to_string(), vec!["Add".to_string()])]);
+    if metrics {
+        services
+            .register(&prometheus::Registry::new(), true)
+            .expect("registered");
+    }
+    let link = config
         .calls
         .link::<Num, Num>("Add", wire_codec!(Num), wire_codec!(Num))
         .expect("a link");
+    services.add("Add", "add", link).expect("linked");
+    let client = services
+        .scope("D", async { UnaryClient::<Num, Num>::current("Add") })
+        .await
+        .expect("a client");
+    services.built();
     let caller = Deployment::new(front, &manifest, &placement, "front", &roster, config)
         .expect("the caller's deployment");
     let root = contract::assemble(&caller, contract::Bindings::new().d(Quiet)).expect("assembled");

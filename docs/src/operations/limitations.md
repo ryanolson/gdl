@@ -442,11 +442,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** give a request a deadline, or set a short `call_timeout`, for a service whose work outlives its callers.
 - **Test:** `a_dropped_call_leaves_the_service_running_until_its_bound` in `crates/gdl-runtime/tests/calls.rs`.
 
-### A drain's figures do not show the calls it waits for
-- **What:** a draining instance waits for the call permits it holds as well as its ledger, but `/metrics` shows only the ledger's roots and the egress permits. An instance can wait for calls with both at 0.
-- **Why:** the call figures are not built yet. See [Segment lifecycle](../concepts/lifecycle.md#stopping).
-- **Workaround:** a call holds its permit for at most its bound plus `call_reply_grace`, so the wait ends by then.
-
 ### A call's refusal and a reply past its grace can queue in velo
 - **What:** a service segment's refusal of a call holds no call permit, and a reply whose permit was released at its call's bound plus `call_reply_grace` holds none either. Both still wait in velo's queue to a caller that does not read, and that queue has no bound.
 - **Why:** velo answers every unary request and does not bound its response queue or a peer's receive queue. A refused forward hand-off is answered the same way. See [Admission and egress](../concepts/admission.md#calls-from-other-segments).

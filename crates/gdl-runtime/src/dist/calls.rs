@@ -17,12 +17,14 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use tokio::time::Instant;
 
 use super::envelope::{CallArrived, decoded};
 use super::runtime::RuntimeConfig;
 use super::runtime::{Runtime, Within};
 use crate::wire::{Codec, RequestCodec};
 use crate::zstd::{self, Compression};
+use gdl::__runtime::{Figures, Owner, Visit, ended};
 use gdl::{Cx, Error, ErrorKind, Result, Unary, UnaryClient};
 
 mod permit;
@@ -316,10 +318,54 @@ pub(crate) trait Serve: Send + Sync + 'static {
     /// The unary node's name.
     fn name(&self) -> &str;
 
+    /// The figures its accepted calls are recorded in as visits, when the
+    /// segment records its figures.
+    fn figures(&self) -> Option<&'static Figures>;
+
     /// Answer `request` under `cx`. The request's bytes are released once
     /// it is decoded, before the service runs: they are a view of velo's
-    /// read buffer, which a held view keeps whole.
-    fn serve<'a>(&'a self, cx: &'a Cx, request: Bytes) -> BoxFuture<'a, Reply>;
+    /// read buffer, which a held view keeps whole. A request that decodes,
+    /// and so runs, begins its call's `visit`; one refused does not.
+    fn serve<'a>(&'a self, cx: &'a Cx, request: Bytes, visit: &'a Visiting)
+    -> BoxFuture<'a, Reply>;
+}
+
+/// A call's visit of the service node, when the segment records one. The
+/// service's `serve` begins it, only once the request has decoded, and the
+/// handler ends it, once, with the outcome of the reply it writes
+/// ([`reply::Written::ending`]): the reply the caller reads, a fallback past
+/// `call_reply_max` or a bound that cut the service short included. It is
+/// held here, not in `serve`'s future, so that it outlives a `serve` that
+/// the call's bound drops.
+pub(crate) struct Visiting {
+    /// The service's figures and the call's arrival, where its clock
+    /// starts; `None` when the segment records nothing.
+    starts: Option<(&'static Figures, Instant)>,
+    owner: OnceLock<Owner>,
+}
+
+impl Visiting {
+    fn new(starts: Option<(&'static Figures, Instant)>) -> Self {
+        Self {
+            starts,
+            owner: OnceLock::new(),
+        }
+    }
+
+    /// Begin the visit, for the service's context `cx`: the visit it
+    /// belongs to, when the segment records one.
+    fn begin(&self, cx: &Cx) -> Option<Arc<Visit>> {
+        let (figures, at) = self.starts?;
+        let owner = self
+            .owner
+            .get_or_init(|| Visit::request(figures, at, cx.deadline(), false));
+        Some(Arc::clone(owner.visit()))
+    }
+
+    /// The visit, if `serve` began one.
+    fn into_owner(self) -> Option<Owner> {
+        self.owner.into_inner()
+    }
 }
 
 /// A service a segment hosts for callers in other segments.
@@ -334,6 +380,9 @@ pub(crate) struct Hosted<S: Unary> {
     pub(crate) request: Option<Compression>,
     /// Under an entry that names its reply: how an answer is compressed.
     pub(crate) reply: Option<Compression>,
+    /// The figures its accepted calls are recorded in as visits, when the
+    /// segment records its figures.
+    pub(crate) figures: Option<&'static Figures>,
 }
 
 impl<S: Unary> Hosted<S> {
@@ -356,7 +405,16 @@ impl<S: Unary> Serve for Hosted<S> {
         &self.name
     }
 
-    fn serve<'a>(&'a self, cx: &'a Cx, request: Bytes) -> BoxFuture<'a, Reply> {
+    fn figures(&self) -> Option<&'static Figures> {
+        self.figures
+    }
+
+    fn serve<'a>(
+        &'a self,
+        cx: &'a Cx,
+        request: Bytes,
+        visit: &'a Visiting,
+    ) -> BoxFuture<'a, Reply> {
         Box::pin(async move {
             let req = match self.request(&request) {
                 Ok(req) => req,
@@ -368,6 +426,17 @@ impl<S: Unary> Serve for Hosted<S> {
             if cx.deadline().is_some_and(gdl::Deadline::is_expired) {
                 return Reply::refused(Error::deadline_exceeded());
             }
+            // Accepted and decoded: a visit of the service node, from the
+            // call's arrival, under the request's id, which its context
+            // carries. A refusal above is none; its caller counts it.
+            let visited;
+            let cx = match visit.begin(cx) {
+                Some(visit) => {
+                    visited = cx.clone().with_visit(Some(visit));
+                    &visited
+                }
+                None => cx,
+            };
             match self.service.call(cx, req).await {
                 Ok(resp) => Reply::answered(|out| self.resp.encode_into(&resp, out), self.reply),
                 Err(error) => Reply::failed(error),
@@ -398,9 +467,14 @@ pub(crate) async fn handle(
         service,
         reply,
         permit,
+        visit,
     } = answer(rt, served, bytes).await;
     let refused = reply.is_refused();
     let written = reply.write(service.as_deref().map(Serve::name), max);
+    // The one end of the service's visit: with what the caller reads.
+    ended(visit.as_ref(), written.ending());
+    drop(visit);
+    let written = written.bytes;
     match permit {
         Some((permit, bound)) if !refused => {
             let bytes = permit.retain(written, bound + grace);
@@ -422,11 +496,14 @@ pub(crate) async fn handle(
 }
 
 /// What the handler answers one call with: the service, once known, the
-/// reply, and the call's permit, with the call's bound, once it took one.
+/// reply, the call's permit, with the call's bound, once it took one, and
+/// the service's visit, once it began one.
 struct Answered {
     service: Option<Arc<dyn Serve>>,
     reply: Reply,
     permit: Option<(CallPermit, tokio::time::Instant)>,
+    /// The service's visit of the call, if it began one.
+    visit: Option<Owner>,
 }
 
 /// Answer one call, `bytes`, that reached the `gdl.call` handler of `rt`,
@@ -446,6 +523,7 @@ async fn answer(
         service: None,
         reply: Reply::refused(error),
         permit: None,
+        visit: None,
     };
     let (Some(rt), Some(served)) = (rt.upgrade(), served.upgrade()) else {
         return refused(Error::new(
@@ -473,6 +551,13 @@ async fn answer(
             ),
         ));
     };
+    // The call's arrival, where its visit starts, when the segment records
+    // one.
+    let visiting = Visiting::new(
+        service
+            .figures()
+            .map(|figures| (figures, tokio::time::Instant::now())),
+    );
     let root = call.cx.root();
     let cx = match call.cx.arrive(rt.config.clock_skew, || rt.wall_now()) {
         Ok(cx) => cx,
@@ -504,7 +589,7 @@ async fn answer(
     // decoded: the rest of the call is read.
     let request = bytes.slice(at);
     drop(bytes);
-    let served = service.serve(&cx, request);
+    let served = service.serve(&cx, request, &visiting);
     let at = bound.instant();
     let reply = match tokio::time::timeout_at(at, served).await {
         Ok(reply) => reply,
@@ -514,6 +599,7 @@ async fn answer(
         service: Some(Arc::clone(service)),
         reply,
         permit: Some((permit, at)),
+        visit: visiting.into_owner(),
     }
 }
 
@@ -602,11 +688,13 @@ mod tests {
                 resp: Codec::<bool>::new(gdl_model::Encoding::default()),
                 request,
                 reply: None,
+                figures: None,
             };
             let reply = hosted
-                .serve(&Cx::new(), request_bytes)
+                .serve(&Cx::new(), request_bytes, &Visiting::new(None))
                 .await
-                .write(Some("Released"), 1024);
+                .write(Some("Released"), 1024)
+                .bytes;
             let answered = Codec::<bool>::new(gdl_model::Encoding::default())
                 .decode(reply::read(&reply).expect("answered"))
                 .expect("decoded");
@@ -647,6 +735,7 @@ mod tests {
             resp: codec,
             request,
             reply: None,
+            figures: None,
         }
     }
 
@@ -660,15 +749,16 @@ mod tests {
         let mut magic = vec![0x28, 0xb5, 0x2f, 0xfd];
         magic.extend_from_slice(b"not a frame");
         let reply = raw(None)
-            .serve(&Cx::new(), Bytes::from(magic.clone()))
+            .serve(&Cx::new(), Bytes::from(magic.clone()), &Visiting::new(None))
             .await
-            .write(Some("Raw"), 1024);
+            .write(Some("Raw"), 1024)
+            .bytes;
         assert_eq!(reply::read(&reply).expect("answered"), &magic[..]);
         let reply = raw(Some(Compression::new(0, 1024)))
-            .serve(&Cx::new(), Bytes::from(magic))
+            .serve(&Cx::new(), Bytes::from(magic), &Visiting::new(None))
             .await;
         assert!(reply.is_refused(), "a bad frame never reaches the service");
-        let bytes = reply.write(Some("Raw"), 1024);
+        let bytes = reply.write(Some("Raw"), 1024).bytes;
         let error = reply::read(&bytes).expect_err("refused");
         assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
     }
@@ -682,10 +772,10 @@ mod tests {
         let mut frame = Vec::new();
         zstd::compress_into(&plain, &mut frame).expect("a frame");
         let refused = raw(Some(Compression::new(0, 8192)))
-            .serve(&Cx::new(), Bytes::from(frame.clone()))
+            .serve(&Cx::new(), Bytes::from(frame.clone()), &Visiting::new(None))
             .await;
         assert!(refused.is_refused(), "the service never ran");
-        let bytes = refused.write(Some("Raw"), 1024);
+        let bytes = refused.write(Some("Raw"), 1024).bytes;
         let error = reply::read(&bytes).expect_err("refused");
         assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
         assert!(
@@ -693,9 +783,10 @@ mod tests {
             "{error}"
         );
         let reply = raw(Some(Compression::new(0, plain.len())))
-            .serve(&Cx::new(), Bytes::from(frame))
+            .serve(&Cx::new(), Bytes::from(frame), &Visiting::new(None))
             .await
-            .write(Some("Raw"), 1 << 20);
+            .write(Some("Raw"), 1 << 20)
+            .bytes;
         assert_eq!(reply::read(&reply).expect("answered"), &plain[..]);
     }
 }

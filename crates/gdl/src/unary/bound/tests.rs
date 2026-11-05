@@ -51,10 +51,13 @@ impl Unary for Words {
 
 /// A table where `Router` calls `Words`, which it hosts.
 fn hosting(words: Arc<Words>) -> UnaryServices {
-    let services = UnaryServices::new([
-        ("Router".to_string(), vec!["Words".to_string()]),
-        ("Words".to_string(), Vec::new()),
-    ]);
+    let services = UnaryServices::new(
+        "front",
+        [
+            ("Router".to_string(), vec!["Words".to_string()]),
+            ("Words".to_string(), Vec::new()),
+        ],
+    );
     services.serve("Words", words).expect("served");
     services
 }
@@ -112,7 +115,7 @@ fn a_build_that_takes_a_client_of_other_types_fails() {
 
 #[test]
 fn a_service_the_segment_neither_hosts_nor_links_is_refused() {
-    let services = UnaryServices::new([("Router".to_string(), vec!["Words".to_string()])]);
+    let services = UnaryServices::new("front", [("Router".to_string(), vec!["Words".to_string()])]);
     let error = take::<String, usize>(&services, "Router", "Words").expect_err("no copy");
     assert_eq!(error.kind(), ErrorKind::Placement);
     assert!(error.message().contains("no copy of `Words`"), "{error}");
@@ -194,7 +197,7 @@ async fn a_call_waiting_on_a_ready_that_failed_fails_with_its_error() {
 /// A service added after the build waits for its readiness too.
 #[tokio::test]
 async fn a_service_served_after_the_build_is_ready_after_its_own_ready() {
-    let services = UnaryServices::new([("Router".to_string(), vec!["Words".to_string()])]);
+    let services = UnaryServices::new("front", [("Router".to_string(), vec!["Words".to_string()])]);
     services.built();
     let words = Arc::new(Words::default());
     services.serve("Words", Arc::clone(&words)).expect("served");

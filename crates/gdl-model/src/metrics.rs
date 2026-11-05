@@ -74,8 +74,8 @@ impl MetricKind {
     }
 }
 
-/// The metrics the runtime records for each segment, what each instance
-/// holds and its phase, those a chooser
+/// The metrics the runtime records for each segment and for the calls its
+/// nodes make to unary services, what each instance holds and its phase, those a chooser
 /// records of its offers to pools and shows of the pools it follows, the
 /// writes to a pool hub's record tables, the process's own figures
 /// (`gdl-cgroup`'s, served unprefixed beside the registry), and dynamo's
@@ -83,7 +83,7 @@ impl MetricKind {
 /// which it reserves. A node's own metrics may not take these names: they
 /// would collide in the registry or in the scrape, or, for the reserved
 /// one, a dashboard would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 62] = [
+pub const RUNTIME_METRICS: [&str; 67] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -99,6 +99,10 @@ pub const RUNTIME_METRICS: [&str; 62] = [
     "end_to_end_cancellation_total",
     "end_to_end_time_to_first_item_seconds",
     "end_to_end_duration_seconds",
+    "calls_total",
+    "call_errors_total",
+    "call_cancellation_total",
+    "call_duration_seconds",
     "uptime_seconds",
     "instance_phase",
     "instance_avoided",
@@ -107,6 +111,7 @@ pub const RUNTIME_METRICS: [&str; 62] = [
     "admission_admitted",
     "admission_limit",
     "egress_in_use",
+    "call_permits_held",
     "active_anchors",
     "offers_declined_total",
     "pool_offers_total",

@@ -6,6 +6,7 @@
 //! before it is written, so that the limit holds the bytes on the wire; the
 //! caller decodes it within its own `decompressed_max`.
 
+use gdl::__runtime::Ending;
 use gdl::{Error, ErrorKind, Result};
 
 use super::super::envelope::{decode, decoded, write_msgpack};
@@ -82,21 +83,50 @@ impl Reply {
     /// answer becomes a failure. The settings refuse a `call_reply_max` below
     /// [`FALLBACK_MAX`], so the fallback always fits; below it, the tag
     /// alone is written, which the caller reads as a `Codec` error.
-    pub(crate) fn write(self, service: Option<&str>, max: usize) -> Vec<u8> {
+    ///
+    /// With the bytes comes the error they carry, if any
+    /// ([`Written::ending`]): the one outcome the service's visit of the
+    /// call ends with, so that it is the outcome the caller reads, a
+    /// fallback included.
+    pub(crate) fn write(self, service: Option<&str>, max: usize) -> Written {
         // The tag of what replaces a reply past `max`.
-        let (instead, bytes) = match self.0 {
-            Kind::Answered(bytes) => (Tag::Failed, bytes),
-            Kind::Failed(error) => (Tag::Failed, error_bytes(Tag::Failed, &error)),
-            Kind::Refused(error) => (Tag::Refused, error_bytes(Tag::Refused, &error)),
+        let (instead, bytes, said) = match self.0 {
+            Kind::Answered(bytes) => (Tag::Failed, bytes, None),
+            Kind::Failed(error) => (Tag::Failed, error_bytes(Tag::Failed, &error), Some(error)),
+            Kind::Refused(error) => (Tag::Refused, error_bytes(Tag::Refused, &error), Some(error)),
         };
         if bytes.len() <= max {
-            return bytes;
+            return Written { bytes, said };
         }
-        let fallback = fallback(instead, service, bytes.len());
-        if fallback.len() <= max {
-            return fallback;
+        let error = oversized(service, bytes.len());
+        let fallback = error_bytes(instead, &error);
+        let bytes = if fallback.len() <= max {
+            fallback
+        } else {
+            vec![instead as u8]
+        };
+        Written {
+            bytes,
+            said: Some(error),
         }
-        vec![instead as u8]
+    }
+}
+
+/// A reply's bytes, as they go on the wire, and the error they carry, if
+/// they carry one.
+pub(crate) struct Written {
+    pub(crate) bytes: Vec<u8>,
+    said: Option<Error>,
+}
+
+impl Written {
+    /// How the service's visit of the call ends: as the caller reads these
+    /// bytes, answered or with their error.
+    pub(crate) fn ending(&self) -> Ending<'_> {
+        match &self.said {
+            None => Ending::Finished,
+            Some(error) => Ending::Failed(error),
+        }
     }
 }
 
@@ -120,12 +150,12 @@ pub(crate) const FALLBACK_MAX: usize = 153;
 // The settings' least `call_reply_max` holds the largest fallback.
 const _: () = assert!(FALLBACK_MAX <= crate::dist::runtime::RuntimeConfig::CALL_REPLY_MIN);
 
-/// What replaces a reply of `len` bytes that is past its limit: a `Codec`
-/// error after `tag`, which names the service, cut to [`NAME_CUT`] bytes,
-/// and the reply's length. Its size has a fixed bound, [`FALLBACK_MAX`],
-/// whatever the reply and the name. Written only for a reply past its
-/// limit: a reply within it costs no allocation for this.
-fn fallback(tag: Tag, service: Option<&str>, len: usize) -> Vec<u8> {
+/// The error that replaces a reply of `len` bytes that is past its limit:
+/// `Codec`, naming the service, cut to [`NAME_CUT`] bytes, and the reply's
+/// length. After its reply's tag ([`fallback`]) its size has a fixed bound,
+/// [`FALLBACK_MAX`], whatever the reply and the name. Made only for a reply
+/// past its limit: a reply within it costs no allocation for this.
+fn oversized(service: Option<&str>, len: usize) -> Error {
     let message = match service {
         Some(name) => format!(
             "the reply of unary node `{}` is {len} bytes, over `call_reply_max`",
@@ -133,7 +163,14 @@ fn fallback(tag: Tag, service: Option<&str>, len: usize) -> Vec<u8> {
         ),
         None => format!("the reply to a call is {len} bytes, over `call_reply_max`"),
     };
-    error_bytes(tag, &Error::new(ErrorKind::Codec, message))
+    Error::new(ErrorKind::Codec, message)
+}
+
+/// What replaces a reply of `len` bytes past its limit: [`oversized`]'s
+/// error after `tag`.
+#[cfg(test)]
+fn fallback(tag: Tag, service: Option<&str>, len: usize) -> Vec<u8> {
+    error_bytes(tag, &oversized(service, len))
 }
 
 /// `name`, cut to at most [`NAME_CUT`] bytes, at a character's boundary.
@@ -260,7 +297,7 @@ mod tests {
             for name in &names {
                 for max in limits {
                     for size in [0, max - 2, max - 1, max, max + 1, max + 2, 4 * max] {
-                        let bytes = reply(kind, size).write(name.as_deref(), max);
+                        let bytes = reply(kind, size).write(name.as_deref(), max).bytes;
                         assert!(
                             bytes.len() <= max,
                             "{} bytes over {max}, size {size}",
@@ -299,7 +336,7 @@ mod tests {
     /// what is written: the tag alone, which reads as a `Codec` error.
     #[test]
     fn a_limit_below_the_fallback_writes_the_tag_alone() {
-        let bytes = reply(Tag::Refused, 4096).write(Some("Tok"), 32);
+        let bytes = reply(Tag::Refused, 4096).write(Some("Tok"), 32).bytes;
         assert_eq!(bytes, [Tag::Refused as u8]);
         assert_eq!(read(&bytes).expect_err("an error").kind(), ErrorKind::Codec);
     }
@@ -325,7 +362,7 @@ mod tests {
     fn a_compressed_answer_is_held_to_its_limit_on_its_wire_bytes() {
         let max = 1024;
         let zeros = vec![0u8; 100 * max];
-        let bytes = coded(&zeros, 512).write(Some("Tok"), max);
+        let bytes = coded(&zeros, 512).write(Some("Tok"), max).bytes;
         assert!(bytes.len() <= max, "{} bytes", bytes.len());
         assert_eq!(bytes[0], Tag::Answered as u8);
         assert!(zstd::is_frame(&bytes[1..]));
@@ -337,19 +374,21 @@ mod tests {
         // A frame past the limit: the fallback, which names the service.
         let mut rng = Seeded(0xc0de_c0de);
         let dense: Vec<u8> = (0..4 * max).map(|_| rng.next() as u8).collect();
-        let bytes = coded(&dense, 512).write(Some("Tok"), max);
+        let bytes = coded(&dense, 512).write(Some("Tok"), max).bytes;
         assert!(bytes.len() <= max);
         let error = read(&bytes).expect_err("past the limit");
         assert_eq!(error.kind(), ErrorKind::Codec);
         assert!(error.message().contains("`Tok`"), "{error}");
         // Below the floor, plain.
-        let bytes = coded(&zeros[..500], 512).write(Some("Tok"), max);
+        let bytes = coded(&zeros[..500], 512).write(Some("Tok"), max).bytes;
         assert_eq!(read(&bytes).expect("answered"), &zeros[..500]);
         // A frame that is not shorter: plain.
-        let bytes = coded(&dense[..900], 512).write(Some("Tok"), max);
+        let bytes = coded(&dense[..900], 512).write(Some("Tok"), max).bytes;
         assert_eq!(read(&bytes).expect("answered"), &dense[..900]);
         // An error stays an error, plain, under a codec too.
-        let bytes = Reply::failed(Error::new(ErrorKind::Node, "x".repeat(800))).write(None, max);
+        let bytes = Reply::failed(Error::new(ErrorKind::Node, "x".repeat(800)))
+            .write(None, max)
+            .bytes;
         assert_eq!(read(&bytes).expect_err("failed").message().len(), 800);
     }
 
@@ -360,7 +399,7 @@ mod tests {
     #[test]
     fn a_compressed_answer_decodes_within_the_callers_limit() {
         let zeros = vec![0u8; 100_000];
-        let bytes = coded(&zeros, 512).write(Some("Tok"), 1024);
+        let bytes = coded(&zeros, 512).write(Some("Tok"), 1024).bytes;
         assert!(bytes.len() <= 1024);
         let limit = Compression::new(512, 8192);
         let error = response(&bytes, Some(limit), |b| Ok(b.len())).expect_err("past the limit");
@@ -426,7 +465,7 @@ mod tests {
                 1 | 2 => (max + rng.below(129)).saturating_sub(64),
                 _ => rng.below(2 * max),
             };
-            let bytes = reply(kind, size).write(name.as_deref(), max);
+            let bytes = reply(kind, size).write(name.as_deref(), max).bytes;
             let at = || {
                 format!(
                     "seed {SEED:#x}, case {case}: {kind:?}, name of {:?} bytes, limit {max}, content {size}, written {}",

@@ -463,13 +463,28 @@ impl gdl::Build for Locked {
 
 /// The client a build takes of a service its segment hosts reads the
 /// service's readiness once, and then builds the service's future as a
-/// local client does: no allocation of its own once the service is ready.
+/// local client does: no allocation of its own once the service is ready,
+/// whether the segment records its calls' durations or only counts them.
 #[test]
 fn a_hosted_services_call_allocates_nothing_once_the_service_is_ready() {
-    let services = gdl::UnaryServices::new([(
-        "Caller".to_string(),
-        vec!["AddOne".to_string(), "Locked".to_string()],
-    )]);
+    for durations in [false, true] {
+        hosted_call_allocations(durations);
+    }
+}
+
+fn hosted_call_allocations(durations: bool) {
+    let services = gdl::UnaryServices::new(
+        "front",
+        [(
+            "Caller".to_string(),
+            vec!["AddOne".to_string(), "Locked".to_string()],
+        )],
+    );
+    if durations {
+        services
+            .register(&prometheus::Registry::new(), true)
+            .expect("registered");
+    }
     services.serve("AddOne", Arc::new(AddOne)).expect("served");
     services
         .serve("Locked", Arc::new(Locked(Default::default())))
@@ -482,6 +497,6 @@ fn a_hosted_services_call_allocates_nothing_once_the_service_is_ready() {
     }));
     services.built();
     futures::executor::block_on(services.ready()).expect("ready");
-    assert_eq!(call_allocations(&ready), 0);
-    assert_eq!(call_allocations(&locked), 0);
+    assert_eq!(call_allocations(&ready), 0, "durations: {durations}");
+    assert_eq!(call_allocations(&locked), 0, "durations: {durations}");
 }

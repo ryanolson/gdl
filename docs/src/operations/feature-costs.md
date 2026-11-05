@@ -1062,6 +1062,39 @@ It makes no allocation of its own either: `a_hosted_services_call_allocates_noth
 
 The `unsafe` code is checked by Miri, under Stacked Borrows with and without `-Zmiri-strict-provenance`, and under Tree Borrows, on the module's tests: `cargo +nightly miri test -p gdl --lib unary::`, with `-Zmiri-disable-isolation` because a context reads the clock. The tests cover futures of 0, 256, and 257 bytes, futures aligned to 16, 64, and 512, a drop on each path, also when the future panics in `poll` or in `Drop`, and two futures that hold a borrow of their own local across a pending poll, one of which reads it in its destructor. With the buffer's address taken through a `&mut` to the buffer, Miri reports both as undefined behavior. Wall time is not measured here.
 
+### Counting a call
+
+A client a node takes in its build counts each of its calls and their errors, always, and times each call while its segment records its figures ([Calls to unary services](observability.md#calls-to-unary-services)). The count goes in the calling thread's shard of its caller's figures, with one `fetch_add`, as a visit's does. A small guard in the call's future counts a call dropped before it ends, as cancelled or, past its deadline, as `deadline_exceeded`. The duration takes two reads of `std::time::Instant`. The `timed` shape is `hosted` in a segment that records its figures.
+
+Measured with the same command and host as above, base `b39f2ce6` and the change built in turn in one checkout and one target directory, two rounds at load 5 to 7. Every row repeated exactly in both rounds, but the mutex rows, which moved by about 2 Ir:
+
+| Callgrind Ir per call | Base | Change | Change − base |
+|---|---|---|---|
+| `placed`: a client made by hand, which counts nothing | 102.0 | 122.0 | +20.0 |
+| `hosted`: counted, metrics off | 108.0 | 161.0 | +53.0 |
+| `timed`: counted and timed, metrics on | | 347.0 | +186.0 over `hosted` |
+| `placed`, pending once | 672.2 | 698.2 | +26.0 |
+| `hosted`, pending once | 678.2 | 737.2 | +59.0 |
+| `timed`, pending once | | 923.2 | +186.0 over `hosted` |
+| `placed`, a lookup behind a tokio mutex | 429.2 to 430.0 | 449.2 to 449.3 | about +20 |
+| `hosted`, a lookup behind a tokio mutex | 435.9 to 437.9 | 488.8 to 489.8 | about +52 |
+| `timed`, a lookup behind a tokio mutex | | 675.0 to 675.5 | about +186 over `hosted` |
+
+The `direct` and `boxed` rows do not change, but for their pending rows, 4 Ir higher in both (607.2 to 611.2, and 803.2 to 807.2), from codegen in the example's loop.
+
+- **No allocation.** `a_hosted_services_call_allocates_nothing_once_the_service_is_ready` in `crates/gdl/tests/allocations.rs` counts 0 for both services, timed and not.
+- **Where the counted call's +53 goes**, from a build with line tables: about 8 Ir for the shard's `fetch_add`, through aarch64's outline-atomics helper; about 3 for the thread's shard index; about 3 for the branch on whether calls are timed; and about 15 to 20 for the drop guard and the moves of a call future that is 32 bytes larger. The rest is in the same lines' loads and branches. A client made by hand pays the guard's empty checks and the larger future: +20.
+- **A call is counted once,** not per item: +53 Ir is small next to a request's edge, about 2,900 Ir for one hop ([Stages in callgrind Ir](#stages-in-callgrind-ir)).
+- **Timing costs about 186 Ir more,** two clock reads and the histogram's bucket. It runs only while the segment records its figures.
+- **The drop guard is kept** so that a call cut off by its caller, or at its deadline, is counted once, as cancelled or `deadline_exceeded`, in both placements: a call to another segment that reaches its bound counts as `deadline_exceeded` too. Without the guard, a local call dropped at the deadline would count nowhere.
+
+The budget for the count was "a few Ir", from the prototype's one plain thread-local counter, which had no atomic, no shard, and no tracking of a call's end or its cancel. On these numbers the budget is now what the table shows: +53 Ir for a counted call with metrics off, and +20 for a client made by hand.
+
+**Rejected:**
+- **One writer per shard**, with a relaxed load and store in place of the `fetch_add`, for the first 64 threads, and a shared overflow shard for later ones. It would be a third rule for picking a shard, beside the two meters' one, and every thread after the first 64 to record would share the overflow shard, which is worse than the masked index once short-lived threads have come and gone. Each figure would also depend on one writer per shard, a new invariant on a hot path. A cheaper counter is a change to the shared meter, for every figure.
+- **No drop guard**, about 15 to 20 Ir less: a local call dropped at its deadline would count nowhere, while a remote call reaching its bound counts as `deadline_exceeded`. The figures would no longer be the same in both placements.
+- **Other shapes, measured in one round each.** The count's fields on the call future with a `PinnedDrop`: `placed` 157 and `hosted` 195, as the drop glue and the call's poll were no longer inlined into the caller; with both forced inline, 134 and 171. A wrapper future around the service's in the slot, only for a counted client: `placed` 126 and `hosted` 211, as the wrapper's place, poll, and drop ran out of line. A thread-local shard index that needs no lazy initialisation, with a fixed array of 64 shards: 3 Ir less on `hosted`, and a second spelling of the meters' shard rule.
+
 ## A remote unary call
 
 What a call to a unary service in another segment costs: one velo unary call to the service segment's `gdl.call` handler, with the call's bound on both sides ([Unary services](../concepts/unary.md#a-call-to-another-segment)). The control is velo's raw unary call between the same two nodes, to a handler that answers its 8-byte payload, under a timeout: no envelope, no bound on the handler's side, and no service. The service adds one to a number, so the rows are the call's overhead. The table was measured before calls took a call permit; [The call permit](#the-call-permit) adds it.
@@ -1142,3 +1175,21 @@ target/release/deps/callcodec-<hash> <mode> 2000    # prints the allocations and
 | allocations, `remote`, `remote-deadline`, `remote-affinity`, `local` | 27.09, 27.09, 30.09, 0 | 27.09, 27.09, 30.09, 0 |
 
 Callgrind's per-function counts of one `remote` run of each build, (Ir at 4,000 − Ir at 2,000) / 2,000, put the change at about 38 Ir per call, under 0.1%: about 19 in the client's future, 13 in `Runtime::pick_call`, which the change does not touch and which is not traced, and 3 in the handler's `serve`. That is within the rounds' spread, so the table cannot show it.
+
+### Call figures on a remote call
+
+What counting a call, and recording it, add to a call to another segment. The bench's `remote` client is now the one a build takes, so it counts each call. `remote-metrics` is `remote` with both segments recording their figures: the caller times each call, and the service's segment records each call it accepts as a visit of the service node. The same bench and command as above, three rounds at load 5 to 7, base `b39f2ce6`:
+
+| Per call, (Ir at 2,000 − Ir at 1,000) / 1,000 | Base | Change |
+|---|---|---|
+| `remote`, Ir | 41,867 to 42,192 | 41,881 to 42,285 |
+| `remote`, allocations | 27.09 | 27.09 |
+| `remote-metrics`, Ir | | 42,965 to 43,151 |
+| `remote-metrics`, allocations | | 28.09 |
+| `raw`, Ir | 33,632 to 33,720 | 33,822 to 33,921 |
+| `local`, Ir | 90.1 to 95.2 | 103.9 to 113.9 |
+| `local`, allocations | 0 | 0 |
+
+- **Counting a remote call is within the rounds' spread,** as the local rows predict: about 50 Ir in 42,000.
+- **Recording costs about 1,000 Ir and one allocation per call:** the caller's two clock reads, and the service's visit. The allocation is the visit's `Arc`, which the service's context shares, as any visit's is ([Runtime metrics](#runtime-metrics)). It is made only on this path: a call to another segment, in a service segment that records its figures. A call in the caller's segment makes none, recorded or not.
+- **`local` is a client made by hand,** which counts nothing: it pays the call's empty guard, as `placed` does above. The bench's `local` rows vary by a few Ir from round to round, unlike the example's.

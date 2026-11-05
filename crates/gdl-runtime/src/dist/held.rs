@@ -1,6 +1,7 @@
 //! What one segment instance holds, read when its registry is scraped: the
 //! roots its admission ledger holds and the ledger's limit, the egress
-//! permits its streams hold, and the anchors its velo node keeps open. An
+//! permits its streams hold, the call permits its accepted calls hold, and
+//! the anchors its velo node keeps open. An
 //! operator that drains the instance reads these to see the drain's
 //! progress; only the process's exit completes it. A request that a source
 //! calls in its own segment passes through neither admission nor egress,
@@ -24,7 +25,7 @@ use super::runtime::{DECLINES, Runtime};
 type Family = (&'static str, &'static str, fn(&Runtime) -> f64);
 
 /// The families, each one series with the registry's labels only.
-const FAMILIES: [Family; 4] = [
+const FAMILIES: [Family; 5] = [
     (
         "admission_admitted",
         "Root requests this instance's admission ledger holds: each until its last stream here is retired by velo.",
@@ -41,6 +42,11 @@ const FAMILIES: [Family; 4] = [
         "egress_in_use",
         "Egress permits this instance holds: one for each stream it produces, until velo has handed its output on.",
         |rt| rt.egress.in_use() as f64,
+    ),
+    (
+        "call_permits_held",
+        "Call permits this instance holds: one for each call from another segment it accepted, until velo has sent its reply, or its bound and call_reply_grace have passed. A drain waits for them.",
+        |rt| rt.call_limit.held() as f64,
     ),
     (
         "active_anchors",

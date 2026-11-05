@@ -479,7 +479,8 @@ async fn a_local_call_never_encodes() {
     let service = Service::new();
     // The router's client, as a segment binary gives it: the copy the
     // segment hosts.
-    let services = gdl::UnaryServices::new([("Router".to_string(), vec!["Tok".to_string()])]);
+    let services =
+        gdl::UnaryServices::new("front", [("Router".to_string(), vec!["Tok".to_string()])]);
     services.serve("Tok", Arc::clone(&service)).expect("served");
     let local: UnaryClient<Ask, Told> = services
         .scope("Router", async { UnaryClient::current("Tok") })

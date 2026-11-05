@@ -37,6 +37,10 @@ use crate::cx::Deadline;
 use crate::error::{Error, ErrorKind, Result};
 use gdl_model::ENDPOINT_LABEL;
 
+mod calls;
+
+pub(crate) use calls::{CallFigures, CallMeter, Placement as CallPlacement};
+
 /// The buckets of every duration: dynamo's, 5 ms to 10 minutes (an
 /// inference request can last minutes), with five more below them, since
 /// a segment's request path often takes less than a millisecond.
@@ -103,10 +107,7 @@ impl Meters {
     /// each entry's shards. Entries are added as the hops that own them
     /// are assembled, before the segment serves.
     pub fn register(registry: &Registry) -> Result<Self> {
-        let shards = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .next_power_of_two()
-            .min(SHARD_LIMIT);
+        let shards = shard_count();
         let entries = Entries::default();
         let collector = Scrape::new(Arc::clone(&entries))?;
         registry.register(Box::new(collector)).map_err(failed)?;
@@ -133,6 +134,27 @@ impl Meters {
     }
 }
 
+/// How many shards a figure is split into: one per thread the machine
+/// runs at once, rounded up to a power of two, at most `SHARD_LIMIT`.
+fn shard_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .next_power_of_two()
+        .min(SHARD_LIMIT)
+}
+
+/// The calling thread's index, which picks its shard of every figure.
+#[inline]
+fn shard_index() -> usize {
+    thread_local! {
+        static INDEX: usize = {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            NEXT.fetch_add(1, Relaxed)
+        };
+    }
+    INDEX.with(|index| *index)
+}
+
 fn failed(error: prometheus::Error) -> Error {
     Error::new(
         ErrorKind::Placement,
@@ -151,14 +173,7 @@ pub struct Figures {
 impl Figures {
     /// The calling thread's shard.
     fn shard(&self) -> &Shard {
-        thread_local! {
-            static INDEX: usize = {
-                static NEXT: AtomicUsize = AtomicUsize::new(0);
-                NEXT.fetch_add(1, Relaxed)
-            };
-        }
-        let index = INDEX.with(|index| *index);
-        &self.shards[index & (self.shards.len() - 1)]
+        &self.shards[shard_index() & (self.shards.len() - 1)]
     }
 }
 

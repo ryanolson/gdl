@@ -213,7 +213,10 @@ async fn a_call_from_ready_reaches_a_service_whose_ready_reads_pool_records() {
         &global_pool(),
     );
     let records = &config.runtime.records;
-    let services = gdl::UnaryServices::new([("Caller".to_string(), vec!["Loaded".to_string()])]);
+    let services = gdl::UnaryServices::new(
+        "front",
+        [("Caller".to_string(), vec!["Loaded".to_string()])],
+    );
     let loaded = records
         .scope(services.scope("Loaded", Loaded::build((), ())))
         .await

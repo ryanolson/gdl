@@ -52,7 +52,7 @@ A service's `ready` run during the build was rejected. A `ready` that reads `Poo
 
 ## What a call costs in the caller's segment
 
-The client of a service the segment hosts reads the service's readiness once per call, then builds the service's future inside the call's own, as `UnaryClient::local` does. It makes no allocation of its own for a service future of 256 bytes or less, aligned to 8 or less. The read costs about 6 instructions over a local client ([Feature costs](../operations/feature-costs.md#a-local-unary-call)).
+The client of a service the segment hosts reads the service's readiness once per call, then builds the service's future inside the call's own, as `UnaryClient::local` does. It makes no allocation of its own for a service future of 256 bytes or less, aligned to 8 or less. The read costs about 6 instructions over a local client ([Feature costs](../operations/feature-costs.md#a-local-unary-call)). The client also counts each call, about 53 instructions with no allocation, and, while the segment records its figures, times it, about 186 more ([Counting a call](../operations/feature-costs.md#counting-a-call)).
 
 ## Lifetime and state
 
@@ -60,6 +60,15 @@ The client of a service the segment hosts reads the service's readiness once per
 - **Copies share nothing.** A unary node listed in several segments has a copy in each, and the copies share no state. Each caller calls the copy in its own segment, with no allocation of its own, and a copy answers only its own segment's callers ([Specs, segments, and layouts](placement.md#unary-nodes)).
 - **A call in the caller's segment ends with its caller.** It runs inside its caller's request, so it has no bound of its own. Dropping the call's future cancels it. A call to another segment has a bound ([A call to another segment](#a-call-to-another-segment)).
 - **The service is dropped after the segment's last request ends**, with the other nodes and the clients they hold.
+
+## What a call records
+
+The same figures in both placements, so that a service can move between segments with no change to a dashboard ([Calls to unary services](../operations/observability.md#calls-to-unary-services)):
+
+- **The caller counts each call** and each error by its kind, always, labelled by the calling node, the service, `local` or `remote`, and the segment of the copy called. A call its caller drops counts as cancelled, or as `deadline_exceeded` once its deadline has passed, in both placements.
+- **The caller times each call** only while its segment records its figures.
+- **A remote service's segment** records each call it ran as a visit of the service node, under the caller's request id, and ends it with the outcome of the reply it sent, the one the caller reads. A call it refused, a request that does not decode among them, is counted by the caller only, as `overloaded` or the refusal's kind.
+- **A client made by hand records nothing.** Only a client a node takes with `UnaryClient::current` has a caller to count under. `UnaryClient::local`, and a link taken from `RuntimeConfig::calls` and handed to a node, count nothing.
 
 ## A call to another segment
 

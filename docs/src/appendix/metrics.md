@@ -52,10 +52,11 @@ These have no `dynamo_endpoint`, and each is read at each scrape from what the i
 | `admission_admitted` | gauge | | Root requests the instance's admission ledger holds. A request holds its root until its last stream here is retired by velo, after its response has ended. |
 | `admission_limit` | gauge | | The most root requests the ledger holds at once: `[runtime] admission_limit`. |
 | `egress_in_use` | gauge | | Egress permits the instance holds: one for each stream it produces, until velo has handed the stream's output on. |
+| `call_permits_held` | gauge | | Call permits the instance holds: one for each call from another segment it accepted, until velo has sent the call's reply, or until the call's bound and `call_reply_grace` have passed. A drain waits for them. |
 | `active_anchors` | gauge | | Anchors the instance's velo node holds open: streams still to arrive here. |
 | `offers_declined_total` | counter | `reason` | Offers from another pool the instance declined, by reason: `full` (no room, or retired), `gone`, `instance`, `not_present`, and `budget`, its pool's gate declining over the pool's budget. A load report counts only `full` and `gone` as refusals, so `home_first` reads only those as saturation. |
 
-`leave_outcome` and `leave_seconds` have a series only for an instance whose nodes registered a leave hook, while the runtime records its figures. `instance_phase` and `instance_avoided` are in every segment's registry. The other five are there only while the runtime records its figures (`RuntimeConfig::metrics`). Once the segment's runtime is gone, they have no series.
+`leave_outcome` and `leave_seconds` have a series only for an instance whose nodes registered a leave hook, while the runtime records its figures. `instance_phase` and `instance_avoided` are in every segment's registry. The other six are there only while the runtime records its figures (`RuntimeConfig::metrics`). Once the segment's runtime is gone, they have no series.
 
 ## Entries
 
@@ -67,8 +68,22 @@ An entry is a node where a visit begins. The parts a visit has decide which fami
 | The first node of a forward run that a hand-off enters | request, and also response when the run reaches the hop's inner end |
 | The inner end of a run the outer end spawns while the response crosses | response |
 | The first node of a backward run this segment opens | response |
+| A unary node, for each call from another segment that it ran: accepted, and its request decoded | request |
 
 `inflight_requests` belongs to both the request and the response parts, so every entry has it.
+
+## Calls to unary services
+
+A segment's calls to unary services, as each node that took its client in its build makes them ([Calls to unary services](../operations/observability.md#calls-to-unary-services)). The families are in `crates/gdl/src/meter/calls.rs`. They have no `dynamo_endpoint`. Each series has four labels of its own: `caller`, the node that called; `service`, the unary node; `placement`, `local` or `remote`; and `segment`, the segment of the copy called. A caller's series appear when it takes its client, at zero.
+
+| Name | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `calls_total` | counter | | Calls made. |
+| `call_errors_total` | counter | `error_type` | Calls that ended with an error, by its kind: the service's own, or the call's, such as `overloaded` when every instance refused it. A call dropped after its deadline counts as `deadline_exceeded`. |
+| `call_cancellation_total` | counter | | Calls their caller dropped before they ended, with their deadline not yet passed. |
+| `call_duration_seconds` | histogram | | Time from a call's making to its end. Only while the runtime records its figures. |
+
+The counters are counted always, and served while the segment serves its registry. `call_duration_seconds` has series only while the runtime records its figures: in a segment binary, while its system listener is on.
 
 ## A chooser's pool families
 
@@ -204,7 +219,7 @@ Under `[system] velo_metrics = true`, a segment serves its velo node's families 
 
 ## Buckets
 
-All six histograms, the runtime's five and `pool_offer_round_trip_seconds`, use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
+All seven histograms, the runtime's five, `call_duration_seconds`, and `pool_offer_round_trip_seconds`, use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
 
 ## `error_type` values
 
@@ -228,7 +243,7 @@ A `ScrapeGaugeVec` has no stored values. At each scrape, the closure the node ga
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 62 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, `instance_phase`, `instance_avoided`, `leave_outcome`, `leave_seconds` and the 5 families of what an instance holds, the 18 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 67 names that a node's own metric cannot take: the 15 runtime families above, the 4 of calls to unary services, `uptime_seconds`, `instance_phase`, `instance_avoided`, `leave_outcome`, `leave_seconds` and the 6 families of what an instance holds, the 18 families of a chooser's pools, `pool_record_writes_total`, the 17 of [a process's own figures](#a-processs-own-figures), and dynamo's `request_duration_seconds`. The process's figures are served unprefixed beside the registry, so with an empty `metrics_prefix` a node's metric of one of their names would appear twice in one scrape. A prefix can make the same clash from another name: under `metrics_prefix = "process"`, a node's `cpu_seconds_total` is served as `process_cpu_seconds_total`. The registry refuses such a metric when it registers, and a segment binary's build fails with the prefix, the metric, and the figure it would be served as. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::VELO_METRICS` is `velo_`, the start of every name of [velo's own families](#velos-own-families). A node's metric that starts with it is refused when it is read, and a segment binary's build refuses a node's metric whose served name starts with it: `velo_frames_total` with no prefix. A `metrics_prefix` that serves every name there, `velo` or one that starts with `velo_`, is refused when the process makes its registry, with an error that names the first runtime name it would serve there. Both rules hold with `velo_metrics` off, so turning it on cannot break a build or change what a fleet serves. velo names its families, so the rule is the start of the name, not a list.
 

@@ -22,6 +22,7 @@ use futures::future::{BoxFuture, Shared};
 
 use super::placed::Slot;
 use super::{Local, UnaryClient};
+use crate::meter::{CallMeter, CallPlacement};
 use crate::{Build, Cx, Error, ErrorKind, Result, Unary};
 
 tokio::task_local! {
@@ -51,6 +52,11 @@ pub struct UnaryServices {
 
 #[derive(Default)]
 struct Table {
+    /// The segment this table belongs to: where a copy it hosts runs.
+    segment: String,
+    /// The figures of the calls each node makes through the clients it
+    /// takes here.
+    meter: CallMeter,
     /// Each node's `calls`, by the node's name, as the graph declares them.
     calls: BTreeMap<String, Vec<String>>,
     /// Each service's client, by the service's name.
@@ -63,19 +69,23 @@ struct Table {
 }
 
 /// One service's client, erased, with the names of its types for the
-/// refusal of a client of other types.
+/// refusal of a client of other types, and where the copy it calls runs.
 struct Entry {
     client: Box<dyn Any + Send + Sync>,
+    placement: CallPlacement,
+    /// The segment of the copy it calls.
+    segment: String,
     req: &'static str,
     resp: &'static str,
 }
 
 impl UnaryServices {
-    /// An empty table for a segment whose nodes call as `calls` says: each
-    /// node's name with the services its `calls` clause names.
-    pub fn new(calls: impl IntoIterator<Item = (String, Vec<String>)>) -> Self {
+    /// An empty table for segment `segment`, whose nodes call as `calls`
+    /// says: each node's name with the services its `calls` clause names.
+    pub fn new(segment: &str, calls: impl IntoIterator<Item = (String, Vec<String>)>) -> Self {
         Self {
             inner: Arc::new(Table {
+                segment: segment.to_string(),
                 calls: calls.into_iter().collect(),
                 ..Table::default()
             }),
@@ -106,8 +116,9 @@ impl UnaryServices {
         };
         let client = UnaryClient::<S::Req, S::Resp> {
             service: Arc::new(gate),
+            figures: None,
         };
-        self.add(name, client)?;
+        self.insert(name, client, CallPlacement::Local, &self.inner.segment)?;
         self.inner
             .gates
             .lock()
@@ -117,13 +128,33 @@ impl UnaryServices {
     }
 
     /// Give `client` to the nodes whose `calls` names `name`: the runtime's
-    /// link to a service in another segment. Refuses a name already in the
-    /// table.
+    /// link to the copy of a service in segment `segment`, another
+    /// segment. Refuses a name already in the table.
     #[doc(hidden)]
     pub fn add<Req: Send + 'static, Resp: Send + 'static>(
         &self,
         name: &str,
+        segment: &str,
         client: UnaryClient<Req, Resp>,
+    ) -> Result<()> {
+        self.insert(name, client, CallPlacement::Remote, segment)
+    }
+
+    /// Serve the figures of the calls this segment's nodes make in
+    /// `registry`: calls and errors, which are counted always, and, when
+    /// `durations`, each call's duration. Durations are recorded for the
+    /// clients taken after this, so a segment registers before it builds
+    /// its nodes. Refuses a registry that holds call figures already.
+    pub fn register(&self, registry: &prometheus::Registry, durations: bool) -> Result<()> {
+        self.inner.meter.register(registry, durations)
+    }
+
+    fn insert<Req: Send + 'static, Resp: Send + 'static>(
+        &self,
+        name: &str,
+        client: UnaryClient<Req, Resp>,
+        placement: CallPlacement,
+        segment: &str,
     ) -> Result<()> {
         let mut clients = self
             .inner
@@ -140,6 +171,8 @@ impl UnaryServices {
             name.to_string(),
             Entry {
                 client: Box::new(client),
+                placement,
+                segment: segment.to_string(),
                 req: type_name::<Req>(),
                 resp: type_name::<Resp>(),
             },
@@ -260,7 +293,14 @@ impl Building {
             ));
         };
         match entry.client.downcast_ref::<UnaryClient<Req, Resp>>() {
-            Some(client) => Ok(client.clone()),
+            Some(client) => Ok(UnaryClient {
+                service: Arc::clone(&client.service),
+                figures: Some(
+                    table
+                        .meter
+                        .figures(node, name, entry.placement, &entry.segment),
+                ),
+            }),
             None => Err(Error::new(
                 ErrorKind::Placement,
                 format!(
@@ -341,3 +381,6 @@ impl<S: Unary> Gate<S> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod figures;

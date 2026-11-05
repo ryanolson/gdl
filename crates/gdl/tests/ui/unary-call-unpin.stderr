@@ -18,7 +18,7 @@ note: required because it appears within the type `gdl::unary::_::__Origin<'_, '
    |
    | / pin_project! {
    | |     /// One call: the request until the first poll, then the service's
-   | |     /// future, in the slot.
+   | |     /// future, in the slot; and the call's tally until it ends.
    | |     struct Call<'a, Req, Resp> {
 ...  |
    | | }

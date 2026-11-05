@@ -63,6 +63,7 @@ The registry holds:
 - what the instance holds now: the roots in its admission ledger, its admission limit, its egress permits in use, and its open anchors, read at each scrape ([Reading a drain](#reading-a-drain));
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
 - the runtime's figures for each segment a request passes through;
+- the calls each node makes to unary services ([Calls to unary services](#calls-to-unary-services));
 - in a chooser, what became of each offer to a pool, by pool and outcome ([A chooser's pool families](../appendix/metrics.md#a-choosers-pool-families)).
 
 Beside the registry, `/metrics` serves the process's own figures ([The process's own figures](#the-processs-own-figures)), and under `velo_metrics` velo's ([velo's own metrics](#velos-own-metrics)), with the same identity labels but never the prefix.
@@ -131,10 +132,21 @@ sequenceDiagram
 - **An error is counted once**, in the segment that raised it. A segment that relays the error from another segment does not count it. The end-to-end counter counts each request's outcome once.
 - **A dropped response** is a cancellation, or `deadline_exceeded` once the deadline has passed.
 - **Nothing is counted per item.**
+- **A unary service called from another segment** records each call it ran as a visit of the service node: it has only a request part, from the call's arrival until its reply is written, its permit and its decode included. It ends with the outcome of the reply its caller reads: a reply replaced past `call_reply_max` counts as `codec`, and a service its bound cut short as `deadline_exceeded`. A call refused before the service ran, its request undecodable among them, is no visit. A reply written just before the bound that reaches the caller after it counts as an answer at the service and as `deadline_exceeded` at the caller. [Calls to unary services](#calls-to-unary-services) covers the caller's figures.
 
 Known gaps in these rules are in [Known limitations](limitations.md): a deadline can count in two segments when their clocks pass together, an operator's recovered error inside one segment counts nowhere, a streamed request's input error counts where it enters a response, and after a cancel the source can hold a request in flight until its caller reads.
 
 dynamo's `request_duration_seconds` spans the whole handler, its stream included. gdl splits that span into the request path and the response path. So gdl does not emit the name, and reserves it. `error_type` holds gdl's error kinds, not the names of dynamo's handler steps (`generate`, `deserialization`). A dashboard keyed on dynamo's values needs an adapter. [Metrics design](../development/metrics-design.md) records why the figures take this shape. [Runtime feature costs](feature-costs.md) holds what recording costs.
+
+## Calls to unary services
+
+A segment counts each call its nodes make to a unary service ([Unary services](../concepts/unary.md)), with the same names whether the copy called runs in the caller's segment or in another one. The labels say which: `caller` is the node that called, `service` the unary node, `placement` is `local` or `remote`, and `segment` is the segment of the copy called. For a local call that is the caller's own segment, which `dynamo_component` also names.
+
+- **`calls_total`** counts each call when it is made. `call_errors_total` counts each call that ended with an error, by its kind: the service's own error, or the call's, such as `overloaded` when every instance refused it. `call_cancellation_total` counts each call its caller dropped before it ended. A call dropped after its deadline counts as `deadline_exceeded` instead.
+- **The counts are kept always,** with metrics on or off, in shards per thread, as the runtime's other figures are. They are served while the segment serves its registry.
+- **`call_duration_seconds`** times each call, from when it is made to its end, only while the segment records its figures: in a segment binary, while its system listener is on. A call is timed with two clock reads, which cost more than its count ([A local unary call](feature-costs.md#a-local-unary-call)).
+- **A refusal counts at the caller.** A service's segment that refuses a call, because it is full, draining, the call's bound has passed, or its request does not decode, records nothing for it. A call it accepts is a visit of the service node ([Reading the runtime's figures](#reading-the-runtimes-figures)), run under the caller's request id, so the service's logs and figures line up with the caller's.
+- **Only a client a build takes counts.** A node that takes its client with `UnaryClient::current` in its build has a caller. A client made with `UnaryClient::local`, as a hand-written composition makes one, counts nothing.
 
 ## Reading a drain
 
@@ -147,6 +159,7 @@ A stopped instance drains: it takes no new work and finishes what it holds ([Seg
 | `leave_outcome{outcome="pending"}` | 0 for a hook: it ended, and the series of its outcome reads 1 |
 | `admission_admitted` | Root requests that entered through a crossing and are still held, each until velo has handed on every stream the instance sent for it |
 | `egress_in_use` | Streams the instance produces, each until velo holds none of its output |
+| `call_permits_held` | Calls from other segments that the instance accepted, each until velo has sent its reply, or until its bound and `call_reply_grace` have passed |
 | `active_anchors` | Streams still to arrive here |
 | `inflight_requests` at the source's endpoint | Requests the instance's source called and has not finished: local work that admission does not see |
 
@@ -160,7 +173,7 @@ These can all read 0 while the instance still holds work, so 0 is not a signal t
 
 `inflight_requests` falls before the ledger does for a request that crosses: a visit leaves it when its response ends here, while the request keeps its admission share and its egress permit until velo's `StreamSender::retired()` resolves, until the consumer has read the stream's last output or left. The instance's own drain waits for the ledger.
 
-The four counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` and `instance_avoided` are always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
+The five counts are on only while the runtime records its figures: in a segment binary, while its system listener is on. `instance_phase` and `instance_avoided` are always in the registry. A segment binary serves its registry once it serves, so a scrape never shows `starting` at 1. A program that embeds a segment and serves its registry sooner can show it.
 
 ## Reading a chooser's pool choices
 

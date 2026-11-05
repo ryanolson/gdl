@@ -108,7 +108,8 @@ fn a_clone_calls_the_same_service() {
     drop(client);
     assert_eq!(drive(clone.call(&cx, 1)).expect("an answer"), 2);
     assert_eq!(service.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(size_of::<UnaryClient<u64, u64>>(), 2 * size_of::<usize>());
+    // The service's `Arc`, and its caller's figures'.
+    assert_eq!(size_of::<UnaryClient<u64, u64>>(), 3 * size_of::<usize>());
 }
 
 /// Answers its request's length; its future is larger than the buffer.

@@ -73,7 +73,7 @@ async fn a_hosted_service_lives_until_the_segment_ends_after_its_last_client_is_
     )
     .expect("deployment");
 
-    let services = UnaryServices::new([("Caller".into(), vec!["Lookup".into()])]);
+    let services = UnaryServices::new("front", [("Caller".into(), vec!["Lookup".into()])]);
     let lookup = Arc::new(Lookup);
     let lifetime: Weak<Lookup> = Arc::downgrade(&lookup);
     services
