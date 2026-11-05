@@ -61,11 +61,13 @@ A spec can name the codec of one edge in its `[codec]` table, for the messages o
 [codec]
 "Engine -> Detokenize" = "msgpack_zstd"
 "Truncate -> Engine" = { codec = "msgpack_zstd", floor = 4096 }
+Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd" }
 ```
 
-- The codec is the spec's, not the message's: one message can cross a slow link compressed and a fast one as it is. So a message's annotation and an edge codec do not mix, and `cargo gdl check` refuses an entry on a pinned message, naming the edge, the message, and its pin.
+- A key without an arrow names a unary node. Its entry is for every call to the node that crosses segments, from any caller, and names the call's `request`, its `reply`, or both, with one `floor` for the two. A call to the copy in the caller's own segment never encodes, so the entry does not touch it.
+- The codec is the spec's, not the message's: one message can cross a slow link compressed and a fast one as it is. So a message's annotation and an edge codec do not mix, and `cargo gdl check` refuses an entry on a pinned message, naming the edge or the unary node, the message, and its pin.
 - The entry is in the placement hash, not the contract hash. Every layout of a spec shares one contract, and each layout has its own `[codec]` table.
-- zstd is in `gdl-runtime` only, behind its `zstd` feature, which the generator turns on for a segment at either end of a codec edge. A node crate never links it (`crates/gdl/tests/dependencies.rs`).
+- zstd is in `gdl-runtime` only, behind its `zstd` feature, which the generator turns on for a segment at either end of a codec edge or of a compressed call. A node crate never links it (`crates/gdl/tests/dependencies.rs`).
 
 [Crossing segments](crossings.md#edge-codecs) says what crosses, and what it costs. The [spec reference](../appendix/spec-reference.md#placement) lists the keys.
 

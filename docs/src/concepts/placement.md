@@ -23,7 +23,7 @@ A deployment is identified by two hashes. Every envelope carries both, and an in
 | Hash | Covers |
 |---|---|
 | contract hash | the graph's name and `schema`; each node's name and role; the hops; each edge's message type as written, with its encoding and the encoding's wire revision; each declared property kind, with its type, encoding, and revision, and the nodes that provide and need it; each unary node, with its role, its request and response with their encodings and revisions, and `idempotent`; each node's `calls` |
-| placement hash | each segment's name and node set, unary nodes included; the non-default `[routing]` entries, a unary node's included; the classes and their segment sets; each class's effective pool policy; the property kinds each class's `[pools.<class>] provides` names; each `[codec]` entry, without its floor |
+| placement hash | each segment's name and node set, unary nodes included; the non-default `[routing]` entries, a unary node's included; the classes and their segment sets; each class's effective pool policy; the property kinds each class's `[pools.<class>] provides` names; each `[codec]` entry, an edge's or a unary node's, without its floor |
 
 - Order does not matter. Node order inside a segment and segment order inside a class do not change a hash. Neither do the order of unary nodes among the nodes, nor the order of a `calls` list.
 - Defaults are not recorded. A placement that spells out `round_robin` for a boundary has the hash of one that leaves it unsaid. For pool policies the exception is deliberate: each class's effective policy is hashed, default included, so that a future change of default changes the hash and not what a placement means.

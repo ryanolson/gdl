@@ -279,11 +279,25 @@ pub enum PlacementError {
         /// Why the parts are refused.
         reason: String,
     },
+    /// A `[codec]` key that names a node names no unary node.
+    UnknownCodecCall {
+        /// The key.
+        service: String,
+        /// The graph's unary nodes.
+        services: Vec<String>,
+    },
+    /// A `[codec]` key names a unary node that no caller calls in another
+    /// segment: a local call never encodes.
+    LocalCodecCall {
+        /// The key.
+        service: String,
+    },
     /// A `[codec]` entry names a part whose message pins its codec.
     PinnedCodec {
-        /// The key.
+        /// The key: an edge, or a unary node.
         edge: String,
-        /// `value`, or a streamed request's `head` or `item`.
+        /// `value`, a streamed request's `head` or `item`, or a call's
+        /// `request` or `reply`.
         part: &'static str,
         /// The message, as the graph names it.
         message: String,
@@ -368,6 +382,9 @@ impl PlacementError {
             | Self::LocalCodecEdge { edge }
             | Self::CodecParts { edge, .. }
             | Self::PinnedCodec { edge, .. } => at("codec".into(), Some(edge)),
+            Self::UnknownCodecCall { service, .. } | Self::LocalCodecCall { service } => {
+                at("codec".into(), Some(service))
+            }
         };
         Problem::at(table, key, self.to_string())
     }
@@ -569,6 +586,22 @@ impl fmt::Display for PlacementError {
                 "codec `{edge}`: the placement does not encode this edge; a codec applies to an edge that crosses segments or is carried by an anchor"
             ),
             Self::CodecParts { edge, reason } => write!(f, "codec `{edge}`: {reason}"),
+            Self::UnknownCodecCall { service, services } => write!(
+                f,
+                "codec `{service}`: the graph has no unary node `{service}`; a key without an arrow names a unary node, and the graph's are {}",
+                match services.is_empty() {
+                    true => "none".to_string(),
+                    false => services
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                }
+            ),
+            Self::LocalCodecCall { service } => write!(
+                f,
+                "codec `{service}`: no node calls `{service}` in another segment; a codec applies to a call that crosses segments, and a call to a copy in the caller's own segment never encodes"
+            ),
             Self::PinnedCodec {
                 edge,
                 part,

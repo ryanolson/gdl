@@ -51,6 +51,7 @@ A spec of one layout has these tables at its top level. A spec with `[layout.<na
 | `[pools.<class>] policy` | how a chooser picks a pool of the class | `"round_robin"` |
 | `[pools.<class>] provides` | the property kinds the class's pools serve from their settings (`[pool.properties]`), not from a node; each must be declared in the graph | none |
 | `[codec] "<from> -> <to>"` | the codec of the edge from `<from>` to `<to>`, in the direction its data flows, for the messages on it that pin none: `"msgpack_zstd"`, or a table of `codec` (every message on the edge), or `head` and `item` (a streamed request's parts), and `floor` (bytes) | no codec |
+| `[codec] <Unary>` | the codec of the calls to a unary node that cross segments, from every caller: a table of `request`, `reply`, or both, and `floor` (bytes), for both parts | no codec |
 | `[layout.<name>.segment\|routing\|class\|pools\|codec]` | the same tables, for one layout | one layout, `default` |
 
 | Name | Rule |
@@ -69,7 +70,14 @@ A `[codec]` entry names one edge, and each direction of a pair of nodes is its o
 - with `head` or `item` on an edge whose request is not streamed;
 - whose key names no edge of the graph, or an edge that the layout does not encode, because it does not cross segments and is not carried by an anchor ([The codec rule](../concepts/crossings.md#the-codec-rule)).
 
-[Edge codecs](../concepts/crossings.md#edge-codecs) says how a compressed message crosses.
+A key without an arrow names a unary node, and its entry is for the node's calls: `Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd" }`. Each part is optional, and one `floor` covers both. `check` refuses a unary node's entry:
+
+- in string form, or with `codec`, `head`, or `item`: it names `request` and `reply`. An edge's entry cannot name them;
+- on a part whose message pins its codec: the request's `Req` or the reply's `Resp`, naming the unary node, the part, the message, and the pin. An entry that names both parts says which one could be named alone;
+- whose key names no unary node of the graph;
+- for a unary node that no caller calls in another segment. A call to the copy in the caller's own segment never encodes.
+
+[Edge codecs](../concepts/crossings.md#edge-codecs) says how a compressed message crosses, and [A call's codec](../concepts/unary.md#a-calls-codec) how a compressed call does.
 
 ### Configuration and deployment
 
@@ -227,7 +235,7 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 |---|---|---|
 | spec `[routing] <node>` | `"round_robin"` | `RequestRouter::DEFAULT` |
 | spec `[pools.<class>] policy` | `"round_robin"` | `PoolPolicy::DEFAULT_POLICY` |
-| spec `[codec] "<from> -> <to>"` `floor` | `16384` | `EdgeCodec::DEFAULT_FLOOR` |
+| spec `[codec] "<from> -> <to>"` `floor`, `[codec] <Unary>` `floor` | `16384` | `EdgeCodec::DEFAULT_FLOOR` |
 | spec `[deployment] base_image` | `"gcr.io/distroless/cc-debian12:nonroot"` | `DEFAULT_BASE_IMAGE` |
 | spec `[deployment] build_image` | `"rust:1.93.1-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
 | spec `[binary] allocator` | `"system"` | `Allocator::DEFAULT` |

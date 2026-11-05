@@ -20,7 +20,7 @@ mod spelled;
 use boundary::bound;
 use calls::Services;
 use classes::classify;
-pub use codecs::{CodecEntry, EdgeCodec, EdgeCompression};
+pub use codecs::{CallCompression, CodecEntry, EdgeCodec, EdgeCompression};
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use layouts::{Placements, check_layout_name};
 pub use pools::PoolPolicy;
@@ -283,8 +283,10 @@ impl Placement {
     }
 
     /// Name the codec of the edge `<from> -> <to>`, for the messages on it
-    /// that pin none. The layout check refuses an edge the graph does not
-    /// have, or one that is not encoded under the placement.
+    /// that pin none, or, keyed by a unary node's name, of its calls that
+    /// cross segments ([`CodecEntry::call`]). The layout check refuses an
+    /// edge the graph does not have, or one that is not encoded under the
+    /// placement, and a unary node that no caller calls in another segment.
     pub fn codec(mut self, edge: &str, entry: CodecEntry) -> Self {
         let key = codecs::edge_key(edge).unwrap_or_else(|_| edge.to_string());
         self.codecs.insert(key, entry);
@@ -419,6 +421,9 @@ pub struct Layout {
     /// The edges a `[codec]` entry compresses, by hop, path, and the
     /// position each enters.
     compression: BTreeMap<(usize, Leg, usize), EdgeCompression>,
+    /// The unary nodes whose calls across segments a `[codec]` entry
+    /// compresses, by name.
+    call_compression: BTreeMap<String, CallCompression>,
     /// Each segment's calls to a copy of a unary node in another segment.
     remote_calls: calls::Remote,
     /// Every call of every copy of each caller, for the crossing report.
@@ -579,10 +584,22 @@ impl Layout {
         self.compression.get(&(hop, leg, pos))
     }
 
-    /// The segments at either end of an edge that a `[codec]` entry
-    /// compresses: each sends or receives a compressed value.
+    /// What a `[codec]` entry compresses on the calls to unary node
+    /// `service` that cross segments: `None` for a node without one.
+    pub fn call_compression(&self, service: &str) -> Option<&CallCompression> {
+        self.call_compression.get(service)
+    }
+
+    /// The segments at either end of an edge, or of a call, that a
+    /// `[codec]` entry compresses: each sends or receives a compressed
+    /// value.
     pub fn compressing_segments(&self) -> BTreeSet<&str> {
         let mut segments = BTreeSet::new();
+        for (from, service, to) in self.remote_calls() {
+            if self.call_compression.contains_key(service) {
+                segments.extend([from, to]);
+            }
+        }
         for &(hop, leg, pos) in self.compression.keys() {
             let hop = &self.hops[hop];
             let runs = match leg {
@@ -981,12 +998,16 @@ fn place(
         }
     }
     let compression = codecs::resolve(&placement.codecs, &manifest.hops, &hops, &mut errors);
+    let call_sites = calls::sites(manifest, &segment_of, &services);
+    let remote_calls = calls::remote(&call_sites);
+    let call_compression =
+        codecs::resolve_calls(&placement.codecs, manifest, &remote_calls, &mut errors);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
-    let call_sites = calls::sites(manifest, &segment_of, &services);
     Ok(Layout {
         compression,
+        call_compression,
         roots: manifest
             .nodes
             .iter()
@@ -994,7 +1015,7 @@ fn place(
             .count(),
         routing,
         call_routing,
-        remote_calls: calls::remote(&call_sites),
+        remote_calls,
         call_sites,
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),

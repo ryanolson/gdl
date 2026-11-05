@@ -1,15 +1,16 @@
 //! A placement's `[codec]` table: an edge's codec, for the messages on it
-//! that pin none. See `docs/src/concepts/crossings.md`.
+//! that pin none, and a unary node's, for its calls that cross segments.
+//! See `docs/src/concepts/crossings.md`.
 
 use std::collections::BTreeMap;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{HopLayout, Leg, PlacementError};
+use super::{HopLayout, Leg, PlacementError, calls};
 use crate::hash::Fnv;
-use crate::manifest::{HopInfo, TypeInfo};
-use crate::{Encoding, Problem};
+use crate::manifest::{HopInfo, Manifest, TypeInfo};
+use crate::{Encoding, Problem, Role};
 
 /// A codec an edge can name: what its unpinned messages become on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,8 +51,9 @@ impl EdgeCodec {
     }
 }
 
-/// One `[codec]` entry: which messages of its edge take which codec, and
-/// the floor below which a value crosses without it.
+/// One `[codec]` entry: which messages of its edge, or of its unary node's
+/// calls, take which codec, and the floor below which a value crosses
+/// without it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodecEntry {
     parts: Parts,
@@ -69,6 +71,12 @@ enum Parts {
         head: Option<EdgeCodec>,
         item: Option<EdgeCodec>,
     },
+    /// A unary node's request, its reply, or both, on every call to it that
+    /// crosses segments: the entry of a key that names the node.
+    Call {
+        request: Option<EdgeCodec>,
+        reply: Option<EdgeCodec>,
+    },
 }
 
 impl CodecEntry {
@@ -84,6 +92,14 @@ impl CodecEntry {
     pub fn each(head: Option<EdgeCodec>, item: Option<EdgeCodec>) -> Self {
         Self {
             parts: Parts::Each { head, item },
+            floor: None,
+        }
+    }
+
+    /// An entry for a unary node's calls: its request, its reply, or both.
+    pub fn call(request: Option<EdgeCodec>, reply: Option<EdgeCodec>) -> Self {
+        Self {
+            parts: Parts::Call { request, reply },
             floor: None,
         }
     }
@@ -115,7 +131,16 @@ impl CodecEntry {
                 codec(h, head);
                 codec(h, item);
             }
+            Parts::Call { request, reply } => {
+                h.str("call");
+                codec(h, request);
+                codec(h, reply);
+            }
         }
+    }
+
+    fn is_call(&self) -> bool {
+        matches!(self.parts, Parts::Call { .. })
     }
 }
 
@@ -129,6 +154,26 @@ pub struct EdgeCompression {
     pub item: bool,
     /// A value shorter than this, in encoded bytes, crosses uncompressed.
     pub floor: u32,
+}
+
+/// What a layout compresses on the calls to one unary node that cross
+/// segments, from every caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallCompression {
+    /// The request, which the caller compresses and the service's segment
+    /// reads.
+    pub request: bool,
+    /// The reply, which the service's segment compresses and the caller
+    /// reads.
+    pub reply: bool,
+    /// A value shorter than this, in encoded bytes, crosses uncompressed.
+    pub floor: u32,
+}
+
+/// Whether `key` names a node, not an edge: one name, with no arrow and no
+/// space. Such a key names a unary node, whose entry is for its calls.
+fn names_a_node(key: &str) -> bool {
+    !key.is_empty() && !key.contains("->") && !key.contains(char::is_whitespace)
 }
 
 /// A `[codec]` key: `<from> -> <to>`, an edge in the direction its data
@@ -149,13 +194,37 @@ pub(super) fn edge_key(key: &str) -> Result<String, String> {
     }
 }
 
-/// Read the `[codec]` keys, each spaced as [`edge_key`] writes it.
+/// Read the `[codec]` keys, each spaced as [`edge_key`] writes it, or a
+/// node's name. A key's form decides what its entry may name: a node's
+/// entry names its calls' parts, and an edge's entry names its messages.
 pub(super) fn keyed(
     codecs: BTreeMap<String, CodecEntry>,
     problems: &mut Vec<Problem>,
 ) -> BTreeMap<String, CodecEntry> {
     let mut keyed = BTreeMap::new();
     for (key, entry) in codecs {
+        if names_a_node(&key) {
+            if entry.is_call() {
+                keyed.insert(key, entry);
+            } else {
+                problems.push(Problem::at(
+                    Some("codec".into()),
+                    Some(key.clone()),
+                    format!(
+                        "`{key}` names a node, so its entry is for a unary node's calls, and names their parts: `{key} = {{ request = \"msgpack_zstd\", reply = \"msgpack_zstd\" }}`, each part optional"
+                    ),
+                ));
+            }
+            continue;
+        }
+        if entry.is_call() {
+            problems.push(Problem::at(
+                Some("codec".into()),
+                Some(key),
+                "`request` and `reply` name the parts of a unary node's calls, under a key that names the node; an edge's entry names `codec`, or `head` and `item`",
+            ));
+            continue;
+        }
         match edge_key(&key) {
             Ok(edge) if keyed.contains_key(&edge) => problems.push(Problem::at(
                 Some("codec".into()),
@@ -173,7 +242,10 @@ pub(super) fn keyed(
 
 /// The placement hash's part for the codecs: nothing when there are none,
 /// so a placement without them keeps its hash. The floor is not hashed: a
-/// receiver reads a value either way, whatever floor its sender has.
+/// receiver reads a value either way, whatever floor its sender has. A
+/// node's key cannot be an edge's, and its entry hashes under its own tag,
+/// so a placement with edge entries only keeps the hash it had before
+/// nodes could have entries.
 pub(super) fn hash(h: &mut Fnv, codecs: &BTreeMap<String, CodecEntry>) {
     if codecs.is_empty() {
         return;
@@ -197,7 +269,7 @@ pub(super) fn resolve(
     errors: &mut Vec<PlacementError>,
 ) -> BTreeMap<(usize, Leg, usize), EdgeCompression> {
     let mut resolved = BTreeMap::new();
-    for (edge, entry) in codecs {
+    for (edge, entry) in codecs.iter().filter(|(_, entry)| !entry.is_call()) {
         let mut found = Vec::new();
         let mut edges = Vec::new();
         for (index, hop) in hops.iter().enumerate() {
@@ -256,6 +328,81 @@ pub(super) fn resolve(
     resolved
 }
 
+/// Resolve each unary node's entry to its calls, and judge it: the key must
+/// name a unary node that some caller calls in another segment, and each
+/// part it names must carry an unpinned message. Keyed by the node.
+pub(super) fn resolve_calls(
+    codecs: &BTreeMap<String, CodecEntry>,
+    manifest: &Manifest,
+    remote: &calls::Remote,
+    errors: &mut Vec<PlacementError>,
+) -> BTreeMap<String, CallCompression> {
+    let mut resolved = BTreeMap::new();
+    for (service, entry) in codecs {
+        let Parts::Call { request, reply } = entry.parts else {
+            continue;
+        };
+        let unary = manifest
+            .node(service)
+            .filter(|node| node.role == Role::Unary)
+            .and_then(|node| node.unary.as_ref());
+        let Some(unary) = unary else {
+            errors.push(PlacementError::UnknownCodecCall {
+                service: service.clone(),
+                services: manifest
+                    .nodes
+                    .iter()
+                    .filter(|node| node.role == Role::Unary)
+                    .map(|node| node.name.clone())
+                    .collect(),
+            });
+            continue;
+        };
+        if !remote.values().any(|calls| calls.contains_key(service)) {
+            errors.push(PlacementError::LocalCodecCall {
+                service: service.clone(),
+            });
+            continue;
+        }
+        let (request, reply) = (request.is_some(), reply.is_some());
+        let pinned: Vec<_> = [
+            ("request", request, &unary.req),
+            ("reply", reply, &unary.resp),
+        ]
+        .into_iter()
+        .filter(|(_, named, ty)| *named && ty.is_pinned())
+        .collect();
+        if pinned.is_empty() {
+            resolved.insert(
+                service.clone(),
+                CallCompression {
+                    request,
+                    reply,
+                    floor: entry.floor.unwrap_or(EdgeCodec::DEFAULT_FLOOR),
+                },
+            );
+            continue;
+        }
+        for (part, _, ty) in pinned {
+            // An entry that names both parts could name the other alone,
+            // unless it is pinned too.
+            let other = match part {
+                "request" if request && reply && !unary.resp.is_pinned() => Some("reply"),
+                "reply" if request && reply && !unary.req.is_pinned() => Some("request"),
+                _ => None,
+            };
+            errors.push(PlacementError::PinnedCodec {
+                edge: service.clone(),
+                part,
+                message: ty.name.clone(),
+                pin: ty.encoding,
+                other,
+            });
+        }
+    }
+    resolved
+}
+
 /// The parts `entry` compresses on an edge carrying `ty`, or `None` with
 /// the reason in `errors`.
 fn judge(
@@ -278,6 +425,8 @@ fn judge(
             return None;
         }
         (Parts::Each { head, item }, Some(_)) => (head.is_some(), item.is_some()),
+        // `keyed` keeps a node's entry off every edge.
+        (Parts::Call { .. }, _) => return None,
     };
     let every = matches!(entry.parts, Parts::Every(_));
     let mut pinned = Vec::new();
@@ -330,6 +479,14 @@ impl Serialize for CodecEntry {
                     map.serialize_entry("item", item.name())?;
                 }
             }
+            Parts::Call { request, reply } => {
+                if let Some(request) = request {
+                    map.serialize_entry("request", request.name())?;
+                }
+                if let Some(reply) = reply {
+                    map.serialize_entry("reply", reply.name())?;
+                }
+            }
         }
         if let Some(floor) = self.floor {
             map.serialize_entry("floor", &floor)?;
@@ -345,7 +502,9 @@ impl<'de> Deserialize<'de> for CodecEntry {
             type Value = CodecEntry;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a codec's name, or a table of `codec`, `head`, `item`, and `floor`")
+                f.write_str(
+                    "a codec's name, or a table of `codec`, `head`, `item`, `request`, `reply`, and `floor`",
+                )
             }
 
             fn visit_str<E: de::Error>(self, name: &str) -> Result<CodecEntry, E> {
@@ -356,6 +515,7 @@ impl<'de> Deserialize<'de> for CodecEntry {
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<CodecEntry, A::Error> {
                 let (mut every, mut head, mut item, mut floor) = (None, None, None, None);
+                let (mut request, mut reply) = (None, None);
                 while let Some(key) = map.next_key::<String>()? {
                     let codec = |map: &mut A| -> Result<EdgeCodec, A::Error> {
                         let name: String = map.next_value()?;
@@ -365,13 +525,26 @@ impl<'de> Deserialize<'de> for CodecEntry {
                         "codec" => every = Some(codec(&mut map)?),
                         "head" => head = Some(codec(&mut map)?),
                         "item" => item = Some(codec(&mut map)?),
+                        "request" => request = Some(codec(&mut map)?),
+                        "reply" => reply = Some(codec(&mut map)?),
                         "floor" => floor = Some(map.next_value::<u32>()?),
                         other => {
                             return Err(de::Error::custom(format!(
-                                "unknown key `{other}`: expected `codec`, `head`, `item`, or `floor`"
+                                "unknown key `{other}`: expected `codec`, `head`, `item`, `request`, `reply`, or `floor`"
                             )));
                         }
                     }
+                }
+                if request.is_some() || reply.is_some() {
+                    if every.is_some() || head.is_some() || item.is_some() {
+                        return Err(de::Error::custom(
+                            "`request` and `reply` name a unary node's calls, and go without `codec`, `head`, and `item`",
+                        ));
+                    }
+                    return Ok(CodecEntry {
+                        parts: Parts::Call { request, reply },
+                        floor,
+                    });
                 }
                 let parts = match (every, head, item) {
                     (Some(every), None, None) => Parts::Every(every),
@@ -380,7 +553,7 @@ impl<'de> Deserialize<'de> for CodecEntry {
                     }
                     (None, ..) => {
                         return Err(de::Error::custom(
-                            "names no codec: write `codec = \"...\"`, or `head` and `item` for a streamed request",
+                            "names no codec: write `codec = \"...\"`, `head` and `item` for a streamed request, or `request` and `reply` for a unary node's calls",
                         ));
                     }
                     (Some(_), ..) => {

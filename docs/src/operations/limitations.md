@@ -309,9 +309,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** use the default `msgpack` codec, which writes field names, or `json`.
 
 ### One edge codec, at one level, for unpinned messages only
-- **What:** a `[codec]` entry names `msgpack_zstd`, named MessagePack and zstd at level 1, and nothing else. It applies only to a message with no `#[gdl(codec = "...")]`, and `check` refuses it on a pinned one. Its floor is a fixed size per edge, and does not adapt to the link or the ratio.
+- **What:** a `[codec]` entry names `msgpack_zstd`, named MessagePack and zstd at level 1, and nothing else. It applies only to a message with no `#[gdl(codec = "...")]`, and `check` refuses it on a pinned one. Its floor is a fixed size per edge, or per unary node for both its request and its reply, and does not adapt to the link or the ratio.
 - **Why:** no other edge codec is built, and a pinned message has chosen its bytes itself. See [Edge codecs](../concepts/crossings.md#edge-codecs).
-- **Workaround:** set a floor per edge, or leave the entry out on a fast link.
+- **Workaround:** set a floor per edge or per unary node, or leave the entry out on a fast link.
 
 ### A compressed item is decoded from a copy, and a compressed head is decompressed before the gate
 - **What:** an item that crosses compressed is decompressed into a buffer its stream keeps and decoded from there, not in velo's buffer. A head that crosses compressed is decompressed when it arrives, before the entry's gate and property checks, so an offer they decline has paid to decompress: 14 M instructions for the 2.2 MB turn in [Edge codecs](crossing-performance.md#edge-codecs).

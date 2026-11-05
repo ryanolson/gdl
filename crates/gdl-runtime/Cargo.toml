@@ -92,6 +92,10 @@ harness = false
 name = "calls"
 harness = false
 
+[[bench]]
+name = "callcodec"
+harness = false
+
 [[test]]
 name = "hub"
 required-features = ["hub"]

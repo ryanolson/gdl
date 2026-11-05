@@ -1089,3 +1089,34 @@ The permit's own cost, from five more rounds of `remote` and `raw` before and af
 - **The rounds' spread is about 300 to 500 Ir**, near the permit's cost. `raw` runs the same code in both builds, and differs by as much.
 - **A remote call costs about 8,000 Ir and 9 allocations over velo's raw call** of the same build.
 - **A call in the caller's segment does not change.** The `local` row is the same, and the `hosted` shape of [A local unary call](#a-local-unary-call), measured again on the same host with its command, two rounds, is 108.0 Ir per call, as before.
+
+### A call's codec
+
+What a `[codec]` entry for a unary node costs a remote call ([A call's codec](../concepts/unary.md#a-calls-codec)). `crates/gdl-runtime/benches/callcodec.rs` makes calls of 1 KiB or 64 KiB of words to a service in another segment that answers its request as it is, with no entry (`remote-text-*`) or under `{ request = "msgpack_zstd", reply = "msgpack_zstd" }` with its 16 KiB floor (`remote-zstd-*`). It is a program apart from `calls`, so that `calls` stays comparable with its earlier rows: in this build, a second graph in `calls` stopped LLVM from inlining `Runtime::call` into the client's future. Each call makes its request, a copy of the text, first. The program prints the allocations and the zstd frames per call. The same host, load average 5 to 16, rustc 1.93.1, bench profile, rustix on its libc backend; Ir per call is (Ir at 4,000 − Ir at 2,000) / 2,000, five rounds:
+
+```bash
+RUSTFLAGS="--cfg rustix_use_libc" cargo bench -p gdl-runtime --bench calls --bench callcodec --no-run
+valgrind --tool=callgrind --callgrind-out-file=/dev/null target/release/deps/callcodec-<hash> <remote-text-small|remote-zstd-below|remote-text-large|remote-zstd-above> <2000|4000>
+target/release/deps/callcodec-<hash> <mode> 2000    # prints the allocations and frames per call
+```
+
+| Per call | Callgrind Ir | Allocations | Frames written, read |
+|---|---|---|---|
+| `remote-text-small`: 1 KiB each way, no entry | 48,471 to 49,037, median 48,667 | 36.09 | 0, 0 |
+| `remote-zstd-below`: the same, under the entry | 48,630 to 49,096, median 48,790 | 36.09 | 0, 0 |
+| `remote-text-large`: 64 KiB each way, no entry | 162,968 to 164,186, median 163,654 | 42.34 | 0, 0 |
+| `remote-zstd-above`: the same, under the entry | 360,097 to 360,689, median 360,377 | 40.35 | 2, 2 |
+
+- **Below the floor a call costs what it costs without the entry**: the same allocations, no frame, and Ir within the rounds' spread.
+- **From the floor on, compression costs about 200,000 Ir for 64 KiB each way**, 2.2 times the plain call, with one frame written and one read each way. The text repeats, so its frames are short; the two fewer allocations are not traced to their sites. An entry suits a link that costs more than this CPU.
+- **A call without an entry does not change.** `remote` and the other modes of `calls`, built before the call codec and after it, five rounds each in one run, (Ir at 4,000 − Ir at 2,000) / 2,000:
+
+| Per call | Before | After |
+|---|---|---|
+| `remote`, Ir | 37,176 to 41,836, median 41,680 | 41,629 to 41,885, median 41,689 |
+| `remote-deadline`, Ir | 41,477 to 41,735, median 41,626 | 41,225 to 41,554, median 41,526 |
+| `remote-affinity`, Ir | 42,792 to 43,398, median 43,263 | 38,898 to 43,437, median 43,175 |
+| `local`, Ir | 87 to 95, median 90 | 85 to 93, median 90 |
+| allocations, `remote`, `remote-deadline`, `remote-affinity`, `local` | 27.09, 27.09, 30.09, 0 | 27.09, 27.09, 30.09, 0 |
+
+Callgrind's per-function counts of one `remote` run of each build, (Ir at 4,000 − Ir at 2,000) / 2,000, put the change at about 38 Ir per call, under 0.1%: about 19 in the client's future, 13 in `Runtime::pick_call`, which the change does not touch and which is not traced, and 3 in the handler's `serve`. That is within the rounds' spread, so the table cannot show it.

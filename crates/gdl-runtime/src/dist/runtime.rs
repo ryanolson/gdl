@@ -1378,7 +1378,9 @@ impl Runtime {
     /// send, is tried on the instance the policy picks next, within the
     /// bound ([`Runtime::call_again`]); the first try is made here, inline,
     /// so that a call answered at once costs no more than it did. A call
-    /// through a selector goes to [`Runtime::call_selected`].
+    /// through a selector goes to [`Runtime::call_selected`]. Under a
+    /// `[codec]` entry for its request, the request is compressed once,
+    /// here, and its plain bytes go: every try sends the same envelope.
     pub(crate) async fn call(
         &self,
         callee: &Callee,
@@ -1408,7 +1410,7 @@ impl Runtime {
         let (envelope, left) = self.call_envelope(
             callee.index,
             super::envelope::WireCx::bounded(cx, bound),
-            payload,
+            super::envelope::CallRequest::of(payload, callee.request)?,
             bound,
         )?;
         // A clone of the envelope is a count: its bytes are shared, and
@@ -1474,7 +1476,9 @@ impl Runtime {
     /// try that missed is tried again by the rules of
     /// [`Runtime::call_again`]: the selector chooses again, told which
     /// instances refused the call, and the declined choice's lease ends
-    /// first.
+    /// first. Under a `[codec]` entry for its request, the request is
+    /// compressed once, before the first choice, and the plain request is
+    /// kept beside its frame for the selector to read on each choice.
     ///
     /// Boxed, and not `async`: a call's future holds only the box, so the
     /// selector's state does not grow every call's, a policy's too.
@@ -1489,6 +1493,13 @@ impl Runtime {
     ) -> futures::future::BoxFuture<'a, Result<bytes::Bytes>> {
         Box::pin(async move {
             let mut payload = payload;
+            // The frame the next try sends, while the call is compressed:
+            // taken by each try, and copied back out of its envelope after
+            // a miss, as the plain request is when the call is not.
+            let mut frame = match callee.request {
+                Some(compression) => payload.compressed(compression)?,
+                None => None,
+            };
             let mut declined = Vec::new();
             let mut missed: Option<CallMiss> = None;
             for _ in 0..=self.config.instance_failovers {
@@ -1520,7 +1531,11 @@ impl Runtime {
                 let mut wire_cx = super::envelope::WireCx::bounded(cx, bound);
                 wire_cx.add_meta(picked.meta);
                 let lease = picked.lease;
-                let (envelope, left) = self.call_envelope(callee.index, wire_cx, payload, bound)?;
+                let (request, kept) = match frame.take() {
+                    Some(frame) => (super::envelope::CallRequest::Frame(frame), Some(payload)),
+                    None => (super::envelope::CallRequest::Plain(payload), None),
+                };
+                let (envelope, left) = self.call_envelope(callee.index, wire_cx, request, bound)?;
                 let called = self
                     .fabric
                     .call_bounded(instance, super::calls::CALL, envelope.clone(), left)
@@ -1544,9 +1559,15 @@ impl Runtime {
                 }
                 missed = Some(now);
                 // The next try's envelope carries the next choice's meta,
-                // so the request is copied out of this one: on a miss
-                // only.
-                payload = super::envelope::CallHead::sent_in(&envelope)?;
+                // so the request is copied out of this one, as the state
+                // the call holds says: on a miss only.
+                payload = match kept {
+                    Some(plain) => {
+                        frame = Some(super::envelope::CallFrame::sent_in(&envelope)?);
+                        plain
+                    }
+                    None => super::envelope::CallHead::sent_in(&envelope)?,
+                };
             }
             Err(missed.map_or_else(
                 || Error::routing("no try of the call was made"),
@@ -1561,7 +1582,7 @@ impl Runtime {
         &self,
         index: u16,
         cx: super::envelope::WireCx,
-        payload: super::envelope::CallHead,
+        payload: super::envelope::CallRequest,
         bound: gdl::Deadline,
     ) -> Result<(bytes::Bytes, Duration)> {
         let envelope = super::envelope::Call {

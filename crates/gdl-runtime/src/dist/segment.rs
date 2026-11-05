@@ -194,11 +194,15 @@ impl Deployment {
                 ),
             ));
         };
+        let (request, reply) =
+            calls::call_codec(&self.rt.layout, name, self.rt.config.decompressed_max);
         let hosted = Hosted {
             name: name.to_string(),
             service,
             req,
             resp,
+            request,
+            reply,
         };
         self.served
             .lock()

@@ -644,8 +644,9 @@ impl Head {
 /// A head that arrived as `frame`, decoded under the receiver's rules
 /// ([`zstd::content_size`]) with at most `limit` bytes, then `view` after
 /// it, with room for a view: what a remote head and a local offer's
-/// restored head both take.
-fn decoded(frame: &[u8], limit: usize, view: &[u8]) -> Result<Vec<u8>> {
+/// restored head take, and, with no view, a call's request and its reply.
+/// The one decoder of a compressed value that is not a stream item.
+pub(crate) fn decoded(frame: &[u8], limit: usize, view: &[u8]) -> Result<Vec<u8>> {
     let size = zstd::content_size(frame, limit)?;
     let mut plain = Vec::with_capacity(size + TAIL_ROOM.max(view.len()));
     zstd::decompress_into(frame, limit, &mut plain)?;
@@ -811,15 +812,64 @@ pub(crate) struct Call {
     pub(crate) identity: Identity,
     pub(crate) service: u16,
     pub(crate) cx: WireCx,
-    pub(crate) payload: CallHead,
+    pub(crate) payload: CallRequest,
+}
+
+/// A call's request as its envelope carries it: plain, or the one frame a
+/// call codec made of it. Two types, not a flag, so that nothing can send
+/// or read a frame as plain bytes, nor a plain request as a frame: a
+/// selector reads only a [`CallHead`], and a retry copies each back out as
+/// its own type.
+pub(crate) enum CallRequest {
+    Plain(CallHead),
+    Frame(CallFrame),
+}
+
+impl CallRequest {
+    /// `head` as its call sends it under `compression`, its call codec for
+    /// the request: one frame from the floor on, when that is shorter, and
+    /// plain otherwise, or without a codec. For a call whose plain bytes
+    /// nothing reads again.
+    pub(crate) fn of(head: CallHead, compression: Option<Compression>) -> Result<Self> {
+        match compression {
+            None => Ok(Self::Plain(head)),
+            Some(compression) => Self::compressed(head, compression),
+        }
+    }
+
+    // Out of line, so that a call without a codec does not carry it.
+    #[inline(never)]
+    fn compressed(head: CallHead, compression: Compression) -> Result<Self> {
+        Ok(match head.compressed(compression)? {
+            Some(frame) => Self::Frame(frame),
+            None => Self::Plain(head),
+        })
+    }
+}
+
+impl From<CallHead> for CallRequest {
+    fn from(head: CallHead) -> Self {
+        Self::Plain(head)
+    }
+}
+
+impl From<CallFrame> for CallRequest {
+    fn from(frame: CallFrame) -> Self {
+        Self::Frame(frame)
+    }
 }
 
 /// A call's request, encoded plain behind room for the rest of its
 /// envelope. Not a [`Head`]: a head may be compressed, or shared with a
-/// send, and a call's request is neither, so [`Call::wire`] has no such
-/// case to meet. A `[codec]` entry for a unary node is read, but not
-/// applied to its calls yet.
+/// send, and a call's request is neither. Its compressed form is a
+/// [`CallFrame`], which only [`CallHead::compressed`] makes.
 pub(crate) struct CallHead(Vec<u8>);
+
+/// A call's request as one zstd frame, behind room for the rest of its
+/// envelope: made only by [`CallHead::compressed`], or copied by
+/// [`CallFrame::sent_in`] from an envelope that carried one. It has no
+/// plain bytes to give a selector.
+pub(crate) struct CallFrame(Vec<u8>);
 
 impl CallHead {
     /// Encode `value` behind [`HEADER_ROOM`] with `encode`, as
@@ -842,14 +892,46 @@ impl CallHead {
 
     /// The request a call's envelope, `sent`, carries, copied behind room
     /// for another envelope: a call through a selector that is tried again
-    /// carries the next choice's meta.
+    /// carries the next choice's meta. Only for an envelope a plain request
+    /// was sent in: its bytes are copied whatever they are, since a request
+    /// with no call codec may begin as a frame does.
     pub(crate) fn sent_in(sent: &[u8]) -> Result<Self> {
-        let request = CallArrived::read(sent)?.payload;
-        let mut buffer = Vec::with_capacity(HEADER_ROOM + request.len());
-        buffer.resize(HEADER_ROOM, 0);
-        buffer.extend_from_slice(request);
-        Ok(Self(buffer))
+        Ok(Self(behind_room(CallArrived::read(sent)?.payload)))
     }
+
+    /// The request as one frame behind its own room, from `compression`'s
+    /// floor on, when that is shorter: `None` below the floor, and for a
+    /// request whose frame is not shorter, which crosses plain.
+    pub(crate) fn compressed(&self, compression: Compression) -> Result<Option<CallFrame>> {
+        let plain = self.plain();
+        if !compression.applies(plain.len()) {
+            return Ok(None);
+        }
+        let mut buffer = Vec::with_capacity(HEADER_ROOM + zstd::bound(plain.len()));
+        buffer.resize(HEADER_ROOM, 0);
+        zstd::compress_into(plain, &mut buffer)?;
+        Ok((buffer.len() - HEADER_ROOM < plain.len()).then_some(CallFrame(buffer)))
+    }
+}
+
+impl CallFrame {
+    /// The frame a call's envelope, `sent`, carries, copied behind room for
+    /// another envelope, as [`CallHead::sent_in`] copies a plain request.
+    /// Only for an envelope a frame was sent in, and refused unless its
+    /// bytes are exactly one complete frame that states its size.
+    pub(crate) fn sent_in(sent: &[u8]) -> Result<Self> {
+        let frame = CallArrived::read(sent)?.payload;
+        zstd::content_size(frame, usize::MAX)?;
+        Ok(Self(behind_room(frame)))
+    }
+}
+
+/// `bytes`, copied behind [`HEADER_ROOM`].
+fn behind_room(bytes: &[u8]) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(HEADER_ROOM + bytes.len());
+    buffer.resize(HEADER_ROOM, 0);
+    buffer.extend_from_slice(bytes);
+    buffer
 }
 
 /// `rmp_serde`'s encoding of a [`Call`] starts with this: an array of its
@@ -869,9 +951,9 @@ pub(crate) struct CallArrived<'a> {
 
 impl Call {
     /// The envelope's bytes. Its other fields are written into the room in
-    /// front of the request, so the bytes are the request's own buffer. A
-    /// header past the room, as large meta makes, is written with a copy of
-    /// the request after it.
+    /// front of the request, plain or a frame, so the bytes are the
+    /// request's own buffer. A header past the room, as large meta makes, is
+    /// written with a copy of the request after it.
     pub(crate) fn wire(self) -> Result<Bytes> {
         let Self {
             identity,
@@ -879,7 +961,8 @@ impl Call {
             cx,
             payload,
         } = self;
-        let CallHead(mut buffer) = payload;
+        let (CallRequest::Plain(CallHead(mut buffer)) | CallRequest::Frame(CallFrame(mut buffer))) =
+            payload;
         let (at, len) = (HEADER_ROOM, buffer.len() - HEADER_ROOM);
         let mut room = [0u8; HEADER_ROOM];
         let mut free = &mut room[..];

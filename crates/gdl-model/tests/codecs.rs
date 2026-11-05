@@ -400,7 +400,7 @@ fn a_codec_entry_and_a_unary_node_compose_in_the_placement() {
     let mut segments = layout.service_segments("Tokenize");
     segments.sort_unstable();
     assert_eq!(segments, ["engine", "front"]);
-    // A unary node is not an edge: a key cannot name it.
+    // A unary node is not an edge, and its entry is a table of its parts.
     let problems = Placement::from_toml(&format!("{UNARY}[codec]\nTokenize = \"msgpack_zstd\"\n"))
         .expect_err("a service name");
     assert!(
@@ -409,4 +409,245 @@ fn a_codec_entry_and_a_unary_node_compose_in_the_placement() {
             .iter()
             .any(|p| p.table.as_deref() == Some("codec"))
     );
+}
+
+/// A placement with edge entries only keeps the hash it had before a
+/// service could have an entry: these are main's values before the
+/// service form.
+#[test]
+fn an_edge_only_placement_keeps_its_hash() {
+    let split = "[segment.front]\nnodes = ['S']\n[segment.engine]\nnodes = ['D']\n";
+    let cases = [
+        placed(r#""D -> G" = "msgpack_zstd""#).hash(),
+        placed(r#""F -> D" = { codec = "msgpack_zstd", floor = 100 }"#).hash(),
+        Placement::from_toml(&format!(
+            "{split}[codec]\n\"S -> D\" = {{ item = \"msgpack_zstd\" }}\n"
+        ))
+        .expect("a placement")
+        .hash(),
+        Placement::from_toml(SPLIT).expect("a placement").hash(),
+    ];
+    assert_eq!(
+        cases,
+        [
+            0x15fc_099d_2b0d_41f3,
+            0x5400_e9ad_08b0_bc6e,
+            0xe575_0e34_e3f7_155f,
+            0xa50a_a269_6aaa_3783,
+        ],
+        "{cases:#x?}"
+    );
+}
+
+/// `calling()` with `Tokenize` in a segment of its own, so that `F` in
+/// `front` calls it across segments.
+const CALLED: &str = "[segment.front]\nnodes = ['S', 'F', 'G']\n[segment.engine]\nnodes = ['D']\n[segment.tok]\nnodes = ['Tokenize']\n";
+
+fn called(codec: &str) -> Placement {
+    Placement::from_toml(&format!("{CALLED}[codec]\n{codec}\n")).expect("a placement")
+}
+
+/// `calling()` with the service's request or response pinned.
+fn calling_pinned(req: bool, resp: bool) -> Manifest {
+    let mut manifest = calling();
+    let unary = manifest
+        .nodes
+        .iter_mut()
+        .find_map(|n| n.unary.as_mut())
+        .expect("Tokenize");
+    unary.req = unary.req.clone().pin(req, false);
+    unary.resp = unary.resp.clone().pin(resp, false);
+    manifest
+}
+
+/// A service's entry is keyed by the service, applies to its calls from
+/// every caller, and names its request, its reply, or both, with one floor.
+#[test]
+fn a_service_entry_resolves_to_its_calls() {
+    let both = layout(
+        &calling(),
+        &called(r#"Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd" }"#),
+    )
+    .expect("a layout");
+    let call = both.call_compression("Tokenize").expect("compressed");
+    assert!(call.request && call.reply);
+    assert_eq!(call.floor, EdgeCodec::DEFAULT_FLOOR);
+    let mut ends: Vec<&str> = both.compressing_segments().into_iter().collect();
+    ends.sort_unstable();
+    assert_eq!(ends, ["front", "tok"]);
+    let request = layout(
+        &calling(),
+        &called(r#"Tokenize = { request = "msgpack_zstd", floor = 4096 }"#),
+    )
+    .expect("a layout");
+    let call = request.call_compression("Tokenize").expect("compressed");
+    assert!(call.request && !call.reply);
+    assert_eq!(call.floor, 4096);
+    let reply = layout(
+        &calling(),
+        &called(r#"Tokenize = { reply = "msgpack_zstd" }"#),
+    )
+    .expect("a layout");
+    let call = reply.call_compression("Tokenize").expect("compressed");
+    assert!(!call.request && call.reply);
+    // Control: no entry, no compression, and no segment builds zstd.
+    let bare = layout(
+        &calling(),
+        &Placement::from_toml(CALLED).expect("a placement"),
+    )
+    .expect("a layout");
+    assert_eq!(bare.call_compression("Tokenize"), None);
+    assert!(bare.compressing_segments().is_empty());
+}
+
+/// The check refuses a service entry on a pinned request or response, for
+/// the part it names, naming the service, the message, and its pin.
+#[test]
+fn a_service_entry_on_a_pinned_message_is_refused() {
+    let both = called(r#"Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd" }"#);
+    let errors = refused(&calling_pinned(true, false), &both);
+    let [
+        error @ PlacementError::PinnedCodec {
+            part: "request", ..
+        },
+    ] = &errors[..]
+    else {
+        panic!("{errors:?}");
+    };
+    let text = error.to_string();
+    for part in [
+        "Tokenize",
+        "`Text`",
+        r#"#[gdl(codec = "msgpack")]"#,
+        "{ reply = ",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
+    assert_eq!(error.problem().table.as_deref(), Some("codec"));
+    let errors = refused(&calling_pinned(false, true), &both);
+    assert!(
+        matches!(
+            &errors[..],
+            [PlacementError::PinnedCodec { part: "reply", .. }]
+        ),
+        "{errors:?}"
+    );
+    let errors = refused(&calling_pinned(true, true), &both);
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    // A pinned part the entry does not name is no conflict.
+    layout(
+        &calling_pinned(true, false),
+        &called(r#"Tokenize = { reply = "msgpack_zstd" }"#),
+    )
+    .expect("the reply alone");
+    layout(&calling(), &both).expect("unpinned");
+}
+
+/// A service entry names a unary node, and one that some caller calls
+/// across segments: a local call never encodes.
+#[test]
+fn a_service_entry_needs_a_call_that_leaves_its_segment() {
+    let entry = r#"{ request = "msgpack_zstd" }"#;
+    let errors = refused(&calling(), &called(&format!("Nope = {entry}")));
+    let [PlacementError::UnknownCodecCall { services, .. }] = &errors[..] else {
+        panic!("{errors:?}");
+    };
+    assert_eq!(services, &["Tokenize"]);
+    assert!(errors[0].to_string().contains("`Nope`"), "{}", errors[0]);
+    // A pipeline node is not a service.
+    let errors = refused(&calling(), &called(&format!("D = {entry}")));
+    assert!(
+        matches!(&errors[..], [PlacementError::UnknownCodecCall { .. }]),
+        "{errors:?}"
+    );
+    let local = Placement::from_toml(&format!(
+        "[segment.front]\nnodes = ['S', 'F', 'G', 'Tokenize']\n[segment.engine]\nnodes = ['D']\n[codec]\nTokenize = {entry}\n"
+    ))
+    .expect("a placement");
+    let errors = refused(&calling(), &local);
+    assert!(
+        matches!(&errors[..], [PlacementError::LocalCodecCall { .. }]),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].problem().table.as_deref(), Some("codec"));
+    // A copy in the caller's segment and one in another: `F` calls its own,
+    // and no caller crosses.
+    let copies = Placement::from_toml(&format!(
+        "[segment.front]\nnodes = ['S', 'F', 'G', 'Tokenize']\n[segment.engine]\nnodes = ['D', 'Tokenize']\n[codec]\nTokenize = {entry}\n"
+    ))
+    .expect("a placement");
+    let errors = refused(&calling(), &copies);
+    assert!(
+        matches!(&errors[..], [PlacementError::LocalCodecCall { .. }]),
+        "{errors:?}"
+    );
+}
+
+/// A key's form decides what its entry may say: an edge's parts on an
+/// edge, a service's on a service, and a service's entry is a table.
+#[test]
+fn a_service_key_takes_a_services_parts() {
+    for codec in [
+        r#"Tokenize = "msgpack_zstd""#,
+        r#"Tokenize = { codec = "msgpack_zstd" }"#,
+        r#"Tokenize = { head = "msgpack_zstd" }"#,
+        r#"Tokenize = { item = "msgpack_zstd" }"#,
+        r#"Tokenize = { floor = 10 }"#,
+        r#"Tokenize = { request = "lz4" }"#,
+        r#"Tokenize = { request = "msgpack_zstd", head = "msgpack_zstd" }"#,
+        r#""F -> D" = { request = "msgpack_zstd" }"#,
+        r#""F -> D" = { reply = "msgpack_zstd" }"#,
+        r#""Tok enize" = { request = "msgpack_zstd" }"#,
+    ] {
+        let problems = Placement::from_toml(&format!("{CALLED}[codec]\n{codec}\n"))
+            .expect_err(codec)
+            .0;
+        assert!(
+            problems.iter().any(|p| p.table.as_deref() == Some("codec")),
+            "{codec}: {problems:?}"
+        );
+    }
+    let problems = Placement::from_toml(&format!("{CALLED}[codec]\nTokenize = \"msgpack_zstd\"\n"))
+        .expect_err("a string")
+        .0;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.message.contains("{ request = ") && p.message.contains("reply = ")),
+        "{problems:?}"
+    );
+}
+
+/// The hash covers a service's entry and which parts it names, but not
+/// its floor.
+#[test]
+fn the_hash_covers_a_service_entry_but_not_its_floor() {
+    let bare = Placement::from_toml(CALLED).expect("a placement").hash();
+    let request = called(r#"Tokenize = { request = "msgpack_zstd" }"#).hash();
+    let reply = called(r#"Tokenize = { reply = "msgpack_zstd" }"#).hash();
+    let both = called(r#"Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd" }"#).hash();
+    let floored = called(r#"Tokenize = { request = "msgpack_zstd", floor = 64 }"#).hash();
+    let hashes = [bare, request, reply, both];
+    for (i, a) in hashes.iter().enumerate() {
+        for b in &hashes[i + 1..] {
+            assert_ne!(a, b, "{hashes:x?}");
+        }
+    }
+    assert_eq!(request, floored);
+}
+
+#[test]
+fn a_placement_with_a_service_entry_survives_its_text_and_json() {
+    for codec in [
+        r#"Tokenize = { request = "msgpack_zstd", reply = "msgpack_zstd", floor = 100 }"#,
+        r#"Tokenize = { reply = "msgpack_zstd" }"#,
+    ] {
+        let placement = called(codec);
+        let text = toml::to_string(&placement).expect("toml");
+        assert_eq!(Placement::from_toml(&text).expect(&text), placement);
+        let json = serde_json::to_string(&placement).expect("json");
+        let back: Placement = serde_json::from_str(&json).expect("json back");
+        assert_eq!(back, placement);
+        layout(&calling(), &back).expect("a layout");
+    }
 }

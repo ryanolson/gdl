@@ -2,11 +2,14 @@
 //! its bytes are written. A reply is made as a [`Reply`], whatever it says,
 //! and only [`Reply::write`] turns one into bytes, holding every kind to
 //! `call_reply_max`. The tags are private here, so no other code can write
-//! a reply of its own.
+//! a reply of its own. Under a call codec an answer is compressed here,
+//! before it is written, so that the limit holds the bytes on the wire; the
+//! caller decodes it within its own `decompressed_max`.
 
 use gdl::{Error, ErrorKind, Result};
 
-use super::super::envelope::{decode, write_msgpack};
+use super::super::envelope::{decode, decoded, write_msgpack};
+use crate::zstd::{self, Compression};
 
 /// What a reply to a call says, before it is written.
 pub(crate) struct Reply(Kind);
@@ -33,11 +36,25 @@ enum Tag {
 impl Reply {
     /// The service answered with what `encode` writes: its response in its
     /// message's encoding. A response that does not encode is a failure.
-    pub(crate) fn answered(encode: impl FnOnce(&mut Vec<u8>) -> Result<()>) -> Self {
+    /// Under a call codec, `compression`, a response from its floor on is
+    /// one zstd frame after the tag, when that is shorter.
+    pub(crate) fn answered(
+        encode: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+        compression: Option<Compression>,
+    ) -> Self {
         let mut bytes = vec![Tag::Answered as u8];
-        match encode(&mut bytes) {
-            Ok(()) => Self(Kind::Answered(bytes)),
-            Err(error) => Self::failed(error),
+        if let Err(error) = encode(&mut bytes) {
+            return Self::failed(error);
+        }
+        match compression {
+            Some(compression) if compression.applies(bytes.len() - 1) => {
+                match compressed(&bytes[1..]) {
+                    Ok(Some(framed)) => Self(Kind::Answered(framed)),
+                    Ok(None) => Self(Kind::Answered(bytes)),
+                    Err(error) => Self::failed(error),
+                }
+            }
+            _ => Self(Kind::Answered(bytes)),
         }
     }
 
@@ -81,6 +98,15 @@ impl Reply {
         }
         vec![instead as u8]
     }
+}
+
+/// `plain` as the answer's tag and one frame, or `None` when the frame is
+/// not shorter, and the answer crosses plain.
+fn compressed(plain: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut framed = Vec::with_capacity(1 + zstd::bound(plain.len()));
+    framed.push(Tag::Answered as u8);
+    zstd::compress_into(plain, &mut framed)?;
+    Ok((framed.len() <= plain.len()).then_some(framed))
 }
 
 /// The most bytes of a service's name that a fallback carries: nothing in
@@ -141,6 +167,25 @@ pub(crate) fn refusal(bytes: &[u8]) -> Option<Error> {
     }
 }
 
+/// A reply's response, decoded by `decode`, or the reply's error. Under a
+/// call codec, `compression`, a response that is a frame is decoded first,
+/// within `compression`'s limit, the caller's `decompressed_max`: a frame
+/// that states more fails the call with `Codec` before anything is
+/// allocated for it.
+pub(crate) fn response<T>(
+    bytes: &[u8],
+    compression: Option<Compression>,
+    decode: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    let body = read(bytes)?;
+    match compression {
+        Some(compression) if zstd::is_frame(body) => {
+            decode(&decoded(body, compression.limit(), &[])?)
+        }
+        _ => decode(body),
+    }
+}
+
 /// A reply, read: the response's bytes, borrowed, or the error.
 pub(crate) fn read(bytes: &[u8]) -> Result<&[u8]> {
     let Some((&tag, rest)) = bytes.split_first() else {
@@ -182,10 +227,13 @@ mod tests {
         let error = || Error::new(ErrorKind::Node, "x".repeat(size));
         match kind {
             // Through `calloc` and `memcpy`: a byte loop is slow in a test build.
-            Tag::Answered => Reply::answered(|out| {
-                out.extend_from_slice(&vec![0; size]);
-                Ok(())
-            }),
+            Tag::Answered => Reply::answered(
+                |out| {
+                    out.extend_from_slice(&vec![0; size]);
+                    Ok(())
+                },
+                None,
+            ),
             Tag::Failed => Reply::failed(error()),
             Tag::Refused => Reply::refused(error()),
         }
@@ -254,6 +302,77 @@ mod tests {
         let bytes = reply(Tag::Refused, 4096).write(Some("Tok"), 32);
         assert_eq!(bytes, [Tag::Refused as u8]);
         assert_eq!(read(&bytes).expect_err("an error").kind(), ErrorKind::Codec);
+    }
+
+    /// An answer of `content`, compressed from `floor` on.
+    fn coded(content: &[u8], floor: u32) -> Reply {
+        Reply::answered(
+            |out| {
+                out.extend_from_slice(content);
+                Ok(())
+            },
+            Some(Compression::new(floor, usize::MAX)),
+        )
+    }
+
+    /// Under a call codec, `call_reply_max` holds the bytes on the wire, its
+    /// tag included: an answer whose plain form is past the limit crosses
+    /// when its frame fits, and reads back whole; one whose frame does not
+    /// fit is the fallback, as a plain answer past the limit is. Below its
+    /// floor, or where the frame is not shorter, an answer is written
+    /// plain. Errors are never compressed.
+    #[test]
+    fn a_compressed_answer_is_held_to_its_limit_on_its_wire_bytes() {
+        let max = 1024;
+        let zeros = vec![0u8; 100 * max];
+        let bytes = coded(&zeros, 512).write(Some("Tok"), max);
+        assert!(bytes.len() <= max, "{} bytes", bytes.len());
+        assert_eq!(bytes[0], Tag::Answered as u8);
+        assert!(zstd::is_frame(&bytes[1..]));
+        let back = response(&bytes, Some(Compression::new(512, zeros.len())), |b| {
+            Ok(b.to_vec())
+        })
+        .expect("answered");
+        assert_eq!(back, zeros);
+        // A frame past the limit: the fallback, which names the service.
+        let mut rng = Seeded(0xc0de_c0de);
+        let dense: Vec<u8> = (0..4 * max).map(|_| rng.next() as u8).collect();
+        let bytes = coded(&dense, 512).write(Some("Tok"), max);
+        assert!(bytes.len() <= max);
+        let error = read(&bytes).expect_err("past the limit");
+        assert_eq!(error.kind(), ErrorKind::Codec);
+        assert!(error.message().contains("`Tok`"), "{error}");
+        // Below the floor, plain.
+        let bytes = coded(&zeros[..500], 512).write(Some("Tok"), max);
+        assert_eq!(read(&bytes).expect("answered"), &zeros[..500]);
+        // A frame that is not shorter: plain.
+        let bytes = coded(&dense[..900], 512).write(Some("Tok"), max);
+        assert_eq!(read(&bytes).expect("answered"), &dense[..900]);
+        // An error stays an error, plain, under a codec too.
+        let bytes = Reply::failed(Error::new(ErrorKind::Node, "x".repeat(800))).write(None, max);
+        assert_eq!(read(&bytes).expect_err("failed").message().len(), 800);
+    }
+
+    /// The caller decodes a compressed answer within its own limit: a
+    /// frame under the service's `call_reply_max` that states more than the
+    /// caller's `decompressed_max` fails with `Codec`. A plain answer is
+    /// read as it is, and a frame is read only under a codec.
+    #[test]
+    fn a_compressed_answer_decodes_within_the_callers_limit() {
+        let zeros = vec![0u8; 100_000];
+        let bytes = coded(&zeros, 512).write(Some("Tok"), 1024);
+        assert!(bytes.len() <= 1024);
+        let limit = Compression::new(512, 8192);
+        let error = response(&bytes, Some(limit), |b| Ok(b.len())).expect_err("past the limit");
+        assert_eq!(error.kind(), ErrorKind::Codec);
+        assert!(
+            error.message().contains("over the limit of 8192"),
+            "{error}"
+        );
+        let within = Compression::new(512, zeros.len());
+        assert_eq!(response(&bytes, Some(within), |b| Ok(b.len())), Ok(100_000));
+        // Without a codec the frame is the response's bytes, as they are.
+        assert_eq!(response(&bytes, None, |b| Ok(b.len())), Ok(bytes.len() - 1));
     }
 
     /// A seeded generator, splitmix64: the workspace has no property-test

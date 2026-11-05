@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 
-use super::envelope::CallArrived;
+use super::envelope::{CallArrived, decoded};
 use super::runtime::RuntimeConfig;
 use super::runtime::{Runtime, Within};
 use crate::wire::{Codec, RequestCodec};
+use crate::zstd::{self, Compression};
 use gdl::{Cx, Error, ErrorKind, Result, Unary, UnaryClient};
 
 mod permit;
@@ -88,6 +89,27 @@ pub(crate) struct Callee {
     /// Whether the graph marks it `idempotent`: a call that may have run
     /// is tried again only then.
     pub(crate) idempotent: bool,
+    /// How its calls compress their request, under a `[codec]` entry that
+    /// names it: compressed once, before the first try.
+    pub(crate) request: Option<Compression>,
+    /// How its replies compress, under that entry: a reply that is a frame
+    /// is decoded within this segment's `decompressed_max`.
+    pub(crate) reply: Option<Compression>,
+}
+
+/// What a `[codec]` entry for unary node `service` compresses under
+/// `layout`: its request and its reply, each within `limit`, a receiver's
+/// `decompressed_max`. `None` for each part it does not name.
+pub(crate) fn call_codec(
+    layout: &gdl_model::Layout,
+    service: &str,
+    limit: usize,
+) -> (Option<Compression>, Option<Compression>) {
+    let Some(codec) = layout.call_compression(service) else {
+        return (None, None);
+    };
+    let part = |named: bool| named.then(|| Compression::new(codec.floor, limit));
+    (part(codec.request), part(codec.reply))
 }
 
 impl Calls {
@@ -182,6 +204,7 @@ impl Calls {
             if let Within::Selector { name, selector, .. } = &within {
                 reads(&rt.segment, service, name, &**selector, target)?;
             }
+            let (request, reply) = call_codec(&rt.layout, service, rt.config.decompressed_max);
             let _ = target.bound.set(Bound {
                 rt: Arc::downgrade(rt),
                 callee: Callee {
@@ -190,6 +213,8 @@ impl Calls {
                     segment,
                     within,
                     idempotent: idempotent.contains(service),
+                    request,
+                    reply,
                 },
             });
         }
@@ -281,7 +306,7 @@ impl<Req: Send + 'static, Resp: Send + 'static> Unary for Link<Req, Resp> {
         let head = self.req.encode_call(&req)?;
         drop(req);
         let reply = rt.call(&bound.callee, cx, head).await?;
-        self.resp.decode(reply::read(&reply)?)
+        reply::response(&reply, bound.callee.reply, |bytes| self.resp.decode(bytes))
     }
 }
 
@@ -303,6 +328,27 @@ pub(crate) struct Hosted<S: Unary> {
     pub(crate) service: Arc<S>,
     pub(crate) req: Codec<S::Req>,
     pub(crate) resp: Codec<S::Resp>,
+    /// Under a `[codec]` entry that names its request: a request that is a
+    /// frame is decoded within this segment's `decompressed_max`. Without
+    /// one, a request's bytes are its message's, whatever they begin with.
+    pub(crate) request: Option<Compression>,
+    /// Under an entry that names its reply: how an answer is compressed.
+    pub(crate) reply: Option<Compression>,
+}
+
+impl<S: Unary> Hosted<S> {
+    /// The request in `bytes`, decoded: from its frame first, under a codec
+    /// for the request, through the one bounded decoder ([`decoded`]). The
+    /// plain bytes a frame decodes into are dropped here, before the
+    /// service runs.
+    fn request(&self, bytes: &[u8]) -> Result<S::Req> {
+        match self.request {
+            Some(compression) if zstd::is_frame(bytes) => {
+                self.req.decode(&decoded(bytes, compression.limit(), &[])?)
+            }
+            _ => self.req.decode(bytes),
+        }
+    }
 }
 
 impl<S: Unary> Serve for Hosted<S> {
@@ -312,7 +358,7 @@ impl<S: Unary> Serve for Hosted<S> {
 
     fn serve<'a>(&'a self, cx: &'a Cx, request: Bytes) -> BoxFuture<'a, Reply> {
         Box::pin(async move {
-            let req = match self.req.decode(&request) {
+            let req = match self.request(&request) {
                 Ok(req) => req,
                 Err(error) => return Reply::refused(error),
             };
@@ -323,7 +369,7 @@ impl<S: Unary> Serve for Hosted<S> {
                 return Reply::refused(Error::deadline_exceeded());
             }
             match self.service.call(cx, req).await {
-                Ok(resp) => Reply::answered(|out| self.resp.encode_into(&resp, out)),
+                Ok(resp) => Reply::answered(|out| self.resp.encode_into(&resp, out), self.reply),
                 Err(error) => Reply::failed(error),
             }
         })
@@ -533,30 +579,123 @@ mod tests {
     /// The bytes a call arrived in are a view of velo's read buffer, which
     /// a held view keeps whole: the request is decoded, and the bytes let
     /// go, before the service runs, which may be until the call's bound.
+    /// So are a compressed request's, and the plain bytes it decodes into.
     #[tokio::test]
     async fn the_requests_bytes_are_released_before_the_service_runs() {
-        let dropped = Arc::new(AtomicBool::new(false));
         let codec = Codec::<u64>::new(gdl_model::Encoding::default());
-        let request = Bytes::from_owner(Owner {
-            bytes: codec.encode(&7).expect("encoded"),
-            dropped: Arc::clone(&dropped),
-        });
-        let hosted = Hosted {
-            name: "Released".to_string(),
-            service: Arc::new(Released(Arc::clone(&dropped))),
-            req: codec,
-            resp: Codec::<bool>::new(gdl_model::Encoding::default()),
-        };
-        let reply = hosted
-            .serve(&Cx::new(), request)
-            .await
-            .write(Some("Released"), 1024);
-        let answered = Codec::<bool>::new(gdl_model::Encoding::default())
-            .decode(reply::read(&reply).expect("answered"))
-            .expect("decoded");
-        assert!(
-            answered,
-            "the service ran while the request's bytes were held"
+        let mut frame = Vec::new();
+        zstd::compress_into(&codec.encode(&7).expect("encoded"), &mut frame).expect("a frame");
+        let compression = Compression::new(0, 1024);
+        for (bytes, request) in [
+            (codec.encode(&7).expect("encoded"), None),
+            (frame, Some(compression)),
+        ] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let request_bytes = Bytes::from_owner(Owner {
+                bytes,
+                dropped: Arc::clone(&dropped),
+            });
+            let hosted = Hosted {
+                name: "Released".to_string(),
+                service: Arc::new(Released(Arc::clone(&dropped))),
+                req: codec,
+                resp: Codec::<bool>::new(gdl_model::Encoding::default()),
+                request,
+                reply: None,
+            };
+            let reply = hosted
+                .serve(&Cx::new(), request_bytes)
+                .await
+                .write(Some("Released"), 1024);
+            let answered = Codec::<bool>::new(gdl_model::Encoding::default())
+                .decode(reply::read(&reply).expect("answered"))
+                .expect("decoded");
+            assert!(
+                answered,
+                "the service ran while the request's bytes were held: {request:?}"
+            );
+        }
+    }
+
+    /// Answers with the bytes of its request.
+    struct Raw;
+
+    impl Unary for Raw {
+        type Req = Vec<u8>;
+        type Resp = Vec<u8>;
+
+        async fn call(&self, _cx: &Cx, req: Vec<u8>) -> Result<Vec<u8>> {
+            Ok(req)
+        }
+    }
+
+    /// Hosts [`Raw`] with a codec that reads and writes bytes as they are,
+    /// as no encoding gdl has does, with a call codec for its request or
+    /// none.
+    fn raw(request: Option<Compression>) -> Hosted<Raw> {
+        let codec = Codec::<Vec<u8>>::from_fns(
+            |value: &Vec<u8>, out: &mut Vec<u8>| {
+                out.extend_from_slice(value);
+                Ok(())
+            },
+            |bytes: &[u8]| Ok(bytes.to_vec()),
         );
+        Hosted {
+            name: "Raw".to_string(),
+            service: Arc::new(Raw),
+            req: codec,
+            resp: codec,
+            request,
+            reply: None,
+        }
+    }
+
+    /// Without a call codec for its request, the handler reads a request's
+    /// bytes as its message's, whatever they begin with: one that begins
+    /// as a zstd frame does arrives intact. Only under a codec, where the
+    /// message is named MessagePack, which never begins so, is it read as
+    /// a frame, and refused when it is not one.
+    #[tokio::test]
+    async fn a_request_is_read_as_a_frame_only_under_a_codec() {
+        let mut magic = vec![0x28, 0xb5, 0x2f, 0xfd];
+        magic.extend_from_slice(b"not a frame");
+        let reply = raw(None)
+            .serve(&Cx::new(), Bytes::from(magic.clone()))
+            .await
+            .write(Some("Raw"), 1024);
+        assert_eq!(reply::read(&reply).expect("answered"), &magic[..]);
+        let reply = raw(Some(Compression::new(0, 1024)))
+            .serve(&Cx::new(), Bytes::from(magic))
+            .await;
+        assert!(reply.is_refused(), "a bad frame never reaches the service");
+        let bytes = reply.write(Some("Raw"), 1024);
+        let error = reply::read(&bytes).expect_err("refused");
+        assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
+    }
+
+    /// A compressed request is decoded within the handler's
+    /// `decompressed_max`: one that states more is refused with `Codec`
+    /// before the service runs, and one within it is served.
+    #[tokio::test]
+    async fn a_compressed_request_decodes_within_the_handlers_limit() {
+        let plain = vec![0u8; 10_000];
+        let mut frame = Vec::new();
+        zstd::compress_into(&plain, &mut frame).expect("a frame");
+        let refused = raw(Some(Compression::new(0, 8192)))
+            .serve(&Cx::new(), Bytes::from(frame.clone()))
+            .await;
+        assert!(refused.is_refused(), "the service never ran");
+        let bytes = refused.write(Some("Raw"), 1024);
+        let error = reply::read(&bytes).expect_err("refused");
+        assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
+        assert!(
+            error.message().contains("over the limit of 8192"),
+            "{error}"
+        );
+        let reply = raw(Some(Compression::new(0, plain.len())))
+            .serve(&Cx::new(), Bytes::from(frame))
+            .await
+            .write(Some("Raw"), 1 << 20);
+        assert_eq!(reply::read(&reply).expect("answered"), &plain[..]);
     }
 }
