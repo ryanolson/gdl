@@ -303,7 +303,9 @@ impl Backend for Local {
         directory.watchers(class)
     }
 
-    // A new process over the same tables.
+    // A new process over the same tables. DynamoDB Local runs in memory
+    // and keeps running, so rule 1 is held across a hub's restart here,
+    // not the store's (`Backend::restart`).
     async fn restart(&self, directory: DynamoDirectory) -> DynamoDirectory {
         DynamoDirectory::with_limits(self.client.clone(), directory.tables().clone(), LIMITS)
     }

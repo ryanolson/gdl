@@ -341,6 +341,8 @@ A backend keeps four rules:
 
 Behind the `conformance` feature, `gdl_pools::conformance::run` holds a backend to these rules, with cases for each rule and for the trait's ordering. A backend that does not keep a rule yet says so (`Backend::keeps`). The suite then requires the rule's cases to fail on that rule, so what a backend says of itself stays true.
 
+Rule 1's case restarts the backend through `Backend::restart`: it drops the last handle and reads what a new one holds. A backend whose store runs as a process of its own, such as a database server, restarts that process there too, over the same data, so the rule holds across the store's restart and not only a hub's. The DynamoDB backend's harness makes a new client to a DynamoDB Local that keeps running in memory, so it proves rule 1 across a hub's restart only. Rule 4's case gives each version of a record its own property list, revocations, and list version, so a backend that joins a record to another version's list fails it, in a snapshot, a change, or a replay. A snapshot opened before a newer write and read after it must hold either version whole. The case also writes a newer version of one pool once a snapshot's first record has arrived, so the backend has begun that snapshot however long it waited to read: the rest of the snapshot must hold each record whole, in either version. A watch resumed before the newer write must replay each version whole.
+
 | Backend | Where | Use | Rules kept |
 |---|---|---|---|
 | `memory` (`MemoryDirectory`) | one directory shared by every hub in one process | tests | 2, 3, 4. Its records live only as long as its process |

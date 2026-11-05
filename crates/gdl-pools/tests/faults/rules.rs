@@ -1,18 +1,24 @@
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use gdl_model::PropertyKey;
 use gdl_pools::{
     DirectoryError, LastWrite, LoadSummary, MemoryDirectory, MemoryLimits, PoolDirectory,
-    PoolEvent, PoolRecord, PoolState, ResumeToken, Withdrawal,
+    PoolEvent, PoolProperty, PoolRecord, PoolState, ResumeToken, Withdrawal,
     conformance::{Backend, Rule},
 };
 use tokio::time::Instant;
 
-use crate::{Events, failure};
+use crate::{Events, fails_only_on, failure};
+
+mod buffered;
+mod lazy;
+mod replay;
 
 const LIMITS: MemoryLimits = MemoryLimits {
     buffer: 8,
@@ -41,6 +47,14 @@ enum Fault {
     LatestPart,
     /// Joins replayed records to the pool's latest summary, regardless of version.
     ReplayPart,
+    /// Joins each record a watch yields to the pool's latest property
+    /// list (its properties and revocations), as a backend that keeps
+    /// the list apart and reads the newest one would.
+    LatestList,
+    /// Joins only the records of a snapshot to the pool's latest property
+    /// list, as a backend that reads the list when it serves a snapshot
+    /// it read before would.
+    SnapshotList,
     /// Restores a record's version but loses its hub address on restart.
     RestartPart,
     /// Restores the record but loses its separately stored load on restart.
@@ -56,13 +70,16 @@ struct Faulty {
     inner: MemoryDirectory,
     fault: Fault,
     restarted: bool,
-    /// Each pool's latest write: its load summary, its lease, and when.
+    /// Each pool's latest write: its load summary, its property list,
+    /// its lease, and when.
     written: Arc<Mutex<HashMap<(String, String), Written>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Written {
     load: Option<LoadSummary>,
+    properties: Vec<PoolProperty>,
+    revoked: Vec<PropertyKey>,
     lease: Duration,
     at: Instant,
 }
@@ -74,11 +91,13 @@ impl PoolDirectory for Faulty {
         let key = (record.class.clone(), record.name.clone());
         let written = Written {
             load: record.load,
+            properties: record.properties.clone(),
+            revoked: record.revoked.clone(),
             lease: record.lease,
             at: Instant::now(),
         };
-        let before = self.written.lock().expect("lock").get(&key).copied();
         if self.fault == Fault::LoadApart {
+            let before = self.written.lock().expect("lock").get(&key).cloned();
             record.load = before.and_then(|before| before.load);
         }
         let result = self.inner.publish(record).await;
@@ -148,6 +167,18 @@ impl PoolDirectory for Faulty {
                         .expect("lock")
                         .get(&(record.class.clone(), record.name.clone()))
                         .and_then(|written| written.load);
+                }
+                if (fault == Fault::LatestList
+                    || (fault == Fault::SnapshotList && matches!(event, Ok(PoolEvent::Current(_)))))
+                    && let Ok(PoolEvent::Current(record) | PoolEvent::Put { record, .. }) =
+                        &mut event
+                    && let Some(latest) = parts
+                        .lock()
+                        .expect("lock")
+                        .get(&(record.class.clone(), record.name.clone()))
+                {
+                    record.properties = latest.properties.clone();
+                    record.revoked = latest.revoked.clone();
                 }
                 if let (
                     Fault::RewritesRegion,
@@ -221,7 +252,9 @@ impl Backend for Fault {
 }
 
 /// A backend that loses its records when it restarts, and says it keeps
-/// them, fails the case of [`Rule::Kept`].
+/// them, fails the case of [`Rule::Kept`], on that rule: as a store that
+/// runs as its own process and comes back empty does, once its harness
+/// restarts that process in `Backend::restart`.
 #[tokio::test]
 async fn a_backend_that_forgets_on_restart_fails() {
     let why = failure(&Fault::ForgetsOnRestart).await;
@@ -229,6 +262,7 @@ async fn a_backend_that_forgets_on_restart_fails() {
         why.ends_with("failed: a_record_stays_until_withdrawn"),
         "{why}"
     );
+    fails_only_on(&Fault::ForgetsOnRestart, Rule::Kept).await;
 }
 
 /// A backend that leaves an expired record out of a new watch deletes it
@@ -405,6 +439,167 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
 
     let why = failure(&Fault::ReplayPart).await;
     assert!(why.contains("a_record_arrives_whole"), "{why}");
+}
+
+/// A backend that joins a record to its pool's latest property list,
+/// rather than the list the record was published with, serves a torn
+/// record, and fails the case of [`Rule::Whole`], on that rule alone.
+#[tokio::test(start_paused = true)]
+async fn a_backend_that_joins_a_record_to_the_latest_list_fails() {
+    let [writer, reader] = Fault::LatestList.fresh().await;
+    let mut watch = reader.watch("model_x", None);
+    assert!(matches!(
+        watch.next().await,
+        Some(Ok(PoolEvent::Synced { snapshot: true, .. }))
+    ));
+    let record = |seq| PoolRecord {
+        dropped: Vec::new(),
+        presence: gdl_pools::Presence::Serving,
+        properties: vec![PoolProperty {
+            property: PropertyKey::new("test", serde_json::json!({ "name": format!("p{seq}") }))
+                .expect("a key"),
+            state: gdl_pools::PropertyState::Ready,
+            since: seq,
+        }],
+        properties_version: seq,
+        revoked: Vec::new(),
+        name: "m1".into(),
+        class: "model_x".into(),
+        region: "us-east-1".into(),
+        parent: None,
+        contract: 1,
+        placement: 2,
+        state: PoolState::Ready,
+        epoch: 1,
+        seq,
+        hub: "m1:1337".into(),
+        lease: PoolRecord::DEFAULT_LEASE,
+        load: None,
+    };
+    let first = record(1);
+    let second = record(2);
+    writer
+        .publish(first.clone())
+        .await
+        .expect("the first write");
+    writer
+        .publish(second.clone())
+        .await
+        .expect("the second write");
+    let Some(Ok(PoolEvent::Put { record: torn, .. })) = watch.next().await else {
+        panic!("the first change is queued");
+    };
+    assert_eq!(torn.version(), first.version());
+    assert_eq!(torn.properties, second.properties);
+    assert_ne!(torn, first);
+    drop((writer, reader, watch));
+
+    let why = failure(&Fault::LatestList).await;
+    assert!(why.ends_with("failed: a_record_arrives_whole"), "{why}");
+    fails_only_on(&Fault::LatestList, Rule::Whole).await;
+}
+
+/// A backend that joins a snapshot's records to the pool's latest list
+/// tears a record whose list changed after the watch began, and fails the
+/// case of [`Rule::Whole`], on that rule alone.
+#[tokio::test(start_paused = true)]
+async fn a_backend_that_joins_a_snapshot_to_the_latest_list_fails() {
+    let [writer, reader] = Fault::SnapshotList.fresh().await;
+    let record = |seq| PoolRecord {
+        dropped: Vec::new(),
+        presence: gdl_pools::Presence::Serving,
+        properties: vec![PoolProperty {
+            property: PropertyKey::new("test", serde_json::json!({ "name": format!("p{seq}") }))
+                .expect("a key"),
+            state: gdl_pools::PropertyState::Ready,
+            since: seq,
+        }],
+        properties_version: seq,
+        revoked: vec![
+            PropertyKey::new("test", serde_json::json!({ "name": format!("r{seq}") }))
+                .expect("a key"),
+        ],
+        name: "m1".into(),
+        class: "model_x".into(),
+        region: "us-east-1".into(),
+        parent: None,
+        contract: 1,
+        placement: 2,
+        state: PoolState::Ready,
+        epoch: 1,
+        seq,
+        hub: "m1:1337".into(),
+        lease: PoolRecord::DEFAULT_LEASE,
+        load: None,
+    };
+    let first = record(1);
+    let second = record(2);
+    writer
+        .publish(first.clone())
+        .await
+        .expect("the first write");
+    let mut snapshot = reader.watch("model_x", None);
+    writer
+        .publish(second.clone())
+        .await
+        .expect("the second write");
+    let Some(Ok(PoolEvent::Current(torn))) = snapshot.next().await else {
+        panic!("the snapshot holds the first write");
+    };
+    assert_eq!(torn.version(), first.version());
+    assert_eq!(torn.properties, second.properties);
+    assert_eq!(torn.revoked, second.revoked);
+    assert_ne!(torn, first);
+    drop((writer, reader, snapshot));
+
+    let why = failure(&Fault::SnapshotList).await;
+    assert!(why.ends_with("failed: a_record_arrives_whole"), "{why}");
+    fails_only_on(&Fault::SnapshotList, Rule::Whole).await;
+}
+
+/// Tears lists as [`Fault::LatestList`] does, and loses its records on
+/// restart, which it says it does.
+struct VolatileLists;
+
+impl Backend for VolatileLists {
+    type Directory = Faulty;
+
+    async fn fresh<const N: usize>(&self) -> [Faulty; N] {
+        Fault::LatestList.fresh().await
+    }
+
+    fn buffer(&self) -> usize {
+        LIMITS.buffer
+    }
+
+    fn history(&self) -> usize {
+        LIMITS.history
+    }
+
+    fn watchers(&self, directory: &Faulty, class: &str) -> usize {
+        directory.inner.watchers(class)
+    }
+
+    async fn restart(&self, _: Faulty) -> Faulty {
+        let [directory] = self.fresh().await;
+        directory
+    }
+
+    fn keeps(&self, rule: Rule) -> bool {
+        rule != Rule::Kept
+    }
+}
+
+/// `fails_only_on` holds every other rule, also one the backend disowns:
+/// a backend that breaks a second rule is not failing on one rule alone.
+#[tokio::test(start_paused = true)]
+async fn failing_only_on_a_rule_takes_no_second_broken_rule() {
+    let why = failure(&VolatileLists).await;
+    assert!(why.ends_with("failed: a_record_arrives_whole"), "{why}");
+    let only = AssertUnwindSafe(fails_only_on(&VolatileLists, Rule::Whole))
+        .catch_unwind()
+        .await;
+    assert!(only.is_err(), "taken, though it breaks Kept too");
 }
 
 /// A backend that keeps a rule but says it does not fails the suite, so

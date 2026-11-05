@@ -75,6 +75,13 @@ pub trait Backend: Sync {
     /// The backend restarted: `directory`, the last of its handles to
     /// what the case made, is dropped as its process ends, and the
     /// handle returned reads what the backend keeps across the restart.
+    ///
+    /// A backend whose store runs as a process of its own, such as a
+    /// database server, restarts that process here too, over the same
+    /// data, before it makes the new handle. The case of [`Rule::Kept`]
+    /// then holds the rule across the store's restart, and not only
+    /// across a hub's. A harness that only makes a new handle to a store
+    /// that keeps running proves the rule across a hub's restart alone.
     fn restart(&self, directory: Self::Directory) -> impl Future<Output = Self::Directory> + Send;
 
     /// Whether the backend keeps `rule`. One that does not must fail the
@@ -976,18 +983,31 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
     }
 }
 
-/// A record with every field set, at `seq`: each field but the name,
+/// A record of `pool` with every field set, at `seq`: each field but the name,
 /// class, and epoch differs between two seqs, so that a part of one
-/// version with the rest of another equals neither.
-fn whole(seq: u64) -> PoolRecord {
+/// version with the rest of another equals neither. That includes the
+/// property list, its revocations, and its version: a backend that keeps
+/// the list apart and joins a record to another version's list fails.
+fn whole(class: &str, pool: &str, seq: u64) -> PoolRecord {
+    let key = |name: String| {
+        gdl_model::PropertyKey::new("test", serde_json::json!({ "name": name })).expect("a key")
+    };
     PoolRecord {
         dropped: Vec::new(),
         presence: crate::Presence::Serving,
-        properties: Vec::new(),
-        properties_version: 0,
-        revoked: Vec::new(),
-        name: "m1".into(),
-        class: MODEL.into(),
+        properties: vec![crate::PoolProperty {
+            property: key(format!("shard-{seq}")),
+            state: if seq.is_multiple_of(2) {
+                crate::PropertyState::Ready
+            } else {
+                crate::PropertyState::Unavailable
+            },
+            since: 1_000 + seq,
+        }],
+        properties_version: 1_000 + seq,
+        revoked: vec![key(format!("revoked-{seq}"))],
+        name: pool.into(),
+        class: class.into(),
         region: format!("region-{seq}"),
         // A home at one seq, and a parents' class at the next.
         parent: Some(if seq.is_multiple_of(2) {
@@ -1004,7 +1024,7 @@ fn whole(seq: u64) -> PoolRecord {
         },
         epoch: 1,
         seq,
-        hub: format!("m1-{seq}:1337"),
+        hub: format!("{pool}-{seq}:1337"),
         lease: Duration::from_secs(30 + seq),
         load: Some(LoadSummary {
             admitted: 10 * seq,
@@ -1050,8 +1070,64 @@ async fn whole_changes(
     }
 }
 
+/// The next event of `watch` is a snapshot's record, one of `versions`
+/// whole; that record.
+async fn one_of(watch: &mut impl Events, versions: &[PoolRecord], what: &str) -> PoolRecord {
+    match next(watch, what).await {
+        PoolEvent::Current(record) if versions.contains(&record) => record,
+        PoolEvent::Current(record) => broke(
+            Rule::Whole,
+            format_args!("published {versions:?}, and {what} is {record:?}"),
+        ),
+        other => panic!("{what}: {other:?}"),
+    }
+}
+
+/// A snapshot under way holds each record whole, though a newer version
+/// of one is written while it is read. The write is made once the
+/// snapshot's first record has arrived, an event a reader sees, so that a
+/// backend has begun its snapshot then however many polls it waits
+/// before it reads: one that joins a record it read before the write to
+/// the list written since fails.
+async fn a_snapshot_under_way_holds_each_record_whole<D: PoolDirectory>(writer: &D, reader: &D) {
+    let pools = ["g1", "g2"];
+    for pool in pools {
+        publish(writer, whole(GLOBAL, pool, 1))
+            .await
+            .expect("a record");
+    }
+    let mut under_way = watch(reader, GLOBAL, None);
+    let firsts = pools.map(|pool| whole(GLOBAL, pool, 1));
+    let read = one_of(&mut under_way, &firsts, "a snapshot's first record").await;
+    let other = if read.name == pools[0] {
+        pools[1]
+    } else {
+        pools[0]
+    };
+    let newer = whole(GLOBAL, other, 2);
+    publish(writer, newer.clone())
+        .await
+        .expect("a newer record");
+    one_of(
+        &mut under_way,
+        &[whole(GLOBAL, other, 1), newer],
+        "the snapshot's record written while it was read",
+    )
+    .await;
+    snapshot_ends(&mut under_way, "a snapshot under way").await;
+}
+
+/// The next event of `watch` ends its snapshot.
+async fn snapshot_ends(watch: &mut impl Events, what: &str) {
+    match next(watch, what).await {
+        PoolEvent::Synced { snapshot: true, .. } => {}
+        other => panic!("the end of {what}: {other:?}"),
+    }
+}
+
 /// Rule [`Rule::Whole`]: a record arrives as it was published, every
-/// field of it, in a snapshot, as a change, and as each change a resumed
+/// field of it, in a snapshot (also one opened, or under way, while a
+/// newer version is written), as a change, and as each change a resumed
 /// watch replays. A backend that stores a part of a record apart (a
 /// second table, say) installs the record only with its matching part.
 async fn a_record_arrives_whole<B: Backend>(backend: &B) {
@@ -1059,7 +1135,7 @@ async fn a_record_arrives_whole<B: Backend>(backend: &B) {
     let mut live = watch(&reader, MODEL, None);
     let (_, start) = snapshot(&mut live).await;
 
-    let first = whole(1);
+    let first = whole(MODEL, "m1", 1);
     publish(&writer, first.clone()).await.expect("a record");
     let (held, _) = snapshot_records(&mut watch(&reader, MODEL, None)).await;
     if held != [first.clone()] {
@@ -1070,11 +1146,38 @@ async fn a_record_arrives_whole<B: Backend>(backend: &B) {
     }
     // Both writes are made before the live watch reads either, so that a
     // backend that joins a queued change to a part written since serves
-    // the first with the second's part.
-    let second = whole(2);
+    // the first with the second's part. So is a snapshot opened before the
+    // second write and first read after it, for a backend that reads the
+    // records when the watch is made and joins their lists later: it holds
+    // either version whole. So is a watch that resumed before the second
+    // write, for a backend whose history is too short to replay both
+    // writes after them.
+    let mut opened = watch(&reader, MODEL, None);
+    let mut replaying = watch(&reader, MODEL, Some(start.clone()));
+    let replaying = match next(&mut replaying, "a watch resumed between the writes").await {
+        PoolEvent::Synced {
+            snapshot: false, ..
+        } => Some(replaying),
+        PoolEvent::Resnapshot => None,
+        other => panic!("a watch resumed between the writes: {other:?}"),
+    };
+    let second = whole(MODEL, "m1", 2);
     publish(&writer, second.clone())
         .await
         .expect("a newer record");
+    let what = "a snapshot opened before a newer write";
+    one_of(&mut opened, &[first.clone(), second.clone()], what).await;
+    snapshot_ends(&mut opened, what).await;
+    drop(opened);
+    if let Some(mut replaying) = replaying {
+        whole_changes(
+            &mut replaying,
+            &first,
+            &second,
+            "a change of a watch resumed between the writes",
+        )
+        .await;
+    }
     whole_changes(&mut live, &first, &second, "a watch's change").await;
     // A resumed watch replays both versions, each whole.
     let mut resumed = watch(&reader, MODEL, Some(start));
@@ -1094,4 +1197,5 @@ async fn a_record_arrives_whole<B: Backend>(backend: &B) {
             format_args!("published {second:?}, and a snapshot holds {held:?}"),
         );
     }
+    a_snapshot_under_way_holds_each_record_whole(&writer, &reader).await;
 }
