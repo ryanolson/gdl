@@ -77,8 +77,8 @@ impl Default for DirLimits {
 }
 
 /// How often a watched class's directory is read: the roster directory's
-/// period.
-const PERIOD: Duration = Duration::from_millis(50);
+/// period. The settings reader holds it, since a lease must cover it.
+const PERIOD: Duration = gdl_model::DirectoryBackend::DIR_POLL;
 
 #[derive(Debug)]
 struct Shared {

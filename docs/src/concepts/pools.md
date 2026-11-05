@@ -106,6 +106,17 @@ For each segment of the pool's class, the hub counts the instances usable for fr
 
 The hub publishes the pool's record to the pool directory when the state, the presence, or the properties change, and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the pool's name, class, region, parent, contract and placement hashes, state, hub address, load summary, presence, properties, the properties an operator revoked, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
 
+Each backend has its own least lease, and a hub refuses a shorter one at start, from its settings or from settings made in code:
+
+| Backend | The lease must be | Why |
+|---|---|---|
+| `relay` | at least 300 ms (`HubTiming::MIN_RELAY_LEASE`) | the child reports at its parent's cadence, never less than 100 ms apart ([The relay backend](#the-relay-backend)) |
+| `dir` | longer than the heartbeat plus 50 ms (`DirectoryBackend::DIR_POLL`) | a reader reads the directory every 50 ms, so it sees a publish up to one poll late, and two publishes up to a heartbeat and a poll apart |
+| `dynamodb` | longer than the heartbeat plus 1 s (`DirectoryBackend::DYNAMODB_POLL`) | the same, at the backend's default query period |
+| `memory` | longer than the heartbeat | a watch gets each change as it is written |
+
+Without these, the hub would start and publish, but every reader would let its record lapse between two polls, and no reader, chooser, or parent's hub would keep the pool in view. A program that gives its hub a directory itself (`gdl_hub::hub_builder_with`) chooses a lease that fits that directory's poll period, since only the program knows it.
+
 The epoch is the hub process's incarnation. A restarted hub takes a new epoch, which orders after every write of the one before. A write that is not newer than what the directory holds for the pool is refused.
 
 The lease is a duration, not an instant. Each reader measures a record's age on its own clock, from the last change of sequence number it saw (`gdl_pools::PoolView`). So clock skew between hosts does not matter. Expiry affects discovery only, not a live follow. Only a `serving` record has a lease ([Presence](#presence)).

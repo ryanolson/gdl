@@ -57,8 +57,9 @@ pub use placement::{
 };
 pub use pool::{
     DirectoryBackend, HubTiming, Parent, PoolSettings, WatchCaps, check_hub_address,
-    check_hub_timing, check_pool_name, check_region_name, check_relay_lease, check_summary,
-    dynamodb_tables, missing_parent_hub, missing_state_dir, pool_variable, shared_under_relay,
+    check_hub_timing, check_polled_lease, check_pool_name, check_region_name, check_relay_lease,
+    check_summary, dynamodb_tables, missing_parent_hub, missing_state_dir, pool_variable,
+    shared_under_relay,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
 pub use properties::{

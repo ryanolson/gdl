@@ -210,7 +210,7 @@ The fleet file fills in each pool's `[pool]` table in its segments' settings. Th
 | `requires.<class>` | the ready pools of a class that the pool's health needs. Only the hub reads it. | 1 for each class sent to |
 | `hold_ms` | how long every quorum must hold before the pool is `ready`. Only the hub reads it. | 2000 |
 | `heartbeat_ms` | how often the hub publishes the pool's record while its state does not change. At least 1. Only the hub reads it. | 10000 |
-| `lease_ms` | how long a reader keeps the record without seeing it published again. At least 1, longer than `heartbeat_ms`, and at least 300 under the `relay` backend. Only the hub reads it. | 30000 |
+| `lease_ms` | how long a reader keeps the record without seeing it published again. At least 1, longer than `heartbeat_ms`, at least 300 under the `relay` backend, and longer than `heartbeat_ms` plus the poll period, 50 under `dir` and 1000 under `dynamodb`. Only the hub reads it. | 30000 |
 | `watch_buffer` | events a watcher may fall behind by before its watch ends. From 1 to 65536. Only the hub reads it. | 1024 |
 | `lost_chooser_ms` | how long a chooser may have no watch of the hub's relay open before the hub stops waiting for its acknowledgements. At least 1. Only the hub reads it. | 30000 |
 | `watch_caps.pool`, `watch_caps.relay`, `watch_caps.follow` | how many watches of the pool, of the relay, and of one follow the hub serves at once. At least 1. Only the hub reads them. | 2048, 2048, 16384 |

@@ -78,8 +78,10 @@ pub fn pool_from_vars(
 /// Kubernetes service account's role. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
 /// Settings made in code are checked as reading them checks them
-/// ([`gdl_model::check_hub_timing`]): a timing the hub cannot run at is
-/// refused, naming its key. [`hub_builder_with`] takes a directory that
+/// ([`gdl_model::check_hub_timing`], and under `dir` and `dynamodb`
+/// [`gdl_model::check_polled_lease`]): a timing the hub cannot run at, or
+/// one whose lease lapses between its readers' polls, is refused, naming
+/// its key. [`hub_builder_with`] takes a directory that
 /// the settings cannot name.
 pub async fn hub_builder(
     config: HubConfig,
@@ -89,6 +91,11 @@ pub async fn hub_builder(
     let Some(pool) = pool else {
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
+    gdl_model::check_polled_lease(&pool.directory, &pool.timing).map_err(|why| {
+        PoolError::new(
+            gdl_model::Problem::at(Some("pool".into()), Some("lease_ms".into()), why).to_string(),
+        )
+    })?;
     match &pool.directory {
         DirectoryBackend::Relay {
             parent_hub,
@@ -150,7 +157,10 @@ pub async fn hub_builder(
 ///
 /// `pool` names no directory of its own: settings whose `directory` key,
 /// or any key of a backend, is set are refused, so that nothing they say
-/// is left unread. The rest is checked as [`hub_builder`] checks it.
+/// is left unread. The rest is checked as [`hub_builder`] checks it, but
+/// for the lease against the directory's poll period, which only the
+/// program that made `directory` knows: it gives a lease longer than the
+/// heartbeat and that period together.
 /// [`pool_from_env`] reads the settings of the `gdl-hub` binary, whose
 /// default backend is `relay`, so it asks a child pool for `parent_hub`:
 /// a program that gives its hub a directory makes its settings itself.

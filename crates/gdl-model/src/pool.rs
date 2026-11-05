@@ -31,7 +31,7 @@ use crate::{Layout, Problem, Problems, PropertyKey, check_layout_name};
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// hold_ms = 2000               # optional, the hub's alone: how long the quorum holds before `ready`
 /// heartbeat_ms = 10000         # optional, the hub's alone: how often the record is published
-/// lease_ms = 30000             # optional, the hub's alone: how long readers keep it; longer than the heartbeat
+/// lease_ms = 30000             # optional, the hub's alone: how long readers keep it; longer than the heartbeat, plus the poll period under `dir` and `dynamodb`
 /// watch_buffer = 1024          # optional, the hub's alone: events a watcher may fall behind by
 /// lost_chooser_ms = 30000      # optional, the hub's alone: how long it waits for a chooser with no watch of its relay
 /// keyed_capacity = 1000000     # optional, the hub's alone: keyed records its table holds
@@ -333,6 +333,13 @@ impl DirectoryBackend {
         parent_hub: None,
         state_dir: None,
     };
+
+    /// How often a `dir` reader reads a watched class's directory: 50 ms.
+    pub const DIR_POLL: Duration = Duration::from_millis(50);
+
+    /// How often a `dynamodb` reader queries a watched class, unless its
+    /// program sets another period: 1 s. Each query is billed.
+    pub const DYNAMODB_POLL: Duration = Duration::from_secs(1);
 }
 
 /// The DynamoDB directory's tables, as `gdl-pools-dynamodb` makes and
@@ -890,6 +897,41 @@ pub fn check_relay_lease(lease: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `timing` suits the readers of `directory`: under a backend
+/// whose readers poll, `dir` ([`DirectoryBackend::DIR_POLL`]) and
+/// `dynamodb` ([`DirectoryBackend::DYNAMODB_POLL`]), a lease longer than
+/// the heartbeat and the poll period together. A reader sees a publish
+/// only at its next poll, so two publishes can reach it that far apart,
+/// and a shorter lease lapses between polls in every reader. `relay` and
+/// `memory` push each change, and take any lease. Reading
+/// [`PoolSettings`] applies it; a hub applies it again to settings made
+/// in code.
+pub fn check_polled_lease(directory: &DirectoryBackend, timing: &HubTiming) -> Result<(), String> {
+    let Some((backend, poll)) = polled(directory) else {
+        return Ok(());
+    };
+    let least = timing.heartbeat.saturating_add(poll);
+    if timing.lease <= least {
+        return Err(format!(
+            "is {}; it must be longer than {} ms, the heartbeat, {} ms, and the `{backend}` backend's poll period, {} ms, together, or readers let the record lapse between two polls",
+            millis(timing.lease),
+            millis(least),
+            millis(timing.heartbeat),
+            millis(poll)
+        ));
+    }
+    Ok(())
+}
+
+/// The name and poll period of a backend whose readers poll.
+fn polled(directory: &DirectoryBackend) -> Option<(&'static str, Duration)> {
+    match directory {
+        DirectoryBackend::Dir { .. } => Some(("dir", DirectoryBackend::DIR_POLL)),
+        DirectoryBackend::DynamoDb { .. } => Some(("dynamodb", DirectoryBackend::DYNAMODB_POLL)),
+        DirectoryBackend::Relay { .. } | DirectoryBackend::Memory => None,
+    }
+}
+
 /// Whether `name` can name a pool: a DNS label.
 pub fn check_pool_name(name: &str) -> Result<(), String> {
     check_label("pool", name)
@@ -1166,6 +1208,22 @@ impl TryFrom<Table> for PoolSettings {
         };
         if matches!(directory, DirectoryBackend::Relay { .. }) {
             check_relay_lease(timing.lease).map_err(|why| at("lease_ms", why))?;
+        }
+        if let Err(why) = check_polled_lease(&directory, &timing) {
+            return Err(match (table.lease_ms, polled(&directory)) {
+                // The lease left at its default: the heartbeat that was
+                // set is what to change.
+                (None, Some((backend, poll))) => at(
+                    "heartbeat_ms",
+                    format!(
+                        "is {}; it must be shorter than the lease, {} ms by default, by more than the `{backend}` backend's poll period, {} ms: set `lease_ms` longer too",
+                        millis(timing.heartbeat),
+                        millis(timing.lease),
+                        millis(poll)
+                    ),
+                ),
+                _ => at("lease_ms", why),
+            });
         }
         if let Some(layout) = &table.layout {
             check_layout_name(layout).map_err(|why| at("layout", why))?;

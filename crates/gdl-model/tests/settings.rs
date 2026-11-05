@@ -883,6 +883,70 @@ fn a_relay_pool_refuses_a_lease_its_reports_cannot_cover() {
     }
 }
 
+/// Under `dir` and `dynamodb` a reader sees a publish only at its next
+/// poll, so two publishes can reach it a heartbeat and a poll period
+/// apart: a lease no longer than the two together lapses between polls in
+/// every reader, so it is refused, naming the key, the lease, and the
+/// least it must pass. When only the heartbeat is set, the refusal names
+/// the heartbeat. `relay` and `memory` push each change, and take it.
+#[test]
+fn a_polled_pool_refuses_a_lease_its_polls_cannot_cover() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    const DIR: &str = "directory = 'dir'\ndir = '/srv/pools'\n";
+    const DYNAMODB: &str = "directory = 'dynamodb'\nrecords_table = 'gdl-pools'\nlists_table = 'gdl-pool-lists'\naws_region = 'us-east-1'\n";
+    let refused = |text: String| {
+        let value: toml::Value = toml::from_str(&text).expect("toml");
+        let problems = PoolSettings::read(value).expect_err(&text);
+        assert_eq!(problems.0.len(), 1, "{text}: {problems}");
+        problems.0[0].clone()
+    };
+    for (backend, poll) in [
+        (DIR, DirectoryBackend::DIR_POLL),
+        (DYNAMODB, DirectoryBackend::DYNAMODB_POLL),
+    ] {
+        let poll = poll.as_millis() as u64;
+        // The least, heartbeat plus poll, and one under it.
+        for lease in [poll + 2, poll + 1, 20] {
+            let problem = refused(format!(
+                "{LEAST}{backend}heartbeat_ms = 2\nlease_ms = {lease}\n"
+            ));
+            assert_eq!(
+                (problem.table.as_deref(), problem.key.as_deref()),
+                (Some("pool"), Some("lease_ms")),
+                "{backend}: {problem}"
+            );
+            let least = poll + 2;
+            assert!(
+                problem
+                    .message
+                    .starts_with(&format!("is {lease}; it must be longer than {least} ms")),
+                "{backend}: {problem}"
+            );
+        }
+        let pool = settings(&format!(
+            "{LEAST}{backend}heartbeat_ms = 2\nlease_ms = {}\n",
+            poll + 3
+        ));
+        assert_eq!(pool.timing.lease, Duration::from_millis(poll + 3));
+        // The lease left at its default, 30 s.
+        let heartbeat = 30_000 - poll;
+        let problem = refused(format!("{LEAST}{backend}heartbeat_ms = {heartbeat}\n"));
+        assert_eq!(problem.key.as_deref(), Some("heartbeat_ms"), "{problem}");
+        assert!(
+            problem.message.starts_with(&format!(
+                "is {heartbeat}; it must be shorter than the lease, 30000 ms by default, by more than"
+            )),
+            "{backend}: {problem}"
+        );
+    }
+    for backend in ["", "directory = 'memory'\n"] {
+        let pool = settings(&format!(
+            "{LEAST}{backend}heartbeat_ms = 2\nlease_ms = 300\n"
+        ));
+        assert_eq!(pool.timing.lease, Duration::from_millis(300), "{backend}");
+    }
+}
+
 /// A pool whose instances report no properties of a kind declares the
 /// ones of that kind it serves: each a key of the kind's type, compared
 /// in its canonical form. A kind that is not a settings key, a key that is not

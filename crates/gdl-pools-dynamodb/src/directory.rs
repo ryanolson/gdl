@@ -91,7 +91,7 @@ impl Default for DynamoLimits {
         Self {
             buffer: 256,
             history: 256,
-            period: Duration::from_secs(1),
+            period: gdl_model::DirectoryBackend::DYNAMODB_POLL,
             first_sync: Duration::from_secs(30),
         }
     }

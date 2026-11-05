@@ -381,6 +381,15 @@ fn a_misspelled_or_malformed_pool_variable_is_refused_by_name() {
             &[("GDL_POOL__SUMMARY_MS__EXTRA", "1")][..],
             "GDL_POOL__SUMMARY_MS__EXTRA: invalid type",
         ),
+        // Under `dir`, which polls every 50 ms, every reader would let the
+        // record lapse between two polls.
+        (
+            &[
+                ("GDL_POOL__HEARTBEAT_MS", "2"),
+                ("GDL_POOL__LEASE_MS", "20"),
+            ][..],
+            "GDL_POOL__LEASE_MS: is 20; it must be longer than 52 ms",
+        ),
     ] {
         Jail::expect_with(|jail| {
             model_pool(jail, "/srv/pools");
@@ -476,6 +485,38 @@ async fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
     );
     let error = result.err().expect("the invalid lease is refused");
     assert!(error.to_string().contains("lease_ms"), "{error}");
+}
+
+/// A lease that every `dir` reader would let lapse between two polls,
+/// built in code, is refused as the reader refuses it, naming its key and
+/// the least it must pass: the heartbeat and the directory's poll period
+/// together. A lease past them is taken.
+#[tokio::test]
+async fn hub_builder_refuses_a_typed_lease_its_directorys_polls_cannot_cover() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-timing-")
+        .tempdir()
+        .expect("a directory");
+    let mut pool = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    pool.timing.heartbeat = Duration::from_millis(2);
+    pool.timing.lease = Duration::from_millis(20);
+    let Err(error) = hub_builder(config(), spec(), Some(pool.clone())).await else {
+        panic!("hub_builder accepted lease_ms = 20 under `dir`, which polls every 50 ms");
+    };
+    assert!(
+        error
+            .to_string()
+            .starts_with("[pool] lease_ms: is 20; it must be longer than 52 ms"),
+        "{error}"
+    );
+    pool.timing.lease =
+        pool.timing.heartbeat + DirectoryBackend::DIR_POLL + Duration::from_millis(1);
+    assert!(
+        hub_builder(config(), spec(), Some(pool)).await.is_ok(),
+        "a lease past the heartbeat and the poll period is taken"
+    );
 }
 
 /// A bound of zero on a lost chooser, built in code, is refused as the
