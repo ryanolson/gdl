@@ -25,6 +25,7 @@ mod pool;
 mod problem;
 mod properties;
 mod supply;
+mod tunables;
 
 use std::fmt;
 
@@ -68,6 +69,7 @@ pub use properties::{
     EntryState, PropertyEntry, PropertyKey, PropertyLists, check_property_kind, read_each,
 };
 pub use supply::{PropertyConsumer, property_supply, selector_consumers};
+pub use tunables::{GLIBC_TUNABLES, MALLOC_TUNABLE, segment_tunables, tunables_warning};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

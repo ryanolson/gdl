@@ -13,6 +13,7 @@ COPY . /app\n\
 ENV CARGO_TARGET_DIR=/build\n\
 RUN . /gdl/target.env && cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path '/app/<bundle>/<segment>/Cargo.toml' && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/<package>\" /gdl/segment\n\
 FROM gcr.io/distroless/cc-debian12:nonroot\n\
+ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=0\n\
 COPY --from=build /gdl/segment /usr/local/bin/segment\n\
 ENTRYPOINT [\"/usr/local/bin/segment\"]\n";
 

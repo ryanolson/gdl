@@ -48,6 +48,77 @@ impl Dgds {
     }
 }
 
+/// The warnings a render of `fleet`, with its DGD files `dgds`, prints
+/// about a user's own `GLIBC_TUNABLES` that does not mention
+/// `glibc.malloc.hugetlb` (`gdl_model::tunables_warning`): each cluster
+/// whose `env` sets one, and each `main` container of a DGD component that
+/// runs a segment whose `env` sets one by value. gdl adds nothing to a
+/// user's value. An entry with a `valueFrom` is not known here, and gets
+/// no warning.
+pub fn tunables_warnings(fleet: &Fleet, dgds: &Dgds) -> Vec<String> {
+    use gdl_model::{GLIBC_TUNABLES, tunables_warning};
+    let mut warnings = Vec::new();
+    for (name, cluster) in fleet.clusters() {
+        // A Slurm site has no `env` of its own.
+        let value = cluster
+            .kubernetes()
+            .and_then(|kube| kube.env.get(GLIBC_TUNABLES));
+        if let Some(value) = value {
+            warnings.extend(tunables_warning(
+                &format!("cluster `{name}`'s `env`"),
+                value,
+            ));
+        }
+    }
+    for (pool, table) in fleet.dgds() {
+        let Some(dgd) = dgds.get(pool) else {
+            continue;
+        };
+        for component in table.components.values() {
+            let found = dgd["spec"]["components"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|c| c["name"] == *component);
+            let Some(found) = found else {
+                continue;
+            };
+            let roles = found["roles"].as_array().into_iter().flatten();
+            let templates = std::iter::once(&found["podTemplate"])
+                .chain(roles.map(|role| &role["podTemplate"]));
+            let mains = templates
+                .flat_map(|template| {
+                    template["spec"]["containers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                })
+                .filter(|container| container["name"] == "main");
+            for main in mains {
+                let set = main["env"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rfind(|var| var["name"] == GLIBC_TUNABLES);
+                let Some(set) = set else {
+                    continue;
+                };
+                if set.get("valueFrom").is_some_and(|from| !from.is_null()) {
+                    continue;
+                }
+                let value = set["value"].as_str().unwrap_or_default();
+                warnings.extend(tunables_warning(
+                    &format!(
+                        "pool `{pool}`'s DGD, in container `main` of component `{component}`,"
+                    ),
+                    value,
+                ));
+            }
+        }
+    }
+    warnings
+}
+
 /// Every problem with the DGD files of `fleet`, whose file is at
 /// `fleet_file`: each that does not read, and each that its pool could
 /// not own in its cluster's namespace ([`gdl_k8s::check_dgd`]). A pool

@@ -158,9 +158,11 @@ fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
          RUN [\"cargo\", \"build\", \"--release\", \"--manifest-path\", {manifest}]\n\
          \n\
          FROM debian:bookworm-slim\n\
+         {env}\
          COPY --from=build [{binary}, \"/usr/local/bin/{package}\"]\n\
          ENTRYPOINT [\"/usr/local/bin/{package}\"]\n",
         marker = emit::MARKER,
+        env = crate::deployment::segment_tunables_env(),
         rust = env!("CARGO_PKG_RUST_VERSION"),
         segment_json = json(segment),
         // `./`: a segment named `-front` is a path to cargo, not an option.
@@ -291,6 +293,24 @@ mod tests {
         assert!(
             dockerfile.contains("\"--manifest-path\", \"./-front/Cargo.toml\"]"),
             "{dockerfile}"
+        );
+    }
+
+    /// An exported segment's image runs with the glibc tunables each
+    /// launcher gives a segment, set in its final stage.
+    #[test]
+    fn the_image_runs_with_malloc_off_huge_pages() {
+        let dockerfile = dockerfile("g", "front", "g-front");
+        let (_, run) = dockerfile
+            .split_once("\nFROM debian:bookworm-slim\n")
+            .expect("a final stage");
+        assert!(
+            run.starts_with(&crate::deployment::segment_tunables_env()),
+            "{dockerfile}"
+        );
+        assert_eq!(
+            crate::deployment::segment_tunables_env(),
+            "ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=0\n"
         );
     }
 

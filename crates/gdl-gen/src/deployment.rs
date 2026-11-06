@@ -412,6 +412,7 @@ mod variables;
 
 pub use deploy::{Deploy, Kube, Kubectl, Reply, Waits, deploy, down};
 pub use dgd::Dgds;
+pub use dgd::tunables_warnings;
 pub use images::{Buildx, Built, Digests, Docker, Outcome, images};
 pub use k8s::{k8s, k8s_files};
 
@@ -721,6 +722,7 @@ impl Bundle {
                 &self.in_build(deployment),
                 &settings.build_image,
                 settings.hub_image.as_ref().unwrap_or(&settings.base_image),
+                "",
             );
         };
         // A new named volume takes the owner and mode of the directory it
@@ -739,6 +741,7 @@ impl Bundle {
             &self.in_build(deployment),
             &settings.build_image,
             settings.hub_image.as_ref().unwrap_or(&settings.base_image),
+            "",
         );
         text.push_str(&format!(
             "COPY --from=build /build-tools/state/ {parent}/\n"
@@ -788,6 +791,7 @@ impl Bundle {
                 .get(segment)
                 .and_then(|s| s.base_image.as_ref())
                 .unwrap_or(&settings.base_image),
+            &segment_tunables_env(),
         );
         self.files.insert(crate_dir.join("Dockerfile"), text);
         self.segment_config(&path, segment, hub, unawaited)
@@ -1089,7 +1093,16 @@ fn segment_healthcheck() -> serde_json::Value {
 /// A Dockerfile that runs `build` in `builder`, and copies the `binary`
 /// it builds and the settings at `config`, a path in the build context,
 /// into `base`.
-fn dockerfile(build: &str, binary: &str, config: &str, builder: &str, base: &str) -> String {
+/// A segment's image carries [`segment_tunables_env`]; the hub's
+/// carries nothing more.
+fn dockerfile(
+    build: &str,
+    binary: &str,
+    config: &str,
+    builder: &str,
+    base: &str,
+    env: &str,
+) -> String {
     // The JSON form keeps a path with spaces, which a local bundle's can
     // hold, one source. Docker still reads the source as a word, where `\`,
     // `$`, and quotes are syntax, and then as a pattern. `./` keeps a path
@@ -1103,10 +1116,21 @@ fn dockerfile(build: &str, binary: &str, config: &str, builder: &str, base: &str
         .collect();
     let config = serde_json::Value::from(config);
     format!(
-        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\nCOPY --from=build {binary} /usr/local/bin/segment\nCOPY [{config}, \"/etc/gdl/config\"]\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
+        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\n{env}COPY --from=build {binary} /usr/local/bin/segment\nCOPY [{config}, \"/etc/gdl/config\"]\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
         emit::MARKER,
     )
 }
+/// The Dockerfile line that gives a segment's image the glibc tunables
+/// each launcher gives a segment (`gdl_model::segment_tunables`), so that
+/// a container started from the image without them gets them too.
+pub(crate) fn segment_tunables_env() -> String {
+    format!(
+        "ENV {}={}\n",
+        gdl_model::GLIBC_TUNABLES,
+        gdl_model::segment_tunables(None)
+    )
+}
+
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }

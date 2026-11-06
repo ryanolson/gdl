@@ -355,8 +355,10 @@ fn the_pool_variables_are_composes_except_addresses() {
     let compose: Value =
         serde_json::from_str(&compose[Path::new("compose.yaml")]).expect("compose.yaml");
     let addresses = ["GDL_POOL__HUB", "GDL_POOL__PARENT_HUB", "GDL_HUB__HOST"];
-    // Set by the cluster, which Compose does not read.
-    let cluster = ["RUST_LOG"];
+    // Set by the cluster, which Compose does not read; and the segments'
+    // glibc tunables, which Compose takes from the image's `ENV` line so
+    // that a user's `env_file` can replace them.
+    let cluster = ["RUST_LOG", gdl_model::GLIBC_TUNABLES];
     let mut compared = 0;
     for (service, settings) in compose["services"].as_object().expect("services") {
         let deployment = service.replace('_', "-");
@@ -414,6 +416,163 @@ fn the_pool_variables_are_composes_except_addresses() {
         }
     }
     assert_eq!(compared, 8, "four pools, each a hub and one segment");
+}
+
+/// Every launcher `cargo gdl` renders gives each segment `GLIBC_TUNABLES`
+/// as `gdl_model::segment_tunables` gives it, so that glibc's malloc does
+/// not ask for transparent huge pages: its own when the cluster sets none,
+/// and the cluster's, as given, otherwise. The launchers are the pods
+/// `cargo gdl k8s` writes (euw1), the pods the operator makes from a
+/// `GdlPool` (use1), the `main` container of a DGD component that runs a
+/// segment, and each segment's image, which is how each Compose service
+/// gets it. A hub gets
+/// only what its cluster gives it. A `GdlPool` written by hand, whose DGD
+/// `cargo gdl` never read, is in `crates/gdl-k8s/tests/dgd.rs`.
+#[test]
+fn every_launcher_gives_a_segment_the_glibc_tunables() {
+    let mirror = Mirror::new();
+    let spec = spec(&mirror);
+    let base = fleet_text();
+    let cluster = "env = { RUST_LOG = \"info\" }";
+    assert!(base.contains(cluster), "{base}");
+    let mut checked = 0;
+    for own in [
+        None,
+        Some("glibc.malloc.arena_max=4"),
+        Some("glibc.malloc.hugetlb"),
+        Some("glibc.malloc.hugetlb=1"),
+    ] {
+        let text = match own {
+            None => base.clone(),
+            Some(own) => base.replace(
+                cluster,
+                &format!("env = {{ RUST_LOG = \"info\", GLIBC_TUNABLES = {own:?} }}"),
+            ),
+        };
+        let fleet = fleet(&text);
+        let objects = objects(&render(&mirror, &spec, &fleet).expect("objects"));
+        for ((kind, name), object) in &objects {
+            if kind != "Deployment" {
+                continue;
+            }
+            let env = env(container(object));
+            let us = name.ends_with("-us")
+                || name.starts_with("global-us-")
+                || name.starts_with("model-x-us-");
+            let segment = name.ends_with("-front") || name.ends_with("-engine");
+            let found = env.get(gdl_model::GLIBC_TUNABLES).map(String::as_str);
+            let given = own.filter(|_| us);
+            match segment {
+                true => {
+                    assert_eq!(
+                        found,
+                        Some(gdl_model::segment_tunables(given).as_str()),
+                        "{name}"
+                    );
+                    checked += 1;
+                }
+                false => assert_eq!(found, given, "{name}"),
+            }
+        }
+    }
+    // Four pools, one segment each, for each of four cluster settings.
+    assert_eq!(checked, 16);
+
+    // A pool's DGD, as the operator makes it from the `GdlPool`, which
+    // holds the DGD file as written: the `main` container of the component
+    // that runs a segment gets it after the file's own variables.
+    let (dgd_fleet, dgds) = dgd::dgd_fleet();
+    let objects = objects(&dgd::render_dgd(&mirror, &spec, &dgd_fleet, &dgds));
+    let dgd = &objects[&("DynamoGraphDeployment".to_string(), "dgd-use1".to_string())];
+    let components = dgd["spec"]["components"].as_array().expect("components");
+    let mut mains = 0;
+    for component in components {
+        let containers = component["podTemplate"]["spec"]["containers"]
+            .as_array()
+            .into_iter()
+            .flatten();
+        for container in containers.filter(|c| c["name"] == "main") {
+            let found = container["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rfind(|var| var["name"] == gdl_model::GLIBC_TUNABLES)
+                .map(|var| var["value"].as_str().expect("a value").to_string());
+            match component["name"] == "Frontend" {
+                true => {
+                    assert_eq!(
+                        found,
+                        Some(gdl_model::segment_tunables(None)),
+                        "{component}"
+                    );
+                    mains += 1;
+                }
+                false => assert_eq!(found, None, "{component}"),
+            }
+        }
+    }
+    assert_eq!(mains, 1, "{dgd}");
+
+    // Compose: a segment service sets no `GLIBC_TUNABLES`, so that a
+    // user's `env_file` or `environment` replaces the default, and runs an
+    // image gdl builds from a Dockerfile with the `ENV` line. In a pool
+    // bundle one service builds each image, and the others name it.
+    let line = format!(
+        "\nENV {}={}\n",
+        gdl_model::GLIBC_TUNABLES,
+        gdl_model::segment_tunables(None)
+    );
+    let classless = super::portable_spec(&mirror).expect("a spec");
+    let pooled = fleet(&base);
+    for (spec, fleet, segments) in [(&spec, Some(&pooled), 4), (&classless, None, 2)] {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-k8s-compose-")
+            .tempdir()
+            .expect("a directory");
+        let files = gdl_gen::compose_files(
+            spec,
+            fleet,
+            temp.path(),
+            &mirror.target(),
+            gdl_gen::Sources::Fetched,
+        )
+        .expect("a bundle");
+        let compose: Value =
+            serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+        let services = compose["services"].as_object().expect("services");
+        let dockerfile = |settings: &Value| -> Option<&String> {
+            let build = &settings["build"];
+            let context = build["context"].as_str().unwrap_or(".");
+            let path = Path::new(build["dockerfile"].as_str()?);
+            match context {
+                "." => files.get(path),
+                context => files.get(&Path::new(context).join(path)),
+            }
+        };
+        let mut found = 0;
+        for (service, settings) in services {
+            let hub = match fleet {
+                Some(_) => !service.contains('_'),
+                None => service == "hub",
+            };
+            assert!(
+                settings["environment"][gdl_model::GLIBC_TUNABLES].is_null(),
+                "{service}: {settings}"
+            );
+            let built = dockerfile(settings).or_else(|| {
+                services
+                    .values()
+                    .filter(|other| {
+                        other["image"] == settings["image"] && !settings["image"].is_null()
+                    })
+                    .find_map(&dockerfile)
+            });
+            let built = built.unwrap_or_else(|| panic!("{service}: no Dockerfile gdl writes"));
+            assert_eq!(built.contains(&line), !hub, "{service}: {built}");
+            found += usize::from(!hub);
+        }
+        assert_eq!(found, segments, "{services:?}");
+    }
 }
 
 /// The fleet's secret is named, never read: the file that the spec names

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use gdl_model::{GLIBC_TUNABLES, segment_tunables};
 use rustix::process::{Pid, Signal, kill_process};
 
 use super::{Plan, Segment};
@@ -279,8 +280,7 @@ pub(super) fn supervise(plan: &Plan, stops: &Stops) -> Result<(), Error> {
 /// its stderr, so that stdout holds only the answers, or the frontend's
 /// address.
 fn launch(segment: &Segment, reads: bool) -> Result<Running, Error> {
-    let mut command = Command::new(&segment.binary);
-    command.arg(&segment.settings);
+    let mut command = segment_command(segment, std::env::var_os(GLIBC_TUNABLES).is_some());
     #[cfg(target_os = "linux")]
     stop_with_run(&mut command);
     if !reads {
@@ -291,6 +291,19 @@ fn launch(segment: &Segment, reads: bool) -> Result<Running, Error> {
         command.stdin(Stdio::null()).stdout(Stdio::from(stderr));
     }
     Running::spawn(&segment.name, &mut command, segment.grace)
+}
+
+/// The command that runs `segment`, with `GLIBC_TUNABLES` set to malloc's
+/// huge pages off unless this process has one of its own (`set`), which
+/// the segment then inherits as it is: glibc reads it only before `main`
+/// (`gdl_model::segment_tunables`).
+fn segment_command(segment: &Segment, set: bool) -> Command {
+    let mut command = Command::new(&segment.binary);
+    command.arg(&segment.settings);
+    if !set {
+        command.env(GLIBC_TUNABLES, segment_tunables(None));
+    }
+    command
 }
 
 /// Run `front` and `others` until every one has exited, stopping them as
@@ -430,6 +443,33 @@ fn stop_with_run(command: &mut Command) {
             }
         });
     }
+}
+
+/// Each segment `run` starts gets `GLIBC_TUNABLES` with malloc's huge
+/// pages off, unless `run` itself was given one, which the segment then
+/// inherits as it is.
+#[cfg(test)]
+#[test]
+fn a_segment_runs_with_malloc_off_huge_pages() {
+    let segment = Segment {
+        name: "engine".into(),
+        binary: "/bin/true".into(),
+        settings: "engine.toml".into(),
+        grace: Duration::from_secs(1),
+    };
+    let command = segment_command(&segment, false);
+    let env: Vec<_> = command.get_envs().collect();
+    assert_eq!(
+        env,
+        [(
+            std::ffi::OsStr::new(GLIBC_TUNABLES),
+            Some(std::ffi::OsStr::new("glibc.malloc.hugetlb=0"))
+        )]
+    );
+    let command = segment_command(&segment, true);
+    assert_eq!(command.get_envs().count(), 0);
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args, ["engine.toml"]);
 }
 
 #[cfg(all(test, target_os = "linux"))]

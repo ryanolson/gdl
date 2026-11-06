@@ -21,7 +21,7 @@ const DGD_TABLE: &str =
     "[pool.dgd-use1.dgd]\nfile = \"dynamo/dgd.yaml\"\ncomponents = { engine = \"Frontend\" }\n";
 
 /// [`DGD_FLEET`] and the DGD files it names, read beside it.
-fn dgd_fleet() -> (gdl_model::Fleet, gdl_gen::Dgds) {
+pub(super) fn dgd_fleet() -> (gdl_model::Fleet, gdl_gen::Dgds) {
     let path = manifest_dir().join(DGD_FLEET);
     let fleet = fleet(&std::fs::read_to_string(&path).expect("the fleet"));
     let dgds = gdl_gen::Dgds::read(&fleet, &path).expect("the DGD files");
@@ -29,7 +29,7 @@ fn dgd_fleet() -> (gdl_model::Fleet, gdl_gen::Dgds) {
 }
 
 /// The objects of `fleet`, whose DGD files are `dgds`, tagged [`TAG`].
-fn render_dgd(
+pub(super) fn render_dgd(
     mirror: &Mirror,
     spec: &gdl_gen::Spec,
     fleet: &gdl_model::Fleet,
@@ -328,4 +328,81 @@ fn a_dgd_yaml_octal_volume_mode_is_refused_and_its_decimal_renders() {
             "{error}"
         );
     }
+}
+
+/// A render warns once for each place a user's `GLIBC_TUNABLES` does not
+/// mention `glibc.malloc.hugetlb`, and adds nothing to it: a cluster's
+/// `env`, and the `main` container of a DGD component that runs a
+/// segment. A value that mentions the tunable, and one from a
+/// `valueFrom`, get none.
+#[test]
+fn a_users_tunables_get_a_warning_and_nothing_more() {
+    let text = std::fs::read_to_string(manifest_dir().join(DGD_FLEET)).expect("the fleet");
+    let dgd: Value = serde_json::from_str(
+        &std::fs::read_to_string(manifest_dir().join(DGD_JSON)).expect("JSON"),
+    )
+    .expect("the DGD");
+    let cluster = "[cluster.use1]\n";
+    assert!(text.contains(cluster), "{text}");
+    let main = "/spec/components/0/podTemplate/spec/containers/0";
+    let warned = |cluster_value: Option<&str>, main_env: Option<Value>| -> Vec<String> {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-k8s-tunables-")
+            .tempdir()
+            .expect("a directory");
+        let fleet_text = match cluster_value {
+            None => text.clone(),
+            Some(value) => text.replace(
+                cluster,
+                &format!("{cluster}env = {{ GLIBC_TUNABLES = {value:?} }}\n"),
+            ),
+        };
+        let mut dgd = dgd.clone();
+        if let Some(var) = main_env {
+            dgd.pointer_mut(main).expect("a main")["env"]
+                .as_array_mut()
+                .expect("an env")
+                .push(var);
+        }
+        std::fs::create_dir(dir.path().join("dynamo")).expect("a directory");
+        std::fs::write(dir.path().join("dynamo/dgd.yaml"), dgd.to_string()).expect("the DGD");
+        let file = dir.path().join("fleet.toml");
+        std::fs::write(&file, &fleet_text).expect("the fleet");
+        let fleet = fleet(&fleet_text);
+        let dgds = gdl_gen::Dgds::read(&fleet, &file).expect("the DGD files");
+        gdl_gen::tunables_warnings(&fleet, &dgds)
+    };
+    assert_eq!(warned(None, None), Vec::<String>::new());
+    let lines = warned(
+        Some("glibc.malloc.arena_max=4"),
+        Some(serde_json::json!({"name": "GLIBC_TUNABLES", "value": "glibc.malloc.perturb=1"})),
+    );
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0]
+            .contains("cluster `use1`'s `env` sets GLIBC_TUNABLES to `glibc.malloc.arena_max=4`"),
+        "{lines:?}"
+    );
+    assert!(lines[1].contains("pool `dgd-use1`'s DGD, in container `main` of component `Frontend`, sets GLIBC_TUNABLES to `glibc.malloc.perturb=1`"), "{lines:?}");
+    for line in &lines {
+        assert!(line.contains("gdl added nothing to it"), "{line}");
+        assert!(line.contains("`glibc.malloc.hugetlb=0`"), "{line}");
+    }
+    assert_eq!(
+        warned(
+            Some("glibc.malloc.hugetlb=1"),
+            Some(
+                serde_json::json!({"name": "GLIBC_TUNABLES", "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}})
+            ),
+        ),
+        Vec::<String>::new()
+    );
+    // A null `valueFrom` with a value counts as that value.
+    let lines = warned(
+        None,
+        Some(
+            serde_json::json!({"name": "GLIBC_TUNABLES", "value": "glibc.malloc.perturb=1", "valueFrom": null}),
+        ),
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
 }

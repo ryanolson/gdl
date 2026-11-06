@@ -239,3 +239,51 @@ fn the_rollover_map_is_outside_every_checksum() {
         }
     }
 }
+
+/// Each segment's container gets `GLIBC_TUNABLES` with malloc's huge
+/// pages off when it has none, under either scaling: `cargo gdl k8s` and
+/// the operator render pods here. One it has is the user's, and is left
+/// byte for byte, a list glibc refuses included. The hub's container does
+/// not get it.
+#[test]
+fn a_segment_container_runs_with_malloc_off_huge_pages() {
+    let env = |objects: &[Value], name: &str| -> Value {
+        template(objects, name)["spec"]["containers"][0]["env"].clone()
+    };
+    for (own, expected) in [
+        (None, "glibc.malloc.hugetlb=0"),
+        (Some("glibc.malloc.arena_max=4"), "glibc.malloc.arena_max=4"),
+        (Some("glibc.malloc.hugetlb"), "glibc.malloc.hugetlb"),
+        (Some("glibc.malloc.hugetlb=0:"), "glibc.malloc.hugetlb=0:"),
+        (Some("glibc.malloc.hugetlb=1"), "glibc.malloc.hugetlb=1"),
+        (Some(""), ""),
+    ] {
+        let mut pool = pool();
+        if let Some(own) = own {
+            pool.segments[0].env.push(Env {
+                name: gdl_model::GLIBC_TUNABLES.into(),
+                value: own.into(),
+            });
+        }
+        for scaling in [Scaling::Operator, Scaling::Fixed] {
+            let objects = children("p", "ns", &pool, scaling).expect("objects");
+            assert_eq!(
+                env(&objects, "p-engine"),
+                json!([
+                    {"name": "GDL_HUB__HOST", "value": "p"},
+                    {"name": "GLIBC_TUNABLES", "value": expected},
+                ]),
+                "{own:?}"
+            );
+            assert_eq!(
+                env(&objects, "p-front"),
+                json!([
+                    {"name": "GDL_HUB__HOST", "value": "p"},
+                    {"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=0"},
+                ])
+            );
+            let hub = env(&objects, "p");
+            assert!(!hub.to_string().contains("GLIBC_TUNABLES"), "{hub}");
+        }
+    }
+}

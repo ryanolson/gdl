@@ -359,6 +359,7 @@ COPY . /app
 ENV CARGO_TARGET_DIR=/build
 RUN cargo build --release --manifest-path '/app/engine/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
+ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=0
 COPY --from=build /build/release/api-engine /usr/local/bin/segment
 COPY ["./engine/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
@@ -503,6 +504,7 @@ COPY . /app
 ENV CARGO_TARGET_DIR=/build
 RUN cargo build --release --manifest-path '/app/front/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
+ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=0
 COPY --from=build /build/release/api-front /usr/local/bin/segment
 COPY ["./front/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]

@@ -299,6 +299,10 @@
               {
                 "name": "GDL_POOL__SUMMARY_MS",
                 "value": "10000"
+              },
+              {
+                "name": "GLIBC_TUNABLES",
+                "value": "glibc.malloc.hugetlb=0"
               }
             ],
             "image": "registry.example/gdl-eu/api-engine:pinned",

@@ -132,6 +132,9 @@ pub fn deploy(
     let site: &mut dyn Site = &mut site;
     site.check(&fleet)?;
     say("check: the spec, the fleet, and each cluster's context");
+    for warning in super::tunables_warnings(&fleet, &dgds) {
+        say(&warning);
+    }
 
     let built = images(&spec, &fleet, &dgds, &how.target, true, how.sources, docker)?;
     say(&format!("images: {} in their registries", built.len()));

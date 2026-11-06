@@ -197,6 +197,34 @@ fn annotate(template: &mut Value, component: &str, checksum: &str) -> Result<(),
     Ok(())
 }
 
+/// Give each container `main` of `template` `GLIBC_TUNABLES` when its
+/// `env` has none, as every launcher of a segment does
+/// ([`crate::render::default_tunables`]). Here, and not where `cargo gdl`
+/// sets the image, since a `GdlPool` can name a DGD that `cargo gdl` never
+/// read. Refused where a `main` container's `env` is not a list.
+fn tune(template: &mut Value, component: &str) -> Result<(), String> {
+    let containers = template
+        .pointer_mut("/spec/containers")
+        .and_then(Value::as_array_mut);
+    for main in containers.into_iter().flatten() {
+        if main["name"] != "main" {
+            continue;
+        }
+        let Some(fields) = main.as_object_mut() else {
+            continue;
+        };
+        let env = fields.entry("env").or_insert(Value::Null);
+        if env.is_null() {
+            *env = Value::Array(Vec::new());
+        }
+        let env = env.as_array_mut().ok_or_else(|| {
+            format!("component `{component}` of the pool's DGD has a container `main` whose `env` is not a list")
+        })?;
+        crate::render::default_tunables(env);
+    }
+    Ok(())
+}
+
 /// `value` as an object, made one where it is absent; refused where it is
 /// another JSON value, as `what` of component `component`.
 fn object<'v>(
@@ -343,6 +371,7 @@ fn fit(
         }
         for template in templates(found) {
             annotate(template, component, checksum)?;
+            tune(template, component)?;
         }
     }
     Ok(())

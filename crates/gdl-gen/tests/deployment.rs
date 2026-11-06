@@ -15,6 +15,8 @@ mod images;
 mod k8s;
 #[path = "deployment/relay.rs"]
 mod relay;
+#[path = "deployment/tunables.rs"]
+mod tunables;
 
 #[test]
 fn compose_starts_segments_only_after_hub_health() {

@@ -488,6 +488,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     )
                 }
             };
+            for warning in gdl_gen::tunables_warnings(&fleet, &dgds) {
+                eprintln!("cargo gdl: {warning}");
+            }
             gdl_gen::k8s(
                 &spec,
                 &fleet,

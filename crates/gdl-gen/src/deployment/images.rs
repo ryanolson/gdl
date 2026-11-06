@@ -412,7 +412,13 @@ fn segment_context(
     );
     files.insert(
         "Dockerfile".into(),
-        dockerfile(&settings.build_image, base, true, &build),
+        dockerfile(
+            &settings.build_image,
+            base,
+            true,
+            &build,
+            &super::segment_tunables_env(),
+        ),
     );
     files
 }
@@ -506,7 +512,13 @@ impl Local {
             "{codegen}cargo build --locked --release --target \"$GDL_TARGET\" --manifest-path {} && cp \"$CARGO_TARGET_DIR/$GDL_TARGET/release/{package}\" /gdl/segment",
             quote(&manifest)
         );
-        dockerfile(&settings.build_image, base, true, &build)
+        dockerfile(
+            &settings.build_image,
+            base,
+            true,
+            &build,
+            &super::segment_tunables_env(),
+        )
     }
 }
 
@@ -529,6 +541,7 @@ fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
         settings.hub_image.as_ref().unwrap_or(&settings.base_image),
         bundle.context.is_some(),
         &build,
+        "",
     )
 }
 
@@ -537,7 +550,9 @@ fn hub_dockerfile(bundle: &super::Bundle, fleet: &Fleet) -> String {
 /// `copies`, and copies the binary `build` leaves at `/gdl/segment` into
 /// `base`, of the image's platform. The final stage runs nothing, so it
 /// needs no emulation.
-fn dockerfile(builder: &str, base: &str, copies: bool, build: &str) -> String {
+/// A segment's image carries `env`, [`super::segment_tunables_env`]; the
+/// hub's carries nothing more.
+fn dockerfile(builder: &str, base: &str, copies: bool, build: &str, env: &str) -> String {
     let copy = if copies {
         "WORKDIR /app\nCOPY . /app\n"
     } else {
@@ -552,6 +567,7 @@ fn dockerfile(builder: &str, base: &str, copies: bool, build: &str) -> String {
          ENV CARGO_TARGET_DIR=/build\n\
          RUN . /gdl/target.env && {build}\n\
          FROM {base}\n\
+         {env}\
          COPY --from=build /gdl/segment /usr/local/bin/segment\n\
          ENTRYPOINT [\"/usr/local/bin/segment\"]\n",
         marker = emit::MARKER,
@@ -762,7 +778,7 @@ mod tests {
     /// final stage, which runs nothing, is of the image's.
     #[test]
     fn only_the_final_stage_is_of_the_images_platform() {
-        let text = dockerfile("builder", "base", true, "true");
+        let text = dockerfile("builder", "base", true, "true", "");
         let froms: Vec<&str> = text.lines().filter(|l| l.starts_with("FROM ")).collect();
         assert_eq!(
             froms,

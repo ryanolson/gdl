@@ -105,6 +105,41 @@ fn a_dgd_segment_runs_in_the_pools_dgd() {
     assert!(config["data"].get("pool.toml").is_some());
 }
 
+/// A GdlPool can reach the operator without passing through cargo gdl's image render.
+#[test]
+fn the_operator_gives_tunables_to_a_dgd_segment() {
+    let mut failures = Vec::new();
+    for scaling in [Scaling::Fixed, Scaling::Operator] {
+        let mut source = dgd();
+        source["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["env"] = json!([{
+            "name": "GLIBC_TUNABLES",
+            "value": "glibc.malloc.arena_max=4",
+        }]);
+        let mut pool = pool();
+        pool.dgd = Some(source.to_string());
+        let objects = children("p", "ns", &pool, scaling).expect("objects");
+
+        let front = find(&objects, "Deployment", "p-front").expect("the other segment");
+        let control = &front["spec"]["template"]["spec"]["containers"][0]["env"];
+        assert_eq!(
+            control,
+            &json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=0"}])
+        );
+
+        let dgd = find(&objects, "DynamoGraphDeployment", "p").expect("the DGD");
+        let found = &component(dgd, "Frontend")["podTemplate"]["spec"]["containers"][0]["env"];
+        // The user's own, as given: gdl adds nothing to it.
+        let expected = json!([{
+            "name": "GLIBC_TUNABLES",
+            "value": "glibc.malloc.arena_max=4",
+        }]);
+        if found != &expected {
+            failures.push(format!("{scaling:?}: {found}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The scaling adapter owns a component's count once it has one, and
 /// dynamo's webhook refuses any other writer: the rendered DGD leaves
 /// `replicas` out of such a component, and keeps it on the others.
@@ -326,6 +361,68 @@ fn a_segments_image_is_set_in_its_components_main_container() {
     expected["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["image"] =
         "registry.example/gdl/pool:built".into();
     assert_eq!(dgd, expected);
+}
+
+/// The pool's DGD, as its render writes it, gives the `main` container of
+/// each component that runs a segment `GLIBC_TUNABLES` with malloc's huge
+/// pages off when its `env` has none. An entry of that name is the
+/// user's, and is left byte for byte, with a `valueFrom` or without. A
+/// component that runs no segment is left as it is.
+#[test]
+fn a_main_container_gets_the_tunables_unless_it_has_them() {
+    let from = json!({"secretKeyRef": {"name": "s", "key": "k"}});
+    for (env, expected) in [
+        (
+            json!([{"name": "A", "value": "1"}, {"name": "GLIBC_TUNABLES", "value": "glibc.malloc.arena_max=4"}]),
+            json!([{"name": "A", "value": "1"}, {"name": "GLIBC_TUNABLES", "value": "glibc.malloc.arena_max=4"}]),
+        ),
+        (
+            json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=1:"}]),
+            json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=1:"}]),
+        ),
+        (
+            json!([{"name": "GLIBC_TUNABLES", "valueFrom": from}]),
+            json!([{"name": "GLIBC_TUNABLES", "valueFrom": from}]),
+        ),
+        (
+            json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.arena_max=4", "valueFrom": null}]),
+            json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.arena_max=4", "valueFrom": null}]),
+        ),
+        (
+            json!([{"name": "A", "value": "1"}]),
+            json!([{"name": "A", "value": "1"}, {"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=0"}]),
+        ),
+        (
+            Value::Null,
+            json!([{"name": "GLIBC_TUNABLES", "value": "glibc.malloc.hugetlb=0"}]),
+        ),
+    ] {
+        let mut source = dgd();
+        let main = "/spec/components/0/podTemplate/spec/containers/0";
+        source.pointer_mut(main).expect("a main")["env"] = env.clone();
+        let mut pool = pool();
+        pool.dgd = Some(source.to_string());
+        let objects = children("p", "ns", &pool, Scaling::Operator).expect("objects");
+        let dgd = find(&objects, "DynamoGraphDeployment", "p").expect("the DGD");
+        assert_eq!(dgd.pointer(main).expect("a main")["env"], expected, "{env}");
+        assert_eq!(
+            dgd["spec"]["components"][1], source["spec"]["components"][1],
+            "a component that runs no segment"
+        );
+    }
+}
+
+/// A `main` container whose `env` is not a list is refused: the render
+/// cannot add to it.
+#[test]
+fn a_main_container_whose_env_is_not_a_list_is_refused() {
+    let mut source = dgd();
+    source["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["env"] =
+        json!({"GLIBC_TUNABLES": "x"});
+    let mut pool = pool();
+    pool.dgd = Some(source.to_string());
+    let error = children("p", "ns", &pool, Scaling::Operator).expect_err("refused");
+    assert!(error.contains("whose `env` is not a list"), "{error}");
 }
 
 /// A component's role templates are where dynamo takes its pods from, so

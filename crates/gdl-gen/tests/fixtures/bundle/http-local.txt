@@ -128,6 +128,7 @@ COPY . /app
 ENV CARGO_TARGET_DIR=/build
 RUN cargo build --locked --release --manifest-path '/app/target/gdl-images/main/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
+ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=0
 COPY --from=build /build/release/http-main /usr/local/bin/segment
 COPY ["./target/gdl-images/main/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]

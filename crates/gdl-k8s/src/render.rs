@@ -431,7 +431,7 @@ impl Render<'_> {
             "name": "segment",
             "image": segment.image,
             "command": [BINARY, format!("{CONFIG_DIR}/{}.toml", segment.name)],
-            "env": environment(&segment.env),
+            "env": segment_env(&segment.env),
             "ports": ports,
             "livenessProbe": probe(&settings.live, 10),
             "readinessProbe": probe(&settings.health, 5),
@@ -599,6 +599,25 @@ pub fn place(
 pub fn resources(container: &mut Value, resources: Option<&Resources>) {
     if let Some(resources) = resources {
         container["resources"] = json!(resources);
+    }
+}
+
+/// `env` as a segment container's `env`, with `GLIBC_TUNABLES` when it
+/// has none ([`default_tunables`]).
+fn segment_env(env: &[Env]) -> Vec<Value> {
+    let mut env = environment(env);
+    default_tunables(&mut env);
+    env
+}
+
+/// Give `env`, a container's `env`, `GLIBC_TUNABLES` with malloc's huge
+/// pages off (`gdl_model::segment_tunables`) when no entry has that name.
+/// An entry of that name, whatever its value or `valueFrom`, is the
+/// user's, and is left as it is.
+pub(crate) fn default_tunables(env: &mut Vec<Value>) {
+    use gdl_model::{GLIBC_TUNABLES, segment_tunables};
+    if !env.iter().any(|var| var["name"] == GLIBC_TUNABLES) {
+        env.push(json!({"name": GLIBC_TUNABLES, "value": segment_tunables(None)}));
     }
 }
 

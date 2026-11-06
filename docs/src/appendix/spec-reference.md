@@ -130,6 +130,44 @@ The measurement used the serving binaries of an HTTP endpoint service, which lin
 
 The second row used mimalloc's runtime variable, which turns off the same `madvise` call that `no_thp` removes. Rejected: letting mimalloc ask for huge pages. A start stalled for up to 6.9 s. The throughput that huge pages gain through fewer TLB misses was not measured, and neither was whether the arena's growth after start stalls requests in the same way. Rejected: setting `MIMALLOC_ALLOW_THP=0` where the binary runs. It works only where each deployment sets it, and a binary started without it asks for huge pages again.
 
+glibc's malloc asks for huge pages too, on AArch64 from glibc 2.43, under every allocator. Its release notes say that it turns on 2 MB transparent huge pages by default there, as the tunable `glibc.malloc.hugetlb=1` does. malloc then calls `madvise(MADV_HUGEPAGE)` on its heap (`[heap]`) and on each thread's arena. A mimalloc segment has these arenas too, since its threads make them. On an aarch64 host with Linux 7.0, transparent huge pages and defrag both set to `madvise`, and glibc 2.43, each film segment held this much in huge pages once it was ready:
+
+| Film segment | Allocator | `AnonHugePages` at ready, glibc's default | With `glibc.malloc.hugetlb=0` |
+|---|---|---|---|
+| `front` | system | 108,544 kB | 0 kB |
+| `engine` | system | 108,544 kB | 0 kB |
+| `accounting` | system | 108,544 kB | 0 kB |
+| `all` | mimalloc | 98,304 kB | 0 kB |
+
+That is about 50 faults of a 2 MB page in each start, on the same path in the kernel as mimalloc's arena: each fault can compact memory before it returns. Stalls were not timed on fragmented memory.
+
+glibc reads its tunables from the environment once, before `main`, so a running process cannot turn this off. So each launcher that gdl renders gives a segment process `GLIBC_TUNABLES` with `glibc.malloc.hugetlb=0`:
+
+- `cargo gdl run`, for each segment it starts;
+- `cargo gdl compose`, through each segment image's `ENV` line alone: Compose ranks a user's `env_file` and `environment` above an image's `ENV`, so a service of gdl's that set the variable would replace the user's value;
+- `cargo gdl k8s`, in each segment container's `env`, and the gdl operator, in the pods it makes from a `GdlPool`;
+- a pool's DGD, in the `main` container of each component that runs a segment, where the pool's objects are rendered: by `cargo gdl k8s`, and by the operator from a `GdlPool`, also one written by hand;
+- the image of each segment that `images`, `compose`, and `export` build, as an `ENV` line.
+
+A user who sets `GLIBC_TUNABLES` owns it. When the launcher's environment has no `GLIBC_TUNABLES`, the launcher sets it to exactly `glibc.malloc.hugetlb=0`. When the user set it, in any form, the launcher passes it on byte for byte and adds nothing. The user's value can reach a launcher as a cluster's `env`, as the `env` of a DGD's `main` container, or in the environment of `cargo gdl run`. An entry that takes its value from elsewhere (`valueFrom`) counts as set. A null `valueFrom` beside a `value` counts as that value. The image's `ENV` line is replaced by a launcher's own variable, as Docker and Kubernetes replace it. `gdl_model::segment_tunables` holds the rule, and every launcher calls it. A hub gets only what its cluster gives it. The setting goes on every architecture. glibc before 2.35 ignores the tunable, and glibc's default on x86_64 is already 0.
+
+`cargo gdl k8s` and `cargo gdl deploy` print one warning for each user's `GLIBC_TUNABLES` that they can read and that does not mention `glibc.malloc.hugetlb`: a cluster's `env`, and the `main` container of each DGD component that runs a segment. The warning says that gdl added nothing, and that the value must include `glibc.malloc.hugetlb=0` to keep the start from stalling. It checks the text only, since it is advice. An entry with a `valueFrom` gets none.
+
+Rejected: adding `glibc.malloc.hugetlb=0` to a user's own list. Three review passes each found a list on which the edit went wrong, because it had to read the list as glibc's loader does. glibc refuses some lists as a whole and applies none of their entries, as for a `:` at the end, so an added entry was lost with the rest. Dropping malformed entries also dropped an empty value that resets a tunable. Numbers such as `+1` and ` 1`, and numbers that overflow, read differently in gdl and in glibc. On glibc 2.39, adding one entry to a list of 32 valid repeated entries crashed the loader, while the same list without the entry ran.
+
+`crates/gdl-gen/tests/film.rs` starts its segments with the variable from the same function, and checks that no mapping of a running segment has the `hg` flag in `/proc/<pid>/smaps`. `every_launcher_gives_a_segment_the_glibc_tunables` in `crates/gdl-gen/tests/deployment/k8s.rs` checks that the launchers set it.
+
+Rejected: a segment binary that runs itself again with the tunable set, when the variable does not name it. A review found six defects in it:
+
+- Under secure execution, such as a binary with a file capability like `cap_net_bind_service`, glibc removes `GLIBC_TUNABLES` before `main`. The second run cannot see that the first set the variable, so the binary runs itself again without end.
+- A binary replaced on disk between the check and the second run is not the binary that started.
+- A binary started through a symbolic link takes the link target's name in `/proc/<pid>/comm`, so `pkill -x` and other stops by name miss it.
+- When the second run fails, the binary runs on with `SIGPIPE` reset to its default action.
+- A bare tunable name stopped the second run, although glibc reads no value from it.
+- The code compiled on other targets but did nothing there, so `-D warnings` refused it.
+
+On a host with glibc 2.39, which does not ask for huge pages, it still ran the binary twice, at a cost of about 11 ms a start. Rejected: `prctl(PR_SET_THP_DISABLE)`. It turns off huge pages for the whole process, so a node that asks for them with `madvise` gets none. The process's children inherit it too.
+
 ## fleet.toml
 
 The fleet file lists a deployment's pools. It is not part of the placement's identity. [Classes and pools](../concepts/pools.md) and [Deploy a fleet of pools](../guides/fleet.md) explain it.

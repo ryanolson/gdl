@@ -273,9 +273,15 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
                 ));
             }
             std::fs::write(&config, settings).expect("runtime config");
+            // As every launcher gdl renders starts a segment.
+            let tunables = std::env::var(gdl_model::GLIBC_TUNABLES).ok();
             let mut process = Running(
                 generated(target("examples").join(format!("debug/film-{segment}")))
                     .arg(config)
+                    .env(
+                        gdl_model::GLIBC_TUNABLES,
+                        gdl_model::segment_tunables(tunables.as_deref()),
+                    )
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
@@ -374,7 +380,10 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
 /// flag that `madvise(MADV_HUGEPAGE)` sets. mimalloc asks for them on its
 /// arena unless it is built with `no_thp`, and then each first touch of a
 /// 2 MB block may compact memory, which stalled starts for seconds on a
-/// fragmented host (`docs/src/appendix/spec-reference.md`).
+/// fragmented host. glibc 2.43's malloc on AArch64 asks for them on its
+/// heap and its thread arenas, under every allocator, unless the launcher
+/// sets `GLIBC_TUNABLES` as `gdl_model::segment_tunables` gives it
+/// (`docs/src/appendix/spec-reference.md#binary`).
 #[cfg(target_os = "linux")]
 fn no_huge_pages_asked(pid: u32) {
     let setting = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled");

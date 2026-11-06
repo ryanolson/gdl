@@ -339,6 +339,10 @@
               {
                 "name": "RUST_LOG",
                 "value": "info"
+              },
+              {
+                "name": "GLIBC_TUNABLES",
+                "value": "glibc.malloc.hugetlb=0"
               }
             ],
             "image": "registry.example/gdl/api-front:pinned",
